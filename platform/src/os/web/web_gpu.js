@@ -945,14 +945,6 @@ export class WasmWebGPU extends WasmWebBrowser {
         continue;
       }
 
-      // Upload uniforms (copy out of shared memory) and grow UBOs if needed.
-      const copyF32 = (ptr, len) => new Float32Array(this.memory.buffer, ptr, len).slice();
-      const pass_u = copyF32(pass_ptr, pass_len);
-      const list_u = copyF32(draw_list_ptr, draw_list_len);
-      const call_u = copyF32(draw_call_ptr, draw_call_len);
-      const user_u = copyF32(user_ptr, user_len);
-      const live_u = copyF32(live_ptr, live_len);
-
       const texIdsAt = at;
       const texIds = [];
       for (let i = 0; i < shader.texture_count; i++) {
@@ -966,11 +958,11 @@ export class WasmWebGPU extends WasmWebBrowser {
       this._emitSingleDraw(
         shader,
         vao,
-        pass_u,
-        list_u,
-        call_u,
-        user_u,
-        live_u,
+        pass_ptr, pass_len,
+        draw_list_ptr, draw_list_len,
+        draw_call_ptr, draw_call_len,
+        user_ptr, user_len,
+        live_ptr, live_len,
         depth_write,
         backface_culling,
         texIds,
@@ -1416,17 +1408,53 @@ export class WasmWebGPU extends WasmWebBrowser {
     );
   }
 
-  _emitSingleDraw(shader, vao, pass_u, list_u, call_u, user_u, live_u, depth_write, backface_culling, texIds) {
+  _emitSingleDraw(
+    shader,
+    vao,
+    pass_ptr, pass_len,
+    list_ptr, list_len,
+    call_ptr, call_len,
+    user_ptr, user_len,
+    live_ptr, live_len,
+    depth_write,
+    backface_culling,
+    texIds
+  ) {
     const NONE_TEX = 0xffffffff;
-    this.ensure_ubo(shader, "ubo_pass", pass_u.byteLength);
-    this.ensure_ubo(shader, "ubo_draw_list", list_u.byteLength);
-    this.ensure_ubo(shader, "ubo_draw_call", call_u.byteLength);
-    this.ensure_ubo(shader, "ubo_user", user_u.byteLength);
-    this.ensure_ubo(shader, "ubo_live", live_u.byteLength);
-    this.queue.writeBuffer(shader.ubo_draw_list, 0, list_u.buffer, list_u.byteOffset, list_u.byteLength);
-    this.queue.writeBuffer(shader.ubo_draw_call, 0, call_u.buffer, call_u.byteOffset, call_u.byteLength);
-    this.queue.writeBuffer(shader.ubo_user, 0, user_u.buffer, user_u.byteOffset, user_u.byteLength);
-    this.queue.writeBuffer(shader.ubo_live, 0, live_u.buffer, live_u.byteOffset, live_u.byteLength);
+    
+    if (!this._scratch_f32) {
+      this._scratch_f32 = new Float32Array(4096);
+    }
+    if (!this._scratch_pass_f32) {
+      this._scratch_pass_f32 = new Float32Array(1024);
+    }
+    
+    const writeUBO = (uboName, ptr, len) => {
+      const byteLen = len * 4;
+      this.ensure_ubo(shader, uboName, byteLen);
+      if (len === 0) return;
+      if (len > this._scratch_f32.length) {
+        this._scratch_f32 = new Float32Array(Math.max(len, this._scratch_f32.length * 2));
+      }
+      const src = new Float32Array(this.memory.buffer, ptr, len);
+      const dst = this._scratch_f32.subarray(0, len);
+      dst.set(src);
+      this.queue.writeBuffer(shader[uboName], 0, dst.buffer, dst.byteOffset, byteLen);
+    };
+
+    if (pass_len > this._scratch_pass_f32.length) {
+      this._scratch_pass_f32 = new Float32Array(Math.max(pass_len, this._scratch_pass_f32.length * 2));
+    }
+    const pass_u = this._scratch_pass_f32.subarray(0, pass_len);
+    if (pass_len > 0) {
+      pass_u.set(new Float32Array(this.memory.buffer, pass_ptr, pass_len));
+    }
+    this.ensure_ubo(shader, "ubo_pass", pass_len * 4);
+
+    writeUBO("ubo_draw_list", list_ptr, list_len);
+    writeUBO("ubo_draw_call", call_ptr, call_len);
+    writeUBO("ubo_user", user_ptr, user_len);
+    writeUBO("ubo_live", live_ptr, live_len);
 
     const textureViews = new Array(shader.texture_count);
     const textureEntries = new Array(shader.texture_count);
@@ -1598,12 +1626,12 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (!shader || !vao) {
       return;
     }
-    const copyF32 = (ptr) => new Float32Array(this.memory.buffer, ptr.ptr, ptr.len).slice();
-    const pass_u = copyF32(args.pass_uniforms);
-    const list_u = copyF32(args.draw_list_uniforms);
-    const call_u = copyF32(args.draw_call_uniforms);
-    const user_u = copyF32(args.user_uniforms);
-    const live_u = copyF32(args.live_uniforms);
+    const pass_ptr = args.pass_uniforms.ptr; const pass_len = args.pass_uniforms.len;
+    const list_ptr = args.draw_list_uniforms.ptr; const list_len = args.draw_list_uniforms.len;
+    const call_ptr = args.draw_call_uniforms.ptr; const call_len = args.draw_call_uniforms.len;
+    const user_ptr = args.user_uniforms.ptr; const user_len = args.user_uniforms.len;
+    const live_ptr = args.live_uniforms.ptr; const live_len = args.live_uniforms.len;
+
     const texIds = [];
     for (let i = 0; i < shader.texture_count; i++) {
       const t = args.textures[i];
@@ -1615,11 +1643,11 @@ export class WasmWebGPU extends WasmWebBrowser {
     this._emitSingleDraw(
       shader,
       vao,
-      pass_u,
-      list_u,
-      call_u,
-      user_u,
-      live_u,
+      pass_ptr, pass_len,
+      list_ptr, list_len,
+      call_ptr, call_len,
+      user_ptr, user_len,
+      live_ptr, live_len,
       !!args.depth_write,
       !!args.backface_culling,
       texIds,
