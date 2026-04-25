@@ -77,6 +77,7 @@ struct ToolCallAccumulator {
 struct InFlightRequest {
     request_id: RequestId,
     accumulated_text: String,
+    reasoning_text: String,
     tool_calls: Vec<ToolCallAccumulator>,
     usage: Option<OpenAiUsage>,
     finish_reason: Option<String>,
@@ -124,6 +125,7 @@ impl OpenAiBackend {
         request: &AiRequest,
         model: &str,
         reasoning_effort: &Option<String>,
+        thinking: &Option<String>,
     ) -> String {
         let mut json = String::new();
         json.push_str("{");
@@ -145,6 +147,10 @@ impl OpenAiBackend {
         // Reasoning effort (for o-series models)
         if let Some(effort) = reasoning_effort {
             json.push_str(&format!("\"reasoning_effort\":\"{}\",", effort));
+        }
+
+        if let Some(mode) = thinking {
+            json.push_str(&format!("\"thinking\":{{\"type\":\"{}\"}},", mode));
         }
 
         if !request.tools.is_empty() {
@@ -255,6 +261,7 @@ impl OpenAiBackend {
             model,
             base_url,
             reasoning_effort,
+            thinking,
         } = &self.config
         else {
             panic!("OpenAiBackend requires OpenAI config");
@@ -264,6 +271,15 @@ impl OpenAiBackend {
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
 
+        log!(
+            "OpenAI request: model={} base_url={} max_tokens={} thinking={:?} messages={}",
+            model,
+            url,
+            request.max_tokens,
+            thinking,
+            request.messages.len()
+        );
+
         let mut http = HttpRequest::new(url, HttpMethod::POST);
         http.set_is_streaming();
         http.set_header("Content-Type".to_string(), "application/json".to_string());
@@ -271,12 +287,12 @@ impl OpenAiBackend {
             http.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
         }
 
-        let body = Self::build_request_json(request, model, reasoning_effort);
+        let body = Self::build_request_json(request, model, reasoning_effort, thinking);
         http.set_string_body(body);
         http
     }
 
-    fn process_stream_data(&mut self, live_id: LiveId, data: &str) -> Vec<AiEvent> {
+    fn process_stream_data(&mut self, live_id: LiveId, data: &str, flush: bool) -> Vec<AiEvent> {
         let mut events = vec![];
 
         let Some(in_flight) = self.in_flight.get_mut(&live_id) else {
@@ -299,6 +315,9 @@ impl OpenAiBackend {
                     in_flight.sse_buffer[..cutoff].to_string(),
                     in_flight.sse_buffer[cutoff..].to_string(),
                 )
+            }
+            None if flush && !in_flight.sse_buffer.trim().is_empty() => {
+                (in_flight.sse_buffer.clone(), String::new())
             }
             None => return events, // no complete event yet; wait for more bytes
         };
@@ -330,15 +349,36 @@ impl OpenAiBackend {
                     for choice in &chunk.choices {
                         if let Some(finish) = &choice.finish_reason {
                             in_flight.finish_reason = Some(finish.clone());
+                            log!("OpenAI stream finish_reason={}", finish);
                         }
 
                         if let Some(delta) = &choice.delta {
                             // Handle text content
                             if let Some(text) = &delta.content {
+                                if !text.is_empty() {
+                                    log!(
+                                        "OpenAI stream content delta chars={}",
+                                        text.chars().count()
+                                    );
+                                }
                                 in_flight.accumulated_text.push_str(text);
                                 events.push(AiEvent::StreamDelta {
                                     request_id,
                                     delta: StreamDelta::TextDelta { text: text.clone() },
+                                });
+                            }
+
+                            if let Some(text) = &delta.reasoning_content {
+                                if !text.is_empty() {
+                                    log!(
+                                        "OpenAI stream reasoning delta chars={}",
+                                        text.chars().count()
+                                    );
+                                }
+                                in_flight.reasoning_text.push_str(text);
+                                events.push(AiEvent::StreamDelta {
+                                    request_id,
+                                    delta: StreamDelta::ThinkingDelta { text: text.clone() },
                                 });
                             }
 
@@ -412,6 +452,7 @@ impl AiBackend for OpenAiBackend {
             InFlightRequest {
                 request_id,
                 accumulated_text: String::new(),
+                reasoning_text: String::new(),
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
@@ -453,11 +494,19 @@ impl AiBackend for OpenAiBackend {
                 match response {
                     NetworkResponse::HttpStreamChunk { response: res, .. } => {
                         if let Some(data) = res.get_string_body() {
-                            ai_events.extend(self.process_stream_data(request_id, &data));
+                            ai_events.extend(self.process_stream_data(request_id, &data, false));
                         }
                     }
                     NetworkResponse::HttpStreamComplete { .. } => {
+                        ai_events.extend(self.process_stream_data(request_id, "", true));
                         if let Some(in_flight) = self.in_flight.remove(&request_id) {
+                            log!(
+                                "OpenAI stream complete: content_chars={} reasoning_chars={} finish_reason={:?} leftover_sse_chars={}",
+                                in_flight.accumulated_text.chars().count(),
+                                in_flight.reasoning_text.chars().count(),
+                                in_flight.finish_reason,
+                                in_flight.sse_buffer.chars().count()
+                            );
                             // Build content blocks
                             let mut content_blocks = vec![];
 
@@ -465,6 +514,12 @@ impl AiBackend for OpenAiBackend {
                                 content_blocks.push(ContentBlock::Text {
                                     text: in_flight.accumulated_text,
                                 });
+                            } else if !in_flight.reasoning_text.is_empty() {
+                                ai_events.push(AiEvent::Error {
+                                    request_id: in_flight.request_id,
+                                    error: "Model returned thinking but no final answer. Try again with MOONSHOT_THINKING=disabled or increase max_tokens.".to_string(),
+                                });
+                                continue;
                             }
 
                             for tc in in_flight.tool_calls {
@@ -532,5 +587,31 @@ impl AiBackend for OpenAiBackend {
 
     fn config(&self) -> &BackendConfig {
         &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_json_includes_optional_thinking_mode() {
+        let request = AiRequest {
+            messages: vec![Message::user("ping")],
+            max_tokens: 32,
+            ..Default::default()
+        };
+
+        let backend = OpenAiBackend::new(BackendConfig::OpenAI {
+            api_key: "test-key".to_string(),
+            model: "kimi-k2.6".to_string(),
+            base_url: Some("https://api.moonshot.ai/v1/chat/completions".to_string()),
+            reasoning_effort: None,
+            thinking: Some("disabled".to_string()),
+        });
+
+        let body = String::from_utf8(backend.build_http_request(&request).body.unwrap()).unwrap();
+
+        assert!(body.contains("\"thinking\":{\"type\":\"disabled\"}"));
     }
 }

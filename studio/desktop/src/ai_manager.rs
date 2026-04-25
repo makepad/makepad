@@ -343,6 +343,7 @@ impl App {
                     model: Self::ai_manager_local_model(),
                     base_url: Some(Self::ai_manager_local_base_url()),
                     reasoning_effort: None,
+                    thinking: None,
                 })),
             ))),
             AiManagerBackend::OpenAiCloud => {
@@ -353,6 +354,7 @@ impl App {
                             model: "gpt-4o".to_string(),
                             base_url: None,
                             reasoning_effort: None,
+                            thinking: None,
                         },
                     )))) as Box<dyn Agent>
                 })

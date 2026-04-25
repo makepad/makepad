@@ -139,6 +139,9 @@ pub enum StreamDelta {
     TextDelta {
         text: String,
     },
+    ThinkingDelta {
+        text: String,
+    },
     ToolUseStart {
         id: String,
         name: String,

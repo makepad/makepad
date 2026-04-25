@@ -57,6 +57,9 @@ pub enum AgentEvent {
     /// Streaming text from the agent
     TextDelta { prompt_id: PromptId, text: String },
 
+    /// Streaming hidden reasoning / thinking progress from the agent.
+    ThinkingDelta { prompt_id: PromptId, text: String },
+
     /// Agent wants to use a tool
     ToolRequest {
         prompt_id: PromptId,
@@ -349,6 +352,10 @@ impl Agent for StatelessBackendAdapter {
                                 StreamDelta::TextDelta { text } => {
                                     session.accumulated_text.push_str(&text);
                                     agent_events.push(AgentEvent::TextDelta { prompt_id, text });
+                                }
+                                StreamDelta::ThinkingDelta { text } => {
+                                    agent_events
+                                        .push(AgentEvent::ThinkingDelta { prompt_id, text });
                                 }
                                 StreamDelta::Error { message } => {
                                     agent_events.push(AgentEvent::PromptError {
