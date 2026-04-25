@@ -529,7 +529,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       throw err;
     }
 
-    variant = { bindGroupLayout, pipeline };
+    variant = { bindGroupLayout, pipeline, key };
     shader.pipelineVariants.set(key, variant);
     return variant;
   }
@@ -582,6 +582,19 @@ export class WasmWebGPU extends WasmWebBrowser {
     return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
   }
 
+  get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds) {
+    if (!shader.bindGroups) shader.bindGroups = new Map();
+    let key = variant.key;
+    for (let i = 0; i < shader.texture_count; i++) {
+        key += '|' + (texIds[i] == null ? 'n' : texIds[i]);
+    }
+    let bg = shader.bindGroups.get(key);
+    if (bg) return bg;
+    bg = this.create_bind_group_for_shader(shader, textureViews, textureEntries, variant);
+    shader.bindGroups.set(key, bg);
+    return bg;
+  }
+
   get_fallback_sampler() {
     if (!this._fallback_sampler) {
       this._fallback_sampler = this.device.createSampler({ magFilter: "nearest", minFilter: "nearest" });
@@ -619,23 +632,25 @@ export class WasmWebGPU extends WasmWebBrowser {
     const device = this.device;
     let entry = this.array_buffers[args.buffer_id];
     const f32 = new Float32Array(this.memory.buffer, args.data.ptr, args.data.len);
-    const byteLength = f32.byteLength;
-    if (!entry || !entry.buf || entry.byteLength !== byteLength) {
+    const requestedByteLength = f32.byteLength;
+    if (!entry || !entry.buf || entry.byteLength < requestedByteLength) {
+      const newByteLength = Math.max(requestedByteLength, entry ? entry.byteLength * 2 : 4096);
       entry = this.array_buffers[args.buffer_id] = {
-        buf: device.createBuffer({ size: Math.max(4, byteLength), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }),
-        byteLength,
+        buf: device.createBuffer({ size: Math.max(4, newByteLength), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }),
+        byteLength: newByteLength,
         length: f32.length,
         data: null,
         packed: new Map(),
+        version: 0,
       };
     }
     // Copy out of shared memory for writeBuffer compatibility/perf predictability.
     const copy = f32.slice();
-    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, copy.byteLength);
+    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, requestedByteLength);
     entry.length = f32.length;
     entry.data = copy;
-    entry.byteLength = byteLength;
-    entry.packed = new Map();
+    entry.version = (entry.version || 0) + 1;
+    if (!entry.packed) entry.packed = new Map();
   }
 
   get_packed_vertex_buffer(entry, logicalSlots, packedVec4s) {
@@ -643,11 +658,30 @@ export class WasmWebGPU extends WasmWebBrowser {
     const strideFloats = packedVec4s * 4;
     if (strideFloats <= logicalSlots) return entry;
 
-    const key = `${logicalSlots}:${strideFloats}:${entry.length}`;
+    const key = `${logicalSlots}:${strideFloats}`;
     let packed = entry.packed?.get(key);
-    if (packed) return packed;
+    if (packed && packed.version === entry.version) return packed;
 
     const itemCount = (entry.length / logicalSlots) | 0;
+    const requiredByteLength = itemCount * strideFloats * 4;
+
+    if (!packed || packed.byteLength < requiredByteLength) {
+      const newByteLength = Math.max(requiredByteLength, packed ? packed.byteLength * 2 : 4096);
+      packed = {
+        buf: this.device.createBuffer({
+          size: Math.max(4, newByteLength),
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        }),
+        byteLength: newByteLength,
+        length: itemCount * strideFloats,
+        logicalLength: entry.length,
+        data: null,
+        version: 0,
+      };
+      if (!entry.packed) entry.packed = new Map();
+      entry.packed.set(key, packed);
+    }
+
     const out = new Float32Array(itemCount * strideFloats);
     for (let i = 0; i < itemCount; i++) {
       const srcOffset = i * logicalSlots;
@@ -655,18 +689,11 @@ export class WasmWebGPU extends WasmWebBrowser {
       out.set(entry.data.subarray(srcOffset, srcOffset + logicalSlots), dstOffset);
     }
 
-    packed = {
-      buf: this.device.createBuffer({
-        size: Math.max(4, out.byteLength),
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      }),
-      byteLength: out.byteLength,
-      length: out.length,
-      logicalLength: entry.length,
-      data: out,
-    };
     this.queue.writeBuffer(packed.buf, 0, out.buffer, out.byteOffset, out.byteLength);
-    entry.packed.set(key, packed);
+    
+    packed.length = out.length;
+    packed.logicalLength = entry.length;
+    packed.version = entry.version;
     return packed;
   }
 
@@ -674,16 +701,17 @@ export class WasmWebGPU extends WasmWebBrowser {
     const device = this.device;
     let entry = this.index_buffers[args.buffer_id];
     const u32 = new Uint32Array(this.memory.buffer, args.data.ptr, args.data.len);
-    const byteLength = u32.byteLength;
-    if (!entry || !entry.buf || entry.byteLength !== byteLength) {
+    const requestedByteLength = u32.byteLength;
+    if (!entry || !entry.buf || entry.byteLength < requestedByteLength) {
+      const newByteLength = Math.max(requestedByteLength, entry ? entry.byteLength * 2 : 4096);
       entry = this.index_buffers[args.buffer_id] = {
-        buf: device.createBuffer({ size: Math.max(4, byteLength), usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }),
-        byteLength,
+        buf: device.createBuffer({ size: Math.max(4, newByteLength), usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }),
+        byteLength: newByteLength,
         length: u32.length,
       };
     }
     const copy = u32.slice();
-    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, copy.byteLength);
+    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, requestedByteLength);
     entry.length = u32.length;
   }
 
@@ -1502,7 +1530,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
     }
     const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
-    const bindGroup = this.create_bind_group_for_shader(shader, textureViews, textureEntries, variant);
+    const bindGroup = this.get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds);
     this._pass.setPipeline(variant.pipeline);
     this._pass.setBindGroup(0, bindGroup);
 
@@ -1620,6 +1648,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (binding >= 0) {
       shader.ubos.set(binding, next);
     }
+    shader.bindGroups = new Map();
   }
 
   // --- Texture uploads from wasm ---
