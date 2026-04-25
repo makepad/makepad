@@ -67,17 +67,10 @@ export class WasmWebGPU extends WasmWebBrowser {
     this.xr = undefined;
     this.video_players = {};
     this.video_anim_frame_id = 0;
-    this._missing_resource_reports = new Set();
-    this._draw_reported_shaders = new Set();
-    this._draw_report_limit = 250; // safety valve
-    this._draw_report_count = 0;
-    this._alloc_tex_reported = new Set();
     this._pending_until_ready = [];
     /** default depth/blend — pipelines encode blend; depth compare is default less-equal */
     this._default_depth_write = true;
     this._default_backface_cull = false;
-    this._debug_enabled = window.makepad_webgpu_debug === true || window.localStorage.getItem("makepad_webgpu_debug") === "1";
-    this._debug_once_keys = new Set();
 
     // Async init; buffer protocol calls until the device exists.
     this._webgpu_init_promise = this.init_webgpu_context();
@@ -110,7 +103,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       throw new Error("WebGPU context unavailable");
     }
     this.format = navigator.gpu.getPreferredCanvasFormat();
-    console.log('[makepad:webgpu] INITIALIZED format=' + this.format + ' adapter=' + (this.adapter.info ? this.adapter.info.description : 'n/a'));
     this.context.configure({
       device: this.device,
       format: this.format,
@@ -141,19 +133,9 @@ export class WasmWebGPU extends WasmWebBrowser {
       });
       this.queue.writeTexture({ texture: tex }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 });
       this.textures[3] = { texture: tex, view: tex.createView(), w: 1, h: 1, format: "rgba8unorm" };
-      if (this._debug_enabled) {
-        console.log("[makepad:webgpu] init default texture id=3 rgba8 1x1");
-      }
     }
   }
 
-  debug_once(tag, details) {
-    if (!this._debug_enabled) return;
-    const key = `${tag}:${details}`;
-    if (this._debug_once_keys.has(key)) return;
-    this._debug_once_keys.add(key);
-    console.warn(`[makepad:webgpu] ${tag} ${details}`);
-  }
 
   // ---- Protocol handlers ----
 
@@ -162,31 +144,6 @@ export class WasmWebGPU extends WasmWebBrowser {
     const device = this.device;
 
     const module = device.createShaderModule({ code: args.wgsl });
-    // Surface WGSL errors early; otherwise the app may silently render only clears.
-    if (typeof module.getCompilationInfo === "function") {
-      module.getCompilationInfo().then((info) => {
-        const errs = (info?.messages || []).filter((m) => m.type === "error");
-        if (errs.length) {
-          console.warn(`[makepad:webgpu] WGSL shader_id=${args.shader_id} compile errors:`);
-          for (const m of errs) {
-            console.warn(`  ${m.lineNum}:${m.linePos} ${m.message}`);
-          }
-        }
-      }).catch(() => {});
-    }
-    module.getCompilationInfo().then(info => {
-      for (const msg of info.messages) {
-        if (msg.type === 'error' || msg.type === 'warning') {
-          console.error(`[makepad:webgpu] shader ${args.shader_id} compile ${msg.type} line ${msg.lineNum}: ${msg.message}`);
-        }
-      }
-    });
-    if (args.samplers && args.samplers.length) {
-      const samplerDesc = args.samplers
-        .map((s, i) => `#${i}(f=${s.filter | 0},a=${s.address | 0},c=${s.coord | 0})`)
-        .join(",");
-      console.log(`[makepad:webgpu] shader ${args.shader_id} samplers ${samplerDesc}`);
-    }
 
     const geom_vec4s = Math.ceil(args.geometry_slots / 4);
     const inst_vec4s = Math.ceil(args.instance_slots / 4);
@@ -522,10 +479,6 @@ export class WasmWebGPU extends WasmWebBrowser {
           : undefined,
       });
     } catch (err) {
-      this.debug_once(
-        "pipeline-create-failed",
-        `fmt=${colorFormat} dw=${depthWrite ? 1 : 0} cull=${backfaceCulling ? 1 : 0} depthAtt=${hasDepthAttachment ? 1 : 0} err=${err && err.message ? err.message : err}`,
-      );
       throw err;
     }
 
@@ -937,10 +890,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       const shader = this.draw_shaders[shader_id];
       const vao = this.vaos[vao_id];
       if (!shader || !vao || !this._pass) {
-        this.debug_once(
-          "skip-draw-missing-state",
-          `shader=${shader_id} vao=${vao_id} haveShader=${!!shader} haveVao=${!!vao} havePass=${!!this._pass}`,
-        );
         at += 16;
         continue;
       }
@@ -1471,92 +1420,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
     }
 
-    // One-time per-shader draw report: helps map "missing visuals" to shader id + bindings + texture ids.
-    if (
-      shader
-      && !this._draw_reported_shaders.has(shader.id | 0)
-      && (this._draw_report_count | 0) < (this._draw_report_limit | 0)
-      && (((shader.textureBindings || []).length | 0) > 0 || ((shader.samplerBindings || []).length | 0) > 0 || (shader.texture_count | 0) > 0)
-    ) {
-      this._draw_reported_shaders.add(shader.id | 0);
-      this._draw_report_count = (this._draw_report_count | 0) + 1;
-      const texIdsDump = [];
-      for (let i = 0; i < shader.texture_count; i++) texIdsDump.push(texIds[i] == null ? NONE_TEX : (texIds[i] >>> 0));
-      const texMeta = textureEntries.map((t) => {
-        if (!t) return null;
-        return {
-          format: t.format,
-          w: t.w ?? t.rtW ?? t.rtDW ?? null,
-          h: t.h ?? t.rtH ?? t.rtDH ?? null,
-          cube: !!t.cube,
-          hasView: !!t.view,
-          hasDepthView: !!t.depthView,
-        };
-      });
-      if (this._debug_enabled) {
-        console.log(
-          `[makepad:webgpu] draw-report shader=${shader.id} texCount=${shader.texture_count} ` +
-          `depthWrite=${depth_write ? 1 : 0} cull=${backface_culling ? 1 : 0} ` +
-          `texIds=${JSON.stringify(texIdsDump)}`,
-        );
-        console.log(
-          `[makepad:webgpu] draw-report shader=${shader.id} textureBindings=${JSON.stringify(shader.textureBindings || [])}`,
-        );
-        console.log(
-          `[makepad:webgpu] draw-report shader=${shader.id} samplerBindings=${JSON.stringify(shader.samplerBindings || [])}`,
-        );
-        console.log(
-          `[makepad:webgpu] draw-report shader=${shader.id} texturesMeta=${JSON.stringify(texMeta)}`,
-        );
-      }
-    }
-
-    // Minimal diagnostics: only report missing/invalid resources that are actually referenced.
-    // This helps pinpoint why SVG/vector/math/markup content might disappear.
-    for (let i = 0; i < shader.texture_count; i++) {
-      const texId = (texIds[i] == null ? NONE_TEX : (texIds[i] >>> 0));
-      if (texId === NONE_TEX) continue;
-      const entry = this.textures[texId];
-      if (!entry || !entry.view) {
-        const key = `shader=${shader.id}|texIndex=${i}|texId=${texId}`;
-        if (!this._missing_resource_reports.has(key)) {
-          this._missing_resource_reports.add(key);
-          if (this._debug_enabled) {
-            console.log(
-              `[makepad:webgpu] missing texture view: ${key} format=${entry?.format || "n/a"} ` +
-              `hasTexture=${!!entry?.texture} hasView=${!!entry?.view}`,
-            );
-            console.log(
-              `[makepad:webgpu] shader ${shader.id} textureBindings=` +
-              `${JSON.stringify(shader.textureBindings || [])} samplerBindings=` +
-              `${JSON.stringify(shader.samplerBindings || [])}`,
-            );
-          }
-        }
-      }
-    }
-
-    // Validate that declared bindings exist in the shader's binding_kinds map.
-    for (const tb of shader.textureBindings || []) {
-      const b = tb.binding | 0;
-      if (shader.binding_kinds?.get(b) !== "texture") {
-        const key = `shader=${shader.id}|missingBindingKind=texture|binding=${b}`;
-        if (!this._missing_resource_reports.has(key)) {
-          this._missing_resource_reports.add(key);
-          console.log(`[makepad:webgpu] unexpected texture binding kind: ${key} kind=${shader.binding_kinds?.get(b)}`);
-        }
-      }
-    }
-    for (const sb of shader.samplerBindings || []) {
-      const b = sb.binding | 0;
-      if (shader.binding_kinds?.get(b) !== "sampler") {
-        const key = `shader=${shader.id}|missingBindingKind=sampler|binding=${b}`;
-        if (!this._missing_resource_reports.has(key)) {
-          this._missing_resource_reports.add(key);
-          console.log(`[makepad:webgpu] unexpected sampler binding kind: ${key} kind=${shader.binding_kinds?.get(b)}`);
-        }
-      }
-    }
     const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
     const bindGroup = this.get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds);
     this._pass.setPipeline(variant.pipeline);
@@ -1566,10 +1429,6 @@ export class WasmWebGPU extends WasmWebBrowser {
     const instRaw = this.array_buffers[vao.inst_vb_id];
     const ib = this.index_buffers[vao.geom_ib_id];
     if (!geomRaw || !instRaw || !ib) {
-      this.debug_once(
-        "skip-draw-missing-buffers",
-        `geomVb=${vao.geom_vb_id} instVb=${vao.inst_vb_id} ib=${vao.geom_ib_id} haveGeom=${!!geomRaw} haveInst=${!!instRaw} haveIb=${!!ib}`,
-      );
       return;
     }
     const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
@@ -1582,10 +1441,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       ? (((instRaw.length | 0) / shader.instance_slots) | 0)
       : 0;
     if (instanceCount <= 0 || indexCount <= 0) {
-      this.debug_once(
-        "skip-draw-empty-geometry",
-        `indexCount=${indexCount} instanceCount=${instanceCount} instSlots=${shader.instance_slots} vaoInstVb=${vao.inst_vb_id} vaoGeomIb=${vao.geom_ib_id} instLen=${instRaw.length | 0} geomLen=${geomRaw.length | 0}`,
-      );
       return;
     }
 
@@ -1609,10 +1464,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       applyEye(xr.right_eye);
     } else {
       this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
-      this._draw_count = (this._draw_count | 0) + 1;
-      if (this._debug_enabled && this._draw_count <= 5) {
-        console.log('[makepad:webgpu] draw#' + this._draw_count + ' indexCount=' + indexCount + ' instanceCount=' + instanceCount + ' shader=' + (shader.id | 0));
-      }
       this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
     }
   }
@@ -1689,12 +1540,6 @@ export class WasmWebGPU extends WasmWebBrowser {
     // Input bytes are BGRA; store them in an RGBA texture and let the shader's
     // `sample*_bgra` helpers swizzle to RGBA (mirrors the WebGL path).
     const tid = args.texture_id | 0;
-    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
-      this._alloc_tex_reported.add(tid);
-      console.log(
-        `[makepad:webgpu] alloc-tex BGRAu8_32 id=${tid} w=${args.width | 0} h=${args.height | 0} bytes=${args.data.len | 0}`,
-      );
-    }
     const w = args.width | 0;
     const h = args.height | 0;
     const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
@@ -1722,12 +1567,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       return;
     }
     const tid = args.texture_id | 0;
-    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
-      this._alloc_tex_reported.add(tid);
-      console.log(
-        `[makepad:webgpu] alloc-tex Ru8 id=${tid} w=${args.width | 0} h=${args.height | 0} bytes=${args.data.len | 0}`,
-      );
-    }
     const w = args.width | 0;
     const h = args.height | 0;
     const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h).slice();
@@ -1755,12 +1594,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       return;
     }
     const tid = args.texture_id | 0;
-    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
-      this._alloc_tex_reported.add(tid);
-      console.log(
-        `[makepad:webgpu] alloc-tex RGBAf32 id=${tid} w=${args.width | 0} h=${args.height | 0} floats=${args.data.len | 0}`,
-      );
-    }
     const w = args.width | 0;
     const h = args.height | 0;
     const f32 = new Float32Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
