@@ -141,10 +141,19 @@ impl FromWasmMsg {
     }
 
     pub fn push_str(&mut self, val: &str) {
-        let chars = val.chars().count();
-        self.push_u32(chars as u32);
-        for c in val.chars() {
-            self.push_u32(c as u32);
+        let bytes = val.as_bytes();
+        let len = bytes.len();
+        self.push_u32(len as u32);
+        let mut i = 0;
+        while i < len {
+            let mut u32_val = 0u32;
+            for j in 0..4 {
+                if i + j < len {
+                    u32_val |= (bytes[i + j] as u32) << (j * 8);
+                }
+            }
+            self.push_u32(u32_val);
+            i += 4;
         }
     }
 
