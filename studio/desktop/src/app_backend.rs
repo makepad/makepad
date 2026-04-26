@@ -792,7 +792,7 @@ impl App {
                 .set_text(cx, &log_filter);
             workspace
                 .check_box(cx, ids!(log_tail_toggle))
-                .set_active(cx, log_tail);
+                .set_active(cx, log_tail, Animate::Yes);
             workspace
                 .desktop_log_view(cx, ids!(log_view))
                 .set_tail(cx, log_tail);

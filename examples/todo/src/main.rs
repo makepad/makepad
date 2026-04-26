@@ -226,7 +226,7 @@ impl Widget for TodoList {
                             continue;
                         };
                         let item = list.item(cx, item_id, id!(Item));
-                        item.check_box(cx, ids!(check)).set_active(cx, todo.done);
+                        item.check_box(cx, ids!(check)).set_active(cx, todo.done, Animate::Yes);
                         item.label(cx, ids!(label)).set_text(cx, &todo.text);
                         item.label(cx, ids!(tag.tag_label)).set_text(cx, &todo.tag);
                         item.view(cx, ids!(tag))
