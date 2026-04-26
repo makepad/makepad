@@ -1808,12 +1808,22 @@ impl Widget for PortalList {
         );
         if self.suppress_child_events || is_scroll_animating {
             match event {
-                Event::TouchUpdate(_)
-                | Event::MouseDown(_)
-                | Event::MouseMove(_)
-                | Event::MouseUp(_) => {
+                // Suppress in-progress interactions so children don't react to
+                // a gesture that the list is handling as part of a "scroll" action.
+                Event::MouseDown(_) | Event::MouseMove(_) => {
                     pass_through_to_children = false;
                 }
+                // Don't suppress touch events if a touch-stop occurred (finger was released).
+                // Without this, a child widget in this list that captured `FingerDown`
+                // (e.g. a button that has been pressed/hovered) will never see the FingerUp,
+                // meaning it'll get stuck in that old pressed/hovered state.
+                Event::TouchUpdate(e) => {
+                    let has_release = e.touches.iter().any(|t| matches!(t.state, TouchState::Stop));
+                    if !has_release {
+                        pass_through_to_children = false;
+                    }
+                }
+                // Note: MouseUp should pass through just like "touch stop" (finger releases) above.
                 _ => {}
             }
         }
