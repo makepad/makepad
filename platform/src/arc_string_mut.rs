@@ -86,10 +86,19 @@ impl ScriptApply for ArcStringMut {
     fn script_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
+        // Same rationale as `String::script_apply` (see `prims.rs`):
+        // text-bearing fields are canonically mutated by imperative setters
+        // (`Label::set_text`, `Button::set_text`, etc.), so a ScriptReapply
+        // walk should not clobber the runtime value with the stale DSL
+        // literal. `Apply::Reload` (LiveEdit) still applies — DSL just
+        // changed, so the new template wins.
+        if apply.is_script_reapply() {
+            return;
+        }
         // Convert to owned String using the heap's cast method
         let mut s = String::new();
         vm.bx.heap.cast_to_string(value, &mut s);

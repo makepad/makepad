@@ -343,12 +343,15 @@ impl Cx {
                         continue;
                     }
                     self.os.openxr.logged_waiting_for_session = false;
-                    // If a script re-apply was requested (e.g., safe area insets
-                    // changed on rotation), fire LiveEdit now.
-                    if self.pending_script_reapply {
-                        self.pending_script_reapply = false;
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
+                    // After every event, drain any pending re-apply. The
+                    // cheap gate (both flags false) keeps the hot path
+                    // zero-cost; everything else — picking the right
+                    // `Event` variant for each flag, skipping shader-cache
+                    // reset for manual triggers, deferring a same-tick
+                    // `ScriptReapply` follow-up to keep rotation light —
+                    // is documented in `run_live_edit_if_needed`.
+                    if self.pending_script_reapply || self.pending_live_edit_request {
+                        self.run_live_edit_if_needed("android");
                     }
                     // Drop the frame entirely if the window surface has been
                     // torn down (typically during background/foreground or a

@@ -487,14 +487,33 @@ impl Cx {
         self.in_draw_event
     }
 
-    /// Updates the `mod.widgets.SAFE_INSET_PAD_*` values on the script heap
-    /// so that Splash code can reference them in widget definitions.
-    /// Requests a deferred re-application of all script/Splash widget definitions,
-    /// causing widgets to pick up updated values from the script heap.
-    /// The re-apply happens on the next event loop iteration (not synchronously),
-    /// to avoid re-entrancy issues when called from within an event handler.
+    /// Requests a deferred `Event::ScriptReapply` on the next event-loop
+    /// iteration. The captured app value is re-applied with
+    /// `Apply::ScriptReapply` — no `script_mod` re-run, so runtime
+    /// `script_eval!` overrides on the heap are preserved. Widgets that
+    /// reference shared heap objects (e.g. `mod.widgets.IMG_MSG_FIT`) pick
+    /// up in-place mutations on this re-apply walk.
+    ///
+    /// Use this when the change you made is a runtime mutation of a shared
+    /// heap object — typically a `script_eval!` override.
     pub fn request_script_reapply(&mut self) {
         self.pending_script_reapply = true;
+    }
+
+    /// Requests a deferred `Event::LiveEdit` on the next event-loop iteration.
+    /// The handler re-runs `script_mod` (re-evaluating any expressions that
+    /// reference primitive heap values like `mod.widgets.SAFE_INSET_PAD_TOP`)
+    /// and then re-applies the widget tree with `Apply::Reload`.
+    ///
+    /// Use this only when a primitive heap value has changed and that value
+    /// is consumed by `script_mod!` block expressions — those expressions are
+    /// not re-evaluated by `Apply::ScriptReapply`. `Apply::Reload` walks
+    /// clobber runtime widget state (animator values, dynamic instance
+    /// buffers, user-typed text in widgets that don't early-return on
+    /// LiveEdit), so prefer `request_script_reapply` when the change can be
+    /// modeled as a shared-heap-object mutation instead.
+    pub fn request_live_edit(&mut self) {
+        self.pending_live_edit_request = true;
     }
 
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {

@@ -634,10 +634,15 @@ impl Widget for Window {
                         }
                     }
 
-                    // If safe area insets changed, trigger a script re-apply
-                    // so widgets pick up new values.
+                    // If safe area insets changed, request a `script_mod`
+                    // re-run so widget definitions that reference these
+                    // primitives via `mod.widgets.SAFE_INSET_PAD_*` get the
+                    // new values re-baked. `request_script_reapply` would
+                    // not work here: those expressions are evaluated when
+                    // `script_mod` runs, and `Apply::ScriptReapply` does
+                    // not re-evaluate them.
                     if old_insets != ev.new_geom.safe_area_insets {
-                        cx.request_script_reapply();
+                        cx.request_live_edit();
                     }
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));

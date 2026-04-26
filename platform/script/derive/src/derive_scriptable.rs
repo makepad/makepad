@@ -179,6 +179,37 @@ fn derive_script_impl_inner(
                 .add(".register_as_ui_root(vm);");
         }
 
+        // Deref'd fields are applied BEFORE apply_default's recursive apply.
+        //
+        // Why this order matters: an `#[apply_default]` field (always an
+        // `Animator` in practice) returns an apply block describing how the
+        // widget's runtime fields should look in its current state — e.g.
+        // `{ height: 0 }` for a "hidden" state. The recursive call then
+        // re-walks the widget with that block as the value, setting the
+        // matching widget fields. If the deref'd field's `script_apply`
+        // (which reapplies the widget's *template* defaults via the inner
+        // base widget) ran AFTER this, it would overwrite the animator's
+        // state-driven values with the template defaults, leaving the
+        // widget visually in its template state for the rest of the apply
+        // pass. On `Apply::ScriptReapply` that produces the "flicker to
+        // defaults" most users notice when a preference change forces a
+        // tree-wide re-walk: every animator-driven widget briefly drops
+        // back to its template visual until the next event handler patches
+        // it up. Running deref first and apply_default's recursive last
+        // means the animator's apply block wins, the widget never visibly
+        // touches its template default, and `Animator::script_apply_default`
+        // can return the *current* state's apply on `ScriptReapply` to
+        // restore the runtime visual state in a single pass.
+        for field in &fields {
+            if field.attrs.iter().any(|a| a.name == "deref") {
+                tb.add("<")
+                    .stream(Some(field.ty.clone()))
+                    .add(" as ScriptApply>::script_apply(&mut self.")
+                    .ident(&field.name)
+                    .add(", vm, apply, scope, value);");
+            }
+        }
+
         for field in &fields {
             if field.attrs.iter().any(|a| a.name == "apply_default") {
                 tb.add("    if let Some(default_value) = <")
@@ -188,16 +219,6 @@ fn derive_script_impl_inner(
                     .add(",vm, apply, scope, value){");
                 tb.add("        self.script_apply(vm, &Apply::Default(apply.as_default().map_or(0, |x| x + 1)), scope, default_value);");
                 tb.add("    }");
-            }
-        }
-
-        for field in &fields {
-            if field.attrs.iter().any(|a| a.name == "deref") {
-                tb.add("<")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptApply>::script_apply(&mut self.")
-                    .ident(&field.name)
-                    .add(", vm, apply, scope, value);");
             }
         }
 
