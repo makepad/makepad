@@ -684,7 +684,7 @@ impl App {
     fn set_toggle_widget_active(&self, cx: &mut Cx, id: LiveId, active: bool) {
         if let Some(mut toggle) = self.ui.widget(cx, &[id]).borrow_mut::<CheckBox>() {
             if toggle.active(cx) != active {
-                toggle.set_active(cx, active);
+                toggle.set_active(cx, active, Animate::Yes);
             }
         }
     }

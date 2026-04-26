@@ -276,7 +276,7 @@ impl MatchEvent for App {
                     if was_tailing {
                         workspace
                             .check_box(cx, ids!(log_tail_toggle))
-                            .set_active(cx, false);
+                            .set_active(cx, false, Animate::Yes);
                         self.set_mount_log_tail(cx, &active_mount, false);
                     }
                 }
