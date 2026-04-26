@@ -141,7 +141,7 @@ pub enum StackNavigationTransitionAction {
     HideEnd(WidgetUid), // Include the parent navigation's UID
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, Widget, Animator)]
 pub struct StackNavigationView {
     #[source]
     source: ScriptObjectRef,
@@ -174,6 +174,87 @@ pub struct StackNavigationView {
     /// The UID of the parent navigation.
     #[rust]
     parent_navigation_uid: Option<WidgetUid>,
+
+    /// Runtime override for the header title text, set by `set_title`.
+    ///
+    /// Stored here (rather than relying solely on `Label.text` persisting
+    /// across re-applies) because in some configurations — notably nested
+    /// inside an `AdaptiveView` whose variant gets re-instantiated on
+    /// `WindowGeomChange` — the inner `title` `Label` widget can be
+    /// recreated via `Apply::New` on rotation, which bypasses
+    /// `ArcStringMut::script_apply`'s `ScriptReapply` early-return. The
+    /// override is re-asserted in `on_after_apply` after every apply walk
+    /// so the title sticks regardless of whether the label was re-applied
+    /// or recreated. Storage cost is one `Rc<String>` clone per stack
+    /// view that has had a title set — refcount bump, no byte copy.
+    #[rust]
+    runtime_title: Option<ArcStringMut>,
+}
+
+impl ScriptHook for StackNavigationView {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        // After every apply walk, re-install the runtime title (if any) into
+        // the inner header title label. This is the bulletproof path —
+        // independent of whether the label was re-applied (`Apply::Reload` /
+        // `Apply::ScriptReapply`) or freshly recreated (`Apply::New`, e.g.
+        // when an enclosing `AdaptiveView` re-instantiates its variant on
+        // `WindowGeomChange`). Either way, the runtime title wins.
+        //
+        // We skip:
+        //   * `Apply::Eval`     — temporary objects, not real applies.
+        //   * `Apply::Animate`  — animator-driven re-apply; widget structure
+        //                         unchanged, no template values were reset.
+        //   * `Apply::Default(N)` — the recursive call from
+        //                         `#[apply_default] animator`. The outer
+        //                         apply (New/Reload/ScriptReapply) already
+        //                         fired this hook; we don't need to redo
+        //                         the title write at every animator-group
+        //                         recursion level.
+        if apply.is_eval() || apply.is_animate() || apply.as_default().is_some() {
+            return;
+        }
+        if let Some(title) = self.runtime_title.as_ref() {
+            // Borrow only what we need from `runtime_title` — `as_ref()`
+            // returns `&str`, which lives as long as the `&self` borrow.
+            // `write_title_to_header_label` only takes `&self`, so the
+            // outstanding borrow on `self.runtime_title` is fine.
+            let title = title.as_ref();
+            self.write_title_to_header_label(vm.cx_mut(), title);
+        }
+    }
+}
+
+impl StackNavigationView {
+    /// Set the runtime title override for this stack view.
+    ///
+    /// The title persists across every kind of apply walk (LiveEdit,
+    /// `request_script_reapply`, AdaptiveView variant swap, etc.) because
+    /// it's re-asserted in `on_after_apply`.
+    pub(crate) fn set_runtime_title(&mut self, cx: &mut Cx, title: &str) {
+        let mut owned = ArcStringMut::default();
+        owned.set(title);
+        self.runtime_title = Some(owned);
+        // Apply immediately so the change is visible without waiting for the
+        // next apply walk.
+        self.write_title_to_header_label(cx, title);
+    }
+
+    /// Single source of truth for the descendant path that resolves the
+    /// header title `Label`. Both `set_runtime_title` (initial write) and
+    /// `on_after_apply` (re-assertion after every apply walk) go through
+    /// this so the path lives in exactly one place; restructuring the
+    /// `StackViewHeader` DSL only requires updating this one site.
+    fn write_title_to_header_label(&self, cx: &mut Cx, title: &str) {
+        self.view
+            .label(cx, ids!(header.content.title_container.title))
+            .set_text(cx, title);
+    }
 }
 
 impl Widget for StackNavigationView {
@@ -677,16 +758,22 @@ impl StackNavigationRef {
         }
     }
 
-    /// Set the title of a specific view in the navigation stack
+    /// Set the title of a specific view in the navigation stack.
+    ///
+    /// The runtime title is stored on the `StackNavigationView` itself and
+    /// re-asserted in `on_after_apply` after every kind of re-apply walk
+    /// (LiveEdit, `request_script_reapply`, AdaptiveView variant swap on
+    /// `WindowGeomChange`, etc.). Callers therefore set it once at push
+    /// time and never need to refresh it.
     ///
     /// # Arguments
     /// * `view_id` - The LiveId of the view whose title to set
     /// * `title` - The new title text
     pub fn set_title(&self, cx: &mut Cx, view_id: LiveId, title: &str) {
-        if let Some(inner) = self.borrow_mut() {
-            let stack_view_ref = inner.stack_navigation_view(cx, &[view_id]);
-            stack_view_ref.label(cx, ids!(title)).set_text(cx, title);
-        }
+        let Some(inner) = self.borrow_mut() else { return; };
+        let stack_view_ref = inner.stack_navigation_view(cx, &[view_id]);
+        let Some(mut stack_view) = stack_view_ref.borrow_mut() else { return; };
+        stack_view.set_runtime_title(cx, title);
     }
 
     /// Get the current depth of the navigation stack

@@ -125,14 +125,18 @@ pub enum Event {
     Draw(DrawEvent),
     LiveEdit,
     /// Request from `Cx::request_script_reapply()` to re-apply the widget
-    /// tree via `Apply::Reload` *without* re-running `script_mod!`.
+    /// tree via `Apply::ScriptReapply` *without* re-running `script_mod!`.
     ///
     /// This is useful when something like a Splash-level script object
     /// has been modified at runtime (e.g., `script_eval!`) and the application
     /// wants every widget in the widget tree to pick up that new modified object value.
     ///
     /// Unlike `Event::LiveEdit`, this preserves any heap object values that have
-    /// already been modified at runtime.
+    /// already been modified at runtime. It also walks the tree with
+    /// `Apply::ScriptReapply` (rather than `Apply::Reload`) so that field
+    /// types whose canonical mutation path is an imperative setter
+    /// (e.g. `Label::set_text`) can early-return and keep their runtime
+    /// value instead of being clobbered by the stale DSL literal.
     ScriptReapply,
     /// A window has gained focus and is now the active window receiving user input.
     WindowGotFocus(WindowId),
