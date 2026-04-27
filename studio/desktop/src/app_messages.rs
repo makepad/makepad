@@ -628,6 +628,7 @@ impl App {
                     .terminal_framebuffer_by_path
                     .entry(path)
                     .or_default();
+                self.reveal_terminal_path(cx, &redraw_path);
                 self.refresh_active_mount_terminal_panel(cx, &redraw_path);
                 self.refresh_ai_manager_report(cx);
             }
@@ -658,6 +659,9 @@ impl App {
                 self.reset_terminal_tab_title(cx, &path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
                 self.refresh_ai_manager_report(cx);
+            }
+            HubToClient::AiMountState { mount, state } => {
+                self.receive_ai_state(cx, &mount, state);
             }
             HubToClient::Error { message } => {
                 self.data.pending_reload_paths.clear();

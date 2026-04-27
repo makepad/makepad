@@ -122,7 +122,7 @@ fn websocket_buildbox_remote_build_roundtrip() {
     let runtime = NetworkRuntime::new(NetworkConfig::default());
 
     let ui_socket = LiveId::from_str("studio2.backend.buildbox.ui");
-    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/$studio_ui"), HttpMethod::GET);
+    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui"), HttpMethod::GET);
     if runtime.ws_open(ui_socket, ui_request).is_err() {
         return;
     }
@@ -226,33 +226,34 @@ fn websocket_buildbox_remote_build_roundtrip() {
         .ws_send(ui_socket, WsSend::Binary(run_query.serialize_bin()))
         .expect("send remote cargo run");
 
-    let started = wait_for_ui_message(
-        &runtime,
-        ui_socket,
-        Duration::from_secs(3),
-        |msg| matches!(msg, HubToClient::BuildStarted { mount, .. } if mount == "repo"),
-    );
-    let build_id = match started {
-        Some(HubToClient::BuildStarted { build_id, .. }) => build_id,
-        _ => panic!("did not receive BuildStarted"),
-    };
-
     let cargo_cmd = wait_for_buildbox_message(&runtime, buildbox_socket, Duration::from_secs(3))
         .expect("did not receive buildbox cargo command");
     assert_eq!(cargo_cmd.0.len(), 1);
-    match &cargo_cmd.0[0] {
+    let build_id = match &cargo_cmd.0[0] {
         HubToBuildBox::CargoBuild {
             build_id: id,
             mount,
             args,
             ..
         } => {
-            assert_eq!(*id, build_id);
             assert_eq!(mount, "repo");
             assert_eq!(args, &vec!["-p".to_string(), "remote-app".to_string()]);
+            *id
         }
         other => panic!("unexpected buildbox command: {:?}", other),
-    }
+    };
+
+    let started = wait_for_ui_message(&runtime, ui_socket, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted {
+                build_id: id,
+                mount,
+                ..
+            } if *id == build_id && mount == "repo"
+        )
+    });
+    assert!(started.is_some(), "did not receive BuildStarted");
 
     let output = BuildBoxToHubVec(vec![BuildBoxToHub::BuildOutput {
         build_id,

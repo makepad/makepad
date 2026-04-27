@@ -281,6 +281,7 @@ pub fn qwen35moe_recurrent_block_spec(
         },
         embedding_length: dims.embedding_length,
         input_norm_name: layer.attn_norm.name.clone(),
+        merged_input_proj_name: None,
         qkv_proj_name: recurrent.wqkv.name.clone(),
         qkv_proj_scale_name: recurrent.scales.wqkv.as_ref().map(|t| t.name.clone()),
         z_proj_name: recurrent.wqkv_gate.name.clone(),

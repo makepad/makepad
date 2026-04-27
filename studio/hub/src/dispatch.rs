@@ -1,13 +1,15 @@
+use crate::ai_manager::{AiManager, AiToolExecutionResult};
+use crate::build_manager::BuildManager;
 use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
 };
-use crate::process_manager::{ProcessManager, MAKEPAD_SPLASH_RUNNABLE};
+use crate::script_manager::{ScriptId, ScriptManager, MAKEPAD_SPLASH_RUNNABLE};
 use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
 use backend_proto::{
-    AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo,
-    ClientId, ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample,
+    AiAgentId, AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec,
+    BuildInfo, ClientId, ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample,
     GCSample as StudioGCSample, GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec,
     HubToClient, LogEntry, LogSource, QueryId, RunItem, RunViewInputVizKind, SaveResult,
     SearchResult, TerminalFramebuffer,
@@ -16,6 +18,7 @@ use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
+use makepad_network::NetworkResponse;
 use makepad_script_std::makepad_network::ToUISender;
 use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
@@ -24,7 +27,7 @@ use makepad_studio_protocol::{
     StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
     WidgetTreeDumpRequest,
 };
-use makepad_terminal_core::{StyleFlags, Terminal};
+use makepad_terminal_core::{StyleFlags, TermKeyCode, Terminal};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -103,13 +106,24 @@ pub enum HubEvent {
         items: Vec<RunItem>,
     },
     ScriptRunRequest {
-        build_id: Option<QueryId>,
+        child_build_id: Option<QueryId>,
         mount: String,
         cwd: PathBuf,
         program: String,
         args: Vec<String>,
         env: HashMap<String, String>,
         package: Option<String>,
+    },
+    ScriptOutput {
+        script_id: ScriptId,
+        mount: String,
+        is_stderr: bool,
+        line: String,
+    },
+    ScriptExited {
+        script_id: ScriptId,
+        mount: String,
+        exit_code: Option<i32>,
     },
     TerminalOutput {
         path: String,
@@ -123,6 +137,51 @@ pub enum HubEvent {
     TerminalExited {
         path: String,
         exit_code: i32,
+    },
+    AiHttpResponse {
+        response: NetworkResponse,
+    },
+    AiToolExecutionDone {
+        mount: String,
+        agent_id: AiAgentId,
+        run_token: u64,
+        results: Vec<AiToolExecutionResult>,
+    },
+    AiOpenTerminalRequest {
+        mount: String,
+        name: Option<String>,
+        command: Option<String>,
+        cols: u16,
+        rows: u16,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    AiListTerminalsRequest {
+        mount: String,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    AiReadTerminalRequest {
+        mount: String,
+        path: String,
+        rows: Option<u16>,
+        top_row: Option<usize>,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    AiSendTerminalTextRequest {
+        mount: String,
+        path: String,
+        text: String,
+        submit: bool,
+        bracketed_paste: Option<bool>,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    AiSendTerminalKeyRequest {
+        mount: String,
+        path: String,
+        key: String,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        reply_tx: Sender<Result<String, String>>,
     },
     WorkerFindFilesDone {
         client_id: ClientId,
@@ -230,6 +289,61 @@ struct TerminalSession {
     subscribers: HashMap<ClientId, TerminalClientViewport>,
 }
 
+#[derive(SerJson)]
+struct AiTerminalInfo {
+    path: String,
+    name: String,
+    terminal_title: String,
+    cols: u16,
+    rows: u16,
+    is_tui: bool,
+    bracketed_paste: bool,
+    cursor_keys_application_mode: bool,
+    bell_pending: bool,
+}
+
+#[derive(SerJson)]
+struct AiTerminalReadResult {
+    path: String,
+    name: String,
+    terminal_title: String,
+    cols: u16,
+    rows: u16,
+    top_row: usize,
+    total_lines: usize,
+    cursor_col: u16,
+    cursor_row: i32,
+    cursor_visible: bool,
+    is_tui: bool,
+    bracketed_paste: bool,
+    cursor_keys_application_mode: bool,
+    text: String,
+}
+
+#[derive(SerJson)]
+struct AiTerminalInputResult {
+    path: String,
+    name: String,
+    bytes_sent: usize,
+    submitted: bool,
+    bracketed_paste: bool,
+    preview: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AiTerminalKeyInput {
+    Named(TermKeyCode),
+    Text(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AiParsedTerminalKeySpec {
+    input: AiTerminalKeyInput,
+    shift: bool,
+    control: bool,
+    alt: bool,
+}
+
 #[derive(Default)]
 struct GitStatusCache {
     entries: HashMap<PathBuf, GitStatusCacheEntry>,
@@ -260,7 +374,9 @@ pub struct HubCore {
     remote_build_owner: HashMap<QueryId, String>,
     log_store: LogStore,
     profiler_store: ProfilerStore,
-    process_manager: ProcessManager,
+    build_manager: BuildManager,
+    script_manager: ScriptManager,
+    ai_manager: AiManager,
     terminal_manager: TerminalManager,
     terminal_sessions: HashMap<String, TerminalSession>,
     live_log_queries: HashMap<QueryId, LiveLogSubscription>,
@@ -299,7 +415,7 @@ impl HubCore {
         let regex_search_worker_count = 8;
         let mut this = Self {
             rx,
-            event_tx,
+            event_tx: event_tx.clone(),
             vfs,
             studio_addr,
             studio_ext_addr,
@@ -317,7 +433,9 @@ impl HubCore {
             remote_build_owner: HashMap::new(),
             log_store: LogStore::default(),
             profiler_store: ProfilerStore::default(),
-            process_manager: ProcessManager::default(),
+            build_manager: BuildManager::default(),
+            script_manager: ScriptManager::default(),
+            ai_manager: AiManager::new(event_tx.clone()),
             terminal_manager: TerminalManager::default(),
             terminal_sessions: HashMap::new(),
             live_log_queries: HashMap::new(),
@@ -340,6 +458,9 @@ impl HubCore {
             pending_forward_to_app_by_build: HashMap::new(),
             stdio_ready_builds: HashSet::new(),
         };
+        for mount in this.vfs.mounts() {
+            this.ai_manager.register_mount(&mount.name, &mount.path);
+        }
         this.reset_fs_watcher();
         this
     }
@@ -483,14 +604,27 @@ impl HubCore {
             } => self.on_process_exited(build_id, exit_code),
             HubEvent::RunItemsUpdated { mount, items } => self.on_run_items_updated(mount, items),
             HubEvent::ScriptRunRequest {
-                build_id,
+                child_build_id,
                 mount,
                 cwd,
                 program,
                 args,
                 env,
                 package,
-            } => self.on_script_run_request(build_id, mount, cwd, program, args, env, package),
+            } => {
+                self.on_script_run_request(child_build_id, mount, cwd, program, args, env, package)
+            }
+            HubEvent::ScriptOutput {
+                script_id,
+                mount,
+                is_stderr,
+                line,
+            } => self.on_script_output(script_id, mount, is_stderr, line),
+            HubEvent::ScriptExited {
+                script_id,
+                mount,
+                exit_code,
+            } => self.on_script_exited(script_id, mount, exit_code),
             HubEvent::TerminalOutput { path, data } => self.on_terminal_output(path, data),
             HubEvent::TerminalResized { path, cols, rows } => {
                 self.on_terminal_resized(path, cols, rows)
@@ -498,6 +632,67 @@ impl HubCore {
             HubEvent::TerminalExited { path, exit_code } => {
                 self.on_terminal_exited(path, exit_code)
             }
+            HubEvent::AiHttpResponse { response } => {
+                if let Some((mount, state)) = self.ai_manager.handle_http_response(response) {
+                    self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+                }
+            }
+            HubEvent::AiToolExecutionDone {
+                mount,
+                agent_id,
+                run_token,
+                results,
+            } => {
+                if let Some(state) = self
+                    .ai_manager
+                    .handle_tool_execution_done(&mount, agent_id, run_token, results)
+                {
+                    self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+                }
+            }
+            HubEvent::AiOpenTerminalRequest {
+                mount,
+                name,
+                command,
+                cols,
+                rows,
+                reply_tx,
+            } => self.on_ai_open_terminal_request(mount, name, command, cols, rows, reply_tx),
+            HubEvent::AiListTerminalsRequest { mount, reply_tx } => {
+                self.on_ai_list_terminals_request(mount, reply_tx)
+            }
+            HubEvent::AiReadTerminalRequest {
+                mount,
+                path,
+                rows,
+                top_row,
+                reply_tx,
+            } => self.on_ai_read_terminal_request(mount, path, rows, top_row, reply_tx),
+            HubEvent::AiSendTerminalTextRequest {
+                mount,
+                path,
+                text,
+                submit,
+                bracketed_paste,
+                reply_tx,
+            } => self.on_ai_send_terminal_text_request(
+                mount,
+                path,
+                text,
+                submit,
+                bracketed_paste,
+                reply_tx,
+            ),
+            HubEvent::AiSendTerminalKeyRequest {
+                mount,
+                path,
+                key,
+                shift,
+                control,
+                alt,
+                reply_tx,
+            } => self
+                .on_ai_send_terminal_key_request(mount, path, key, shift, control, alt, reply_tx),
             HubEvent::WorkerFindFilesDone {
                 client_id,
                 query_id,
@@ -735,6 +930,9 @@ impl HubCore {
             ClientToHub::Mount { name, path } => match self.vfs.mount(&name, path) {
                 Ok(()) => {
                     self.reset_fs_watcher();
+                    if let Ok(root) = self.vfs.resolve_mount(&name) {
+                        self.ai_manager.register_mount(&name, &root);
+                    }
                     match self.vfs.load_file_tree(&name) {
                         Ok(data) => self
                             .send_ui_reply(client_id, HubToClient::FileTree { mount: name, data }),
@@ -758,6 +956,7 @@ impl HubCore {
                 self.pending_mount_root_splash_restarts.remove(&name);
                 self.build_mount_by_id.retain(|_, mount| mount != &name);
                 self.run_items_by_mount.remove(&name);
+                let ai_state = self.ai_manager.remove_mount(&name);
                 self.send_ui_reply(
                     client_id,
                     HubToClient::FileTree {
@@ -768,8 +967,15 @@ impl HubCore {
                 self.send_ui_reply(
                     client_id,
                     HubToClient::FileTreeDiff {
-                        mount: name,
+                        mount: name.clone(),
                         changes,
+                    },
+                );
+                self.send_ui_reply(
+                    client_id,
+                    HubToClient::AiMountState {
+                        mount: name.clone(),
+                        state: ai_state,
                     },
                 );
             }
@@ -784,8 +990,16 @@ impl HubCore {
                     self.primary_ui_by_mount.remove(&mount);
                 }
                 if let Some(items) = self.run_items_by_mount.get(&mount).cloned() {
-                    self.send_ui_reply(client_id, HubToClient::RunItems { mount, items });
+                    self.send_ui_reply(
+                        client_id,
+                        HubToClient::RunItems {
+                            mount: mount.clone(),
+                            items,
+                        },
+                    );
                 }
+                let state = self.ai_manager.get_state(&mount);
+                self.send_ui_reply(client_id, HubToClient::AiMountState { mount, state });
             }
             ClientToHub::LoadFileTree { mount } => {
                 self.enqueue_file_tree_load_for_client(mount, client_id);
@@ -964,11 +1178,7 @@ impl HubCore {
                 self.send_ui_reply(
                     client_id,
                     HubToClient::Builds {
-                        builds: self
-                            .list_all_builds()
-                            .into_iter()
-                            .filter(|build| build.package != MAKEPAD_SPLASH_RUNNABLE)
-                            .collect(),
+                        builds: self.list_all_builds(),
                     },
                 );
             }
@@ -983,7 +1193,7 @@ impl HubCore {
             ClientToHub::RunItem { mount, name } => {
                 let build_id = self.alloc_build_id();
                 if let Err(err) = self
-                    .process_manager
+                    .script_manager
                     .invoke_script_run_item(&mount, &name, build_id)
                 {
                     self.send_ui_error(client_id, err);
@@ -1038,7 +1248,7 @@ impl HubCore {
                         return;
                     }
                 };
-                match self.process_manager.start_cargo_run(
+                match self.build_manager.start_cargo_run(
                     build_id,
                     mount.clone(),
                     &cwd,
@@ -1097,7 +1307,6 @@ impl HubCore {
                         return;
                     }
 
-                    let build_id = self.alloc_build_id();
                     let cwd = match self.vfs.resolve_mount(&mount) {
                         Ok(cwd) => cwd,
                         Err(err) => {
@@ -1105,23 +1314,14 @@ impl HubCore {
                             return;
                         }
                     };
-                    match self.process_manager.start_script_run(
-                        build_id,
+                    match self.script_manager.start_script(
                         mount.clone(),
                         &cwd,
                         self.studio_addr.clone(),
                         self.studio_ext_addr.clone(),
                         self.event_tx.clone(),
                     ) {
-                        Ok(info) => {
-                            self.build_mount_by_id
-                                .insert(info.build_id, info.mount.clone());
-                            self.broadcast_ui_message(HubToClient::BuildStarted {
-                                build_id: info.build_id,
-                                mount: info.mount,
-                                package: info.package,
-                            });
-                        }
+                        Ok(_) => {}
                         Err(err) => self.send_ui_error(client_id, err),
                     }
                     return;
@@ -1169,7 +1369,7 @@ impl HubCore {
                         return;
                     }
                 };
-                match self.process_manager.start_cargo_run(
+                match self.build_manager.start_cargo_run(
                     build_id,
                     mount.clone(),
                     &cwd,
@@ -1191,7 +1391,7 @@ impl HubCore {
                 }
             }
             ClientToHub::StopBuild { build_id } => {
-                if self.process_manager.stop_build(build_id).is_ok() {
+                if self.build_manager.stop_build(build_id).is_ok() {
                     return;
                 }
                 let Some(buildbox_name) = self.remote_build_owner.get(&build_id).cloned() else {
@@ -1205,7 +1405,7 @@ impl HubCore {
                 }
             }
             ClientToHub::ClearBuild { build_id } => {
-                if self.process_manager.stop_build(build_id).is_ok() {
+                if self.build_manager.stop_build(build_id).is_ok() {
                     self.send_build_cleanup_message(build_id);
                     return;
                 }
@@ -1415,8 +1615,8 @@ impl HubCore {
                 cols,
                 rows,
                 env,
-            } => {
-                if self.terminal_sessions.contains_key(&path) {
+            } => match self.ensure_terminal_session_open(&path, cols, rows, env) {
+                Ok(_opened_now) => {
                     self.send_ui_reply(
                         client_id,
                         HubToClient::TerminalOpened { path: path.clone() },
@@ -1430,74 +1630,9 @@ impl HubCore {
                         rows,
                         usize::MAX,
                     );
-                    return;
                 }
-                let Some(mount) = mount_from_virtual_path(&path).map(ToOwned::to_owned) else {
-                    self.send_ui_error(
-                        client_id,
-                        format!("invalid terminal path (missing mount): {}", path),
-                    );
-                    return;
-                };
-                let cwd = match self.vfs.resolve_mount(&mount) {
-                    Ok(cwd) => cwd,
-                    Err(err) => {
-                        self.send_ui_error(client_id, err.to_string());
-                        return;
-                    }
-                };
-                let history = self
-                    .vfs
-                    .resolve_path(&path)
-                    .ok()
-                    .and_then(|disk_path| fs::read(disk_path).ok())
-                    .unwrap_or_default();
-                match self.terminal_manager.open_terminal(
-                    path.clone(),
-                    mount,
-                    &cwd,
-                    cols,
-                    rows,
-                    env,
-                    self.event_tx.clone(),
-                ) {
-                    Ok(()) => {
-                        let cols = cols.max(1);
-                        let rows = rows.max(1);
-                        let mut terminal = Terminal::new(cols as usize, rows as usize);
-                        if !history.is_empty() {
-                            terminal.process_bytes(&history);
-                            let _ = terminal.take_outbound();
-                        }
-                        self.terminal_sessions.insert(
-                            path.clone(),
-                            TerminalSession {
-                                terminal,
-                                cols,
-                                rows,
-                                applied_cols: cols,
-                                applied_rows: rows,
-                                frame_seq: 0,
-                                bell_pending: false,
-                                subscribers: HashMap::new(),
-                            },
-                        );
-                        self.send_ui_reply(
-                            client_id,
-                            HubToClient::TerminalOpened { path: path.clone() },
-                        );
-                        self.send_terminal_viewport_for_client(
-                            client_id,
-                            &path,
-                            cols,
-                            rows,
-                            rows,
-                            usize::MAX,
-                        );
-                    }
-                    Err(err) => self.send_ui_error(client_id, err),
-                }
-            }
+                Err(err) => self.send_ui_error(client_id, err),
+            },
             ClientToHub::TerminalInput { path, data } => {
                 match self.terminal_manager.send_input(&path, data) {
                     Ok(()) => self.set_terminal_bell_state(&path, false),
@@ -1518,6 +1653,38 @@ impl HubCore {
             ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
                 self.terminal_sessions.remove(&path);
+            }
+            ClientToHub::AiGetState { mount } => {
+                let state = self.ai_manager.get_state(&mount);
+                self.send_ui_reply(client_id, HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiCreateAgent { mount, title } => {
+                let state = self.ai_manager.create_agent(&mount, title);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiDeleteAgent { mount, agent_id } => {
+                let state = self.ai_manager.delete_agent(&mount, agent_id);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiSelectAgent { mount, agent_id } => {
+                let state = self.ai_manager.select_agent(&mount, agent_id);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiSetBackend { mount, backend_id } => {
+                let state = self.ai_manager.set_backend(&mount, &backend_id);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiSendPrompt {
+                mount,
+                agent_id,
+                text,
+            } => {
+                let state = self.ai_manager.send_prompt(&mount, agent_id, &text);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiCancelPrompt { mount, agent_id } => {
+                let state = self.ai_manager.cancel_prompt(&mount, agent_id);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
             }
             ClientToHub::QueryLogs {
                 build_id,
@@ -2189,7 +2356,7 @@ impl HubCore {
         for msg in msgs.0 {
             let mut line = msg.serialize_json();
             line.push('\n');
-            self.process_manager.send_stdin(build_id, &line)?;
+            self.build_manager.send_stdin(build_id, &line)?;
         }
         Ok(())
     }
@@ -2380,14 +2547,14 @@ impl HubCore {
     }
 
     fn list_all_builds(&self) -> Vec<BuildInfo> {
-        let mut builds = self.process_manager.list_builds();
+        let mut builds = self.build_manager.list_builds();
         builds.extend(self.remote_builds.values().cloned());
         builds.sort_by_key(|build| build.build_id.0);
         builds
     }
 
     fn build_info_for_id(&self, build_id: QueryId) -> Option<BuildInfo> {
-        self.process_manager
+        self.build_manager
             .list_builds()
             .into_iter()
             .find(|build| build.build_id == build_id)
@@ -2399,7 +2566,9 @@ impl HubCore {
             .app_sockets
             .iter()
             .map(|(web_socket_id, socket)| {
-                let build_info = socket.build_id.and_then(|build_id| self.build_info_for_id(build_id));
+                let build_info = socket
+                    .build_id
+                    .and_then(|build_id| self.build_info_for_id(build_id));
                 AppSocketInfo {
                     web_socket_id: *web_socket_id,
                     build_id: socket.build_id,
@@ -2441,53 +2610,27 @@ impl HubCore {
         virtual_path == format!("{}/{}", mount, MAKEPAD_SPLASH_RUNNABLE)
     }
 
-    fn mount_root_splash_build_ids(&self, mount: &str) -> Vec<QueryId> {
-        let mut build_ids: Vec<QueryId> = self
-            .process_manager
-            .list_builds()
-            .into_iter()
-            .filter_map(|build| {
-                (build.active && build.mount == mount && build.package == MAKEPAD_SPLASH_RUNNABLE)
-                    .then_some(build.build_id)
-            })
-            .collect();
-        build_ids.sort_by_key(|build_id| build_id.0);
-        build_ids
-    }
-
     fn mount_root_splash_running(&self, mount: &str) -> bool {
-        !self.mount_root_splash_build_ids(mount).is_empty()
+        self.script_manager.is_running_for_mount(mount)
     }
 
-    fn ensure_mount_root_splash_running(
-        &mut self,
-        mount: &str,
-    ) -> Result<Option<BuildInfo>, String> {
+    fn ensure_mount_root_splash_running(&mut self, mount: &str) -> Result<bool, String> {
         if !self.mount_has_root_splash(mount) || self.mount_root_splash_running(mount) {
-            return Ok(None);
+            return Ok(false);
         }
 
-        let build_id = self.alloc_build_id();
         let cwd = self
             .vfs
             .resolve_mount(mount)
             .map_err(|err| err.to_string())?;
-        let info = self.process_manager.start_script_run(
-            build_id,
+        self.script_manager.start_script(
             mount.to_string(),
             &cwd,
             self.studio_addr.clone(),
             self.studio_ext_addr.clone(),
             self.event_tx.clone(),
         )?;
-        self.build_mount_by_id
-            .insert(info.build_id, info.mount.clone());
-        self.broadcast_ui_message(HubToClient::BuildStarted {
-            build_id: info.build_id,
-            mount: info.mount.clone(),
-            package: info.package.clone(),
-        });
-        Ok(Some(info))
+        Ok(true)
     }
 
     fn start_mount_root_splash_with_reporting(&mut self, mount: &str) {
@@ -2514,8 +2657,7 @@ impl HubCore {
     }
 
     fn request_mount_root_splash_reload(&mut self, mount: &str) {
-        let build_ids = self.mount_root_splash_build_ids(mount);
-        if build_ids.is_empty() {
+        if !self.mount_root_splash_running(mount) {
             if self.primary_ui_for_mount(mount).is_some() && self.mount_has_root_splash(mount) {
                 self.start_mount_root_splash_with_reporting(mount);
             }
@@ -2529,16 +2671,14 @@ impl HubCore {
             self.pending_mount_root_splash_restarts.remove(mount);
         }
 
-        for build_id in build_ids {
-            if let Err(err) = self.process_manager.stop_build(build_id) {
-                if let Some(client_id) = self.primary_ui_for_mount(mount) {
-                    self.send_ui_error(client_id, err);
-                } else {
-                    eprintln!(
-                        "[studio2-backend] failed to stop {} build {} for mount {}: {}",
-                        MAKEPAD_SPLASH_RUNNABLE, build_id.0, mount, err
-                    );
-                }
+        if let Err(err) = self.script_manager.stop_script_for_mount(mount) {
+            if let Some(client_id) = self.primary_ui_for_mount(mount) {
+                self.send_ui_error(client_id, err);
+            } else {
+                eprintln!(
+                    "[studio2-backend] failed to stop {} for mount {}: {}",
+                    MAKEPAD_SPLASH_RUNNABLE, mount, err
+                );
             }
         }
     }
@@ -2593,7 +2733,7 @@ impl HubCore {
 
     fn on_script_run_request(
         &mut self,
-        build_id: Option<QueryId>,
+        child_build_id: Option<QueryId>,
         mount: String,
         cwd: PathBuf,
         program: String,
@@ -2601,9 +2741,9 @@ impl HubCore {
         env: HashMap<String, String>,
         package: Option<String>,
     ) {
-        let build_id = build_id.unwrap_or_else(|| self.alloc_build_id());
+        let build_id = child_build_id.unwrap_or_else(|| self.alloc_build_id());
         let package = package.unwrap_or_else(|| display_name_from_command(&program, &args));
-        match self.process_manager.start_command_run(
+        match self.build_manager.start_command_run(
             build_id,
             mount.clone(),
             package.clone(),
@@ -3003,26 +3143,51 @@ impl HubCore {
         }
     }
 
-    fn on_process_output(&mut self, build_id: QueryId, is_stderr: bool, line: String) {
+    fn on_script_output(
+        &mut self,
+        _script_id: ScriptId,
+        _mount: String,
+        is_stderr: bool,
+        line: String,
+    ) {
         if line.is_empty() {
             return;
         }
-        if self.process_manager.package_for_build(build_id) == Some(MAKEPAD_SPLASH_RUNNABLE) {
-            let (index, entry) = self.log_store.append(AppendLogEntry {
-                build_id: Some(build_id),
-                level: if is_stderr {
-                    LogLevel::Error
-                } else {
-                    LogLevel::Log
-                },
-                source: LogSource::Studio,
-                message: line,
-                file_name: None,
-                line: None,
-                column: None,
-                timestamp: None,
-            });
-            self.broadcast_live_log_entry(index, entry);
+        let (index, entry) = self.log_store.append(AppendLogEntry {
+            build_id: None,
+            level: if is_stderr {
+                LogLevel::Error
+            } else {
+                LogLevel::Log
+            },
+            source: LogSource::Studio,
+            message: line,
+            file_name: None,
+            line: None,
+            column: None,
+            timestamp: None,
+        });
+        self.broadcast_live_log_entry(index, entry);
+    }
+
+    fn on_script_exited(&mut self, script_id: ScriptId, mount: String, exit_code: Option<i32>) {
+        if self
+            .script_manager
+            .mark_exited(script_id, exit_code)
+            .is_none()
+        {
+            return;
+        }
+        self.run_items_by_mount.insert(mount.clone(), Vec::new());
+        self.broadcast_ui_message(HubToClient::RunItems {
+            mount: mount.clone(),
+            items: Vec::new(),
+        });
+        self.maybe_restart_pending_mount_root_splash(&mount);
+    }
+
+    fn on_process_output(&mut self, build_id: QueryId, is_stderr: bool, line: String) {
+        if line.is_empty() {
             return;
         }
         match parse_cargo_output_line(&line) {
@@ -3059,7 +3224,11 @@ impl HubCore {
         }
     }
     fn on_process_exited(&mut self, build_id: QueryId, exit_code: Option<i32>) {
-        let Some(info) = self.process_manager.mark_exited(build_id, exit_code) else {
+        if self
+            .build_manager
+            .mark_exited(build_id, exit_code)
+            .is_none()
+        {
             return;
         };
         self.stdio_ready_builds.remove(&build_id);
@@ -3068,15 +3237,6 @@ impl HubCore {
             build_id,
             exit_code,
         });
-        if info.package == MAKEPAD_SPLASH_RUNNABLE {
-            self.run_items_by_mount
-                .insert(info.mount.clone(), Vec::new());
-            self.broadcast_ui_message(HubToClient::RunItems {
-                mount: info.mount.clone(),
-                items: Vec::new(),
-            });
-            self.maybe_restart_pending_mount_root_splash(&info.mount);
-        }
     }
 
     fn on_terminal_output(&mut self, path: String, data: Vec<u8>) {
@@ -3160,6 +3320,362 @@ impl HubCore {
             path,
             code: exit_code,
         });
+    }
+
+    fn ensure_terminal_session_open(
+        &mut self,
+        path: &str,
+        cols: u16,
+        rows: u16,
+        env: HashMap<String, String>,
+    ) -> Result<bool, String> {
+        if self.terminal_sessions.contains_key(path) {
+            return Ok(false);
+        }
+        let Some(mount) = mount_from_virtual_path(path).map(ToOwned::to_owned) else {
+            return Err(format!("invalid terminal path (missing mount): {}", path));
+        };
+        let cwd = self
+            .vfs
+            .resolve_mount(&mount)
+            .map_err(|err| err.to_string())?;
+        let history = self
+            .vfs
+            .resolve_path(path)
+            .ok()
+            .and_then(|disk_path| fs::read(disk_path).ok())
+            .unwrap_or_default();
+        self.terminal_manager.open_terminal(
+            path.to_string(),
+            mount,
+            &cwd,
+            cols,
+            rows,
+            env,
+            self.event_tx.clone(),
+        )?;
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let mut terminal = Terminal::new(cols as usize, rows as usize);
+        if !history.is_empty() {
+            terminal.process_bytes(&history);
+            let _ = terminal.take_outbound();
+        }
+        self.terminal_sessions.insert(
+            path.to_string(),
+            TerminalSession {
+                terminal,
+                cols,
+                rows,
+                applied_cols: cols,
+                applied_rows: rows,
+                frame_seq: 0,
+                bell_pending: false,
+                subscribers: HashMap::new(),
+            },
+        );
+        Ok(true)
+    }
+
+    fn on_ai_open_terminal_request(
+        &mut self,
+        mount: String,
+        name: Option<String>,
+        command: Option<String>,
+        cols: u16,
+        rows: u16,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.open_ai_terminal(&mount, name.as_deref(), command.as_deref(), cols, rows);
+        let _ = reply_tx.send(result);
+    }
+
+    fn open_ai_terminal(
+        &mut self,
+        mount: &str,
+        name: Option<&str>,
+        command: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, String> {
+        let path = self.next_ai_terminal_path(mount, name, command)?;
+        self.vfs
+            .save_text_file(&path, "")
+            .map_err(|err| err.to_string())?;
+        self.self_save_suppress_until_by_path
+            .insert(path.clone(), Instant::now() + FS_SELF_SAVE_SUPPRESS);
+        let _ = self.ensure_terminal_session_open(&path, cols, rows, HashMap::new())?;
+        self.broadcast_ui_message(HubToClient::TerminalOpened { path: path.clone() });
+        if let Some(command) = command.map(str::trim).filter(|command| !command.is_empty()) {
+            self.terminal_manager
+                .send_input(&path, format!("{}\n", command).into_bytes())?;
+        }
+        Ok(self.ai_terminal_info(&path)?.serialize_json())
+    }
+
+    fn on_ai_list_terminals_request(
+        &mut self,
+        mount: String,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.list_ai_terminals(&mount);
+        let _ = reply_tx.send(result);
+    }
+
+    fn on_ai_read_terminal_request(
+        &mut self,
+        mount: String,
+        path: String,
+        rows: Option<u16>,
+        top_row: Option<usize>,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.read_ai_terminal(&mount, &path, rows, top_row);
+        let _ = reply_tx.send(result);
+    }
+
+    fn on_ai_send_terminal_text_request(
+        &mut self,
+        mount: String,
+        path: String,
+        text: String,
+        submit: bool,
+        bracketed_paste: Option<bool>,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.send_ai_terminal_text(&mount, &path, &text, submit, bracketed_paste);
+        let _ = reply_tx.send(result);
+    }
+
+    fn on_ai_send_terminal_key_request(
+        &mut self,
+        mount: String,
+        path: String,
+        key: String,
+        shift: bool,
+        control: bool,
+        alt: bool,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.send_ai_terminal_key(&mount, &path, &key, shift, control, alt);
+        let _ = reply_tx.send(result);
+    }
+
+    fn list_ai_terminals(&self, mount: &str) -> Result<String, String> {
+        let mut terminals = self
+            .terminal_sessions
+            .iter()
+            .filter(|(path, _)| self.terminal_manager.mount_for_path(path.as_str()) == Some(mount))
+            .map(|(path, _)| self.ai_terminal_info(path))
+            .collect::<Result<Vec<_>, String>>()?;
+        terminals.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(terminals.serialize_json())
+    }
+
+    fn read_ai_terminal(
+        &self,
+        mount: &str,
+        path: &str,
+        rows: Option<u16>,
+        top_row: Option<usize>,
+    ) -> Result<String, String> {
+        self.ensure_ai_terminal_access(mount, path)?;
+        let session = self
+            .terminal_sessions
+            .get(path)
+            .ok_or_else(|| format!("unknown terminal: {}", path))?;
+        let frame = terminal_framebuffer_from_terminal(
+            &session.terminal,
+            session.cols.max(1),
+            rows.unwrap_or(session.rows).max(1),
+            top_row.unwrap_or(usize::MAX),
+            session.frame_seq,
+        );
+        Ok(AiTerminalReadResult {
+            path: path.to_string(),
+            name: Self::terminal_display_name(path),
+            terminal_title: session.terminal.title.clone(),
+            cols: frame.cols,
+            rows: frame.rows,
+            top_row: frame.top_row,
+            total_lines: frame.total_lines,
+            cursor_col: frame.cursor_col,
+            cursor_row: frame.cursor_row,
+            cursor_visible: frame.cursor_visible,
+            is_tui: frame.is_tui,
+            bracketed_paste: frame.bracketed_paste,
+            cursor_keys_application_mode: frame.cursor_keys_application_mode,
+            text: terminal_framebuffer_text(&frame),
+        }
+        .serialize_json())
+    }
+
+    fn send_ai_terminal_text(
+        &mut self,
+        mount: &str,
+        path: &str,
+        text: &str,
+        submit: bool,
+        bracketed_paste: Option<bool>,
+    ) -> Result<String, String> {
+        self.ensure_ai_terminal_access(mount, path)?;
+        let bracketed_paste = {
+            let session = self
+                .terminal_sessions
+                .get(path)
+                .ok_or_else(|| format!("unknown terminal: {}", path))?;
+            bracketed_paste.unwrap_or(session.terminal.modes.bracketed_paste && text.contains('\n'))
+        };
+        if text.is_empty() && !submit {
+            return Err("send_terminal_text requires non-empty text or submit=true".to_string());
+        }
+        let mut bytes = Vec::with_capacity(text.len() + 17);
+        if bracketed_paste {
+            bytes.extend_from_slice(b"\x1b[200~");
+        }
+        bytes.extend_from_slice(text.as_bytes());
+        if bracketed_paste {
+            bytes.extend_from_slice(b"\x1b[201~");
+        }
+        if submit {
+            bytes.push(b'\r');
+        }
+        self.terminal_manager.send_input(path, bytes.clone())?;
+        self.set_terminal_bell_state(path, false);
+        let preview_source = if submit {
+            format!("{}<enter>", text)
+        } else {
+            text.to_string()
+        };
+        Ok(AiTerminalInputResult {
+            path: path.to_string(),
+            name: Self::terminal_display_name(path),
+            bytes_sent: bytes.len(),
+            submitted: submit,
+            bracketed_paste,
+            preview: preview_text(&preview_source),
+        }
+        .serialize_json())
+    }
+
+    fn send_ai_terminal_key(
+        &mut self,
+        mount: &str,
+        path: &str,
+        key: &str,
+        shift: bool,
+        control: bool,
+        alt: bool,
+    ) -> Result<String, String> {
+        self.ensure_ai_terminal_access(mount, path)?;
+        let spec = parse_ai_terminal_key_spec(key, shift, control, alt)?;
+        let bytes = {
+            let session = self
+                .terminal_sessions
+                .get(path)
+                .ok_or_else(|| format!("unknown terminal: {}", path))?;
+            encode_ai_terminal_key(&session.terminal, &spec)
+                .ok_or_else(|| format!("unsupported terminal key '{}'", key))?
+        };
+        self.terminal_manager.send_input(path, bytes.clone())?;
+        self.set_terminal_bell_state(path, false);
+        Ok(AiTerminalInputResult {
+            path: path.to_string(),
+            name: Self::terminal_display_name(path),
+            bytes_sent: bytes.len(),
+            submitted: false,
+            bracketed_paste: false,
+            preview: preview_text(key),
+        }
+        .serialize_json())
+    }
+
+    fn ai_terminal_info(&self, path: &str) -> Result<AiTerminalInfo, String> {
+        let session = self
+            .terminal_sessions
+            .get(path)
+            .ok_or_else(|| format!("unknown terminal: {}", path))?;
+        Ok(AiTerminalInfo {
+            path: path.to_string(),
+            name: Self::terminal_display_name(path),
+            terminal_title: session.terminal.title.clone(),
+            cols: session.cols,
+            rows: session.rows,
+            is_tui: session.terminal.modes.alt_screen
+                || session.terminal.screen().scroll_top != 0
+                || session.terminal.screen().scroll_bottom != session.terminal.screen().rows(),
+            bracketed_paste: session.terminal.modes.bracketed_paste,
+            cursor_keys_application_mode: session.terminal.modes.cursor_keys,
+            bell_pending: session.bell_pending,
+        })
+    }
+
+    fn ensure_ai_terminal_access(&self, mount: &str, path: &str) -> Result<(), String> {
+        match self.terminal_manager.mount_for_path(path) {
+            Some(actual_mount) if actual_mount == mount => Ok(()),
+            Some(actual_mount) => Err(format!(
+                "terminal '{}' belongs to mount '{}', not '{}'",
+                path, actual_mount, mount
+            )),
+            None => Err(format!("unknown terminal: {}", path)),
+        }
+    }
+
+    fn terminal_display_name(path: &str) -> String {
+        path.rsplit('/').next().unwrap_or(path).to_string()
+    }
+
+    fn next_ai_terminal_path(
+        &self,
+        mount: &str,
+        name: Option<&str>,
+        command: Option<&str>,
+    ) -> Result<String, String> {
+        self.vfs
+            .resolve_mount(mount)
+            .map_err(|err| err.to_string())?;
+        if let Some(stem) = name
+            .and_then(sanitize_terminal_stem)
+            .or_else(|| command.and_then(terminal_stem_from_command))
+        {
+            return self.unique_ai_terminal_path(mount, &stem);
+        }
+        for index in 0usize.. {
+            let stem = if index < 26 {
+                ((b'a' + index as u8) as char).to_string()
+            } else {
+                format!("t{}", index + 1)
+            };
+            let path = format!("{}/.makepad/{}.term", mount, stem);
+            if !self.is_terminal_path_taken(&path) {
+                return Ok(path);
+            }
+        }
+        Err("failed to allocate terminal path".to_string())
+    }
+
+    fn unique_ai_terminal_path(&self, mount: &str, stem: &str) -> Result<String, String> {
+        for index in 0usize.. {
+            let file_name = if index == 0 {
+                format!("{}.term", stem)
+            } else {
+                format!("{}-{}.term", stem, index + 1)
+            };
+            let path = format!("{}/.makepad/{}", mount, file_name);
+            if !self.is_terminal_path_taken(&path) {
+                return Ok(path);
+            }
+        }
+        Err("failed to allocate named terminal path".to_string())
+    }
+
+    fn is_terminal_path_taken(&self, path: &str) -> bool {
+        self.terminal_sessions.contains_key(path)
+            || self
+                .vfs
+                .resolve_path(path)
+                .map(|disk_path| disk_path.exists())
+                .unwrap_or(false)
     }
 
     fn send_terminal_viewport_for_client(
@@ -3587,8 +4103,167 @@ fn terminal_framebuffer_from_terminal(
     }
 }
 
+fn terminal_framebuffer_text(frame: &TerminalFramebuffer) -> String {
+    let cols = frame.cols as usize;
+    let rows = frame.rows as usize;
+    let cell_count = cols.saturating_mul(rows);
+    let stride = if cell_count == 0 {
+        0
+    } else {
+        (frame.cells.len() / cell_count).max(4)
+    };
+    let mut out = String::new();
+    for row in 0..rows {
+        let mut line = String::with_capacity(cols);
+        for col in 0..cols {
+            let idx = (row * cols + col) * stride;
+            let codepoint = if idx + 3 < frame.cells.len() {
+                u32::from_le_bytes([
+                    frame.cells[idx],
+                    frame.cells[idx + 1],
+                    frame.cells[idx + 2],
+                    frame.cells[idx + 3],
+                ])
+            } else {
+                ' ' as u32
+            };
+            line.push(match codepoint {
+                0 => ' ',
+                value => char::from_u32(value).unwrap_or(' '),
+            });
+        }
+        out.push_str(line.trim_end_matches(' '));
+        if row + 1 < rows {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn preview_text(text: &str) -> String {
+    let normalized = text.replace('\r', "\\r").replace('\n', "\\n");
+    let mut out = normalized.chars().take(160).collect::<String>();
+    if normalized.chars().count() > 160 {
+        out.push_str("...");
+    }
+    out
+}
+
+fn parse_ai_terminal_key_spec(
+    key: &str,
+    shift: bool,
+    control: bool,
+    alt: bool,
+) -> Result<AiParsedTerminalKeySpec, String> {
+    let mut shift = shift;
+    let mut control = control;
+    let mut alt = alt;
+    let raw = key.trim();
+    if raw.is_empty() {
+        return Err("terminal key cannot be empty".to_string());
+    }
+
+    let parts = raw
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err("terminal key cannot be empty".to_string());
+    }
+    let base = parts.last().copied().unwrap_or(raw);
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        match modifier.to_ascii_lowercase().as_str() {
+            "shift" => shift = true,
+            "ctrl" | "control" => control = true,
+            "alt" | "option" => alt = true,
+            other => return Err(format!("unsupported terminal key modifier '{}'", other)),
+        }
+    }
+
+    let input = match base.to_ascii_lowercase().as_str() {
+        "enter" | "return" => AiTerminalKeyInput::Named(TermKeyCode::Return),
+        "tab" => AiTerminalKeyInput::Named(TermKeyCode::Tab),
+        "backspace" | "bs" => AiTerminalKeyInput::Named(TermKeyCode::Backspace),
+        "escape" | "esc" => AiTerminalKeyInput::Named(TermKeyCode::Escape),
+        "delete" | "del" => AiTerminalKeyInput::Named(TermKeyCode::Delete),
+        "up" | "arrowup" => AiTerminalKeyInput::Named(TermKeyCode::Up),
+        "down" | "arrowdown" => AiTerminalKeyInput::Named(TermKeyCode::Down),
+        "left" | "arrowleft" => AiTerminalKeyInput::Named(TermKeyCode::Left),
+        "right" | "arrowright" => AiTerminalKeyInput::Named(TermKeyCode::Right),
+        "home" => AiTerminalKeyInput::Named(TermKeyCode::Home),
+        "end" => AiTerminalKeyInput::Named(TermKeyCode::End),
+        "pageup" | "page_up" | "pgup" => AiTerminalKeyInput::Named(TermKeyCode::PageUp),
+        "pagedown" | "page_down" | "pgdown" => AiTerminalKeyInput::Named(TermKeyCode::PageDown),
+        "insert" | "ins" => AiTerminalKeyInput::Named(TermKeyCode::Insert),
+        "f1" => AiTerminalKeyInput::Named(TermKeyCode::F1),
+        "f2" => AiTerminalKeyInput::Named(TermKeyCode::F2),
+        "f3" => AiTerminalKeyInput::Named(TermKeyCode::F3),
+        "f4" => AiTerminalKeyInput::Named(TermKeyCode::F4),
+        "f5" => AiTerminalKeyInput::Named(TermKeyCode::F5),
+        "f6" => AiTerminalKeyInput::Named(TermKeyCode::F6),
+        "f7" => AiTerminalKeyInput::Named(TermKeyCode::F7),
+        "f8" => AiTerminalKeyInput::Named(TermKeyCode::F8),
+        "f9" => AiTerminalKeyInput::Named(TermKeyCode::F9),
+        "f10" => AiTerminalKeyInput::Named(TermKeyCode::F10),
+        "f11" => AiTerminalKeyInput::Named(TermKeyCode::F11),
+        "f12" => AiTerminalKeyInput::Named(TermKeyCode::F12),
+        "space" => AiTerminalKeyInput::Text(" ".to_string()),
+        _ => {
+            if base.chars().count() == 1 {
+                AiTerminalKeyInput::Text(base.to_string())
+            } else {
+                return Err(format!("unsupported terminal key '{}'", base));
+            }
+        }
+    };
+
+    Ok(AiParsedTerminalKeySpec {
+        input,
+        shift,
+        control,
+        alt,
+    })
+}
+
+fn encode_ai_terminal_key(terminal: &Terminal, spec: &AiParsedTerminalKeySpec) -> Option<Vec<u8>> {
+    match &spec.input {
+        AiTerminalKeyInput::Named(key_code) => {
+            terminal.encode_key(*key_code, "", spec.shift, spec.control, spec.alt)
+        }
+        AiTerminalKeyInput::Text(text) => {
+            terminal.encode_key(TermKeyCode::None, text, spec.shift, spec.control, spec.alt)
+        }
+    }
+}
+
 fn rgb_to_u32(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+fn sanitize_terminal_stem(raw: &str) -> Option<String> {
+    let mut stem = String::new();
+    let mut last_was_dash = false;
+    for ch in raw.trim().chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() {
+            stem.push(ch);
+            last_was_dash = false;
+        } else if !stem.is_empty() && matches!(ch, '-' | '_' | ' ' | '.') && !last_was_dash {
+            stem.push('-');
+            last_was_dash = true;
+        }
+    }
+    while stem.ends_with('-') {
+        stem.pop();
+    }
+    (!stem.is_empty()).then_some(stem)
+}
+
+fn terminal_stem_from_command(command: &str) -> Option<String> {
+    let token = command.split_whitespace().next()?;
+    let token = token.rsplit('/').next().unwrap_or(token);
+    sanitize_terminal_stem(token)
 }
 
 fn mount_from_virtual_path(path: &str) -> Option<&str> {
@@ -4344,6 +5019,50 @@ mod tests {
         assert_eq!(decode_frame_codepoint(&frame, 0, 0), 'A' as u32);
         assert_eq!(decode_frame_codepoint(&frame, 0, 1), 0);
         assert_eq!(decode_frame_codepoint(&frame, 0, 2), 'B' as u32);
+    }
+
+    #[test]
+    fn terminal_framebuffer_text_trims_rows_and_hides_nul_cells() {
+        let mut term = Terminal::new(4, 2);
+        term.screen_mut().grid.cell_mut(0, 0).codepoint = 'A';
+        term.screen_mut().grid.cell_mut(1, 0).codepoint = '\0';
+        term.screen_mut().grid.cell_mut(2, 0).codepoint = 'B';
+        term.screen_mut().grid.cell_mut(0, 1).codepoint = 'C';
+
+        let frame = terminal_framebuffer_from_terminal(&term, 4, 2, 0, 1);
+        assert_eq!(terminal_framebuffer_text(&frame), "A B\nC");
+    }
+
+    #[test]
+    fn parse_ai_terminal_key_spec_supports_modifiers_and_named_keys() {
+        let spec = parse_ai_terminal_key_spec("ctrl+shift+tab", false, false, false).unwrap();
+        assert_eq!(
+            spec,
+            AiParsedTerminalKeySpec {
+                input: AiTerminalKeyInput::Named(TermKeyCode::Tab),
+                shift: true,
+                control: true,
+                alt: false,
+            }
+        );
+
+        let spec = parse_ai_terminal_key_spec("F5", false, false, false).unwrap();
+        assert_eq!(
+            spec,
+            AiParsedTerminalKeySpec {
+                input: AiTerminalKeyInput::Named(TermKeyCode::F5),
+                shift: false,
+                control: false,
+                alt: false,
+            }
+        );
+    }
+
+    #[test]
+    fn encode_ai_terminal_key_supports_ctrl_letters() {
+        let spec = parse_ai_terminal_key_spec("ctrl+c", false, false, false).unwrap();
+        let terminal = Terminal::new(80, 24);
+        assert_eq!(encode_ai_terminal_key(&terminal, &spec), Some(vec![0x03]));
     }
 
     #[test]

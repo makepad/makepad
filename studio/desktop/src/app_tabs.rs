@@ -151,6 +151,12 @@ impl App {
         if !self.data.tab_to_path.contains_key(&tab_id) {
             return;
         }
+        if let Some(path) = self.data.tab_to_path.get(&tab_id).cloned() {
+            if Self::is_terminal_virtual_path(&path) {
+                self.delete_terminal_path(cx, &path);
+                return;
+            }
+        }
         let mount = self
             .data
             .tab_to_path
@@ -263,6 +269,14 @@ impl App {
     }
 
     pub(super) fn open_path_in_editor(&mut self, cx: &mut Cx, path: &str) {
+        if Self::is_terminal_virtual_path(path) {
+            self.reveal_terminal_path(cx, path);
+            self.set_status(
+                cx,
+                &format!("opened terminal {}", Self::default_terminal_tab_title(path)),
+            );
+            return;
+        }
         let path = path.to_string();
         let Some((tab_id, already_open)) = self.ensure_editor_tab_for_path(cx, &path, true) else {
             self.set_status(cx, "failed to create editor tab");
@@ -1264,7 +1278,10 @@ mod tests {
     fn assert_weighted(align: Option<SplitterAlign>, expected: f64) {
         match align {
             Some(SplitterAlign::Weighted(actual)) => {
-                assert!((actual - expected).abs() < 0.0001, "expected {expected}, got {actual}");
+                assert!(
+                    (actual - expected).abs() < 0.0001,
+                    "expected {expected}, got {actual}"
+                );
             }
             Some(other) => panic!("expected weighted splitter align, got {:?}", other),
             None => panic!("expected weighted splitter align, got none"),
@@ -1273,14 +1290,12 @@ mod tests {
 
     #[test]
     fn no_active_runs_do_not_auto_collapse_preview() {
-        assert!(
-            run_preview_splitter_restore_target(
-                SplitterAlign::Weighted(0.62),
-                false,
-                Some(SplitterAlign::Weighted(0.4)),
-            )
-            .is_none()
-        );
+        assert!(run_preview_splitter_restore_target(
+            SplitterAlign::Weighted(0.62),
+            false,
+            Some(SplitterAlign::Weighted(0.4)),
+        )
+        .is_none());
     }
 
     #[test]
