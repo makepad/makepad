@@ -370,10 +370,14 @@ fn rust_build(
     // Derive ndk_root from ndk_prebuilt_root by going up through
     // `toolchains/llvm/prebuilt/<host>/` (4 levels).
     let ndk_root = ndk_prebuilt_root
-        .parent().unwrap()   // prebuilt/
-        .parent().unwrap()   // llvm/
-        .parent().unwrap()   // toolchains/
-        .parent().unwrap()   // ndk root
+        .parent()
+        .unwrap() // prebuilt/
+        .parent()
+        .unwrap() // llvm/
+        .parent()
+        .unwrap() // toolchains/
+        .parent()
+        .unwrap() // ndk root
         .to_path_buf();
     for android_target in android_targets {
         let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
@@ -419,10 +423,8 @@ fn rust_build(
 
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
-        let rustflags = compose_android_rustflags(
-            std::env::var("RUSTFLAGS").ok().as_deref(),
-            &cfg_flag,
-        );
+        let rustflags =
+            compose_android_rustflags(std::env::var("RUSTFLAGS").ok().as_deref(), &cfg_flag);
 
         let makepad_env = if let AndroidVariant::Quest = variant {
             Some(match std::env::var("MAKEPAD") {
@@ -1929,10 +1931,7 @@ default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
     #[test]
     fn compose_android_rustflags_preserves_existing_flags() {
         assert_eq!(
-            compose_android_rustflags(
-                Some("-C debuginfo=1"),
-                "--cfg android_target=\"aarch64\""
-            ),
+            compose_android_rustflags(Some("-C debuginfo=1"), "--cfg android_target=\"aarch64\""),
             "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\""
         );
     }

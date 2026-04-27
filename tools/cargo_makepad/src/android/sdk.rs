@@ -484,7 +484,11 @@ pub fn expand_sdk(
 
             let cwd = std::env::current_dir().unwrap();
             let url_file_name = url_file_name(urls.ndk_windows);
-            println!("4/5: Unzipping: {} ({})", url_file_name, if full_ndk { "full NDK" } else { "stripped NDK" });
+            println!(
+                "4/5: Unzipping: {} ({})",
+                url_file_name,
+                if full_ndk { "full NDK" } else { "stripped NDK" }
+            );
 
             if full_ndk {
                 // Extract the entire NDK zip into src_dir, then move it.
@@ -495,7 +499,8 @@ pub fn expand_sdk(
                     &cwd,
                     "unzip",
                     &[
-                        "-q", "-o",
+                        "-q",
+                        "-o",
                         src_dir.join(url_file_name).to_str().unwrap(),
                         "-d",
                         src_dir.to_str().unwrap(),
@@ -506,11 +511,14 @@ pub fn expand_sdk(
                         &cwd,
                         "cp",
                         &[
-                            "--force", "--recursive", "--preserve",
+                            "--force",
+                            "--recursive",
+                            "--preserve",
                             src_dir.join(NDK_ZIP_ROOT).to_str().unwrap(),
                             ndk_out.parent().unwrap().to_str().unwrap(),
                         ],
-                    ).unwrap();
+                    )
+                    .unwrap();
                     // Rename extracted dir to versioned name.
                     let extracted = sdk_dir.join("ndk").join(NDK_ZIP_ROOT);
                     if extracted.exists() && extracted != ndk_out {
@@ -520,8 +528,9 @@ pub fn expand_sdk(
                             std::fs::remove_dir_all(&ndk_out)
                                 .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
                         }
-                        std::fs::rename(&extracted, &ndk_out)
-                            .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
+                        std::fs::rename(&extracted, &ndk_out).map_err(|e| {
+                            format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}")
+                        })?;
                     }
                 } else {
                     // Windows native shell: use tar.
@@ -530,7 +539,9 @@ pub fn expand_sdk(
                         &cwd,
                         "tar",
                         &[
-                            "-x", "-z", "-f",
+                            "-x",
+                            "-z",
+                            "-f",
                             src_dir.join(url_file_name).to_str().unwrap(),
                             "--strip-components",
                             &num_path_components.to_string(),
@@ -538,7 +549,8 @@ pub fn expand_sdk(
                             ndk_out.to_str().unwrap(),
                             NDK_ZIP_ROOT,
                         ],
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
             } else {
                 // Stripped: only extract toolchains/llvm/prebuilt/<host>.
@@ -551,7 +563,8 @@ pub fn expand_sdk(
                     &cwd,
                     "unzip",
                     &[
-                        "-q", "-o",
+                        "-q",
+                        "-o",
                         src_dir.join(url_file_name).to_str().unwrap(),
                         &format!("{NDK_IN}/**/*"),
                         "-d",
@@ -563,18 +576,23 @@ pub fn expand_sdk(
                         &cwd,
                         "cp",
                         &[
-                            "--force", "--recursive", "--preserve",
+                            "--force",
+                            "--recursive",
+                            "--preserve",
                             src_dir.join(&NDK_IN).to_str().unwrap(),
                             ndk_out_path.parent().unwrap().to_str().unwrap(),
                         ],
-                    ).unwrap();
+                    )
+                    .unwrap();
                 } else {
                     let num_path_components = Path::new(&NDK_IN).iter().count();
                     shell(
                         &cwd,
                         "tar",
                         &[
-                            "-x", "-z", "-f",
+                            "-x",
+                            "-z",
+                            "-f",
                             src_dir.join(url_file_name).to_str().unwrap(),
                             "--strip-components",
                             &num_path_components.to_string(),
@@ -582,7 +600,8 @@ pub fn expand_sdk(
                             ndk_out_path.to_str().unwrap(),
                             &NDK_IN,
                         ],
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
             }
             /*
@@ -814,7 +833,8 @@ pub fn expand_sdk(
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let prebuilt_root = sdk_dir.join(format!("{NDK_BASE_OUT}/toolchains/llvm/prebuilt"));
+                let prebuilt_root =
+                    sdk_dir.join(format!("{NDK_BASE_OUT}/toolchains/llvm/prebuilt"));
                 std::fs::read_dir(&prebuilt_root)
                     .expect("failed to read NDK `prebuilt/` dir: {prebuilt_root:?}")
                     .filter_map(|r| {
@@ -1001,7 +1021,11 @@ pub fn expand_sdk(
             // Extract the entire NDK zip, then copy the needed subtree(s).
             let cwd = std::env::current_dir().unwrap();
             let url_file_name = url_file_name(urls.ndk_linux);
-            println!("4/5: Unzipping: {} ({})", url_file_name, if full_ndk { "full NDK" } else { "stripped NDK" });
+            println!(
+                "4/5: Unzipping: {} ({})",
+                url_file_name,
+                if full_ndk { "full NDK" } else { "stripped NDK" }
+            );
             shell(
                 &cwd,
                 "unzip",
@@ -1036,8 +1060,9 @@ pub fn expand_sdk(
                         std::fs::remove_dir_all(&ndk_out)
                             .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
                     }
-                    std::fs::rename(&extracted, &ndk_out)
-                        .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
+                    std::fs::rename(&extracted, &ndk_out).map_err(|e| {
+                        format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}")
+                    })?;
                 }
             } else {
                 // Stripped: only copy toolchains/llvm/prebuilt/<host>.

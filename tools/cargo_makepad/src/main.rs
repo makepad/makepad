@@ -71,18 +71,10 @@ fn show_help() {
     println!();
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
-    println!(
-        "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
-    );
-    println!(
-        "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
-    );
-    println!(
-        "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
-    );
-    println!(
-        "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
-    );
+    println!("       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)");
+    println!("       --strip-custom-sections                   Legacy mode: only strip custom wasm sections");
+    println!("       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)");
+    println!("       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy");
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
     );
@@ -254,7 +246,16 @@ fn show_help() {
     );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!("                                                 (or set STUDIO_HOST=127.0.0.1:8001)");
+    println!(
+        "                                                 (or set STUDIO_HOST=127.0.0.1:8001)"
+    );
+    println!();
+    println!("Check commands:");
+    println!();
+    println!("    check script                                  Check script with runtime-first validation and parser fallback.");
+    println!("                                                 Auto-discovers script_mod!/script! in src/**/*.rs.");
+    println!("    check all                                    Check Rust build on all configured platforms.");
+    println!("    check install-toolchain                       Install toolchains for check all.");
     println!();
     println!();
 }
