@@ -3,6 +3,10 @@ use crate::makepad_micro_serde::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
+fn retain_persistable_editor_tabs(editor_tab_to_path: &mut HashMap<LiveId, String>) {
+    editor_tab_to_path.retain(|_, path| !App::is_terminal_virtual_path(path));
+}
+
 #[derive(SerRon, DeRon)]
 struct PersistedMountStateRon {
     mount: String,
@@ -39,6 +43,7 @@ impl App {
         let mut ids = HashSet::from([
             id!(tree_tab),
             id!(run_list_tab),
+            id!(ai_tab),
             id!(editor_first),
             id!(run_first),
             id!(log_first),
@@ -169,8 +174,7 @@ impl App {
         valid_mounts: &HashSet<String>,
     ) -> Option<HashMap<LiveId, DockItem>> {
         Self::sanitize_dock_items(dock_items, |_, name, _, kind| {
-            (kind == id!(MountWorkspace) && valid_mounts.contains(name))
-                || kind == id!(AiManagerPane)
+            kind == id!(MountWorkspace) && valid_mounts.contains(name)
         })
     }
 
@@ -178,9 +182,23 @@ impl App {
         dock_items: HashMap<LiveId, DockItem>,
         allowed_tab_ids: &HashSet<LiveId>,
     ) -> Option<HashMap<LiveId, DockItem>> {
-        Self::sanitize_dock_items(dock_items, |tab_id, _, _, _| {
+        let dock_items = Self::sanitize_dock_items(dock_items, |tab_id, _, _, _| {
             allowed_tab_ids.contains(&tab_id)
-        })
+        })?;
+        if Self::workspace_dock_has_required_sidebar_tabs(&dock_items) {
+            Some(dock_items)
+        } else {
+            None
+        }
+    }
+
+    fn workspace_dock_has_required_sidebar_tabs(dock_items: &HashMap<LiveId, DockItem>) -> bool {
+        let Some(DockItem::Tabs { tabs, .. }) = dock_items.get(&id!(tree_tabs)) else {
+            return false;
+        };
+        tabs.contains(&id!(tree_tab))
+            && tabs.contains(&id!(run_list_tab))
+            && tabs.contains(&id!(ai_tab))
     }
 
     fn rebuild_mount_tab_bindings(&mut self, cx: &Cx) {
@@ -239,6 +257,7 @@ impl App {
             mount_state.terminal_files.clear();
             mount_state.terminal_path_to_tab.clear();
             mount_state.terminal_tab_to_path.clear();
+            mount_state.ai_state = None;
             mount_state.file_filter_query = None;
             mount_state.file_filter_pending = false;
             mount_state.file_filter_results.clear();
@@ -268,12 +287,10 @@ impl App {
                 .load_state(cx, dock_items);
         }
         self.rebuild_mount_tab_bindings(cx);
-        let _ = self.ensure_ai_manager_tab(cx);
         for mount in &mount_names {
             let _ = self.ensure_mount_tab(cx, mount);
         }
         self.rebuild_mount_tab_bindings(cx);
-        let _ = self.ensure_ai_manager_tab(cx);
 
         let saved_mounts: HashMap<String, PersistedMountStateRon> = state
             .mounts
@@ -291,6 +308,7 @@ impl App {
             };
 
             let mut editor_tab_to_path = saved.editor_tab_to_path.clone();
+            retain_persistable_editor_tabs(&mut editor_tab_to_path);
             let mut terminal_tab_to_path = saved.terminal_tab_to_path.clone();
             let allowed_tab_ids = Self::persistent_workspace_tab_ids(
                 editor_tab_to_path.keys().copied(),
@@ -358,7 +376,8 @@ impl App {
 
         let mut editor_tab_to_path = HashMap::new();
         for (editor_tab_id, path) in &self.data.tab_to_path {
-            if Self::mount_from_virtual_path(path) == Some(mount)
+            if !Self::is_terminal_virtual_path(path)
+                && Self::mount_from_virtual_path(path) == Some(mount)
                 && dock.find_tab_bar_of_tab(*editor_tab_id).is_some()
             {
                 editor_tab_to_path.insert(*editor_tab_id, path.clone());
@@ -488,5 +507,120 @@ mod tests {
 
         assert_eq!(restored.sidebar_restore_width, None);
         assert_eq!(restored.bottom_panel_restore_height, None);
+    }
+
+    #[test]
+    fn terminal_editor_tabs_are_not_persisted() {
+        let tab_id = LiveId(1);
+        let mut editor_tab_to_path = HashMap::from([
+            (tab_id, "makepad/.makepad/a.term".to_string()),
+            (LiveId(2), "makepad/studio/desktop/src/main.rs".to_string()),
+        ]);
+
+        retain_persistable_editor_tabs(&mut editor_tab_to_path);
+
+        assert!(!editor_tab_to_path.contains_key(&tab_id));
+        assert_eq!(
+            editor_tab_to_path.get(&LiveId(2)).map(String::as_str),
+            Some("makepad/studio/desktop/src/main.rs")
+        );
+    }
+
+    #[test]
+    fn legacy_workspace_dock_without_ai_tab_is_rejected() {
+        let dock_items = HashMap::from([
+            (
+                id!(root),
+                DockItem::Tabs {
+                    tabs: vec![id!(tree_tabs)],
+                    selected: 0,
+                    closable: false,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(tree_tabs),
+                DockItem::Tabs {
+                    tabs: vec![id!(tree_tab), id!(run_list_tab)],
+                    selected: 0,
+                    closable: false,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(tree_tab),
+                DockItem::Tab {
+                    name: "Files".to_string(),
+                    template: id!(FilesTab),
+                    kind: id!(FileTreePane),
+                },
+            ),
+            (
+                id!(run_list_tab),
+                DockItem::Tab {
+                    name: "Run".to_string(),
+                    template: id!(RunListTab),
+                    kind: id!(RunListPane),
+                },
+            ),
+        ]);
+        let allowed = HashSet::from([id!(tree_tab), id!(run_list_tab), id!(ai_tab)]);
+
+        let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed);
+
+        assert!(sanitized.is_none());
+    }
+
+    #[test]
+    fn workspace_dock_with_ai_tab_is_kept() {
+        let dock_items = HashMap::from([
+            (
+                id!(root),
+                DockItem::Tabs {
+                    tabs: vec![id!(tree_tabs)],
+                    selected: 0,
+                    closable: false,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(tree_tabs),
+                DockItem::Tabs {
+                    tabs: vec![id!(tree_tab), id!(run_list_tab), id!(ai_tab)],
+                    selected: 0,
+                    closable: false,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(tree_tab),
+                DockItem::Tab {
+                    name: "Files".to_string(),
+                    template: id!(FilesTab),
+                    kind: id!(FileTreePane),
+                },
+            ),
+            (
+                id!(run_list_tab),
+                DockItem::Tab {
+                    name: "Run".to_string(),
+                    template: id!(RunListTab),
+                    kind: id!(RunListPane),
+                },
+            ),
+            (
+                id!(ai_tab),
+                DockItem::Tab {
+                    name: "AI".to_string(),
+                    template: id!(AiTab),
+                    kind: id!(AiPane),
+                },
+            ),
+        ]);
+        let allowed = HashSet::from([id!(tree_tab), id!(run_list_tab), id!(ai_tab)]);
+
+        let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed);
+
+        assert!(sanitized.is_some());
     }
 }

@@ -188,6 +188,36 @@ pub enum ClientToHub {
         path: String,
     },
 
+    // === AI ===
+    AiGetState {
+        mount: String,
+    },
+    AiCreateAgent {
+        mount: String,
+        title: Option<String>,
+    },
+    AiDeleteAgent {
+        mount: String,
+        agent_id: AiAgentId,
+    },
+    AiSelectAgent {
+        mount: String,
+        agent_id: AiAgentId,
+    },
+    AiSetBackend {
+        mount: String,
+        backend_id: String,
+    },
+    AiSendPrompt {
+        mount: String,
+        agent_id: AiAgentId,
+        text: String,
+    },
+    AiCancelPrompt {
+        mount: String,
+        agent_id: AiAgentId,
+    },
+
     // === Search & Query ===
     SearchFiles {
         mount: Option<String>,
@@ -409,6 +439,12 @@ pub enum HubToClient {
         code: i32,
     },
 
+    // === AI ===
+    AiMountState {
+        mount: String,
+        state: AiMountState,
+    },
+
     // === Search & Query ===
     SearchFileResults {
         query_id: QueryId,
@@ -586,6 +622,64 @@ pub struct AppSocketInfo {
 pub struct RunItem {
     pub name: String,
     pub in_studio: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiAgentId(pub u64);
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub enum AiMessageRole {
+    User,
+    Assistant,
+    Thinking,
+    System,
+    ToolCall,
+    ToolResult,
+    Error,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiMessage {
+    pub role: AiMessageRole,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiBackendInfo {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub configured: bool,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiAgentSummary {
+    pub agent_id: AiAgentId,
+    pub title: String,
+    pub backend_id: String,
+    pub status: String,
+    pub pending: bool,
+    pub updated_at: f64,
+    pub message_count: usize,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiAgentState {
+    pub agent_id: AiAgentId,
+    pub title: String,
+    pub backend_id: String,
+    pub status: String,
+    pub pending: bool,
+    pub messages: Vec<AiMessage>,
+}
+
+#[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiMountState {
+    pub backends: Vec<AiBackendInfo>,
+    pub active_backend_id: Option<String>,
+    pub active_agent_id: Option<AiAgentId>,
+    pub agents: Vec<AiAgentSummary>,
+    pub active_agent: Option<AiAgentState>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

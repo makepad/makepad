@@ -222,6 +222,34 @@ where
     None
 }
 
+pub fn try_affine_quantized_matmul_bf16_top1<FW, FS, FB>(
+    spec: AffineQuantizedMatmulSpec<'_>,
+    weight_cache_key: &str,
+    scales_cache_key: &str,
+    biases_cache_key: &str,
+    load_weight_bytes: FW,
+    load_scales_bytes: FS,
+    load_biases_bytes: FB,
+) -> Option<Result<u32, String>>
+where
+    FW: FnOnce() -> Result<Vec<u8>, String>,
+    FS: FnOnce() -> Result<Vec<u8>, String>,
+    FB: FnOnce() -> Result<Vec<u8>, String>,
+{
+    if metal::supports_affine_quantized_matmul(spec.bits, spec.group_size) {
+        return Some(metal::try_affine_quantized_matmul_bf16_top1(
+            spec,
+            weight_cache_key,
+            scales_cache_key,
+            biases_cache_key,
+            load_weight_bytes,
+            load_scales_bytes,
+            load_biases_bytes,
+        ));
+    }
+    None
+}
+
 pub fn try_affine_quantized_matmul_bf16_rows<FW, FS, FB>(
     spec: AffineQuantizedMatmulRowsSpec<'_>,
     weight_cache_key: &str,

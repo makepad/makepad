@@ -1129,7 +1129,7 @@ constant short FC_bin_f  [[function_constant(FC_BIN + 1)]];
 constant bool  FC_bin_rb [[function_constant(FC_BIN + 2)]];
 constant bool  FC_bin_cb [[function_constant(FC_BIN + 3)]];
 
-template <typename T0, typename T1, typename T>
+template <typename T0, typename T1, typename T, typename Tacc>
 kernel void kernel_bin_fuse_impl(
         constant ggml_metal_kargs_bin & args,
         device const char * src0,
@@ -1155,48 +1155,48 @@ kernel void kernel_bin_fuse_impl(
             device const T1 * src1_row = (device const T1 *) (src1 + args.o1[0]);
 
             if (FC_OP == 0) {
-                dst_row[i0] = src0_row[i0] + src1_row[i1];
+                dst_row[i0] = T(Tacc(src0_row[i0]) + Tacc(src1_row[i1]));
             }
 
             if (FC_OP == 1) {
-                dst_row[i0] = src0_row[i0] - src1_row[i1];
+                dst_row[i0] = T(Tacc(src0_row[i0]) - Tacc(src1_row[i1]));
             }
 
             if (FC_OP == 2) {
-                dst_row[i0] = src0_row[i0] * src1_row[i1];
+                dst_row[i0] = T(Tacc(src0_row[i0]) * Tacc(src1_row[i1]));
             }
 
             if (FC_OP == 3) {
-                dst_row[i0] = src0_row[i0] / src1_row[i1];
+                dst_row[i0] = T(Tacc(src0_row[i0]) / Tacc(src1_row[i1]));
             }
         } else {
-            T0 res = src0_row[i0];
+            Tacc res = Tacc(src0_row[i0]);
 
             if (FC_OP == 0) {
                 FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                    res += ((device const T1 *) (src1 + args.o1[j]))[i1];
+                    res += Tacc(((device const T1 *) (src1 + args.o1[j]))[i1]);
                 }
             }
 
             if (FC_OP == 1) {
                 FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                    res -= ((device const T1 *) (src1 + args.o1[j]))[i1];
+                    res -= Tacc(((device const T1 *) (src1 + args.o1[j]))[i1]);
                 }
             }
 
             if (FC_OP == 2) {
                 FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                    res *= ((device const T1 *) (src1 + args.o1[j]))[i1];
+                    res *= Tacc(((device const T1 *) (src1 + args.o1[j]))[i1]);
                 }
             }
 
             if (FC_OP == 3) {
                 FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                    res /= ((device const T1 *) (src1 + args.o1[j]))[i1];
+                    res /= Tacc(((device const T1 *) (src1 + args.o1[j]))[i1]);
                 }
             }
 
-            dst_row[i0] = res;
+            dst_row[i0] = T(res);
         }
     } else {
         const int i03 = tgpig.z;
@@ -1221,19 +1221,19 @@ kernel void kernel_bin_fuse_impl(
                 const int i10 = FC_CB ? i0%args.ne10 : i0;
 
                 if (FC_OP == 0) {
-                    dst_ptr[i0] = src0_ptr[i0] + src1_ptr[i10];
+                    dst_ptr[i0] = T(Tacc(src0_ptr[i0]) + Tacc(src1_ptr[i10]));
                 }
 
                 if (FC_OP == 1) {
-                    dst_ptr[i0] = src0_ptr[i0] - src1_ptr[i10];
+                    dst_ptr[i0] = T(Tacc(src0_ptr[i0]) - Tacc(src1_ptr[i10]));
                 }
 
                 if (FC_OP == 2) {
-                    dst_ptr[i0] = src0_ptr[i0] * src1_ptr[i10];
+                    dst_ptr[i0] = T(Tacc(src0_ptr[i0]) * Tacc(src1_ptr[i10]));
                 }
 
                 if (FC_OP == 3) {
-                    dst_ptr[i0] = src0_ptr[i0] / src1_ptr[i10];
+                    dst_ptr[i0] = T(Tacc(src0_ptr[i0]) / Tacc(src1_ptr[i10]));
                 }
             }
         } else {
@@ -1245,33 +1245,33 @@ kernel void kernel_bin_fuse_impl(
             for (int i0 = tpitg.x; i0 < args.ne0; i0 += ntg.x) {
                 const int i10 = FC_CB ? i0%args.ne10 : i0;
 
-                T res = src0_ptr[i0];
+                Tacc res = Tacc(src0_ptr[i0]);
 
                 if (FC_OP == 0) {
                     FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                        res += src1_ptr[j][i10];
+                        res += Tacc(src1_ptr[j][i10]);
                     }
                 }
 
                 if (FC_OP == 1) {
                     FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                        res -= src1_ptr[j][i10];
+                        res -= Tacc(src1_ptr[j][i10]);
                     }
                 }
 
                 if (FC_OP == 2) {
                     FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                        res *= src1_ptr[j][i10];
+                        res *= Tacc(src1_ptr[j][i10]);
                     }
                 }
 
                 if (FC_OP == 3) {
                     FOR_UNROLL (short j = 0; j < FC_F; ++j) {
-                        res /= src1_ptr[j][i10];
+                        res /= Tacc(src1_ptr[j][i10]);
                     }
                 }
 
-                dst_ptr[i0] = res;
+                dst_ptr[i0] = T(res);
             }
         }
     }
@@ -1282,10 +1282,14 @@ kernel void kernel_bin_fuse_impl(
 #undef FC_CB
 }
 
-typedef decltype(kernel_bin_fuse_impl<float, float, float>) kernel_bin_fuse_t;
+typedef decltype(kernel_bin_fuse_impl<float, float, float, float>) kernel_bin_fuse_t;
 
-template [[host_name("kernel_bin_fuse_f32_f32_f32")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float,  float,  float>;
-template [[host_name("kernel_bin_fuse_f32_f32_f32_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float4, float4, float4>;
+template [[host_name("kernel_bin_fuse_f32_f32_f32")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float,  float,  float,  float>;
+template [[host_name("kernel_bin_fuse_f32_f32_f32_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<float4, float4, float4, float4>;
+template [[host_name("kernel_bin_fuse_bf16_f32_bf16")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<bfloat,  float,  bfloat,  float>;
+template [[host_name("kernel_bin_fuse_bf16_f32_bf16_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<bfloat4, float4, bfloat4, float4>;
+template [[host_name("kernel_bin_fuse_bf16_bf16_bf16")]]   kernel kernel_bin_fuse_t kernel_bin_fuse_impl<bfloat,  bfloat,  bfloat,  float>;
+template [[host_name("kernel_bin_fuse_bf16_bf16_bf16_4")]] kernel kernel_bin_fuse_t kernel_bin_fuse_impl<bfloat4, bfloat4, bfloat4, float4>;
 
 kernel void kernel_add_id(
         constant ggml_metal_kargs_add_id & args,
@@ -11774,6 +11778,32 @@ kernel void kernel_mlx_affine_qmv_row_bf16_q8(
     );
 }
 
+kernel void kernel_mlx_affine_qmv_row_bf16_q5(
+        constant MlxAffineQprojRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const uint * weights [[buffer(2)]],
+        device const bfloat * scales [[buffer(3)]],
+        device const bfloat * biases [[buffer(4)]],
+        device bfloat * out [[buffer(5)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort simd_gid [[simdgroup_index_in_threadgroup]],
+        ushort simd_lid [[thread_index_in_simdgroup]]) {
+    const int in_vec_size = int(args.n_in);
+    const int out_vec_size = int(args.out_rows);
+    mlx_quant_qmv_impl<bfloat, 64, 5>(
+        weights,
+        scales,
+        biases,
+        x,
+        out,
+        in_vec_size,
+        out_vec_size,
+        tgpig,
+        uint(simd_gid),
+        uint(simd_lid)
+    );
+}
+
 kernel void kernel_mlx_affine_qmv_selected_experts_row_bf16(
         constant MlxAffineSelectedExpertsQprojRowArgs & args [[buffer(0)]],
         device const bfloat * x [[buffer(1)]],
@@ -13184,6 +13214,67 @@ kernel void kernel_mlx_add_row_bf16(
     out[gid] = bfloat(float(x[gid]) + float(y[gid]));
 }
 
+kernel void kernel_mlx_cpy_f32_bf16_row(
+        constant MlxAddRowArgs & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device bfloat * out [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+    out[gid] = bfloat(x[gid]);
+}
+
+kernel void kernel_mlx_cpy_bf16_f32_row(
+        constant MlxAddRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device float * out [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+    out[gid] = float(x[gid]);
+}
+
+kernel void kernel_mlx_argmax_bf16_partial(
+        constant MlxAddRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device float * partial_values [[buffer(2)]],
+        device uint * partial_indices [[buffer(3)]],
+        uint gid [[thread_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]],
+        uint tgid [[threadgroup_position_in_grid]]) {
+    threadgroup float values[256];
+    threadgroup uint indices[256];
+
+    float best = -INFINITY;
+    uint best_index = 0xffffffffu;
+    if (gid < args.n) {
+        best = float(x[gid]);
+        best_index = gid;
+    }
+    values[tid] = best;
+    indices[tid] = best_index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            const float other = values[tid + stride];
+            const uint other_index = indices[tid + stride];
+            if (other > values[tid] || (other == values[tid] && other_index < indices[tid])) {
+                values[tid] = other;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0u) {
+        partial_values[tgid] = values[0];
+        partial_indices[tgid] = indices[0];
+    }
+}
+
 kernel void kernel_mlx_scale_row_bf16(
         constant MlxScaleRowArgs & args [[buffer(0)]],
         device const bfloat * x [[buffer(1)]],
@@ -13449,6 +13540,23 @@ kernel void kernel_mlx_geglu_row_bf16(
     const float gate_gelu = mlx_bf16_round_float(gate_half * gate_one_plus);
 
     out[gid] = bfloat(gate_gelu * up_f);
+}
+
+kernel void kernel_mlx_swiglu_row_bf16(
+        constant MlxGegluRowArgs & args [[buffer(0)]],
+        device const bfloat * gate [[buffer(1)]],
+        device const bfloat * up [[buffer(2)]],
+        device bfloat * out [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+
+    const float gate_f = float(gate[gid]);
+    const float up_f = float(up[gid]);
+    const float silu = mlx_bf16_round_float(gate_f / (1.0f + precise::exp(-gate_f)));
+
+    out[gid] = bfloat(silu * up_f);
 }
 
 kernel void kernel_mlx_geglu_strided_rows_bf16(

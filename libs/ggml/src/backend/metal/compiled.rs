@@ -924,6 +924,13 @@ pub struct MetalGraphTensorWrite<'a> {
     pub bytes: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct MetalGraphTensorBufferCopy<'a> {
+    pub tensor_id: TensorId,
+    pub source_buffer: &'a super::MetalBuffer,
+    pub source_offset_bytes: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetalTensorBinding {
     pub tensor_id: TensorId,
@@ -1186,33 +1193,20 @@ pub fn execute_compiled_graph(
     inputs: &[MetalGraphTensorWrite<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
-    runtime.begin_command_batch()?;
-    let execute_result = (|| -> Result<(), String> {
-        for input in inputs {
-            let binding = binding(compiled, input.tensor_id)?;
-            let tensor = ctx
-                .tensor(input.tensor_id)
-                .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
-            if input.bytes.len() != tensor.nbytes() {
-                return Err(format!(
-                    "input '{}' byte length mismatch: got {}, expected {}",
-                    tensor.name().unwrap_or("<unnamed>"),
-                    input.bytes.len(),
-                    tensor.nbytes()
-                ));
-            }
-            runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
-        }
+    execute_compiled_graph_with_buffer_inputs(runtime, ctx, compiled, inputs, &[], outputs)
+}
 
-        for node in &compiled.nodes {
-            let tensor = ctx.tensor(node.node_id).ok_or_else(|| {
-                format!("compiled graph references invalid tensor {}", node.node_id)
-            })?;
-            execute_node(runtime, ctx, compiled, tensor, node)?;
-            runtime.memory_barrier_buffers()?;
-        }
-        Ok(())
-    })();
+pub fn execute_compiled_graph_with_buffer_inputs(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    inputs: &[MetalGraphTensorWrite<'_>],
+    buffer_inputs: &[MetalGraphTensorBufferCopy<'_>],
+    outputs: &[TensorId],
+) -> Result<MetalGraphExecution, String> {
+    runtime.begin_command_batch()?;
+    let execute_result =
+        execute_compiled_graph_in_active_batch(runtime, ctx, compiled, inputs, buffer_inputs);
 
     if let Err(err) = execute_result {
         let _ = runtime.discard_command_batch();
@@ -1233,6 +1227,52 @@ pub fn execute_compiled_graph(
         );
     }
     Ok(execution)
+}
+
+pub fn execute_compiled_graph_in_active_batch(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    inputs: &[MetalGraphTensorWrite<'_>],
+    buffer_inputs: &[MetalGraphTensorBufferCopy<'_>],
+) -> Result<(), String> {
+    for input in inputs {
+        let binding = binding(compiled, input.tensor_id)?;
+        let tensor = ctx
+            .tensor(input.tensor_id)
+            .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+        if input.bytes.len() != tensor.nbytes() {
+            return Err(format!(
+                "input '{}' byte length mismatch: got {}, expected {}",
+                tensor.name().unwrap_or("<unnamed>"),
+                input.bytes.len(),
+                tensor.nbytes()
+            ));
+        }
+        runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
+    }
+    for input in buffer_inputs {
+        let binding = binding(compiled, input.tensor_id)?;
+        let tensor = ctx
+            .tensor(input.tensor_id)
+            .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+        runtime.copy_buffer_range(
+            input.source_buffer,
+            input.source_offset_bytes,
+            &compiled.main_buffer,
+            binding.offset_bytes,
+            tensor.nbytes(),
+        )?;
+    }
+
+    for node in &compiled.nodes {
+        let tensor = ctx
+            .tensor(node.node_id)
+            .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
+        execute_node(runtime, ctx, compiled, tensor, node)?;
+        runtime.memory_barrier_buffers()?;
+    }
+    Ok(())
 }
 
 fn prepared_node_from_plan(

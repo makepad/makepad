@@ -20,7 +20,6 @@ pub use makepad_widgets::makepad_script::makepad_live_id;
 pub use makepad_widgets::makepad_script::makepad_micro_serde;
 
 use crate::{
-    ai_manager::{AiManagerBackend, AiManagerState},
     app_data::*,
     desktop_code_editor::*,
     desktop_file_tree::*,
@@ -130,8 +129,6 @@ pub struct App {
     #[rust]
     pub data: AppData,
     #[rust]
-    pub ai_manager: AiManagerState,
-    #[rust]
     pub file_filter_debounce_timer: Timer,
     #[rust]
     pub pending_file_filter: Option<(String, String)>,
@@ -143,6 +140,12 @@ pub struct App {
     pub bottom_panel_animation: Option<BottomPanelAnimation>,
     #[rust]
     pub bottom_panel_animation_next_frame: NextFrame,
+    #[rust]
+    pub ai_chat_scroll_pending: bool,
+    #[rust]
+    pub ai_chat_scroll_next_frame: NextFrame,
+    #[rust]
+    pub ai_chat_scroll_frames_remaining: u8,
 }
 
 impl MatchEvent for App {
@@ -157,65 +160,6 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(ai_send_button)).clicked(actions) {
-            self.send_ai_manager_prompt(cx);
-        }
-        if self.ui.button(cx, ids!(ai_cancel_button)).clicked(actions) {
-            self.cancel_ai_manager_prompt(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(ai_refresh_report_button))
-            .clicked(actions)
-        {
-            self.refresh_ai_manager_report(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(ai_add_task_button))
-            .clicked(actions)
-        {
-            self.add_ai_manager_task(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(ai_clear_tasks_button))
-            .clicked(actions)
-        {
-            self.clear_ai_manager_tasks(cx);
-        }
-        if self
-            .ui
-            .text_input(cx, ids!(ai_prompt_input))
-            .escaped(actions)
-        {
-            self.cancel_ai_manager_prompt(cx);
-        }
-        if self
-            .ui
-            .text_input(cx, ids!(ai_task_input))
-            .returned(actions)
-            .is_some()
-        {
-            self.add_ai_manager_task(cx);
-        }
-        if let Some(index) = self
-            .ui
-            .drop_down(cx, ids!(ai_backend_dropdown))
-            .selected(actions)
-        {
-            if let Some(backend) = AiManagerBackend::from_index(index) {
-                let _ = self.switch_ai_manager_backend(cx, backend);
-            }
-        }
-        if let Some(index) = self
-            .ui
-            .drop_down(cx, ids!(ai_task_terminal_dropdown))
-            .selected(actions)
-        {
-            self.set_ai_manager_task_terminal_selection(cx, index);
-        }
-
         if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_mount_sidebar(cx, &active_mount);
@@ -251,6 +195,43 @@ impl MatchEvent for App {
                     .changed(actions)
                 {
                     self.queue_mount_file_filter(cx, &active_mount, filter);
+                }
+                if let Some(index) = workspace
+                    .drop_down(cx, ids!(ai_agent_dropdown))
+                    .selected(actions)
+                {
+                    self.select_ai_manager_agent(&active_mount, index);
+                }
+                if workspace.button(cx, ids!(ai_new_button)).clicked(actions) {
+                    self.create_ai_manager_agent(&active_mount);
+                }
+                if workspace
+                    .button(cx, ids!(ai_delete_button))
+                    .clicked(actions)
+                {
+                    self.delete_ai_manager_agent(&active_mount);
+                }
+                if workspace.button(cx, ids!(ai_send_button)).clicked(actions) {
+                    self.send_ai_manager_prompt(cx, &active_mount);
+                }
+                if workspace
+                    .button(cx, ids!(ai_cancel_button))
+                    .clicked(actions)
+                {
+                    self.cancel_ai_manager_prompt(&active_mount);
+                }
+                if workspace
+                    .text_input(cx, ids!(ai_prompt_input))
+                    .escaped(actions)
+                {
+                    self.cancel_ai_manager_prompt(&active_mount);
+                }
+                if workspace
+                    .text_input(cx, ids!(ai_prompt_input))
+                    .returned(actions)
+                    .is_some()
+                {
+                    self.send_ai_manager_prompt(cx, &active_mount);
                 }
                 if let Some((mount, name)) = workspace
                     .desktop_run_list(cx, ids!(run_list))
@@ -315,12 +296,19 @@ impl MatchEvent for App {
                     DockAction::TabWasPressed(tab_id) => {
                         if let Some(mount) = self.data.tab_to_mount.get(&tab_id).cloned() {
                             self.select_mount(cx, &mount);
-                        } else if tab_id == id!(ai_manager_tab) {
+                        } else if tab_id == id!(ai_tab) {
+                            if let Some(mount) = self.data.active_mount.clone() {
+                                self.request_ai_mount_state(&mount);
+                            }
                             self.refresh_ai_manager_report(cx);
                         } else if tab_id == id!(terminal_add) {
                             if let Some(mount) = self.data.active_mount.clone() {
-                                self.select_bottom_terminal_panel(cx, &mount);
+                                self.reveal_bottom_terminal_panel(cx, &mount);
                                 self.create_new_terminal_tab(cx, &mount);
+                            }
+                        } else if tab_id == id!(bottom_terminal_tab) {
+                            if let Some(mount) = self.data.active_mount.clone() {
+                                self.ensure_mount_terminal_file(cx, &mount);
                             }
                         } else {
                             if let Some(state) = self.data.log_tab_state.get(&tab_id) {
@@ -336,7 +324,7 @@ impl MatchEvent for App {
                                 || self.terminal_tab_mount_path(tab_id).is_some()
                             {
                                 if let Some(mount) = self.data.active_mount.clone() {
-                                    self.select_bottom_terminal_panel(cx, &mount);
+                                    self.reveal_bottom_terminal_panel(cx, &mount);
                                 }
                             }
                             if let Some((_mount, path)) = self.terminal_tab_mount_path(tab_id) {
@@ -351,6 +339,7 @@ impl MatchEvent for App {
                         }
                         if tab_id == id!(tree_tab)
                             || tab_id == id!(run_list_tab)
+                            || tab_id == id!(ai_tab)
                             || tab_id == id!(editor_first)
                             || tab_id == id!(run_first)
                             || tab_id == id!(log_first)
@@ -423,6 +412,13 @@ impl AppMain for App {
                 self.flush_queued_mount_file_filter(cx);
             }
         }
+        if let Event::KeyDown(key_event) = event {
+            if key_event.key_code == KeyCode::Escape && self.active_ai_agent_is_pending() {
+                if let Some(active_mount) = self.data.active_mount.clone() {
+                    self.cancel_ai_manager_prompt(&active_mount);
+                }
+            }
+        }
         self.match_event(cx, event);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
@@ -437,6 +433,11 @@ impl AppMain for App {
                 .is_some()
             {
                 self.step_bottom_panel_animation(cx, ne.time);
+            }
+            if self.ai_chat_scroll_pending
+                && self.ai_chat_scroll_next_frame.is_event(event).is_some()
+            {
+                self.flush_ai_chat_scroll_to_bottom(cx);
             }
         }
 
@@ -459,7 +460,6 @@ impl AppMain for App {
         if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx)
         }
-        self.handle_ai_manager_agent_events(cx, event);
         self.refresh_run_view_targets(cx);
         self.save_state_if_needed(cx);
     }
