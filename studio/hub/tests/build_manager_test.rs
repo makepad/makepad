@@ -1,4 +1,4 @@
-use makepad_studio_hub::process_manager::ProcessManager;
+use makepad_studio_hub::build_manager::BuildManager;
 use makepad_studio_hub::HubEvent;
 use makepad_studio_protocol::hub_protocol::{ClientId, QueryId};
 use std::collections::HashMap;
@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[test]
-fn process_manager_emits_output_and_exit_for_cargo() {
+fn build_manager_emits_output_and_exit_for_cargo() {
     let (tx, rx) = mpsc::channel::<HubEvent>();
-    let mut manager = ProcessManager::default();
+    let mut manager = BuildManager::default();
     let tmp = makepad_studio_hub::test_support::tempdir().unwrap();
 
     let build_id = QueryId::new(ClientId(7), 1);
@@ -63,9 +63,9 @@ fn process_manager_emits_output_and_exit_for_cargo() {
 
 #[cfg(unix)]
 #[test]
-fn process_manager_stop_build_kills_process_group() {
+fn build_manager_stop_build_kills_process_group() {
     let (tx, rx) = mpsc::channel::<HubEvent>();
-    let mut manager = ProcessManager::default();
+    let mut manager = BuildManager::default();
     let tmp = makepad_studio_hub::test_support::tempdir().unwrap();
 
     let build_id = QueryId::new(ClientId(7), 2);

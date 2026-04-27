@@ -195,9 +195,6 @@ impl AffineMetalBackend {
         self.runtime
             .end_command_batch()
             .map_err(|err| format!("end affine metal batch failed: {err}"))?;
-        self.runtime
-            .wait_idle()
-            .map_err(|err| format!("wait affine metal idle failed: {err}"))?;
         Ok(())
     }
 
@@ -266,22 +263,54 @@ impl AffineMetalBackend {
         output_buffer: &MetalBuffer,
         len_words: usize,
     ) -> Result<Vec<f32>, String> {
-        let bytes = self
-            .runtime
-            .read_buffer(output_buffer, len_words * size_of::<u16>())
-            .map_err(|err| format!("read affine metal output failed: {err}"))?;
-        if bytes.len() != len_words * size_of::<u16>() {
-            return Err(format!(
-                "affine metal output byte length mismatch: got {} expected {}",
-                bytes.len(),
-                len_words * size_of::<u16>()
-            ));
+        self.runtime
+            .with_readable_buffer(output_buffer, len_words * size_of::<u16>(), |bytes| {
+                if bytes.len() != len_words * size_of::<u16>() {
+                    return Err(format!(
+                        "affine metal output byte length mismatch: got {} expected {}",
+                        bytes.len(),
+                        len_words * size_of::<u16>()
+                    ));
+                }
+                let mut out = Vec::with_capacity(len_words);
+                for chunk in bytes.chunks_exact(size_of::<u16>()) {
+                    out.push(bf16_word_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])));
+                }
+                Ok(out)
+            })
+            .map_err(|err| format!("read affine metal output failed: {err}"))
+    }
+
+    fn read_output_top1(
+        &self,
+        output_buffer: &MetalBuffer,
+        len_words: usize,
+    ) -> Result<u32, String> {
+        if len_words == 0 {
+            return Err("cannot compute top1 over empty output".to_string());
         }
-        let mut out = Vec::with_capacity(len_words);
-        for chunk in bytes.chunks_exact(size_of::<u16>()) {
-            out.push(bf16_word_to_f32(u16::from_le_bytes([chunk[0], chunk[1]])));
-        }
-        Ok(out)
+        self.runtime
+            .with_readable_buffer(output_buffer, len_words * size_of::<u16>(), |bytes| {
+                if bytes.len() != len_words * size_of::<u16>() {
+                    return Err(format!(
+                        "affine metal top1 byte length mismatch: got {} expected {}",
+                        bytes.len(),
+                        len_words * size_of::<u16>()
+                    ));
+                }
+                let mut best_index = 0u32;
+                let mut best_value = f32::NEG_INFINITY;
+                for (index, chunk) in bytes.chunks_exact(size_of::<u16>()).enumerate() {
+                    let value = bf16_word_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+                    let token_id = index as u32;
+                    if value > best_value || (value == best_value && token_id < best_index) {
+                        best_value = value;
+                        best_index = token_id;
+                    }
+                }
+                Ok(best_index)
+            })
+            .map_err(|err| format!("read affine metal output top1 failed: {err}"))
     }
 
     fn matmul<FW, FS, FB>(
@@ -334,6 +363,58 @@ impl AffineMetalBackend {
             &output_buffer,
         )?;
         self.read_output_f32(&output_buffer, spec.out_rows)
+    }
+
+    fn matmul_top1<FW, FS, FB>(
+        &mut self,
+        spec: AffineQuantizedMatmulSpec<'_>,
+        weight_cache_key: &str,
+        scales_cache_key: &str,
+        biases_cache_key: &str,
+        load_weight_bytes: FW,
+        load_scales_bytes: FS,
+        load_biases_bytes: FB,
+    ) -> Result<u32, String>
+    where
+        FW: FnOnce() -> Result<Vec<u8>, String>,
+        FS: FnOnce() -> Result<Vec<u8>, String>,
+        FB: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        self.prepare_scope(spec.cache_namespace);
+
+        if spec.out_rows == 0 {
+            return Err("cannot compute top1 with zero output rows".to_string());
+        }
+
+        let input_buffer = self.ensure_input_buffer(spec.input_bf16_words.len())?;
+        let output_buffer = self.ensure_output_buffer(spec.out_rows)?;
+        self.runtime
+            .write_buffer(
+                &input_buffer,
+                0,
+                u16_words_as_le_bytes(spec.input_bf16_words),
+            )
+            .map_err(|err| format!("write affine metal input failed: {err}"))?;
+
+        let weight_buffer = self.cached_tensor_buffer(weight_cache_key, load_weight_bytes)?;
+        let scales_buffer = self.cached_tensor_buffer(scales_cache_key, load_scales_bytes)?;
+        let biases_buffer = self.cached_tensor_buffer(biases_cache_key, load_biases_bytes)?;
+        let args = AffineQmvArgs {
+            n_in: spec.input_bf16_words.len() as u32,
+            weight_words_per_row: spec.weight_words_per_row as u32,
+            qparams_per_row: spec.qparams_per_row as u32,
+            out_rows: spec.out_rows as u32,
+        };
+        self.dispatch_qmv(
+            spec.bits,
+            &args,
+            &input_buffer,
+            &weight_buffer,
+            &scales_buffer,
+            &biases_buffer,
+            &output_buffer,
+        )?;
+        self.read_output_top1(&output_buffer, spec.out_rows)
     }
 
     fn matmul_rows<FW, FS, FB>(
@@ -422,8 +503,27 @@ impl AffineMetalBackend {
     }
 }
 
+thread_local! {
+    static AFFINE_METAL_BACKEND: RefCell<Option<AffineMetalBackend>> = const { RefCell::new(None) };
+}
+
+fn with_affine_backend<R, F>(f: F) -> Result<R, String>
+where
+    F: FnOnce(&mut AffineMetalBackend) -> Result<R, String>,
+{
+    AFFINE_METAL_BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        if backend.is_none() {
+            *backend = Some(AffineMetalBackend::load()?);
+        }
+        f(backend
+            .as_mut()
+            .expect("affine metal backend was just initialized"))
+    })
+}
+
 pub fn supports_affine_quantized_matmul(bits: u32, group_size: u64) -> bool {
-    matches!(bits, 4 | 8) && group_size == 64 && MetalRuntime::is_available()
+    matches!(bits, 4 | 8) && group_size == 64 && cfg!(target_os = "macos")
 }
 
 pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
@@ -440,27 +540,43 @@ where
     FS: FnOnce() -> Result<Vec<u8>, String>,
     FB: FnOnce() -> Result<Vec<u8>, String>,
 {
-    thread_local! {
-        static AFFINE_METAL_BACKEND: RefCell<Option<AffineMetalBackend>> = const { RefCell::new(None) };
-    }
+    with_affine_backend(|backend| {
+        backend.matmul(
+            spec,
+            weight_cache_key,
+            scales_cache_key,
+            biases_cache_key,
+            load_weight_bytes,
+            load_scales_bytes,
+            load_biases_bytes,
+        )
+    })
+}
 
-    AFFINE_METAL_BACKEND.with(|backend| {
-        let mut backend = backend.borrow_mut();
-        if backend.is_none() {
-            *backend = Some(AffineMetalBackend::load()?);
-        }
-        backend
-            .as_mut()
-            .expect("affine metal backend was just initialized")
-            .matmul(
-                spec,
-                weight_cache_key,
-                scales_cache_key,
-                biases_cache_key,
-                load_weight_bytes,
-                load_scales_bytes,
-                load_biases_bytes,
-            )
+pub fn try_affine_quantized_matmul_bf16_top1<FW, FS, FB>(
+    spec: AffineQuantizedMatmulSpec<'_>,
+    weight_cache_key: &str,
+    scales_cache_key: &str,
+    biases_cache_key: &str,
+    load_weight_bytes: FW,
+    load_scales_bytes: FS,
+    load_biases_bytes: FB,
+) -> Result<u32, String>
+where
+    FW: FnOnce() -> Result<Vec<u8>, String>,
+    FS: FnOnce() -> Result<Vec<u8>, String>,
+    FB: FnOnce() -> Result<Vec<u8>, String>,
+{
+    with_affine_backend(|backend| {
+        backend.matmul_top1(
+            spec,
+            weight_cache_key,
+            scales_cache_key,
+            biases_cache_key,
+            load_weight_bytes,
+            load_scales_bytes,
+            load_biases_bytes,
+        )
     })
 }
 
@@ -478,27 +594,16 @@ where
     FS: FnOnce() -> Result<Vec<u8>, String>,
     FB: FnOnce() -> Result<Vec<u8>, String>,
 {
-    thread_local! {
-        static AFFINE_METAL_BACKEND: RefCell<Option<AffineMetalBackend>> = const { RefCell::new(None) };
-    }
-
-    AFFINE_METAL_BACKEND.with(|backend| {
-        let mut backend = backend.borrow_mut();
-        if backend.is_none() {
-            *backend = Some(AffineMetalBackend::load()?);
-        }
-        backend
-            .as_mut()
-            .expect("affine metal backend was just initialized")
-            .matmul_rows(
-                spec,
-                weight_cache_key,
-                scales_cache_key,
-                biases_cache_key,
-                load_weight_bytes,
-                load_scales_bytes,
-                load_biases_bytes,
-            )
+    with_affine_backend(|backend| {
+        backend.matmul_rows(
+            spec,
+            weight_cache_key,
+            scales_cache_key,
+            biases_cache_key,
+            load_weight_bytes,
+            load_scales_bytes,
+            load_biases_bytes,
+        )
     })
 }
 

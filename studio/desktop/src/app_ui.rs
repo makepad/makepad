@@ -18,6 +18,17 @@ script_mod! {
         }
     }
 
+    let AiChatMarkdown = Markdown {
+        width: Fill
+        height: Fit
+        selectable: true
+        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+        paragraph_spacing: 14.0
+        inline_code_padding: Inset {left: 4.0 right: 4.0 top: 2.0 bottom: 2.0}
+        inline_code_margin: Inset {left: 2.0 right: 2.0 top: 0.0 bottom: 0.0}
+        body: ""
+    }
+
     let LogToolbarToggle = Toggle {
         margin: Inset {}
         padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
@@ -122,7 +133,7 @@ script_mod! {
         }
     }
 
-    let AiManagerBody = RectView {
+    let AiPane = RectView {
         width: Fill
         height: Fill
         flow: Down
@@ -139,276 +150,72 @@ script_mod! {
                 align: Align {x: 0.0 y: 0.5}
 
                 Label {
-                    text: "AI Manager"
-                }
-
-                View {width: 12.0 height: Fit}
-
-                Label {
-                    text: "Backend:"
-                }
-
-                ai_backend_dropdown := DropDown {
-                    width: 210.0
-                    labels: ["OpenAI Localhost" "OpenAI" "Claude" "Gemini"]
+                    text: "AI"
                 }
 
                 Filler {}
 
                 ai_status_label := Label {
                     width: Fit
-                    text: "Initializing manager..."
+                    text: "Loading AI..."
                 }
             }
         }
 
-        ai_root_split := Splitter {
+        View {
             width: Fill
-            height: Fill
-            axis: SplitterAxis.Vertical
-            align: SplitterAlign.FromB(190.0)
+            height: Fit
+            flow: Right
+            spacing: theme.space_2
+            padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 8.0}
 
-            a: Splitter {
+            ai_agent_dropdown := DropDown {
                 width: Fill
-                height: Fill
-                axis: SplitterAxis.Horizontal
-                align: SplitterAlign.Weighted(0.62)
-
-                a: RectView {
-                    width: Fill
-                    height: Fill
-                    flow: Down
-                    draw_bg +: {
-                        color: theme.color_bg_container
-                    }
-
-                    PaneToolbar {
-                        Label {
-                            text: "Conversation"
-                        }
-                    }
-
-                    chat_scroll := ScrollYView {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 12.0}
-                        ai_chat_markdown := Markdown {
-                            width: Fill
-                            height: Fit
-                            selectable: true
-                            body: ""
-                        }
-                    }
-                }
-
-                b: Splitter {
-                    width: Fill
-                    height: Fill
-                    axis: SplitterAxis.Vertical
-                    align: SplitterAlign.Weighted(0.34)
-
-                    a: RectView {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        draw_bg +: {
-                            color: theme.color_bg_container
-                        }
-
-                        PaneToolbar {
-                            View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: theme.space_2
-                                align: Align {x: 0.0 y: 0.5}
-
-                                Label {
-                                    text: "Tasks"
-                                }
-
-                                Filler {}
-
-                                ai_clear_tasks_button := ButtonFlat {
-                                    text: "Clear Tasks"
-                                }
-                            }
-                        }
-
-                        View {
-                            width: Fill
-                            height: Fit
-                            flow: Down
-                            spacing: theme.space_2
-                            padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 12.0}
-
-                            View {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: theme.space_2
-                                align: Align {x: 0.0 y: 0.5}
-
-                                ai_task_terminal_dropdown := DropDown {
-                                    width: 240.0
-                                    labels: ["Choose terminal…"]
-                                }
-
-                                ai_add_task_button := ButtonFlat {
-                                    text: "Add Task"
-                                }
-                            }
-
-                            ai_task_input := TextInputFlat {
-                                width: Fill
-                                height: 34.0
-                                empty_text: "Describe the goal for the selected terminal."
-                            }
-                        }
-
-                        ScrollYView {
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            padding: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 12.0}
-                            ai_tasks_markdown := Markdown {
-                                width: Fill
-                                height: Fit
-                                selectable: true
-                                body: ""
-                            }
-                        }
-                    }
-
-                    b: Splitter {
-                        width: Fill
-                        height: Fill
-                        axis: SplitterAxis.Vertical
-                        align: SplitterAlign.Weighted(0.42)
-
-                        a: RectView {
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            draw_bg +: {
-                                color: theme.color_bg_container
-                            }
-
-                            PaneToolbar {
-                                Label {
-                                    text: "Studio Overview"
-                                }
-                            }
-
-                            ScrollYView {
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 12.0}
-                                ai_overview_markdown := Markdown {
-                                    width: Fill
-                                    height: Fit
-                                    selectable: true
-                                    body: ""
-                                }
-                            }
-                        }
-
-                        b: RectView {
-                            width: Fill
-                            height: Fill
-                            flow: Down
-                            draw_bg +: {
-                                color: theme.color_bg_container
-                            }
-
-                            PaneToolbar {
-                                Label {
-                                    text: "Report Preview"
-                                }
-                            }
-
-                            ScrollYView {
-                                width: Fill
-                                height: Fill
-                                flow: Down
-                                padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 12.0}
-                                ai_report_markdown := Markdown {
-                                    width: Fill
-                                    height: Fit
-                                    selectable: true
-                                    body: ""
-                                }
-                            }
-                        }
-                    }
-                }
+                labels: ["Chat 1"]
             }
 
-            b: RectView {
+            ai_new_button := ButtonFlat {
+                width: 34.0
+                text: "+"
+            }
+
+            ai_delete_button := ButtonFlat {
+                width: 34.0
+                text: "x"
+            }
+        }
+
+        chat_scroll := ScrollYView {
+            width: Fill
+            height: Fill
+            flow: Down
+            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 20.0}
+            ai_chat_markdown := AiChatMarkdown {}
+        }
+
+        View {
+            width: Fill
+            height: Fit
+            flow: Right
+            spacing: theme.space_2
+            align: Align {x: 0.0 y: 0.5}
+            padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
+
+            ai_prompt_input := TextInputFlat {
                 width: Fill
-                height: Fill
-                flow: Down
-                draw_bg +: {
-                    color: theme.color_bg_container
-                }
+                height: Fit
+                is_multiline: false
+                empty_text: ""
+            }
 
-                PaneToolbar {
-                    View {
-                        width: Fill
-                        height: Fit
-                        flow: Right
-                        spacing: theme.space_2
-                        align: Align {x: 0.0 y: 0.5}
+            ai_send_button := ButtonFlat {
+                width: 68.0
+                text: "Send"
+            }
 
-                        Label {
-                            text: "Manager Prompt"
-                        }
-
-                        Filler {}
-
-                        ai_refresh_report_button := ButtonFlat {
-                            text: "Refresh Report"
-                        }
-
-                        ai_cancel_button := ButtonFlat {
-                            text: "Cancel"
-                            visible: false
-                        }
-
-                        ai_send_button := ButtonFlat {
-                            text: "Send"
-                        }
-                    }
-                }
-
-                View {
-                    width: Fill
-                    height: Fill
-                    flow: Down
-                    spacing: theme.space_2
-                    padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 12.0}
-
-                    ai_prompt_input := TextInputFlat {
-                        width: Fill
-                        height: Fill
-                        is_multiline: true
-                        empty_text: "Ask the manager to inspect terminals, unblock Codex, or update the report."
-                    }
-
-                    View {
-                        width: Fill
-                        height: Fit
-                        flow: Right
-                        align: Align {x: 0.0 y: 0.5}
-
-                        ai_report_path_label := Label {
-                            width: Fit
-                            text: "No report path"
-                        }
-                    }
-                }
+            ai_cancel_button := ButtonFlat {
+                width: 68.0
+                text: "Stop"
             }
         }
     }
@@ -564,16 +371,6 @@ script_mod! {
         }
     }
 
-    let TerminalShellPane = View {
-        width: Fill
-        height: Fill
-        terminal_tabs := DockTabs {
-            tabs: [@terminal_first @terminal_add]
-            selected: 0
-            closable: true
-        }
-    }
-
     let CaptionChromeToggle = ButtonFlatterIcon {
         width: 36.0
         height: 28.0
@@ -649,7 +446,7 @@ script_mod! {
         }
     }
 
-    let AiManagerTab = IconTab {
+    let AiTab = IconTab {
         draw_icon +: {
             color: STUDIO_PALETTE_1
             svg: crate_resource("self://resources/icons/icon_ai.svg")
@@ -782,6 +579,44 @@ script_mod! {
         }
     }
 
+    let TerminalShellPane = View {
+        width: Fill
+        height: Fill
+
+        terminal_dock := StudioDock {
+            width: Fill
+            height: Fill
+
+            tab_bar +: {
+                TerminalTab := TerminalTab {}
+                TerminalCloseableTab := TerminalCloseableTab {}
+                TerminalAddTab := TerminalAddTab {}
+            }
+
+            root := DockTabs {
+                tabs: [@terminal_first @terminal_add]
+                selected: 0
+                closable: true
+            }
+
+            terminal_first := DockTab {
+                name: ""
+                template: @TerminalTab
+                kind: @TerminalFirstPane
+            }
+
+            terminal_add := DockTab {
+                name: "+"
+                template: @TerminalAddTab
+                kind: @TerminalAddPane
+            }
+
+            TerminalFirstPane := TerminalFirstPane {}
+            TerminalPane := TerminalPane {}
+            TerminalAddPane := View {}
+        }
+    }
+
     mod.widgets.AppUI = Window {
         window.inner_size: vec2(1400 900)
         caption_bar := SolidView {
@@ -893,11 +728,10 @@ script_mod! {
 
                 tab_bar +: {
                     MountTab := MountTab {}
-                    AiManagerTab := AiManagerTab {}
                 }
 
                 root := DockTabs {
-                    tabs: [@mount_first @ai_manager_tab]
+                    tabs: [@mount_first]
                     selected: 0
                     closable: false
                 }
@@ -906,12 +740,6 @@ script_mod! {
                     name: "makepad"
                     template: @MountTab
                     kind: @MountWorkspace
-                }
-
-                ai_manager_tab := DockTab {
-                    name: "AI Manager"
-                    template: @AiManagerTab
-                    kind: @AiManagerPane
                 }
 
                 MountWorkspace := View {
@@ -925,6 +753,7 @@ script_mod! {
                         tab_bar +: {
                             FilesTab := FilesTab {}
                             RunListTab := RunListTab {}
+                            AiTab := AiTab {}
                             EditorFirstTab := EditorFirstTab {}
                             EditorTab := EditorTab {}
                             RunFirstTab := RunFirstTab {}
@@ -964,7 +793,7 @@ script_mod! {
                         }
 
                         tree_tabs := DockTabs {
-                            tabs: [@tree_tab @run_list_tab]
+                            tabs: [@tree_tab @run_list_tab @ai_tab]
                             selected: 0
                             closable: false
                         }
@@ -993,6 +822,12 @@ script_mod! {
                             kind: @RunListPane
                         }
 
+                        ai_tab := DockTab {
+                            name: "AI"
+                            template: @AiTab
+                            kind: @AiPane
+                        }
+
                         editor_first := DockTab {
                             name: ""
                             template: @EditorFirstTab
@@ -1011,18 +846,6 @@ script_mod! {
                             kind: @LogFirstPane
                         }
 
-                        terminal_first := DockTab {
-                            name: ""
-                            template: @TerminalTab
-                            kind: @TerminalFirstPane
-                        }
-
-                        terminal_add := DockTab {
-                            name: "+"
-                            template: @TerminalAddTab
-                            kind: @TerminalAddPane
-                        }
-
                         bottom_terminal_tab := DockTab {
                             name: "Terminal"
                             template: @TerminalTab
@@ -1031,6 +854,7 @@ script_mod! {
 
                         FileTreePane := FileTreePane {}
                         RunListPane := RunListPane {}
+                        AiPane := AiPane {}
                         CodeEditorPane := CodeEditorPane {}
                         EditorFirstPane := EditorFirstPane {}
                         RunningAppPane := RunningAppPane {}
@@ -1038,14 +862,10 @@ script_mod! {
                         LogFirstPane := LogFirstPane {}
                         LogPane := LogPane {}
                         ProfilerPane := ProfilerPane {}
-                        TerminalFirstPane := TerminalFirstPane {}
                         TerminalShellPane := TerminalShellPane {}
-                        TerminalPane := TerminalPane {}
-                        TerminalAddPane := View {}
                     }
                 }
 
-                AiManagerPane := AiManagerBody {}
             }
         }
     }

@@ -4,8 +4,8 @@ use crate::{
     makepad_widgets::{file_tree::GitStatusDotKind, *},
 };
 use makepad_studio_protocol::hub_protocol::{
-    EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus, LogSource, QueryId,
-    RunItem, TerminalFramebuffer,
+    AiMountState, EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus,
+    LogSource, QueryId, RunItem, TerminalFramebuffer,
 };
 use makepad_studio_protocol::LogLevel;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -75,6 +75,7 @@ pub struct MountState {
     pub select_last_terminal_once: bool,
     pub terminal_path_to_tab: HashMap<String, LiveId>,
     pub terminal_tab_to_path: HashMap<LiveId, String>,
+    pub ai_state: Option<AiMountState>,
     pub file_filter: String,
     pub file_filter_results: Vec<String>,
     pub file_filter_query: Option<QueryId>,
@@ -98,6 +99,7 @@ impl Default for MountState {
             select_last_terminal_once: false,
             terminal_path_to_tab: HashMap::new(),
             terminal_tab_to_path: HashMap::new(),
+            ai_state: None,
             file_filter: String::new(),
             file_filter_results: Vec::new(),
             file_filter_query: None,

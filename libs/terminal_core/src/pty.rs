@@ -256,8 +256,12 @@ impl Pty {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
+        let env_shell = env.iter().find_map(|(key, value)| {
+            (*key == "SHELL" && !value.is_empty()).then(|| (*value).to_owned())
+        });
         let shell = shell
             .map(str::to_owned)
+            .or(env_shell)
             .or_else(|| std::env::var("SHELL").ok())
             .unwrap_or_else(|| "/bin/zsh".to_owned());
 
@@ -708,7 +712,9 @@ fn write_fd_once(fd: i32, data: &[u8]) -> io::Result<usize> {
     }
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
-        Some(code) if code == libc_ffi::EINTR => Err(io::Error::new(io::ErrorKind::Interrupted, err)),
+        Some(code) if code == libc_ffi::EINTR => {
+            Err(io::Error::new(io::ErrorKind::Interrupted, err))
+        }
         Some(code) if code == libc_ffi::EAGAIN || code == libc_ffi::EWOULDBLOCK => {
             Err(io::Error::new(io::ErrorKind::WouldBlock, err))
         }
