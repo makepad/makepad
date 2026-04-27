@@ -503,10 +503,22 @@ impl ScriptHook for StackNavigation {
         if apply.is_new() {
             self.navigation_stack = NavigationStack::default();
         } else if apply.is_reload() {
-            // Make sure current stack view is visible when code reloads
-            if let Some(current_entry) = self.navigation_stack.current() {
+            // Reload re-applies every DSL value across the whole tree, which
+            // resets `visible: false` and `offset: 4000.0` (the StackNavigationView
+            // defaults) on every stack view we've previously pushed — not just
+            // the topmost. Restore visibility/offset for every entry in the
+            // history so popping back to a view underneath the current one
+            // reveals it instead of the parent's bare background.
+            //
+            // This matters on rotation specifically: a safe-area-inset change
+            // calls `cx.request_live_edit()` (see window.rs), which fires this
+            // reload pass. Before this loop existed, rotating with several
+            // rooms pushed and then tapping back showed a blank screen because
+            // the previous room view was still `visible = false`.
+            let view_ids = self.navigation_stack.view_ids();
+            for view_id in view_ids {
                 let stack_view_ref =
-                    self.stack_navigation_view(_vm.cx_mut(), &[current_entry.view_id]);
+                    self.stack_navigation_view(_vm.cx_mut(), &[view_id]);
                 if let Some(mut inner) = stack_view_ref.borrow_mut() {
                     inner.view.visible = true;
                     inner.offset = 0.0;
@@ -578,8 +590,15 @@ impl WidgetMatchEvent for StackNavigation {
         for action in actions {
             if let WindowAction::WindowGeomChange(ce) = action.as_widget_action().cast() {
                 self.screen_width = ce.new_geom.inner_size.x * ce.new_geom.dpi_factor;
-                if let Some(current_entry) = self.navigation_stack.current() {
-                    let stack_view_ref = self.stack_navigation_view(cx, &[current_entry.view_id]);
+                // Refresh `offset_to_hide` on every stack view we know about,
+                // not just the current one. Previously-pushed views hold the
+                // screen width that was current when they were pushed, so
+                // after a rotation the slide-out animation on those views
+                // would terminate at the old (e.g. portrait) edge instead of
+                // sliding fully off the new (e.g. landscape) edge.
+                let view_ids = self.navigation_stack.view_ids();
+                for view_id in view_ids {
+                    let stack_view_ref = self.stack_navigation_view(cx, &[view_id]);
                     stack_view_ref.set_offset_to_hide(self.screen_width);
                 }
             }
