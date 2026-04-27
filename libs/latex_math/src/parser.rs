@@ -458,10 +458,19 @@ impl<'a> Parser<'a> {
             if stop(self) || self.peek().is_none() {
                 break;
             }
+            let pos_before = self.pos;
             if let Some(node) = self.parse_one() {
                 // Check for sub/superscript attachment
                 let node = self.maybe_attach_scripts(node);
                 nodes.push(node);
+            }
+            // Infinite-loop guard: if parse_one returned None AND did not
+            // advance the cursor, consume one char so we make progress.
+            // Without this, input containing a token parse_one can't handle
+            // (e.g. a stray `}` or an unknown command in malformed LaTeX)
+            // spins this loop forever at 100% CPU.
+            if self.pos == pos_before {
+                self.advance();
             }
         }
         nodes

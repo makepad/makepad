@@ -26,6 +26,7 @@ pub enum BackendConfig {
         model: String,
         base_url: Option<String>,
         reasoning_effort: Option<String>,
+        thinking: Option<String>,
     },
     Gemini {
         api_key: String,

@@ -91,6 +91,9 @@ impl MacosWindow {
         match config.chrome {
             MacosWindowChrome::Borderless => {
                 style_mask |= NSWindowStyleMask::NSBorderlessWindowMask as u64;
+                if config.resizable {
+                    style_mask |= NSWindowStyleMask::NSResizableWindowMask as u64;
+                }
             }
             MacosWindowChrome::Titled => {
                 style_mask |= NSWindowStyleMask::NSTitledWindowMask as u64;

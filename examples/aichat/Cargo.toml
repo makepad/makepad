@@ -10,3 +10,26 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../../widgets", features = ["maps", "pdf"] }
 makepad-code-editor = { path = "../../code_editor" }
 makepad-ai = { path = "../../libs/makepad_ai" }
+
+# Streaming-markdown helpers: sanitizer + latex auto-wrap + remend. Provides
+# `streaming_display_with_latex_autowrap_remend` and `wrap_bare_latex`, which
+# feed the Markdown widget a CommonMark-clean view of a mid-stream LLM buffer
+# so the fade animation and fenced blocks don't thrash on every token.
+# Default feature set (no "mermaid") — mermaid rendering requires a widget-
+# side code-block hook that is not yet in makepad, so pulling the heavier
+# rusty-mermaid/usvg/resvg stack here would add ~90 transitive crates for no
+# visible feature.
+streaming-markdown-kit = { git = "https://github.com/Project-Robius-China/streaming-markdown-kit" }
+
+# Inline-diagram renderer. The `makepad` feature pulls in the Makepad-native
+# `DiagramView` widget that turns a ```diagram-fenced JSON body into a
+# painted pyramid/tree/flowchart/layers/quadrant. Path dep rather than a
+# published release — lock-step with this fork's `dev` branch.
+makepad-diagram-kit = { path = "../../../../makepad-diagram-kit", features = ["makepad"] }
+
+# Cross-platform URL opener. `std::process::Command` only works on desktop —
+# iOS/Android/WASM need platform-specific plumbing (UIApplication, Intent,
+# window.open). robius-open is the Robius-ecosystem standard for this
+# (used by robrix and moly). Pulled from git until the 2.0.0 release lands on
+# crates.io.
+robius-open = { git = "https://github.com/project-robius/robius" }

@@ -225,6 +225,14 @@ pub struct Markdown {
     in_splash_block: bool,
     #[rust]
     splash_block_string: String,
+    // Diagram block state — triggered by a ```diagram fenced code block.
+    // Mirrors splash_block exactly; body is forwarded to a `diagram_block`
+    // template whose inner widget (e.g., `makepad-diagram-kit::DiagramView`)
+    // accepts the raw JSON via `set_text`.
+    #[rust]
+    in_diagram_block: bool,
+    #[rust]
+    diagram_block_string: String,
     #[live(false)]
     use_math_widget: bool,
     #[rust]
@@ -398,9 +406,16 @@ impl Markdown {
                     is_first_block = false;
                     // Check if this is a runsplash block
                     let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
+                    // Check if this is a diagram block (renders via
+                    // makepad-diagram-kit::DiagramView when the consumer
+                    // registers a `diagram_block` template).
+                    let is_diagram = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "diagram");
                     if is_runsplash {
                         self.in_splash_block = true;
                         self.splash_block_string.clear();
+                    } else if is_diagram {
+                        self.in_diagram_block = true;
+                        self.diagram_block_string.clear();
                     } else if self.use_code_block_widget {
                         self.in_code_block = true;
                         self.code_block_string.clear();
@@ -425,6 +440,18 @@ impl Markdown {
                             //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
                             //});
                             item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else if self.in_diagram_block {
+                        self.in_diagram_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let dbs = &self.diagram_block_string;
+                        // Forward the raw JSON body to whichever inner widget
+                        // the consumer wires into the `diagram_block` template.
+                        // The conventional id is `diagram_view`, matching the
+                        // `splash_view` pattern above.
+                        tf.item_with(cx, entry_id, id!(diagram_block), |cx, item, _tf| {
+                            item.widget(cx, ids!(diagram_view)).set_text(cx, dbs);
                             item.draw_all_unscoped(cx);
                         });
                     } else if self.in_code_block {
@@ -506,6 +533,8 @@ impl Markdown {
                 MdEvent::Text(text) => {
                     if self.in_splash_block {
                         self.splash_block_string.push_str(&text);
+                    } else if self.in_diagram_block {
+                        self.diagram_block_string.push_str(&text);
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
                     } else {
@@ -515,6 +544,8 @@ impl Markdown {
                 MdEvent::SoftBreak => {
                     if self.in_splash_block {
                         self.splash_block_string.push('\n');
+                    } else if self.in_diagram_block {
+                        self.diagram_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
@@ -524,6 +555,8 @@ impl Markdown {
                 MdEvent::HardBreak => {
                     if self.in_splash_block {
                         self.splash_block_string.push('\n');
+                    } else if self.in_diagram_block {
+                        self.diagram_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
@@ -685,10 +718,13 @@ struct MarkdownLink {
 
 impl WidgetMatchEvent for MarkdownLink {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.link.clicked(actions) {
+        if let Some(modifiers) = self.link.clicked_modifiers(actions) {
             cx.widget_action(
                 self.widget_uid(),
-                MarkdownAction::LinkNavigated(self.href.clone()),
+                MarkdownAction::LinkNavigated {
+                    url: self.href.clone(),
+                    modifiers,
+                },
             );
         }
     }
@@ -726,5 +762,14 @@ impl MarkdownLinkRef {
 pub enum MarkdownAction {
     #[default]
     None,
-    LinkNavigated(String),
+    /// Emitted when a `[text](url)` link is clicked. Consumers receive the
+    /// URL along with the `KeyModifiers` that were held during the click, so
+    /// they can implement Cmd/Ctrl+click-to-open UX on desktop while leaving
+    /// plain clicks free for drag-to-select inside the Markdown widget. On
+    /// mobile & web there is no modifier concept, so consumers typically
+    /// ignore `modifiers` there and open on every tap.
+    LinkNavigated {
+        url: String,
+        modifiers: KeyModifiers,
+    },
 }
