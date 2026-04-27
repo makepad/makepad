@@ -140,17 +140,32 @@ fn derive_script_impl_inner(
                 .iter()
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
-                tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
+                tb.add("{ let __field_value = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
                     .add(").into(), apply);");
-                tb.add("if __field_value.is_none() && apply.is_reload(){");
-                tb.add("    let default_value = <")
-                    .stream(Some(field.ty.clone()))
-                    .add(" as ScriptNew>::script_reload_default(vm);");
-                tb.add("    if !default_value.is_nil(){");
-                tb.add("        __field_value = Some(default_value);");
-                tb.add("    }");
-                tb.add("}");
+                // No fallback to the field type's own `script_reload_default`
+                // when the incoming value doesn't re-state this field.
+                //
+                // `script_reload_default` returns the field type's
+                // type-generic default (the value registered via
+                // `set_type_default()`), not the DSL override the parent
+                // widget declared on this specific field. For a field like
+                // TextFlow's `table_row_walk`, the parent declares
+                //     table_row_walk: Walk{width: Fill, height: Fit}
+                // but `Walk::script_reload_default` returns the bare
+                // `Walk::default()` = `width: Fill, height: Fill`. Applying
+                // that on a reapply walk clobbers the DSL override and e.g.
+                // breaks Markdown tables (the row turtle loses its bounded
+                // height, cells compute `inner_w = 0`, body rows disappear).
+                //
+                // The construction path (`Apply::New`) reads the DSL override
+                // through `script_from_value`, not `value_for_apply`, so the
+                // field starts life with the right value. On any reapply where
+                // the incoming value's proto chain doesn't expose this field
+                // (which is the common case for nested fields under
+                // `#[deref]`), preserving the construction-time value is
+                // correct. If a reapply genuinely wants to change a nested
+                // field, the caller re-states it explicitly.
                 tb.add("if let Some(v) = __field_value {");
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
