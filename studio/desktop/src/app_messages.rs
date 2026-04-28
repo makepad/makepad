@@ -139,7 +139,6 @@ impl App {
                     ui_file_sync_trace!("ignore FileChanged path={} reason=terminal", path);
                     return;
                 }
-                self.process_ai_manager_path_change(cx, &path);
 
                 // Root-level watcher fallback: backend can emit mount names when
                 // it only knows "something changed under this mount".
@@ -659,7 +658,6 @@ impl App {
                     .insert(path.clone(), frame);
                 self.refresh_active_mount_terminal_panel(cx, &path);
                 self.refresh_ai_manager_preview(cx);
-                self.process_ai_manager_task_terminal_update(cx, &path);
             }
             HubToClient::TerminalTitle { path, title } => {
                 self.apply_terminal_tab_title(cx, &path, title);
@@ -667,7 +665,6 @@ impl App {
                 self.refresh_ai_manager_report(cx);
             }
             HubToClient::TerminalExited { path, code } => {
-                self.process_ai_manager_terminal_closed(cx, &path, code);
                 self.reset_terminal_tab_title(cx, &path);
                 self.handle_terminal_exit_cleanup(cx, &path);
                 self.set_status(cx, &format!("terminal exited ({})", code));

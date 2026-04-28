@@ -4,8 +4,8 @@ use crate::{
     makepad_widgets::{file_tree::GitStatusDotKind, *},
 };
 use makepad_studio_protocol::hub_protocol::{
-    AiAgentId, AiMountState, EventSample, FileNodeType, FileTreeData, GCSample, GPUSample,
-    GitStatus, LogSource, QueryId, RunItem, TerminalFramebuffer,
+    AiMountState, EventSample, FileNodeType, FileTreeData, GCSample, GPUSample, GitStatus,
+    LogSource, QueryId, RunItem, TerminalFramebuffer,
 };
 use makepad_studio_protocol::LogLevel;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -62,37 +62,6 @@ pub struct UiProfilerSamples {
     pub total_in_window: usize,
 }
 
-#[derive(Clone, Debug)]
-pub struct AiQueuedFollowup {
-    pub agent_id: AiAgentId,
-    pub task_id: u64,
-    pub signature: String,
-    pub text: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct AiTrackedTask {
-    pub id: u64,
-    pub agent_id: AiAgentId,
-    pub goal: String,
-    pub terminal_path: Option<String>,
-    pub expected_paths: Vec<String>,
-    pub touched_paths: Vec<String>,
-    pub status: String,
-    pub last_terminal_mode: String,
-    pub last_terminal_summary: String,
-    pub last_terminal_excerpt: String,
-    pub last_codex_status: Option<String>,
-}
-
-#[derive(Default)]
-pub struct AiLocalMountState {
-    pub next_task_id: u64,
-    pub last_processed_message_count_by_agent: HashMap<AiAgentId, usize>,
-    pub tasks: Vec<AiTrackedTask>,
-    pub queued_followups: VecDeque<AiQueuedFollowup>,
-}
-
 pub struct MountState {
     pub root: PathBuf,
     pub tab_id: Option<LiveId>,
@@ -113,7 +82,6 @@ pub struct MountState {
     pub file_filter_pending: bool,
     pub log_filter: String,
     pub log_tail: bool,
-    pub ai_local: AiLocalMountState,
 }
 
 impl Default for MountState {
@@ -138,10 +106,6 @@ impl Default for MountState {
             file_filter_pending: false,
             log_filter: String::new(),
             log_tail: true,
-            ai_local: AiLocalMountState {
-                next_task_id: 1,
-                ..Default::default()
-            },
         }
     }
 }
