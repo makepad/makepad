@@ -5,7 +5,7 @@ use makepad_network::{HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, N
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,20 @@ const DEFAULT_BASH_TIMEOUT_SECS: u64 = 20;
 const MAX_BASH_TIMEOUT_SECS: u64 = 120;
 const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../ai_mgr.md");
 const AI_CHAT_PERSIST_FS_SUPPRESS: Duration = Duration::from_millis(1_500);
+const AI_TASK_EVENT_PREFIX: &str = "TASK EVENT:";
+const AI_TERMINAL_EXCERPT_MAX_CHARS: usize = 480;
+const AI_TERMINAL_EXCERPT_MAX_LINES: usize = 10;
+
+pub struct AiTerminalObservation {
+    pub path: String,
+    pub terminal_title: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub top_row: usize,
+    pub total_lines: usize,
+    pub is_tui: bool,
+    pub text: String,
+}
 
 #[derive(Clone)]
 struct AiBackendConfig {
@@ -97,9 +111,46 @@ struct MountAgents {
     active_backend_id: String,
     active_agent_id: Option<AiAgentId>,
     next_chat_ordinal: u64,
+    next_task_id: u64,
     loaded_from_disk: bool,
     order: Vec<AiAgentId>,
     agents: HashMap<AiAgentId, RunningAgent>,
+    tasks: Vec<AiTrackedTask>,
+    queued_followups: VecDeque<AiQueuedFollowup>,
+    terminal_snapshots: HashMap<String, AiTerminalSnapshot>,
+}
+
+#[derive(Clone, Debug)]
+struct AiTrackedTask {
+    id: u64,
+    agent_id: AiAgentId,
+    goal: String,
+    terminal_path: Option<String>,
+    expected_paths: Vec<String>,
+    touched_paths: Vec<String>,
+    status: String,
+    last_terminal_mode: String,
+    last_terminal_summary: String,
+    last_terminal_excerpt: String,
+    last_codex_status: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AiQueuedFollowup {
+    agent_id: AiAgentId,
+    task_id: u64,
+    signature: String,
+    text: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AiTerminalSnapshot {
+    path: String,
+    mode: &'static str,
+    summary: String,
+    visible_text: String,
+    is_codex: bool,
+    codex_status: Option<String>,
 }
 
 struct InFlightRequest {
@@ -368,9 +419,13 @@ impl AiManager {
                     active_backend_id: default_backend_id.clone(),
                     active_agent_id: None,
                     next_chat_ordinal: 1,
+                    next_task_id: 1,
                     loaded_from_disk: false,
                     order: Vec::new(),
                     agents: HashMap::new(),
+                    tasks: Vec::new(),
+                    queued_followups: VecDeque::new(),
+                    terminal_snapshots: HashMap::new(),
                 });
             entry.root_path = root.to_string_lossy().to_string();
             if entry.active_backend_id.is_empty() {
@@ -540,6 +595,7 @@ impl AiManager {
             agent.updated_at = now_seconds();
         }
 
+        self.note_ai_prompt_task(mount, agent_id, prompt);
         self.persist_mount_state_best_effort(mount);
         self.start_model_request(mount, agent_id, run_token);
         self.snapshot(mount)
@@ -572,6 +628,217 @@ impl AiManager {
         }
         self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
+    }
+
+    pub fn process_terminal_observation(
+        &mut self,
+        mount: &str,
+        observation: AiTerminalObservation,
+    ) -> Option<AiMountState> {
+        self.ensure_mount_entry(mount);
+        let (mode, is_codex, summary, codex_status) =
+            Self::terminal_mode_and_summary(&observation.terminal_title, &observation.text);
+        let snapshot = AiTerminalSnapshot {
+            path: observation.path.clone(),
+            mode,
+            summary,
+            visible_text: observation.text,
+            is_codex,
+            codex_status,
+        };
+
+        let mut queue = Vec::new();
+        let mut changed = false;
+        {
+            let mount_state = self.mounts.get_mut(mount)?;
+            let previous = mount_state
+                .terminal_snapshots
+                .insert(snapshot.path.clone(), snapshot.clone());
+            if previous
+                .as_ref()
+                .map(|previous| {
+                    previous.mode != snapshot.mode
+                        || previous.summary != snapshot.summary
+                        || previous.codex_status != snapshot.codex_status
+                        || previous.is_codex != snapshot.is_codex
+                })
+                .unwrap_or(true)
+            {
+                changed = true;
+            }
+
+            for task in mount_state
+                .tasks
+                .iter_mut()
+                .filter(|task| task.terminal_path.as_deref() == Some(snapshot.path.as_str()))
+            {
+                let previous_mode = task.last_terminal_mode.clone();
+                let previous_summary = task.last_terminal_summary.clone();
+                let previous_excerpt = task.last_terminal_excerpt.clone();
+                let previous_codex_status = task.last_codex_status.clone();
+
+                task.status = if snapshot.mode == "needs-attention" {
+                    "needs-attention".to_string()
+                } else if snapshot.mode == "done" {
+                    "done".to_string()
+                } else {
+                    "watching".to_string()
+                };
+                task.last_terminal_mode = snapshot.mode.to_string();
+                task.last_terminal_summary = snapshot.summary.clone();
+                task.last_terminal_excerpt = Self::truncate_terminal_excerpt(
+                    &snapshot.visible_text,
+                    AI_TERMINAL_EXCERPT_MAX_CHARS,
+                    AI_TERMINAL_EXCERPT_MAX_LINES,
+                );
+                task.last_codex_status = snapshot.codex_status.clone();
+
+                if previous_mode != task.last_terminal_mode
+                    || previous_summary != task.last_terminal_summary
+                    || previous_excerpt != task.last_terminal_excerpt
+                    || previous_codex_status != task.last_codex_status
+                {
+                    changed = true;
+                }
+
+                if previous_mode != "needs-attention" && snapshot.mode == "needs-attention" {
+                    queue.push((
+                        task.id,
+                        format!(
+                            "terminal:{}:attention:{}",
+                            snapshot.path, task.last_terminal_summary
+                        ),
+                        "Tracked terminal needs attention".to_string(),
+                    ));
+                } else if previous_mode != "done" && snapshot.mode == "done" {
+                    queue.push((
+                        task.id,
+                        format!(
+                            "terminal:{}:done:{}",
+                            snapshot.path, task.last_terminal_summary
+                        ),
+                        "Tracked terminal appears done".to_string(),
+                    ));
+                }
+            }
+        }
+
+        for (task_id, signature, reason) in queue {
+            self.queue_ai_task_followup(mount, task_id, signature, &reason);
+        }
+
+        let dispatched = self.dispatch_next_ai_manager_followup(mount);
+        if changed || dispatched {
+            Some(self.snapshot(mount))
+        } else {
+            None
+        }
+    }
+
+    pub fn process_terminal_closed(
+        &mut self,
+        mount: &str,
+        path: &str,
+        exit_code: i32,
+    ) -> Option<AiMountState> {
+        self.ensure_mount_entry(mount);
+        let summary = format!("terminal exited ({})", exit_code);
+        let snapshot = AiTerminalSnapshot {
+            path: path.to_string(),
+            mode: "exited",
+            summary: summary.clone(),
+            visible_text: String::new(),
+            is_codex: false,
+            codex_status: None,
+        };
+
+        let mut queue = Vec::new();
+        {
+            let mount_state = self.mounts.get_mut(mount)?;
+            mount_state
+                .terminal_snapshots
+                .insert(path.to_string(), snapshot);
+            for task in mount_state
+                .tasks
+                .iter_mut()
+                .filter(|task| task.terminal_path.as_deref() == Some(path))
+            {
+                task.status = if exit_code == 0 {
+                    "done".to_string()
+                } else {
+                    "needs-attention".to_string()
+                };
+                task.last_terminal_mode = "exited".to_string();
+                task.last_terminal_summary = summary.clone();
+                task.last_codex_status = None;
+                queue.push((
+                    task.id,
+                    format!("terminal:{}:exit:{}", path, exit_code),
+                    format!("Tracked terminal exited with code {}", exit_code),
+                ));
+            }
+        }
+
+        for (task_id, signature, reason) in queue {
+            self.queue_ai_task_followup(mount, task_id, signature, &reason);
+        }
+
+        self.dispatch_next_ai_manager_followup(mount);
+        Some(self.snapshot(mount))
+    }
+
+    pub fn process_path_change(&mut self, mount: &str, virtual_path: &str) -> Option<AiMountState> {
+        self.ensure_mount_entry(mount);
+        let relative_path = if virtual_path == mount {
+            return None;
+        } else {
+            virtual_path
+                .strip_prefix(&format!("{}/", mount))
+                .unwrap_or(virtual_path)
+        };
+
+        let mut queue = Vec::new();
+        let mut changed = false;
+        {
+            let mount_state = self.mounts.get_mut(mount)?;
+            for task in &mut mount_state.tasks {
+                if !matches_expected_path(relative_path, &task.expected_paths) {
+                    continue;
+                }
+                if !task
+                    .touched_paths
+                    .iter()
+                    .any(|existing| existing == relative_path)
+                {
+                    task.touched_paths.push(relative_path.to_string());
+                    changed = true;
+                }
+                if matches!(
+                    task.last_terminal_mode.as_str(),
+                    "done" | "awaiting-input" | "needs-attention"
+                ) {
+                    queue.push((
+                        task.id,
+                        format!(
+                            "file:{}:{}:{}",
+                            relative_path, task.last_terminal_mode, task.last_terminal_summary
+                        ),
+                        format!("Observed filesystem change for `{}`", relative_path),
+                    ));
+                }
+            }
+        }
+
+        for (task_id, signature, reason) in queue {
+            self.queue_ai_task_followup(mount, task_id, signature, &reason);
+        }
+
+        let dispatched = self.dispatch_next_ai_manager_followup(mount);
+        if changed || dispatched {
+            Some(self.snapshot(mount))
+        } else {
+            None
+        }
     }
 
     pub fn handle_http_response(
@@ -696,6 +963,9 @@ impl AiManager {
                 agent.status = "thinking...".to_string();
                 continue_loop = true;
             }
+        }
+        for result in &results {
+            self.process_ai_tool_result_for_task(mount, agent_id, result);
         }
         self.persist_mount_state_best_effort(mount);
 
@@ -1128,9 +1398,13 @@ impl AiManager {
                     active_backend_id: default_backend_id,
                     active_agent_id: None,
                     next_chat_ordinal: 1,
+                    next_task_id: 1,
                     loaded_from_disk: false,
                     order: Vec::new(),
                     agents: HashMap::new(),
+                    tasks: Vec::new(),
+                    queued_followups: VecDeque::new(),
+                    terminal_snapshots: HashMap::new(),
                 },
             );
         }
@@ -1156,9 +1430,13 @@ impl AiManager {
                 active_backend_id: default_backend_id,
                 active_agent_id: None,
                 next_chat_ordinal: 1,
+                next_task_id: 1,
                 loaded_from_disk: false,
                 order: Vec::new(),
                 agents: HashMap::new(),
+                tasks: Vec::new(),
+                queued_followups: VecDeque::new(),
+                terminal_snapshots: HashMap::new(),
             });
         let title = format!("Chat {}", mount_state.next_chat_ordinal);
         mount_state.next_chat_ordinal += 1;
@@ -1303,6 +1581,381 @@ impl AiManager {
         });
     }
 
+    fn note_ai_prompt_task(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) {
+        if prompt.starts_with(AI_TASK_EVENT_PREFIX) || !should_track_ai_terminal_task(prompt) {
+            return;
+        }
+        let Some(mount_state) = self.mounts.get_mut(mount) else {
+            return;
+        };
+        let task_id = mount_state.next_task_id.max(1);
+        mount_state.next_task_id = task_id.saturating_add(1);
+        mount_state.tasks.push(AiTrackedTask {
+            id: task_id,
+            agent_id,
+            goal: prompt.trim().to_string(),
+            terminal_path: None,
+            expected_paths: extract_expected_paths_from_prompt(prompt),
+            touched_paths: Vec::new(),
+            status: "waiting-terminal".to_string(),
+            last_terminal_mode: "waiting-terminal".to_string(),
+            last_terminal_summary: "Waiting for the AI to hand work to a terminal".to_string(),
+            last_terminal_excerpt: String::new(),
+            last_codex_status: None,
+        });
+    }
+
+    fn process_ai_tool_result_for_task(
+        &mut self,
+        mount: &str,
+        agent_id: AiAgentId,
+        result: &AiToolExecutionResult,
+    ) -> bool {
+        if !is_terminal_tool_name(&result.tool_name) {
+            return false;
+        }
+        let Some(path) = parse_json_string_field(&result.content, "path") else {
+            return false;
+        };
+        self.bind_waiting_ai_task_to_terminal(mount, agent_id, &path)
+    }
+
+    fn bind_waiting_ai_task_to_terminal(
+        &mut self,
+        mount: &str,
+        agent_id: AiAgentId,
+        path: &str,
+    ) -> bool {
+        let Some(mount_state) = self.mounts.get_mut(mount) else {
+            return false;
+        };
+        let Some(task) = mount_state
+            .tasks
+            .iter_mut()
+            .find(|task| task.agent_id == agent_id && task.terminal_path.is_none())
+        else {
+            return false;
+        };
+        let snapshot = mount_state
+            .terminal_snapshots
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| AiTerminalSnapshot {
+                path: path.to_string(),
+                mode: "starting",
+                summary: format!("Tracking {}", terminal_display_name(path)),
+                visible_text: String::new(),
+                is_codex: false,
+                codex_status: None,
+            });
+        task.terminal_path = Some(path.to_string());
+        task.status = "watching".to_string();
+        task.last_terminal_mode = snapshot.mode.to_string();
+        task.last_terminal_summary = snapshot.summary;
+        task.last_terminal_excerpt = Self::truncate_terminal_excerpt(
+            &snapshot.visible_text,
+            AI_TERMINAL_EXCERPT_MAX_CHARS,
+            AI_TERMINAL_EXCERPT_MAX_LINES,
+        );
+        task.last_codex_status = snapshot.codex_status;
+        true
+    }
+
+    fn queue_ai_task_followup(
+        &mut self,
+        mount: &str,
+        task_id: u64,
+        signature: String,
+        reason: &str,
+    ) {
+        let Some((agent_id, text)) = self.ai_task_event_prompt(mount, task_id, reason) else {
+            return;
+        };
+        let Some(mount_state) = self.mounts.get_mut(mount) else {
+            return;
+        };
+        if mount_state
+            .queued_followups
+            .iter()
+            .any(|entry| entry.task_id == task_id && entry.signature == signature)
+        {
+            return;
+        }
+        mount_state.queued_followups.push_back(AiQueuedFollowup {
+            agent_id,
+            task_id,
+            signature,
+            text,
+        });
+    }
+
+    fn ai_task_event_prompt(
+        &self,
+        mount: &str,
+        task_id: u64,
+        reason: &str,
+    ) -> Option<(AiAgentId, String)> {
+        let task = self
+            .mounts
+            .get(mount)?
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)?;
+        let mut prompt = String::new();
+        prompt.push_str(AI_TASK_EVENT_PREFIX);
+        prompt.push(' ');
+        prompt.push_str(&format!("task {} update\n", task.id));
+        prompt.push_str(&format!("Reason: {}\n", reason));
+        prompt.push_str(&format!("Goal: {}\n", task.goal));
+        prompt.push_str(&format!("Task state: {}\n", task.status));
+        if let Some(path) = &task.terminal_path {
+            prompt.push_str(&format!("Terminal path: {}\n", path));
+        }
+        prompt.push_str(&format!("Terminal mode: {}\n", task.last_terminal_mode));
+        if let Some(codex_status) = &task.last_codex_status {
+            prompt.push_str(&format!("Codex status: {}\n", codex_status));
+        }
+        if !task.last_terminal_summary.is_empty() {
+            prompt.push_str(&format!("Summary: {}\n", task.last_terminal_summary));
+        }
+        if !task.expected_paths.is_empty() {
+            prompt.push_str(&format!(
+                "Expected paths: {}\n",
+                task.expected_paths.join(", ")
+            ));
+        }
+        if !task.touched_paths.is_empty() {
+            prompt.push_str(&format!(
+                "Touched paths: {}\n",
+                task.touched_paths.join(", ")
+            ));
+        }
+        if !task.last_terminal_excerpt.is_empty() {
+            prompt.push_str("\nLatest output excerpt:\n```text\n");
+            prompt.push_str(&task.last_terminal_excerpt);
+            prompt.push_str("\n```\n");
+        }
+        prompt.push_str(
+            "\nContinue supervising this delegated terminal task. If it is finished, tell the user briefly. If more work is needed, use terminal tools instead of guessing.",
+        );
+        Some((task.agent_id, prompt))
+    }
+
+    fn dispatch_next_ai_manager_followup(&mut self, mount: &str) -> bool {
+        let Some((queue_index, queued)) = self.mounts.get(mount).and_then(|mount_state| {
+            mount_state
+                .queued_followups
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| {
+                    mount_state
+                        .agents
+                        .get(&entry.agent_id)
+                        .map(|agent| !agent.is_pending())
+                        .unwrap_or(false)
+                })
+                .map(|(index, entry)| (index, entry.clone()))
+        }) else {
+            return false;
+        };
+        if let Some(mount_state) = self.mounts.get_mut(mount) {
+            let _ = mount_state.queued_followups.remove(queue_index);
+        }
+        self.send_prompt(mount, queued.agent_id, &queued.text);
+        true
+    }
+
+    fn ai_live_markdown(&self, mount_state: &MountAgents) -> String {
+        let mut markdown = String::new();
+        if mount_state.tasks.is_empty() {
+            markdown.push_str("**Tasks**\n\n_No delegated terminal tasks yet._");
+        } else {
+            markdown.push_str("**Tasks**\n\n");
+            for task in &mount_state.tasks {
+                markdown.push_str(&format!(
+                    "- `T{}` [{}] {}\n",
+                    task.id,
+                    task.status,
+                    truncate_inline(&task.goal, 96)
+                ));
+                if let Some(path) = &task.terminal_path {
+                    markdown.push_str(&format!(
+                        "  `{}` [{}]\n",
+                        path,
+                        truncate_inline(&task.last_terminal_summary, 96)
+                    ));
+                } else {
+                    markdown.push_str("  waiting for terminal assignment\n");
+                }
+                if !task.touched_paths.is_empty() {
+                    markdown.push_str(&format!("  files: {}\n", task.touched_paths.join(", ")));
+                } else if !task.expected_paths.is_empty() {
+                    markdown.push_str(&format!(
+                        "  expecting: {}\n",
+                        task.expected_paths.join(", ")
+                    ));
+                }
+            }
+        }
+
+        markdown.push_str("\n\n**Terminals**\n\n");
+        if mount_state.terminal_snapshots.is_empty() {
+            markdown.push_str("_No terminal activity yet._");
+        } else {
+            let mut terminals = mount_state
+                .terminal_snapshots
+                .values()
+                .collect::<Vec<&AiTerminalSnapshot>>();
+            terminals.sort_by(|left, right| left.path.cmp(&right.path));
+            for terminal in terminals {
+                markdown.push_str(&format!(
+                    "- `{}` [{}{}]\n",
+                    terminal.path,
+                    terminal.mode,
+                    if terminal.is_codex { " / codex" } else { "" }
+                ));
+                if let Some(codex_status) = &terminal.codex_status {
+                    markdown.push_str(&format!("  {}\n", truncate_inline(codex_status, 96)));
+                }
+                markdown.push_str(&format!("  {}\n", truncate_inline(&terminal.summary, 96)));
+            }
+        }
+        markdown
+    }
+
+    pub(crate) fn terminal_mode_and_summary(
+        title: &str,
+        visible_text: &str,
+    ) -> (&'static str, bool, String, Option<String>) {
+        let lines: Vec<String> = visible_text.lines().map(|line| line.to_string()).collect();
+        let lowered = format!("{}\n{}", title, visible_text).to_lowercase();
+        let is_codex = lowered.contains("codex")
+            || lowered.contains("apply_patch")
+            || lowered.contains("exec_command")
+            || lowered.contains("functions.exec_command");
+        let codex_status = if is_codex {
+            Self::detect_codex_status_line(&lines)
+        } else {
+            None
+        };
+        let needs_attention = lowered.contains("permission denied")
+            || lowered.contains("sandbox")
+            || lowered.contains("panic")
+            || lowered.contains("error:")
+            || lowered.contains("failed")
+            || lowered.contains("blocked")
+            || lowered.contains("approve")
+            || lowered.contains("how would you like to proceed");
+        let awaiting_input = lowered.contains("waiting for user")
+            || lowered.contains("request user input")
+            || lowered.contains("press enter")
+            || lowered.contains("press return")
+            || lowered.contains("continue?")
+            || lowered.contains("type 'continue'")
+            || lowered.contains("type \"continue\"");
+        let working = lowered.contains("apply_patch")
+            || lowered.contains("exec_command")
+            || lowered.contains("searching")
+            || lowered.contains("reading")
+            || lowered.contains("building")
+            || lowered.contains("testing")
+            || lowered.contains("running")
+            || lowered.contains("patching")
+            || codex_status.is_some();
+        let codex_prompt_visible = is_codex
+            && lines
+                .iter()
+                .rev()
+                .take(6)
+                .any(|line| Self::is_codex_prompt_line(line));
+
+        let mode = if needs_attention {
+            "needs-attention"
+        } else if awaiting_input {
+            "awaiting-input"
+        } else if is_codex && codex_prompt_visible && codex_status.is_none() {
+            "done"
+        } else if visible_text.trim().is_empty() {
+            "starting"
+        } else if working {
+            "working"
+        } else {
+            "idle"
+        };
+
+        (
+            mode,
+            is_codex,
+            Self::terminal_summary_line(&lines, is_codex, codex_status.as_deref()),
+            codex_status,
+        )
+    }
+
+    fn is_codex_prompt_line(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        trimmed.starts_with('\u{203a}')
+            || trimmed.starts_with('>')
+            || trimmed.contains("Enter a prompt...")
+    }
+
+    fn detect_codex_status_line(lines: &[String]) -> Option<String> {
+        lines.iter().rev().take(8).find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.contains("Working (") && trimmed.contains("esc to interrupt") {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn terminal_summary_line(
+        lines: &[String],
+        is_codex: bool,
+        codex_status: Option<&str>,
+    ) -> String {
+        lines
+            .iter()
+            .rev()
+            .map(|line| line.trim())
+            .find(|line| {
+                !line.is_empty()
+                    && Some(*line) != codex_status
+                    && !(is_codex
+                        && (Self::is_codex_prompt_line(line)
+                            || line.contains("esc to interrupt")
+                            || line.contains("100% left")
+                            || line.contains("left \u{00b7}")))
+            })
+            .map(|line| truncate_inline(line, 140))
+            .unwrap_or_else(|| "No visible output yet".to_string())
+    }
+
+    fn truncate_terminal_excerpt(text: &str, max_chars: usize, max_lines: usize) -> String {
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        let start = lines.len().saturating_sub(max_lines);
+        let excerpt = lines[start..].join("\n");
+        if excerpt.chars().count() <= max_chars {
+            return excerpt;
+        }
+        let tail: String = excerpt
+            .chars()
+            .rev()
+            .take(max_chars.saturating_sub(3))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("...{}", tail)
+    }
+
     fn snapshot(&self, mount: &str) -> AiMountState {
         let Some(mount_state) = self.mounts.get(mount) else {
             return AiMountState::default();
@@ -1350,6 +2003,7 @@ impl AiManager {
             active_agent_id: mount_state.active_agent_id,
             agents,
             active_agent,
+            live_markdown: self.ai_live_markdown(mount_state),
         }
     }
 
@@ -1398,7 +2052,8 @@ impl AiManager {
 
         for chat in chats {
             self.next_agent_id = self.next_agent_id.max(chat.agent_id.0.saturating_add(1));
-            next_chat_ordinal = next_chat_ordinal.max(chat_title_ordinal(&chat.title).saturating_add(1));
+            next_chat_ordinal =
+                next_chat_ordinal.max(chat_title_ordinal(&chat.title).saturating_add(1));
 
             let agent_id = chat.agent_id;
             let pending = chat.pending;
@@ -1456,7 +2111,8 @@ impl AiManager {
         if let Some(mount_state) = self.mounts.get_mut(mount) {
             mount_state.order = order;
             mount_state.agents = agents;
-            mount_state.active_agent_id = active_agent_id.or_else(|| mount_state.order.last().copied());
+            mount_state.active_agent_id =
+                active_agent_id.or_else(|| mount_state.order.last().copied());
             mount_state.next_chat_ordinal = next_chat_ordinal.max(1);
         }
     }
@@ -2720,6 +3376,101 @@ fn summarize_title(prompt: &str) -> String {
     title
 }
 
+fn is_terminal_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_terminal" | "send_terminal_text" | "send_terminal_key" | "open_terminal"
+    )
+}
+
+fn should_track_ai_terminal_task(prompt: &str) -> bool {
+    let lowered = prompt.to_lowercase();
+    lowered.contains("codex")
+        || lowered.contains("terminal")
+        || lowered.contains("other agent")
+        || lowered.contains("tell ") && lowered.contains(" to ")
+}
+
+fn extract_expected_paths_from_prompt(prompt: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in prompt.split_whitespace() {
+        let token = raw.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+            )
+        });
+        if token.is_empty() || token.starts_with('-') {
+            continue;
+        }
+        let looks_like_path = token.contains('/')
+            || token.contains('\\')
+            || token.rsplit_once('.').is_some_and(|(_, ext)| {
+                !ext.is_empty()
+                    && ext.len() <= 8
+                    && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+            });
+        if !looks_like_path {
+            continue;
+        }
+        let normalized = token.replace('\\', "/");
+        if !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn matches_expected_path(path: &str, expected_paths: &[String]) -> bool {
+    expected_paths.iter().any(|expected| {
+        path == expected || path.ends_with(&format!("/{}", expected)) || expected.ends_with(path)
+    })
+}
+
+fn parse_json_string_field(json: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\":\"", field);
+    let start = json.find(&needle)? + needle.len();
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in json[start..].chars() {
+        if escaped {
+            out.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    None
+}
+
+fn terminal_display_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
+}
+
 fn chat_title_ordinal(title: &str) -> u64 {
     title
         .strip_prefix("Chat ")
@@ -2771,6 +3522,65 @@ mod tests {
             summarize_title("01234567890123456789012345678901234567890"),
             "0123456789012345678901234567890123456789..."
         );
+    }
+
+    #[test]
+    fn extracts_expected_paths_from_prompt() {
+        assert_eq!(
+            extract_expected_paths_from_prompt("tell codex to write a poem into `poem.txt`"),
+            vec!["poem.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn matches_expected_path_handles_relative_targets() {
+        assert!(matches_expected_path(
+            "src/poem.txt",
+            &[String::from("poem.txt")]
+        ));
+        assert!(matches_expected_path(
+            "poem.txt",
+            &[String::from("poem.txt")]
+        ));
+    }
+
+    #[test]
+    fn terminal_mode_detects_codex_working_status() {
+        let text = "\n\nWorking (12s) esc to interrupt\n";
+        let (mode, is_codex, _summary, codex_status) =
+            AiManager::terminal_mode_and_summary("codex", text);
+        assert_eq!(mode, "working");
+        assert!(is_codex);
+        assert_eq!(
+            codex_status.as_deref(),
+            Some("Working (12s) esc to interrupt")
+        );
+    }
+
+    #[test]
+    fn terminal_observation_updates_hub_live_markdown() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 42,
+                    total_lines: 50,
+                    is_tui: true,
+                    text: "Working (12s) esc to interrupt\n".to_string(),
+                },
+            )
+            .expect("terminal observation should change state");
+
+        assert!(state.live_markdown.contains("[working / codex]"));
+        assert!(state
+            .live_markdown
+            .contains("Working (12s) esc to interrupt"));
     }
 
     #[test]

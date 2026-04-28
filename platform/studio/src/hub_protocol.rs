@@ -682,6 +682,7 @@ pub struct AiMountState {
     pub active_agent_id: Option<AiAgentId>,
     pub agents: Vec<AiAgentSummary>,
     pub active_agent: Option<AiAgentState>,
+    pub live_markdown: String,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
