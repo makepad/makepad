@@ -23,7 +23,9 @@ enum FingerScrollState {
 }
 
 impl Default for FingerScrollState {
-    fn default() -> Self { Self::Idle }
+    fn default() -> Self {
+        Self::Idle
+    }
 }
 
 script_mod! {
@@ -348,19 +350,27 @@ impl Widget for TabBar {
                 }
                 TabAction::TouchScroll { abs, time } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
-                        let Some(old_abs) = samples.last().map(|s| s.abs) else { return };
+                        let Some(old_abs) = samples.last().map(|s| s.abs) else {
+                            return;
+                        };
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);
                         }
                         let delta = abs.x - old_abs;
                         let scroll_pos = self.scroll_bars.get_scroll_pos();
-                        if self.scroll_bars.set_scroll_pos(cx, Vec2d { x: scroll_pos.x - delta, y: scroll_pos.y }) {
+                        if self.scroll_bars.set_scroll_pos(
+                            cx,
+                            Vec2d {
+                                x: scroll_pos.x - delta,
+                                y: scroll_pos.y,
+                            },
+                        ) {
                             self.view_area.redraw(cx);
                         }
                     }
                 }
-                TabAction::TouchUp { abs: _, time: _, } => {
+                TabAction::TouchUp { abs: _, time: _ } => {
                     if let FingerScrollState::Dragging { samples } = &self.finger_scroll {
                         // Calculate flick velocity from recent samples.
                         let mut last: Option<&FingerScrollSample> = None;
@@ -427,12 +437,14 @@ impl TabBar {
             let remaining = target - current;
             if remaining.abs() < 1.0 {
                 // Close enough — snap to target and stop.
-                self.scroll_bars.set_scroll_pos(cx, Vec2d { x: target, y: 0.0 });
+                self.scroll_bars
+                    .set_scroll_pos(cx, Vec2d { x: target, y: 0.0 });
                 self.scroll_into_view_anim = None;
             } else {
                 // Ease toward target.
                 let new_x = current + remaining * SMOOTHING;
-                self.scroll_bars.set_scroll_pos(cx, Vec2d { x: new_x, y: 0.0 });
+                self.scroll_bars
+                    .set_scroll_pos(cx, Vec2d { x: new_x, y: 0.0 });
                 self.scroll_into_view_anim = Some(ScrollIntoViewAnim {
                     target_scroll_x: target,
                     next_frame: cx.new_next_frame(),
@@ -447,21 +459,28 @@ impl TabBar {
         const FLICK_DECAY: f64 = 0.97;
         const FLICK_MINIMUM: f64 = 0.2;
 
-        let flick_delta = if let FingerScrollState::Flicking { delta, next_frame } = &self.finger_scroll {
-            if next_frame.is_event(event).is_some() {
-                Some(*delta)
+        let flick_delta =
+            if let FingerScrollState::Flicking { delta, next_frame } = &self.finger_scroll {
+                if next_frame.is_event(event).is_some() {
+                    Some(*delta)
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         if let Some(mut delta) = flick_delta {
             delta *= FLICK_DECAY;
             if delta.abs() > FLICK_MINIMUM {
                 let scroll_pos = self.scroll_bars.get_scroll_pos();
-                if self.scroll_bars.set_scroll_pos(cx, Vec2d { x: scroll_pos.x - delta, y: scroll_pos.y }) {
+                if self.scroll_bars.set_scroll_pos(
+                    cx,
+                    Vec2d {
+                        x: scroll_pos.x - delta,
+                        y: scroll_pos.y,
+                    },
+                ) {
                     self.view_area.redraw(cx);
                 }
                 self.finger_scroll = FingerScrollState::Flicking {

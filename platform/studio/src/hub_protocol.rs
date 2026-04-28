@@ -294,6 +294,8 @@ pub enum HubToClient {
         path: String,
         content: String,
         git_status: GitStatus,
+        line: Option<usize>,
+        column: Option<usize>,
     },
     TextFileRead {
         path: String,

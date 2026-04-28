@@ -262,15 +262,24 @@ impl ScriptHook for Dock {
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
-                                        let splitter = DockItemSplitter::script_from_value(vm, kv.value);
+                                        let splitter =
+                                            DockItemSplitter::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, splitter.to_dock_item());
                                     }
-                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTabs::script_type_id_static()) {
+                                } else if vm
+                                    .bx
+                                    .heap
+                                    .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
+                                {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
                                         let tabs = DockItemTabs::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tabs.to_dock_item());
                                     }
-                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTab::script_type_id_static()) {
+                                } else if vm
+                                    .bx
+                                    .heap
+                                    .type_matches_id(val_obj, DockItemTab::script_type_id_static())
+                                {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
                                         let tab = DockItemTab::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tab.to_dock_item());
@@ -766,7 +775,10 @@ impl Dock {
     fn find_drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
             // Skip panels with hidden tab bars — they should not be drop targets.
-            if let Some(DockItem::Tabs { hide_tab_bar: true, .. }) = self.dock_items.get(tab_bar_id) {
+            if let Some(DockItem::Tabs {
+                hide_tab_bar: true, ..
+            }) = self.dock_items.get(tab_bar_id)
+            {
                 continue;
             }
             let rect = tab_bar.contents_rect;
@@ -1448,7 +1460,9 @@ impl Widget for Dock {
                         } else {
                             String::new()
                         };
-                        let tab_size = tab_bar.tab_bar.tab_rect(cx, item)
+                        let tab_size = tab_bar
+                            .tab_bar
+                            .tab_rect(cx, item)
                             .map(|r| r.size)
                             .unwrap_or(dvec2(100.0, 30.0));
                         if let Some(ghost) = tab_bar.tab_bar.create_ghost_tab(cx, item) {
@@ -1536,8 +1550,7 @@ impl Widget for Dock {
                 self.drop_state = None;
                 self.dragging_tab = None;
                 let redraw_id = cx.redraw_id;
-                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()]
-                    .clear_draw_items(redraw_id);
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(redraw_id);
                 cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
                     .clear_draw_items(redraw_id);
                 self.area.redraw(cx);
@@ -1547,8 +1560,7 @@ impl Widget for Dock {
                 self.drop_state = None;
                 self.dragging_tab = None;
                 let redraw_id = cx.redraw_id;
-                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()]
-                    .clear_draw_items(redraw_id);
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(redraw_id);
                 cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
                     .clear_draw_items(redraw_id);
                 self.area.redraw(cx);

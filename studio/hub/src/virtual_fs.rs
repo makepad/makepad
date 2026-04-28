@@ -793,6 +793,9 @@ impl VirtualFs {
                 if name == ".git" {
                     return None;
                 }
+                if name == ".makepad" {
+                    return None;
+                }
                 if skip_branch_dir && name == "branch" {
                     return None;
                 }

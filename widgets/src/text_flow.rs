@@ -1516,25 +1516,34 @@ impl TextFlow {
             } else {
                 transparent
             };
-            self.draw_block.draw_abs(cx, Rect {
-                pos: cell_rect.pos,
-                size: dvec2(cell_rect.size.x, row_height),
-            });
+            self.draw_block.draw_abs(
+                cx,
+                Rect {
+                    pos: cell_rect.pos,
+                    size: dvec2(cell_rect.size.x, row_height),
+                },
+            );
 
             if is_first_row {
                 self.draw_block.table_header_bg_color = transparent;
-                self.draw_block.draw_abs(cx, Rect {
-                    pos: cell_rect.pos,
-                    size: dvec2(cell_rect.size.x, 1.0),
-                });
+                self.draw_block.draw_abs(
+                    cx,
+                    Rect {
+                        pos: cell_rect.pos,
+                        size: dvec2(cell_rect.size.x, 1.0),
+                    },
+                );
             }
 
             if i == 0 {
                 self.draw_block.table_header_bg_color = transparent;
-                self.draw_block.draw_abs(cx, Rect {
-                    pos: cell_rect.pos,
-                    size: dvec2(1.0, row_height),
-                });
+                self.draw_block.draw_abs(
+                    cx,
+                    Rect {
+                        pos: cell_rect.pos,
+                        size: dvec2(1.0, row_height),
+                    },
+                );
             }
         }
         self.draw_block.table_header_bg_color = saved_bg;
@@ -1554,7 +1563,10 @@ impl TextFlow {
         };
         let walk = Walk {
             width: Size::Fixed(cell_width),
-            height: Size::Fit { min: None, max: None },
+            height: Size::Fit {
+                min: None,
+                max: None,
+            },
             ..Walk::default()
         };
         let mut layout = self.table_cell_layout;
@@ -1845,10 +1857,7 @@ impl TextFlow {
                 } else {
                     None
                 };
-                let wrap = matches!(
-                    cx.turtle().layout().flow,
-                    Flow::Right { wrap: true, .. }
-                );
+                let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
 
                 let laidout_text = dt.layout(
                     cx,

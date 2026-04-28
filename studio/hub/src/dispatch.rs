@@ -155,6 +155,20 @@ pub enum HubEvent {
         rows: u16,
         reply_tx: Sender<Result<String, String>>,
     },
+    AiOpenEditorRequest {
+        mount: String,
+        path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+        reply_tx: Sender<Result<String, String>>,
+    },
+    AiObserveFilesystemRequest {
+        mount: String,
+        path: Option<String>,
+        limit: usize,
+        since_secs: u64,
+        reply_tx: Sender<Result<String, String>>,
+    },
     AiListTerminalsRequest {
         mount: String,
         reply_tx: Sender<Result<String, String>>,
@@ -170,7 +184,7 @@ pub enum HubEvent {
         mount: String,
         path: String,
         text: String,
-        submit: bool,
+        submit: Option<bool>,
         bracketed_paste: Option<bool>,
         reply_tx: Sender<Result<String, String>>,
     },
@@ -213,6 +227,10 @@ pub enum HubEvent {
         mount: String,
         path: PathBuf,
     },
+    SuppressMountRootFsEvents {
+        mount: String,
+        duration: Duration,
+    },
     Shutdown,
 }
 
@@ -220,9 +238,11 @@ const FS_EVENT_PATH_DEBOUNCE: Duration = Duration::from_millis(80);
 const FS_EVENT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(120);
 const FS_EVENT_HISTORY_PRUNE_INTERVAL: Duration = Duration::from_secs(4);
 const FS_EVENT_HISTORY_RETENTION: Duration = Duration::from_secs(12);
+const FS_RECENT_CHANGE_RETENTION: Duration = Duration::from_secs(300);
 const FS_DELTA_FLUSH_DELAY: Duration = Duration::from_millis(32);
 const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 const FS_SELF_SAVE_SUPPRESS: Duration = Duration::from_millis(300);
+const AI_TERMINAL_SUBMIT_DELAY: Duration = Duration::from_millis(60);
 const GIT_STATUS_CACHE_TTL: Duration = Duration::from_millis(250);
 const IN_PROCESS_UI_WEB_SOCKET_ID: u64 = 0;
 const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
@@ -330,6 +350,21 @@ struct AiTerminalInputResult {
     preview: String,
 }
 
+#[derive(SerJson)]
+struct AiFilesystemChange {
+    path: String,
+    kind: String,
+    seconds_ago: f64,
+}
+
+#[derive(SerJson)]
+struct AiFilesystemObserveResult {
+    mount: String,
+    path_filter: Option<String>,
+    since_secs: u64,
+    changes: Vec<AiFilesystemChange>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AiTerminalKeyInput {
     Named(TermKeyCode),
@@ -388,6 +423,7 @@ pub struct HubCore {
     git_status_cache: Arc<Mutex<GitStatusCache>>,
     fs_watcher: Option<FileSystemWatcher>,
     fs_event_last_by_path: HashMap<String, Instant>,
+    fs_recent_change_at_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
     fs_pending_reload_mounts: HashSet<String>,
     pending_mount_root_splash_restarts: HashSet<String>,
@@ -447,6 +483,7 @@ impl HubCore {
             git_status_cache: Arc::new(Mutex::new(GitStatusCache::default())),
             fs_watcher: None,
             fs_event_last_by_path: HashMap::new(),
+            fs_recent_change_at_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
             fs_pending_reload_mounts: HashSet::new(),
             pending_mount_root_splash_restarts: HashSet::new(),
@@ -658,6 +695,20 @@ impl HubCore {
                 rows,
                 reply_tx,
             } => self.on_ai_open_terminal_request(mount, name, command, cols, rows, reply_tx),
+            HubEvent::AiOpenEditorRequest {
+                mount,
+                path,
+                line,
+                column,
+                reply_tx,
+            } => self.on_ai_open_editor_request(mount, path, line, column, reply_tx),
+            HubEvent::AiObserveFilesystemRequest {
+                mount,
+                path,
+                limit,
+                since_secs,
+                reply_tx,
+            } => self.on_ai_observe_filesystem_request(mount, path, limit, since_secs, reply_tx),
             HubEvent::AiListTerminalsRequest { mount, reply_tx } => {
                 self.on_ai_list_terminals_request(mount, reply_tx)
             }
@@ -718,6 +769,9 @@ impl HubCore {
             }
             HubEvent::FlushPendingFileTreeDiffs => self.flush_pending_file_tree_diffs(),
             HubEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
+            HubEvent::SuppressMountRootFsEvents { mount, duration } => {
+                self.suppress_mount_root_fs_events(&mount, duration)
+            }
             HubEvent::Shutdown => return false,
         }
         true
@@ -1011,6 +1065,8 @@ impl HubCore {
                         path,
                         content,
                         git_status: backend_proto::GitStatus::Unknown,
+                        line: None,
+                        column: None,
                     },
                 ),
                 Err(err) => self.send_ui_error(client_id, err.to_string()),
@@ -1652,7 +1708,6 @@ impl HubCore {
             }
             ClientToHub::TerminalClose { path } => {
                 self.terminal_manager.close_terminal(&path);
-                self.terminal_sessions.remove(&path);
             }
             ClientToHub::AiGetState { mount } => {
                 let state = self.ai_manager.get_state(&mount);
@@ -1805,6 +1860,7 @@ impl HubCore {
     fn reset_fs_watcher(&mut self) {
         self.fs_watcher.take();
         self.fs_event_last_by_path.clear();
+        self.fs_recent_change_at_by_path.clear();
         self.fs_pending_diffs.clear();
         self.fs_pending_reload_mounts.clear();
         self.fs_diff_flush_scheduled = false;
@@ -1914,6 +1970,7 @@ impl HubCore {
             if self.should_suppress_self_save_mount_root_event(&mount, now) {
                 return;
             }
+            self.record_recent_fs_change(mount.clone(), now);
             // Some watcher implementations only report "mount root changed".
             // Broadcast a mount-level FileChanged so UI can refresh open tabs.
             self.broadcast_ui_message(HubToClient::FileChanged {
@@ -1926,6 +1983,7 @@ impl HubCore {
         if self.should_suppress_self_save_event(&virtual_path, now) {
             return;
         }
+        self.record_recent_fs_change(virtual_path.clone(), now);
         if Self::is_mount_root_splash_virtual_path(&mount, &virtual_path) {
             self.request_mount_root_splash_reload(&mount);
         }
@@ -1953,6 +2011,18 @@ impl HubCore {
         let (path, virtual_path) =
             self.collapse_removed_path_to_missing_ancestor(&mount, path, virtual_path);
         self.enqueue_file_tree_delta(&mount, &virtual_path, path, now);
+    }
+
+    fn suppress_mount_root_fs_events(&mut self, mount: &str, duration: Duration) {
+        let until = Instant::now() + duration;
+        self.mount_suppress_fs_until
+            .entry(mount.to_string())
+            .and_modify(|existing| {
+                if *existing < until {
+                    *existing = until;
+                }
+            })
+            .or_insert(until);
     }
 
     fn collapse_removed_path_to_missing_ancestor(
@@ -2198,8 +2268,14 @@ impl HubCore {
         self.fs_event_last_prune = now;
         self.fs_event_last_by_path
             .retain(|_, ts| now.saturating_duration_since(*ts) < FS_EVENT_HISTORY_RETENTION);
+        self.fs_recent_change_at_by_path
+            .retain(|_, ts| now.saturating_duration_since(*ts) < FS_RECENT_CHANGE_RETENTION);
         self.self_save_suppress_until_by_path
             .retain(|_, until| *until > now);
+    }
+
+    fn record_recent_fs_change(&mut self, path: String, now: Instant) {
+        self.fs_recent_change_at_by_path.insert(path, now);
     }
 
     fn should_suppress_self_save_event(&mut self, virtual_path: &str, now: Instant) -> bool {
@@ -3390,6 +3466,30 @@ impl HubCore {
         let _ = reply_tx.send(result);
     }
 
+    fn on_ai_open_editor_request(
+        &mut self,
+        mount: String,
+        path: String,
+        line: Option<usize>,
+        column: Option<usize>,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.open_ai_editor(&mount, &path, line, column);
+        let _ = reply_tx.send(result);
+    }
+
+    fn on_ai_observe_filesystem_request(
+        &mut self,
+        mount: String,
+        path: Option<String>,
+        limit: usize,
+        since_secs: u64,
+        reply_tx: Sender<Result<String, String>>,
+    ) {
+        let result = self.observe_ai_filesystem(&mount, path.as_deref(), limit, since_secs);
+        let _ = reply_tx.send(result);
+    }
+
     fn open_ai_terminal(
         &mut self,
         mount: &str,
@@ -3411,6 +3511,120 @@ impl HubCore {
                 .send_input(&path, format!("{}\n", command).into_bytes())?;
         }
         Ok(self.ai_terminal_info(&path)?.serialize_json())
+    }
+
+    fn open_ai_editor(
+        &mut self,
+        mount: &str,
+        path: &str,
+        line: Option<usize>,
+        column: Option<usize>,
+    ) -> Result<String, String> {
+        if mount_from_virtual_path(path) != Some(mount) {
+            return Err(format!(
+                "editor path '{}' does not belong to mount '{}'",
+                path, mount
+            ));
+        }
+        let Some(client_id) = self.primary_ui_for_mount(mount) else {
+            return Err(format!(
+                "no primary Studio UI is observing mount '{}'",
+                mount
+            ));
+        };
+        let content = self
+            .vfs
+            .open_text_file(path)
+            .map_err(|err| err.to_string())?;
+        let line = line.map(|value| value.max(1));
+        let column = column.map(|value| value.max(1));
+        self.send_ui_reply(
+            client_id,
+            HubToClient::TextFileOpened {
+                path: path.to_string(),
+                content,
+                git_status: backend_proto::GitStatus::Unknown,
+                line,
+                column,
+            },
+        );
+        if let Some(line) = line {
+            Ok(format!(
+                "Opened {} at {}:{} in Studio editor.",
+                path,
+                line,
+                column.unwrap_or(1)
+            ))
+        } else {
+            Ok(format!("Opened {} in Studio editor.", path))
+        }
+    }
+
+    fn observe_ai_filesystem(
+        &mut self,
+        mount: &str,
+        path_filter: Option<&str>,
+        limit: usize,
+        since_secs: u64,
+    ) -> Result<String, String> {
+        let now = Instant::now();
+        self.prune_fs_event_history(now);
+
+        let normalized_filter = path_filter
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != ".")
+            .map(|value| value.trim_matches('/').to_string());
+        let since = Duration::from_secs(since_secs.max(1));
+        let mount_prefix = format!("{}/", mount);
+
+        let mut changes = self
+            .fs_recent_change_at_by_path
+            .iter()
+            .filter_map(|(virtual_path, observed_at)| {
+                let age = now.saturating_duration_since(*observed_at);
+                if age > since {
+                    return None;
+                }
+                let (relative_path, kind) = if virtual_path == mount {
+                    (".".to_string(), "mount".to_string())
+                } else if let Some(rest) = virtual_path.strip_prefix(&mount_prefix) {
+                    (rest.to_string(), "path".to_string())
+                } else {
+                    return None;
+                };
+                if let Some(filter) = normalized_filter.as_deref() {
+                    if relative_path == "." {
+                        return None;
+                    }
+                    let exact = relative_path == filter;
+                    let within = relative_path.starts_with(&format!("{}/", filter));
+                    if !exact && !within {
+                        return None;
+                    }
+                }
+                Some((
+                    *observed_at,
+                    AiFilesystemChange {
+                        path: relative_path,
+                        kind,
+                        seconds_ago: age.as_secs_f64(),
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        changes.sort_by(|a, b| b.0.cmp(&a.0));
+
+        Ok(AiFilesystemObserveResult {
+            mount: mount.to_string(),
+            path_filter: normalized_filter,
+            since_secs,
+            changes: changes
+                .into_iter()
+                .take(limit.max(1))
+                .map(|(_, change)| change)
+                .collect(),
+        }
+        .serialize_json())
     }
 
     fn on_ai_list_terminals_request(
@@ -3439,7 +3653,7 @@ impl HubCore {
         mount: String,
         path: String,
         text: String,
-        submit: bool,
+        submit: Option<bool>,
         bracketed_paste: Option<bool>,
         reply_tx: Sender<Result<String, String>>,
     ) {
@@ -3515,21 +3729,48 @@ impl HubCore {
         mount: &str,
         path: &str,
         text: &str,
-        submit: bool,
+        submit: Option<bool>,
         bracketed_paste: Option<bool>,
     ) -> Result<String, String> {
         self.ensure_ai_terminal_access(mount, path)?;
-        let bracketed_paste = {
+        let (bracketed_paste, submit, submit_bytes) = {
             let session = self
                 .terminal_sessions
                 .get(path)
                 .ok_or_else(|| format!("unknown terminal: {}", path))?;
-            bracketed_paste.unwrap_or(session.terminal.modes.bracketed_paste && text.contains('\n'))
+            let visible_text = {
+                let frame = terminal_framebuffer_from_terminal(
+                    &session.terminal,
+                    session.cols.max(1),
+                    session.rows.max(1),
+                    usize::MAX,
+                    0,
+                );
+                terminal_framebuffer_text(&frame)
+            };
+            let bracketed_paste = bracketed_paste
+                .unwrap_or(session.terminal.modes.bracketed_paste && text.contains('\n'));
+            let submit = submit.unwrap_or(false)
+                || Self::terminal_auto_submit_ai_text(
+                    path,
+                    &session.terminal.title,
+                    &visible_text,
+                    text,
+                );
+            let submit_bytes = if submit {
+                session
+                    .terminal
+                    .encode_key(TermKeyCode::Return, "", false, false, false)
+                    .or_else(|| Some(vec![b'\n']))
+            } else {
+                None
+            };
+            (bracketed_paste, submit, submit_bytes)
         };
         if text.is_empty() && !submit {
             return Err("send_terminal_text requires non-empty text or submit=true".to_string());
         }
-        let mut bytes = Vec::with_capacity(text.len() + 17);
+        let mut bytes = Vec::with_capacity(text.len() + 16);
         if bracketed_paste {
             bytes.extend_from_slice(b"\x1b[200~");
         }
@@ -3537,10 +3778,21 @@ impl HubCore {
         if bracketed_paste {
             bytes.extend_from_slice(b"\x1b[201~");
         }
-        if submit {
-            bytes.push(b'\r');
+        if !bytes.is_empty() {
+            self.terminal_manager.send_input(path, bytes.clone())?;
         }
-        self.terminal_manager.send_input(path, bytes.clone())?;
+        let submit_len = if let Some(submit_bytes) = submit_bytes {
+            let len = submit_bytes.len();
+            if bytes.is_empty() {
+                self.terminal_manager.send_input(path, submit_bytes)?;
+            } else {
+                self.terminal_manager
+                    .send_input_delayed(path, submit_bytes, AI_TERMINAL_SUBMIT_DELAY)?;
+            }
+            len
+        } else {
+            0
+        };
         self.set_terminal_bell_state(path, false);
         let preview_source = if submit {
             format!("{}<enter>", text)
@@ -3550,7 +3802,7 @@ impl HubCore {
         Ok(AiTerminalInputResult {
             path: path.to_string(),
             name: Self::terminal_display_name(path),
-            bytes_sent: bytes.len(),
+            bytes_sent: bytes.len() + submit_len,
             submitted: submit,
             bracketed_paste,
             preview: preview_text(&preview_source),
@@ -3623,6 +3875,23 @@ impl HubCore {
 
     fn terminal_display_name(path: &str) -> String {
         path.rsplit('/').next().unwrap_or(path).to_string()
+    }
+
+    fn terminal_auto_submit_ai_text(
+        path: &str,
+        terminal_title: &str,
+        visible_text: &str,
+        text: &str,
+    ) -> bool {
+        if text.trim().is_empty() || text.ends_with('\n') || text.ends_with('\r') {
+            return false;
+        }
+        let haystack = format!("{}\n{}\n{}", path, terminal_title, visible_text).to_lowercase();
+        haystack.contains("codex")
+            || haystack.contains("claude")
+            || haystack.contains("aider")
+            || haystack.contains("enter a prompt")
+            || haystack.contains("esc to interrupt")
     }
 
     fn next_ai_terminal_path(
@@ -5066,6 +5335,40 @@ mod tests {
     }
 
     #[test]
+    fn terminal_auto_submit_ai_text_detects_agent_terminals() {
+        assert!(HubCore::terminal_auto_submit_ai_text(
+            "repo/.makepad/codex.term",
+            "",
+            "",
+            "write a poem into poem.txt"
+        ));
+        assert!(HubCore::terminal_auto_submit_ai_text(
+            "repo/.makepad/a.term",
+            "Claude Code",
+            "",
+            "continue"
+        ));
+        assert!(HubCore::terminal_auto_submit_ai_text(
+            "repo/.makepad/a.term",
+            "zsh",
+            "› Enter a prompt...",
+            "write a poem into poem.txt"
+        ));
+        assert!(!HubCore::terminal_auto_submit_ai_text(
+            "repo/.makepad/shell.term",
+            "zsh",
+            "",
+            "echo hi"
+        ));
+        assert!(!HubCore::terminal_auto_submit_ai_text(
+            "repo/.makepad/codex.term",
+            "",
+            "",
+            "already has newline\n"
+        ));
+    }
+
+    #[test]
     fn terminal_framebuffer_sparse_codex_roundtrip_after_30_15_30_resize_without_history() {
         let cols = 120u16;
         let rows_large = 30u16;
@@ -5595,6 +5898,35 @@ mod tests {
                 ) || matches!(msg, HubToClient::FileChanged { path } if path == "repo")
             }),
             "expected mount-root fs event to remain suppressed"
+        );
+    }
+
+    #[test]
+    fn suppress_mount_root_fs_events_event_suppresses_mount_root_fallback() {
+        let dir = crate::test_support::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".makepad/ai_chats")).unwrap();
+        fs::write(dir.path().join(".makepad/ai_chats/chat.json"), "{}\n").unwrap();
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        core.handle_event(HubEvent::SuppressMountRootFsEvents {
+            mount: "repo".to_string(),
+            duration: Duration::from_secs(2),
+        });
+        core.handle_event(HubEvent::MountFsChanged {
+            mount: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        });
+
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        assert!(
+            !messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    HubToClient::FileTree { mount, .. } | HubToClient::FileTreeDiff { mount, .. }
+                        if mount == "repo"
+                ) || matches!(msg, HubToClient::FileChanged { path } if path == "repo")
+            }),
+            "expected persisted .makepad chat root fallback to remain suppressed"
         );
     }
 

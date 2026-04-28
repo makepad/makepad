@@ -4,13 +4,13 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
         },
         makepad_live_id::*,
@@ -746,9 +746,11 @@ impl Cx {
 
                 // Synthesize internal drag-and-drop events from touch gestures.
                 if self.os.internal_drag_items.is_some() {
-                    if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::TouchState::Stop
-                    }) {
+                    if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::TouchState::Stop)
+                    {
                         if let Some(items) = self.os.internal_drag_items.take() {
                             self.call_event_handler(&Event::Drop(DropEvent {
                                 modifiers: e.modifiers.clone(),
@@ -760,9 +762,11 @@ impl Cx {
                             self.call_event_handler(&Event::DragEnd);
                             self.drag_drop.cycle_drag();
                         }
-                    } else if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::TouchState::Move
-                    }) {
+                    } else if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::TouchState::Move)
+                    {
                         if let Some(items) = self.os.internal_drag_items.as_ref() {
                             self.call_event_handler(&Event::Drag(DragEvent {
                                 modifiers: e.modifiers.clone(),
@@ -1008,9 +1012,7 @@ impl Cx {
                     if let Some(mtk_view) = mtk_view {
                         let host_view: ObjcId = unsafe { msg_send![mtk_view, superview] };
                         if host_view != nil {
-                            if let Some(browser) =
-                                self.os.system_browsers.get_mut(&browser_id)
-                            {
+                            if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
                                 browser.update(host_view, rect, visible);
                             }
                         }

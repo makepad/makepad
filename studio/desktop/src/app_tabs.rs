@@ -1149,22 +1149,28 @@ impl App {
         }
     }
 
+    fn active_mount_dock_containing_tab(&mut self, cx: &mut Cx, tab_id: LiveId) -> Option<DockRef> {
+        let active_mount = self.data.active_mount.clone()?;
+        if let Some(dock) = self.mount_workspace_dock(cx, &active_mount) {
+            if dock.find_tab_bar_of_tab(tab_id).is_some() {
+                return Some(dock);
+            }
+        }
+        let dock = self.mount_terminal_dock(cx, &active_mount)?;
+        if dock.find_tab_bar_of_tab(tab_id).is_some() {
+            Some(dock)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn start_workspace_tab_drag(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        if self.data.tab_to_mount.contains_key(&tab_id)
-            || tab_id == id!(terminal_add)
-            || tab_id == id!(bottom_terminal_tab)
-        {
+        if self.data.tab_to_mount.contains_key(&tab_id) {
             return;
         }
-        let Some(active_mount) = self.data.active_mount.clone() else {
+        let Some(dock) = self.active_mount_dock_containing_tab(cx, tab_id) else {
             return;
         };
-        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
-            return;
-        };
-        if dock.find_tab_bar_of_tab(tab_id).is_none() {
-            return;
-        }
 
         dock.tab_start_drag(
             cx,
@@ -1180,19 +1186,12 @@ impl App {
         let Some(source_tab_id) = Self::drag_source_tab_id(drag_event.items.as_ref()) else {
             return;
         };
-        if self.data.tab_to_mount.contains_key(&source_tab_id) || source_tab_id == id!(terminal_add)
-        {
+        if self.data.tab_to_mount.contains_key(&source_tab_id) {
             return;
         }
-        let Some(active_mount) = self.data.active_mount.clone() else {
+        let Some(dock) = self.active_mount_dock_containing_tab(cx, source_tab_id) else {
             return;
         };
-        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
-            return;
-        };
-        if dock.find_tab_bar_of_tab(source_tab_id).is_none() {
-            return;
-        }
 
         dock.accept_drag(cx, drag_event, DragResponse::Move);
     }
@@ -1201,19 +1200,12 @@ impl App {
         let Some(source_tab_id) = Self::drag_source_tab_id(drop_event.items.as_ref()) else {
             return;
         };
-        if self.data.tab_to_mount.contains_key(&source_tab_id) || source_tab_id == id!(terminal_add)
-        {
+        if self.data.tab_to_mount.contains_key(&source_tab_id) {
             return;
         }
-        let Some(active_mount) = self.data.active_mount.clone() else {
+        let Some(dock) = self.active_mount_dock_containing_tab(cx, source_tab_id) else {
             return;
         };
-        let Some(dock) = self.mount_workspace_dock(cx, &active_mount) else {
-            return;
-        };
-        if dock.find_tab_bar_of_tab(source_tab_id).is_none() {
-            return;
-        }
 
         dock.drop_move(cx, drop_event.abs, source_tab_id);
 

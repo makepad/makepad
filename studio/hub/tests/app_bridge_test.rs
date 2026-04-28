@@ -102,7 +102,10 @@ fn wait_for_app_socket_registration(
             continue;
         };
         if let HubToClient::AppSockets { sockets } = msg {
-            if sockets.iter().any(|socket| socket.build_id == Some(build_id)) {
+            if sockets
+                .iter()
+                .any(|socket| socket.build_id == Some(build_id))
+            {
                 return;
             }
         }

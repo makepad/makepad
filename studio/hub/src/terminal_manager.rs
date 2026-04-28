@@ -8,6 +8,7 @@ use std::time::Duration;
 
 enum TerminalControl {
     Input(Vec<u8>),
+    DelayedInput { data: Vec<u8>, delay: Duration },
     Resize { cols: u16, rows: u16 },
     Close,
 }
@@ -20,6 +21,11 @@ struct RunningTerminal {
 struct PendingInput {
     data: Vec<u8>,
     offset: usize,
+}
+
+struct DelayedInput {
+    data: Vec<u8>,
+    due: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -73,6 +79,21 @@ impl TerminalManager {
             .map_err(|_| format!("failed to send input to terminal: {}", path))
     }
 
+    pub fn send_input_delayed(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        delay: Duration,
+    ) -> Result<(), String> {
+        let Some(terminal) = self.terminals.get(path) else {
+            return Err(format!("unknown terminal: {}", path));
+        };
+        terminal
+            .control_tx
+            .send(TerminalControl::DelayedInput { data, delay })
+            .map_err(|_| format!("failed to send delayed input to terminal: {}", path))
+    }
+
     pub fn resize(&self, path: &str, cols: u16, rows: u16) -> Result<(), String> {
         let Some(terminal) = self.terminals.get(path) else {
             return Err(format!("unknown terminal: {}", path));
@@ -114,6 +135,7 @@ fn run_terminal_loop(
     let mut pending_resize: Option<(u16, u16)> = None;
     let mut last_resize_time = std::time::Instant::now() - Duration::from_secs(1);
     let resize_throttle = Duration::from_millis(50); // Throttle to 20fps to prevent TUI garbling
+    let mut delayed_input = VecDeque::<DelayedInput>::new();
 
     loop {
         loop {
@@ -121,6 +143,14 @@ fn run_terminal_loop(
                 Ok(TerminalControl::Input(data)) => {
                     if !data.is_empty() {
                         pending_input.push_back(PendingInput { data, offset: 0 });
+                    }
+                }
+                Ok(TerminalControl::DelayedInput { data, delay }) => {
+                    if !data.is_empty() {
+                        delayed_input.push_back(DelayedInput {
+                            data,
+                            due: std::time::Instant::now() + delay,
+                        });
                     }
                 }
                 Ok(TerminalControl::Resize { cols, rows }) => {
@@ -143,6 +173,19 @@ fn run_terminal_loop(
 
         if should_close {
             break;
+        }
+
+        let now = std::time::Instant::now();
+        while delayed_input
+            .front()
+            .is_some_and(|input| input.due <= now)
+        {
+            if let Some(input) = delayed_input.pop_front() {
+                pending_input.push_back(PendingInput {
+                    data: input.data,
+                    offset: 0,
+                });
+            }
         }
 
         while let Some(front) = pending_input.front_mut() {
@@ -212,6 +255,14 @@ fn run_terminal_loop(
         }
 
         if pending_input.is_empty() && pending_resize.is_none() && !had_output {
+            if let Some(next) = delayed_input.front() {
+                let wait = next
+                    .due
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(Duration::from_millis(16));
+                thread::sleep(wait);
+                continue;
+            }
             thread::sleep(Duration::from_millis(16));
         } else {
             thread::sleep(Duration::from_millis(1));

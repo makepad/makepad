@@ -969,7 +969,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                     in_initial_delay: true,
                                 });
                                 let delay_secs = state.key_repeat_delay as f64 / 1000.0;
-                                state.timers.start_timer(KEY_REPEAT_TIMER_ID, delay_secs, false);
+                                state
+                                    .timers
+                                    .start_timer(KEY_REPEAT_TIMER_ID, delay_secs, false);
                             }
                         }
                         wl_keyboard::KeyState::Released => {
@@ -977,7 +979,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                                 let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
 
                                 // Stop key repeat if this is the key being repeated
-                                if state.key_repeat.as_ref().is_some_and(|r| r.key_code == key_code) {
+                                if state
+                                    .key_repeat
+                                    .as_ref()
+                                    .is_some_and(|r| r.key_code == key_code)
+                                {
                                     state.timers.stop_timer(KEY_REPEAT_TIMER_ID);
                                     state.key_repeat = None;
                                 }
@@ -1301,8 +1307,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                             // component that breaks widgets combining both axes
                             // (e.g. tab bar horizontal scroll via vertical wheel).
                             dvec2(
-                                if acc.x != 0.0 { acc.x.signum() * speed } else { 0.0 },
-                                if acc.y != 0.0 { acc.y.signum() * speed } else { 0.0 },
+                                if acc.x != 0.0 {
+                                    acc.x.signum() * speed
+                                } else {
+                                    0.0
+                                },
+                                if acc.y != 0.0 {
+                                    acc.y.signum() * speed
+                                } else {
+                                    0.0
+                                },
                             )
                         } else {
                             acc
@@ -1624,7 +1638,8 @@ impl WaylandState {
                 // Initial delay has elapsed; switch to steady-state repeat interval.
                 repeat.in_initial_delay = false;
                 let interval_secs = 1.0 / self.key_repeat_rate as f64;
-                self.timers.start_timer(KEY_REPEAT_TIMER_ID, interval_secs, true);
+                self.timers
+                    .start_timer(KEY_REPEAT_TIMER_ID, interval_secs, true);
             }
 
             self.do_callback(XlibEvent::KeyDown(KeyEvent {

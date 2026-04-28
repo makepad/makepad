@@ -47,9 +47,7 @@ impl App {
             id!(editor_first),
             id!(run_first),
             id!(log_first),
-            id!(bottom_terminal_tab),
             id!(terminal_first),
-            id!(terminal_add),
         ]);
         ids.extend(editor_tabs);
         ids.extend(terminal_tabs);
@@ -185,7 +183,10 @@ impl App {
         let dock_items = Self::sanitize_dock_items(dock_items, |tab_id, _, _, _| {
             allowed_tab_ids.contains(&tab_id)
         })?;
-        if Self::workspace_dock_has_required_sidebar_tabs(&dock_items) {
+        if Self::workspace_dock_has_required_sidebar_tabs(&dock_items)
+            && dock_items.contains_key(&id!(log_first))
+            && dock_items.contains_key(&id!(terminal_first))
+        {
             Some(dock_items)
         } else {
             None

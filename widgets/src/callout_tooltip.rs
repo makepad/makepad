@@ -224,7 +224,11 @@ impl WidgetMatchEvent for CalloutTooltip {
 
         for action in actions {
             match action.as_widget_action().cast() {
-                TooltipAction::HoverIn { text, widget_rect, options } => {
+                TooltipAction::HoverIn {
+                    text,
+                    widget_rect,
+                    options,
+                } => {
                     had_tooltip_event = true;
                     if let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) {
                         buffered = Some((uid, text, widget_rect, options));
@@ -378,8 +382,7 @@ impl CalloutTooltip {
             }
             TooltipPosition::Right => {
                 tooltip_pos.x = pos.x + size.x;
-                let available_x =
-                    (avail_right - tooltip_pos.x - triangle_height * 2.0).max(0.0);
+                let available_x = (avail_right - tooltip_pos.x - triangle_height * 2.0).max(0.0);
                 if expected_dimension.x > available_x {
                     fixed_width = true;
                     width_to_be_fixed = available_x.max(24.0);
@@ -705,7 +708,10 @@ mod tests {
     fn full_screen(width: f64, height: f64) -> Rect {
         Rect {
             pos: DVec2::default(),
-            size: DVec2 { x: width, y: height },
+            size: DVec2 {
+                x: width,
+                y: height,
+            },
         }
     }
 
@@ -723,7 +729,10 @@ mod tests {
 
         // Tooltip should be centered horizontally on widget (center=200 - 50 = 150).
         assert_eq!(calc.tooltip_pos.x, 150.0);
-        assert!(!calc.fixed_width, "tooltip fits, should not need fixed_width");
+        assert!(
+            !calc.fixed_width,
+            "tooltip fits, should not need fixed_width"
+        );
     }
 
     #[test]
@@ -771,7 +780,10 @@ mod tests {
         let avail = full_screen(400.0, 600.0);
         let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
 
-        assert!(calc.fixed_width, "tooltip wider than screen must trigger fixed_width");
+        assert!(
+            calc.fixed_width,
+            "tooltip wider than screen must trigger fixed_width"
+        );
         assert_eq!(calc.tooltip_pos.x, 0.0);
         assert_eq!(calc.width_to_be_fixed, 400.0);
     }
@@ -812,7 +824,10 @@ mod tests {
         let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
 
         assert!(calc.fixed_width);
-        assert_eq!(calc.tooltip_pos.x, 60.0, "should pin to safe-area left, not 0");
+        assert_eq!(
+            calc.tooltip_pos.x, 60.0,
+            "should pin to safe-area left, not 0"
+        );
         assert_eq!(calc.width_to_be_fixed, 680.0, "should use safe-area width");
     }
 

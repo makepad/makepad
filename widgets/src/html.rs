@@ -640,9 +640,7 @@ impl Widget for Html {
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
                 }
-                Hit::FingerUp(fu)
-                    if fu.is_over && fu.is_primary_hit() && fu.was_tap() =>
-                {
+                Hit::FingerUp(fu) if fu.is_over && fu.is_primary_hit() && fu.was_tap() => {
                     details_toggle = Some(details_id);
                     break;
                 }
@@ -693,8 +691,7 @@ impl Widget for Html {
                 // and existing_item resolves each to its WidgetRef without
                 // going through the global widget tree. Typical details
                 // counts per Html are small (<10), so this is cheap.
-                let ids: SmallVec<[LiveId; 8]> =
-                    self.seen_details.iter().copied().collect();
+                let ids: SmallVec<[LiveId; 8]> = self.seen_details.iter().copied().collect();
                 for id in ids {
                     let fb_ref = self.text_flow.existing_item(id);
                     if fb_ref.widget_uid() == widget_action.widget_uid {
@@ -745,16 +742,14 @@ impl Widget for Html {
             // (which would jump_to_close and hide all content).
             if let Some(tag) = node.open_tag_lc() {
                 if tag == live_id!(details) {
-                    let details_id =
-                        if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
-                            LiveId::from_str(id_str)
-                        } else {
-                            details_auto_id += 1;
-                            // Offset into the high bits to avoid colliding with
-                            // HtmlLink's auto_id (small ints) in the items map.
-                            LiveId(0xd37a_115_0000_0000u64
-                                .wrapping_add(details_auto_id))
-                        };
+                    let details_id = if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
+                        LiveId::from_str(id_str)
+                    } else {
+                        details_auto_id += 1;
+                        // Offset into the high bits to avoid colliding with
+                        // HtmlLink's auto_id (small ints) in the items map.
+                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(details_auto_id))
+                    };
                     let initial_open = node.find_attr_lc(live_id!(open)).is_some();
                     self.details_stack.push(DetailsLevel {
                         id: details_id,
@@ -770,8 +765,10 @@ impl Widget for Html {
                     continue;
                 }
                 if tag == live_id!(summary) {
-                    if let Some(&DetailsLevel { id: details_id, is_open: initial_open }) =
-                        self.details_stack.last()
+                    if let Some(&DetailsLevel {
+                        id: details_id,
+                        is_open: initial_open,
+                    }) = self.details_stack.last()
                     {
                         let fb_ref = self.text_flow.item_with_scope(
                             cx,
@@ -793,8 +790,7 @@ impl Widget for Html {
                                 .last()
                                 .unwrap_or(&self.text_flow.font_size)
                                 as f64;
-                            let needs_seed =
-                                !self.seen_details.contains(&details_id);
+                            let needs_seed = !self.seen_details.contains(&details_id);
                             // Walk scaled to the current summary font size so
                             // the triangle tracks headings, `<sub>`, etc. The
                             // right margin is the gap between triangle and
@@ -870,10 +866,8 @@ impl Widget for Html {
                                     Some(b) => {
                                         let x0 = b.pos.x.min(r.pos.x);
                                         let y0 = b.pos.y.min(r.pos.y);
-                                        let x1 = (b.pos.x + b.size.x)
-                                            .max(r.pos.x + r.size.x);
-                                        let y1 = (b.pos.y + b.size.y)
-                                            .max(r.pos.y + r.size.y);
+                                        let x1 = (b.pos.x + b.size.x).max(r.pos.x + r.size.x);
+                                        let y1 = (b.pos.y + b.size.y).max(r.pos.y + r.size.y);
                                         Rect {
                                             pos: dvec2(x0, y0),
                                             size: dvec2(x1 - x0, y1 - y0),

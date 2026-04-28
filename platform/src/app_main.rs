@@ -118,14 +118,17 @@ pub(crate) fn resolve_studio_host() -> String {
 }
 
 pub(crate) fn resolve_studio_build() -> Option<String> {
-    std::env::var("STUDIO_BUILD").ok().and_then(|build| {
-        let build = build.trim();
-        (!build.is_empty()).then(|| build.to_string())
-    }).or_else(|| {
-        std::env::var("STUDIO")
-            .ok()
-            .and_then(|studio| extract_studio_build_id(&studio))
-    })
+    std::env::var("STUDIO_BUILD")
+        .ok()
+        .and_then(|build| {
+            let build = build.trim();
+            (!build.is_empty()).then(|| build.to_string())
+        })
+        .or_else(|| {
+            std::env::var("STUDIO")
+                .ok()
+                .and_then(|studio| extract_studio_build_id(&studio))
+        })
 }
 
 pub(crate) fn resolve_studio_crate() -> Option<String> {
@@ -142,7 +145,11 @@ pub(crate) fn resolve_studio_crate() -> Option<String> {
         })
 }
 
-fn build_studio_http(studio_host: &str, studio_build: Option<&str>, studio_crate: Option<&str>) -> String {
+fn build_studio_http(
+    studio_host: &str,
+    studio_build: Option<&str>,
+    studio_crate: Option<&str>,
+) -> String {
     let studio_host = normalize_studio_host(studio_host);
     if studio_host.is_empty() {
         return String::new();
@@ -188,7 +195,10 @@ mod tests {
             extract_studio_build_id("127.0.0.1:8001/app/42"),
             Some("42".to_string())
         );
-        assert_eq!(extract_studio_build_id("http://127.0.0.1:8001/app/77"), Some("77".to_string()));
+        assert_eq!(
+            extract_studio_build_id("http://127.0.0.1:8001/app/77"),
+            Some("77".to_string())
+        );
     }
 
     #[test]
@@ -204,11 +214,7 @@ mod tests {
     #[test]
     fn build_studio_http_uses_query_identity() {
         assert_eq!(
-            build_studio_http(
-                "127.0.0.1:8001",
-                Some("77"),
-                Some("makepad-example-xr"),
-            ),
+            build_studio_http("127.0.0.1:8001", Some("77"), Some("makepad-example-xr"),),
             "http://127.0.0.1:8001/app?build=77&crate=makepad-example-xr"
         );
         assert_eq!(
@@ -259,8 +265,8 @@ pub trait AppMain {
 macro_rules! _app_main_event_closure {
     ($app:ident) => {{
         let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>>
-            = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
                 *app.borrow_mut() = Some(cx.with_vm(|vm| {
@@ -295,7 +301,9 @@ macro_rules! _app_main_event_closure {
             if let Event::ScriptReapply = event {
                 let mut app_ref = app.borrow_mut();
                 if let Some(app) = app_ref.as_mut() {
-                    let value = app_value.borrow().as_ref()
+                    let value = app_value
+                        .borrow()
+                        .as_ref()
                         .map(|r| $crate::ScriptValue::from(r.as_object()));
                     if let Some(value) = value {
                         cx.with_vm(|vm| {
@@ -335,9 +343,9 @@ macro_rules! app_main {
             // The event-handler closure (which captures `app` and
             // `app_value` Rcs internally) is shared across all four
             // platform entry points via `_app_main_event_closure!`.
-            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(
-                Cx::new($crate::_app_main_event_closure!($app)),
-            ));
+            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(
+                $crate::_app_main_event_closure!($app),
+            )));
             let studio_http = $crate::resolve_studio_http();
             cx.borrow_mut().init_websockets(&studio_http);
             if $crate::should_run_stdin_loop_from_env() {

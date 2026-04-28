@@ -93,9 +93,21 @@ impl App {
                     self.set_status(cx, &format!("file tree loaded: {}", mount));
                 }
             }
-            HubToClient::TextFileOpened { path, content, .. } => {
+            HubToClient::TextFileOpened {
+                path,
+                content,
+                line,
+                column,
+                ..
+            } => {
                 if Self::is_terminal_virtual_path(&path) {
                     return;
+                }
+                if line.is_some() || column.is_some() {
+                    self.data.pending_log_jumps.insert(
+                        path.clone(),
+                        (line.unwrap_or(1).max(1), column.unwrap_or(1).max(1)),
+                    );
                 }
                 self.apply_editor_text_update(cx, path, content, true);
                 self.set_status(cx, "opened file");
@@ -127,6 +139,7 @@ impl App {
                     ui_file_sync_trace!("ignore FileChanged path={} reason=terminal", path);
                     return;
                 }
+                self.process_ai_manager_path_change(cx, &path);
 
                 // Root-level watcher fallback: backend can emit mount names when
                 // it only knows "something changed under this mount".
@@ -650,13 +663,13 @@ impl App {
             }
             HubToClient::TerminalTitle { path, title } => {
                 self.apply_terminal_tab_title(cx, &path, title);
+                self.refresh_ai_manager_preview(cx);
                 self.refresh_ai_manager_report(cx);
             }
             HubToClient::TerminalExited { path, code } => {
-                self.data.terminal_open_paths.remove(&path);
-                self.data.terminal_frame_id_by_path.remove(&path);
-                self.data.terminal_framebuffer_by_path.remove(&path);
+                self.process_ai_manager_terminal_closed(cx, &path, code);
                 self.reset_terminal_tab_title(cx, &path);
+                self.handle_terminal_exit_cleanup(cx, &path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
                 self.refresh_ai_manager_report(cx);
             }

@@ -777,10 +777,7 @@ fn mlx_chat_session_routes_qwen_without_gemma_specific_cli_logic() {
         }
         Err(err) => {
             let message = err.to_string();
-            assert!(
-                message.contains("missing tokenizer piece"),
-                "{message}"
-            );
+            assert!(message.contains("missing tokenizer piece"), "{message}");
             assert!(session.messages().is_empty());
         }
     }
