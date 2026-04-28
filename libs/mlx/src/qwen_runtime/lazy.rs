@@ -146,7 +146,9 @@ pub(crate) fn reference_generation_backend(
     runtime: Arc<MlxQwen35MoeRuntimeSession>,
     do_sample: bool,
 ) -> Result<Box<dyn QwenGenerationBackend>, Box<dyn Error>> {
-    Ok(Box::new(QwenReferenceGenerationBackend::new(runtime, do_sample)?))
+    Ok(Box::new(QwenReferenceGenerationBackend::new(
+        runtime, do_sample,
+    )?))
 }
 
 pub(crate) fn start_generation_graph(
@@ -156,12 +158,15 @@ pub(crate) fn start_generation_graph(
     max_new_tokens: Option<usize>,
 ) -> Result<MlxQwen35MoeGenerationGraph, Box<dyn Error>> {
     let step_stride = backend.preferred_generation_stride().max(1);
-    MlxQwen35MoeGenerationGraph::new(MlxQwen35MoeGenerationCursor::new(
-        Arc::new(Mutex::new(backend)),
-        prompt_token_ids,
-        stop_tokens,
-        max_new_tokens,
-    )?, step_stride)
+    MlxQwen35MoeGenerationGraph::new(
+        MlxQwen35MoeGenerationCursor::new(
+            Arc::new(Mutex::new(backend)),
+            prompt_token_ids,
+            stop_tokens,
+            max_new_tokens,
+        )?,
+        step_stride,
+    )
 }
 
 impl MlxQwen35MoeGenerationCursor {
@@ -193,8 +198,9 @@ impl MlxQwen35MoeGenerationCursor {
     }
 
     fn remaining_generation_limit(&self) -> usize {
-        self.max_new_tokens
-            .map_or(usize::MAX, |limit| limit.saturating_sub(self.generated_token_ids.len()))
+        self.max_new_tokens.map_or(usize::MAX, |limit| {
+            limit.saturating_sub(self.generated_token_ids.len())
+        })
     }
 
     fn reached_generation_limit(&self) -> bool {
@@ -260,12 +266,11 @@ impl MlxQwen35MoeGenerationCursor {
                     let chunk_stride = backend.preferred_generation_stride().max(1);
                     let chunk_len = remaining_target.min(remaining_max).min(chunk_stride);
                     if chunk_len > 1 {
-                        let chunk_tokens = backend
-                            .eval_token_chunk(last_generated, input_position, chunk_len)?;
+                        let chunk_tokens =
+                            backend.eval_token_chunk(last_generated, input_position, chunk_len)?;
                         for token_id in chunk_tokens {
                             if self.stop_tokens.contains(&token_id) {
-                                self.stop_reason =
-                                    Some(MlxQwen35MoeStopReason::EosToken(token_id));
+                                self.stop_reason = Some(MlxQwen35MoeStopReason::EosToken(token_id));
                                 break;
                             }
                             self.generated_token_ids.push(token_id);
@@ -280,7 +285,8 @@ impl MlxQwen35MoeGenerationCursor {
                         }
                         continue;
                     }
-                    self.pending_next = Some(backend.eval_next_token(last_generated, input_position)?);
+                    self.pending_next =
+                        Some(backend.eval_next_token(last_generated, input_position)?);
                 }
             }
             let next_token = self
@@ -393,7 +399,10 @@ impl MlxQwen35MoeGenerationGraph {
         })
     }
 
-    fn step_node(&self, requested_count: usize) -> Result<Arc<MlxQwen35MoeGenerationStepNode>, String> {
+    fn step_node(
+        &self,
+        requested_count: usize,
+    ) -> Result<Arc<MlxQwen35MoeGenerationStepNode>, String> {
         let target = self
             .max_new_tokens
             .map_or(requested_count, |limit| requested_count.min(limit));
@@ -411,10 +420,9 @@ impl MlxQwen35MoeGenerationGraph {
                     .checked_sub(self.step_stride)
                     .and_then(|index| index.checked_sub(1))
                     .ok_or_else(|| "generation step dependency underflow".to_string())?;
-                let prev = nodes
-                    .get(dependency_index)
-                    .cloned()
-                    .ok_or_else(|| format!("missing generation dependency {}", dependency_index + 1))?;
+                let prev = nodes.get(dependency_index).cloned().ok_or_else(|| {
+                    format!("missing generation dependency {}", dependency_index + 1)
+                })?;
                 MlxQwen35MoeGenerationDependency::Previous(prev)
             } else {
                 MlxQwen35MoeGenerationDependency::PromptPrefill(Arc::clone(&self.prompt_prefill))
@@ -579,27 +587,31 @@ mod tests {
 
         let snapshot3 = graph.finish_snapshot().unwrap();
         assert_eq!(&*snapshot3.generated_token_ids, &[11, 12, 13]);
-        assert_eq!(snapshot3.stop_reason, Some(MlxQwen35MoeStopReason::MaxNewTokens));
+        assert_eq!(
+            snapshot3.stop_reason,
+            Some(MlxQwen35MoeStopReason::MaxNewTokens)
+        );
         assert!(!snapshot3.has_pending_next);
     }
 
     #[test]
     fn qwen_generation_graph_stops_on_eos_without_appending_it() {
         let (backend, _) = mock_backend(21, vec![99, 42, 43, 44]);
-        let graph = mock_graph(
-            backend,
-            BTreeSet::from([99u32]),
-            Some(8),
-        );
+        let graph = mock_graph(backend, BTreeSet::from([99u32]), Some(8));
         let snapshot = graph.finish_snapshot().unwrap();
         assert_eq!(&*snapshot.generated_token_ids, &[21]);
-        assert_eq!(snapshot.stop_reason, Some(MlxQwen35MoeStopReason::EosToken(99)));
+        assert_eq!(
+            snapshot.stop_reason,
+            Some(MlxQwen35MoeStopReason::EosToken(99))
+        );
     }
 
     #[test]
     fn qwen_generation_graph_uses_stride_sized_chunk_dependencies() {
         let (backend, stats) = mock_backend(11, vec![12, 13, 14, 15, 16, 17, 18, 19]);
-        let backend = Arc::new(Mutex::new(Box::new(backend) as Box<dyn QwenGenerationBackend>));
+        let backend = Arc::new(Mutex::new(
+            Box::new(backend) as Box<dyn QwenGenerationBackend>
+        ));
         let graph = MlxQwen35MoeGenerationGraph::new(
             MlxQwen35MoeGenerationCursor::new(
                 Arc::clone(&backend),
@@ -612,7 +624,10 @@ mod tests {
         )
         .unwrap();
         let snapshot = graph.snapshot_up_to(9).unwrap();
-        assert_eq!(&*snapshot.generated_token_ids, &[11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(
+            &*snapshot.generated_token_ids,
+            &[11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
         let stats = stats.lock().unwrap();
         assert_eq!(stats.chunk_calls, vec![4, 4]);
         assert_eq!(stats.eval_calls, 8);

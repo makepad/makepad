@@ -333,8 +333,7 @@ pub fn parse_html(
                         // non-whitespace position past the buffer end, and
                         // gets silently dropped.
                         if ch.is_whitespace() {
-                            *last_non_whitespace =
-                                (*last_non_whitespace).min(start);
+                            *last_non_whitespace = (*last_non_whitespace).min(start);
                         } else {
                             *last_non_whitespace = decoded.len();
                         }

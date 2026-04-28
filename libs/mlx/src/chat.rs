@@ -3,9 +3,8 @@ use crate::text_runtime::{
     GemmaTextModel, GemmaTextSamplingOptions, MlxTextSamplingRng,
 };
 use crate::{
-    MlxModelFamily, MlxModelManifest, MlxQwen35MoeGenerationOutput,
-    MlxQwen35MoeRuntimeSession, MlxQwen35MoeStopReason, MlxTokenizerConfig, QwenChatMessage,
-    QwenChatRole,
+    MlxModelFamily, MlxModelManifest, MlxQwen35MoeGenerationOutput, MlxQwen35MoeRuntimeSession,
+    MlxQwen35MoeStopReason, MlxTokenizerConfig, QwenChatMessage, QwenChatRole,
 };
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -166,9 +165,7 @@ impl MlxChatGenerationOutput {
             generated_token_ids: output.generated_token_ids.clone(),
             stop_reason: match output.stop_reason {
                 MlxQwen35MoeStopReason::MaxNewTokens => MlxChatStopReason::MaxNewTokens,
-                MlxQwen35MoeStopReason::EosToken(token_id) => {
-                    MlxChatStopReason::EosToken(token_id)
-                }
+                MlxQwen35MoeStopReason::EosToken(token_id) => MlxChatStopReason::EosToken(token_id),
             },
             metrics: MlxChatGenerationMetrics {
                 prompt_prefill_tokens_per_second: output.metrics.prompt_prefill_tokens_per_second,
@@ -977,10 +974,7 @@ impl MlxQwen35MoeChatSession {
         let user_message = QwenChatMessage::new(QwenChatRole::User, content);
         let mut messages = self.messages.clone();
         messages.push(user_message.clone());
-        let prompt_text = Arc::<str>::from(
-            self.runtime
-                .format_chat_prompt(&messages, false)?,
-        );
+        let prompt_text = Arc::<str>::from(self.runtime.format_chat_prompt(&messages, false)?);
         let output = self.runtime.generate_preformatted_streaming(
             prompt_text,
             self.max_new_tokens,
@@ -992,7 +986,9 @@ impl MlxQwen35MoeChatSession {
             QwenChatRole::Assistant,
             output.generated_text.as_ref(),
         ));
-        Ok(Arc::new(MlxChatGenerationOutput::from_qwen(output.as_ref())))
+        Ok(Arc::new(MlxChatGenerationOutput::from_qwen(
+            output.as_ref(),
+        )))
     }
 
     pub fn send_user_message(

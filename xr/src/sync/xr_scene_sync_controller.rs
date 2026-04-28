@@ -39,7 +39,11 @@ impl XrSceneSyncController {
 
     fn poses_match(left: Pose, right: Pose) -> bool {
         let translation_delta = (left.position - right.position).length();
-        let rotation_dot = left.orientation.dot(right.orientation).abs().clamp(0.0, 1.0);
+        let rotation_dot = left
+            .orientation
+            .dot(right.orientation)
+            .abs()
+            .clamp(0.0, 1.0);
         let rotation_delta_degrees = (2.0 * rotation_dot.acos()).to_degrees();
         translation_delta <= ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS
             && rotation_delta_degrees <= ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES
@@ -72,10 +76,7 @@ impl XrSceneSyncController {
         if self.network_started {
             return;
         }
-        if let Some(mut peer_sync) = ui
-            .widget(cx, ids!(xr_peer_sync))
-            .borrow_mut::<XrPeerSync>()
-        {
+        if let Some(mut peer_sync) = ui.widget(cx, ids!(xr_peer_sync)).borrow_mut::<XrPeerSync>() {
             peer_sync.set_enabled(cx, true);
             self.network_started = true;
         }
@@ -85,10 +86,7 @@ impl XrSceneSyncController {
         let Some(activity_id) = self.current_activity(ui, cx) else {
             return;
         };
-        if let Some(mut peer_sync) = ui
-            .widget(cx, ids!(xr_peer_sync))
-            .borrow_mut::<XrPeerSync>()
-        {
+        if let Some(mut peer_sync) = ui.widget(cx, ids!(xr_peer_sync)).borrow_mut::<XrPeerSync>() {
             if peer_sync.enabled() && peer_sync.current_activity().is_none() {
                 let _ = peer_sync.set_local_activity(cx, activity_id);
             }
@@ -132,10 +130,7 @@ impl XrSceneSyncController {
             return;
         }
 
-        if let Some(mut peer_sync) = ui
-            .widget(cx, ids!(xr_peer_sync))
-            .borrow_mut::<XrPeerSync>()
-        {
+        if let Some(mut peer_sync) = ui.widget(cx, ids!(xr_peer_sync)).borrow_mut::<XrPeerSync>() {
             if peer_sync.send_activity_pose_reset(content_pose) {
                 self.last_activity_pose_sync = Some(content_pose);
                 self.last_activity_pose_sync_activity = Some(activity_id);
@@ -211,12 +206,13 @@ impl XrSceneSyncController {
         }
         let reset_applied = {
             let peer_sync_widget = ui.widget(cx, ids!(xr_peer_sync));
-            let reset_applied = if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
-                peer_sync.reset_local_shared_bootstrap_objects(runtime_bodies.as_ref());
-                true
-            } else {
-                false
-            };
+            let reset_applied =
+                if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                    peer_sync.reset_local_shared_bootstrap_objects(runtime_bodies.as_ref());
+                    true
+                } else {
+                    false
+                };
             reset_applied
         };
         if reset_applied {

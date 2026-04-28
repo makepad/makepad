@@ -222,13 +222,35 @@ fn show_help() {
     println!("Desktop commands:");
     println!();
     println!(
-        "    desktop build <cargo args>                   Run cargo build with Makepad icon env autodetection"
+        "    desktop build [sign opts] <cargo args>       Run cargo build with Makepad icon env autodetection"
     );
     println!(
         "    desktop run <cargo args>                     Run cargo run with Makepad icon env autodetection"
     );
     println!(
         "    desktop check <cargo args>                   Run cargo check with Makepad icon env autodetection"
+    );
+    println!(
+        "    desktop sign [sign opts] <cargo args>        Sign a built macOS desktop artifact"
+    );
+    println!("    [sign opts]:");
+    println!(
+        "       --sign                                     Enable post-build signing for `desktop build`"
+    );
+    println!(
+        "       --cert='<IDENTITY>'                        codesign identity; defaults to a single Apple Development identity if unambiguous"
+    );
+    println!(
+        "       --entitlements='<PATH>'                    Use an explicit entitlements plist"
+    );
+    println!(
+        "       --debugger                                 Generate com.apple.security.cs.debugger entitlement"
+    );
+    println!(
+        "       --get-task-allow                           Generate com.apple.security.get-task-allow entitlement"
+    );
+    println!(
+        "       --runtime                                  Sign with hardened runtime (--options runtime)"
     );
     println!();
     println!("Linux commands:");
@@ -254,7 +276,9 @@ fn show_help() {
     );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!("                                                 (or set STUDIO_HOST=127.0.0.1:8001)");
+    println!(
+        "                                                 (or set STUDIO_HOST=127.0.0.1:8001)"
+    );
     println!();
     println!();
 }

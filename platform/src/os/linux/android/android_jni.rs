@@ -314,10 +314,7 @@ const MAKEPAD_STUDIO_HOST_PREF_KEY: &str = "studio_host";
 const MAKEPAD_STUDIO_CRATE_PREF_KEY: &str = "studio_crate";
 const ANDROID_MODE_PRIVATE: i32 = 0;
 
-unsafe fn new_jstring(
-    env: *mut jni_sys::JNIEnv,
-    value: &str,
-) -> Option<jni_sys::jstring> {
+unsafe fn new_jstring(env: *mut jni_sys::JNIEnv, value: &str) -> Option<jni_sys::jstring> {
     let value = CString::new(value).ok()?;
     let value = ((**env).NewStringUTF.unwrap())(env, value.as_ptr());
     if value.is_null() {
@@ -439,12 +436,7 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
         .filter(|v| !v.trim().is_empty());
 
     if let Some(studio_host) = intent_studio_host {
-        let _ = persist_string_pref(
-            env,
-            activity,
-            MAKEPAD_STUDIO_HOST_PREF_KEY,
-            &studio_host,
-        );
+        let _ = persist_string_pref(env, activity, MAKEPAD_STUDIO_HOST_PREF_KEY, &studio_host);
         std::env::set_var("STUDIO_HOST", &studio_host);
     } else if let Some(studio_host) =
         get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_HOST_PREF_KEY)
@@ -453,12 +445,7 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
     }
 
     if let Some(studio_crate) = intent_studio_crate {
-        let _ = persist_string_pref(
-            env,
-            activity,
-            MAKEPAD_STUDIO_CRATE_PREF_KEY,
-            &studio_crate,
-        );
+        let _ = persist_string_pref(env, activity, MAKEPAD_STUDIO_CRATE_PREF_KEY, &studio_crate);
         std::env::set_var("STUDIO_CRATE", &studio_crate);
     } else if let Some(studio_crate) =
         get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_CRATE_PREF_KEY)
@@ -1322,12 +1309,7 @@ pub unsafe fn to_java_set_surface_cover_visible(visible: bool) {
 
 pub unsafe fn to_java_request_surface_snapshot_refresh() {
     let env = attach_jni_env();
-    ndk_utils::call_void_method!(
-        env,
-        get_activity(),
-        "requestSurfaceSnapshotRefresh",
-        "()V"
-    );
+    ndk_utils::call_void_method!(env, get_activity(), "requestSurfaceSnapshotRefresh", "()V");
 }
 
 pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
@@ -1848,9 +1830,8 @@ pub unsafe fn to_java_update_tex_image(
     env: *mut jni_sys::JNIEnv,
     video_decoder_ref: jni_sys::jobject,
 ) -> bool {
-    let updated = ndk_utils::call_bool_method!(
-        env, video_decoder_ref, "maybeUpdateTexImage", "()Z"
-    );
+    let updated =
+        ndk_utils::call_bool_method!(env, video_decoder_ref, "maybeUpdateTexImage", "()Z");
     updated != 0
 }
 

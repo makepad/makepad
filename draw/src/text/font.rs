@@ -168,7 +168,8 @@ impl Font {
     pub fn has_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> bool {
         self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
-            face.glyph_raster_image(glyph_id, dpxs_per_em as u16).is_some()
+            face.glyph_raster_image(glyph_id, dpxs_per_em as u16)
+                .is_some()
         })
     }
 
@@ -187,7 +188,6 @@ impl Font {
             .borrow_mut()
             .rasterize_glyph_stable_fallback(self, glyph_id, dpxs_per_em)
     }
-
 }
 
 impl Eq for Font {}

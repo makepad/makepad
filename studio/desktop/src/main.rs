@@ -255,9 +255,11 @@ impl MatchEvent for App {
                         .map(|state| state.log_tail)
                         .unwrap_or(true);
                     if was_tailing {
-                        workspace
-                            .check_box(cx, ids!(log_tail_toggle))
-                            .set_active(cx, false, Animate::Yes);
+                        workspace.check_box(cx, ids!(log_tail_toggle)).set_active(
+                            cx,
+                            false,
+                            Animate::Yes,
+                        );
                         self.set_mount_log_tail(cx, &active_mount, false);
                     }
                 }
@@ -282,6 +284,14 @@ impl MatchEvent for App {
                 {
                     self.open_profiler_for_mount(cx, &active_mount);
                 }
+                if workspace
+                    .button(cx, ids!(terminal_add_button))
+                    .clicked(actions)
+                {
+                    self.select_bottom_terminal_panel(cx, &active_mount);
+                    self.reveal_bottom_terminal_panel(cx, &active_mount);
+                    self.create_new_terminal_tab(cx, &active_mount);
+                }
             }
         }
 
@@ -301,15 +311,6 @@ impl MatchEvent for App {
                                 self.request_ai_mount_state(&mount);
                             }
                             self.refresh_ai_manager_report(cx);
-                        } else if tab_id == id!(terminal_add) {
-                            if let Some(mount) = self.data.active_mount.clone() {
-                                self.reveal_bottom_terminal_panel(cx, &mount);
-                                self.create_new_terminal_tab(cx, &mount);
-                            }
-                        } else if tab_id == id!(bottom_terminal_tab) {
-                            if let Some(mount) = self.data.active_mount.clone() {
-                                self.ensure_mount_terminal_file(cx, &mount);
-                            }
                         } else {
                             if let Some(state) = self.data.log_tab_state.get(&tab_id) {
                                 self.data
@@ -343,9 +344,7 @@ impl MatchEvent for App {
                             || tab_id == id!(editor_first)
                             || tab_id == id!(run_first)
                             || tab_id == id!(log_first)
-                            || tab_id == id!(bottom_terminal_tab)
                             || tab_id == id!(terminal_first)
-                            || tab_id == id!(terminal_add)
                         {
                             continue;
                         }

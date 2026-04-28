@@ -145,7 +145,11 @@ impl CxScriptResources {
 
 /// Try to load a resource from the packaged location on Apple platforms
 /// using NSBundle to resolve the app bundle's resource path.
-#[cfg(any(target_os = "ios", target_os = "tvos", all(target_os = "macos", apple_bundle)))]
+#[cfg(any(
+    target_os = "ios",
+    target_os = "tvos",
+    all(target_os = "macos", apple_bundle)
+))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let bundle_path = if let Some(root) = cx.package_root.as_deref() {
         format!("{}/{}", root, dep_path)

@@ -610,14 +610,16 @@ impl Cx {
             if let Err(msg) = &result.vs_status {
                 crate::error!(
                     "Background vertex-shader compile failed for shader id {}: {}",
-                    result.shader_id, msg
+                    result.shader_id,
+                    msg
                 );
                 continue;
             }
             if let Err(msg) = &result.ps_status {
                 crate::error!(
                     "Background pixel-shader compile failed for shader id {}: {}",
-                    result.shader_id, msg
+                    result.shader_id,
+                    msg
                 );
                 continue;
             }
@@ -740,7 +742,9 @@ impl Cx {
     // Used by the shared SLUG helper path that also runs on Linux (where GL may
     // async-compile) to decide whether to draw or fall back to raster.
     pub fn is_draw_shader_window_ready(&self, shader_id: DrawShaderId) -> bool {
-        self.draw_shaders.shaders[shader_id.index].os_shader_id.is_some()
+        self.draw_shaders.shaders[shader_id.index]
+            .os_shader_id
+            .is_some()
     }
 }
 

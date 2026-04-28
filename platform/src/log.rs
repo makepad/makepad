@@ -5,11 +5,11 @@ use makepad_studio_protocol::{AppToStudio, StudioLogItem};
 #[allow(unused)]
 fn log_level_prefix(level: LogLevel) -> &'static str {
     match level {
-        LogLevel::Panic   => "[!]",
-        LogLevel::Error   => "[E]",
+        LogLevel::Panic => "[!]",
+        LogLevel::Error => "[E]",
         LogLevel::Warning => "[W]",
-        LogLevel::Log     => "[I]",
-        LogLevel::Wait    => "[.]",
+        LogLevel::Log => "[I]",
+        LogLevel::Wait => "[.]",
     }
 }
 
@@ -113,7 +113,10 @@ pub(crate) fn log_with_level_makepad_platform(
             let msg = format!(
                 "{} {}:{}:{} - {}\0",
                 log_level_prefix(level),
-                file_name, line_start, column_start, message
+                file_name,
+                line_start,
+                column_start,
+                message
             );
             let hilevel: hilog_sys::LogLevel = match level {
                 LogLevel::Warning => hilog_sys::LogLevel::LOG_WARN,

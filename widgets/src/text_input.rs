@@ -1053,10 +1053,8 @@ impl TextInput {
             if self.is_multiline {
                 let position = self.cursor_to_position(self.cursor()).unwrap();
                 let laidout_row = &laidout_text.rows[position.row_index];
-                let y_min =
-                    (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
-                let y_max =
-                    (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+                let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+                let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
 
                 // If the min y of the row is less than the scroll position, scroll up so
                 // that the top of the row appears at the top.
@@ -1071,8 +1069,7 @@ impl TextInput {
                 }
             } else {
                 // Single-line: auto-scroll horizontally to keep the cursor visible.
-                let password_cursor =
-                    self.cursor_to_password_cursor(self.cursor());
+                let password_cursor = self.cursor_to_password_cursor(self.cursor());
                 let cursor_pos = laidout_text.cursor_to_position(password_cursor);
                 let cursor_x = cursor_pos.x_in_lpxs as f64;
 
@@ -1558,12 +1555,8 @@ impl Widget for TextInput {
         // scroll_to_cursor will tighten the bounds after compute_final_size
         // determines the actual dimensions.
         let inner_origin = cx.turtle().inner_origin();
-        let content_clip_index = cx.push_clip_rect_tracked(rect(
-            inner_origin.x,
-            inner_origin.y,
-            f64::MAX,
-            f64::MAX,
-        ));
+        let content_clip_index =
+            cx.push_clip_rect_tracked(rect(inner_origin.x, inner_origin.y, f64::MAX, f64::MAX));
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
@@ -1580,7 +1573,10 @@ impl Widget for TextInput {
             let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
             cx.show_text_ime_with_config(
                 self.draw_bg.area(),
-                dvec2(cursor_bottom_pos.x - self.scroll_x, cursor_bottom_pos.y - self.scroll_y),
+                dvec2(
+                    cursor_bottom_pos.x - self.scroll_x,
+                    cursor_bottom_pos.y - self.scroll_y,
+                ),
                 self.get_ime_config(),
             );
         }
@@ -2377,7 +2373,9 @@ impl TextInputRef {
     /// Returns whether this (multiline) text input emits `Returned` on plain
     /// Enter. See [`TextInput::submit_on_enter`] for details.
     pub fn submit_on_enter(&self) -> bool {
-        self.borrow().map(|inner| inner.submit_on_enter()).unwrap_or(false)
+        self.borrow()
+            .map(|inner| inner.submit_on_enter())
+            .unwrap_or(false)
     }
 
     /// Sets whether this (multiline) text input emits `Returned` on plain

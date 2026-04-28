@@ -156,3 +156,22 @@ fn load_file_tree_is_scoped_to_requested_mount() {
         .iter()
         .any(|node| node.path == "beta/src/b.rs"));
 }
+
+#[test]
+fn load_file_tree_ignores_makepad_state_directory() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".makepad/ai_chats")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join(".makepad/ai_chats/chat.json"), "{}\n").unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn visible() {}\n").unwrap();
+
+    let mut vfs = VirtualFs::new();
+    vfs.mount("repo", dir.path()).unwrap();
+
+    let tree = vfs.load_file_tree("repo").unwrap();
+    assert!(tree.nodes.iter().any(|node| node.path == "repo/src/lib.rs"));
+    assert!(!tree
+        .nodes
+        .iter()
+        .any(|node| node.path == "repo/.makepad" || node.path.starts_with("repo/.makepad/")));
+}

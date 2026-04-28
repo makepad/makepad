@@ -55,10 +55,8 @@ pub fn start_http_gateway(
                     headers,
                     response_sender,
                 } => {
-                    let request_path = if let Some(search) = headers
-                        .search
-                        .as_ref()
-                        .filter(|search| !search.is_empty())
+                    let request_path = if let Some(search) =
+                        headers.search.as_ref().filter(|search| !search.is_empty())
                     {
                         format!("{}?{}", headers.path, search)
                     } else {
@@ -316,7 +314,10 @@ mod tests {
         assert_eq!(parse_app_path("/app/not-a-number"), None);
         assert_eq!(parse_app_path("/app/77/extra"), None);
         assert_eq!(parse_app_path("/app"), None);
-        assert_eq!(parse_app_path("/app?build=nope&crate=makepad-example-xr"), None);
+        assert_eq!(
+            parse_app_path("/app?build=nope&crate=makepad-example-xr"),
+            None
+        );
         assert_eq!(parse_app_path("/ui"), None);
     }
 }

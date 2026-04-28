@@ -88,11 +88,7 @@ pub trait TankSceneHost {
     ) -> Option<XrNetPeerId>;
     fn widget_is_local_shared_object(&self, cx: &mut Cx, widget_uid: WidgetUid) -> bool;
     fn emit_local_shared_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid;
-    fn emit_local_shared_body_spawn_exact(
-        &mut self,
-        cx: &mut Cx,
-        spawn: XrBodySpawn,
-    ) -> WidgetUid;
+    fn emit_local_shared_body_spawn_exact(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid;
     fn runtime_body_state(&self, widget_uid: WidgetUid) -> Option<XrRuntimeBodyState>;
     fn runtime_contacts(&self) -> Option<Rc<Vec<(WidgetUid, WidgetUid)>>>;
     fn apply_car_control(&mut self, cx: &mut Cx, control: XrCarControl);
@@ -146,11 +142,7 @@ impl TankSceneHost for WidgetRef {
         widget_uid
     }
 
-    fn emit_local_shared_body_spawn_exact(
-        &mut self,
-        cx: &mut Cx,
-        spawn: XrBodySpawn,
-    ) -> WidgetUid {
+    fn emit_local_shared_body_spawn_exact(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid {
         let peer_sync_widget = self.widget(cx, ids!(xr_peer_sync));
         if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
             if let Some(spawn) = peer_sync.send_local_body_spawn_exact(spawn) {
@@ -379,11 +371,7 @@ impl TankSceneRuntime {
         (radius, rest_length)
     }
 
-    fn tank_spawn_support_clearance_meters<H: TankSceneHost>(
-        &self,
-        host: &H,
-        cx: &mut Cx,
-    ) -> f32 {
+    fn tank_spawn_support_clearance_meters<H: TankSceneHost>(&self, host: &H, cx: &mut Cx) -> f32 {
         let scene_scale_y = self
             .tank_scene_spawn_basis(host, cx)
             .map(|(_, _, scale)| scale.y.abs())
@@ -446,8 +434,8 @@ impl TankSceneRuntime {
             };
             let steering = tank_body.linked_support_steer_angles[index].unwrap_or(0.0);
             let spin = tank_body.linked_support_spin_angles[index].unwrap_or(0.0);
-            if let Some(mut pivot) = Self::tank_wheel_pivot_ref(cx, tank_widget, index)
-                .borrow_mut::<XrNode>()
+            if let Some(mut pivot) =
+                Self::tank_wheel_pivot_ref(cx, tank_widget, index).borrow_mut::<XrNode>()
             {
                 pivot.set_pos(cx, local_pose.position);
                 pivot.set_rot(cx, vec3f(0.0, steering, 0.0));
@@ -856,12 +844,7 @@ impl TankSceneRuntime {
         Some(widget_uid)
     }
 
-    fn sync_local_tank_widgets<H: TankSceneHost>(
-        &mut self,
-        host: &mut H,
-        cx: &mut Cx,
-        now: f64,
-    ) {
+    fn sync_local_tank_widgets<H: TankSceneHost>(&mut self, host: &mut H, cx: &mut Cx, now: f64) {
         let ui = host.ui_root();
         let Some((tank_widget_uid, tank_body)) = self.local_tank_body_state(host, cx) else {
             ui.widget(cx, ids!(scene_status))
@@ -889,7 +872,10 @@ impl TankSceneRuntime {
         {
             barrel.set_rot(cx, vec3f(self.tank_turret_pitch, 0.0, 0.0));
         }
-        if let Some(mut hull) = tank_widget.widget(cx, ids!(hull_block)).borrow_mut::<Cube>() {
+        if let Some(mut hull) = tank_widget
+            .widget(cx, ids!(hull_block))
+            .borrow_mut::<Cube>()
+        {
             let color = if now < self.tank_hit_flash_until {
                 vec4f(0.98, 0.36, 0.26, 1.0)
             } else {
@@ -918,19 +904,15 @@ impl TankSceneRuntime {
         }
         let (pitch_input, yaw_input) = tank_stick_axes(controller.stick, self.tank_drive);
         let dt = dt.clamp(1.0 / 240.0, 0.1);
-        self.tank_turret_yaw = (self.tank_turret_yaw + yaw_input * TANK_TURRET_YAW_SPEED_RADPS * dt)
+        self.tank_turret_yaw = (self.tank_turret_yaw
+            + yaw_input * TANK_TURRET_YAW_SPEED_RADPS * dt)
             .rem_euclid(std::f32::consts::TAU);
         self.tank_turret_pitch = (self.tank_turret_pitch
             + pitch_input * TANK_TURRET_PITCH_SPEED_RADPS * dt)
             .clamp(TANK_TURRET_PITCH_MIN_RAD, TANK_TURRET_PITCH_MAX_RAD);
     }
 
-    fn detect_local_tank_hits<H: TankSceneHost>(
-        &mut self,
-        host: &mut H,
-        cx: &mut Cx,
-        now: f64,
-    ) {
+    fn detect_local_tank_hits<H: TankSceneHost>(&mut self, host: &mut H, cx: &mut Cx, now: f64) {
         let Some(local_tank_widget_uid) = self.local_tank_widget_uid(host, cx) else {
             self.tank_active_hit_projectiles.clear();
             return;
@@ -1028,8 +1010,8 @@ impl TankSceneRuntime {
         let direction = barrel_orientation
             .rotate_vec3(&vec3f(0.0, 0.0, 1.0))
             .normalize();
-        let projectile_radius =
-            TANK_PROJECTILE_RADIUS_METERS * tank_scale.x.min(tank_scale.y).min(tank_scale.z).max(0.0001);
+        let projectile_radius = TANK_PROJECTILE_RADIUS_METERS
+            * tank_scale.x.min(tank_scale.y).min(tank_scale.z).max(0.0001);
         let mut next_emit_at = self.tank_projectile_next_emit_at.unwrap_or(now);
         let mut emitted = 0usize;
 
