@@ -1818,7 +1818,10 @@ impl Widget for PortalList {
                 // (e.g. a button that has been pressed/hovered) will never see the FingerUp,
                 // meaning it'll get stuck in that old pressed/hovered state.
                 Event::TouchUpdate(e) => {
-                    let has_release = e.touches.iter().any(|t| matches!(t.state, TouchState::Stop));
+                    let has_release = e
+                        .touches
+                        .iter()
+                        .any(|t| matches!(t.state, TouchState::Stop));
                     if !has_release {
                         pass_through_to_children = false;
                     }

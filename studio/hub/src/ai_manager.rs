@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 const LOCAL_BACKEND_ID: &str = "openai_localhost";
 const CLOUD_BACKEND_ID: &str = "openai";
-const DEFAULT_LOCAL_BASE_URL: &str = "http://10.0.0.165:8080/v1/chat/completions";
+const DEFAULT_LOCAL_BASE_URL: &str = "http://10.0.0.217:8080/v1/chat/completions";
 const DEFAULT_LOCAL_MODEL: &str = "";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 const DEFAULT_MAX_TOKENS: u32 = 2048;
@@ -26,10 +26,16 @@ const MAX_TOOL_ROUNDS: u32 = 8;
 const DEFAULT_READ_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const DEFAULT_SEARCH_LIMIT: usize = 100;
+const DEFAULT_OBSERVE_FILESYSTEM_LIMIT: usize = 50;
+const MAX_OBSERVE_FILESYSTEM_LIMIT: usize = 500;
+const DEFAULT_OBSERVE_FILESYSTEM_WINDOW_SECS: u64 = 300;
+const MAX_OBSERVE_FILESYSTEM_WINDOW_SECS: u64 = 3600;
 const MAX_FILE_BYTES: usize = 512 * 1024;
 const MAX_RESULT_CHARS: usize = 16_000;
 const DEFAULT_BASH_TIMEOUT_SECS: u64 = 20;
 const MAX_BASH_TIMEOUT_SECS: u64 = 120;
+const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../ai_mgr.md");
+const AI_CHAT_PERSIST_FS_SUPPRESS: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone)]
 struct AiBackendConfig {
@@ -42,14 +48,14 @@ struct AiBackendConfig {
     disable_thinking_via_chat_template: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, SerJson, DeJson)]
 struct ToolCallRecord {
     id: String,
     name: String,
     arguments_json: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, SerJson, DeJson)]
 enum ConversationItem {
     User {
         text: String,
@@ -91,6 +97,7 @@ struct MountAgents {
     active_backend_id: String,
     active_agent_id: Option<AiAgentId>,
     next_chat_ordinal: u64,
+    loaded_from_disk: bool,
     order: Vec<AiAgentId>,
     agents: HashMap<AiAgentId, RunningAgent>,
 }
@@ -130,6 +137,20 @@ struct StreamingTurnState {
 struct StreamUpdate {
     changed: bool,
     done: bool,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+struct PersistedAiChat {
+    version: u32,
+    agent_id: AiAgentId,
+    title: String,
+    backend_id: String,
+    active: Option<bool>,
+    status: String,
+    pending: bool,
+    updated_at: f64,
+    messages: Vec<AiMessage>,
+    history: Vec<ConversationItem>,
 }
 
 #[derive(DeJson)]
@@ -248,6 +269,13 @@ struct BashArgs {
 }
 
 #[derive(DeJson)]
+struct ObserveFilesystemArgs {
+    path: Option<String>,
+    limit: Option<usize>,
+    since_secs: Option<u64>,
+}
+
+#[derive(DeJson)]
 struct ReadTerminalArgs {
     path: String,
     rows: Option<u16>,
@@ -260,6 +288,13 @@ struct OpenTerminalArgs {
     command: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+}
+
+#[derive(DeJson)]
+struct OpenEditorArgs {
+    path: String,
+    line: Option<usize>,
+    column: Option<usize>,
 }
 
 #[derive(DeJson)]
@@ -323,22 +358,34 @@ impl AiManager {
 
     pub fn register_mount(&mut self, mount: &str, root: &Path) {
         let default_backend_id = self.default_backend_id();
-        let entry = self
-            .mounts
-            .entry(mount.to_string())
-            .or_insert_with(|| MountAgents {
-                root_path: String::new(),
-                active_backend_id: default_backend_id.clone(),
-                active_agent_id: None,
-                next_chat_ordinal: 1,
-                order: Vec::new(),
-                agents: HashMap::new(),
-            });
-        entry.root_path = root.to_string_lossy().to_string();
-        if entry.active_backend_id.is_empty() {
-            entry.active_backend_id = default_backend_id;
+        let mut should_load = false;
+        {
+            let entry = self
+                .mounts
+                .entry(mount.to_string())
+                .or_insert_with(|| MountAgents {
+                    root_path: String::new(),
+                    active_backend_id: default_backend_id.clone(),
+                    active_agent_id: None,
+                    next_chat_ordinal: 1,
+                    loaded_from_disk: false,
+                    order: Vec::new(),
+                    agents: HashMap::new(),
+                });
+            entry.root_path = root.to_string_lossy().to_string();
+            if entry.active_backend_id.is_empty() {
+                entry.active_backend_id = default_backend_id.clone();
+            }
+            if !entry.loaded_from_disk {
+                entry.loaded_from_disk = true;
+                should_load = true;
+            }
+        }
+        if should_load {
+            self.load_mount_from_disk(mount);
         }
         self.ensure_default_agent(mount);
+        self.persist_mount_state_best_effort(mount);
     }
 
     pub fn remove_mount(&mut self, mount: &str) -> AiMountState {
@@ -355,6 +402,7 @@ impl AiManager {
 
     pub fn get_state(&mut self, mount: &str) -> AiMountState {
         self.ensure_default_agent(mount);
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -389,6 +437,7 @@ impl AiManager {
                 updated_at: now_seconds(),
             },
         );
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -409,6 +458,8 @@ impl AiManager {
             self.inflight.remove(&request_id);
         }
         self.ensure_default_agent(mount);
+        self.remove_agent_file_best_effort(mount, agent_id);
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -419,6 +470,7 @@ impl AiManager {
                 mount_state.active_agent_id = Some(agent_id);
             }
         }
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -439,6 +491,7 @@ impl AiManager {
                 }
             }
         }
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -487,6 +540,7 @@ impl AiManager {
             agent.updated_at = now_seconds();
         }
 
+        self.persist_mount_state_best_effort(mount);
         self.start_model_request(mount, agent_id, run_token);
         self.snapshot(mount)
     }
@@ -516,6 +570,7 @@ impl AiManager {
             }
             agent.updated_at = now_seconds();
         }
+        self.persist_mount_state_best_effort(mount);
         self.snapshot(mount)
     }
 
@@ -642,6 +697,7 @@ impl AiManager {
                 continue_loop = true;
             }
         }
+        self.persist_mount_state_best_effort(mount);
 
         if continue_loop {
             self.start_model_request(mount, agent_id, run_token);
@@ -991,6 +1047,7 @@ impl AiManager {
                 tool_calls,
             );
         }
+        self.persist_mount_state_best_effort(mount);
         Some(self.snapshot(mount))
     }
 
@@ -1071,6 +1128,7 @@ impl AiManager {
                     active_backend_id: default_backend_id,
                     active_agent_id: None,
                     next_chat_ordinal: 1,
+                    loaded_from_disk: false,
                     order: Vec::new(),
                     agents: HashMap::new(),
                 },
@@ -1098,6 +1156,7 @@ impl AiManager {
                 active_backend_id: default_backend_id,
                 active_agent_id: None,
                 next_chat_ordinal: 1,
+                loaded_from_disk: false,
                 order: Vec::new(),
                 agents: HashMap::new(),
             });
@@ -1121,6 +1180,7 @@ impl AiManager {
                 updated_at: now_seconds(),
             },
         );
+        self.persist_mount_state_best_effort(mount);
     }
 
     fn alloc_agent_id(&mut self) -> AiAgentId {
@@ -1293,6 +1353,190 @@ impl AiManager {
         }
     }
 
+    fn load_mount_from_disk(&mut self, mount: &str) {
+        let Some((root_path, fallback_backend_id)) = self.mounts.get(mount).map(|mount_state| {
+            (
+                mount_state.root_path.clone(),
+                mount_state.active_backend_id.clone(),
+            )
+        }) else {
+            return;
+        };
+        if root_path.is_empty() {
+            return;
+        }
+
+        let Ok(entries) = fs::read_dir(ai_chats_dir(Path::new(&root_path))) else {
+            return;
+        };
+
+        let mut chats = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(chat) = PersistedAiChat::deserialize_json(&contents) else {
+                continue;
+            };
+            chats.push(chat);
+        }
+
+        if chats.is_empty() {
+            return;
+        }
+
+        chats.sort_by_key(|chat| chat.agent_id.0);
+        let mut order = Vec::with_capacity(chats.len());
+        let mut agents = HashMap::with_capacity(chats.len());
+        let mut next_chat_ordinal = 1u64;
+        let mut active_agent_id = None;
+        let mut newest_key = None::<(u64, u64)>;
+
+        for chat in chats {
+            self.next_agent_id = self.next_agent_id.max(chat.agent_id.0.saturating_add(1));
+            next_chat_ordinal = next_chat_ordinal.max(chat_title_ordinal(&chat.title).saturating_add(1));
+
+            let agent_id = chat.agent_id;
+            let pending = chat.pending;
+            let mut messages = chat.messages;
+            if pending {
+                while messages.last().is_some_and(|message| {
+                    matches!(message.role, AiMessageRole::Thinking) && message.text.is_empty()
+                }) {
+                    messages.pop();
+                }
+            }
+            let backend_id = if self.backend_by_id(&chat.backend_id).is_some() {
+                chat.backend_id
+            } else {
+                fallback_backend_id.clone()
+            };
+            let status = if pending {
+                "ready".to_string()
+            } else if chat.status.trim().is_empty() {
+                "ready".to_string()
+            } else {
+                chat.status
+            };
+
+            let updated_micros = (chat.updated_at.max(0.0) * 1_000_000.0) as u64;
+            let key = (updated_micros, agent_id.0);
+            if chat.active.unwrap_or(false) {
+                active_agent_id = Some(agent_id);
+            } else if newest_key.map(|existing| key >= existing).unwrap_or(true) {
+                newest_key = Some(key);
+                if active_agent_id.is_none() {
+                    active_agent_id = Some(agent_id);
+                }
+            }
+
+            order.push(agent_id);
+            agents.insert(
+                agent_id,
+                RunningAgent {
+                    title: chat.title,
+                    backend_id,
+                    status,
+                    pending_request_id: None,
+                    pending_tool_batch: false,
+                    cancel_requested: false,
+                    run_token: 0,
+                    tool_rounds: 0,
+                    messages,
+                    history: chat.history,
+                    updated_at: chat.updated_at,
+                },
+            );
+        }
+
+        if let Some(mount_state) = self.mounts.get_mut(mount) {
+            mount_state.order = order;
+            mount_state.agents = agents;
+            mount_state.active_agent_id = active_agent_id.or_else(|| mount_state.order.last().copied());
+            mount_state.next_chat_ordinal = next_chat_ordinal.max(1);
+        }
+    }
+
+    fn persist_mount_state_best_effort(&self, mount: &str) {
+        self.suppress_chat_persist_fs_events(mount);
+        if let Err(err) = self.persist_mount_state(mount) {
+            eprintln!("makepad-studio-hub: failed to persist AI chats for mount {mount}: {err}");
+        }
+    }
+
+    fn suppress_chat_persist_fs_events(&self, mount: &str) {
+        let _ = self.event_tx.send(HubEvent::SuppressMountRootFsEvents {
+            mount: mount.to_string(),
+            duration: AI_CHAT_PERSIST_FS_SUPPRESS,
+        });
+    }
+
+    fn persist_mount_state(&self, mount: &str) -> Result<(), String> {
+        let Some(mount_state) = self.mounts.get(mount) else {
+            return Ok(());
+        };
+        if mount_state.root_path.is_empty() {
+            return Ok(());
+        }
+
+        let dir = ai_chats_dir(Path::new(&mount_state.root_path));
+        fs::create_dir_all(&dir)
+            .map_err(|err| format!("failed to create {}: {}", dir.display(), err))?;
+
+        for agent_id in &mount_state.order {
+            let Some(agent) = mount_state.agents.get(agent_id) else {
+                continue;
+            };
+            let persisted = PersistedAiChat {
+                version: 1,
+                agent_id: *agent_id,
+                title: agent.title.clone(),
+                backend_id: agent.backend_id.clone(),
+                active: Some(mount_state.active_agent_id == Some(*agent_id)),
+                status: agent.status.clone(),
+                pending: agent.is_pending(),
+                updated_at: agent.updated_at,
+                messages: agent.messages.clone(),
+                history: agent.history.clone(),
+            };
+            let path = ai_chat_file_path(Path::new(&mount_state.root_path), *agent_id);
+            fs::write(&path, persisted.serialize_json())
+                .map_err(|err| format!("failed to write {}: {}", path.display(), err))?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_agent_file_best_effort(&self, mount: &str, agent_id: AiAgentId) {
+        let Some(root_path) = self
+            .mounts
+            .get(mount)
+            .map(|mount_state| mount_state.root_path.clone())
+        else {
+            return;
+        };
+        if root_path.is_empty() {
+            return;
+        }
+        self.suppress_chat_persist_fs_events(mount);
+        let path = ai_chat_file_path(Path::new(&root_path), agent_id);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                eprintln!(
+                    "makepad-studio-hub: failed to remove AI chat {}: {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
     fn set_agent_error(&mut self, mount: &str, agent_id: AiAgentId, error: String) {
         if let Some(agent) = self
             .mounts
@@ -1311,6 +1555,7 @@ impl AiManager {
                 text: error,
             });
         }
+        self.persist_mount_state_best_effort(mount);
     }
 
     fn backend_by_id(&self, backend_id: &str) -> Option<&AiBackendConfig> {
@@ -1351,6 +1596,7 @@ fn build_request_body(
     root_path: &str,
     history: &[ConversationItem],
 ) -> String {
+    let system_prompt = render_system_prompt(mount, root_path);
     let mut out = String::new();
     out.push('{');
     let mut needs_comma = false;
@@ -1367,15 +1613,7 @@ fn build_request_body(
     out.push_str("\"messages\":[");
     let mut first_message = true;
 
-    append_plain_message(
-        &mut out,
-        &mut first_message,
-        "system",
-        &format!(
-            "You are the Makepad Studio hub coding agent for mount '{}' rooted at '{}'. Use tools instead of guessing. Read files before editing them. Keep changes scoped to the request. Use bash for quick command-line inspection or verification. Use open_terminal when the user wants a Studio terminal or an interactive tool like codex. Use list_terminals, read_terminal, send_terminal_text, and send_terminal_key to inspect and control Studio terminals. Prefer send_terminal_text for ordinary typing and send_terminal_key for Enter, Ctrl+C, arrows, or function keys. After tool work is complete, answer concisely.",
-            mount, root_path
-        ),
-    );
+    append_plain_message(&mut out, &mut first_message, "system", &system_prompt);
 
     for item in history {
         match item {
@@ -1442,6 +1680,14 @@ fn build_request_body(
     out
 }
 
+fn render_system_prompt(mount: &str, root_path: &str) -> String {
+    SYSTEM_PROMPT_TEMPLATE
+        .replace("{{mount}}", mount)
+        .replace("{{root_path}}", root_path)
+        .trim()
+        .to_string()
+}
+
 fn append_plain_message(out: &mut String, first_message: &mut bool, role: &str, content: &str) {
     if !*first_message {
         out.push(',');
@@ -1495,6 +1741,20 @@ fn append_tool_definitions(out: &mut String) {
     append_tool_definition(
         out,
         &mut first,
+        "open_editor",
+        "Open a UTF-8 text file in a Studio code editor tab for this workspace, optionally jumping to a line and column.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to open in Studio"},"line":{"type":"integer","description":"Optional 1-indexed line to focus after opening"},"column":{"type":"integer","description":"Optional 1-indexed column to focus after opening"}},"required":["path"]}"#,
+    );
+    append_tool_definition(
+        out,
+        &mut first,
+        "observe_filesystem",
+        "Return recent filesystem changes observed by the Studio hub watcher for this workspace. Use this after other agents edit files.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"Optional workspace-relative path prefix to filter changes"},"limit":{"type":"integer","description":"Maximum number of recent changes to return"},"since_secs":{"type":"integer","description":"Only include changes observed within this many seconds"}}}"#,
+    );
+    append_tool_definition(
+        out,
+        &mut first,
         "open_terminal",
         "Open a Studio terminal for this workspace and optionally run an initial command such as codex.",
         r#"{"type":"object","properties":{"name":{"type":"string","description":"Optional terminal tab name stem"},"command":{"type":"string","description":"Optional command to send after the terminal opens"},"cols":{"type":"integer","description":"Optional terminal column count"},"rows":{"type":"integer","description":"Optional terminal row count"}}}"#,
@@ -1517,8 +1777,8 @@ fn append_tool_definitions(out: &mut String) {
         out,
         &mut first,
         "send_terminal_text",
-        "Send text to an open Studio terminal, optionally submitting it with Enter.",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#,
+        "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately, especially for codex prompts.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands and codex prompts that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#,
     );
     append_tool_definition(
         out,
@@ -1772,6 +2032,12 @@ fn execute_tool_call(
         "replace_in_file" => ReplaceInFileArgs::deserialize_json(&tool_call.arguments_json)
             .map_err(|err| format!("invalid replace_in_file arguments: {:?}", err))
             .and_then(|args| tool_replace_in_file(root_path, args)),
+        "open_editor" => OpenEditorArgs::deserialize_json(&tool_call.arguments_json)
+            .map_err(|err| format!("invalid open_editor arguments: {:?}", err))
+            .and_then(|args| tool_open_editor(root_path, mount, event_tx, args)),
+        "observe_filesystem" => ObserveFilesystemArgs::deserialize_json(&tool_call.arguments_json)
+            .map_err(|err| format!("invalid observe_filesystem arguments: {:?}", err))
+            .and_then(|args| tool_observe_filesystem(root_path, mount, event_tx, args)),
         "open_terminal" => OpenTerminalArgs::deserialize_json(&tool_call.arguments_json)
             .map_err(|err| format!("invalid open_terminal arguments: {:?}", err))
             .and_then(|args| tool_open_terminal(mount, event_tx, args)),
@@ -1827,6 +2093,85 @@ fn tool_open_terminal(
     )
 }
 
+fn tool_open_editor(
+    root_path: &Path,
+    mount: &str,
+    event_tx: &Sender<HubEvent>,
+    args: OpenEditorArgs,
+) -> Result<String, String> {
+    let path = resolve_workspace_path(root_path, &args.path)?;
+    let metadata =
+        fs::metadata(&path).map_err(|err| format!("failed to stat '{}': {}", args.path, err))?;
+    if !metadata.is_file() {
+        return Err(format!("'{}' is not a file", args.path));
+    }
+    let virtual_path = format!("{}/{}", mount, display_path(root_path, &path));
+    request_hub_tool(
+        event_tx,
+        |reply_tx| HubEvent::AiOpenEditorRequest {
+            mount: mount.to_string(),
+            path: virtual_path.clone(),
+            line: args
+                .line
+                .or(args.column.map(|_| 1))
+                .map(|value| value.max(1)),
+            column: args.column.map(|value| value.max(1)),
+            reply_tx,
+        },
+        "failed to request editor open from hub",
+        "timed out waiting for hub to open editor",
+    )
+}
+
+fn tool_observe_filesystem(
+    root_path: &Path,
+    mount: &str,
+    event_tx: &Sender<HubEvent>,
+    args: ObserveFilesystemArgs,
+) -> Result<String, String> {
+    let path = match args.path {
+        Some(path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() || trimmed == "." {
+                None
+            } else {
+                let root = root_path.canonicalize().map_err(|err| {
+                    format!(
+                        "failed to resolve workspace root '{}': {}",
+                        root_path.display(),
+                        err
+                    )
+                })?;
+                let path = resolve_workspace_path(&root, trimmed)?;
+                if path == root {
+                    None
+                } else {
+                    Some(display_path(&root, &path))
+                }
+            }
+        }
+        None => None,
+    };
+    request_hub_tool(
+        event_tx,
+        |reply_tx| HubEvent::AiObserveFilesystemRequest {
+            mount: mount.to_string(),
+            path,
+            limit: args
+                .limit
+                .unwrap_or(DEFAULT_OBSERVE_FILESYSTEM_LIMIT)
+                .clamp(1, MAX_OBSERVE_FILESYSTEM_LIMIT),
+            since_secs: args
+                .since_secs
+                .unwrap_or(DEFAULT_OBSERVE_FILESYSTEM_WINDOW_SECS)
+                .clamp(1, MAX_OBSERVE_FILESYSTEM_WINDOW_SECS),
+            reply_tx,
+        },
+        "failed to request filesystem observation from hub",
+        "timed out waiting for hub filesystem observation",
+    )
+}
+
 fn tool_list_terminals(mount: &str, event_tx: &Sender<HubEvent>) -> Result<String, String> {
     request_hub_tool(
         event_tx,
@@ -1869,7 +2214,7 @@ fn tool_send_terminal_text(
             mount: mount.to_string(),
             path: args.path.trim().to_string(),
             text: args.text,
-            submit: args.submit.unwrap_or(false),
+            submit: args.submit,
             bracketed_paste: args.bracketed_paste,
             reply_tx,
         },
@@ -2375,6 +2720,21 @@ fn summarize_title(prompt: &str) -> String {
     title
 }
 
+fn chat_title_ordinal(title: &str) -> u64 {
+    title
+        .strip_prefix("Chat ")
+        .and_then(|suffix| suffix.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn ai_chats_dir(root_path: &Path) -> PathBuf {
+    root_path.join(".makepad").join("ai_chats")
+}
+
+fn ai_chat_file_path(root_path: &Path, agent_id: AiAgentId) -> PathBuf {
+    ai_chats_dir(root_path).join(format!("chat-{:020}.json", agent_id.0))
+}
+
 fn read_secret_or_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -2458,6 +2818,8 @@ mod tests {
         let body = build_request_body(&backend, "repo", "/tmp/repo", &[]);
         assert!(body.contains("\"tools\""));
         assert!(body.contains("\"read_file\""));
+        assert!(body.contains("\"open_editor\""));
+        assert!(body.contains("\"observe_filesystem\""));
         assert!(body.contains("\"open_terminal\""));
         assert!(body.contains("\"list_terminals\""));
         assert!(body.contains("\"read_terminal\""));
@@ -2465,6 +2827,16 @@ mod tests {
         assert!(body.contains("\"send_terminal_key\""));
         assert!(!body.contains("\"model\""));
         assert!(!body.contains("\"chat_template_kwargs\":{\"enable_thinking\":false}"));
+    }
+
+    #[test]
+    fn render_system_prompt_replaces_mount_and_root_placeholders() {
+        let prompt = render_system_prompt("repo", "/tmp/repo");
+        assert!(prompt.contains("mount 'repo'"));
+        assert!(prompt.contains("rooted at '/tmp/repo'"));
+        assert!(prompt.contains("observe_filesystem"));
+        assert!(prompt.contains("open_editor"));
+        assert!(prompt.contains("send_terminal_text.submit"));
     }
 
     struct TestBackend;

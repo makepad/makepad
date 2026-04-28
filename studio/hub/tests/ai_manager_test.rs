@@ -1,5 +1,8 @@
 use makepad_studio_hub::{HubConfig, MountConfig, StudioHub};
-use makepad_studio_protocol::hub_protocol::{AiMessageRole, AiMountState, ClientToHub, HubToClient};
+use makepad_studio_protocol::hub_protocol::{
+    AiMessageRole, AiMountState, ClientToHub, HubToClient,
+};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Mutex, OnceLock};
@@ -80,7 +83,9 @@ fn write_chunked_sse(stream: &mut std::net::TcpStream, chunks: &[&str]) {
         "Transfer-Encoding: chunked\r\n",
         "Connection: close\r\n\r\n"
     );
-    stream.write_all(headers.as_bytes()).expect("write sse headers");
+    stream
+        .write_all(headers.as_bytes())
+        .expect("write sse headers");
     stream.flush().expect("flush sse headers");
     for chunk in chunks {
         let bytes = chunk.as_bytes();
@@ -93,7 +98,9 @@ fn write_chunked_sse(stream: &mut std::net::TcpStream, chunks: &[&str]) {
         stream.flush().expect("flush sse chunk");
         thread::sleep(Duration::from_millis(60));
     }
-    stream.write_all(b"0\r\n\r\n").expect("write sse terminator");
+    stream
+        .write_all(b"0\r\n\r\n")
+        .expect("write sse terminator");
     stream.flush().expect("flush sse terminator");
 }
 
@@ -126,9 +133,28 @@ fn wait_for_ai_state(
     panic!("timed out waiting for AiMountState for mount {}", mount);
 }
 
+fn wait_for_message(
+    connection: &makepad_studio_hub::HubConnection,
+    timeout: Duration,
+    predicate: impl Fn(&HubToClient) -> bool,
+) -> HubToClient {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let Some(msg) = connection.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        if predicate(&msg) {
+            return msg;
+        }
+    }
+    panic!("timed out waiting for HubToClient message");
+}
+
 #[test]
 fn ai_manager_round_trips_prompt_through_local_backend() {
-    let _env_lock = ai_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
     let addr = listener.local_addr().expect("local addr");
@@ -198,21 +224,176 @@ fn ai_manager_round_trips_prompt_through_local_backend() {
             .as_ref()
             .map(|agent| {
                 !agent.pending
-                    && agent.messages.iter().any(|message| message.text == "assistant reply")
+                    && agent
+                        .messages
+                        .iter()
+                        .any(|message| message.text == "assistant reply")
             })
             .unwrap_or(false)
     });
 
     let messages = &done.active_agent.expect("active agent").messages;
-    assert!(messages.iter().any(|message| message.text == "hello from test"));
-    assert!(messages.iter().any(|message| message.text == "assistant reply"));
+    assert!(messages
+        .iter()
+        .any(|message| message.text == "hello from test"));
+    assert!(messages
+        .iter()
+        .any(|message| message.text == "assistant reply"));
 
     server.join().expect("join ai server");
 }
 
 #[test]
+fn ai_manager_persists_chats_per_mount_and_loads_them_on_restart() {
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
+    let addr = listener.local_addr().expect("local addr");
+    let _base_url = EnvGuard::set(
+        "MAKEPAD_STUDIO_AI_BASE_URL",
+        format!("http://{}/v1/chat/completions", addr),
+    );
+
+    let repo = makepad_studio_hub::test_support::tempdir().expect("tempdir");
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: repo.path().to_path_buf(),
+        }],
+        enable_in_process_gateway: false,
+        ..Default::default()
+    };
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept ai request");
+        let request_text = read_http_request(&mut stream);
+        assert!(request_text.contains("\"stream\":true"));
+        write_chunked_sse(
+            &mut stream,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking now\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"assistant reply\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+    });
+
+    {
+        let mut connection = StudioHub::start_in_process(config.clone()).expect("start backend");
+
+        let _ = connection.send(ClientToHub::AiGetState {
+            mount: "repo".to_string(),
+        });
+        let initial = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+            state.active_agent.is_some()
+        });
+        let agent_id = initial.active_agent_id.expect("default ai agent");
+
+        let _ = connection.send(ClientToHub::AiSendPrompt {
+            mount: "repo".to_string(),
+            agent_id,
+            text: "persist this chat".to_string(),
+        });
+
+        let done = wait_for_ai_state(&connection, "repo", Duration::from_secs(5), |state| {
+            state
+                .active_agent
+                .as_ref()
+                .map(|agent| {
+                    !agent.pending
+                        && agent
+                            .messages
+                            .iter()
+                            .any(|message| message.text.contains("assistant reply"))
+                })
+                .unwrap_or(false)
+        });
+        assert!(done
+            .active_agent
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.text.contains("thinking now")));
+
+        let _ = connection.send(ClientToHub::AiCreateAgent {
+            mount: "repo".to_string(),
+            title: Some("Second chat".to_string()),
+        });
+        let two_chats = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+            state.agents.len() == 2
+        });
+        assert_eq!(two_chats.agents.len(), 2);
+    }
+
+    server.join().expect("join ai server");
+
+    let chats_dir = repo.path().join(".makepad/ai_chats");
+    let chat_files = fs::read_dir(&chats_dir)
+        .expect("read chats dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .count();
+    assert_eq!(chat_files, 2);
+
+    let mut connection = StudioHub::start_in_process(config).expect("restart backend");
+    let _ = connection.send(ClientToHub::AiGetState {
+        mount: "repo".to_string(),
+    });
+    let restored = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+        state.agents.len() == 2
+            && state.agents.iter().any(|agent| agent.title == "persist this chat")
+            && state.agents.iter().any(|agent| agent.title == "Second chat")
+            && state
+                .active_agent
+                .as_ref()
+                .map(|agent| agent.title == "Second chat")
+                .unwrap_or(false)
+    });
+    assert_eq!(restored.agents.len(), 2);
+    assert_eq!(restored.active_agent.as_ref().unwrap().title, "Second chat");
+
+    let first_agent_id = restored
+        .agents
+        .iter()
+        .find(|agent| agent.title == "persist this chat")
+        .expect("first restored agent")
+        .agent_id;
+    let _ = connection.send(ClientToHub::AiSelectAgent {
+        mount: "repo".to_string(),
+        agent_id: first_agent_id,
+    });
+    let restored_first_chat =
+        wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+            state
+                .active_agent
+                .as_ref()
+                .map(|agent| {
+                    agent.agent_id == first_agent_id
+                        && agent
+                            .messages
+                            .iter()
+                            .any(|message| message.text.contains("persist this chat"))
+                        && agent
+                            .messages
+                            .iter()
+                            .any(|message| message.text.contains("assistant reply"))
+                })
+                .unwrap_or(false)
+        });
+    assert_eq!(
+        restored_first_chat.active_agent.as_ref().unwrap().title,
+        "persist this chat"
+    );
+}
+
+#[test]
 fn ai_manager_executes_tool_calls_inside_the_hub() {
-    let _env_lock = ai_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
     let addr = listener.local_addr().expect("local addr");
@@ -295,7 +476,9 @@ fn ai_manager_executes_tool_calls_inside_the_hub() {
     });
 
     let messages = &done.active_agent.expect("active agent").messages;
-    assert!(messages.iter().any(|message| message.text.contains("read_file")));
+    assert!(messages
+        .iter()
+        .any(|message| message.text.contains("read_file")));
     assert!(messages
         .iter()
         .any(|message| message.text.contains("finished after tool call")));
@@ -304,8 +487,359 @@ fn ai_manager_executes_tool_calls_inside_the_hub() {
 }
 
 #[test]
+fn ai_manager_open_editor_tool_opens_file_in_primary_ui() {
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
+    let addr = listener.local_addr().expect("local addr");
+    let _base_url = EnvGuard::set(
+        "MAKEPAD_STUDIO_AI_BASE_URL",
+        format!("http://{}/v1/chat/completions", addr),
+    );
+
+    let repo = makepad_studio_hub::test_support::tempdir().expect("tempdir");
+    fs::create_dir_all(repo.path().join("src")).expect("create src");
+    fs::write(repo.path().join("src/lib.rs"), "pub fn opened_by_ai() {}\n").expect("write file");
+
+    let server = thread::spawn(move || {
+        let (mut stream1, _) = listener.accept().expect("accept first ai request");
+        let request1 = read_http_request(&mut stream1);
+        assert!(request1.contains("\"open_editor\""));
+        write_chunked_sse(
+            &mut stream1,
+            &[
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+                    "\"id\":\"call_open_editor\",\"type\":\"function\",\"function\":{",
+                    "\"name\":\"open_editor\",",
+                    "\"arguments\":\"{\\\"path\\\":\\\"src/lib.rs\\\"}\"",
+                    "}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "data: [DONE]\n\n",
+            ],
+        );
+
+        let (mut stream2, _) = listener.accept().expect("accept second ai request");
+        let request2 = read_http_request(&mut stream2);
+        assert!(request2.contains("\"tool_call_id\":\"call_open_editor\""));
+        assert!(request2.contains("Opened repo/src/lib.rs in Studio editor."));
+        write_chunked_sse(
+            &mut stream2,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"editor opened\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+    });
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: repo.path().to_path_buf(),
+        }],
+        enable_in_process_gateway: false,
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let _ = connection.send(ClientToHub::AiGetState {
+        mount: "repo".to_string(),
+    });
+    let initial = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+        state.active_agent.is_some()
+    });
+    let agent_id = initial.active_agent_id.expect("default ai agent");
+
+    let _ = connection.send(ClientToHub::AiSendPrompt {
+        mount: "repo".to_string(),
+        agent_id,
+        text: "open src/lib.rs".to_string(),
+    });
+
+    let opened = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileOpened { path, content, .. }
+                if path == "repo/src/lib.rs" && content == "pub fn opened_by_ai() {}\n"
+        )
+    });
+    match opened {
+        HubToClient::TextFileOpened { path, content, .. } => {
+            assert_eq!(path, "repo/src/lib.rs");
+            assert_eq!(content, "pub fn opened_by_ai() {}\n");
+        }
+        _ => unreachable!(),
+    }
+
+    let done = wait_for_ai_state(&connection, "repo", Duration::from_secs(5), |state| {
+        state
+            .active_agent
+            .as_ref()
+            .map(|agent| {
+                !agent.pending
+                    && agent
+                        .messages
+                        .iter()
+                        .any(|message| message.text.contains("editor opened"))
+            })
+            .unwrap_or(false)
+    });
+
+    assert!(done
+        .active_agent
+        .as_ref()
+        .unwrap()
+        .messages
+        .iter()
+        .any(|message| message.text.contains("open_editor")));
+
+    server.join().expect("join ai server");
+}
+
+#[test]
+fn ai_manager_open_editor_tool_forwards_jump_location_to_primary_ui() {
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
+    let addr = listener.local_addr().expect("local addr");
+    let _base_url = EnvGuard::set(
+        "MAKEPAD_STUDIO_AI_BASE_URL",
+        format!("http://{}/v1/chat/completions", addr),
+    );
+
+    let repo = makepad_studio_hub::test_support::tempdir().expect("tempdir");
+    fs::create_dir_all(repo.path().join("src")).expect("create src");
+    fs::write(repo.path().join("src/lib.rs"), "pub fn jumped_by_ai() {}\n").expect("write file");
+
+    let server = thread::spawn(move || {
+        let (mut stream1, _) = listener.accept().expect("accept first ai request");
+        let request1 = read_http_request(&mut stream1);
+        assert!(request1.contains("\"open_editor\""));
+        write_chunked_sse(
+            &mut stream1,
+            &[
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+                    "\"id\":\"call_open_editor\",\"type\":\"function\",\"function\":{",
+                    "\"name\":\"open_editor\",",
+                    "\"arguments\":\"{\\\"path\\\":\\\"src/lib.rs\\\",\\\"line\\\":1,\\\"column\\\":8}\"",
+                    "}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "data: [DONE]\n\n",
+            ],
+        );
+
+        let (mut stream2, _) = listener.accept().expect("accept second ai request");
+        let request2 = read_http_request(&mut stream2);
+        assert!(request2.contains("\"tool_call_id\":\"call_open_editor\""));
+        assert!(request2.contains("Opened repo/src/lib.rs at 1:8 in Studio editor."));
+        write_chunked_sse(
+            &mut stream2,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"editor jumped\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+    });
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: repo.path().to_path_buf(),
+        }],
+        enable_in_process_gateway: false,
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start backend");
+
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(true),
+    });
+    let initial = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+        state.active_agent.is_some()
+    });
+    let agent_id = initial.active_agent_id.expect("default ai agent");
+
+    let _ = connection.send(ClientToHub::AiSendPrompt {
+        mount: "repo".to_string(),
+        agent_id,
+        text: "open src/lib.rs at line 1 column 8".to_string(),
+    });
+
+    let opened = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            HubToClient::TextFileOpened {
+                path,
+                content,
+                line,
+                column,
+                ..
+            } if path == "repo/src/lib.rs"
+                && content == "pub fn jumped_by_ai() {}\n"
+                && *line == Some(1)
+                && *column == Some(8)
+        )
+    });
+    match opened {
+        HubToClient::TextFileOpened {
+            path,
+            content,
+            line,
+            column,
+            ..
+        } => {
+            assert_eq!(path, "repo/src/lib.rs");
+            assert_eq!(content, "pub fn jumped_by_ai() {}\n");
+            assert_eq!(line, Some(1));
+            assert_eq!(column, Some(8));
+        }
+        _ => unreachable!(),
+    }
+
+    let done = wait_for_ai_state(&connection, "repo", Duration::from_secs(5), |state| {
+        state
+            .active_agent
+            .as_ref()
+            .map(|agent| {
+                !agent.pending
+                    && agent
+                        .messages
+                        .iter()
+                        .any(|message| message.text.contains("editor jumped"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(done
+        .active_agent
+        .as_ref()
+        .unwrap()
+        .messages
+        .iter()
+        .any(|message| message.text.contains("open_editor")));
+
+    server.join().expect("join ai server");
+}
+
+#[test]
+fn ai_manager_observe_filesystem_tool_reports_recent_changes() {
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
+    let addr = listener.local_addr().expect("local addr");
+    let _base_url = EnvGuard::set(
+        "MAKEPAD_STUDIO_AI_BASE_URL",
+        format!("http://{}/v1/chat/completions", addr),
+    );
+
+    let repo = makepad_studio_hub::test_support::tempdir().expect("tempdir");
+    fs::create_dir_all(repo.path().join("src")).expect("create src");
+    fs::write(repo.path().join("src/lib.rs"), "pub fn before() {}\n").expect("write file");
+
+    let server = thread::spawn(move || {
+        let (mut stream1, _) = listener.accept().expect("accept first ai request");
+        let request1 = read_http_request(&mut stream1);
+        assert!(request1.contains("\"observe_filesystem\""));
+        write_chunked_sse(
+            &mut stream1,
+            &[
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+                    "\"id\":\"call_observe_fs\",\"type\":\"function\",\"function\":{",
+                    "\"name\":\"observe_filesystem\",",
+                    "\"arguments\":\"{\\\"path\\\":\\\"src\\\",\\\"since_secs\\\":300}\"",
+                    "}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "data: [DONE]\n\n",
+            ],
+        );
+
+        let (mut stream2, _) = listener.accept().expect("accept second ai request");
+        let request2 = read_http_request(&mut stream2);
+        assert!(request2.contains("\"tool_call_id\":\"call_observe_fs\""));
+        assert!(request2.contains("src/lib.rs"));
+        write_chunked_sse(
+            &mut stream2,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"observed changes\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+    });
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: repo.path().to_path_buf(),
+        }],
+        enable_in_process_gateway: false,
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start backend");
+
+    let _ = connection.send(ClientToHub::AiGetState {
+        mount: "repo".to_string(),
+    });
+    let initial = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+        state.active_agent.is_some()
+    });
+    let agent_id = initial.active_agent_id.expect("default ai agent");
+
+    fs::write(repo.path().join("src/lib.rs"), "pub fn after() {}\n").expect("update file");
+    let _ = wait_for_message(&connection, Duration::from_secs(6), |msg| {
+        matches!(
+            msg,
+            HubToClient::FileChanged { path }
+                if path == "repo/src/lib.rs" || path == "repo"
+        )
+    });
+
+    let _ = connection.send(ClientToHub::AiSendPrompt {
+        mount: "repo".to_string(),
+        agent_id,
+        text: "what changed under src recently?".to_string(),
+    });
+
+    let done = wait_for_ai_state(&connection, "repo", Duration::from_secs(5), |state| {
+        state
+            .active_agent
+            .as_ref()
+            .map(|agent| {
+                !agent.pending
+                    && agent
+                        .messages
+                        .iter()
+                        .any(|message| message.text.contains("observed changes"))
+            })
+            .unwrap_or(false)
+    });
+    assert!(done
+        .active_agent
+        .as_ref()
+        .unwrap()
+        .messages
+        .iter()
+        .any(|message| message.text.contains("observe_filesystem")));
+
+    server.join().expect("join ai server");
+}
+
+#[test]
 fn ai_manager_streams_thinking_before_completion() {
-    let _env_lock = ai_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
     let addr = listener.local_addr().expect("local addr");
@@ -400,7 +934,9 @@ fn ai_manager_streams_thinking_before_completion() {
 
 #[test]
 fn ai_manager_preserves_streamed_thinking_whitespace() {
-    let _env_lock = ai_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
     let addr = listener.local_addr().expect("local addr");
@@ -480,7 +1016,9 @@ fn ai_manager_preserves_streamed_thinking_whitespace() {
 
 #[test]
 fn ai_manager_accepts_second_prompt_after_done_before_socket_close() {
-    let _env_lock = ai_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
     let addr = listener.local_addr().expect("local addr");
@@ -552,10 +1090,10 @@ fn ai_manager_accepts_second_prompt_after_done_before_socket_close() {
             .as_ref()
             .map(|agent| {
                 !agent.pending
-                    && agent
-                        .messages
-                        .iter()
-                        .any(|message| matches!(message.role, AiMessageRole::Assistant) && message.text.contains("Hi!"))
+                    && agent.messages.iter().any(|message| {
+                        matches!(message.role, AiMessageRole::Assistant)
+                            && message.text.contains("Hi!")
+                    })
             })
             .unwrap_or(false)
     });

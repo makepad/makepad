@@ -517,8 +517,7 @@ impl ScriptHook for StackNavigation {
             // the previous room view was still `visible = false`.
             let view_ids = self.navigation_stack.view_ids();
             for view_id in view_ids {
-                let stack_view_ref =
-                    self.stack_navigation_view(_vm.cx_mut(), &[view_id]);
+                let stack_view_ref = self.stack_navigation_view(_vm.cx_mut(), &[view_id]);
                 if let Some(mut inner) = stack_view_ref.borrow_mut() {
                     inner.view.visible = true;
                     inner.offset = 0.0;
@@ -789,9 +788,13 @@ impl StackNavigationRef {
     /// * `view_id` - The LiveId of the view whose title to set
     /// * `title` - The new title text
     pub fn set_title(&self, cx: &mut Cx, view_id: LiveId, title: &str) {
-        let Some(inner) = self.borrow_mut() else { return; };
+        let Some(inner) = self.borrow_mut() else {
+            return;
+        };
         let stack_view_ref = inner.stack_navigation_view(cx, &[view_id]);
-        let Some(mut stack_view) = stack_view_ref.borrow_mut() else { return; };
+        let Some(mut stack_view) = stack_view_ref.borrow_mut() else {
+            return;
+        };
         stack_view.set_runtime_title(cx, title);
     }
 

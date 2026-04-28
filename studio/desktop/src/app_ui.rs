@@ -24,7 +24,7 @@ script_mod! {
         selectable: true
         padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
         paragraph_spacing: 14.0
-        inline_code_padding: Inset {left: 4.0 right: 4.0 top: 2.0 bottom: 2.0}
+        inline_code_padding: Inset {left: 4.0 right: 4.0 top: 1.0 bottom: 3.0}
         inline_code_margin: Inset {left: 2.0 right: 2.0 top: 0.0 bottom: 0.0}
         body: ""
     }
@@ -44,8 +44,9 @@ script_mod! {
     }
 
     let SidebarFilterInput = TextInputFlat {
+        height: 26.0
         margin: Inset {}
-        padding: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+        padding: Inset {left: 12.0 right: 12.0 top: 5.0 bottom: 1.0}
         draw_bg +: {
             border_radius: 4.0
 
@@ -77,8 +78,9 @@ script_mod! {
     }
 
     let LogToolbarFilterInput = TextInputFlat {
+        height: 26.0
         margin: Inset {}
-        padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+        padding: Inset {left: 10.0 right: 10.0 top: 5.0 bottom: 1.0}
         draw_bg +: {
             border_radius: 4.0
 
@@ -182,6 +184,26 @@ script_mod! {
             ai_delete_button := ButtonFlat {
                 width: 34.0
                 text: "x"
+            }
+        }
+
+        View {
+            width: Fill
+            height: Fit
+            flow: Down
+            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 0.0}
+
+            Label {
+                text: "Live"
+                draw_text.color: theme.color_label_outer
+            }
+
+            ai_live_scroll := ScrollYView {
+                width: Fill
+                height: 132.0
+                flow: Down
+                padding: Inset {left: 0.0 right: 0.0 top: 8.0 bottom: 8.0}
+                ai_live_markdown := AiChatMarkdown {}
             }
         }
 
@@ -363,10 +385,16 @@ script_mod! {
         View {
             width: Fill
             height: Fill
-            align: Align {x: 0.5 y: 0.5}
+            flow: Down
+            align: Center
+            spacing: theme.space_3
             placeholder := Label {
-                text: "Terminal press + to add a terminal"
+                text: "Terminal tabs live here"
                 draw_text.color: theme.color_label_outer
+            }
+            terminal_add_button := ButtonFlat {
+                width: 136.0
+                text: "Add Terminal"
             }
         }
     }
@@ -534,36 +562,6 @@ script_mod! {
         }
     }
 
-    let TerminalAddTab = TabFlat {
-        closeable: false
-        width: 28.0
-        spacing: 0.0
-        align: Center
-        padding: Inset {left: 0.0 right: 0.0 top: theme.space_2 bottom: theme.space_2}
-        icon_walk: Walk {width: 0.0 height: 0.0}
-        draw_text +: {
-            color: theme.color_label_inner_inactive
-            color_hover: theme.color_label_inner
-            color_active: theme.color_label_inner_active
-            text_style: theme.font_bold{
-                font_size: theme.font_size_p + 1.0
-            }
-        }
-        draw_bg +: {
-            color: theme.color_bg_app * 0.82
-            color_hover: theme.color_bg_app * 0.94
-            color_active: theme.color_fg_app
-
-            border_color: theme.color_u_hidden
-            border_color_hover: theme.color_u_hidden
-            border_color_active: theme.color_bg_app * 0.92
-
-            border_color_2: theme.color_u_hidden
-            border_color_2_hover: theme.color_u_hidden
-            border_color_2_active: theme.color_bg_app * 0.92
-        }
-    }
-
     let StudioDock = DockFlat {
         tab_bar +: {
             height: STUDIO_HEADER_HEIGHT
@@ -576,44 +574,6 @@ script_mod! {
                 border_radius: 1.5
                 splitter_pad: 1.5
             }
-        }
-    }
-
-    let TerminalShellPane = View {
-        width: Fill
-        height: Fill
-
-        terminal_dock := StudioDock {
-            width: Fill
-            height: Fill
-
-            tab_bar +: {
-                TerminalTab := TerminalTab {}
-                TerminalCloseableTab := TerminalCloseableTab {}
-                TerminalAddTab := TerminalAddTab {}
-            }
-
-            root := DockTabs {
-                tabs: [@terminal_first @terminal_add]
-                selected: 0
-                closable: true
-            }
-
-            terminal_first := DockTab {
-                name: ""
-                template: @TerminalTab
-                kind: @TerminalFirstPane
-            }
-
-            terminal_add := DockTab {
-                name: "+"
-                template: @TerminalAddTab
-                kind: @TerminalAddPane
-            }
-
-            TerminalFirstPane := TerminalFirstPane {}
-            TerminalPane := TerminalPane {}
-            TerminalAddPane := View {}
         }
     }
 
@@ -762,7 +722,6 @@ script_mod! {
                             LogTab := LogTab {}
                             TerminalTab := TerminalTab {}
                             TerminalCloseableTab := TerminalCloseableTab {}
-                            TerminalAddTab := TerminalAddTab {}
                         }
 
                         root := DockSplitter {
@@ -787,7 +746,7 @@ script_mod! {
                         }
 
                         bottom_panel_tabs := DockTabs {
-                            tabs: [@log_first @bottom_terminal_tab]
+                            tabs: [@log_first @terminal_first]
                             selected: 0
                             closable: false
                         }
@@ -846,10 +805,10 @@ script_mod! {
                             kind: @LogFirstPane
                         }
 
-                        bottom_terminal_tab := DockTab {
+                        terminal_first := DockTab {
                             name: "Terminal"
                             template: @TerminalTab
-                            kind: @TerminalShellPane
+                            kind: @TerminalFirstPane
                         }
 
                         FileTreePane := FileTreePane {}
@@ -862,7 +821,8 @@ script_mod! {
                         LogFirstPane := LogFirstPane {}
                         LogPane := LogPane {}
                         ProfilerPane := ProfilerPane {}
-                        TerminalShellPane := TerminalShellPane {}
+                        TerminalFirstPane := TerminalFirstPane {}
+                        TerminalPane := TerminalPane {}
                     }
                 }
 
