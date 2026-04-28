@@ -1,4 +1,4 @@
-use crate::ai_manager::{AiManager, AiToolExecutionResult};
+use crate::ai_manager::{AiManager, AiTerminalObservation, AiToolExecutionResult};
 use crate::build_manager::BuildManager;
 use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -222,6 +223,7 @@ pub enum HubEvent {
         mount: String,
         change: backend_proto::FileTreeChange,
     },
+    FlushPendingFsEvents,
     FlushPendingFileTreeDiffs,
     MountFsChanged {
         mount: String,
@@ -235,6 +237,8 @@ pub enum HubEvent {
 }
 
 const FS_EVENT_PATH_DEBOUNCE: Duration = Duration::from_millis(80);
+const FS_EVENT_BATCH_FLUSH_DELAY: Duration = Duration::from_millis(80);
+const FS_EVENT_BATCH_RELOAD_THRESHOLD: usize = 256;
 const FS_EVENT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(120);
 const FS_EVENT_HISTORY_PRUNE_INTERVAL: Duration = Duration::from_secs(4);
 const FS_EVENT_HISTORY_RETENTION: Duration = Duration::from_secs(12);
@@ -249,6 +253,13 @@ const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
 
 fn studio_hub_debug_enabled() -> bool {
     env::var_os("MAKEPAD_STUDIO_HUB_DEBUG").is_some()
+}
+
+fn schedule_fs_event_flush(event_tx: Sender<HubEvent>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(FS_EVENT_BATCH_FLUSH_DELAY);
+        let _ = event_tx.send(HubEvent::FlushPendingFsEvents);
+    });
 }
 
 struct UiClient {
@@ -314,6 +325,10 @@ struct AiTerminalInfo {
     path: String,
     name: String,
     terminal_title: String,
+    mode: String,
+    summary: String,
+    is_codex: bool,
+    codex_status: Option<String>,
     cols: u16,
     rows: u16,
     is_tui: bool,
@@ -335,6 +350,10 @@ struct AiTerminalReadResult {
     cursor_row: i32,
     cursor_visible: bool,
     is_tui: bool,
+    mode: String,
+    summary: String,
+    is_codex: bool,
+    codex_status: Option<String>,
     bracketed_paste: bool,
     cursor_keys_application_mode: bool,
     text: String,
@@ -389,6 +408,36 @@ struct GitStatusCacheEntry {
     status: backend_proto::GitStatus,
 }
 
+#[derive(Default)]
+struct FsWatchEventBatch {
+    events: Mutex<HashSet<(String, PathBuf)>>,
+    flush_scheduled: AtomicBool,
+}
+
+impl FsWatchEventBatch {
+    fn clear(&self) {
+        if let Ok(mut events) = self.events.lock() {
+            events.clear();
+        }
+        self.flush_scheduled.store(false, Ordering::Release);
+    }
+
+    fn push(&self, mount: String, path: PathBuf) -> bool {
+        if let Ok(mut events) = self.events.lock() {
+            events.insert((mount, path));
+        }
+        !self.flush_scheduled.swap(true, Ordering::AcqRel)
+    }
+
+    fn take_ready(&self) -> HashSet<(String, PathBuf)> {
+        self.flush_scheduled.store(false, Ordering::Release);
+        self.events
+            .lock()
+            .map(|mut events| std::mem::take(&mut *events))
+            .unwrap_or_default()
+    }
+}
+
 pub struct HubCore {
     rx: Receiver<HubEvent>,
     event_tx: Sender<HubEvent>,
@@ -422,6 +471,7 @@ pub struct HubCore {
     io_worker_pool: WorkerPool,
     git_status_cache: Arc<Mutex<GitStatusCache>>,
     fs_watcher: Option<FileSystemWatcher>,
+    fs_watch_events: Arc<FsWatchEventBatch>,
     fs_event_last_by_path: HashMap<String, Instant>,
     fs_recent_change_at_by_path: HashMap<String, Instant>,
     fs_pending_diffs: HashMap<String, Vec<backend_proto::FileTreeChange>>,
@@ -482,6 +532,7 @@ impl HubCore {
             io_worker_pool: WorkerPool::new(1),
             git_status_cache: Arc::new(Mutex::new(GitStatusCache::default())),
             fs_watcher: None,
+            fs_watch_events: Arc::new(FsWatchEventBatch::default()),
             fs_event_last_by_path: HashMap::new(),
             fs_recent_change_at_by_path: HashMap::new(),
             fs_pending_diffs: HashMap::new(),
@@ -767,8 +818,9 @@ impl HubCore {
             HubEvent::WorkerFileTreeDeltaDone { mount, change } => {
                 self.queue_file_tree_delta_change(mount, change);
             }
+            HubEvent::FlushPendingFsEvents => self.flush_pending_mount_fs_events(),
             HubEvent::FlushPendingFileTreeDiffs => self.flush_pending_file_tree_diffs(),
-            HubEvent::MountFsChanged { mount, path } => self.on_mount_fs_changed(mount, path),
+            HubEvent::MountFsChanged { mount, path } => self.queue_mount_fs_changed(mount, path),
             HubEvent::SuppressMountRootFsEvents { mount, duration } => {
                 self.suppress_mount_root_fs_events(&mount, duration)
             }
@@ -1686,6 +1738,7 @@ impl HubCore {
                         rows,
                         usize::MAX,
                     );
+                    self.process_ai_terminal_observation_for_path(&path);
                 }
                 Err(err) => self.send_ui_error(client_id, err),
             },
@@ -1859,6 +1912,7 @@ impl HubCore {
 
     fn reset_fs_watcher(&mut self) {
         self.fs_watcher.take();
+        self.fs_watch_events.clear();
         self.fs_event_last_by_path.clear();
         self.fs_recent_change_at_by_path.clear();
         self.fs_pending_diffs.clear();
@@ -1882,11 +1936,11 @@ impl HubCore {
         }
 
         let event_tx = self.event_tx.clone();
+        let fs_watch_events = Arc::clone(&self.fs_watch_events);
         match FileSystemWatcher::start(roots, move |event| {
-            let _ = event_tx.send(HubEvent::MountFsChanged {
-                mount: event.mount,
-                path: event.path,
-            });
+            if fs_watch_events.push(event.mount, event.path) {
+                schedule_fs_event_flush(event_tx.clone());
+            }
         }) {
             Ok(watcher) => {
                 self.fs_watcher = Some(watcher);
@@ -1894,6 +1948,66 @@ impl HubCore {
             Err(err) => {
                 eprintln!("[studio2-backend] filesystem watcher unavailable: {}", err);
             }
+        }
+    }
+
+    fn queue_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
+        if self.fs_watch_events.push(mount, path) {
+            schedule_fs_event_flush(self.event_tx.clone());
+        }
+    }
+
+    fn flush_pending_mount_fs_events(&mut self) {
+        let pending = self.fs_watch_events.take_ready();
+        if pending.is_empty() {
+            return;
+        }
+
+        let mut by_mount: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for (mount, path) in pending {
+            by_mount.entry(mount).or_default().push(path);
+        }
+        for (mount, paths) in by_mount {
+            self.flush_pending_mount_fs_events_for_mount(mount, paths);
+        }
+    }
+
+    fn flush_pending_mount_fs_events_for_mount(&mut self, mount: String, paths: Vec<PathBuf>) {
+        let mut paths_to_process = Vec::with_capacity(paths.len());
+        let mut saw_git_status_change = false;
+        for path in paths {
+            let Some(virtual_path) = self.mount_path_to_virtual(&mount, &path) else {
+                paths_to_process.push(path);
+                continue;
+            };
+            if self.is_git_status_watch_virtual_path(&mount, &virtual_path) {
+                saw_git_status_change = true;
+                continue;
+            }
+            if self.should_ignore_fs_watch_virtual_path(&mount, &virtual_path) {
+                continue;
+            }
+            paths_to_process.push(path);
+        }
+
+        if saw_git_status_change {
+            self.invalidate_git_status_cache_for_mount(&mount);
+            self.reload_mount_file_tree_broadcast(&mount);
+        }
+
+        if paths_to_process.is_empty() {
+            return;
+        }
+        paths_to_process.sort();
+        paths_to_process.dedup();
+
+        if paths_to_process.len() > FS_EVENT_BATCH_RELOAD_THRESHOLD {
+            self.process_mount_fs_storm(&mount);
+            return;
+        }
+
+        for path in paths_to_process {
+            self.process_mount_fs_changed(mount.clone(), path);
         }
     }
 
@@ -1936,7 +2050,7 @@ impl HubCore {
         });
     }
 
-    fn on_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
+    fn process_mount_fs_changed(&mut self, mount: String, path: PathBuf) {
         let now = Instant::now();
         let path_is_file = path.is_file();
         let path_is_dir = path.is_dir();
@@ -1971,6 +2085,7 @@ impl HubCore {
                 return;
             }
             self.record_recent_fs_change(mount.clone(), now);
+            self.process_ai_path_change(&mount, &mount);
             // Some watcher implementations only report "mount root changed".
             // Broadcast a mount-level FileChanged so UI can refresh open tabs.
             self.broadcast_ui_message(HubToClient::FileChanged {
@@ -1984,6 +2099,7 @@ impl HubCore {
             return;
         }
         self.record_recent_fs_change(virtual_path.clone(), now);
+        self.process_ai_path_change(&mount, &virtual_path);
         if Self::is_mount_root_splash_virtual_path(&mount, &virtual_path) {
             self.request_mount_root_splash_reload(&mount);
         }
@@ -2011,6 +2127,17 @@ impl HubCore {
         let (path, virtual_path) =
             self.collapse_removed_path_to_missing_ancestor(&mount, path, virtual_path);
         self.enqueue_file_tree_delta(&mount, &virtual_path, path, now);
+    }
+
+    fn process_mount_fs_storm(&mut self, mount: &str) {
+        let now = Instant::now();
+        self.record_recent_fs_change(mount.to_string(), now);
+        self.process_ai_path_change(mount, mount);
+        self.broadcast_ui_message(HubToClient::FileChanged {
+            path: mount.to_string(),
+        });
+        self.maybe_revive_mount_root_splash_from_fs_fallback(mount);
+        self.reload_mount_file_tree_broadcast(mount);
     }
 
     fn suppress_mount_root_fs_events(&mut self, mount: &str, duration: Duration) {
@@ -3354,6 +3481,7 @@ impl HubCore {
             self.set_terminal_bell_state(&path, true);
         }
         self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
+        self.process_ai_terminal_observation_for_path(&path);
         // Persist terminal history off the dispatch thread so fs I/O cannot
         // block terminal framebuffer delivery.
         let history_vfs = self.vfs.clone_for_search();
@@ -3386,16 +3514,25 @@ impl HubCore {
                 };
             }
             self.push_terminal_frame_updates(&path, false);
+            self.process_ai_terminal_observation_for_path(&path);
         }
     }
 
     fn on_terminal_exited(&mut self, path: String, exit_code: i32) {
-        self.terminal_manager.remove_terminal(&path);
+        let mount = self.terminal_manager.remove_terminal(&path);
         self.terminal_sessions.remove(&path);
         self.broadcast_ui_message(HubToClient::TerminalExited {
-            path,
+            path: path.clone(),
             code: exit_code,
         });
+        if let Some(mount) = mount {
+            if let Some(state) = self
+                .ai_manager
+                .process_terminal_closed(&mount, &path, exit_code)
+            {
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+        }
     }
 
     fn ensure_terminal_session_open(
@@ -3510,6 +3647,7 @@ impl HubCore {
             self.terminal_manager
                 .send_input(&path, format!("{}\n", command).into_bytes())?;
         }
+        self.process_ai_terminal_observation_for_path(&path);
         Ok(self.ai_terminal_info(&path)?.serialize_json())
     }
 
@@ -3686,14 +3824,12 @@ impl HubCore {
         Ok(terminals.serialize_json())
     }
 
-    fn read_ai_terminal(
+    fn ai_terminal_observation(
         &self,
-        mount: &str,
         path: &str,
         rows: Option<u16>,
         top_row: Option<usize>,
-    ) -> Result<String, String> {
-        self.ensure_ai_terminal_access(mount, path)?;
+    ) -> Result<AiTerminalObservation, String> {
         let session = self
             .terminal_sessions
             .get(path)
@@ -3705,21 +3841,87 @@ impl HubCore {
             top_row.unwrap_or(usize::MAX),
             session.frame_seq,
         );
-        Ok(AiTerminalReadResult {
+        Ok(AiTerminalObservation {
             path: path.to_string(),
-            name: Self::terminal_display_name(path),
             terminal_title: session.terminal.title.clone(),
             cols: frame.cols,
             rows: frame.rows,
             top_row: frame.top_row,
             total_lines: frame.total_lines,
+            is_tui: frame.is_tui,
+            text: terminal_framebuffer_text(&frame),
+        })
+    }
+
+    fn process_ai_terminal_observation_for_path(&mut self, path: &str) {
+        let Some(mount) = self
+            .terminal_manager
+            .mount_for_path(path)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Ok(observation) = self.ai_terminal_observation(path, None, Some(usize::MAX)) else {
+            return;
+        };
+        if let Some(state) = self
+            .ai_manager
+            .process_terminal_observation(&mount, observation)
+        {
+            self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+        }
+    }
+
+    fn process_ai_path_change(&mut self, mount: &str, virtual_path: &str) {
+        if let Some(state) = self.ai_manager.process_path_change(mount, virtual_path) {
+            self.broadcast_ui_message(HubToClient::AiMountState {
+                mount: mount.to_string(),
+                state,
+            });
+        }
+    }
+
+    fn read_ai_terminal(
+        &self,
+        mount: &str,
+        path: &str,
+        rows: Option<u16>,
+        top_row: Option<usize>,
+    ) -> Result<String, String> {
+        self.ensure_ai_terminal_access(mount, path)?;
+        let observation = self.ai_terminal_observation(path, rows, top_row)?;
+        let (mode, is_codex, summary, codex_status) =
+            AiManager::terminal_mode_and_summary(&observation.terminal_title, &observation.text);
+        let session = self
+            .terminal_sessions
+            .get(path)
+            .ok_or_else(|| format!("unknown terminal: {}", path))?;
+        let frame = terminal_framebuffer_from_terminal(
+            &session.terminal,
+            observation.cols,
+            observation.rows,
+            observation.top_row,
+            session.frame_seq,
+        );
+        Ok(AiTerminalReadResult {
+            path: path.to_string(),
+            name: Self::terminal_display_name(path),
+            terminal_title: observation.terminal_title,
+            cols: observation.cols,
+            rows: observation.rows,
+            top_row: observation.top_row,
+            total_lines: observation.total_lines,
             cursor_col: frame.cursor_col,
             cursor_row: frame.cursor_row,
             cursor_visible: frame.cursor_visible,
-            is_tui: frame.is_tui,
+            is_tui: observation.is_tui,
+            mode: mode.to_string(),
+            summary,
+            is_codex,
+            codex_status,
             bracketed_paste: frame.bracketed_paste,
             cursor_keys_application_mode: frame.cursor_keys_application_mode,
-            text: terminal_framebuffer_text(&frame),
+            text: observation.text,
         }
         .serialize_json())
     }
@@ -3786,8 +3988,11 @@ impl HubCore {
             if bytes.is_empty() {
                 self.terminal_manager.send_input(path, submit_bytes)?;
             } else {
-                self.terminal_manager
-                    .send_input_delayed(path, submit_bytes, AI_TERMINAL_SUBMIT_DELAY)?;
+                self.terminal_manager.send_input_delayed(
+                    path,
+                    submit_bytes,
+                    AI_TERMINAL_SUBMIT_DELAY,
+                )?;
             }
             len
         } else {
@@ -3847,10 +4052,17 @@ impl HubCore {
             .terminal_sessions
             .get(path)
             .ok_or_else(|| format!("unknown terminal: {}", path))?;
+        let observation = self.ai_terminal_observation(path, None, Some(usize::MAX))?;
+        let (mode, is_codex, summary, codex_status) =
+            AiManager::terminal_mode_and_summary(&observation.terminal_title, &observation.text);
         Ok(AiTerminalInfo {
             path: path.to_string(),
             name: Self::terminal_display_name(path),
             terminal_title: session.terminal.title.clone(),
+            mode: mode.to_string(),
+            summary,
+            is_codex,
+            codex_status,
             cols: session.cols,
             rows: session.rows,
             is_tui: session.terminal.modes.alt_screen
@@ -5888,6 +6100,7 @@ mod tests {
             path: dir.path().to_path_buf(),
         });
 
+        pump_core(&mut core, Duration::from_millis(400));
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
         assert!(
             !messages.iter().any(|msg| {
@@ -5917,6 +6130,7 @@ mod tests {
             path: dir.path().to_path_buf(),
         });
 
+        pump_core(&mut core, Duration::from_millis(400));
         let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
         assert!(
             !messages.iter().any(|msg| {
@@ -6087,6 +6301,56 @@ mod tests {
                 )
             }),
             "expected Removed diff for repo/src/nested"
+        );
+    }
+
+    #[test]
+    fn raw_fs_event_storm_collapses_before_worker_deltas() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        for index in 0..(FS_EVENT_BATCH_RELOAD_THRESHOLD + 16) {
+            fs::write(
+                src_dir.join(format!("generated_{index}.rs")),
+                format!("pub fn generated_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+
+        let (mut core, ui_rx) = test_core_with_ui(dir.path());
+        for index in 0..(FS_EVENT_BATCH_RELOAD_THRESHOLD + 16) {
+            core.handle_event(HubEvent::MountFsChanged {
+                mount: "repo".to_string(),
+                path: src_dir.join(format!("generated_{index}.rs")),
+            });
+        }
+
+        pump_core(&mut core, Duration::from_millis(900));
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(350));
+        let file_tree_count = messages
+            .iter()
+            .filter(|msg| matches!(msg, HubToClient::FileTree { mount, .. } if mount == "repo"))
+            .count();
+        let file_tree_diff_count = messages
+            .iter()
+            .filter(|msg| matches!(msg, HubToClient::FileTreeDiff { mount, .. } if mount == "repo"))
+            .count();
+        let file_changed_count = messages
+            .iter()
+            .filter(|msg| matches!(msg, HubToClient::FileChanged { path } if path == "repo"))
+            .count();
+
+        assert_eq!(
+            file_tree_count, 1,
+            "expected one full tree reload for raw watcher storm"
+        );
+        assert_eq!(
+            file_tree_diff_count, 0,
+            "expected raw watcher storm to avoid per-path worker diffs"
+        );
+        assert_eq!(
+            file_changed_count, 1,
+            "expected one mount-level editor refresh signal"
         );
     }
 
