@@ -22,7 +22,6 @@ const DEFAULT_LOCAL_BASE_URL: &str = "http://10.0.0.217:8080/v1/chat/completions
 const DEFAULT_LOCAL_MODEL: &str = "";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 const DEFAULT_MAX_TOKENS: u32 = 2048;
-const MAX_TOOL_ROUNDS: u32 = 8;
 const DEFAULT_READ_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const DEFAULT_SEARCH_LIMIT: usize = 100;
@@ -37,6 +36,8 @@ const MAX_BASH_TIMEOUT_SECS: u64 = 120;
 const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../ai_mgr.md");
 const AI_CHAT_PERSIST_FS_SUPPRESS: Duration = Duration::from_millis(1_500);
 const AI_TASK_EVENT_PREFIX: &str = "TASK EVENT:";
+const AI_WAITING_MESSAGE_PREFIX: &str = "WAITING:";
+const AI_TERMINAL_OBSERVATION_PREFIX: &str = "TERMINAL OBSERVATION:";
 const AI_TERMINAL_EXCERPT_MAX_CHARS: usize = 480;
 const AI_TERMINAL_EXCERPT_MAX_LINES: usize = 10;
 
@@ -98,9 +99,9 @@ struct RunningAgent {
     status: String,
     pending_request_id: Option<LiveId>,
     pending_tool_batch: bool,
+    pending_tool_message_start: Option<usize>,
     cancel_requested: bool,
     run_token: u64,
-    tool_rounds: u32,
     messages: Vec<AiMessage>,
     history: Vec<ConversationItem>,
     updated_at: f64,
@@ -484,9 +485,9 @@ impl AiManager {
                 status: "ready".to_string(),
                 pending_request_id: None,
                 pending_tool_batch: false,
+                pending_tool_message_start: None,
                 cancel_requested: false,
                 run_token: 0,
-                tool_rounds: 0,
                 messages: Vec::new(),
                 history: Vec::new(),
                 updated_at: now_seconds(),
@@ -584,9 +585,9 @@ impl AiManager {
             });
             agent.pending_request_id = None;
             agent.pending_tool_batch = false;
+            agent.pending_tool_message_start = None;
             agent.cancel_requested = false;
             agent.run_token = run_token;
-            agent.tool_rounds = 0;
             agent.status = "thinking...".to_string();
             agent.messages.push(AiMessage {
                 role: AiMessageRole::Thinking,
@@ -621,6 +622,7 @@ impl AiManager {
                 agent.cancel_requested = true;
                 agent.status = "cancelling...".to_string();
             } else {
+                agent.pending_tool_message_start = None;
                 agent.cancel_requested = false;
                 agent.status = "cancelled".to_string();
             }
@@ -648,6 +650,7 @@ impl AiManager {
         };
 
         let mut queue = Vec::new();
+        let mut chat_updates = Vec::new();
         let mut changed = false;
         {
             let mount_state = self.mounts.get_mut(mount)?;
@@ -664,6 +667,12 @@ impl AiManager {
                 })
                 .unwrap_or(true)
             {
+                changed = true;
+            }
+
+            let created_observed_task =
+                Self::ensure_observed_codex_terminal_task(mount_state, &snapshot);
+            if created_observed_task {
                 changed = true;
             }
 
@@ -693,12 +702,30 @@ impl AiManager {
                 );
                 task.last_codex_status = snapshot.codex_status.clone();
 
-                if previous_mode != task.last_terminal_mode
+                if created_observed_task
+                    || previous_mode != task.last_terminal_mode
                     || previous_summary != task.last_terminal_summary
                     || previous_excerpt != task.last_terminal_excerpt
                     || previous_codex_status != task.last_codex_status
                 {
                     changed = true;
+                }
+                if created_observed_task
+                    || previous_mode != task.last_terminal_mode
+                    || previous_summary != task.last_terminal_summary
+                    || previous_excerpt != task.last_terminal_excerpt
+                    || previous_codex_status != task.last_codex_status
+                {
+                    chat_updates.push((
+                        task.agent_id,
+                        format_terminal_observation_message(
+                            &snapshot.path,
+                            snapshot.mode,
+                            &snapshot.summary,
+                            snapshot.codex_status.as_deref(),
+                            &task.last_terminal_excerpt,
+                        ),
+                    ));
                 }
 
                 if previous_mode != "needs-attention" && snapshot.mode == "needs-attention" {
@@ -721,6 +748,14 @@ impl AiManager {
                     ));
                 }
             }
+
+            for (agent_id, message) in chat_updates {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    upsert_terminal_observation_message(&mut agent.messages, &message);
+                    upsert_terminal_observation_history(&mut agent.history, &message);
+                    agent.updated_at = now_seconds();
+                }
+            }
         }
 
         for (task_id, signature, reason) in queue {
@@ -729,6 +764,70 @@ impl AiManager {
 
         let dispatched = self.dispatch_next_ai_manager_followup(mount);
         if changed || dispatched {
+            Some(self.snapshot(mount))
+        } else {
+            None
+        }
+    }
+
+    pub fn process_terminal_input(&mut self, mount: &str, path: &str) -> Option<AiMountState> {
+        self.ensure_mount_entry(mount);
+        let mut changed = false;
+        {
+            let mount_state = self.mounts.get_mut(mount)?;
+            let path_lowered = path.to_lowercase();
+            let (is_codex, summary, snapshot) = {
+                let snapshot = mount_state
+                    .terminal_snapshots
+                    .entry(path.to_string())
+                    .or_insert_with(|| AiTerminalSnapshot {
+                        path: path.to_string(),
+                        mode: "input",
+                        summary: String::new(),
+                        visible_text: String::new(),
+                        is_codex: path_lowered.contains("codex"),
+                        codex_status: None,
+                    });
+                let is_codex = snapshot.is_codex || path_lowered.contains("codex");
+                let summary = if is_codex {
+                    "Input sent to Codex"
+                } else {
+                    "Input sent to terminal"
+                };
+                if snapshot.mode != "input"
+                    || snapshot.summary != summary
+                    || snapshot.is_codex != is_codex
+                    || snapshot.codex_status.is_some()
+                {
+                    snapshot.mode = "input";
+                    snapshot.summary = summary.to_string();
+                    snapshot.is_codex = is_codex;
+                    snapshot.codex_status = None;
+                    changed = true;
+                }
+                (is_codex, summary.to_string(), snapshot.clone())
+            };
+
+            if is_codex && Self::ensure_observed_codex_terminal_task(mount_state, &snapshot) {
+                changed = true;
+            }
+
+            for task in mount_state
+                .tasks
+                .iter_mut()
+                .filter(|task| task.terminal_path.as_deref() == Some(path))
+            {
+                if task.last_terminal_mode != "input" || task.last_terminal_summary != summary {
+                    changed = true;
+                }
+                task.status = "watching".to_string();
+                task.last_terminal_mode = "input".to_string();
+                task.last_terminal_summary = summary.clone();
+                task.last_codex_status = None;
+            }
+        }
+
+        if changed {
             Some(self.snapshot(mount))
         } else {
             None
@@ -932,34 +1031,47 @@ impl AiManager {
         }
 
         let mut continue_loop = false;
+        let waiting_message = if results.len() == 1 {
+            format_terminal_waiting_message(&results[0])
+        } else {
+            None
+        };
         if let Some(agent) = self
             .mounts
             .get_mut(mount)
             .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
         {
             agent.pending_tool_batch = false;
+            let pending_tool_message_start = agent.pending_tool_message_start.take();
             for result in &results {
                 agent.history.push(ConversationItem::ToolResult {
                     tool_call_id: result.tool_call_id.clone(),
                     content: result.content.clone(),
                 });
-                agent.messages.push(AiMessage {
-                    role: AiMessageRole::ToolResult,
-                    text: format_tool_result_message(result),
-                });
+                if waiting_message.is_none() {
+                    agent.messages.push(AiMessage {
+                        role: AiMessageRole::ToolResult,
+                        text: format_tool_result_message(result),
+                    });
+                }
+            }
+            if let Some(waiting_message) = waiting_message.clone() {
+                if let Some(start) = pending_tool_message_start {
+                    if start <= agent.messages.len() {
+                        agent.messages.truncate(start);
+                    } else {
+                        trim_terminal_waiting_tail(&mut agent.messages);
+                    }
+                } else {
+                    trim_terminal_waiting_tail(&mut agent.messages);
+                }
+                upsert_terminal_waiting_message(&mut agent.messages, waiting_message);
             }
             agent.updated_at = now_seconds();
             if agent.cancel_requested {
                 agent.cancel_requested = false;
                 agent.status = "cancelled".to_string();
-            } else if agent.tool_rounds >= MAX_TOOL_ROUNDS {
-                self.set_agent_error(
-                    mount,
-                    agent_id,
-                    format!("tool loop exceeded {} rounds", MAX_TOOL_ROUNDS),
-                );
             } else {
-                agent.tool_rounds += 1;
                 agent.status = "thinking...".to_string();
                 continue_loop = true;
             }
@@ -1044,6 +1156,18 @@ impl AiManager {
                 ),
             );
             return Some((mount.clone(), self.snapshot(&mount)));
+        }
+        if let Ok(turn) = extract_assistant_turn(&body) {
+            let in_flight = self.inflight.remove(&request_id)?;
+            return self
+                .complete_assistant_turn(
+                    &mount,
+                    agent_id,
+                    in_flight.run_token,
+                    turn,
+                    Some(in_flight.stream.visible),
+                )
+                .map(|state| (mount.clone(), state));
         }
         if let Err(error) = self.process_stream_data(request_id, &body, true) {
             self.inflight.remove(&request_id);
@@ -1222,6 +1346,8 @@ impl AiManager {
         visible: Option<StreamVisibleState>,
     ) -> Option<AiMountState> {
         let mut tool_batch: Option<(PathBuf, Vec<ToolCallRecord>)> = None;
+        let mut empty_assistant_response = false;
+        let mut retry_empty_terminal_response = false;
         if let Some(mount_state) = self.mounts.get_mut(mount) {
             if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
                 if agent.run_token != run_token {
@@ -1229,6 +1355,18 @@ impl AiManager {
                 }
                 agent.pending_request_id = None;
                 agent.updated_at = now_seconds();
+                let visible_message_start = visible
+                    .as_ref()
+                    .and_then(|visible| {
+                        [
+                            visible.thinking_message_index,
+                            visible.assistant_message_index,
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                    })
+                    .unwrap_or(agent.messages.len());
 
                 if let Some(mut visible) = visible {
                     if turn.thinking_text.trim().is_empty() {
@@ -1273,28 +1411,43 @@ impl AiManager {
                     }
                 }
 
-                agent.history.push(ConversationItem::Assistant {
-                    text: turn.text.clone(),
-                    tool_calls: turn.tool_calls.clone(),
-                });
-
                 if turn.tool_calls.is_empty() {
+                    agent.pending_tool_message_start = None;
                     if turn.text.trim().is_empty() && turn.thinking_text.trim().is_empty() {
-                        self.set_agent_error(
-                            mount,
-                            agent_id,
-                            "AI backend returned an empty assistant response".to_string(),
-                        );
+                        if let Some(waiting_message) =
+                            last_terminal_waiting_message_from_history(&agent.history)
+                        {
+                            trim_terminal_waiting_tail(&mut agent.messages);
+                            upsert_terminal_waiting_message(&mut agent.messages, waiting_message);
+                            agent.status = "thinking...".to_string();
+                            retry_empty_terminal_response = true;
+                        } else {
+                            empty_assistant_response = true;
+                        }
                     } else {
+                        if !turn.text.trim().is_empty() {
+                            agent.history.push(ConversationItem::Assistant {
+                                text: turn.text.clone(),
+                                tool_calls: Vec::new(),
+                            });
+                        }
                         agent.status = "ready".to_string();
                     }
                 } else {
+                    agent.history.push(ConversationItem::Assistant {
+                        text: turn.text.clone(),
+                        tool_calls: turn.tool_calls.clone(),
+                    });
+                    let compact_waiting_read =
+                        turn.tool_calls.len() == 1 && turn.tool_calls[0].name == "read_terminal";
                     for tool_call in &turn.tool_calls {
                         agent.messages.push(AiMessage {
                             role: AiMessageRole::ToolCall,
                             text: format_tool_call_message(tool_call),
                         });
                     }
+                    agent.pending_tool_message_start =
+                        compact_waiting_read.then_some(visible_message_start);
                     agent.pending_tool_batch = true;
                     agent.status = if turn.tool_calls.len() == 1 {
                         format!("running {}...", turn.tool_calls[0].name)
@@ -1307,6 +1460,16 @@ impl AiManager {
                     ));
                 }
             }
+        }
+        if empty_assistant_response {
+            self.set_agent_error(
+                mount,
+                agent_id,
+                "AI backend returned an empty assistant response".to_string(),
+            );
+        }
+        if retry_empty_terminal_response {
+            self.start_model_request(mount, agent_id, run_token);
         }
         if let Some((root_path, tool_calls)) = tool_batch {
             self.spawn_tool_execution(
@@ -1450,9 +1613,9 @@ impl AiManager {
                 status: "ready".to_string(),
                 pending_request_id: None,
                 pending_tool_batch: false,
+                pending_tool_message_start: None,
                 cancel_requested: false,
                 run_token: 0,
-                tool_rounds: 0,
                 messages: Vec::new(),
                 history: Vec::new(),
                 updated_at: now_seconds(),
@@ -1512,41 +1675,48 @@ impl AiManager {
         }
         request.set_string_body(body);
 
-        match self.runtime.http_start(request_id, request) {
-            Ok(()) => {
-                self.inflight.insert(
-                    request_id,
-                    InFlightRequest {
-                        mount: mount.to_string(),
-                        agent_id,
-                        run_token,
-                        stream: StreamingTurnState::default(),
-                    },
-                );
-                if let Some(agent) = self
-                    .mounts
-                    .get_mut(mount)
-                    .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
-                {
-                    if agent.run_token == run_token {
-                        let thinking_message_index =
-                            agent.messages.len().checked_sub(1).filter(|&index| {
-                                agent.messages.get(index).is_some_and(|message| {
-                                    matches!(message.role, AiMessageRole::Thinking)
-                                        && message.text.is_empty()
-                                })
-                            });
-                        agent.pending_request_id = Some(request_id);
-                        agent.pending_tool_batch = false;
-                        agent.updated_at = now_seconds();
-                        if let Some(in_flight) = self.inflight.get_mut(&request_id) {
-                            in_flight.stream.visible.thinking_message_index =
-                                thinking_message_index;
-                        }
-                    }
+        let Some(thinking_message_index) = self
+            .mounts
+            .get_mut(mount)
+            .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+            .and_then(|agent| {
+                if agent.run_token != run_token {
+                    return None;
                 }
-            }
+                let thinking_message_index = agent.messages.len().checked_sub(1).filter(|&index| {
+                    agent.messages.get(index).is_some_and(|message| {
+                        matches!(message.role, AiMessageRole::Thinking) && message.text.is_empty()
+                    })
+                });
+                agent.pending_request_id = Some(request_id);
+                agent.pending_tool_batch = false;
+                agent.updated_at = now_seconds();
+                Some(thinking_message_index)
+            })
+        else {
+            return;
+        };
+
+        self.inflight.insert(
+            request_id,
+            InFlightRequest {
+                mount: mount.to_string(),
+                agent_id,
+                run_token,
+                stream: StreamingTurnState {
+                    visible: StreamVisibleState {
+                        thinking_message_index,
+                        assistant_message_index: None,
+                    },
+                    ..StreamingTurnState::default()
+                },
+            },
+        );
+
+        match self.runtime.http_start(request_id, request) {
+            Ok(()) => {}
             Err(err) => {
+                self.inflight.remove(&request_id);
                 self.set_agent_error(mount, agent_id, format!("request failed: {:?}", err));
             }
         }
@@ -1661,6 +1831,54 @@ impl AiManager {
         true
     }
 
+    fn ensure_observed_codex_terminal_task(
+        mount_state: &mut MountAgents,
+        snapshot: &AiTerminalSnapshot,
+    ) -> bool {
+        if !snapshot.is_codex {
+            return false;
+        }
+        if mount_state
+            .tasks
+            .iter()
+            .any(|task| task.terminal_path.as_deref() == Some(snapshot.path.as_str()))
+        {
+            return false;
+        }
+        let Some(agent_id) = mount_state.active_agent_id else {
+            return false;
+        };
+        let task_id = mount_state.next_task_id.max(1);
+        mount_state.next_task_id = task_id.saturating_add(1);
+        mount_state.tasks.push(AiTrackedTask {
+            id: task_id,
+            agent_id,
+            goal: format!(
+                "Observe Codex terminal `{}`",
+                terminal_display_name(&snapshot.path)
+            ),
+            terminal_path: Some(snapshot.path.clone()),
+            expected_paths: Vec::new(),
+            touched_paths: Vec::new(),
+            status: if snapshot.mode == "needs-attention" {
+                "needs-attention".to_string()
+            } else if snapshot.mode == "done" || snapshot.mode == "exited" {
+                "done".to_string()
+            } else {
+                "observing".to_string()
+            },
+            last_terminal_mode: snapshot.mode.to_string(),
+            last_terminal_summary: snapshot.summary.clone(),
+            last_terminal_excerpt: Self::truncate_terminal_excerpt(
+                &snapshot.visible_text,
+                AI_TERMINAL_EXCERPT_MAX_CHARS,
+                AI_TERMINAL_EXCERPT_MAX_LINES,
+            ),
+            last_codex_status: snapshot.codex_status.clone(),
+        });
+        true
+    }
+
     fn queue_ai_task_followup(
         &mut self,
         mount: &str,
@@ -1736,7 +1954,7 @@ impl AiManager {
             prompt.push_str("\n```\n");
         }
         prompt.push_str(
-            "\nContinue supervising this delegated terminal task. If it is finished, tell the user briefly. If more work is needed, use terminal tools instead of guessing.",
+            "\nContinue supervising this observed terminal task. If it is finished, tell the user briefly. If more work is needed, use terminal tools instead of guessing.",
         );
         Some((task.agent_id, prompt))
     }
@@ -1829,15 +2047,32 @@ impl AiManager {
     ) -> (&'static str, bool, String, Option<String>) {
         let lines: Vec<String> = visible_text.lines().map(|line| line.to_string()).collect();
         let lowered = format!("{}\n{}", title, visible_text).to_lowercase();
+        let codex_status = Self::detect_codex_status_line(&lines);
+        let codex_prompt_visible = lines
+            .iter()
+            .rev()
+            .take(6)
+            .any(|line| Self::is_codex_prompt_line(line));
+        let strong_codex_prompt_visible = lines
+            .iter()
+            .rev()
+            .take(6)
+            .any(|line| Self::is_strong_codex_prompt_line(line));
+        let codex_prompt_has_draft = lines
+            .iter()
+            .rev()
+            .take(6)
+            .any(|line| Self::is_codex_prompt_line(line) && Self::codex_prompt_has_draft(line));
         let is_codex = lowered.contains("codex")
             || lowered.contains("apply_patch")
             || lowered.contains("exec_command")
-            || lowered.contains("functions.exec_command");
-        let codex_status = if is_codex {
-            Self::detect_codex_status_line(&lines)
-        } else {
-            None
-        };
+            || lowered.contains("functions.exec_command")
+            || lowered.contains("esc to interrupt")
+            || lowered.contains("left \u{00b7}")
+            || lowered.contains("gpt-5")
+            || codex_status.is_some()
+            || strong_codex_prompt_visible;
+        let codex_status = if is_codex { codex_status } else { None };
         let needs_attention = lowered.contains("permission denied")
             || lowered.contains("sandbox")
             || lowered.contains("panic")
@@ -1862,23 +2097,19 @@ impl AiManager {
             || lowered.contains("running")
             || lowered.contains("patching")
             || codex_status.is_some();
-        let codex_prompt_visible = is_codex
-            && lines
-                .iter()
-                .rev()
-                .take(6)
-                .any(|line| Self::is_codex_prompt_line(line));
 
         let mode = if needs_attention {
             "needs-attention"
+        } else if working {
+            "working"
+        } else if is_codex && codex_prompt_has_draft {
+            "awaiting-input"
         } else if awaiting_input {
             "awaiting-input"
         } else if is_codex && codex_prompt_visible && codex_status.is_none() {
             "done"
         } else if visible_text.trim().is_empty() {
             "starting"
-        } else if working {
-            "working"
         } else {
             "idle"
         };
@@ -1898,10 +2129,34 @@ impl AiManager {
             || trimmed.contains("Enter a prompt...")
     }
 
+    fn is_strong_codex_prompt_line(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        trimmed.starts_with('\u{203a}') || trimmed.contains("Enter a prompt...")
+    }
+
+    fn codex_prompt_has_draft(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix('\u{203a}') {
+            rest
+        } else if let Some(rest) = trimmed.strip_prefix('>') {
+            rest
+        } else {
+            return false;
+        };
+        let rest = rest.trim();
+        !rest.is_empty() && !rest.contains("Enter a prompt...")
+    }
+
     fn detect_codex_status_line(lines: &[String]) -> Option<String> {
         lines.iter().rev().take(8).find_map(|line| {
             let trimmed = line.trim();
-            if trimmed.contains("Working (") && trimmed.contains("esc to interrupt") {
+            let lowered = trimmed.to_lowercase();
+            if (trimmed.contains("Working (") && trimmed.contains("esc to interrupt"))
+                || (lowered.contains("working")
+                    && (lowered.contains("esc to interrupt")
+                        || lowered.contains("gpt-")
+                        || lowered.contains("codex")))
+            {
                 Some(trimmed.to_string())
             } else {
                 None
@@ -2098,11 +2353,11 @@ impl AiManager {
                     status,
                     pending_request_id: None,
                     pending_tool_batch: false,
+                    pending_tool_message_start: None,
                     cancel_requested: false,
                     run_token: 0,
-                    tool_rounds: 0,
                     messages,
-                    history: chat.history,
+                    history: sanitize_conversation_history(chat.history),
                     updated_at: chat.updated_at,
                 },
             );
@@ -2157,7 +2412,7 @@ impl AiManager {
                 pending: agent.is_pending(),
                 updated_at: agent.updated_at,
                 messages: agent.messages.clone(),
-                history: agent.history.clone(),
+                history: sanitize_conversation_history(agent.history.clone()),
             };
             let path = ai_chat_file_path(Path::new(&mount_state.root_path), *agent_id);
             fs::write(&path, persisted.serialize_json())
@@ -2203,6 +2458,7 @@ impl AiManager {
                 self.inflight.remove(&request_id);
             }
             agent.pending_tool_batch = false;
+            agent.pending_tool_message_start = None;
             agent.cancel_requested = false;
             agent.status = error.clone();
             agent.updated_at = now_seconds();
@@ -2277,6 +2533,9 @@ fn build_request_body(
                 append_plain_message(&mut out, &mut first_message, "user", text);
             }
             ConversationItem::Assistant { text, tool_calls } => {
+                if is_empty_assistant_turn(text, tool_calls) {
+                    continue;
+                }
                 if tool_calls.is_empty() {
                     append_plain_message(&mut out, &mut first_message, "assistant", text);
                 } else {
@@ -2342,6 +2601,22 @@ fn render_system_prompt(mount: &str, root_path: &str) -> String {
         .replace("{{root_path}}", root_path)
         .trim()
         .to_string()
+}
+
+fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
+    history
+        .into_iter()
+        .filter(|item| match item {
+            ConversationItem::Assistant { text, tool_calls } => {
+                !is_empty_assistant_turn(text, tool_calls)
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
+    text.trim().is_empty() && tool_calls.is_empty()
 }
 
 fn append_plain_message(out: &mut String, first_message: &mut bool, role: &str, content: &str) {
@@ -2756,6 +3031,7 @@ fn tool_open_editor(
     args: OpenEditorArgs,
 ) -> Result<String, String> {
     let path = resolve_workspace_path(root_path, &args.path)?;
+    reject_skipped_workspace_path(root_path, &path, &args.path)?;
     let metadata =
         fs::metadata(&path).map_err(|err| format!("failed to stat '{}': {}", args.path, err))?;
     if !metadata.is_file() {
@@ -2799,6 +3075,7 @@ fn tool_observe_filesystem(
                     )
                 })?;
                 let path = resolve_workspace_path(&root, trimmed)?;
+                reject_skipped_workspace_path(&root, &path, trimmed)?;
                 if path == root {
                     None
                 } else {
@@ -2917,6 +3194,7 @@ fn request_hub_tool(
 
 fn tool_read_file(root_path: &Path, args: ReadFileArgs) -> Result<String, String> {
     let path = resolve_workspace_path(root_path, &args.path)?;
+    reject_skipped_workspace_path(root_path, &path, &args.path)?;
     let bytes =
         fs::read(&path).map_err(|err| format!("failed to read '{}': {}", args.path, err))?;
     if bytes.len() > MAX_FILE_BYTES {
@@ -2963,6 +3241,9 @@ fn tool_read_file(root_path: &Path, args: ReadFileArgs) -> Result<String, String
 fn tool_list_files(root_path: &Path, args: ListFilesArgs) -> Result<String, String> {
     let path_arg = args.path.unwrap_or_else(|| ".".to_string());
     let path = resolve_workspace_path(root_path, &path_arg)?;
+    if should_skip_workspace_path(root_path, &path) {
+        return Ok("No files found.".to_string());
+    }
     let limit = args.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, 500);
     let mut entries = Vec::new();
     collect_paths(root_path, &path, &mut entries, limit)?;
@@ -2983,6 +3264,9 @@ fn tool_search_text(root_path: &Path, args: SearchTextArgs) -> Result<String, St
     if pattern.is_empty() {
         return Err("search pattern cannot be empty".to_string());
     }
+    if should_skip_workspace_path(root_path, &search_root) {
+        return Ok(format!("No matches found for '{}'.", pattern));
+    }
     let limit = args.limit.unwrap_or(DEFAULT_SEARCH_LIMIT).clamp(1, 500);
     let mut matches = Vec::new();
     search_paths(root_path, &search_root, pattern, &mut matches, limit)?;
@@ -2998,6 +3282,7 @@ fn tool_search_text(root_path: &Path, args: SearchTextArgs) -> Result<String, St
 
 fn tool_write_file(root_path: &Path, args: WriteFileArgs) -> Result<String, String> {
     let path = resolve_workspace_path(root_path, &args.path)?;
+    reject_skipped_workspace_path(root_path, &path, &args.path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             format!(
@@ -3017,6 +3302,7 @@ fn tool_write_file(root_path: &Path, args: WriteFileArgs) -> Result<String, Stri
 
 fn tool_replace_in_file(root_path: &Path, args: ReplaceInFileArgs) -> Result<String, String> {
     let path = resolve_workspace_path(root_path, &args.path)?;
+    reject_skipped_workspace_path(root_path, &path, &args.path)?;
     let text = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read '{}': {}", args.path, err))?;
     if args.old_text.is_empty() {
@@ -3093,7 +3379,7 @@ fn collect_paths(
             break;
         }
         let path = entry.path();
-        if should_skip_path(&path) {
+        if should_skip_workspace_path(root_path, &path) {
             continue;
         }
         let metadata = match entry.metadata() {
@@ -3136,7 +3422,7 @@ fn search_paths(
             break;
         }
         let path = entry.path();
-        if should_skip_path(&path) {
+        if should_skip_workspace_path(root_path, &path) {
             continue;
         }
         let metadata = match entry.metadata() {
@@ -3183,11 +3469,41 @@ fn search_file(
     Ok(())
 }
 
+fn should_skip_workspace_path(root_path: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(root_path).unwrap_or(path);
+    should_skip_path(relative)
+}
+
 fn should_skip_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| matches!(name, ".git" | "target" | "node_modules"))
-        .unwrap_or(false)
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(should_skip_path_name)
+            .unwrap_or(false)
+    })
+}
+
+fn should_skip_path_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".makepad" | ".claude" | ".rustup" | "target" | "node_modules" | "build"
+    ) || name.ends_with(".term")
+}
+
+fn reject_skipped_workspace_path(
+    root_path: &Path,
+    path: &Path,
+    raw_path: &str,
+) -> Result<(), String> {
+    if should_skip_workspace_path(root_path, path) {
+        Err(format!(
+            "'{}' is Studio/internal state and is not available to AI file tools",
+            raw_path
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn resolve_workspace_path(root_path: &Path, raw_path: &str) -> Result<PathBuf, String> {
@@ -3345,6 +3661,186 @@ fn format_tool_result_message(result: &AiToolExecutionResult) -> String {
         label,
         truncate_text(result.content.trim(), MAX_RESULT_CHARS)
     )
+}
+
+fn format_terminal_waiting_message(result: &AiToolExecutionResult) -> Option<String> {
+    if result.is_error || result.tool_name != "read_terminal" {
+        return None;
+    }
+    let mode = parse_json_string_field(&result.content, "mode").unwrap_or_default();
+    let path = parse_json_string_field(&result.content, "path").unwrap_or_default();
+    let detail = parse_json_string_field(&result.content, "codex_status")
+        .or_else(|| parse_json_string_field(&result.content, "summary"))
+        .unwrap_or_default();
+    let detail_lowered = detail.to_ascii_lowercase();
+    if mode != "working"
+        && !detail_lowered.contains("working")
+        && !detail_lowered.contains("esc to interrupt")
+    {
+        return None;
+    }
+
+    let mut message = format!("{}waiting", AI_WAITING_MESSAGE_PREFIX);
+    if !path.is_empty() {
+        message.push_str(" on `");
+        message.push_str(&path);
+        message.push('`');
+    }
+    if !detail.trim().is_empty() {
+        message.push_str(" - ");
+        message.push_str(&truncate_waiting_detail(&detail));
+    }
+    Some(message)
+}
+
+fn last_terminal_waiting_message_from_history(history: &[ConversationItem]) -> Option<String> {
+    let ConversationItem::ToolResult {
+        tool_call_id,
+        content,
+    } = history.last()?
+    else {
+        return None;
+    };
+
+    let tool_call = history.iter().rev().find_map(|item| {
+        let ConversationItem::Assistant { tool_calls, .. } = item else {
+            return None;
+        };
+        tool_calls
+            .iter()
+            .find(|tool_call| tool_call.id == *tool_call_id && tool_call.name == "read_terminal")
+    })?;
+
+    format_terminal_waiting_message(&AiToolExecutionResult {
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        content: content.clone(),
+        is_error: false,
+    })
+}
+
+fn format_terminal_observation_message(
+    path: &str,
+    mode: &str,
+    summary: &str,
+    codex_status: Option<&str>,
+    excerpt: &str,
+) -> String {
+    let mut message = format!("{} {}\n", AI_TERMINAL_OBSERVATION_PREFIX, path);
+    message.push_str(&format!("Mode: {}\n", mode));
+    if let Some(codex_status) = codex_status.filter(|value| !value.trim().is_empty()) {
+        message.push_str(&format!("Codex status: {}\n", codex_status.trim()));
+    }
+    if !summary.trim().is_empty() {
+        message.push_str(&format!("Summary: {}\n", summary.trim()));
+    }
+    if !excerpt.trim().is_empty() {
+        message.push_str("\nLatest output excerpt:\n```text\n");
+        message.push_str(excerpt.trim());
+        message.push_str("\n```");
+    }
+    message
+}
+
+fn upsert_terminal_observation_message(messages: &mut Vec<AiMessage>, text: &str) {
+    let path = terminal_observation_path(text);
+    if let Some(path) = path {
+        if let Some(last) = messages.last_mut() {
+            if matches!(last.role, AiMessageRole::System)
+                && terminal_observation_path(&last.text) == Some(path)
+            {
+                last.text = text.to_string();
+                return;
+            }
+        }
+    }
+    messages.push(AiMessage {
+        role: AiMessageRole::System,
+        text: text.to_string(),
+    });
+}
+
+fn upsert_terminal_observation_history(history: &mut Vec<ConversationItem>, text: &str) {
+    let path = terminal_observation_path(text);
+    if let Some(path) = path {
+        if let Some(ConversationItem::User { text: last }) = history.last_mut() {
+            if terminal_observation_path(last) == Some(path) {
+                *last = text.to_string();
+                return;
+            }
+        }
+    }
+    history.push(ConversationItem::User {
+        text: text.to_string(),
+    });
+}
+
+fn terminal_observation_path(text: &str) -> Option<&str> {
+    text.lines()
+        .next()?
+        .strip_prefix(AI_TERMINAL_OBSERVATION_PREFIX)?
+        .trim()
+        .split_whitespace()
+        .next()
+}
+
+fn upsert_terminal_waiting_message(messages: &mut Vec<AiMessage>, waiting_message: String) {
+    if let Some(last) = messages.last_mut() {
+        if matches!(last.role, AiMessageRole::Thinking)
+            && last.text.starts_with(AI_WAITING_MESSAGE_PREFIX)
+        {
+            last.text = waiting_message;
+            return;
+        }
+    }
+    messages.push(AiMessage {
+        role: AiMessageRole::Thinking,
+        text: waiting_message,
+    });
+}
+
+fn trim_terminal_waiting_tail(messages: &mut Vec<AiMessage>) {
+    if messages
+        .last()
+        .is_some_and(|message| message_tool_name(message) == Some("read_terminal"))
+    {
+        messages.pop();
+    }
+    while messages.last().is_some_and(|message| {
+        matches!(
+            message.role,
+            AiMessageRole::Thinking | AiMessageRole::Assistant
+        ) && looks_like_terminal_waiting_text(&message.text)
+    }) {
+        messages.pop();
+    }
+}
+
+fn message_tool_name(message: &AiMessage) -> Option<&str> {
+    if !matches!(message.role, AiMessageRole::ToolCall) {
+        return None;
+    }
+    let rest = message.text.strip_prefix('`')?;
+    let (tool_name, _) = rest.split_once('`')?;
+    Some(tool_name)
+}
+
+fn looks_like_terminal_waiting_text(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("working on the task")
+        || lowered.contains("still working")
+        || (lowered.contains("codex") && lowered.contains("working"))
+        || ((lowered.contains("wait") || lowered.contains("check again"))
+            && lowered.contains("progress"))
+}
+
+fn truncate_waiting_detail(text: &str) -> String {
+    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = single_line.chars().take(160).collect::<String>();
+    if single_line.chars().count() > 160 {
+        out.push_str("...");
+    }
+    out
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -3545,6 +4041,84 @@ mod tests {
     }
 
     #[test]
+    fn ai_file_tools_skip_studio_internal_paths() {
+        assert!(should_skip_path(Path::new(".makepad")));
+        assert!(should_skip_path(Path::new(".makepad/ai_chats/chat.json")));
+        assert!(should_skip_path(Path::new("examples/.makepad/chat.term")));
+        assert!(should_skip_path(Path::new("chat.term")));
+        assert!(should_skip_path(Path::new(".claude")));
+        assert!(should_skip_path(Path::new(".rustup")));
+        assert!(should_skip_path(Path::new("target")));
+        assert!(should_skip_path(Path::new("node_modules")));
+        assert!(should_skip_path(Path::new("build")));
+        assert!(!should_skip_path(Path::new("examples")));
+        assert!(!should_skip_path(Path::new("src")));
+
+        let root = Path::new("/repo");
+        assert!(should_skip_workspace_path(
+            root,
+            Path::new("/repo/.makepad/ai_chats/chat.json")
+        ));
+        assert!(!should_skip_workspace_path(
+            root,
+            Path::new("/repo/examples/aichat/src/main.rs")
+        ));
+    }
+
+    #[test]
+    fn list_files_omits_ai_chat_storage() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "makepad_ai_list_files_test_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(root.join(".makepad/ai_chats")).unwrap();
+        fs::create_dir_all(root.join("examples")).unwrap();
+        fs::write(root.join(".makepad/ai_chats/chat.json"), "{}").unwrap();
+        fs::write(root.join("examples/main.rs"), "fn main() {}\n").unwrap();
+
+        let result = tool_list_files(
+            &root,
+            ListFilesArgs {
+                path: None,
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+        assert!(result.contains("examples/"));
+        assert!(result.contains("examples/main.rs"));
+        assert!(!result.contains(".makepad"));
+        assert!(!result.contains("chat.json"));
+
+        let hidden_result = tool_list_files(
+            &root,
+            ListFilesArgs {
+                path: Some(".makepad".to_string()),
+                limit: Some(50),
+            },
+        )
+        .unwrap();
+        assert_eq!(hidden_result, "No files found.");
+
+        let hidden_read = tool_read_file(
+            &root,
+            ReadFileArgs {
+                path: ".makepad/ai_chats/chat.json".to_string(),
+                offset: None,
+                limit: None,
+            },
+        )
+        .unwrap_err();
+        assert!(hidden_read.contains("Studio/internal state"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn terminal_mode_detects_codex_working_status() {
         let text = "\n\nWorking (12s) esc to interrupt\n";
         let (mode, is_codex, _summary, codex_status) =
@@ -3555,6 +4129,67 @@ mod tests {
             codex_status.as_deref(),
             Some("Working (12s) esc to interrupt")
         );
+    }
+
+    #[test]
+    fn terminal_mode_detects_codex_prompt_draft() {
+        let (mode, is_codex, _summary, codex_status) =
+            AiManager::terminal_mode_and_summary("", "\n\u{203a} make a hello world example\n");
+        assert_eq!(mode, "awaiting-input");
+        assert!(is_codex);
+        assert_eq!(codex_status, None);
+    }
+
+    #[test]
+    fn terminal_mode_detects_compact_codex_working_status() {
+        let text = "\n[working] gpt-5.5 xhigh fast \u{00b7} ~/makepad/makepad\n";
+        let (mode, is_codex, _summary, codex_status) =
+            AiManager::terminal_mode_and_summary("", text);
+        assert_eq!(mode, "working");
+        assert!(is_codex);
+        assert_eq!(
+            codex_status.as_deref(),
+            Some("[working] gpt-5.5 xhigh fast \u{00b7} ~/makepad/makepad")
+        );
+    }
+
+    #[test]
+    fn terminal_mode_prefers_codex_working_status_over_prompt_line() {
+        let text = "• Working (20s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 xhigh fast \u{00b7} ~/makepad/makepad";
+        let (mode, is_codex, _summary, codex_status) =
+            AiManager::terminal_mode_and_summary("", text);
+        assert_eq!(mode, "working");
+        assert!(is_codex);
+        assert_eq!(
+            codex_status.as_deref(),
+            Some("• Working (20s • esc to interrupt)")
+        );
+    }
+
+    #[test]
+    fn terminal_input_marks_existing_codex_snapshot_active() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.process_terminal_observation(
+            "repo",
+            AiTerminalObservation {
+                path: "repo/.makepad/hello-world-makepad.term".to_string(),
+                terminal_title: "codex".to_string(),
+                cols: 80,
+                rows: 8,
+                top_row: 42,
+                total_lines: 50,
+                is_tui: true,
+                text: "\u{203a}\n".to_string(),
+            },
+        );
+
+        let state = manager
+            .process_terminal_input("repo", "repo/.makepad/hello-world-makepad.term")
+            .expect("terminal input should change state");
+
+        assert!(state.live_markdown.contains("[input / codex]"));
+        assert!(state.live_markdown.contains("Input sent to Codex"));
     }
 
     #[test]
@@ -3581,6 +4216,224 @@ mod tests {
         assert!(state
             .live_markdown
             .contains("Working (12s) esc to interrupt"));
+    }
+
+    #[test]
+    fn terminal_observation_autotracks_direct_codex_activity() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/manual-codex.term".to_string(),
+                    terminal_title: String::new(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "• Working (2s • esc to interrupt)\n\n  gpt-5.5 xhigh fast · ~/makepad/makepad".to_string(),
+                },
+            )
+            .expect("codex terminal observation should change state");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert_eq!(mount_state.tasks.len(), 1);
+        assert_eq!(
+            mount_state.tasks[0].terminal_path.as_deref(),
+            Some("repo/.makepad/manual-codex.term")
+        );
+        assert!(mount_state.tasks[0]
+            .goal
+            .contains("Observe Codex terminal `manual-codex.term`"));
+        assert!(state
+            .live_markdown
+            .contains("Observe Codex terminal `manual-codex.term`"));
+        assert!(state.live_markdown.contains("[working / codex]"));
+        let agent = mount_state
+            .agents
+            .get(&mount_state.active_agent_id.unwrap())
+            .unwrap();
+        assert!(agent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::System)
+                && message.text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
+                && message.text.contains("repo/.makepad/manual-codex.term")
+                && message.text.contains("Working (2s")
+        }));
+        assert!(agent.history.iter().any(|item| {
+            matches!(
+                item,
+                ConversationItem::User { text }
+                    if text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
+                        && text.contains("repo/.makepad/manual-codex.term")
+                        && text.contains("Working (2s")
+            )
+        }));
+
+        manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/manual-codex.term".to_string(),
+                    terminal_title: String::new(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "• Working (3s • esc to interrupt)\n\n  gpt-5.5 xhigh fast · ~/makepad/makepad".to_string(),
+                },
+            )
+            .expect("updated codex terminal observation should change state");
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let agent = mount_state
+            .agents
+            .get(&mount_state.active_agent_id.unwrap())
+            .unwrap();
+        let visible_observations = agent
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, AiMessageRole::System)
+                    && message.text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(visible_observations.len(), 1);
+        assert!(visible_observations[0].text.contains("Working (3s"));
+        let history_observations = agent
+            .history
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ConversationItem::User { text }
+                        if text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
+                )
+            })
+            .count();
+        assert_eq!(history_observations, 1);
+    }
+
+    #[test]
+    fn terminal_observation_records_regular_terminal_without_task() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/shell.term".to_string(),
+                    terminal_title: "zsh".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: false,
+                    text: "cargo check\nfinished".to_string(),
+                },
+            )
+            .expect("terminal observation should change state");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.tasks.is_empty());
+        assert!(mount_state
+            .terminal_snapshots
+            .contains_key("repo/.makepad/shell.term"));
+        assert!(state.live_markdown.contains("repo/.makepad/shell.term"));
+    }
+
+    #[test]
+    fn working_terminal_reads_compact_to_single_waiting_message() {
+        let tool_call = ToolCallRecord {
+            id: "call_1".to_string(),
+            name: "read_terminal".to_string(),
+            arguments_json: r#"{"path":"makepad/.makepad/hello-world-makepad.term"}"#.to_string(),
+        };
+        let result = AiToolExecutionResult {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "read_terminal".to_string(),
+            content: r#"{"path":"makepad/.makepad/hello-world-makepad.term","mode":"working","summary":"gpt-5.5 xhigh fast","codex_status":"Working (12s) esc to interrupt"}"#.to_string(),
+            is_error: false,
+        };
+        let waiting_message = format_terminal_waiting_message(&result).unwrap();
+
+        let mut messages = vec![AiMessage {
+            role: AiMessageRole::User,
+            text: "watch the task".to_string(),
+        }];
+        let start = messages.len();
+        messages.push(AiMessage {
+            role: AiMessageRole::Thinking,
+            text: "The codex instance is working on the task. Let me wait a bit more and check again for progress.".to_string(),
+        });
+        messages.push(AiMessage {
+            role: AiMessageRole::ToolCall,
+            text: format_tool_call_message(&tool_call),
+        });
+        messages.truncate(start);
+        upsert_terminal_waiting_message(&mut messages, waiting_message);
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[1].role, AiMessageRole::Thinking));
+        assert!(messages[1].text.starts_with(AI_WAITING_MESSAGE_PREFIX));
+        assert!(messages[1]
+            .text
+            .contains("makepad/.makepad/hello-world-makepad.term"));
+
+        let start = messages.len();
+        messages.push(AiMessage {
+            role: AiMessageRole::Thinking,
+            text: "The codex instance is still working. I will check again.".to_string(),
+        });
+        messages.push(AiMessage {
+            role: AiMessageRole::ToolCall,
+            text: format_tool_call_message(&tool_call),
+        });
+        messages.truncate(start);
+        upsert_terminal_waiting_message(
+            &mut messages,
+            "WAITING:waiting on `makepad/.makepad/hello-world-makepad.term` - Working (30s)"
+                .to_string(),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].text.contains("Working (30s)"));
+    }
+
+    #[test]
+    fn waiting_message_accepts_legacy_awaiting_input_with_working_status() {
+        let result = AiToolExecutionResult {
+            tool_call_id: "call_1".to_string(),
+            tool_name: "read_terminal".to_string(),
+            content: r#"{"path":"makepad/.makepad/hello-world-buttons.term","mode":"awaiting-input","summary":"gpt-5.5 xhigh fast","codex_status":"• Working (20s • esc to interrupt)"}"#.to_string(),
+            is_error: false,
+        };
+        let message = format_terminal_waiting_message(&result).unwrap();
+        assert!(message.starts_with(AI_WAITING_MESSAGE_PREFIX));
+        assert!(message.contains("Working (20s"));
+    }
+
+    #[test]
+    fn last_terminal_waiting_message_recovers_from_history() {
+        let history = vec![
+            ConversationItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_1".to_string(),
+                    name: "read_terminal".to_string(),
+                    arguments_json: r#"{"path":"makepad/.makepad/hello-world-buttons.term"}"#
+                        .to_string(),
+                }],
+            },
+            ConversationItem::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                content: r#"{"path":"makepad/.makepad/hello-world-buttons.term","mode":"awaiting-input","codex_status":"• Working (20s • esc to interrupt)"}"#.to_string(),
+            },
+        ];
+        let message = last_terminal_waiting_message_from_history(&history).unwrap();
+        assert!(message.contains("hello-world-buttons.term"));
+        assert!(message.contains("Working (20s"));
     }
 
     #[test]
@@ -3612,6 +4465,84 @@ mod tests {
         .unwrap();
         assert_eq!(turn.text, "hello");
         assert_eq!(turn.thinking_text, "step 1\nstep 2");
+    }
+
+    #[test]
+    fn empty_assistant_turn_does_not_enter_history() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+        }
+
+        manager.complete_assistant_turn(
+            "repo",
+            agent_id,
+            run_token,
+            AssistantTurn {
+                text: String::new(),
+                thinking_text: String::new(),
+                tool_calls: Vec::new(),
+            },
+            None,
+        );
+
+        let agent = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.agents.get(&agent_id))
+            .unwrap();
+        assert!(agent.history.is_empty());
+        assert!(agent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::Error)
+                && message
+                    .text
+                    .contains("AI backend returned an empty assistant response")
+        }));
+    }
+
+    #[test]
+    fn request_body_skips_persisted_empty_assistant_turns() {
+        let backend = AiBackendConfig {
+            id: LOCAL_BACKEND_ID.to_string(),
+            label: String::new(),
+            detail: String::new(),
+            url: DEFAULT_LOCAL_BASE_URL.to_string(),
+            model: String::new(),
+            api_key: None,
+            disable_thinking_via_chat_template: false,
+        };
+        let history = vec![
+            ConversationItem::User {
+                text: "hello".to_string(),
+            },
+            ConversationItem::Assistant {
+                text: String::new(),
+                tool_calls: Vec::new(),
+            },
+            ConversationItem::User {
+                text: "again".to_string(),
+            },
+        ];
+
+        let body = build_request_body(&backend, "repo", "/tmp/repo", &history);
+
+        assert!(!body.contains("\"role\":\"assistant\",\"content\":\"\""));
+        assert!(body.contains("\"content\":\"hello\""));
+        assert!(body.contains("\"content\":\"again\""));
     }
 
     #[test]
@@ -3647,6 +4578,8 @@ mod tests {
         assert!(prompt.contains("observe_filesystem"));
         assert!(prompt.contains("open_editor"));
         assert!(prompt.contains("send_terminal_text.submit"));
+        assert!(prompt.contains("interpret that as a Makepad app/example"));
+        assert!(prompt.contains("not as a Python script, web app"));
     }
 
     struct TestBackend;
