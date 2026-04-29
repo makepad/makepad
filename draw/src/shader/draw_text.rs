@@ -1448,12 +1448,7 @@ struct SlugDrawSyncPlan {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl SlugDrawSyncPlan {
-    fn ensure(
-        &mut self,
-        cx: &Cx,
-        source_shader_id: usize,
-        target_shader_id: usize,
-    ) {
+    fn ensure(&mut self, cx: &Cx, source_shader_id: usize, target_shader_id: usize) {
         if self.source_shader_id == Some(source_shader_id)
             && self.target_shader_id == Some(target_shader_id)
         {
@@ -1627,10 +1622,9 @@ impl DrawText {
         let mut pending_slug_generation = 0;
 
         if self.slug_promotion.redraw_id != redraw_id {
-            self.slug_promotion.allow_slug_this_redraw =
-                self.slug_promotion.redraw_id != 0
-                    && self.slug_promotion.saw_slug_candidates_this_redraw
-                    && !self.slug_promotion.saw_unready_this_redraw;
+            self.slug_promotion.allow_slug_this_redraw = self.slug_promotion.redraw_id != 0
+                && self.slug_promotion.saw_slug_candidates_this_redraw
+                && !self.slug_promotion.saw_unready_this_redraw;
             self.slug_promotion.redraw_id = redraw_id;
             self.slug_promotion.saw_slug_candidates_this_redraw = false;
             self.slug_promotion.saw_unready_this_redraw = false;
@@ -1639,7 +1633,10 @@ impl DrawText {
         for row in &text.rows {
             for glyph in &row.glyphs {
                 let font_size_in_dpxs = glyph.font_size_in_lpxs * dpi_factor;
-                if glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs) {
+                if glyph
+                    .font
+                    .has_glyph_raster_image(glyph.id, font_size_in_dpxs)
+                {
                     continue;
                 }
                 if !cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
@@ -1974,7 +1971,8 @@ impl DrawText {
 
         let mut color_2 = [-1.0; 4];
         if self.slug_sync_plan.source_has_color_2 {
-            self.draw_vars.get_uniform(cx.cx, live_id!(color_2), &mut color_2);
+            self.draw_vars
+                .get_uniform(cx.cx, live_id!(color_2), &mut color_2);
         }
         slug_draw.draw_vars.set_uniform(
             cx.cx,
@@ -2148,10 +2146,7 @@ impl DrawText {
             }
         }
 
-        let wrap = matches!(
-            cx.turtle().layout().flow,
-            Flow::Right { wrap: true, .. }
-        );
+        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
@@ -2491,9 +2486,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        self.text_style
-            .font_family
-            .ensure_fonts_loaded(cx);
+        self.text_style.font_family.ensure_fonts_loaded(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -2870,8 +2863,11 @@ impl DrawText {
 
     fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<ResolvedGlyph> {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
-        let glyph_prefers_raster_image = glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs);
-        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
+        let glyph_prefers_raster_image = glyph
+            .font
+            .has_glyph_raster_image(glyph.id, font_size_in_dpxs);
+        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs)
+        {
             let slug_lookup = {
                 let mut fonts = cx.fonts.borrow_mut();
                 fonts.get_or_cache_slug_glyph(cx.cx.redraw_id, glyph.font.as_ref(), glyph.id)
@@ -3008,9 +3004,7 @@ impl DrawText {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         let should_use_slug = cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs);
         let fallback_dpxs_per_em = if should_use_slug && font_size_in_dpxs > 0.0 {
-            cx.fonts
-                .borrow()
-                .max_rasterized_glyph_dpxs_per_em()
+            cx.fonts.borrow().max_rasterized_glyph_dpxs_per_em()
         } else {
             0.0
         };
@@ -3020,7 +3014,8 @@ impl DrawText {
             } else {
                 font_size_in_dpxs
             };
-            glyph.font
+            glyph
+                .font
                 .rasterize_glyph_stable_fallback(glyph.id, stable_dpxs_per_em)
         } else {
             glyph.rasterize(font_size_in_dpxs)
@@ -3395,9 +3390,8 @@ mod tests {
             let mut draw_text = DrawText::script_new_with_default(vm);
             draw_text.color = vec4(0.11, 0.22, 0.33, 0.44);
 
-            let packed = vm.with_cx_mut(|cx| {
-                read_instance(&draw_text.draw_vars, cx, live_id!(color))
-            });
+            let packed =
+                vm.with_cx_mut(|cx| read_instance(&draw_text.draw_vars, cx, live_id!(color)));
 
             assert_eq!(packed, [0.11, 0.22, 0.33, 0.44]);
         });
@@ -3414,9 +3408,8 @@ mod tests {
             let mut slug_draw = DrawTextSlug::script_new_with_default(vm);
             slug_draw.color = vec4(0.15, 0.25, 0.35, 0.45);
 
-            let packed = vm.with_cx_mut(|cx| {
-                read_instance(&slug_draw.draw_vars, cx, live_id!(color))
-            });
+            let packed =
+                vm.with_cx_mut(|cx| read_instance(&slug_draw.draw_vars, cx, live_id!(color)));
 
             assert_eq!(packed, [0.15, 0.25, 0.35, 0.45]);
         });

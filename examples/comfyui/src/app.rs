@@ -13,7 +13,8 @@ script_mod! {
     let comfy_ip = "10.0.0.165:8000"
     let llm_base = "http://10.0.0.217:8080"
     let prompt_path = "/Users/admin/prompt.txt"
-    let auto_seconds = 60
+    let rerun_seconds = 20
+    let comfy_client_id = "8a327a3e4961419ea7386c542f0ea491"
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
     let displays = [
         Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false}
@@ -106,12 +107,19 @@ script_mod! {
         set_status("Prompt saved to prompt.txt")
     }
 
+    fn schedule_auto_rerun(){
+        if !auto_enabled return
+        if auto_timer != nil std.stop_timer(auto_timer)
+        auto_timer = std.start_timeout(rerun_seconds, || {
+            auto_timer = nil
+            if auto_enabled && !is_running post()
+        })
+    }
+
     fn start_auto_loop(){
         if auto_enabled return
         auto_enabled = true
-        auto_timer = std.start_interval(auto_seconds) do fn{
-            post()
-        }
+        if !is_running schedule_auto_rerun()
         refresh_auto_button()
         set_status("Auto loop started")
     }
@@ -219,40 +227,23 @@ script_mod! {
                 promise.resolve(image)
             }
             on_error: |e| {
-                set_status("Comfy history error")
-                ~e
+                ui_log("Comfy history error: " + ("" + e))
                 promise.resolve(nil)
             }
         }
         promise
     }
 
-    fn connect_comfy_websocket(model){
-        let task = std.task()
-        net.web_socket("ws://"+comfy_ip+"/ws?clientId=8a327a3e4961419ea7386c542f0ea491") do net.WebSocketEvents{
-            on_string:fn(str){
-                let msg = ok{str.parse_json()}
-                if msg == nil return;
-                if ok{msg.type == "execution_start"}
-                    task.emit(@progress ok{0.0})
-                if ok{msg.type == "progress"}
-                    task.emit(@progress ok{msg.data.value/msg.data.max})
-                if ok{msg.data.nodes[model.save].state == "finished"}{
-                    task.emit(@progress ok{1.0})
-                    let prompt_id = ok{msg.data.nodes[model.save].prompt_id}
-                    task.emit(@done, prompt_id)
-                }
-            }
-            on_error:fn(e){
-                set_status("Comfy websocket error")
-                ~e
-                task.emit(@error, e)
-            }
-            on_closed:fn(){
-                task.emit(@closed)
-            }
+    fn comfy_wait_for_image(prompt_id, model, timeout_seconds){
+        let waited = 0
+        loop{
+            let image = comfy_last_image(prompt_id, model).await()
+            if image != nil return image
+            if waited >= timeout_seconds return nil
+            waited += 1
+            set_progress("waiting " + waited + "s")
+            sleep_seconds(1)
         }
-        task
     }
 
     fn comfy_render(prompt, display, model){
@@ -276,7 +267,7 @@ script_mod! {
         let req = net.HttpRequest{
             url: "http://" + comfy_ip + "/prompt"
             method: net.HttpMethod.POST
-            body:{prompt:flow client_id:"8a327a3e4961419ea7386c542f0ea491"}.to_json()
+            body:{prompt:flow client_id:comfy_client_id}.to_json()
         }
         net.http_request(req) do net.HttpEvents{
             on_response: |res| promise.resolve(ok{res.body.parse_json().prompt_id})
@@ -351,8 +342,6 @@ script_mod! {
         on_get: |headers| http_response(headers, displays)
     })
 
-    let comfy_socket = connect_comfy_websocket(model)
-
     fn post(){
         if is_running {
             ui_log("Run ignored: already running")
@@ -424,7 +413,6 @@ script_mod! {
         }
 
         messages.push({content:image_prompt_text role:"assistant"})
-        comfy_socket.queue.clear()
 
         let visual_description = ok{image_prompt.visual_description}
         let style_keywords = ok{image_prompt.style_and_keywords}
@@ -440,34 +428,9 @@ script_mod! {
         }
 
         set_status("Rendering in ComfyUI")
-        let event_prompt_id = prompt_id
-        loop{
-            let event = comfy_socket.next()
-            if event == nil {
-                set_status("Comfy websocket closed")
-                is_running = false
-                ui.run_now_btn.set_text("Run Now")
-                return false
-            }
-            if event[0] == @progress{
-                set_progress("" + (event[1] * 100) + "%")
-            }
-            if event[0] == @done{
-                event_prompt_id = event[1]
-                break
-            }
-            if event[0] == @error || event[0] == @closed{
-                set_status("Comfy websocket error")
-                is_running = false
-                ui.run_now_btn.set_text("Run Now")
-                return false
-            }
-        }
-
-        set_status("Fetching image from ComfyUI")
-        let image = comfy_last_image(event_prompt_id, model).await()
+        let image = comfy_wait_for_image(prompt_id, model, 120)
         if image == nil {
-            set_status("Comfy history returned no image")
+            set_status("ComfyUI render timed out")
             is_running = false
             ui.run_now_btn.set_text("Run Now")
             return false
@@ -507,6 +470,7 @@ script_mod! {
         display.prompt = visual_description + " - " + style_keywords
 
         set_status("Done")
+        if auto_enabled schedule_auto_rerun()
         is_running = false
         ui.run_now_btn.set_text("Run Now")
         true

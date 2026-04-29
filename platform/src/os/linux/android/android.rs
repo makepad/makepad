@@ -30,6 +30,7 @@ use {
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             video_playback::CameraPreviewMode,
             Event,
@@ -41,7 +42,6 @@ use {
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
-            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
@@ -317,7 +317,10 @@ impl Cx {
                     let mut pending_touch_move: Option<FromJavaMessage> = None;
                     while let Ok(msg) = from_java_rx.try_recv() {
                         if let FromJavaMessage::Touch(ref touches) = msg {
-                            if touches.iter().all(|t| t.state == crate::event::finger::TouchState::Move) {
+                            if touches
+                                .iter()
+                                .all(|t| t.state == crate::event::finger::TouchState::Move)
+                            {
                                 // This is a pure move event — defer it; a newer one
                                 // may arrive and supersede it.
                                 pending_touch_move = Some(msg);
@@ -757,9 +760,11 @@ impl Cx {
 
                 // Synthesize internal drag-and-drop events from touch gestures.
                 if self.os.internal_drag_items.is_some() {
-                    if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::finger::TouchState::Stop
-                    }) {
+                    if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::finger::TouchState::Stop)
+                    {
                         // Touch lifted: fire Drop + DragEnd
                         if let Some(items) = self.os.internal_drag_items.take() {
                             self.call_event_handler(&Event::Drop(DropEvent {
@@ -772,9 +777,11 @@ impl Cx {
                             self.call_event_handler(&Event::DragEnd);
                             self.drag_drop.cycle_drag();
                         }
-                    } else if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::finger::TouchState::Move
-                    }) {
+                    } else if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::finger::TouchState::Move)
+                    {
                         // Finger moving: fire Drag event
                         if let Some(items) = self.os.internal_drag_items.as_ref() {
                             self.call_event_handler(&Event::Drag(DragEvent {
@@ -1796,7 +1803,9 @@ impl Cx {
                         width,
                         height,
                     }) => {
-                        if let Some((old_window, _, _)) = initial_surface.replace((window, width, height)) {
+                        if let Some((old_window, _, _)) =
+                            initial_surface.replace((window, width, height))
+                        {
                             unsafe {
                                 if !old_window.is_null() {
                                     ndk_sys::ANativeWindow_release(old_window);

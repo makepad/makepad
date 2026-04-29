@@ -1,13 +1,13 @@
 use makepad_micro_serde::{DeBin, DeJson, SerBin, SerJson};
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
+    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId, QUERY_ID_CLIENT_LANES,
 };
 
 #[test]
 fn query_id_layout_roundtrip() {
     let client = ClientId(42);
     let qid = QueryId::new(client, 123456789);
-    assert_eq!(qid.client_id(), client);
+    assert_eq!(qid.client_id(), ClientId(client.0 % QUERY_ID_CLIENT_LANES));
     assert_eq!(qid.counter(), 123456789);
 }
 

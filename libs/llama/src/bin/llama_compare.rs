@@ -21,11 +21,10 @@ use makepad_llama::{
     compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
     create_metal_context_buffer_with_runtime, execute_attention_block_graph_metal_cached,
     execute_attention_decode_graph_metal_cached,
-    execute_delta_net_recurrent_decode_graph_metal_cached, gemma4_attention_block_layout,
-    gemma4_attention_block_spec, gemma4_attention_decode_spec,
+    execute_delta_net_recurrent_decode_graph_metal_cached, execute_logits_probe_metal,
+    gemma4_attention_block_layout, gemma4_attention_block_spec, gemma4_attention_decode_spec,
     gemma4_embedding_logits_probe_spec, gemma4_first_attention_block_spec,
-    gemma4_first_full_attention_block_spec, execute_logits_probe_metal,
-    prepare_attention_block_graph,
+    gemma4_first_full_attention_block_spec, prepare_attention_block_graph,
     prepare_attention_decode_graph_with_key_count, qwen35_attention_block_layout,
     qwen35_attention_block_spec, qwen35_attention_decode_spec,
     qwen35_delta_net_recurrent_decode_spec, qwen35_first_attention_block_spec,
@@ -157,8 +156,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let rust_prompt_token_ids = vocab.tokenize(&args.prompt, false, true)?;
     let rust_step_logits = run_rust_hybrid_decode_stepwise(&model, &rust_prompt_token_ids)?;
     let rust_logits = run_rust_hybrid_decode(&model, &rust_prompt_token_ids)?;
-    let rust_batched_logits = match run_rust_hybrid_decode_batched(&model, &rust_prompt_token_ids)
-    {
+    let rust_batched_logits = match run_rust_hybrid_decode_batched(&model, &rust_prompt_token_ids) {
         Ok(logits) => Some(logits),
         Err(err) => {
             println!("compare.batched.error: {}", err);
@@ -943,11 +941,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "gemma_upstream.result_output_max_abs_diff: {:.9}",
                 gemma_upstream_tail.result_output_stats.max_abs_diff
             );
-            let gemma_final_probe = gemma_final_probe_check(
-                &model,
-                &upstream.token_ids,
-                upstream_step_final_logits,
-            )?;
+            let gemma_final_probe =
+                gemma_final_probe_check(&model, &upstream.token_ids, upstream_step_final_logits)?;
             println!(
                 "gemma_probe.result_output_vs_hybrid_max_abs_diff: {:.9}",
                 gemma_final_probe.probe_vs_hybrid_stats.max_abs_diff
@@ -957,8 +952,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 gemma_final_probe.probe_vs_upstream_stats.max_abs_diff
             );
             if model.require_gemma4()?.embedding_length_per_layer_input != 0 {
-                let gemma_shared_per_layer =
-                    gemma_upstream_shared_per_layer_input_check(&args, &model, &upstream.token_ids)?;
+                let gemma_shared_per_layer = gemma_upstream_shared_per_layer_input_check(
+                    &args,
+                    &model,
+                    &upstream.token_ids,
+                )?;
                 println!(
                     "gemma_upstream.shared_per_layer.selected_max_abs_diff: {:.9}",
                     gemma_shared_per_layer.selected_stats.max_abs_diff
@@ -1083,7 +1081,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     println!(
                         "gemma_manual.layer{}._f16_attn_residual_max_abs_diff: {:.9}",
-                        manual_graph_f16.layer_index, manual_graph_f16.attn_residual_stats.max_abs_diff
+                        manual_graph_f16.layer_index,
+                        manual_graph_f16.attn_residual_stats.max_abs_diff
                     );
                     println!(
                         "gemma_manual.layer{}._f16_ffn_norm_max_abs_diff: {:.9}",
@@ -1126,7 +1125,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     println!(
                         "gemma_manual.layer{}._f32_attn_residual_max_abs_diff: {:.9}",
-                        manual_graph_f32.layer_index, manual_graph_f32.attn_residual_stats.max_abs_diff
+                        manual_graph_f32.layer_index,
+                        manual_graph_f32.attn_residual_stats.max_abs_diff
                     );
                     println!(
                         "gemma_manual.layer{}._f32_ffn_norm_max_abs_diff: {:.9}",
@@ -1159,7 +1159,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!(
                     "gemma_upstream.layer{}._attn_out_standalone_max_abs_diff: {:.9}",
-                    layer_check.layer_index, standalone_layer_check.attn_residual_stats.max_abs_diff
+                    layer_check.layer_index,
+                    standalone_layer_check.attn_residual_stats.max_abs_diff
                 );
                 println!(
                     "gemma_upstream.layer{}._layer_out_standalone_max_abs_diff: {:.9}",
@@ -1214,15 +1215,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "gemma_upstream.layer{}._cache_source_selfcheck_max_abs_diff: {:.9}",
                             source_layer_index, source_self_check.hidden_stats.max_abs_diff
                         );
-                        let source_cache_check =
-                            gemma_hybrid_source_cache_check(&model, &upstream.token_ids, source_layer_index)?;
+                        let source_cache_check = gemma_hybrid_source_cache_check(
+                            &model,
+                            &upstream.token_ids,
+                            source_layer_index,
+                        )?;
                         println!(
                             "gemma_upstream.layer{}._cache_source_k_cache_max_abs_diff: {:.9}",
-                            source_cache_check.layer_index, source_cache_check.k_cache_stats.max_abs_diff
+                            source_cache_check.layer_index,
+                            source_cache_check.k_cache_stats.max_abs_diff
                         );
                         println!(
                             "gemma_upstream.layer{}._cache_source_v_cache_max_abs_diff: {:.9}",
-                            source_cache_check.layer_index, source_cache_check.v_cache_stats.max_abs_diff
+                            source_cache_check.layer_index,
+                            source_cache_check.v_cache_stats.max_abs_diff
                         );
                         let source_layer_check = gemma_upstream_layer_preview_check(
                             &args,
@@ -1245,8 +1251,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             source_layer_index, source_layer_check.post_ffn_stats.max_abs_diff
                         );
                         for late_layer_index in source_layer_index..=layer_index {
-                            if let Some(layer_stats) =
-                                gemma_upstream_stack.layer_post_ffn_stats.get(&late_layer_index)
+                            if let Some(layer_stats) = gemma_upstream_stack
+                                .layer_post_ffn_stats
+                                .get(&late_layer_index)
                             {
                                 println!(
                                     "gemma_upstream.layer{}._stack_layer_out_max_abs_diff: {:.9}",
@@ -1387,8 +1394,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     }
-                    let layer_check =
-                        gemma_upstream_layer_preview_check(&args, &model, &upstream.token_ids, layer_index)?;
+                    let layer_check = gemma_upstream_layer_preview_check(
+                        &args,
+                        &model,
+                        &upstream.token_ids,
+                        layer_index,
+                    )?;
                     if let Some(attn_post_norm) = layer_check.attn_post_norm_stats {
                         println!(
                             "gemma_upstream.layer{}._attn_post_norm_max_abs_diff: {:.9}",
@@ -3952,7 +3963,9 @@ fn gemma_upstream_shared_per_layer_input_check(
     token_ids: &[i32],
 ) -> Result<GemmaUpstreamSharedPerLayerInputCheck, Box<dyn std::error::Error>> {
     if token_ids.is_empty() {
-        return Err("gemma upstream shared per-layer input check requires a non-empty prompt".into());
+        return Err(
+            "gemma upstream shared per-layer input check requires a non-empty prompt".into(),
+        );
     }
 
     let max_context = u32::try_from(token_ids.len())?;
@@ -4125,9 +4138,10 @@ fn execute_gemma_standalone_input_reference(
         .tensor_ids
         .get(&tensors.globals.token_embd.name)
         .ok_or("missing gemma token embedding tensor id")?;
-    let mut input_embed = loaded
-        .ctx
-        .get_rows(token_embd_id, input_tokens, BufferUsage::Activations)?;
+    let mut input_embed =
+        loaded
+            .ctx
+            .get_rows(token_embd_id, input_tokens, BufferUsage::Activations)?;
     input_embed = loaded.ctx.scale(
         input_embed,
         (cfg.embedding_length as f32).sqrt(),
@@ -4192,7 +4206,11 @@ fn execute_gemma_standalone_input_reference(
         tensor_id: input_tokens,
         bytes: &token_bytes,
     }];
-    let execution = session.execute(&loaded.ctx, &writes, &[input_embed_out, attn_input_norm_out])?;
+    let execution = session.execute(
+        &loaded.ctx,
+        &writes,
+        &[input_embed_out, attn_input_norm_out],
+    )?;
 
     Ok(GemmaStandaloneInputReference {
         input_embed: tensor_preview_from_tensor_bytes(
@@ -4232,7 +4250,8 @@ fn gemma_per_layer_token_get_rows_direct_check(
         .per_layer_token_embd
         .ok_or("gemma4 model is missing per_layer_token_embd.weight")?;
     let layout = GgufWeightLayout::from_tensors(vec![tensor.clone()])?;
-    let mut loaded = layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let mut loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
     let cpu = cpu_get_rows_loaded(&mut loaded, &tensor.name, token_ids)?;
     let metal = metal_get_rows_loaded(&mut loaded, &tensor.name, token_ids)?;
     Ok(compare_logits(&metal, &cpu))
@@ -4385,7 +4404,9 @@ fn gemma_upstream_layer_output_standalone_check(
     layer_index: u32,
 ) -> Result<LogitComparison, Box<dyn std::error::Error>> {
     if token_ids.is_empty() {
-        return Err("gemma upstream standalone layer output check requires a non-empty prompt".into());
+        return Err(
+            "gemma upstream standalone layer output check requires a non-empty prompt".into(),
+        );
     }
 
     let max_context = u32::try_from(token_ids.len())?;
@@ -4441,7 +4462,9 @@ fn gemma_upstream_layer_preview_standalone_check(
     layer_index: u32,
 ) -> Result<GemmaUpstreamLayerPreviewCheck, Box<dyn std::error::Error>> {
     if token_ids.is_empty() {
-        return Err("gemma upstream standalone layer preview check requires a non-empty prompt".into());
+        return Err(
+            "gemma upstream standalone layer preview check requires a non-empty prompt".into(),
+        );
     }
 
     let max_context = u32::try_from(token_ids.len())?;
@@ -4603,7 +4626,10 @@ fn gemma_upstream_attn_post_norm_from_raw_attention_check(
     let upstream_preview = upstream_previews
         .get(&upstream_name)
         .ok_or_else(|| format!("missing upstream preview '{}'", upstream_name))?;
-    Ok(compare_logits(&rust_preview.values, &upstream_preview.values))
+    Ok(compare_logits(
+        &rust_preview.values,
+        &upstream_preview.values,
+    ))
 }
 
 fn gemma_hybrid_source_cache_check(
@@ -4641,14 +4667,18 @@ fn gemma_hybrid_source_cache_check(
         &output_ids,
     )?;
     let snapshot = capture_checkpoint_session_cache_snapshot(&session, token_ids.len())?;
-    let hybrid_k = snapshot
-        .attention_k
-        .get(&layer_index)
-        .ok_or_else(|| format!("missing hybrid attention-k snapshot for layer {}", layer_index))?;
-    let hybrid_v = snapshot
-        .attention_v
-        .get(&layer_index)
-        .ok_or_else(|| format!("missing hybrid attention-v snapshot for layer {}", layer_index))?;
+    let hybrid_k = snapshot.attention_k.get(&layer_index).ok_or_else(|| {
+        format!(
+            "missing hybrid attention-k snapshot for layer {}",
+            layer_index
+        )
+    })?;
+    let hybrid_v = snapshot.attention_v.get(&layer_index).ok_or_else(|| {
+        format!(
+            "missing hybrid attention-v snapshot for layer {}",
+            layer_index
+        )
+    })?;
 
     let (_, _, layout, decode_spec) =
         attention_check_setup_for_layer(model, layer_index, max_context, TensorType::F32)?;
@@ -5023,10 +5053,7 @@ fn gemma_layer_manual_reference(
 
     let mut input_embed =
         cpu_get_rows_loaded(&mut loaded, &tensors.globals.token_embd.name, token_ids)?;
-    cpu_scale_inplace(
-        &mut input_embed,
-        (cfg.embedding_length as f32).sqrt(),
-    );
+    cpu_scale_inplace(&mut input_embed, (cfg.embedding_length as f32).sqrt());
 
     let positions = (0..n_tokens)
         .map(i32::try_from)
@@ -5193,8 +5220,7 @@ fn gemma_layer_manual_reference(
             "shared_per_layer.proj".to_owned(),
             last_token_slice(&per_layer_model_proj, shared_width)?.to_vec(),
         );
-        let mut shared_per_layer_inputs =
-            cpu_add_rows(&per_layer_model_proj, &per_layer_selected)?;
+        let mut shared_per_layer_inputs = cpu_add_rows(&per_layer_model_proj, &per_layer_selected)?;
         cpu_scale_inplace(&mut shared_per_layer_inputs, 1.0 / 2.0f32.sqrt());
         outputs.insert(
             "shared_per_layer.input".to_owned(),
@@ -5211,7 +5237,8 @@ fn gemma_layer_manual_reference(
         let per_layer_gate =
             cpu_mul_mat_loaded(&mut loaded, &per_layer_inp_gate_name, &pe_in, n_tokens)?;
         let per_layer_gate = cpu_gelu_rows(&per_layer_gate)?;
-        let per_layer_gated = cpu_mul_rows_broadcast(&per_layer_gate, hidden_per_layer, &layer_inputs)?;
+        let per_layer_gated =
+            cpu_mul_rows_broadcast(&per_layer_gate, hidden_per_layer, &layer_inputs)?;
         let per_layer_proj = cpu_mul_mat_loaded(
             &mut loaded,
             &per_layer_proj_name,
@@ -5234,7 +5261,11 @@ fn gemma_layer_manual_reference(
         post_ffn = cpu_add_rows(&pe_in, &per_layer_embd_out)?;
     }
 
-    if let Some(scale_name) = layer.layer_output_scale.as_ref().map(|tensor| tensor.name.as_str()) {
+    if let Some(scale_name) = layer
+        .layer_output_scale
+        .as_ref()
+        .map(|tensor| tensor.name.as_str())
+    {
         let scale = read_loaded_tensor_values_f32(&loaded, scale_name)?;
         post_ffn = cpu_mul_rows_broadcast(&post_ffn, hidden_size, &scale)?;
     }
@@ -12204,13 +12235,9 @@ fn cpu_get_rows_loaded(
     let width = usize::try_from(tensor.ne[0])?;
     let height = usize::try_from(tensor.ne[1])?;
     let bytes = loaded.ctx.tensor_data(tensor_id)?;
-    if let Some(rows) = get_rows_ggml_bytes_cpu(
-        bytes,
-        tensor.desc.ty.ggml_type(),
-        width,
-        height,
-        row_ids,
-    ) {
+    if let Some(rows) =
+        get_rows_ggml_bytes_cpu(bytes, tensor.desc.ty.ggml_type(), width, height, row_ids)
+    {
         return Ok(rows);
     }
     metal_get_rows_loaded(loaded, tensor_name, row_ids)

@@ -18,7 +18,7 @@ impl Default for CarDriveConfig {
 }
 
 pub fn script_mod(_vm: &mut ScriptVm) -> ScriptValue {
-    NIL 
+    NIL
 }
 
 pub fn car_drive_command(

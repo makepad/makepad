@@ -42,7 +42,10 @@ struct CachedSlugGlyphInfo {
 #[derive(Clone, Copy, Debug)]
 pub enum SlugGlyphCacheResult {
     Ready(SlugGlyphInfo),
-    NeedsUpload { generation: u64, glyph: SlugGlyphInfo },
+    NeedsUpload {
+        generation: u64,
+        glyph: SlugGlyphInfo,
+    },
     Deferred,
     Unavailable,
 }
@@ -744,7 +747,11 @@ mod tests {
         calc_coverage(coverage_x, coverage_y, weight_x, weight_y)
     }
 
-    fn curves_for_glyph(atlas: &SlugAtlas, curve_offset: usize, curve_count: usize) -> Vec<TestCurve> {
+    fn curves_for_glyph(
+        atlas: &SlugAtlas,
+        curve_offset: usize,
+        curve_count: usize,
+    ) -> Vec<TestCurve> {
         let mut curves = Vec::with_capacity(curve_count);
         for i in 0..curve_count {
             let base = (curve_offset + i) * 8;
@@ -764,8 +771,8 @@ mod tests {
     fn load_test_font() -> std::rc::Rc<crate::text::font::Font> {
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0x5151_0001_u64.into();
-        let font_data =
-            SharedBytes::from_file_mmap_or_read(bundled_font_path()).expect("font bytes should load");
+        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+            .expect("font bytes should load");
         loader.define_font(
             font_id,
             FontDefinition {
@@ -852,10 +859,18 @@ mod tests {
             for y in 0..33 {
                 for x in 0..33 {
                     let sample = (x as f32 / 32.0, y as f32 / 32.0);
-                    max_alpha = max_alpha.max(alpha_at_full_scan(&curves, sample, 1.0 / 192.0, 1.0 / 192.0));
+                    max_alpha = max_alpha.max(alpha_at_full_scan(
+                        &curves,
+                        sample,
+                        1.0 / 192.0,
+                        1.0 / 192.0,
+                    ));
                 }
             }
-            assert!(max_alpha > 0.2, "expected visible SLUG coverage for {ch:?}, got {max_alpha}");
+            assert!(
+                max_alpha > 0.2,
+                "expected visible SLUG coverage for {ch:?}, got {max_alpha}"
+            );
         }
     }
 }

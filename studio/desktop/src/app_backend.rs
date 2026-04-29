@@ -392,7 +392,6 @@ impl App {
         match StudioHub::start_in_process(config) {
             Ok(studio) => {
                 self.data.studio = Some(studio);
-                let _ = self.ensure_ai_manager_tab(cx);
                 for mount in &mounts {
                     self.data.mounts.entry(mount.name.clone()).or_default().root =
                         mount.path.clone();
@@ -521,6 +520,32 @@ impl App {
         Some(workspace.dock(cx, ids!(dock)))
     }
 
+    pub(super) fn mount_terminal_dock(&mut self, cx: &mut Cx, mount: &str) -> Option<DockRef> {
+        let dock = self.mount_workspace_dock(cx, mount)?;
+        if dock.find_tab_bar_of_tab(id!(bottom_terminal_tab)).is_some() {
+            dock.close_tab(cx, id!(bottom_terminal_tab));
+        }
+        if dock.find_tab_bar_of_tab(id!(terminal_first)).is_none() {
+            let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, id!(log_first))?;
+            if dock
+                .create_tab(
+                    cx,
+                    tab_bar,
+                    id!(terminal_first),
+                    id!(TerminalFirstPane),
+                    "Terminal".to_string(),
+                    id!(TerminalTab),
+                    Some(pos),
+                )
+                .is_none()
+            {
+                return None;
+            }
+        }
+        dock.set_tab_title(cx, id!(terminal_first), "Terminal".to_string());
+        Some(dock)
+    }
+
     pub(super) fn refresh_active_mount_tree(&mut self, cx: &mut Cx) {
         let Some(active_mount) = self.data.active_mount.clone() else {
             self.data.file_tree = FlatFileTree::default();
@@ -567,7 +592,7 @@ impl App {
             workspace.widget(cx, ids!(log_view)).redraw(cx);
         }
 
-        if let Some(dock) = self.mount_workspace_dock(cx, &active_mount) {
+        if let Some(dock) = self.mount_terminal_dock(cx, &active_mount) {
             for tab_id in terminal_tabs {
                 dock.item(tab_id).redraw(cx);
                 dock.redraw_tab(cx, tab_id);
@@ -588,7 +613,7 @@ impl App {
         else {
             return;
         };
-        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
+        if let Some(dock) = self.mount_terminal_dock(cx, mount) {
             dock.item(tab_id).redraw(cx);
         }
     }
@@ -616,7 +641,7 @@ impl App {
         }) else {
             return;
         };
-        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+        if let Some(dock) = self.mount_terminal_dock(cx, &mount) {
             dock.set_tab_title(cx, tab_id, title);
             dock.redraw_tab(cx, tab_id);
         }
@@ -632,7 +657,7 @@ impl App {
         }) else {
             return;
         };
-        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+        if let Some(dock) = self.mount_terminal_dock(cx, &mount) {
             dock.set_tab_title(cx, tab_id, title);
             dock.redraw_tab(cx, tab_id);
         }
@@ -860,7 +885,7 @@ impl App {
             .map(|path| (path.clone(), self.terminal_tab_title(path)))
             .collect();
 
-        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+        let Some(dock) = self.mount_terminal_dock(cx, mount) else {
             return;
         };
 
@@ -868,12 +893,12 @@ impl App {
         let path_to_tab = &mut mount_state.terminal_path_to_tab;
         let tab_to_path = &mut mount_state.terminal_tab_to_path;
 
-        // Keep terminal_first as a persistent icon-only anchor tab.
+        // Keep terminal_first as a persistent anchor tab.
         if let Some(old_path) = tab_to_path.remove(&id!(terminal_first)) {
             path_to_tab.remove(&old_path);
         }
         path_to_tab.retain(|_, tab_id| *tab_id != id!(terminal_first));
-        dock.set_tab_title(cx, id!(terminal_first), String::new());
+        dock.set_tab_title(cx, id!(terminal_first), "Terminal".to_string());
 
         for path in files.iter() {
             let title = titles
@@ -889,11 +914,20 @@ impl App {
                 path_to_tab.remove(path);
                 tab_to_path.remove(&existing);
             }
-            // Create a new terminal tab before the "+" button.
-            let Some((tab_bar, pos)) = Self::reachable_tab_bar_of_tab(&dock, id!(terminal_add))
+            let Some((tab_bar, anchor_pos)) =
+                Self::reachable_tab_bar_of_tab(&dock, id!(terminal_first))
             else {
                 continue;
             };
+            let insert_after = path_to_tab
+                .values()
+                .copied()
+                .chain(std::iter::once(id!(terminal_first)))
+                .filter_map(|tab_id| Self::reachable_tab_bar_of_tab(&dock, tab_id))
+                .filter(|(candidate_bar, _)| *candidate_bar == tab_bar)
+                .map(|(_, pos)| pos)
+                .max()
+                .unwrap_or(anchor_pos);
             let tab_id = dock.unique_id(LiveId::from_str(path).0);
             if dock
                 .create_tab(
@@ -903,7 +937,7 @@ impl App {
                     id!(TerminalPane),
                     title,
                     id!(TerminalCloseableTab),
-                    Some(pos.saturating_sub(1)),
+                    Some(insert_after),
                 )
                 .is_none()
             {
@@ -942,7 +976,6 @@ impl App {
             } else {
                 dock.select_tab(cx, id!(terminal_first));
             }
-            dock.select_tab(cx, id!(bottom_terminal_tab));
         }
     }
 
@@ -950,7 +983,34 @@ impl App {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return;
         };
-        dock.select_tab(cx, id!(bottom_terminal_tab));
+        dock.select_tab(cx, id!(terminal_first));
+    }
+
+    pub(super) fn reveal_bottom_terminal_panel(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(current_height) = self.workspace_main_splitter_height(cx, mount) else {
+            return;
+        };
+        if current_height > 1.0 {
+            return;
+        }
+        let restore_height = self
+            .mount_state(mount)
+            .and_then(|state| state.bottom_panel_restore_height)
+            .unwrap_or(220.0);
+        self.start_bottom_panel_animation(cx, mount, restore_height);
+    }
+
+    pub(super) fn select_terminal_path(&mut self, cx: &mut Cx, mount: &str, path: &str) {
+        let Some(tab_id) = self
+            .mount_state(mount)
+            .and_then(|state| state.terminal_path_to_tab.get(path).copied())
+        else {
+            return;
+        };
+        let Some(dock) = self.mount_terminal_dock(cx, mount) else {
+            return;
+        };
+        dock.select_tab(cx, tab_id);
     }
 
     pub(super) fn toggle_bottom_panel(&mut self, cx: &mut Cx, mount: &str) {
@@ -1056,6 +1116,27 @@ impl App {
         }
     }
 
+    pub(super) fn reveal_terminal_path(&mut self, cx: &mut Cx, path: &str) {
+        let Some(mount) = Self::mount_from_virtual_path(path).map(str::to_string) else {
+            return;
+        };
+        {
+            let mount_state = self.mount_state_mut(&mount);
+            mount_state.select_last_terminal_once = true;
+            if !mount_state
+                .terminal_files
+                .iter()
+                .any(|existing| existing == path)
+            {
+                mount_state.terminal_files.push(path.to_string());
+                mount_state.terminal_files.sort();
+            }
+        }
+        self.reveal_bottom_terminal_panel(cx, &mount);
+        self.ensure_mount_terminal_file(cx, &mount);
+        self.select_terminal_path(cx, &mount, path);
+    }
+
     pub(super) fn next_terminal_path(&mut self, mount: &str) -> String {
         let files = self
             .mount_state(mount)
@@ -1102,15 +1183,103 @@ impl App {
             .entry(path.clone())
             .or_default();
         self.sync_mount_terminal_tabs(_cx, mount, true);
+        self.select_terminal_path(_cx, mount, &path);
         self.ensure_terminal_session_open(&path);
         self.set_status(_cx, &format!("created terminal {}", name));
         self.refresh_ai_manager_report(_cx);
     }
 
-    pub(super) fn delete_terminal_tab_file(&mut self, cx: &mut Cx, mount: &str, tab_id: LiveId) {
-        if tab_id == id!(terminal_add) {
-            return;
+    fn remove_terminal_path_local_state(
+        &mut self,
+        cx: &mut Cx,
+        path: &str,
+    ) -> Option<(String, bool)> {
+        if !Self::is_terminal_virtual_path(path) {
+            return None;
         }
+        let mount = Self::mount_from_virtual_path(path).map(str::to_string)?;
+        let mut removed_any = false;
+
+        if let Some(editor_tab_id) = self.data.path_to_tab.remove(path) {
+            removed_any = true;
+            self.data.tab_to_path.remove(&editor_tab_id);
+            self.data.sessions.remove(&editor_tab_id);
+            if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                if dock.find_tab_bar_of_tab(editor_tab_id).is_some() {
+                    dock.close_tab(cx, editor_tab_id);
+                }
+            }
+        }
+        self.data.pending_open_paths.remove(path);
+        self.data.pending_reload_paths.remove(path);
+        if self.data.current_file_path.as_deref() == Some(path) {
+            self.data.current_file_path = None;
+            self.set_current_file_label(cx, None);
+        }
+        self.update_editor_tab_titles(cx);
+
+        let terminal_tab_id = self
+            .mount_state(&mount)
+            .and_then(|mount| mount.terminal_path_to_tab.get(path).copied());
+        {
+            let mount_state = self.mount_state_mut(&mount);
+            if let Some(tab_id) = terminal_tab_id {
+                removed_any = true;
+                mount_state.terminal_tab_to_path.remove(&tab_id);
+            }
+            if mount_state.terminal_path_to_tab.remove(path).is_some() {
+                removed_any = true;
+            }
+            let before = mount_state.terminal_files.len();
+            mount_state.terminal_files.retain(|file| file != path);
+            if mount_state.terminal_files.len() != before {
+                removed_any = true;
+            }
+        }
+        if let Some(tab_id) = terminal_tab_id {
+            if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                if dock.find_tab_bar_of_tab(tab_id).is_some() {
+                    dock.close_tab(cx, tab_id);
+                }
+            }
+        }
+
+        removed_any |= self.data.terminal_open_paths.remove(path);
+        removed_any |= self.data.terminal_frame_id_by_path.remove(path).is_some();
+        removed_any |= self
+            .data
+            .terminal_framebuffer_by_path
+            .remove(path)
+            .is_some();
+        removed_any |= self.data.terminal_title_by_path.remove(path).is_some();
+
+        Some((mount, removed_any))
+    }
+
+    pub(super) fn delete_terminal_path(&mut self, cx: &mut Cx, path: &str) {
+        let Some((_mount, _removed_any)) = self.remove_terminal_path_local_state(cx, path) else {
+            return;
+        };
+
+        let path = path.to_string();
+        let _ = self.send_studio(ClientToHub::TerminalClose { path: path.clone() });
+        let _ = self.send_studio(ClientToHub::DeleteFile { path });
+        self.refresh_ai_manager_report(cx);
+    }
+
+    pub(super) fn handle_terminal_exit_cleanup(&mut self, cx: &mut Cx, path: &str) {
+        let Some((_mount, removed_any)) = self.remove_terminal_path_local_state(cx, path) else {
+            return;
+        };
+        if removed_any {
+            let _ = self.send_studio(ClientToHub::DeleteFile {
+                path: path.to_string(),
+            });
+            self.refresh_ai_manager_report(cx);
+        }
+    }
+
+    pub(super) fn delete_terminal_tab_file(&mut self, cx: &mut Cx, mount: &str, tab_id: LiveId) {
         let Some(path) = self
             .mount_state(mount)
             .and_then(|mount| mount.terminal_tab_to_path.get(&tab_id))
@@ -1118,24 +1287,8 @@ impl App {
         else {
             return;
         };
-
-        let mount_state = self.mount_state_mut(mount);
-        mount_state.terminal_tab_to_path.remove(&tab_id);
-        mount_state.terminal_path_to_tab.remove(&path);
-        mount_state.terminal_files.retain(|file| file != &path);
-        if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-            if tab_id != id!(terminal_first) {
-                dock.close_tab(cx, tab_id);
-            } else {
-                dock.set_tab_title(cx, id!(terminal_first), String::new());
-            }
-        }
-
-        self.data.terminal_open_paths.remove(&path);
-        self.data.terminal_framebuffer_by_path.remove(&path);
-        let _ = self.send_studio(ClientToHub::TerminalClose { path: path.clone() });
-        let _ = self.send_studio(ClientToHub::DeleteFile { path });
-        self.refresh_ai_manager_report(cx);
+        let _ = mount;
+        self.delete_terminal_path(cx, &path);
     }
 
     pub(super) fn select_mount(&mut self, cx: &mut Cx, mount: &str) {
@@ -1161,6 +1314,7 @@ impl App {
         self.restart_log_query_for_mount(cx, mount);
         self.refresh_active_mount_run_list(cx);
         self.refresh_active_mount_log_panels(cx);
+        self.request_ai_mount_state(mount);
         self.refresh_ai_manager_report(cx);
     }
 }
