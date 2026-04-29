@@ -1974,7 +1974,18 @@ impl TextFlow {
                             // previous row while naturally-wrapped lines
                             // get the configured `wrap_spacing` gap.
                             let ws = cx.turtle().wrap_spacing();
+                            // Restore the un-inflated left padding around
+                            // the new-line call. `turtle_new_line_with_spacing`
+                            // positions the cursor at `origin.x + padding.left`,
+                            // and we already added `pad_l` to padding.left
+                            // above. Without this, the cursor lands at
+                            // `parent_left + pad_l`, then the `walk_margin(pad_l)`
+                            // below adds another `pad_l` — leaving the box's
+                            // left edge floating `pad_l` px in from the
+                            // parent's content edge instead of flush against it.
+                            cx.turtle_mut().set_padding_left(old_padding_left);
                             cx.turtle_new_line_with_spacing(ws);
+                            cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
                         }
                     }
                 }
