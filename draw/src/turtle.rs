@@ -650,6 +650,16 @@ impl Turtle {
         self.layout.padding.left = left;
     }
 
+    /// Sets the right padding of this turtle's layout.
+    ///
+    /// Useful for temporarily reserving space at the right edge of an
+    /// in-flow turtle (e.g. so wrapping text leaves room for trailing
+    /// decoration drawn after the layout call). Save the previous value
+    /// via [`Turtle::padding`] and restore it when done.
+    pub fn set_padding_right(&mut self, right: f64) {
+        self.layout.padding.right = right;
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align
@@ -1488,9 +1498,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         {
                             let finished_walk = &self.finished_walks[finished_walk_index];
 
-                            let inner_unused_height = (inner_effective_height
-                                - finished_walk.outer_size.y)
-                                .max(0.0);
+                            let inner_unused_height =
+                                (inner_effective_height - finished_walk.outer_size.y).max(0.0);
 
                             let dx = turtle.align().x * inner_unused_width;
                             let dy = turtle.align().y * inner_unused_height;
@@ -1512,9 +1521,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                         let finished_walk = &self.finished_walks[finished_walk_index];
 
-                        let inner_unused_height = (inner_effective_height
-                            - finished_walk.outer_size.y)
-                            .max(0.0);
+                        let inner_unused_height =
+                            (inner_effective_height - finished_walk.outer_size.y).max(0.0);
 
                         let dx =
                             turtle.total_resolved_length_to(finished_walk.deferred_before_count);
@@ -1549,8 +1557,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             for walk_idx in row_walks_start..row_walks_end {
                                 row_width += self.finished_walks[walk_idx].outer_size.x;
                             }
-                            let row_unused_width =
-                                (inner_effective_width - row_width).max(0.0);
+                            let row_unused_width = (inner_effective_width - row_width).max(0.0);
                             let dx = align_x * row_unused_width;
 
                             if dx != 0.0 {
@@ -1589,9 +1596,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                             let finished_walk = &self.finished_walks[finished_walk_index];
 
-                            let inner_unused_width = (inner_effective_width
-                                - finished_walk.outer_size.x)
-                                .max(0.0);
+                            let inner_unused_width =
+                                (inner_effective_width - finished_walk.outer_size.x).max(0.0);
 
                             let dx = turtle.align().x * inner_unused_width;
                             let dy = turtle.align().y * inner_unused_height;
@@ -1613,9 +1619,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                         let finished_walk = &self.finished_walks[finished_walk_index];
 
-                        let inner_unused_width = (inner_effective_width
-                            - finished_walk.outer_size.x)
-                            .max(0.0);
+                        let inner_unused_width =
+                            (inner_effective_width - finished_walk.outer_size.x).max(0.0);
 
                         let dx = turtle.align().x * inner_unused_width;
                         let dy =
@@ -1639,12 +1644,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                         let finished_walk = &self.finished_walks[finished_walk_index];
 
-                        let inner_unused_width = (inner_effective_width
-                            - finished_walk.outer_size.x)
-                            .max(0.0);
-                        let inner_unused_height = (inner_effective_height
-                            - finished_walk.outer_size.y)
-                            .max(0.0);
+                        let inner_unused_width =
+                            (inner_effective_width - finished_walk.outer_size.x).max(0.0);
+                        let inner_unused_height =
+                            (inner_effective_height - finished_walk.outer_size.y).max(0.0);
 
                         let dx = turtle.align().x * inner_unused_width;
                         let dy = turtle.align().y * inner_unused_height;
@@ -1800,7 +1803,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             }
 
             if !ancestor.width().is_nan() {
-                let available = ancestor.inner_width() - consumed_padding + current.padding().width();
+                let available =
+                    ancestor.inner_width() - consumed_padding + current.padding().width();
                 max_width = max_width.min(available);
                 break;
             }
@@ -2629,6 +2633,11 @@ impl Walk {
 impl Layout {
     pub fn with_scroll(mut self, v: Vec2d) -> Self {
         self.scroll = v;
+        self
+    }
+
+    pub fn with_align(mut self, v: Align) -> Self {
+        self.align = v;
         self
     }
 
