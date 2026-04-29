@@ -395,6 +395,20 @@ script_mod! {
         }
     }
 
+    let TabGlass = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+
+            Label{text: "Gauss" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            open_gauss_popup_btn := Button{text: "Open Gauss"}
+            open_apple_glass_popup_btn := Button{text: "Open Apple Glass"}
+            open_glass_lens_button_btn := Button{text: "Open Lens Button"}
+            open_gradient_blur_popup_btn := Button{text: "Open Gradient Blur"}
+        }
+    }
+
     // Text tab - labels, headings, text inputs
     let TabText = SolidView{
         width: Fill height: Fill
@@ -1646,8 +1660,8 @@ script_mod! {
 
         // Left panel - Selection test first, then input widgets
         left_tabs := DockTabs{
-            tabs: [@scrollbar_test_tab, @selection_test_tab, @toggles_tab, @sliders_tab, @text_tab, @dropdowns_tab]
-            selected: 1
+            tabs: [@glass_tab, @scrollbar_test_tab, @selection_test_tab, @toggles_tab, @sliders_tab, @text_tab, @dropdowns_tab]
+            selected: 0
             closable: false
         }
 
@@ -1712,6 +1726,11 @@ script_mod! {
             name: "Sliders"
             template: @CloseableTab
             kind: @TabSliders        }
+
+        glass_tab := DockTab{
+            name: "Gauss"
+            template: @CloseableTab
+            kind: @TabGlass        }
 
         text_tab := DockTab{
             name: "Text"
@@ -1778,6 +1797,7 @@ script_mod! {
         TabButtons := TabButtons{}
         TabToggles := TabToggles{}
         TabSliders := TabSliders{}
+        TabGlass := TabGlass{}
         TabText := TabText{}
         TabDropdowns := TabDropdowns{}
         TabMarkup := TabMarkup{}
@@ -1802,7 +1822,236 @@ script_mod! {
                 window.title: "Splash Example"
                 body +: {
                     padding: 4
+                    flow: Overlay
                     dock := AppDock{}
+                    gauss_demo_layer := View{
+                        width: Fill
+                        height: Fill
+                        flow: Overlay
+                        align: Align{x: 1.0 y: 0.0}
+
+                        gauss_popup := PopupNotification{
+                            align: Align{x: 0.5 y: 0.5}
+                            content +: {
+                                width: 430
+                                height: 300
+                                flow: Overlay
+                                clip_x: false
+                                clip_y: false
+
+                                gauss_popup_bg := GaussRoundedView{
+                                    width: Fill
+                                    height: Fill
+                                    draw_bg +: {
+                                        blur_level: 5.0
+                                        lensing_effect: 0.0
+                                        corner_radius: 18.0
+                                        tint_color: #b8b8b8
+                                        tint_alpha: 0.07
+                                        surface_alpha: 0.82
+                                        border_alpha: 0.36
+                                        specular_strength: 0.10
+                                        fallback_color: #8c8c8c
+                                        shadow_color: #000b
+                                        shadow_radius: 44.0
+                                        shadow_offset: vec2(0.0, 18.0)
+                                    }
+                                }
+
+                                gauss_popup_content := View{
+                                    width: Fill
+                                    height: Fill
+                                    padding: 22
+                                    flow: Down
+                                    spacing: 12
+
+                                    Label{
+                                        text: "Gauss"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 18
+                                    }
+                                    gauss_blur_slider := Slider{width: Fill text: "Blurriness" min: 0.0 max: 6.0 default: 5.0}
+                                    gauss_lensing_slider := Slider{width: Fill text: "Lensing Effect" min: 0.0 max: 100.0 default: 0.0}
+                                    View{
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                    View{
+                                        width: Fill
+                                        height: 72
+                                        flow: Right
+                                        align: Align{x: 1.0 y: 0.5}
+                                        close_gauss_popup_btn := ButtonFlat{text: "Close"}
+                                    }
+                                }
+                            }
+                        }
+
+                        apple_glass_popup := PopupNotification{
+                            align: Align{x: 0.5 y: 0.5}
+                            content +: {
+                                width: 430
+                                height: 300
+                                flow: Overlay
+                                clip_x: false
+                                clip_y: false
+
+                                apple_glass_popup_bg := AppleGlassRoundedView{
+                                    width: Fill
+                                    height: Fill
+                                    draw_bg +: {
+                                        blur_level: 5.2
+                                        lensing_effect: 0.75
+                                        corner_radius: 18.0
+                                        tint_color: #b8b8b8
+                                        tint_alpha: 0.08
+                                        surface_alpha: 0.76
+                                        border_alpha: 0.56
+                                        specular_strength: 0.14
+                                        fallback_color: #8c8c8c
+                                        shadow_color: #000c
+                                        shadow_radius: 46.0
+                                        shadow_offset: vec2(0.0, 20.0)
+                                        diffraction_strength: 2.4
+                                    }
+                                }
+
+                                apple_glass_popup_content := View{
+                                    width: Fill
+                                    height: Fill
+                                    padding: 22
+                                    flow: Down
+                                    spacing: 12
+
+                                    Label{
+                                        text: "Apple Glass"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 18
+                                    }
+                                    apple_glass_blur_slider := Slider{width: Fill text: "Blurriness" min: 0.0 max: 6.0 default: 5.2}
+                                    apple_glass_lensing_slider := Slider{width: Fill text: "Lensing Effect" min: 0.0 max: 100.0 default: 75.0}
+                                    View{
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                    View{
+                                        width: Fill
+                                        height: 72
+                                        flow: Right
+                                        align: Align{x: 1.0 y: 0.5}
+                                        close_apple_glass_popup_btn := ButtonFlat{text: "Close"}
+                                    }
+                                }
+                            }
+                        }
+
+                        glass_lens_button_popup := PopupNotification{
+                            align: Align{x: 0.5 y: 0.5}
+                            content +: {
+                                width: 300
+                                height: 92
+                                flow: Overlay
+                                clip_x: false
+                                clip_y: false
+
+                                glass_lens_button_bg := AppleGlassRoundedView{
+                                    width: Fill
+                                    height: Fill
+                                    draw_bg +: {
+                                        blur_level: 0.25
+                                        lensing_effect: 1.0
+                                        lensing_strength: 29.0
+                                        lensing_width: 10.0
+                                        corner_radius: 23.0
+                                        tint_color: #b8b8b8
+                                        tint_alpha: 0.025
+                                        border_alpha: 0.82
+                                        specular_strength: 0.24
+                                        noise_strength: 0.004
+                                        fallback_color: #4a4a4a
+                                        shadow_color: #0009
+                                        shadow_radius: 34.0
+                                        shadow_offset: vec2(0.0, 14.0)
+                                        diffraction_strength: 3.6
+                                    }
+                                }
+                                close_glass_lens_button_btn := ButtonFlat{
+                                    width: Fill
+                                    height: Fill
+                                    text: "Focus"
+                                    draw_text.color: #fff
+                                    draw_text.text_style.font_size: 22
+                                    draw_bg +: {
+                                        border_size: 0.0
+                                        color: #0000
+                                        color_hover: #0000
+                                        color_down: #0000
+                                        color_focus: #0000
+                                        border_color: #0000
+                                        border_color_hover: #0000
+                                        border_color_down: #0000
+                                        border_color_focus: #0000
+                                    }
+                                }
+                            }
+                        }
+
+                        gradient_blur_popup := PopupNotification{
+                            align: Align{x: 0.5 y: 0.5}
+                            content +: {
+                                width: 520
+                                height: 280
+                                flow: Overlay
+                                clip_x: false
+                                clip_y: false
+
+                                gradient_blur_popup_bg := GaussGradientRoundedView{
+                                    width: Fill
+                                    height: Fill
+                                    draw_bg +: {
+                                        blur_level: 4.35
+                                        gradient_blur_edge: 1.45
+                                        gradient_blur_edge_width: 0.20
+                                        gradient_blur_power: 0.75
+                                        corner_radius: 18.0
+                                        tint_color: #b8b8b8
+                                        tint_alpha: 0.045
+                                        border_alpha: 0.44
+                                        specular_strength: 0.08
+                                        fallback_color: #6a6a6a
+                                        shadow_color: #000b
+                                        shadow_radius: 44.0
+                                        shadow_offset: vec2(0.0, 18.0)
+                                    }
+                                }
+
+                                gradient_blur_popup_content := View{
+                                    width: Fill
+                                    height: Fill
+                                    padding: 22
+                                    flow: Down
+                                    spacing: 12
+
+                                    Label{
+                                        text: "Gradient Blur"
+                                        draw_text.color: #fff
+                                        draw_text.text_style.font_size: 18
+                                    }
+                                    View{
+                                        width: Fill
+                                        height: Fill
+                                    }
+                                    View{
+                                        width: Fill
+                                        height: 72
+                                        flow: Right
+                                        align: Align{x: 1.0 y: 0.5}
+                                        close_gradient_blur_popup_btn := ButtonFlat{text: "Close"}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1813,6 +2062,32 @@ script_mod! {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    lens_press_next_frame: NextFrame,
+    #[rust]
+    lens_press_started_at: f64,
+    #[rust]
+    lens_pressing: bool,
+    #[rust]
+    lens_ripple_animating: bool,
+}
+
+impl App {
+    fn set_focus_lens_press_response(
+        &mut self,
+        cx: &mut Cx,
+        flatten: f32,
+        ripple_start: f32,
+        ripple_strength: f32,
+    ) {
+        if let Some(mut glass) = self
+            .ui
+            .widget(cx, ids!(glass_lens_button_bg))
+            .borrow_mut::<GaussRoundedView>()
+        {
+            glass.set_press_response(cx, flatten, ripple_start, ripple_strength);
+        }
+    }
 }
 
 impl MatchEvent for App {
@@ -1826,6 +2101,41 @@ impl MatchEvent for App {
             .load_image_file_by_path(cx, image_path)
         {
             log!("Failed to load image: {:?}", e);
+        }
+    }
+
+    fn handle_next_frame(&mut self, cx: &mut Cx, e: &NextFrameEvent) {
+        if !self.lens_ripple_animating || !e.set.contains(&self.lens_press_next_frame) {
+            return;
+        }
+
+        if self.lens_press_started_at <= 0.0 {
+            self.lens_press_started_at = e.time;
+        }
+        let age = (e.time - self.lens_press_started_at).max(0.0);
+        let release_fade = (1.0 - age / 0.26).max(0.0) as f32;
+        let flatten = if self.lens_pressing {
+            1.0
+        } else {
+            release_fade
+        };
+        let ripple_strength = if self.lens_pressing || age < 0.56 {
+            1.0
+        } else {
+            0.0
+        };
+        self.set_focus_lens_press_response(
+            cx,
+            flatten,
+            self.lens_press_started_at as f32,
+            ripple_strength,
+        );
+
+        if self.lens_pressing || age < 0.56 {
+            self.lens_press_next_frame = cx.new_next_frame();
+        } else {
+            self.lens_ripple_animating = false;
+            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
         }
     }
 
@@ -1880,6 +2190,167 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(hide_popup_btn)).clicked(actions) {
             log!("Hiding popup notification");
             self.ui.popup_notification(cx, ids!(popup_notif)).close(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(open_gauss_popup_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .popup_notification(cx, ids!(apple_glass_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(glass_lens_button_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(gradient_blur_popup))
+                .close(cx);
+            self.ui.popup_notification(cx, ids!(gauss_popup)).open(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(open_apple_glass_popup_btn))
+            .clicked(actions)
+        {
+            self.ui.popup_notification(cx, ids!(gauss_popup)).close(cx);
+            self.ui
+                .popup_notification(cx, ids!(glass_lens_button_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(gradient_blur_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(apple_glass_popup))
+                .open(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(open_glass_lens_button_btn))
+            .clicked(actions)
+        {
+            self.ui.popup_notification(cx, ids!(gauss_popup)).close(cx);
+            self.ui
+                .popup_notification(cx, ids!(apple_glass_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(gradient_blur_popup))
+                .close(cx);
+            self.lens_pressing = false;
+            self.lens_ripple_animating = false;
+            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.ui
+                .popup_notification(cx, ids!(glass_lens_button_popup))
+                .open(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(open_gradient_blur_popup_btn))
+            .clicked(actions)
+        {
+            self.ui.popup_notification(cx, ids!(gauss_popup)).close(cx);
+            self.ui
+                .popup_notification(cx, ids!(apple_glass_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(glass_lens_button_popup))
+                .close(cx);
+            self.ui
+                .popup_notification(cx, ids!(gradient_blur_popup))
+                .open(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(close_gauss_popup_btn))
+            .clicked(actions)
+        {
+            self.ui.popup_notification(cx, ids!(gauss_popup)).close(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(close_apple_glass_popup_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .popup_notification(cx, ids!(apple_glass_popup))
+                .close(cx);
+        }
+        let focus_lens_button = self.ui.button(cx, ids!(close_glass_lens_button_btn));
+        if focus_lens_button.pressed(actions) {
+            self.lens_pressing = true;
+            self.lens_ripple_animating = true;
+            self.lens_press_started_at = 0.0;
+            self.set_focus_lens_press_response(cx, 1.0, -1000.0, 0.0);
+            self.lens_press_next_frame = cx.new_next_frame();
+        }
+        if focus_lens_button.released(actions) {
+            self.lens_pressing = false;
+            self.lens_ripple_animating = true;
+            self.lens_press_next_frame = cx.new_next_frame();
+        }
+        if focus_lens_button.clicked(actions) {
+            self.lens_pressing = false;
+            self.lens_ripple_animating = false;
+            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            self.ui
+                .popup_notification(cx, ids!(glass_lens_button_popup))
+                .close(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(close_gradient_blur_popup_btn))
+            .clicked(actions)
+        {
+            self.ui
+                .popup_notification(cx, ids!(gradient_blur_popup))
+                .close(cx);
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(gauss_blur_slider)).slided(actions) {
+            if let Some(mut glass) = self
+                .ui
+                .widget(cx, ids!(gauss_popup_bg))
+                .borrow_mut::<GaussRoundedView>()
+            {
+                glass.set_blurriness(cx, value as f32);
+            }
+        }
+        if let Some(value) = self
+            .ui
+            .slider(cx, ids!(gauss_lensing_slider))
+            .slided(actions)
+        {
+            if let Some(mut glass) = self
+                .ui
+                .widget(cx, ids!(gauss_popup_bg))
+                .borrow_mut::<GaussRoundedView>()
+            {
+                glass.set_lensing_effect(cx, value as f32 / 100.0);
+            }
+        }
+        if let Some(value) = self
+            .ui
+            .slider(cx, ids!(apple_glass_blur_slider))
+            .slided(actions)
+        {
+            if let Some(mut glass) = self
+                .ui
+                .widget(cx, ids!(apple_glass_popup_bg))
+                .borrow_mut::<GaussRoundedView>()
+            {
+                glass.set_blurriness(cx, value as f32);
+            }
+        }
+        if let Some(value) = self
+            .ui
+            .slider(cx, ids!(apple_glass_lensing_slider))
+            .slided(actions)
+        {
+            if let Some(mut glass) = self
+                .ui
+                .widget(cx, ids!(apple_glass_popup_bg))
+                .borrow_mut::<GaussRoundedView>()
+            {
+                glass.set_lensing_effect(cx, value as f32 / 100.0);
+            }
         }
 
         if let Some(value) = self.ui.check_box(cx, ids!(checkbox)).changed(actions) {

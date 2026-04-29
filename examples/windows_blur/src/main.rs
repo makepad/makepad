@@ -245,30 +245,30 @@ script_mod! {
                             height: Fit
                             flow: Overlay
 
-                            hero_shell := GlassPanel{
+                            hero_shell := View{
                                 width: Fill
                                 height: Fit
                                 padding: Inset{top: 14, bottom: 14, left: 14, right: 14}
-                                draw_bg +: {
-                                    tint_color: #FFFFFF
-                                    tint_alpha: 0.08
-                                    border_color: #FFFFFF
-                                    border_alpha: 0.24
-                                    corner_radius: 34.0
-                                    specular_strength: 0.42
-                                    noise_strength: 0.02
-                                    use_scene_blur: 1.0
-                                    blur_amount: 0.92
-                                }
                                 SceneVector{}
                             }
 
-                            View{
+                            GaussRoundedView{
                                 width: Fill
                                 height: Fit
                                 padding: Inset{top: 32, bottom: 32, left: 34, right: 34}
                                 flow: Right
                                 spacing: 24
+                                draw_bg +: {
+                                    tint_color: #FFFFFF
+                                    tint_alpha: 0.18
+                                    surface_alpha: 0.82
+                                    border_color: #FFFFFF
+                                    border_alpha: 0.28
+                                    corner_radius: 34.0
+                                    specular_strength: 0.24
+                                    noise_strength: 0.014
+                                    blur_level: 5.4
+                                }
 
                                 View{
                                     width: Fill

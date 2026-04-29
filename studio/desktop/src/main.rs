@@ -211,14 +211,12 @@ impl MatchEvent for App {
                 {
                     self.delete_ai_manager_agent(&active_mount);
                 }
-                if workspace.button(cx, ids!(ai_send_button)).clicked(actions) {
-                    self.send_ai_manager_prompt(cx, &active_mount);
-                }
-                if workspace
-                    .button(cx, ids!(ai_cancel_button))
-                    .clicked(actions)
-                {
-                    self.cancel_ai_manager_prompt(&active_mount);
+                if workspace.button(cx, ids!(ai_run_button)).clicked(actions) {
+                    if self.active_ai_agent_is_pending_for_mount(&active_mount) {
+                        self.cancel_ai_manager_prompt(&active_mount);
+                    } else {
+                        self.send_ai_manager_prompt(cx, &active_mount);
+                    }
                 }
                 if workspace
                     .text_input(cx, ids!(ai_prompt_input))

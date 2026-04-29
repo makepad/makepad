@@ -30,11 +30,20 @@ impl Overlay {
     pub fn begin(&self, cx: &mut Cx2d) {
         // mark our overlay_id on cx
         cx.overlay_id = Some(self.draw_list.id());
+        cx.overlay_pass_id = None;
+        // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
+    }
+
+    pub fn begin_for_pass(&self, cx: &mut Cx2d, pass_id: DrawPassId) {
+        // mark our overlay_id on cx
+        cx.overlay_id = Some(self.draw_list.id());
+        cx.overlay_pass_id = Some(pass_id);
         // cx.overlay_sweep_lock = Some(self.sweep_lock.clone());
     }
 
     pub fn end(&self, cx: &mut Cx2d) {
         cx.overlay_id = None;
+        cx.overlay_pass_id = None;
         let parent_id = cx.draw_list_stack.last().cloned().unwrap();
         let redraw_id = cx.redraw_id;
         cx.draw_lists[parent_id].append_sub_list(redraw_id, self.draw_list.id());

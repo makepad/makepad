@@ -19,7 +19,10 @@ use {
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
     std::rc::Rc,
+    std::sync::atomic::{AtomicUsize, Ordering},
 };
+
+static LAST_RENDER_PASS_COUNT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 impl Cx {
     #[allow(dead_code)]
@@ -104,6 +107,11 @@ impl Cx {
             }
         }
         self.demo_time_repaint = false;
+
+        let pass_count = passes_todo.len();
+        if LAST_RENDER_PASS_COUNT.swap(pass_count, Ordering::Relaxed) != pass_count {
+            crate::log!("UI render passes: {}", pass_count);
+        }
     }
 
     pub(crate) fn need_redrawing(&self) -> bool {
