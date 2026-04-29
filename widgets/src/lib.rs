@@ -45,6 +45,7 @@ pub mod radio_button;
 
 pub mod adaptive_view;
 pub mod desktop_button;
+pub mod gauss_view;
 pub mod keyboard_view;
 pub mod nav_control;
 #[cfg(feature = "voice")]
@@ -148,6 +149,7 @@ pub use crate::{
 
     fold_button::*,
     fold_header::*,
+    gauss_view::*,
 
     icon::*,
 
@@ -532,6 +534,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     });
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
+    crate::gauss_view::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);

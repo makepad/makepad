@@ -23,9 +23,37 @@ script_mod! {
         height: Fit
         selectable: true
         padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
-        paragraph_spacing: 14.0
+        paragraph_spacing: 9.0
+        pre_code_spacing: 4.0
         inline_code_padding: Inset {left: 4.0 right: 4.0 top: 1.0 bottom: 3.0}
         inline_code_margin: Inset {left: 2.0 right: 2.0 top: 0.0 bottom: 0.0}
+        heading_base_scale: 1.45
+        quote_layout: Layout {
+            flow: Flow.Right {wrap: true}
+            padding: Inset {left: 8.0 right: 8.0 top: 4.0 bottom: 5.0}
+        }
+        draw_block +: {
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_label_inner_inactive
+            code_color: theme.color_bg_highlight
+        }
+        splash_block := View {
+            width: Fill
+            height: 54.0
+            flow: Overlay
+            margin: Inset {left: 0.0 right: 0.0 top: 3.0 bottom: 1.0}
+            splash_view := CodeView {
+                keep_cursor_at_end: false
+                editor +: {
+                    height: 54.0
+                    word_wrap: true
+                    pad_left_top: vec2(8.0, 5.0)
+                    draw_bg +: {
+                        color: theme.color_bg_highlight
+                    }
+                }
+            }
+        }
         body: ""
     }
 
@@ -135,6 +163,84 @@ script_mod! {
         }
     }
 
+    let AiPromptInput = TextInputFlat {
+        width: Fill
+        height: 92.0
+        is_multiline: true
+        submit_on_enter: false
+        empty_text: "Ask AI"
+        margin: Inset {}
+        padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 10.0}
+        draw_bg +: {
+            border_radius: 7.0
+
+            color: theme.color_bg_highlight * 0.72
+            color_hover: theme.color_bg_highlight * 0.78
+            color_focus: theme.color_bg_highlight * 0.84
+            color_down: theme.color_bg_highlight * 0.74
+            color_empty: theme.color_bg_highlight * 0.72
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_focus: theme.color_bevel_focus
+            border_color_down: theme.color_u_hidden
+            border_color_empty: theme.color_u_hidden
+            border_color_disabled: theme.color_u_hidden
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_focus: theme.color_u_hidden
+            border_color_2_down: theme.color_u_hidden
+            border_color_2_empty: theme.color_u_hidden
+            border_color_2_disabled: theme.color_u_hidden
+        }
+        draw_text +: {
+            color_empty: theme.color_label_inner_inactive
+            color_empty_hover: theme.color_label_inner_inactive
+            color_empty_focus: theme.color_label_inner_inactive
+        }
+    }
+
+    let AiRunButton = ButtonFlat {
+        width: 42.0
+        height: 42.0
+        margin: Inset {}
+        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+        text: "▶"
+        draw_bg +: {
+            border_radius: 7.0
+            color: theme.color_bg_highlight * 0.9
+            color_hover: theme.color_bg_highlight * 1.04
+            color_down: theme.color_bg_highlight * 0.76
+            color_focus: theme.color_bg_highlight
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_focus: theme.color_u_hidden
+            border_color_down: theme.color_u_hidden
+            border_color_disabled: theme.color_bg_odd
+        }
+        draw_text +: {
+            color: theme.color_label_outer
+            color_hover: theme.color_label_outer
+            color_down: theme.color_label_outer
+            color_focus: theme.color_label_outer
+            color_disabled: theme.color_label_inner_inactive
+            text_style: theme.font_bold {
+                font_size: 15.0
+            }
+        }
+    }
+
+    let AiPaneDivider = View {
+        width: Fill
+        height: 1.0
+        margin: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+        show_bg: true
+        draw_bg +: {
+            color: theme.color_bg_highlight * 0.86
+        }
+    }
+
     let AiPane = RectView {
         width: Fill
         height: Fill
@@ -143,7 +249,17 @@ script_mod! {
             color: theme.color_bg_container
         }
 
-        PaneToolbar {
+        RectView {
+            width: Fill
+            height: STUDIO_HEADER_HEIGHT
+            flow: Right
+            align: Align {x: 0.0 y: 0.5}
+            padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+            spacing: theme.space_2
+            draw_bg +: {
+                color: theme.color_bg_highlight
+            }
+
             View {
                 width: Fill
                 height: Fit
@@ -164,12 +280,15 @@ script_mod! {
             }
         }
 
-        View {
+        RectView {
             width: Fill
             height: Fit
             flow: Right
             spacing: theme.space_2
             padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 8.0}
+            draw_bg +: {
+                color: theme.color_bg_highlight
+            }
 
             ai_agent_dropdown := DropDown {
                 width: Fill
@@ -187,11 +306,14 @@ script_mod! {
             }
         }
 
-        View {
+        RectView {
             width: Fill
             height: Fit
             flow: Down
             padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 0.0}
+            draw_bg +: {
+                color: theme.color_bg_highlight
+            }
 
             Label {
                 text: "Live"
@@ -202,43 +324,44 @@ script_mod! {
                 width: Fill
                 height: 132.0
                 flow: Down
-                padding: Inset {left: 0.0 right: 0.0 top: 8.0 bottom: 8.0}
+                show_bg: true
+                padding: Inset {left: 8.0 right: 8.0 top: 8.0 bottom: 8.0}
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.76
+                }
                 ai_live_markdown := AiChatMarkdown {}
             }
         }
+
+        AiPaneDivider {}
 
         chat_scroll := ScrollYView {
             width: Fill
             height: Fill
             flow: Down
-            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 20.0}
+            show_bg: true
+            padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 14.0}
+            draw_bg +: {
+                color: theme.color_bg_container * 1.02
+            }
             ai_chat_markdown := AiChatMarkdown {}
         }
 
-        View {
+        AiPaneDivider {}
+
+        RectView {
             width: Fill
             height: Fit
             flow: Right
             spacing: theme.space_2
-            align: Align {x: 0.0 y: 0.5}
+            align: Align {x: 0.0 y: 1.0}
             padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
-
-            ai_prompt_input := TextInputFlat {
-                width: Fill
-                height: Fit
-                is_multiline: false
-                empty_text: ""
+            draw_bg +: {
+                color: theme.color_bg_highlight
             }
 
-            ai_send_button := ButtonFlat {
-                width: 68.0
-                text: "Send"
-            }
-
-            ai_cancel_button := ButtonFlat {
-                width: 68.0
-                text: "Stop"
-            }
+            ai_prompt_input := AiPromptInput {}
+            ai_run_button := AiRunButton {}
         }
     }
 

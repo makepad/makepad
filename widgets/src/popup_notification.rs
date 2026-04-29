@@ -77,6 +77,10 @@ impl Widget for PopupNotification {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        if !self.opened {
+            return DrawStep::done();
+        }
+
         let draw_list = self.draw_list.as_mut().unwrap();
         draw_list.begin_overlay_reuse(cx);
 
@@ -84,9 +88,7 @@ impl Widget for PopupNotification {
         cx.begin_root_turtle(size, self.view.layout);
         self.draw_bg.begin(cx, self.view.walk, self.view.layout);
 
-        if self.opened {
-            let _ = self.view.draw_all(cx, scope);
-        }
+        let _ = self.view.draw_all(cx, scope);
 
         self.draw_bg.end(cx);
 

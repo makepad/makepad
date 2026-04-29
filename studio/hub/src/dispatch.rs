@@ -1744,7 +1744,10 @@ impl HubCore {
             },
             ClientToHub::TerminalInput { path, data } => {
                 match self.terminal_manager.send_input(&path, data) {
-                    Ok(()) => self.set_terminal_bell_state(&path, false),
+                    Ok(()) => {
+                        self.set_terminal_bell_state(&path, false);
+                        self.process_ai_terminal_input_for_path(&path);
+                    }
                     Err(err) => self.send_ui_error(client_id, err),
                 }
             }
@@ -3872,6 +3875,19 @@ impl HubCore {
         }
     }
 
+    fn process_ai_terminal_input_for_path(&mut self, path: &str) {
+        let Some(mount) = self
+            .terminal_manager
+            .mount_for_path(path)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if let Some(state) = self.ai_manager.process_terminal_input(&mount, path) {
+            self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+        }
+    }
+
     fn process_ai_path_change(&mut self, mount: &str, virtual_path: &str) {
         if let Some(state) = self.ai_manager.process_path_change(mount, virtual_path) {
             self.broadcast_ui_message(HubToClient::AiMountState {
@@ -3999,6 +4015,7 @@ impl HubCore {
             0
         };
         self.set_terminal_bell_state(path, false);
+        self.process_ai_terminal_input_for_path(path);
         let preview_source = if submit {
             format!("{}<enter>", text)
         } else {
@@ -4036,6 +4053,7 @@ impl HubCore {
         };
         self.terminal_manager.send_input(path, bytes.clone())?;
         self.set_terminal_bell_state(path, false);
+        self.process_ai_terminal_input_for_path(path);
         Ok(AiTerminalInputResult {
             path: path.to_string(),
             name: Self::terminal_display_name(path),
