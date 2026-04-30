@@ -1414,6 +1414,12 @@ fn add_font_assets_dir_to_apk(
         ) {
             continue;
         }
+        // Skip files that already ship from the sibling `resources/` dir —
+        // otherwise the same TTF lands in the APK twice. The widgets crate
+        // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
+        if resource_dir.join(path).is_file() {
+            continue;
+        }
         cp(&source_dir.join(path), &dst_dir.join(path), false)?;
         let path = path.display().to_string().replace("\\", "/");
         assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
