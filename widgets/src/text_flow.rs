@@ -1881,16 +1881,145 @@ impl TextFlow {
                     let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                     areas_tracker.track_rect(cx, rect);
                 }
+
+                // Reserve space on both edges for the inline code box's
+                // padding by temporarily inflating the turtle's left and
+                // right padding. Without these, wrapped continuation rows
+                // start flush at the parent's left edge and the layouter
+                // wraps text right at the line's rightmost pixel, so the
+                // box's padding on the wrap-side spills past the parent's
+                // draw bounds and the inner rounded corners get clipped.
+                let pad_l = self.inline_code_padding.left;
+                let pad_r = self.inline_code_padding.right;
+                let old_padding_left = cx.turtle().padding().left;
+                let old_padding_right = cx.turtle().padding().right;
+                cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
+                cx.turtle_mut().set_padding_right(old_padding_right + pad_r);
+
+                // If, even with the reduced wrap width, the `<code>` text
+                // still wouldn't admit any glyphs at the current cursor
+                // position (the layouter would emit an empty continuation
+                // row before the actual content), wrap to a new line first.
+                // Otherwise that empty row renders as a stranded mini-box
+                // at the end of the previous line.
+                //
+                // Mid-text splits (`tofu` on one row, `apply` on the next)
+                // are still allowed — this only kicks in when row 0 would
+                // be glyph-empty.
+                let turtle_pos = cx.turtle().pos();
+                let turtle_rect = cx.turtle().inner_rect();
+                let max_width = if !turtle_rect.size.x.is_nan() {
+                    Some(turtle_rect.size.x as f32)
+                } else {
+                    None
+                };
+                let wrap_enabled =
+                    matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+                if wrap_enabled && !self.first_thing_on_a_line {
+                    if let Some(max_width) = max_width {
+                        // The eventual layout will start at cursor + pad_l
+                        // (because we walk pad_l below). Predict against
+                        // that effective indent.
+                        let first_row_indent =
+                            (turtle_pos.x - turtle_rect.pos.x) as f32 + pad_l as f32;
+                        let row_offset = cx.turtle().next_row_offset() as f32;
+                        let layout_align = dt.layout_align;
+                        let measured = dt.layout(
+                            cx,
+                            first_row_indent,
+                            row_offset,
+                            Some(max_width),
+                            true,
+                            layout_align,
+                            text,
+                        );
+                        let row0_empty = measured
+                            .rows
+                            .first()
+                            .map(|r| r.glyphs.is_empty())
+                            .unwrap_or(false);
+                        let has_more_rows = measured.rows.len() > 1;
+                        // Also measure on a fresh line (indent=0) to see if
+                        // the text would fit on a single row by itself.
+                        let fresh = dt.layout(
+                            cx,
+                            0.0,
+                            row_offset,
+                            Some(max_width),
+                            true,
+                            layout_align,
+                            text,
+                        );
+                        let fits_on_fresh_line = fresh.rows.len() == 1;
+                        // Wrap to a new line if EITHER:
+                        //   (a) row 0 would be empty (continuation didn't
+                        //       admit any glyphs) — leaving a stranded
+                        //       mini-box on the previous row, OR
+                        //   (b) the text would split across multiple rows
+                        //       here but would fit on a single fresh line.
+                        //       Splitting here forces draw_walk_resumable_with
+                        //       into its per-row glyph batching path, which
+                        //       puts row 1+ glyphs into a different draw_item
+                        //       than row 0 (because the box draws between
+                        //       them) — and that race-conditions in
+                        //       parent-heavy contexts (PortalList recycling,
+                        //       many concurrent draws) so wrapped row glyphs
+                        //       can fail to paint at all.
+                        let needs_wrap =
+                            (row0_empty && has_more_rows) || (has_more_rows && fits_on_fresh_line);
+                        if needs_wrap {
+                            // Match the spacing the layouter would have
+                            // used had it wrapped naturally — otherwise
+                            // the forced new line sits tight against the
+                            // previous row while naturally-wrapped lines
+                            // get the configured `wrap_spacing` gap.
+                            let ws = cx.turtle().wrap_spacing();
+                            // Restore the un-inflated left padding around
+                            // the new-line call. `turtle_new_line_with_spacing`
+                            // positions the cursor at `origin.x + padding.left`,
+                            // and we already added `pad_l` to padding.left
+                            // above. Without this, the cursor lands at
+                            // `parent_left + pad_l`, then the `walk_margin(pad_l)`
+                            // below adds another `pad_l` — leaving the box's
+                            // left edge floating `pad_l` px in from the
+                            // parent's content edge instead of flush against it.
+                            cx.turtle_mut().set_padding_left(old_padding_left);
+                            cx.turtle_new_line_with_spacing(ws);
+                            cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
+                        }
+                    }
+                }
+
+                // Walk the box's left padding so the actual text glyphs
+                // start `pad_l` past the cursor — this leaves room inside
+                // the box for the visible left padding (text never sits
+                // flush with the box's rounded left edge).
+                let pad_l_rect = TextFlow::walk_margin(cx, pad_l);
+                areas_tracker.track_rect(cx, pad_l_rect);
+
                 let code_pad_h = (self.inline_code_padding.top
                     + self.inline_code_padding.bottom
                     + self.inline_code_margin.top
                     + self.inline_code_margin.bottom) as f64;
-                let result = dt.draw_walk_resumable_with(cx, text, |cx, mut rect, _| {
+                let result = dt.draw_walk_resumable_with_background(cx, text, |cx, mut rect, _| {
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
                 });
+
+                // Restore the turtle's padding before walking the right
+                // side; we want the trailing pad/margin walks to advance
+                // the cursor normally without being constrained by the
+                // inflated padding we used for layout.
+                cx.turtle_mut().set_padding_left(old_padding_left);
+                cx.turtle_mut().set_padding_right(old_padding_right);
+
+                // Walk the box's right padding so the cursor advances past
+                // the visible right edge of the box.
+                let pad_r_rect = TextFlow::walk_margin(cx, pad_r);
+                areas_tracker.track_rect(cx, pad_r_rect);
+
                 // The inline_code padding/margin extends the visual rect
                 // beyond what draw_walk_resumable_with allocated in the
                 // turtle. Grow used_height so the next row starts below the

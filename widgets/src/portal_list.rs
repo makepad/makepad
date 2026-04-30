@@ -542,7 +542,18 @@ impl ScriptHook for PortalList {
 
 impl PortalList {
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, self.layout);
+        // The outer turtle wraps the inner item turtle (Fill cross-axis, Fit
+        // main-axis). If we let `self.layout.align` apply here, a non-zero
+        // main-axis align would shift the inner turtle as a whole when items
+        // don't fill the viewport — showing up as leading empty space at the
+        // start of the list. Drop align on the outer turtle: the user's
+        // `align` config is reserved for the inner item turtle (cross-axis
+        // only — see `next_visible_item`).
+        let outer_layout = Layout {
+            align: Align::default(),
+            ..self.layout
+        };
+        cx.begin_turtle(walk, outer_layout);
         self.draw_align_list.clear();
     }
 
@@ -820,10 +831,18 @@ impl PortalList {
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
+        // Propagate only the cross-axis component of the PortalList's own
+        // `align` to the inner item turtle, so items shorter than the bar's
+        // cross-axis size get centered. Main-axis align is intentionally
+        // dropped: items are stacked along the flow direction and may
+        // overflow (PortalList scrolls), so main-axis centering would either
+        // create leading empty space when items don't fill the viewport or
+        // misalign with the scroll origin. The default Align{x:0,y:0}
+        // preserves prior top-left item behavior.
         let layout = if vi == Vec2Index::Y {
-            Layout::flow_down()
+            Layout::flow_down().with_align_x(self.layout.align.x)
         } else {
-            Layout::flow_right()
+            Layout::flow_right().with_align_y(self.layout.align.y)
         };
 
         if let Some(draw_state) = self.draw_state.get() {
@@ -1015,7 +1034,7 @@ impl PortalList {
                                         height: Size::fit(),
                                         metrics: Metrics::default(),
                                     },
-                                    Layout::flow_down(),
+                                    layout,
                                 );
                                 return Some(last_index + 1);
                             }
