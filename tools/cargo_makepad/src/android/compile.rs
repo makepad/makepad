@@ -1507,7 +1507,17 @@ pub fn build(
     let underscore_build_crate = build_crate.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_binary_name}"));
-    let app_label = app_label.unwrap_or_else(|| underscore_binary_name.clone());
+    // When the caller didn't pass --app-label, fall back to the binary name with the
+    // first letter capitalized so the launcher icon doesn't show a lowercased crate
+    // name. The package name (java_url) stays lowercase since Android package IDs
+    // conventionally are.
+    let app_label = app_label.unwrap_or_else(|| {
+        let mut chars = underscore_binary_name.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    });
 
     if let Some(icon) = resolve_app_icon_env(build_crate)? {
         for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
