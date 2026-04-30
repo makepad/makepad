@@ -18,8 +18,11 @@ export class WasmWebGPU extends WasmWebBrowser {
       return null;
     }
     try {
-      return new WasmWebGPU(wasm, dispatch, canvas);
-    } catch (_e) {
+      const webgpu = new WasmWebGPU(wasm, dispatch, canvas);
+      await webgpu._webgpu_init_promise;
+      return webgpu;
+    } catch (e) {
+      console.warn("[makepad] backend=webgpu init failed; falling back to webgl2", e);
       return null;
     }
   }
@@ -68,6 +71,10 @@ export class WasmWebGPU extends WasmWebBrowser {
     this.video_players = {};
     this.video_anim_frame_id = 0;
     this._pending_until_ready = [];
+    // Expensive GPU validation scopes are off by default (enable only when debugging).
+    this._enable_error_scopes = false;
+    // Use dynamic-offset uniform streaming (avoids per-draw UBO buffer allocation).
+    this._use_dynamic_ubo_rings = true;
     /** default depth/blend — pipelines encode blend; depth compare is default less-equal */
     this._default_depth_write = true;
     this._default_backface_cull = false;
@@ -123,6 +130,16 @@ export class WasmWebGPU extends WasmWebBrowser {
     this.buffers.geometry = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     this.buffers.instances = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     this.buffers.indices = new WgpuRingBuffer(this.device, 4 * 1024 * 1024, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST);
+
+    // Triple-buffered uniform rings for dynamic offsets.
+    // This avoids overwriting uniform data that may still be in-flight on the GPU.
+    const uniformRingBytes = 16 * 1024 * 1024;
+    this._uniform_rings = [
+      new WgpuRingBuffer(this.device, uniformRingBytes, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
+      new WgpuRingBuffer(this.device, uniformRingBytes, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
+      new WgpuRingBuffer(this.device, uniformRingBytes, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
+    ];
+    this._uniform_ring_index = 0;
 
     // Some shaders reference low texture ids very early (before the app allocates real textures).
     // Provide a stable default so draws don't sample "missing" and output nothing.
@@ -262,7 +279,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         layoutEntries.push({
           binding,
           visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          buffer: { type: "uniform" },
+          buffer: { type: "uniform", hasDynamicOffset: true },
         });
       }
     }
@@ -314,6 +331,19 @@ export class WasmWebGPU extends WasmWebBrowser {
       instance_slots: args.instance_slots,
     };
 
+    // Precompute binding lookup tables and a stable, sorted binding order so
+    // bind group creation in the hot path can avoid Map/sort churn.
+    shader._bindings_sorted = Array.from(binding_kinds.keys()).sort((a, b) => (a | 0) - (b | 0));
+    shader._sampler_binding_by_binding = new Map();
+    for (const sb of samplerBindings || []) shader._sampler_binding_by_binding.set(sb.binding | 0, sb);
+    shader._texture_binding_by_binding = new Map();
+    for (const tb of textureBindings || []) shader._texture_binding_by_binding.set(tb.binding | 0, tb);
+
+    shader._scratch_texIds = new Uint32Array(16);
+    shader._scratch_textureViews = new Array(shader.texture_count);
+    shader._scratch_textureEntries = new Array(shader.texture_count);
+    shader._scratch_dyn_offsets = null;
+
     // Ensure we have a buffer for every declared uniform binding.
     for (const [binding, kind] of binding_kinds.entries()) {
       if (kind !== "buffer") continue;
@@ -329,6 +359,12 @@ export class WasmWebGPU extends WasmWebBrowser {
       else if (varName.includes("_mp_scope_uniforms")) { shader.ubo_live = shader.ubos.get(binding); shader.ubo_binding_live = binding; }
     }
     shader.baseBindGroup = null;
+
+    // Dynamic-offset UBO streaming metadata.
+    shader._dyn_buffer_bindings_sorted = shader._bindings_sorted.filter((b) => shader.binding_kinds.get(b) === "buffer");
+    shader._dyn_binding_sizes = new Map(); // binding -> size bytes (aligned)
+    shader._dyn_bind_groups = new Map(); // key -> GPUBindGroup
+    shader._dyn_bind_groups_epoch = 1;
 
     this.draw_shaders[args.shader_id] = shader;
   }
@@ -389,6 +425,13 @@ export class WasmWebGPU extends WasmWebBrowser {
   }
 
   make_pipeline_variant_key(shader, textureEntries, colorFormat, depthWrite, backfaceCulling) {
+    const dw = depthWrite ? 1 : 0;
+    const bf = backfaceCulling ? 1 : 0;
+    const hd = this._pass_has_depth ? 1 : 0;
+    return `${colorFormat}|${dw}|${bf}|${hd}`;
+  }
+
+  make_layout_variant_key(shader, textureEntries) {
     const textureKey = shader.textureBindings
       .map(({ textureIndex, declaredSampleType }) =>
         this.sample_type_for_texture_entry(textureEntries[textureIndex], declaredSampleType))
@@ -396,31 +439,19 @@ export class WasmWebGPU extends WasmWebBrowser {
     const samplerKey = shader.samplerDescs
       .map((_, samplerIndex) => this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries))
       .join("|");
-    const dw = depthWrite ? 1 : 0;
-    const bf = backfaceCulling ? 1 : 0;
-    const hd = this._pass_has_depth ? 1 : 0;
-    return `${colorFormat}|${dw}|${bf}|${hd}|${textureKey}::${samplerKey}`;
+    return `${textureKey}::${samplerKey}`;
   }
 
-  sampler_binding_type_for_index(shader, samplerIndex, textureEntries) {
-    const hasUnfilterableTexture = shader.textureBindings.some(({ textureIndex, declaredSampleType }) => {
-      return shader.texture_sampler_indices[textureIndex] === samplerIndex
-        && this.sample_type_for_texture_entry(textureEntries[textureIndex], declaredSampleType) === "unfilterable-float";
-    });
-    if (hasUnfilterableTexture) return "non-filtering";
-    const desc = shader.samplerDescs[samplerIndex];
-    return desc && (desc.filter | 0) !== 0 ? "filtering" : "non-filtering";
-  }
-
-  get_pipeline_variant(shader, textureEntries, depthWrite, backfaceCulling) {
-    const colorFormat = this._pass_color_format || this.format;
-    const key = this.make_pipeline_variant_key(shader, textureEntries, colorFormat, depthWrite, backfaceCulling);
-    let variant = shader.pipelineVariants.get(key);
-    if (variant) return variant;
+  get_layout_variant(shader, textureEntries) {
+    if (!shader.layoutVariants) shader.layoutVariants = new Map();
+    const key = this.make_layout_variant_key(shader, textureEntries);
+    let layout = shader.layoutVariants.get(key);
+    if (layout) return layout;
 
     const layoutEntries = shader.baseLayoutEntries.map((entry) => {
       if (entry.texture) {
-        const textureBinding = shader.textureBindings.find((item) => item.binding === entry.binding);
+        const textureBinding = shader._texture_binding_by_binding?.get(entry.binding | 0)
+          || shader.textureBindings.find((item) => item.binding === entry.binding);
         if (!textureBinding) return entry;
         return {
           ...entry,
@@ -434,7 +465,8 @@ export class WasmWebGPU extends WasmWebBrowser {
         };
       }
       if (entry.sampler) {
-        const samplerBinding = shader.samplerBindings.find((item) => item.binding === entry.binding);
+        const samplerBinding = shader._sampler_binding_by_binding?.get(entry.binding | 0)
+          || shader.samplerBindings.find((item) => item.binding === entry.binding);
         if (!samplerBinding) return entry;
         return {
           ...entry,
@@ -452,12 +484,34 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     const bindGroupLayout = this.device.createBindGroupLayout({ entries: layoutEntries });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+    layout = { bindGroupLayout, pipelineLayout, key };
+    shader.layoutVariants.set(key, layout);
+    return layout;
+  }
+
+  sampler_binding_type_for_index(shader, samplerIndex, textureEntries) {
+    const hasUnfilterableTexture = shader.textureBindings.some(({ textureIndex, declaredSampleType }) => {
+      return shader.texture_sampler_indices[textureIndex] === samplerIndex
+        && this.sample_type_for_texture_entry(textureEntries[textureIndex], declaredSampleType) === "unfilterable-float";
+    });
+    if (hasUnfilterableTexture) return "non-filtering";
+    const desc = shader.samplerDescs[samplerIndex];
+    return desc && (desc.filter | 0) !== 0 ? "filtering" : "non-filtering";
+  }
+
+  get_pipeline_variant(shader, textureEntries, depthWrite, backfaceCulling) {
+    const colorFormat = this._pass_color_format || this.format;
+    const layout = this.get_layout_variant(shader, textureEntries);
+    const pipeBase = this.make_pipeline_variant_key(shader, textureEntries, colorFormat, depthWrite, backfaceCulling);
+    const key = `${pipeBase}|L:${layout.key}`;
+    let variant = shader.pipelineVariants.get(key);
+    if (variant) return variant;
     const cullMode = backfaceCulling ? "back" : "none";
     const hasDepthAttachment = !!this._pass_has_depth;
     let pipeline;
     try {
       pipeline = this.device.createRenderPipeline({
-        layout: pipelineLayout,
+        layout: layout.pipelineLayout,
         vertex: { module: shader.shaderModule, entryPoint: "vertex_main", buffers: shader.vertexBuffers },
         fragment: {
           module: shader.shaderModule,
@@ -483,7 +537,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       throw err;
     }
 
-    variant = { bindGroupLayout, pipeline, key };
+    variant = { bindGroupLayout: layout.bindGroupLayout, pipeline, key };
     shader.pipelineVariants.set(key, variant);
     return variant;
   }
@@ -601,11 +655,15 @@ export class WasmWebGPU extends WasmWebBrowser {
         version: 0,
       };
     }
-    // Copy out of shared memory for writeBuffer compatibility/perf predictability.
-    const copy = f32.slice();
-    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, requestedByteLength);
+    // Keep a persistent CPU copy for packing; reuse allocation when possible.
+    let cpu = entry.data;
+    if (!cpu || cpu.length < f32.length) {
+      cpu = new Float32Array(f32.length);
+      entry.data = cpu;
+    }
+    cpu.set(f32);
+    this.queue.writeBuffer(entry.buf, 0, cpu.buffer, cpu.byteOffset, requestedByteLength);
     entry.length = f32.length;
-    entry.data = copy;
     entry.version = (entry.version || 0) + 1;
     if (!entry.packed) entry.packed = new Map();
   }
@@ -632,14 +690,21 @@ export class WasmWebGPU extends WasmWebBrowser {
         byteLength: newByteLength,
         length: itemCount * strideFloats,
         logicalLength: entry.length,
-        data: null,
+        // Scratch staging used for repacking; avoids per-update allocations.
+        scratch: null,
         version: 0,
       };
       if (!entry.packed) entry.packed = new Map();
       entry.packed.set(key, packed);
     }
 
-    const out = new Float32Array(itemCount * strideFloats);
+    const requiredFloats = itemCount * strideFloats;
+    if (!packed.scratch || packed.scratch.length < requiredFloats) {
+      // Grow exponentially to reduce realloc churn.
+      const nextLen = Math.max(requiredFloats, packed.scratch ? (packed.scratch.length * 2) : 4096);
+      packed.scratch = new Float32Array(nextLen);
+    }
+    const out = packed.scratch.subarray(0, requiredFloats);
     for (let i = 0; i < itemCount; i++) {
       const srcOffset = i * logicalSlots;
       const dstOffset = i * strideFloats;
@@ -647,7 +712,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
 
     this.queue.writeBuffer(packed.buf, 0, out.buffer, out.byteOffset, out.byteLength);
-    
+
     packed.length = out.length;
     packed.logicalLength = entry.length;
     packed.version = entry.version;
@@ -665,10 +730,16 @@ export class WasmWebGPU extends WasmWebBrowser {
         buf: device.createBuffer({ size: Math.max(4, newByteLength), usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }),
         byteLength: newByteLength,
         length: u32.length,
+        data: null,
       };
     }
-    const copy = u32.slice();
-    this.queue.writeBuffer(entry.buf, 0, copy.buffer, copy.byteOffset, requestedByteLength);
+    let cpu = entry.data;
+    if (!cpu || cpu.length < u32.length) {
+      cpu = new Uint32Array(u32.length);
+      entry.data = cpu;
+    }
+    cpu.set(u32);
+    this.queue.writeBuffer(entry.buf, 0, cpu.buffer, cpu.byteOffset, requestedByteLength);
     entry.length = u32.length;
   }
 
@@ -687,6 +758,10 @@ export class WasmWebGPU extends WasmWebBrowser {
       return;
     }
     this._frame_id = (this._frame_id || 0) + 1;
+    if (this._use_dynamic_ubo_rings && this._uniform_rings) {
+      this._uniform_ring_index = (this._frame_id | 0) % 3;
+      this._uniform_rings[this._uniform_ring_index].begin_frame();
+    }
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = true;
     }
@@ -716,9 +791,18 @@ export class WasmWebGPU extends WasmWebBrowser {
     // depth_write is enabled on some draw calls. Keep depth only when XR provides it.
     // (Render-to-texture can still request depth explicitly via depth_targets.)
 
+    const depthStencilAttachment = depthView
+      ? {
+          view: depthView,
+          depthClearValue: args.clear_depth,
+          depthLoadOp: "clear",
+          depthStoreOp: "store",
+        }
+      : undefined;
+
     this._pass_color_format = this.format;
     this._pass_extent = { w, h };
-    this._pass_has_depth = false;
+    this._pass_has_depth = !!depthStencilAttachment;
 
     this._encoder = this.device.createCommandEncoder();
     this._pass = this._encoder.beginRenderPass({
@@ -730,7 +814,7 @@ export class WasmWebGPU extends WasmWebBrowser {
           storeOp: "store",
         },
       ],
-      depthStencilAttachment: undefined,
+      depthStencilAttachment,
     });
   }
 
@@ -836,19 +920,25 @@ export class WasmWebGPU extends WasmWebBrowser {
     const rowBytes = w * 4;
     const bytesPerRow = (rowBytes + 255) & ~255;
     const faceBytes = rowBytes * h;
-    const all = new Uint8Array(this.memory.buffer, args.data.ptr, faceBytes * 6).slice();
     const texture = this.device.createTexture({
       dimension: "2d",
       size: [w, h, 6],
       format: "bgra8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    const staging = new Uint8Array(bytesPerRow * h);
+    const needed = bytesPerRow * h;
+    if (!this._scratch_tex_u8 || this._scratch_tex_u8.length < needed) {
+      const nextLen = Math.max(needed, this._scratch_tex_u8 ? (this._scratch_tex_u8.length * 2) : 4096);
+      this._scratch_tex_u8 = new Uint8Array(nextLen);
+    }
+    const staging = this._scratch_tex_u8.subarray(0, needed);
+    const srcAll = new Uint8Array(this.memory.buffer, args.data.ptr, faceBytes * 6);
     for (let face = 0; face < 6; face++) {
-      const slice = all.subarray(face * faceBytes, (face + 1) * faceBytes);
-      staging.fill(0);
+      const faceOff = face * faceBytes;
+      // Note: we intentionally don't clear the row padding; WebGPU ignores bytes past rowBytes.
       for (let row = 0; row < h; row++) {
-        staging.set(slice.subarray(row * rowBytes, row * rowBytes + rowBytes), row * bytesPerRow);
+        const srcRowOff = faceOff + row * rowBytes;
+        staging.set(srcAll.subarray(srcRowOff, srcRowOff + rowBytes), row * bytesPerRow);
       }
       this.queue.writeTexture(
         { texture, origin: { x: 0, y: 0, z: face } },
@@ -904,13 +994,10 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
 
       const texIdsAt = at;
-      const texIds = [];
-      for (let i = 0; i < shader.texture_count; i++) {
-        texIds.push(words[texIdsAt + i]);
-      }
-      while (texIds.length < 16) {
-        texIds.push(NONE_TEX);
-      }
+      const texIds = shader._scratch_texIds;
+      const tc = shader.texture_count | 0;
+      for (let i = 0; i < tc; i++) texIds[i] = words[texIdsAt + i] >>> 0;
+      for (let i = tc; i < 16; i++) texIds[i] = NONE_TEX;
       at += 16;
 
       this._emitSingleDraw(
@@ -935,16 +1022,28 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (this._encoder) {
       const cmd = this._encoder.finish();
       this._encoder = null;
-      this.device.pushErrorScope('validation');
-      this.device.pushErrorScope('internal');
+      if (this._enable_error_scopes) {
+        this.device.pushErrorScope("validation");
+        this.device.pushErrorScope("internal");
+      }
       this.queue.submit([cmd]);
-      this.device.popErrorScope().then(e => { if (e) console.error('[makepad:webgpu] internal GPU error:', e.message); });
-      this.device.popErrorScope().then(e => { if (e) console.error('[makepad:webgpu] validation GPU error:', e.message); });
+      if (this._enable_error_scopes) {
+        this.device.popErrorScope().then((e) => {
+          if (e) console.error("[makepad:webgpu] internal GPU error:", e.message);
+        });
+        this.device.popErrorScope().then((e) => {
+          if (e) console.error("[makepad:webgpu] validation GPU error:", e.message);
+        });
+      }
     }
   }
 
   on_xr_animation_frame(time, frame) {
     this._frame_id = (this._frame_id || 0) + 1;
+    if (this._use_dynamic_ubo_rings && this._uniform_rings) {
+      this._uniform_ring_index = (this._frame_id | 0) % 3;
+      this._uniform_rings[this._uniform_ring_index].begin_frame();
+    }
     function empty_transform() {
       return {
         orientation: { a: 0, b: 0, c: 0, d: 0 },
@@ -1356,7 +1455,13 @@ export class WasmWebGPU extends WasmWebBrowser {
       );
       return;
     }
-    const staging = new Uint8Array(bytesPerRow * h);
+    const needed = bytesPerRow * h;
+    if (!this._scratch_tex_u8 || this._scratch_tex_u8.length < needed) {
+      // Grow exponentially to reduce churn on frequent resizes.
+      const nextLen = Math.max(needed, this._scratch_tex_u8 ? (this._scratch_tex_u8.length * 2) : 4096);
+      this._scratch_tex_u8 = new Uint8Array(nextLen);
+    }
+    const staging = this._scratch_tex_u8.subarray(0, needed);
     for (let row = 0; row < h; row++) {
       staging.set(bytes.subarray(row * rowBytes, row * rowBytes + rowBytes), row * bytesPerRow);
     }
@@ -1381,7 +1486,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     texIds
   ) {
     const NONE_TEX = 0xffffffff;
-    
+
     if (!this._scratch_f32) {
       this._scratch_f32 = new Float32Array(4096);
     }
@@ -1389,10 +1494,194 @@ export class WasmWebGPU extends WasmWebBrowser {
       this._scratch_pass_f32 = new Float32Array(1024);
     }
 
-    // In WebGPU, queue.writeBuffer() resolves BEFORE the submitted command buffer.
-    // This means if we reuse the same UBO for multiple draw calls within a render pass,
-    // only the last writeBuffer wins and all draws see that data.
-    // Fix: allocate a separate GPUBuffer per draw call from a pool, reset each frame.
+    // Uniform streaming:
+    // Prefer dynamic-offset uniform rings (no per-draw UBO buffers). Fall back to the
+    // older per-draw UBO pool if disabled.
+
+    if (this._use_dynamic_ubo_rings && this._uniform_rings) {
+      const ring = this._uniform_rings[this._uniform_ring_index | 0];
+      const bindings = shader._dyn_buffer_bindings_sorted || [];
+      if (!shader._scratch_dyn_offsets || shader._scratch_dyn_offsets.length !== bindings.length) {
+        shader._scratch_dyn_offsets = new Uint32Array(Math.max(1, bindings.length));
+      }
+      const dynOffsets = shader._scratch_dyn_offsets;
+
+      const align256 = (n) => Math.max(256, (n + 255) & ~255);
+      const passBinding = shader.ubo_binding_pass | 0;
+      const listBinding = shader.ubo_binding_draw_list | 0;
+      const callBinding = shader.ubo_binding_draw_call | 0;
+      const userBinding = shader.ubo_binding_user | 0;
+      const liveBinding = shader.ubo_binding_live | 0;
+
+      // Cache immutable-per-pass/per-list/per-shader uniform blocks so we don't
+      // rewrite them for every draw.
+      if (!shader._dyn_uniform_cache) {
+        shader._dyn_uniform_cache = {
+          frame_id: -1,
+          ring_slot: -1,
+          pass: { ptr: 0, len: 0, off: 0, byteLen: 0 },
+          list: { ptr: 0, len: 0, off: 0, byteLen: 0 },
+          live: { ptr: 0, len: 0, off: 0, byteLen: 0 },
+        };
+      }
+      const cache = shader._dyn_uniform_cache;
+      const ringSlot = this._uniform_ring_index | 0;
+      if ((cache.frame_id | 0) !== (this._frame_id | 0) || (cache.ring_slot | 0) !== ringSlot) {
+        cache.frame_id = this._frame_id | 0;
+        cache.ring_slot = ringSlot;
+        cache.pass.ptr = cache.pass.len = cache.pass.off = cache.pass.byteLen = 0;
+        cache.list.ptr = cache.list.len = cache.list.off = cache.list.byteLen = 0;
+        cache.live.ptr = cache.live.len = cache.live.off = cache.live.byteLen = 0;
+      }
+
+      // Copy pass uniforms into a dedicated scratch buffer (may be mutated for XR).
+      if (pass_len > this._scratch_pass_f32.length) {
+        this._scratch_pass_f32 = new Float32Array(Math.max(pass_len, this._scratch_pass_f32.length * 2));
+      }
+      const pass_u = this._scratch_pass_f32.subarray(0, pass_len);
+      if (pass_len > 0) pass_u.set(new Float32Array(this.memory.buffer, pass_ptr, pass_len));
+
+      const scratchCopy = (ptr, len) => {
+        if (len <= 0) return null;
+        if (len > this._scratch_f32.length) {
+          this._scratch_f32 = new Float32Array(Math.max(len, this._scratch_f32.length * 2));
+        }
+        const dst = this._scratch_f32.subarray(0, len);
+        dst.set(new Float32Array(this.memory.buffer, ptr, len));
+        return dst;
+      };
+
+      // Allocate+write each dynamic UBO binding into the ring, recording offsets in binding order.
+      for (let i = 0; i < bindings.length; i++) {
+        const binding = bindings[i] | 0;
+        let ptr = 0, len = 0;
+        let data = null;
+        if (binding === passBinding) { ptr = pass_ptr; len = pass_len; data = pass_u; }
+        else if (binding === listBinding) { ptr = list_ptr; len = list_len; data = scratchCopy(ptr, len); }
+        else if (binding === callBinding) { ptr = call_ptr; len = call_len; data = scratchCopy(ptr, len); }
+        else if (binding === userBinding) { ptr = user_ptr; len = user_len; data = scratchCopy(ptr, len); }
+        else if (binding === liveBinding) { ptr = live_ptr; len = live_len; data = scratchCopy(ptr, len); }
+        else { ptr = 0; len = 0; data = null; }
+
+        const byteLen = align256((len | 0) * 4);
+        const prevSize = shader._dyn_binding_sizes.get(binding) || 0;
+        if (byteLen > prevSize) {
+          shader._dyn_binding_sizes.set(binding, byteLen);
+          shader._dyn_bind_groups_epoch = (shader._dyn_bind_groups_epoch | 0) + 1;
+          shader._dyn_bind_groups.clear();
+        }
+
+        // Cache pass/list/live offsets to avoid repeated writes.
+        if (binding === passBinding) {
+          const c = cache.pass;
+          if ((c.ptr | 0) === (ptr | 0) && (c.len | 0) === (len | 0) && (c.byteLen | 0) >= (byteLen | 0)) {
+            dynOffsets[i] = c.off >>> 0;
+          } else {
+            const off = ring.alloc(byteLen, 256);
+            dynOffsets[i] = off >>> 0;
+            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
+          }
+          continue;
+        }
+        if (binding === listBinding) {
+          const c = cache.list;
+          if ((c.ptr | 0) === (ptr | 0) && (c.len | 0) === (len | 0) && (c.byteLen | 0) >= (byteLen | 0)) {
+            dynOffsets[i] = c.off >>> 0;
+          } else {
+            const off = ring.alloc(byteLen, 256);
+            dynOffsets[i] = off >>> 0;
+            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
+          }
+          continue;
+        }
+        if (binding === liveBinding) {
+          const c = cache.live;
+          if ((c.ptr | 0) === (ptr | 0) && (c.len | 0) === (len | 0) && (c.byteLen | 0) >= (byteLen | 0)) {
+            dynOffsets[i] = c.off >>> 0;
+          } else {
+            const off = ring.alloc(byteLen, 256);
+            dynOffsets[i] = off >>> 0;
+            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
+          }
+          continue;
+        }
+
+        // draw_call + user are expected to vary per draw; always allocate+write.
+        const off = ring.alloc(byteLen, 256);
+        dynOffsets[i] = off >>> 0;
+        if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+      }
+
+      // Build texture view arrays without allocation.
+      const textureViews = shader._scratch_textureViews;
+      const textureEntries = shader._scratch_textureEntries;
+      for (let i = 0; i < (shader.texture_count | 0); i++) {
+        const tid = texIds[i];
+        const texId = tid === undefined || tid === null ? NONE_TEX : tid >>> 0;
+        if (texId !== NONE_TEX) {
+          const tex = this.textures[texId];
+          textureViews[i] = tex ? tex.view : null;
+          textureEntries[i] = tex || null;
+        } else {
+          textureViews[i] = null;
+          textureEntries[i] = null;
+        }
+      }
+
+      const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
+      const bindGroup = this.get_bind_group_for_shader_dyn(shader, textureViews, textureEntries, variant, texIds, ring, dynOffsets);
+
+      this._pass.setPipeline(variant.pipeline);
+      this._pass.setBindGroup(0, bindGroup, dynOffsets);
+
+      const geomRaw = this.array_buffers[vao.geom_vb_id];
+      const instRaw = this.array_buffers[vao.inst_vb_id];
+      const ib = this.index_buffers[vao.geom_ib_id];
+      if (!geomRaw || !instRaw || !ib) return;
+      const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
+      const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.inst_vec4s);
+      this._pass.setVertexBuffer(0, geom.buf);
+      this._pass.setVertexBuffer(1, inst.buf);
+      this._pass.setIndexBuffer(ib.buf, "uint32");
+
+      const indexCount = ib.length | 0;
+      const instanceCount = shader.instance_slots > 0 ? (((instRaw.length | 0) / shader.instance_slots) | 0) : 0;
+      if (instanceCount <= 0 || indexCount <= 0) return;
+
+      const xr = this.xr;
+      if (xr !== undefined && xr.in_xr_pass && xr.left_eye && xr.left_eye.viewport) {
+        const passBindIndex = bindings.indexOf(passBinding);
+        const applyEye = (eye) => {
+          const vp = eye.viewport;
+          this._pass.setViewport(vp.x | 0, vp.y | 0, Math.max(1, vp.width | 0), Math.max(1, vp.height | 0), 0, 1);
+          this._pass.setScissorRect(vp.x | 0, vp.y | 0, Math.max(1, vp.width | 0), Math.max(1, vp.height | 0));
+          const m = pass_u;
+          const mp = eye.projection_matrix;
+          for (let i = 0; i < 16; i++) m[i] = mp[i];
+          const mt = eye.transform_matrix;
+          for (let i = 0; i < 16; i++) m[i + 16] = mt[i];
+          const mi = eye.invtransform_matrix;
+          for (let i = 0; i < 16; i++) m[i + 32] = mi[i];
+          // Re-write pass UBO region for this eye.
+          // Note: dynOffsets[passBindingIndex] corresponds to pass binding's offset.
+          if (passBindIndex >= 0) {
+            const off = dynOffsets[passBindIndex] | 0;
+            this.queue.writeBuffer(ring.buffer, off, pass_u.buffer, pass_u.byteOffset, (pass_len | 0) * 4);
+          }
+          this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
+        };
+        applyEye(xr.left_eye);
+        applyEye(xr.right_eye);
+      } else {
+        this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
+      }
+      return;
+    }
+
+    // ---- Fallback path: per-draw UBO pool ----
 
     if (!shader._ubo_pool) {
       shader._ubo_pool = [];      // Array of {pass, list, call, user, live} buffer sets
@@ -1408,6 +1697,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (!shader._ubo_pool[poolIdx]) {
       shader._ubo_pool[poolIdx] = {
         pass: null, list: null, call: null, user: null, live: null,
+        _ver: { pass: 0, list: 0, call: 0, user: 0, live: 0 },
       };
     }
     const poolSlot = shader._ubo_pool[poolIdx];
@@ -1422,6 +1712,9 @@ export class WasmWebGPU extends WasmWebBrowser {
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         poolSlot[slot] = buf;
+        if (poolSlot._ver && poolSlot._ver[slot] !== undefined) {
+          poolSlot._ver[slot] = (poolSlot._ver[slot] | 0) + 1;
+        }
       }
       return buf;
     };
@@ -1459,9 +1752,9 @@ export class WasmWebGPU extends WasmWebBrowser {
     const liveBuf = writePoolUBO("live", live_ptr, live_len);
 
     // Build a direct bind group using the pool buffers for this draw call
-    const textureViews = new Array(shader.texture_count);
-    const textureEntries = new Array(shader.texture_count);
-    for (let i = 0; i < shader.texture_count; i++) {
+    const textureViews = shader._scratch_textureViews;
+    const textureEntries = shader._scratch_textureEntries;
+    for (let i = 0; i < (shader.texture_count | 0); i++) {
       const tid = texIds[i];
       const texId = tid === undefined || tid === null ? NONE_TEX : tid >>> 0;
       if (texId !== NONE_TEX) {
@@ -1476,10 +1769,20 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
 
-    // Create bind group directly with pool buffers (no caching — each draw call is unique)
-    const bindGroup = this._create_bind_group_with_pool_bufs(
-      shader, variant, textureViews, textureEntries,
-      passBuf, listBuf, callBuf, userBuf, liveBuf
+    // Cache bind groups per (pipeline variant, textures+versions, poolIdx, pool buffer versions).
+    const bindGroup = this.get_bind_group_for_shader_pool(
+      shader,
+      textureViews,
+      textureEntries,
+      variant,
+      texIds,
+      poolIdx,
+      passBuf,
+      listBuf,
+      callBuf,
+      userBuf,
+      liveBuf,
+      poolSlot,
     );
 
     this._pass.setPipeline(variant.pipeline);
@@ -1527,59 +1830,141 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
   }
 
-  _create_bind_group_with_pool_bufs(shader, variant, textureViews, textureEntries, passBuf, listBuf, callBuf, userBuf, liveBuf) {
+  create_bind_group_for_shader_pool(shader, variant, textureViews, textureEntries, passBuf, listBuf, callBuf, userBuf, liveBuf) {
     const entries = [];
+    const kindMap = shader.binding_kinds;
+    const bindings = shader._bindings_sorted || [];
 
-    // Map named UBO bindings to their pool buffers
-    const uboMap = new Map();
-    if (shader.ubo_binding_pass >= 0) uboMap.set(shader.ubo_binding_pass, passBuf);
-    if (shader.ubo_binding_draw_list >= 0) uboMap.set(shader.ubo_binding_draw_list, listBuf);
-    if (shader.ubo_binding_draw_call >= 0) uboMap.set(shader.ubo_binding_draw_call, callBuf);
-    if (shader.ubo_binding_user >= 0) uboMap.set(shader.ubo_binding_user, userBuf);
-    if (shader.ubo_binding_live >= 0) uboMap.set(shader.ubo_binding_live, liveBuf);
+    const passBinding = shader.ubo_binding_pass | 0;
+    const listBinding = shader.ubo_binding_draw_list | 0;
+    const callBinding = shader.ubo_binding_draw_call | 0;
+    const userBinding = shader.ubo_binding_user | 0;
+    const liveBinding = shader.ubo_binding_live | 0;
 
-    for (const [binding, kind] of shader.binding_kinds.entries()) {
-      if (kind !== "buffer") continue;
-      const buf = uboMap.get(binding) || shader.ubos.get(binding) || passBuf;
-      entries.push({ binding, resource: { buffer: buf } });
+    for (let bi = 0; bi < bindings.length; bi++) {
+      const binding = bindings[bi] | 0;
+      const kind = kindMap.get(binding);
+      if (kind === "buffer") {
+        let buf = null;
+        if (binding === passBinding) buf = passBuf;
+        else if (binding === listBinding) buf = listBuf;
+        else if (binding === callBinding) buf = callBuf;
+        else if (binding === userBinding) buf = userBuf;
+        else if (binding === liveBinding) buf = liveBuf;
+        else buf = shader.ubos.get(binding) || passBuf;
+        entries.push({ binding, resource: { buffer: buf } });
+      } else if (kind === "sampler") {
+        const sb = shader._sampler_binding_by_binding?.get(binding);
+        const samplerIndex = sb ? (sb.samplerIndex | 0) : -1;
+        const bindingType = samplerIndex >= 0
+          ? this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries)
+          : "non-filtering";
+        const desc = samplerIndex >= 0 ? shader.samplerDescs[samplerIndex] : null;
+        const useOriginal =
+          (bindingType === "filtering" && desc && (desc.filter | 0) !== 0)
+          || (bindingType === "non-filtering" && (!desc || (desc.filter | 0) === 0));
+        const samplerRes = samplerIndex >= 0
+          ? (useOriginal
+              ? (shader.samplers[samplerIndex] || this.get_fallback_sampler())
+              : this.get_sampler_resource(desc, bindingType))
+          : this.get_fallback_sampler();
+        entries.push({ binding, resource: samplerRes });
+      } else if (kind === "texture") {
+        const tb = shader._texture_binding_by_binding?.get(binding);
+        const textureIndex = tb ? (tb.textureIndex | 0) : 0;
+        const declaredSampleType = tb ? tb.declaredSampleType : "float";
+        const isDepth = declaredSampleType === "depth";
+        const entry = textureEntries[textureIndex];
+        const view = isDepth
+          ? ((entry && entry.depthView) ? entry.depthView : this.get_fallback_depth_texture_view())
+          : (textureViews[textureIndex] || this.get_fallback_texture_view());
+        entries.push({ binding, resource: view });
+      }
     }
 
-    // Bind samplers
-    for (const sb of shader.samplerBindings || []) {
-      const samplerIndex = sb.samplerIndex | 0;
-      const b = sb.binding | 0;
-      if (shader.binding_kinds?.get(b) !== "sampler") continue;
-      const bindingType = this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries);
-      const desc = shader.samplerDescs[samplerIndex];
-      const useOriginal =
-        (bindingType === "filtering" && desc && (desc.filter | 0) !== 0)
-        || (bindingType === "non-filtering" && (!desc || (desc.filter | 0) === 0));
-      entries.push({
-        binding: b,
-        resource: useOriginal
-          ? (shader.samplers[samplerIndex] || this.get_fallback_sampler())
-          : this.get_sampler_resource(desc, bindingType),
-      });
+    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries });
+  }
+
+  get_bind_group_for_shader_pool(shader, textureViews, textureEntries, variant, texIds, pool_idx, passBuf, listBuf, callBuf, userBuf, liveBuf, poolSlot) {
+    if (!shader.bindGroupsPool) shader.bindGroupsPool = new Map();
+    let key = variant.key + "|P" + (pool_idx | 0);
+    if (poolSlot && poolSlot._ver) {
+      key += "|B" +
+        (poolSlot._ver.pass | 0) + "," +
+        (poolSlot._ver.list | 0) + "," +
+        (poolSlot._ver.call | 0) + "," +
+        (poolSlot._ver.user | 0) + "," +
+        (poolSlot._ver.live | 0);
     }
-
-    // Bind textures
-    for (const tb of shader.textureBindings || []) {
-      const isDepth = tb.declaredSampleType === "depth";
-      const entry = textureEntries[tb.textureIndex];
-      const view = isDepth
-        ? ((entry && entry.depthView) ? entry.depthView : this.get_fallback_depth_texture_view())
-        : (textureViews[tb.textureIndex] || this.get_fallback_texture_view());
-      const b = tb.binding | 0;
-      if (shader.binding_kinds?.get(b) !== "texture") continue;
-      entries.push({ binding: b, resource: view });
+    for (let i = 0; i < (shader.texture_count | 0); i++) {
+      const tid = texIds[i];
+      const entry = textureEntries[i];
+      const ver = entry ? (entry.version | 0) : 0;
+      key += "|" + (tid === undefined ? "n" : (tid >>> 0)) + ":" + ver;
     }
+    let bg = shader.bindGroupsPool.get(key);
+    if (bg) return bg;
+    bg = this.create_bind_group_for_shader_pool(shader, variant, textureViews, textureEntries, passBuf, listBuf, callBuf, userBuf, liveBuf);
+    shader.bindGroupsPool.set(key, bg);
+    return bg;
+  }
 
-    // Deduplicate bindings
-    const byBinding = new Map();
-    for (const e of entries) byBinding.set(e.binding | 0, e);
-    const uniqueEntries = Array.from(byBinding.values()).sort((a, b) => (a.binding | 0) - (b.binding | 0));
+  create_bind_group_for_shader_dyn(shader, variant, textureViews, textureEntries, ring) {
+    const entries = [];
+    const kindMap = shader.binding_kinds;
+    const bindings = shader._bindings_sorted || [];
+    for (let bi = 0; bi < bindings.length; bi++) {
+      const binding = bindings[bi] | 0;
+      const kind = kindMap.get(binding);
+      if (kind === "buffer") {
+        const size = shader._dyn_binding_sizes.get(binding) || 256;
+        entries.push({ binding, resource: { buffer: ring.buffer, offset: 0, size } });
+      } else if (kind === "sampler") {
+        const sb = shader._sampler_binding_by_binding?.get(binding);
+        const samplerIndex = sb ? (sb.samplerIndex | 0) : -1;
+        const bindingType = samplerIndex >= 0
+          ? this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries)
+          : "non-filtering";
+        const desc = samplerIndex >= 0 ? shader.samplerDescs[samplerIndex] : null;
+        const useOriginal =
+          (bindingType === "filtering" && desc && (desc.filter | 0) !== 0)
+          || (bindingType === "non-filtering" && (!desc || (desc.filter | 0) === 0));
+        const samplerRes = samplerIndex >= 0
+          ? (useOriginal
+              ? (shader.samplers[samplerIndex] || this.get_fallback_sampler())
+              : this.get_sampler_resource(desc, bindingType))
+          : this.get_fallback_sampler();
+        entries.push({ binding, resource: samplerRes });
+      } else if (kind === "texture") {
+        const tb = shader._texture_binding_by_binding?.get(binding);
+        const textureIndex = tb ? (tb.textureIndex | 0) : 0;
+        const declaredSampleType = tb ? tb.declaredSampleType : "float";
+        const isDepth = declaredSampleType === "depth";
+        const entry = textureEntries[textureIndex];
+        const view = isDepth
+          ? ((entry && entry.depthView) ? entry.depthView : this.get_fallback_depth_texture_view())
+          : (textureViews[textureIndex] || this.get_fallback_texture_view());
+        entries.push({ binding, resource: view });
+      }
+    }
+    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries });
+  }
 
-    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
+  get_bind_group_for_shader_dyn(shader, textureViews, textureEntries, variant, texIds, ring, dynOffsets) {
+    // Key on pipeline variant, uniform-ring slot, dynamic epoch (sizes), and textures+versions.
+    const ringSlot = this._uniform_ring_index | 0;
+    let key = variant.key + "|R" + ringSlot + "|E" + (shader._dyn_bind_groups_epoch | 0);
+    for (let i = 0; i < (shader.texture_count | 0); i++) {
+      const tid = texIds[i];
+      const entry = textureEntries[i];
+      const ver = entry ? (entry.version | 0) : 0;
+      key += "|" + (tid === undefined ? "n" : (tid >>> 0)) + ":" + ver;
+    }
+    let bg = shader._dyn_bind_groups.get(key);
+    if (bg) return bg;
+    bg = this.create_bind_group_for_shader_dyn(shader, variant, textureViews, textureEntries, ring);
+    shader._dyn_bind_groups.set(key, bg);
+    return bg;
   }
 
   FromWasmDrawCall(args) {
@@ -1656,7 +2041,16 @@ export class WasmWebGPU extends WasmWebBrowser {
     const tid = args.texture_id | 0;
     const w = args.width | 0;
     const h = args.height | 0;
-    const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
+    const src = new Uint8Array(this.memory.buffer, args.data.ptr, w * h * 4);
+    let bytes = src;
+    if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+      if (!this._scratch_upload_u8 || this._scratch_upload_u8.length < src.length) {
+        const nextLen = Math.max(src.length, this._scratch_upload_u8 ? (this._scratch_upload_u8.length * 2) : 4096);
+        this._scratch_upload_u8 = new Uint8Array(nextLen);
+      }
+      bytes = this._scratch_upload_u8.subarray(0, src.length);
+      bytes.set(src);
+    }
     let entry = this.textures[args.texture_id];
     if (!entry || entry.w !== w || entry.h !== h || entry.format !== "rgba8unorm") {
       const texture = this.device.createTexture({
@@ -1684,7 +2078,16 @@ export class WasmWebGPU extends WasmWebBrowser {
     const tid = args.texture_id | 0;
     const w = args.width | 0;
     const h = args.height | 0;
-    const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h).slice();
+    const src = new Uint8Array(this.memory.buffer, args.data.ptr, w * h);
+    let bytes = src;
+    if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+      if (!this._scratch_upload_u8 || this._scratch_upload_u8.length < src.length) {
+        const nextLen = Math.max(src.length, this._scratch_upload_u8 ? (this._scratch_upload_u8.length * 2) : 4096);
+        this._scratch_upload_u8 = new Uint8Array(nextLen);
+      }
+      bytes = this._scratch_upload_u8.subarray(0, src.length);
+      bytes.set(src);
+    }
     let entry = this.textures[args.texture_id];
     if (!entry || entry.w !== w || entry.h !== h || entry.format !== "r8unorm") {
       const texture = this.device.createTexture({
@@ -1712,7 +2115,16 @@ export class WasmWebGPU extends WasmWebBrowser {
     const tid = args.texture_id | 0;
     const w = args.width | 0;
     const h = args.height | 0;
-    const f32 = new Float32Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
+    const srcBytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h * 16);
+    let bytes = srcBytes;
+    if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+      if (!this._scratch_upload_u8 || this._scratch_upload_u8.length < srcBytes.length) {
+        const nextLen = Math.max(srcBytes.length, this._scratch_upload_u8 ? (this._scratch_upload_u8.length * 2) : 4096);
+        this._scratch_upload_u8 = new Uint8Array(nextLen);
+      }
+      bytes = this._scratch_upload_u8.subarray(0, srcBytes.length);
+      bytes.set(srcBytes);
+    }
     let entry = this.textures[args.texture_id];
     if (!entry || entry.w !== w || entry.h !== h || entry.format !== "rgba32float") {
       const texture = this.device.createTexture({
@@ -1729,7 +2141,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         version: (entry ? (entry.version | 0) + 1 : 1),
       };
     }
-    this._write_texture_2d_bytes(entry.texture, w, h, new Uint8Array(f32.buffer), 16);
+    this._write_texture_2d_bytes(entry.texture, w, h, bytes, 16);
   }
 }
 
