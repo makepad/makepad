@@ -151,6 +151,8 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            QuitReason,
+            QuitRequestedEvent,
             SafeAreaInsets,
             SelectionHandleDragEvent,
             SelectionHandleKind,
