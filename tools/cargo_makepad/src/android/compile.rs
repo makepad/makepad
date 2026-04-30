@@ -370,10 +370,14 @@ fn rust_build(
     // Derive ndk_root from ndk_prebuilt_root by going up through
     // `toolchains/llvm/prebuilt/<host>/` (4 levels).
     let ndk_root = ndk_prebuilt_root
-        .parent().unwrap()   // prebuilt/
-        .parent().unwrap()   // llvm/
-        .parent().unwrap()   // toolchains/
-        .parent().unwrap()   // ndk root
+        .parent()
+        .unwrap() // prebuilt/
+        .parent()
+        .unwrap() // llvm/
+        .parent()
+        .unwrap() // toolchains/
+        .parent()
+        .unwrap() // ndk root
         .to_path_buf();
     for android_target in android_targets {
         let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
@@ -419,10 +423,8 @@ fn rust_build(
 
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
-        let rustflags = compose_android_rustflags(
-            std::env::var("RUSTFLAGS").ok().as_deref(),
-            &cfg_flag,
-        );
+        let rustflags =
+            compose_android_rustflags(std::env::var("RUSTFLAGS").ok().as_deref(), &cfg_flag);
 
         let makepad_env = if let AndroidVariant::Quest = variant {
             Some(match std::env::var("MAKEPAD") {
@@ -1412,6 +1414,12 @@ fn add_font_assets_dir_to_apk(
         ) {
             continue;
         }
+        // Skip files that already ship from the sibling `resources/` dir —
+        // otherwise the same TTF lands in the APK twice. The widgets crate
+        // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
+        if resource_dir.join(path).is_file() {
+            continue;
+        }
         cp(&source_dir.join(path), &dst_dir.join(path), false)?;
         let path = path.display().to_string().replace("\\", "/");
         assets_to_add.push(format!("assets/makepad/{crate_name}/fonts/{path}"));
@@ -1505,7 +1513,17 @@ pub fn build(
     let underscore_build_crate = build_crate.replace('-', "_");
 
     let java_url = package_name.unwrap_or_else(|| format!("dev.makepad.{underscore_binary_name}"));
-    let app_label = app_label.unwrap_or_else(|| underscore_binary_name.clone());
+    // When the caller didn't pass --app-label, fall back to the binary name with the
+    // first letter capitalized so the launcher icon doesn't show a lowercased crate
+    // name. The package name (java_url) stays lowercase since Android package IDs
+    // conventionally are.
+    let app_label = app_label.unwrap_or_else(|| {
+        let mut chars = underscore_binary_name.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    });
 
     if let Some(icon) = resolve_app_icon_env(build_crate)? {
         for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
@@ -1929,10 +1947,7 @@ default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
     #[test]
     fn compose_android_rustflags_preserves_existing_flags() {
         assert_eq!(
-            compose_android_rustflags(
-                Some("-C debuginfo=1"),
-                "--cfg android_target=\"aarch64\""
-            ),
+            compose_android_rustflags(Some("-C debuginfo=1"), "--cfg android_target=\"aarch64\""),
             "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\""
         );
     }

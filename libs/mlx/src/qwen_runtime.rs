@@ -588,11 +588,11 @@ impl MlxQwen35MoeRuntimeSession {
         {
             return Ok(runtime);
         }
-        let runtime = Arc::new(Mutex::new(
-            cuda::CudaQwenTextRuntime::load(self).map_err(|message| {
+        let runtime = Arc::new(Mutex::new(cuda::CudaQwenTextRuntime::load(self).map_err(
+            |message| {
                 self.invalid_runtime_error(format!("failed to load qwen cuda runtime: {message}"))
-            })?,
-        ));
+            },
+        )?));
         self.cuda_text_runtime
             .lock()
             .map_err(|_| self.invalid_runtime_error("qwen cuda runtime mutex poisoned"))?
@@ -673,7 +673,12 @@ impl MlxQwen35MoeRuntimeSession {
         } else {
             lazy::reference_generation_backend(self.clone(), do_sample)?
         };
-        lazy::start_generation_graph(backend, prompt_token_ids, self.stop_tokens.clone(), max_new_tokens)
+        lazy::start_generation_graph(
+            backend,
+            prompt_token_ids,
+            self.stop_tokens.clone(),
+            max_new_tokens,
+        )
     }
 
     pub fn generate_preformatted_streaming<F>(
@@ -717,11 +722,8 @@ impl MlxQwen35MoeRuntimeSession {
         }
 
         let started = Instant::now();
-        let graph = self.start_generation_graph(
-            prompt_token_ids.clone(),
-            Some(max_new_tokens),
-            do_sample,
-        )?;
+        let graph =
+            self.start_generation_graph(prompt_token_ids.clone(), Some(max_new_tokens), do_sample)?;
         let snapshot_stride = graph.step_stride();
         let mut detokenizer = self.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.tokenizer.special_token_ids().to_vec();
@@ -776,8 +778,10 @@ impl MlxQwen35MoeRuntimeSession {
         let final_delta = detokenizer.finalize();
         if !final_delta.is_empty() {
             raw_generated_text.push_str(&final_delta);
-            let visible_text =
-                extract_qwen35moe_assistant_response_text(self.tokenizer_config(), &raw_generated_text);
+            let visible_text = extract_qwen35moe_assistant_response_text(
+                self.tokenizer_config(),
+                &raw_generated_text,
+            );
             if let Some(visible_delta) = visible_text.strip_prefix(&streamed_visible_text) {
                 if !visible_delta.is_empty() {
                     on_text_delta(visible_delta)?;
@@ -811,7 +815,11 @@ impl MlxQwen35MoeRuntimeSession {
     }
 
     fn max_context_tokens(&self) -> usize {
-        self.weights.snapshot.config.text_config.max_position_embeddings as usize
+        self.weights
+            .snapshot
+            .config
+            .text_config
+            .max_position_embeddings as usize
     }
 
     fn sampling_options(&self, do_sample: bool) -> QwenSamplingOptions {
@@ -833,7 +841,13 @@ impl MlxQwen35MoeRuntimeSession {
     }
 
     fn rope_sections4(&self) -> Result<[u32; 4]> {
-        let sections = &self.weights.snapshot.config.text_config.rope_parameters.mrope_section;
+        let sections = &self
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .rope_parameters
+            .mrope_section;
         if sections.len() != 3 {
             return Err(self.invalid_runtime_error(format!(
                 "expected 3 text mrope sections, got {:?}",
@@ -845,7 +859,12 @@ impl MlxQwen35MoeRuntimeSession {
 
     fn attention_rotary_dim(&self) -> usize {
         ((self.weights.snapshot.config.text_config.head_dim as f32)
-            * self.weights.snapshot.config.text_config.partial_rotary_factor)
+            * self
+                .weights
+                .snapshot
+                .config
+                .text_config
+                .partial_rotary_factor)
             .round() as usize
     }
 
@@ -864,7 +883,12 @@ impl MlxQwen35MoeRuntimeSession {
             )));
         }
         for layer_index in 0..self.tensors.layers.len() {
-            self.apply_layer_decode_reference_f32(layer_index, position, &mut hidden, decode_state)?;
+            self.apply_layer_decode_reference_f32(
+                layer_index,
+                position,
+                &mut hidden,
+                decode_state,
+            )?;
         }
         hidden = self.rms_norm_weighted_f32(
             &hidden,
@@ -883,20 +907,17 @@ impl MlxQwen35MoeRuntimeSession {
         hidden: &mut Vec<f32>,
         decode_state: &mut MlxQwen35MoeDecodeState,
     ) -> Result<()> {
-        let layer = self
-            .tensors
-            .layers
-            .get(layer_index)
-            .ok_or_else(|| self.invalid_runtime_error(format!("layer {} out of range", layer_index)))?;
+        let layer = self.tensors.layers.get(layer_index).ok_or_else(|| {
+            self.invalid_runtime_error(format!("layer {} out of range", layer_index))
+        })?;
         let attn_input = self.rms_norm_weighted_f32(
             hidden,
             &layer.attn_norm,
             self.weights.snapshot.config.text_config.rms_norm_eps,
         )?;
         let attn_out = match decode_state.layers.get_mut(layer_index) {
-            Some(MlxQwen35MoeLayerDecodeState::Attention(state)) => {
-                self.apply_attention_layer_decode_reference_f32(layer, &attn_input, position, state)?
-            }
+            Some(MlxQwen35MoeLayerDecodeState::Attention(state)) => self
+                .apply_attention_layer_decode_reference_f32(layer, &attn_input, position, state)?,
             Some(MlxQwen35MoeLayerDecodeState::Recurrent(state)) => {
                 self.apply_recurrent_layer_decode_reference_f32(layer, &attn_input, state)?
             }
@@ -968,7 +989,13 @@ impl MlxQwen35MoeRuntimeSession {
         .map_err(|message| self.invalid_runtime_error(message))?;
 
         let rotary_dim = self.attention_rotary_dim();
-        let rope_theta = self.weights.snapshot.config.text_config.rope_parameters.rope_theta;
+        let rope_theta = self
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .rope_parameters
+            .rope_theta;
         let rope_type = self
             .weights
             .snapshot
@@ -1061,8 +1088,11 @@ impl MlxQwen35MoeRuntimeSession {
         let z = self.project_vector_bf16_words(&input_words, &recurrent.wqkv_gate)?;
         let beta_logits = self.project_vector_bf16_words(&input_words, &recurrent.ssm_beta)?;
         let alpha = self.project_vector_bf16_words(&input_words, &recurrent.ssm_alpha)?;
-        let conv_kernel =
-            self.conv1d_kernel_f32(&recurrent.ssm_conv1d, self.dims.ssm_conv_kernel as usize, qkv.len())?;
+        let conv_kernel = self.conv1d_kernel_f32(
+            &recurrent.ssm_conv1d,
+            self.dims.ssm_conv_kernel as usize,
+            qkv.len(),
+        )?;
         let conv_out = apply_ssm_conv_with_state_f32(
             &qkv,
             &mut state.conv_state,
@@ -1231,7 +1261,8 @@ impl MlxQwen35MoeRuntimeSession {
             .ok_or_else(|| {
                 self.invalid_runtime_error(format!("layer {} out of range", layer_index))
             })?;
-        let router_logits = self.project_vector_bf16_words(&hidden_words, &layer.moe.ffn_gate_inp)?;
+        let router_logits =
+            self.project_vector_bf16_words(&hidden_words, &layer.moe.ffn_gate_inp)?;
         let (router_probabilities, routed_experts) =
             softmax_top_k_routes(&router_logits, self.dims.expert_used_count as usize)
                 .map_err(|message| self.invalid_runtime_error(message))?;
@@ -1389,13 +1420,12 @@ impl MlxQwen35MoeRuntimeSession {
             )));
         }
         let flat = Arc::<[f32]>::from(
-            self
-            .weights
-            .read_bf16_tensor_words_cached(name)?
-            .iter()
-            .copied()
-            .map(qwen_bf16_word_to_f32)
-            .collect::<Vec<_>>(),
+            self.weights
+                .read_bf16_tensor_words_cached(name)?
+                .iter()
+                .copied()
+                .map(qwen_bf16_word_to_f32)
+                .collect::<Vec<_>>(),
         );
         self.f32_tensor_cache
             .lock()
@@ -1542,8 +1572,12 @@ impl MlxQwen35MoeRuntimeSession {
                     .checked_add(qparam_cols)
                     .ok_or_else(|| self.invalid_runtime_error("qparam row end overflow"))?;
                 let packed_words = self.weights.read_u32_tensor_words_cached(weight_name)?;
-                let scale_words = self.weights.read_bf16_tensor_words_cached(&actual_scales_name)?;
-                let bias_words = self.weights.read_bf16_tensor_words_cached(&actual_biases_name)?;
+                let scale_words = self
+                    .weights
+                    .read_bf16_tensor_words_cached(&actual_scales_name)?;
+                let bias_words = self
+                    .weights
+                    .read_bf16_tensor_words_cached(&actual_biases_name)?;
                 let packed = &packed_words[packed_start..packed_end];
                 let scales = &scale_words[qparam_start..qparam_end];
                 let biases = &bias_words[qparam_start..qparam_end];
@@ -2300,22 +2334,22 @@ fn affine_dequantize_row_f32(
     }
     let mask = (1u32 << bits) - 1;
     let mut out = Vec::with_capacity(out_size as usize);
-        for group_idx in 0..scales.len() {
-            let scale = qwen_bf16_word_to_f32(scales[group_idx]);
-            let bias = qwen_bf16_word_to_f32(biases[group_idx]);
-            let group_start = group_idx * words_per_group as usize;
-            let group_end = group_start + words_per_group as usize;
-            for packed in &packed_weights[group_start..group_end] {
-                let mut packed_word = *packed;
-                for _ in 0..values_per_word as usize {
-                    let q = (packed_word & mask) as f32;
-                    out.push(qwen_bf16_round_to_f32(
-                        qwen_bf16_round_to_f32(q * scale) + bias,
-                    ));
-                    packed_word >>= bits;
-                }
+    for group_idx in 0..scales.len() {
+        let scale = qwen_bf16_word_to_f32(scales[group_idx]);
+        let bias = qwen_bf16_word_to_f32(biases[group_idx]);
+        let group_start = group_idx * words_per_group as usize;
+        let group_end = group_start + words_per_group as usize;
+        for packed in &packed_weights[group_start..group_end] {
+            let mut packed_word = *packed;
+            for _ in 0..values_per_word as usize {
+                let q = (packed_word & mask) as f32;
+                out.push(qwen_bf16_round_to_f32(
+                    qwen_bf16_round_to_f32(q * scale) + bias,
+                ));
+                packed_word >>= bits;
             }
         }
+    }
     Ok(out)
 }
 
@@ -2396,7 +2430,10 @@ fn build_qwen_generation_metrics(
         time_to_first_token_elapsed,
         steady_state_elapsed,
         steady_state_generated_tokens,
-        prompt_prefill_tokens_per_second: tokens_per_second(prompt_token_count, time_to_first_token_elapsed),
+        prompt_prefill_tokens_per_second: tokens_per_second(
+            prompt_token_count,
+            time_to_first_token_elapsed,
+        ),
         steady_state_decode_tokens_per_second: tokens_per_second(
             steady_state_generated_tokens,
             steady_state_elapsed,
@@ -2415,11 +2452,7 @@ fn tokens_per_second(token_count: usize, elapsed: Duration) -> f64 {
 }
 
 fn f32_to_bf16_words(values: &[f32]) -> Vec<u16> {
-    values
-        .iter()
-        .copied()
-        .map(qwen_f32_to_bf16_word)
-        .collect()
+    values.iter().copied().map(qwen_f32_to_bf16_word).collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2594,7 +2627,10 @@ fn finalize_sampled_candidates(
             }
         }
         candidates.truncate(keep_count.max(1));
-        let truncated_sum = candidates.iter().map(|candidate| candidate.prob).sum::<f64>();
+        let truncated_sum = candidates
+            .iter()
+            .map(|candidate| candidate.prob)
+            .sum::<f64>();
         for candidate in &mut candidates {
             candidate.prob /= truncated_sum;
         }
@@ -3392,8 +3428,8 @@ mod tests {
         apply_qwen_rope_rows_in_place, gated_delta_net_step_f32, grouped_self_attention_step_f32,
         qwen_bf16_round_to_f32, qwen_f32_to_bf16_word, qwen_text_mrope_positions,
         softmax_top_k_routes, split_gate_up_projection, split_interleaved_query_gate_heads,
-        split_recurrent_qkv_projection, ssm_conv_step_f32, swiglu_split_f32, MlxQwen35MoeRuntimeSession,
-        QwenChatMessage, QwenChatRole,
+        split_recurrent_qkv_projection, ssm_conv_step_f32, swiglu_split_f32,
+        MlxQwen35MoeRuntimeSession, QwenChatMessage, QwenChatRole,
     };
     use std::path::PathBuf;
 

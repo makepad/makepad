@@ -701,10 +701,21 @@ pub fn build(
     shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
     // alright lets make the .app file with manifest
+    // Capitalize the first letter for the user-visible name (CFBundleDisplayName /
+    // CFBundleName) so the iOS home-screen icon doesn't show a lowercased crate name,
+    // while keeping the bundle identifier lowercase so existing provisioning profiles
+    // still match.
+    let display_name = {
+        let mut chars = product.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    };
     let plist = PlistValues {
         identifier: format!("{org}.{product}").to_string(),
-        display_name: product.to_string(),
-        name: product.to_string(),
+        display_name: display_name.clone(),
+        name: display_name,
         executable: binary_name.clone(),
         version: "1.0.0".to_string(),
     };
@@ -1004,7 +1015,7 @@ pub fn copy_resources(
             cp_all(source_dir, &dst_dir, false)?;
             Ok(())
         };
-    let add_font_assets_dir = |crate_name: &str, source_dir: &Path| -> Result<(), String> {
+    let add_font_assets_dir = |crate_name: &str, source_dir: &Path, resource_dir: &Path| -> Result<(), String> {
         if !source_dir.is_dir() {
             return Ok(());
         }
@@ -1022,6 +1033,12 @@ pub fn copy_resources(
             ) {
                 continue;
             }
+            // Skip files that already ship from the sibling `resources/` dir —
+            // otherwise the same TTF lands in the bundle twice. The widgets crate
+            // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
+            if resource_dir.join(path).is_file() {
+                continue;
+            }
             cp(&source_dir.join(path), &dst_dir.join(path), false)?;
         }
         Ok(())
@@ -1029,12 +1046,12 @@ pub fn copy_resources(
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     add_assets_dir(build_crate, &build_crate_dir.join("resources"), "resources")?;
-    add_font_assets_dir(build_crate, &build_crate_dir.join("fonts"))?;
+    add_font_assets_dir(build_crate, &build_crate_dir.join("fonts"), &build_crate_dir.join("resources"))?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
     for (name, dep_dir) in deps.iter() {
         add_assets_dir(name, &dep_dir.join("resources"), "resources")?;
-        add_font_assets_dir(name, &dep_dir.join("fonts"))?;
+        add_font_assets_dir(name, &dep_dir.join("fonts"), &dep_dir.join("resources"))?;
     }
 
     Ok(())

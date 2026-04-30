@@ -330,16 +330,26 @@ impl ScriptApplyDefault for Animator {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) -> Option<ScriptValue> {
-        if !apply.is_new() || apply.is_eval() {
+        if apply.is_live_edit_reload() || apply.is_animate() || apply.is_eval() {
             return None;
         }
-        let index = apply.as_default().map_or(0, |x| x + 1);
-        let (_, group) = self.groups.iter().nth(index)?;
-        let state = group.states.get(&group.default)?;
 
-        // Return the apply value from that state
-        let apply = state.apply?.into();
-        Some(apply)
+        if let Some(state_obj_ref) = self.state_object.as_ref() {
+            if apply.as_default().is_none() {
+                return Some(state_obj_ref.as_object().into());
+            }
+            return None;
+        }
+
+        let index = apply.as_default().map_or(0, |x| x + 1);
+        let (group_id, group) = self.groups.iter().nth(index)?;
+        let state_id = self
+            .current_states
+            .get(group_id)
+            .copied()
+            .unwrap_or(group.default);
+        let state = group.states.get(&state_id)?;
+        Some(state.apply?.into())
     }
 }
 
@@ -359,6 +369,29 @@ impl AnimatorAction {
 }
 
 impl Animator {
+    /// Returns the apply `ScriptObject` for the current state of the given
+    /// state group, falling back to the group's default state if no current
+    /// state is set yet.
+    ///
+    /// Useful from a widget's `on_after_apply` hook on `Apply::ScriptReapply`
+    /// to re-snap animator-driven fields (`walk.height`, `View.visible`,
+    /// shader uniforms, etc.) after a `request_script_reapply` walk has
+    /// clobbered them with the template defaults — the caller can apply
+    /// the returned object via `self.script_apply(vm, &Apply::Animate, ...)`
+    /// directly, without going through `animator_cut` (which calls
+    /// `cx.with_vm` and would panic if the VM is already held by the
+    /// surrounding apply chain).
+    pub fn current_state_apply(&self, group_id: LiveId) -> Option<ScriptObject> {
+        let group = self.groups.get(&group_id)?;
+        let state_id = self
+            .current_states
+            .get(&group_id)
+            .copied()
+            .unwrap_or(group.default);
+        let state = group.states.get(&state_id)?;
+        state.apply
+    }
+
     /// Start animating to a new state
     pub fn play(
         &mut self,
