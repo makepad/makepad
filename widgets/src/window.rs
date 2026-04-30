@@ -70,7 +70,7 @@ script_mod! {
         ..mod.draw.DrawQuad
         source_texture: texture_2d(float)
         detail_texture: texture_2d(float)
-        detail_mix: uniform(0.72)
+        detail_mix: uniform(0.82)
 
         sample_source: fn(uv: vec2) -> vec4 {
             return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
@@ -565,9 +565,9 @@ impl GaussStack {
             upsample.draw_vars.set_texture(0, &source_texture);
             upsample.draw_vars.set_texture(1, &level.texture);
             let detail_mix = if index == GAUSS_SMOOTH_LEVEL_START {
-                0.82
+                0.90
             } else {
-                0.68
+                0.78
             };
             upsample
                 .draw_vars
