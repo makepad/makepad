@@ -652,6 +652,18 @@ impl ShaderBackend {
                     format!("l_{}", base)
                 }
             }
+            Self::Wgsl => {
+                let base = if id == id!(self) {
+                    "_self".to_string()
+                } else {
+                    format!("{}", id)
+                };
+                if shadow > 0 {
+                    format!("l_{}_{}", base, shadow)
+                } else {
+                    format!("l_{}", base)
+                }
+            }
             Self::Rust => {
                 let base = if id == id!(self) {
                     "_self".to_string()

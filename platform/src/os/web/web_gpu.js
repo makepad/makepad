@@ -43,13 +43,6 @@ export class WasmWebGPU extends WasmWebBrowser {
     this.context = null;
     this.format = null;
 
-    // Resource streaming scaffolding (ring buffers + caches).
-    this.buffers = {
-      uniforms: null,
-      geometry: null,
-      instances: null,
-      indices: null,
-    };
     this.pipeline_cache = new Map();
     this.texture_cache = new Map();
     this.vaos = [];
@@ -75,6 +68,27 @@ export class WasmWebGPU extends WasmWebBrowser {
     this._enable_error_scopes = false;
     // Use dynamic-offset uniform streaming (avoids per-draw UBO buffer allocation).
     this._use_dynamic_ubo_rings = true;
+    this._webgpu_perf = {
+      passes: 0,
+      submits: 0,
+      draw_commands: 0,
+      skipped_draws: 0,
+      pipelines_created: 0,
+      layouts_created: 0,
+      bind_groups_created: 0,
+      bind_group_hits: 0,
+      uniform_write_calls: 0,
+      uniform_write_bytes: 0,
+      uniform_payload_bytes: 0,
+      buffer_write_calls: 0,
+      buffer_write_bytes: 0,
+      texture_write_bytes: 0,
+      repack_calls: 0,
+      repack_bytes: 0,
+      pipeline_sets: 0,
+      vertex_buffer_sets: 0,
+      index_buffer_sets: 0,
+    };
     /** default depth/blend — pipelines encode blend; depth compare is default less-equal */
     this._default_depth_write = true;
     this._default_backface_cull = false;
@@ -96,6 +110,150 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
       this.load_deps();
     });
+  }
+
+  reset_backend_perf() {
+    const p = this._webgpu_perf;
+    if (!p) return;
+    for (const key of Object.keys(p)) {
+      p[key] = 0;
+    }
+  }
+
+  format_backend_perf_hud() {
+    const p = this._webgpu_perf;
+    if (!p) return "";
+    const kb = (bytes) => (bytes / 1024).toFixed(bytes >= 1024 * 1024 ? 0 : 1);
+    return "\nwebgpu" +
+      "\npasses: " + p.passes + " submits: " + p.submits +
+      "\ncmds: " + p.draw_commands + " skipped: " + p.skipped_draws +
+      "\npipelines: " + p.pipelines_created + " layouts: " + p.layouts_created +
+      "\nbindgroups: " + p.bind_groups_created + " hits: " + p.bind_group_hits +
+      "\nuniform: " + p.uniform_write_calls + " / " + kb(p.uniform_payload_bytes) + "KB payload / " + kb(p.uniform_write_bytes) + "KB queued" +
+      "\nbuffers: " + p.buffer_write_calls + " / " + kb(p.buffer_write_bytes) + "KB" +
+      "\ntextures: " + kb(p.texture_write_bytes) + "KB" +
+      "\nrepack: " + p.repack_calls + " / " + kb(p.repack_bytes) + "KB" +
+      "\nstate: p" + p.pipeline_sets + " vb" + p.vertex_buffer_sets + " ib" + p.index_buffer_sets;
+  }
+
+  get_backend_perf_snapshot() {
+    const p = this._webgpu_perf;
+    if (!p) return null;
+    return {
+      name: "webgpu",
+      passes: p.passes,
+      submits: p.submits,
+      draw_commands: p.draw_commands,
+      skipped_draws: p.skipped_draws,
+      pipelines_created: p.pipelines_created,
+      layouts_created: p.layouts_created,
+      bind_groups_created: p.bind_groups_created,
+      bind_group_hits: p.bind_group_hits,
+      uniform_write_calls: p.uniform_write_calls,
+      uniform_write_bytes: p.uniform_write_bytes,
+      uniform_payload_bytes: p.uniform_payload_bytes,
+      buffer_write_calls: p.buffer_write_calls,
+      buffer_write_bytes: p.buffer_write_bytes,
+      texture_write_bytes: p.texture_write_bytes,
+      repack_calls: p.repack_calls,
+      repack_bytes: p.repack_bytes,
+      pipeline_sets: p.pipeline_sets,
+      vertex_buffer_sets: p.vertex_buffer_sets,
+      index_buffer_sets: p.index_buffer_sets,
+    };
+  }
+
+  reset_pass_state_cache() {
+    this._last_pipeline = null;
+    this._last_vertex_buffer0 = null;
+    this._last_vertex_buffer1 = null;
+    this._last_index_buffer = null;
+    this._last_index_format = "";
+  }
+
+  set_pipeline_cached(pipeline) {
+    if (this._last_pipeline === pipeline) return;
+    this._pass.setPipeline(pipeline);
+    this._last_pipeline = pipeline;
+    if (this._webgpu_perf) this._webgpu_perf.pipeline_sets += 1;
+  }
+
+  set_vertex_buffer_cached(slot, buffer) {
+    if (slot === 0) {
+      if (this._last_vertex_buffer0 === buffer) return;
+      this._last_vertex_buffer0 = buffer;
+    } else if (slot === 1) {
+      if (this._last_vertex_buffer1 === buffer) return;
+      this._last_vertex_buffer1 = buffer;
+    }
+    this._pass.setVertexBuffer(slot, buffer);
+    if (this._webgpu_perf) this._webgpu_perf.vertex_buffer_sets += 1;
+  }
+
+  set_index_buffer_cached(buffer, format) {
+    if (this._last_index_buffer === buffer && this._last_index_format === format) return;
+    this._pass.setIndexBuffer(buffer, format);
+    this._last_index_buffer = buffer;
+    this._last_index_format = format;
+    if (this._webgpu_perf) this._webgpu_perf.index_buffer_sets += 1;
+  }
+
+  record_uniform_write(byteLen, payloadBytes = byteLen) {
+    if (!this._webgpu_perf || byteLen <= 0) return;
+    this._webgpu_perf.uniform_write_calls += 1;
+    this._webgpu_perf.uniform_write_bytes += byteLen;
+    this._webgpu_perf.uniform_payload_bytes += payloadBytes;
+  }
+
+  flush_uniform_writes(buffer, writes) {
+    if (!writes || writes.length === 0) {
+      return;
+    }
+    let minOff = writes[0].off >>> 0;
+    let maxEnd = (writes[0].off + writes[0].bytes.byteLength) >>> 0;
+    let payloadBytes = 0;
+    for (let i = 0; i < writes.length; i++) {
+      const w = writes[i];
+      const off = w.off >>> 0;
+      const end = off + w.bytes.byteLength;
+      minOff = Math.min(minOff, off);
+      maxEnd = Math.max(maxEnd, end);
+      payloadBytes += w.bytes.byteLength;
+    }
+
+    const span = maxEnd - minOff;
+    if (span > payloadBytes + 4096) {
+      for (let i = 0; i < writes.length; i++) {
+        const w = writes[i];
+        if (!this._scratch_uniform_u8 || this._scratch_uniform_u8.length < w.bytes.byteLength) {
+          const nextLen = Math.max(w.bytes.byteLength, this._scratch_uniform_u8 ? this._scratch_uniform_u8.length * 2 : 4096);
+          this._scratch_uniform_u8 = new Uint8Array(nextLen);
+        }
+        const staging = this._scratch_uniform_u8.subarray(0, w.bytes.byteLength);
+        staging.set(w.bytes);
+        this.queue.writeBuffer(buffer, w.off, staging.buffer, staging.byteOffset, staging.byteLength);
+        this.record_uniform_write(w.bytes.byteLength);
+      }
+      return;
+    }
+
+    if (!this._scratch_uniform_u8 || this._scratch_uniform_u8.length < span) {
+      const nextLen = Math.max(span, this._scratch_uniform_u8 ? this._scratch_uniform_u8.length * 2 : 4096);
+      this._scratch_uniform_u8 = new Uint8Array(nextLen);
+    }
+    const staging = this._scratch_uniform_u8.subarray(0, span);
+    for (let i = 0; i < writes.length; i++) {
+      const w = writes[i];
+      staging.set(w.bytes, (w.off >>> 0) - minOff);
+    }
+    this.queue.writeBuffer(buffer, minOff, staging.buffer, staging.byteOffset, span);
+    this.record_uniform_write(span, payloadBytes);
+  }
+
+  record_webgpu_draw() {
+    if (this.perf) {
+      this.perf.draw_calls = (this.perf.draw_calls | 0) + 1;
+    }
   }
 
   async init_webgpu_context() {
@@ -124,12 +282,6 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     // Minimal gpu_info for ToWasmInit.
     this.gpu_info = this.gpu_info || { min_uniform_vectors: 0, vendor: "webgpu", renderer: "webgpu" };
-
-    // Default ring buffer sizes (can be tuned later).
-    this.buffers.uniforms = new WgpuRingBuffer(this.device, 4 * 1024 * 1024, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-    this.buffers.geometry = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
-    this.buffers.instances = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
-    this.buffers.indices = new WgpuRingBuffer(this.device, 4 * 1024 * 1024, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST);
 
     // Triple-buffered uniform rings for dynamic offsets.
     // This avoids overwriting uniform data that may still be in-flight on the GPU.
@@ -166,27 +318,38 @@ export class WasmWebGPU extends WasmWebBrowser {
     const geom_vec4s = Math.ceil(args.geometry_slots / 4);
     const inst_vec4s = Math.ceil(args.instance_slots / 4);
 
+    const attrFormatForChunk = (totalSlots, chunkIndex) => {
+      const slots = Math.min(4, Math.max(1, totalSlots - chunkIndex * 4));
+      return slots === 1
+        ? "float32"
+        : slots === 2
+          ? "float32x2"
+          : slots === 3
+            ? "float32x3"
+            : "float32x4";
+    };
+
     const vertexBuffers = [];
     if (geom_vec4s > 0) {
       vertexBuffers.push({
-        arrayStride: geom_vec4s * 16,
+        arrayStride: args.geometry_slots * 4,
         stepMode: "vertex",
         attributes: new Array(geom_vec4s).fill(0).map((_, i) => ({
           shaderLocation: i,
           offset: i * 16,
-          format: "float32x4",
+          format: attrFormatForChunk(args.geometry_slots, i),
         })),
       });
     }
     if (inst_vec4s > 0) {
       const baseLoc = geom_vec4s;
       vertexBuffers.push({
-        arrayStride: inst_vec4s * 16,
+        arrayStride: args.instance_slots * 4,
         stepMode: "instance",
         attributes: new Array(inst_vec4s).fill(0).map((_, i) => ({
           shaderLocation: baseLoc + i,
           offset: i * 16,
-          format: "float32x4",
+          format: attrFormatForChunk(args.instance_slots, i),
         })),
       });
     }
@@ -327,6 +490,8 @@ export class WasmWebGPU extends WasmWebBrowser {
       samplers,
       geom_vec4s,
       inst_vec4s,
+      geometry_stride_slots: args.geometry_slots,
+      instance_stride_slots: args.instance_slots,
       geometry_slots: args.geometry_slots,
       instance_slots: args.instance_slots,
     };
@@ -484,6 +649,9 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     const bindGroupLayout = this.device.createBindGroupLayout({ entries: layoutEntries });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+    if (this._webgpu_perf) {
+      this._webgpu_perf.layouts_created += 1;
+    }
     layout = { bindGroupLayout, pipelineLayout, key };
     shader.layoutVariants.set(key, layout);
     return layout;
@@ -539,6 +707,9 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     variant = { bindGroupLayout: layout.bindGroupLayout, pipeline, key };
     shader.pipelineVariants.set(key, variant);
+    if (this._webgpu_perf) {
+      this._webgpu_perf.pipelines_created += 1;
+    }
     return variant;
   }
 
@@ -587,6 +758,9 @@ export class WasmWebGPU extends WasmWebBrowser {
     for (const e of entries) byBinding.set(e.binding | 0, e);
     const uniqueEntries = Array.from(byBinding.values()).sort((a, b) => (a.binding | 0) - (b.binding | 0));
 
+    if (this._webgpu_perf) {
+      this._webgpu_perf.bind_groups_created += 1;
+    }
     return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
   }
 
@@ -600,7 +774,10 @@ export class WasmWebGPU extends WasmWebBrowser {
         key += '|' + (tid == null ? 'n' : tid) + ':' + ver;
     }
     let bg = shader.bindGroups.get(key);
-    if (bg) return bg;
+    if (bg) {
+      if (this._webgpu_perf) this._webgpu_perf.bind_group_hits += 1;
+      return bg;
+    }
     bg = this.create_bind_group_for_shader(shader, textureViews, textureEntries, variant);
     shader.bindGroups.set(key, bg);
     return bg;
@@ -663,14 +840,18 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
     cpu.set(f32);
     this.queue.writeBuffer(entry.buf, 0, cpu.buffer, cpu.byteOffset, requestedByteLength);
+    if (this._webgpu_perf) {
+      this._webgpu_perf.buffer_write_calls += 1;
+      this._webgpu_perf.buffer_write_bytes += requestedByteLength;
+    }
     entry.length = f32.length;
     entry.version = (entry.version || 0) + 1;
     if (!entry.packed) entry.packed = new Map();
   }
 
-  get_packed_vertex_buffer(entry, logicalSlots, packedVec4s) {
+  get_packed_vertex_buffer(entry, logicalSlots, strideSlots) {
     if (!entry || !entry.data || logicalSlots <= 0) return entry;
-    const strideFloats = packedVec4s * 4;
+    const strideFloats = strideSlots | 0;
     if (strideFloats <= logicalSlots) return entry;
 
     const key = `${logicalSlots}:${strideFloats}`;
@@ -712,6 +893,12 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
 
     this.queue.writeBuffer(packed.buf, 0, out.buffer, out.byteOffset, out.byteLength);
+    if (this._webgpu_perf) {
+      this._webgpu_perf.repack_calls += 1;
+      this._webgpu_perf.repack_bytes += out.byteLength;
+      this._webgpu_perf.buffer_write_calls += 1;
+      this._webgpu_perf.buffer_write_bytes += out.byteLength;
+    }
 
     packed.length = out.length;
     packed.logicalLength = entry.length;
@@ -740,6 +927,10 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
     cpu.set(u32);
     this.queue.writeBuffer(entry.buf, 0, cpu.buffer, cpu.byteOffset, requestedByteLength);
+    if (this._webgpu_perf) {
+      this._webgpu_perf.buffer_write_calls += 1;
+      this._webgpu_perf.buffer_write_bytes += requestedByteLength;
+    }
     entry.length = u32.length;
   }
 
@@ -756,6 +947,9 @@ export class WasmWebGPU extends WasmWebBrowser {
   FromWasmBeginRenderCanvas(args) {
     if (!this.device) {
       return;
+    }
+    if (this._webgpu_perf) {
+      this._webgpu_perf.passes += 1;
     }
     this._frame_id = (this._frame_id || 0) + 1;
     if (this._use_dynamic_ubo_rings && this._uniform_rings) {
@@ -803,6 +997,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     this._pass_color_format = this.format;
     this._pass_extent = { w, h };
     this._pass_has_depth = !!depthStencilAttachment;
+    this.reset_pass_state_cache();
 
     this._encoder = this.device.createCommandEncoder();
     this._pass = this._encoder.beginRenderPass({
@@ -821,6 +1016,9 @@ export class WasmWebGPU extends WasmWebBrowser {
   FromWasmBeginRenderTexture(args) {
     if (!this.device) {
       return;
+    }
+    if (this._webgpu_perf) {
+      this._webgpu_perf.passes += 1;
     }
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
@@ -896,6 +1094,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     this._pass_color_format = "bgra8unorm";
     this._pass_extent = { w, h };
     this._pass_has_depth = !!depthStencilAttachment;
+    this.reset_pass_state_cache();
 
     this._encoder = this.device.createCommandEncoder();
     this._pass = this._encoder.beginRenderPass({
@@ -974,6 +1173,9 @@ export class WasmWebGPU extends WasmWebBrowser {
       const cmd = words[at++];
       if (cmd === 0) break;
       if (cmd !== CMD_DRAW) break;
+      if (this._webgpu_perf) {
+        this._webgpu_perf.draw_commands += 1;
+      }
 
       const shader_id = words[at++];
       const vao_id = words[at++];
@@ -989,6 +1191,9 @@ export class WasmWebGPU extends WasmWebBrowser {
       const shader = this.draw_shaders[shader_id];
       const vao = this.vaos[vao_id];
       if (!shader || !vao || !this._pass) {
+        if (this._webgpu_perf) {
+          this._webgpu_perf.skipped_draws += 1;
+        }
         at += 16;
         continue;
       }
@@ -1027,6 +1232,9 @@ export class WasmWebGPU extends WasmWebBrowser {
         this.device.pushErrorScope("internal");
       }
       this.queue.submit([cmd]);
+      if (this._webgpu_perf) {
+        this._webgpu_perf.submits += 1;
+      }
       if (this._enable_error_scopes) {
         this.device.popErrorScope().then((e) => {
           if (e) console.error("[makepad:webgpu] internal GPU error:", e.message);
@@ -1446,6 +1654,9 @@ export class WasmWebGPU extends WasmWebBrowser {
   _write_texture_2d_bytes(texture, w, h, bytes, bytesPerPixel) {
     const rowBytes = w * bytesPerPixel;
     const bytesPerRow = (rowBytes + 255) & ~255;
+    if (this._webgpu_perf) {
+      this._webgpu_perf.texture_write_bytes += bytesPerRow * h;
+    }
     if (bytesPerRow === rowBytes) {
       this.queue.writeTexture(
         { texture },
@@ -1541,15 +1752,15 @@ export class WasmWebGPU extends WasmWebBrowser {
       const pass_u = this._scratch_pass_f32.subarray(0, pass_len);
       if (pass_len > 0) pass_u.set(new Float32Array(this.memory.buffer, pass_ptr, pass_len));
 
-      const scratchCopy = (ptr, len) => {
+      const uniformBytes = (ptr, len, data) => {
         if (len <= 0) return null;
-        if (len > this._scratch_f32.length) {
-          this._scratch_f32 = new Float32Array(Math.max(len, this._scratch_f32.length * 2));
+        const bytes = (len | 0) * 4;
+        if (data) {
+          return new Uint8Array(data.buffer, data.byteOffset, bytes);
         }
-        const dst = this._scratch_f32.subarray(0, len);
-        dst.set(new Float32Array(this.memory.buffer, ptr, len));
-        return dst;
+        return new Uint8Array(this.memory.buffer, ptr, bytes);
       };
+      const pendingUniformWrites = [];
 
       // Allocate+write each dynamic UBO binding into the ring, recording offsets in binding order.
       for (let i = 0; i < bindings.length; i++) {
@@ -1557,10 +1768,10 @@ export class WasmWebGPU extends WasmWebBrowser {
         let ptr = 0, len = 0;
         let data = null;
         if (binding === passBinding) { ptr = pass_ptr; len = pass_len; data = pass_u; }
-        else if (binding === listBinding) { ptr = list_ptr; len = list_len; data = scratchCopy(ptr, len); }
-        else if (binding === callBinding) { ptr = call_ptr; len = call_len; data = scratchCopy(ptr, len); }
-        else if (binding === userBinding) { ptr = user_ptr; len = user_len; data = scratchCopy(ptr, len); }
-        else if (binding === liveBinding) { ptr = live_ptr; len = live_len; data = scratchCopy(ptr, len); }
+        else if (binding === listBinding) { ptr = list_ptr; len = list_len; }
+        else if (binding === callBinding) { ptr = call_ptr; len = call_len; }
+        else if (binding === userBinding) { ptr = user_ptr; len = user_len; }
+        else if (binding === liveBinding) { ptr = live_ptr; len = live_len; }
         else { ptr = 0; len = 0; data = null; }
 
         const byteLen = align256((len | 0) * 4);
@@ -1579,7 +1790,9 @@ export class WasmWebGPU extends WasmWebBrowser {
           } else {
             const off = ring.alloc(byteLen, 256);
             dynOffsets[i] = off >>> 0;
-            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            if (data && len > 0) {
+              pendingUniformWrites.push({ off, bytes: uniformBytes(ptr, len, data) });
+            }
             c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
           }
           continue;
@@ -1591,7 +1804,9 @@ export class WasmWebGPU extends WasmWebBrowser {
           } else {
             const off = ring.alloc(byteLen, 256);
             dynOffsets[i] = off >>> 0;
-            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            if (len > 0) {
+              pendingUniformWrites.push({ off, bytes: uniformBytes(ptr, len, data) });
+            }
             c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
           }
           continue;
@@ -1603,7 +1818,9 @@ export class WasmWebGPU extends WasmWebBrowser {
           } else {
             const off = ring.alloc(byteLen, 256);
             dynOffsets[i] = off >>> 0;
-            if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+            if (len > 0) {
+              pendingUniformWrites.push({ off, bytes: uniformBytes(ptr, len, data) });
+            }
             c.ptr = ptr | 0; c.len = len | 0; c.off = off >>> 0; c.byteLen = byteLen | 0;
           }
           continue;
@@ -1612,8 +1829,11 @@ export class WasmWebGPU extends WasmWebBrowser {
         // draw_call + user are expected to vary per draw; always allocate+write.
         const off = ring.alloc(byteLen, 256);
         dynOffsets[i] = off >>> 0;
-        if (data && len > 0) this.queue.writeBuffer(ring.buffer, off, data.buffer, data.byteOffset, (len | 0) * 4);
+        if (len > 0) {
+          pendingUniformWrites.push({ off, bytes: uniformBytes(ptr, len, data) });
+        }
       }
+      this.flush_uniform_writes(ring.buffer, pendingUniformWrites);
 
       // Build texture view arrays without allocation.
       const textureViews = shader._scratch_textureViews;
@@ -1634,22 +1854,28 @@ export class WasmWebGPU extends WasmWebBrowser {
       const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
       const bindGroup = this.get_bind_group_for_shader_dyn(shader, textureViews, textureEntries, variant, texIds, ring, dynOffsets);
 
-      this._pass.setPipeline(variant.pipeline);
+      this.set_pipeline_cached(variant.pipeline);
       this._pass.setBindGroup(0, bindGroup, dynOffsets);
 
       const geomRaw = this.array_buffers[vao.geom_vb_id];
       const instRaw = this.array_buffers[vao.inst_vb_id];
       const ib = this.index_buffers[vao.geom_ib_id];
-      if (!geomRaw || !instRaw || !ib) return;
-      const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
-      const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.inst_vec4s);
-      this._pass.setVertexBuffer(0, geom.buf);
-      this._pass.setVertexBuffer(1, inst.buf);
-      this._pass.setIndexBuffer(ib.buf, "uint32");
+      if (!geomRaw || !instRaw || !ib) {
+        if (this._webgpu_perf) this._webgpu_perf.skipped_draws += 1;
+        return;
+      }
+      const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geometry_stride_slots);
+      const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.instance_stride_slots);
+      this.set_vertex_buffer_cached(0, geom.buf);
+      this.set_vertex_buffer_cached(1, inst.buf);
+      this.set_index_buffer_cached(ib.buf, "uint32");
 
       const indexCount = ib.length | 0;
       const instanceCount = shader.instance_slots > 0 ? (((instRaw.length | 0) / shader.instance_slots) | 0) : 0;
-      if (instanceCount <= 0 || indexCount <= 0) return;
+      if (instanceCount <= 0 || indexCount <= 0) {
+        if (this._webgpu_perf) this._webgpu_perf.skipped_draws += 1;
+        return;
+      }
 
       const xr = this.xr;
       if (xr !== undefined && xr.in_xr_pass && xr.left_eye && xr.left_eye.viewport) {
@@ -1669,13 +1895,17 @@ export class WasmWebGPU extends WasmWebBrowser {
           // Note: dynOffsets[passBindingIndex] corresponds to pass binding's offset.
           if (passBindIndex >= 0) {
             const off = dynOffsets[passBindIndex] | 0;
-            this.queue.writeBuffer(ring.buffer, off, pass_u.buffer, pass_u.byteOffset, (pass_len | 0) * 4);
+            const bytes = (pass_len | 0) * 4;
+            this.queue.writeBuffer(ring.buffer, off, pass_u.buffer, pass_u.byteOffset, bytes);
+            this.record_uniform_write(bytes);
           }
+          this.record_webgpu_draw();
           this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
         };
         applyEye(xr.left_eye);
         applyEye(xr.right_eye);
       } else {
+        this.record_webgpu_draw();
         this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
       }
       return;
@@ -1730,6 +1960,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       const dst = this._scratch_f32.subarray(0, len);
       dst.set(src);
       this.queue.writeBuffer(buf, 0, dst.buffer, dst.byteOffset, byteLen);
+      this.record_uniform_write(byteLen);
       return buf;
     };
 
@@ -1745,6 +1976,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     const passBuf = ensurePoolBuf("pass", pass_len * 4);
     if (pass_len > 0) {
       this.queue.writeBuffer(passBuf, 0, pass_u.buffer, pass_u.byteOffset, pass_len * 4);
+      this.record_uniform_write(pass_len * 4);
     }
     const listBuf = writePoolUBO("list", list_ptr, list_len);
     const callBuf = writePoolUBO("call", call_ptr, call_len);
@@ -1785,25 +2017,27 @@ export class WasmWebGPU extends WasmWebBrowser {
       poolSlot,
     );
 
-    this._pass.setPipeline(variant.pipeline);
+    this.set_pipeline_cached(variant.pipeline);
     this._pass.setBindGroup(0, bindGroup);
 
     const geomRaw = this.array_buffers[vao.geom_vb_id];
     const instRaw = this.array_buffers[vao.inst_vb_id];
     const ib = this.index_buffers[vao.geom_ib_id];
     if (!geomRaw || !instRaw || !ib) {
+      if (this._webgpu_perf) this._webgpu_perf.skipped_draws += 1;
       return;
     }
-    const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
-    const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.inst_vec4s);
-    this._pass.setVertexBuffer(0, geom.buf);
-    this._pass.setVertexBuffer(1, inst.buf);
-    this._pass.setIndexBuffer(ib.buf, "uint32");
+    const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geometry_stride_slots);
+    const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.instance_stride_slots);
+    this.set_vertex_buffer_cached(0, geom.buf);
+    this.set_vertex_buffer_cached(1, inst.buf);
+    this.set_index_buffer_cached(ib.buf, "uint32");
     const indexCount = ib.length | 0;
     const instanceCount = shader.instance_slots > 0
       ? (((instRaw.length | 0) / shader.instance_slots) | 0)
       : 0;
     if (instanceCount <= 0 || indexCount <= 0) {
+      if (this._webgpu_perf) this._webgpu_perf.skipped_draws += 1;
       return;
     }
 
@@ -1821,11 +2055,14 @@ export class WasmWebGPU extends WasmWebBrowser {
         const mi = eye.invtransform_matrix;
         for (let i = 0; i < 16; i++) m[i + 32] = mi[i];
         this.queue.writeBuffer(passBuf, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
+        this.record_uniform_write(pass_u.byteLength);
+        this.record_webgpu_draw();
         this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
       };
       applyEye(xr.left_eye);
       applyEye(xr.right_eye);
     } else {
+      this.record_webgpu_draw();
       this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
     }
   }
@@ -1882,6 +2119,9 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
     }
 
+    if (this._webgpu_perf) {
+      this._webgpu_perf.bind_groups_created += 1;
+    }
     return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries });
   }
 
@@ -1903,7 +2143,10 @@ export class WasmWebGPU extends WasmWebBrowser {
       key += "|" + (tid === undefined ? "n" : (tid >>> 0)) + ":" + ver;
     }
     let bg = shader.bindGroupsPool.get(key);
-    if (bg) return bg;
+    if (bg) {
+      if (this._webgpu_perf) this._webgpu_perf.bind_group_hits += 1;
+      return bg;
+    }
     bg = this.create_bind_group_for_shader_pool(shader, variant, textureViews, textureEntries, passBuf, listBuf, callBuf, userBuf, liveBuf);
     shader.bindGroupsPool.set(key, bg);
     return bg;
@@ -1947,6 +2190,9 @@ export class WasmWebGPU extends WasmWebBrowser {
         entries.push({ binding, resource: view });
       }
     }
+    if (this._webgpu_perf) {
+      this._webgpu_perf.bind_groups_created += 1;
+    }
     return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries });
   }
 
@@ -1961,7 +2207,10 @@ export class WasmWebGPU extends WasmWebBrowser {
       key += "|" + (tid === undefined ? "n" : (tid >>> 0)) + ":" + ver;
     }
     let bg = shader._dyn_bind_groups.get(key);
-    if (bg) return bg;
+    if (bg) {
+      if (this._webgpu_perf) this._webgpu_perf.bind_group_hits += 1;
+      return bg;
+    }
     bg = this.create_bind_group_for_shader_dyn(shader, variant, textureViews, textureEntries, ring);
     shader._dyn_bind_groups.set(key, bg);
     return bg;
@@ -1982,13 +2231,17 @@ export class WasmWebGPU extends WasmWebBrowser {
     const user_ptr = args.user_uniforms.ptr; const user_len = args.user_uniforms.len;
     const live_ptr = args.live_uniforms.ptr; const live_len = args.live_uniforms.len;
 
-    const texIds = [];
-    for (let i = 0; i < shader.texture_count; i++) {
+    const texIds = shader._scratch_texIds;
+    const tc = shader.texture_count | 0;
+    for (let i = 0; i < tc; i++) {
       const t = args.textures[i];
-      texIds.push(t == null ? 0xffffffff : t >>> 0);
+      texIds[i] = t == null ? 0xffffffff : t >>> 0;
     }
-    while (texIds.length < 16) {
-      texIds.push(0xffffffff);
+    for (let i = tc; i < 16; i++) {
+      texIds[i] = 0xffffffff;
+    }
+    if (this._webgpu_perf) {
+      this._webgpu_perf.draw_commands += 1;
     }
     this._emitSingleDraw(
       shader,

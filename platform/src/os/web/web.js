@@ -57,11 +57,48 @@ export class WasmWebBrowser extends WasmBridge {
             last_pump_ms: 0,
             draw_calls: 0,
             last_frame_draw_calls: 0,
+            last_snapshot: null,
+            last_active_snapshot: null,
         };
         this.perf_hud = null;
         this.perf_hud_timer = 0;
+        if (typeof window !== "undefined") {
+            window.makepad_web_backend = this;
+            window.makepad_get_perf_snapshot = () => this.get_perf_snapshot();
+        }
 
         this.dispatch_first_msg();
+    }
+
+    get_perf_snapshot() {
+        const perf = this.perf || {};
+        return perf.last_snapshot || {
+            pump_ms: perf.last_pump_ms || 0,
+            draw_calls: perf.last_frame_draw_calls || 0,
+            backend: typeof this.get_backend_perf_snapshot === "function"
+                ? this.get_backend_perf_snapshot()
+                : null,
+            last_active: perf.last_active_snapshot || null,
+        };
+    }
+
+    perf_snapshot_is_active(snapshot) {
+        if (!snapshot) {
+            return false;
+        }
+        if ((snapshot.draw_calls || 0) > 0) {
+            return true;
+        }
+        const backend = snapshot.backend;
+        if (!backend) {
+            return false;
+        }
+        return (backend.passes || 0) > 0 ||
+            (backend.submits || 0) > 0 ||
+            (backend.draw_commands || 0) > 0 ||
+            (backend.buffer_write_bytes || 0) > 0 ||
+            (backend.uniform_write_bytes || 0) > 0 ||
+            (backend.texture_write_bytes || 0) > 0;
     }
 
     emit_location_change() {
@@ -1227,6 +1264,9 @@ export class WasmWebBrowser extends WasmBridge {
         // Reset per-pump counters. Backends increment `perf.draw_calls`.
         if (this.perf) {
             this.perf.draw_calls = 0;
+            if (typeof this.reset_backend_perf === "function") {
+                this.reset_backend_perf();
+            }
         }
         this.buffer_upload_serial += 1;
         let to_wasm = this.to_wasm;
@@ -1242,6 +1282,27 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.perf) {
                 this.perf.last_pump_ms = pump_ms;
                 this.perf.last_frame_draw_calls = this.perf.draw_calls;
+                const snapshot = {
+                    pump_ms: this.perf.last_pump_ms,
+                    draw_calls: this.perf.last_frame_draw_calls,
+                    backend: typeof this.get_backend_perf_snapshot === "function"
+                        ? this.get_backend_perf_snapshot()
+                        : null,
+                    last_active: this.perf.last_active_snapshot || null,
+                };
+                if (this.perf_snapshot_is_active(snapshot)) {
+                    const active_snapshot = {
+                        pump_ms: snapshot.pump_ms,
+                        draw_calls: snapshot.draw_calls,
+                        backend: snapshot.backend,
+                    };
+                    snapshot.last_active = active_snapshot;
+                    this.perf.last_active_snapshot = active_snapshot;
+                }
+                else {
+                    snapshot.last_active = this.perf.last_active_snapshot || null;
+                }
+                this.perf.last_snapshot = snapshot;
             }
             this.update_perf_hud();
         }
@@ -1284,7 +1345,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.perf_hud.textContent =
             "makepad web\n" +
             "pump: " + this.perf.last_pump_ms.toFixed(2) + "ms\n" +
-            "draw_calls: " + this.perf.last_frame_draw_calls;
+            "draw_calls: " + this.perf.last_frame_draw_calls +
+            (typeof this.format_backend_perf_hud === "function"
+                ? this.format_backend_perf_hud()
+                : "");
     }
 
 

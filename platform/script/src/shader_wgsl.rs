@@ -125,6 +125,28 @@ fn wgsl_packed_component(prefix: &str, slot: usize) -> String {
     format!("{prefix}{vec_idx}.{comp}")
 }
 
+fn wgsl_attr_chunk_type(total_slots: usize, chunk_idx: usize) -> &'static str {
+    let remaining = total_slots.saturating_sub(chunk_idx * 4).min(4);
+    match remaining {
+        0 => "vec4f",
+        1 => "f32",
+        2 => "vec2f",
+        3 => "vec3f",
+        _ => "vec4f",
+    }
+}
+
+fn wgsl_attr_packed_component(prefix: &str, total_slots: usize, slot: usize) -> String {
+    let vec_idx = slot / 4;
+    let remaining = total_slots.saturating_sub(vec_idx * 4).min(4);
+    if remaining == 1 {
+        format!("{prefix}{vec_idx}")
+    } else {
+        let comp = wgsl_swizzle_component(slot & 3);
+        format!("{prefix}{vec_idx}.{comp}")
+    }
+}
+
 fn wgsl_push_field(
     output: &ShaderOutput,
     vm: &ScriptVm,
@@ -374,9 +396,10 @@ fn wgsl_unpack_expr_for_field(
     field: &WgslPackedField,
     prefix: &str,
     source: WgslPackedSource,
+    total_slots: usize,
 ) -> String {
     let scalars = (0..field.slots)
-        .map(|slot| wgsl_packed_component(prefix, field.offset + slot))
+        .map(|slot| wgsl_attr_packed_component(prefix, total_slots, field.offset + slot))
         .collect::<Vec<_>>();
     let pod_ty = vm.bx.heap.pod_type_ref(field.ty);
     let inline = ScriptPodTypeInline {
@@ -401,6 +424,7 @@ fn build_draw_shader_wgsl(
         .last()
         .map(|field| field.offset + field.slots)
         .unwrap_or(0);
+    let varying_packed_slots = wgsl_num_packed_vec4s(varying_slots) * 4;
 
     let has_dyn_uniforms = output
         .io
@@ -647,8 +671,10 @@ fn build_draw_shader_wgsl(
     for idx in 0..wgsl_num_packed_vec4s(geometry_slots) {
         writeln!(
             out,
-            "    @location({}) packed_geometry_{}: vec4f,",
-            location, idx
+            "    @location({}) packed_geometry_{}: {},",
+            location,
+            idx,
+            wgsl_attr_chunk_type(geometry_slots, idx)
         )
         .ok();
         location += 1;
@@ -656,8 +682,10 @@ fn build_draw_shader_wgsl(
     for idx in 0..wgsl_num_packed_vec4s(instance_slots) {
         writeln!(
             out,
-            "    @location({}) packed_instance_{}: vec4f,",
-            location, idx
+            "    @location({}) packed_instance_{}: {},",
+            location,
+            idx,
+            wgsl_attr_chunk_type(instance_slots, idx)
         )
         .ok();
         location += 1;
@@ -832,6 +860,7 @@ fn build_draw_shader_wgsl(
             field,
             "in.packed_geometry_",
             WgslPackedSource::BitPackedFloat,
+            geometry_slots,
         );
         writeln!(out, "    {} = {};", field.name, value_expr).ok();
     }
@@ -842,6 +871,7 @@ fn build_draw_shader_wgsl(
             field,
             "in.packed_instance_",
             WgslPackedSource::BitPackedFloat,
+            instance_slots,
         );
         writeln!(out, "    {} = {};", field.name, value_expr).ok();
     }
@@ -911,6 +941,7 @@ fn build_draw_shader_wgsl(
                 field,
                 "in.packed_varying_",
                 WgslPackedSource::NumericFloat,
+                varying_packed_slots,
             );
             writeln!(out, "    {} = {};", field.name, value_expr).ok();
         }
@@ -963,6 +994,7 @@ fn build_draw_shader_wgsl(
                 field,
                 "in.packed_varying_",
                 WgslPackedSource::NumericFloat,
+                varying_packed_slots,
             );
             writeln!(out, "    {} = {};", field.name, value_expr).ok();
         }
