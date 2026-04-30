@@ -650,6 +650,16 @@ impl Turtle {
         self.layout.padding.left = left;
     }
 
+    /// Sets the right padding of this turtle's layout.
+    ///
+    /// Useful for temporarily reserving space at the right edge of an
+    /// in-flow turtle (e.g. so wrapping text leaves room for trailing
+    /// decoration drawn after the layout call). Save the previous value
+    /// via [`Turtle::padding`] and restore it when done.
+    pub fn set_padding_right(&mut self, right: f64) {
+        self.layout.padding.right = right;
+    }
+
     /// Returns the alignment of each walk of this turtle with respect to it's rectangle.
     pub fn align(&self) -> Align {
         self.layout.align
@@ -2623,6 +2633,11 @@ impl Walk {
 impl Layout {
     pub fn with_scroll(mut self, v: Vec2d) -> Self {
         self.scroll = v;
+        self
+    }
+
+    pub fn with_align(mut self, v: Align) -> Self {
+        self.align = v;
         self
     }
 

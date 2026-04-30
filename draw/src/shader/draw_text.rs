@@ -2216,6 +2216,27 @@ impl DrawText {
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
     ) -> (usize, bool) {
+        self.draw_walk_resumable_with_inner(cx, text_str, false, &mut f)
+    }
+
+    /// Like [`Self::draw_walk_resumable_with`], but invokes the callback before
+    /// emitting glyphs. Use this for backgrounds that must sit behind text.
+    pub fn draw_walk_resumable_with_background(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        mut f: impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> (usize, bool) {
+        self.draw_walk_resumable_with_inner(cx, text_str, true, &mut f)
+    }
+
+    fn draw_walk_resumable_with_inner(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        callback_before_text: bool,
+        f: &mut impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> (usize, bool) {
         // ── Layout parameters ──
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
@@ -2308,8 +2329,21 @@ impl DrawText {
                 };
                 let row_top_y = (row_origin.y - row.ascender_in_lpxs * self.font_scale) as f64;
 
-                // Draw this row's glyphs as a separate aligned-instance batch.
                 let row_als = cx.align_list_len();
+                let (sx, ex) =
+                    row_span_x_bounds_in_lpxs(row, row_idx == 0, row_idx + 1 == text.rows.len());
+                let row_rect = rect(
+                    (row_origin.x + sx * self.font_scale) as f64,
+                    row_top_y + shift_y as f64,
+                    ((ex - sx) * self.font_scale) as f64,
+                    row_h,
+                );
+
+                if callback_before_text {
+                    f(cx, row_rect, row.ascender_in_lpxs);
+                }
+
+                // Draw this row's glyphs as a separate aligned-instance batch.
                 if let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) {
                     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                     self.draw_row(cx, row_origin, row, &mut instances.instances);
@@ -2335,20 +2369,11 @@ impl DrawText {
                     (row.ascender_in_lpxs * row.line_spacing_scale - row.ascender_in_lpxs) as f64,
                 );
 
-                // Call the `f` callback for this row (draws inline-code bg,
-                // strikethrough, underline, or plain area tracking).
-                let (sx, ex) =
-                    row_span_x_bounds_in_lpxs(row, row_idx == 0, row_idx + 1 == text.rows.len());
-                f(
-                    cx,
-                    rect(
-                        (row_origin.x + sx * self.font_scale) as f64,
-                        row_top_y + shift_y as f64,
-                        ((ex - sx) * self.font_scale) as f64,
-                        row_h,
-                    ),
-                    row.ascender_in_lpxs,
-                );
+                // Call the `f` callback for this row (draws strikethrough,
+                // underline, or plain area tracking).
+                if !callback_before_text {
+                    f(cx, row_rect, row.ascender_in_lpxs);
+                }
 
                 // Emit a per-row FinishedWalk covering this row's glyphs +
                 // callback rect-areas.
@@ -2373,6 +2398,31 @@ impl DrawText {
         } else {
             // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
             let align_list_start = cx.align_list_len();
+            if callback_before_text {
+                for (row_index, row) in text.rows.iter().enumerate() {
+                    let (sx, ex) = row_span_x_bounds_in_lpxs(
+                        row,
+                        row_index == 0,
+                        row_index + 1 == text.rows.len(),
+                    );
+                    f(
+                        cx,
+                        rect(
+                            (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale)
+                                as f64,
+                            (origin_in_lpxs.y
+                                + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
+                                as f64
+                                + shift_y as f64,
+                            ((ex - sx) * self.font_scale) as f64,
+                            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale)
+                                as f64,
+                        ),
+                        row.ascender_in_lpxs,
+                    );
+                }
+            }
+
             self.draw_text(cx, origin_in_lpxs, &text);
 
             let turtle = cx.turtle_mut();
@@ -2385,6 +2435,31 @@ impl DrawText {
                     - last_row.ascender_in_lpxs) as f64,
             );
 
+            if !callback_before_text {
+                for (row_index, row) in text.rows.iter().enumerate() {
+                    let (sx, ex) = row_span_x_bounds_in_lpxs(
+                        row,
+                        row_index == 0,
+                        row_index + 1 == text.rows.len(),
+                    );
+                    f(
+                        cx,
+                        rect(
+                            (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale)
+                                as f64,
+                            (origin_in_lpxs.y
+                                + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
+                                as f64
+                                + shift_y as f64,
+                            ((ex - sx) * self.font_scale) as f64,
+                            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale)
+                                as f64,
+                        ),
+                        row.ascender_in_lpxs,
+                    );
+                }
+            }
+
             cx.emit_turtle_walk(
                 Rect {
                     pos: new_turtle_pos,
@@ -2395,27 +2470,6 @@ impl DrawText {
                 },
                 align_list_start,
             );
-
-            for (row_index, row) in text.rows.iter().enumerate() {
-                let (sx, ex) = row_span_x_bounds_in_lpxs(
-                    row,
-                    row_index == 0,
-                    row_index + 1 == text.rows.len(),
-                );
-                f(
-                    cx,
-                    rect(
-                        (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale) as f64,
-                        (origin_in_lpxs.y
-                            + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
-                            as f64
-                            + shift_y as f64,
-                        ((ex - sx) * self.font_scale) as f64,
-                        ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale) as f64,
-                    ),
-                    row.ascender_in_lpxs,
-                );
-            }
         }
 
         (text.rows.len(), text.is_truncated)
