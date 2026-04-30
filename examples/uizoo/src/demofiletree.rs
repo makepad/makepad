@@ -299,7 +299,11 @@ impl Widget for DemoFileTree {
                             let message = match err {
                                 FileError::Unknown(s) | FileError::CannotOpen(s) => s,
                             };
-                            log!("DemoFileTree: cannot read `{}`: {}", root_path.display(), message);
+                            log!(
+                                "DemoFileTree: cannot read `{}`: {}",
+                                root_path.display(),
+                                message
+                            );
                             FileNodeData::Directory {
                                 entries: vec![DirectoryEntry {
                                     name: format!("<cannot access filesystem: {}>", message),

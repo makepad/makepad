@@ -93,9 +93,21 @@ impl App {
                     self.set_status(cx, &format!("file tree loaded: {}", mount));
                 }
             }
-            HubToClient::TextFileOpened { path, content, .. } => {
+            HubToClient::TextFileOpened {
+                path,
+                content,
+                line,
+                column,
+                ..
+            } => {
                 if Self::is_terminal_virtual_path(&path) {
                     return;
+                }
+                if line.is_some() || column.is_some() {
+                    self.data.pending_log_jumps.insert(
+                        path.clone(),
+                        (line.unwrap_or(1).max(1), column.unwrap_or(1).max(1)),
+                    );
                 }
                 self.apply_editor_text_update(cx, path, content, true);
                 self.set_status(cx, "opened file");
@@ -628,6 +640,7 @@ impl App {
                     .terminal_framebuffer_by_path
                     .entry(path)
                     .or_default();
+                self.reveal_terminal_path(cx, &redraw_path);
                 self.refresh_active_mount_terminal_panel(cx, &redraw_path);
                 self.refresh_ai_manager_report(cx);
             }
@@ -645,19 +658,20 @@ impl App {
                     .insert(path.clone(), frame);
                 self.refresh_active_mount_terminal_panel(cx, &path);
                 self.refresh_ai_manager_preview(cx);
-                self.process_ai_manager_task_terminal_update(cx, &path);
             }
             HubToClient::TerminalTitle { path, title } => {
                 self.apply_terminal_tab_title(cx, &path, title);
+                self.refresh_ai_manager_preview(cx);
                 self.refresh_ai_manager_report(cx);
             }
             HubToClient::TerminalExited { path, code } => {
-                self.data.terminal_open_paths.remove(&path);
-                self.data.terminal_frame_id_by_path.remove(&path);
-                self.data.terminal_framebuffer_by_path.remove(&path);
                 self.reset_terminal_tab_title(cx, &path);
+                self.handle_terminal_exit_cleanup(cx, &path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
                 self.refresh_ai_manager_report(cx);
+            }
+            HubToClient::AiMountState { mount, state } => {
+                self.receive_ai_state(cx, &mount, state);
             }
             HubToClient::Error { message } => {
                 self.data.pending_reload_paths.clear();

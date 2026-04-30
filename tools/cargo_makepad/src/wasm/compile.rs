@@ -223,6 +223,7 @@ pub fn generate_html(
             wasm._memory = wasm.exports.memory;
             wasm._module = module;
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
+            const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
             "
         )
     } else {
@@ -244,6 +245,7 @@ pub fn generate_html(
         format!(
             "
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
+            const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 './{wasm}.wasm'{split_options}
             );
@@ -266,10 +268,14 @@ pub fn generate_html(
         <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
         <link rel='modulepreload' href='./bindgen.js'>
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_gpu.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_runtime.js'>
         "
     } else {
         "
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_gpu.js'>
+        <link rel='modulepreload' href='./makepad_platform/web_runtime.js'>
         "
     };
 
@@ -333,7 +339,10 @@ pub fn generate_html(
                 class MyWasmApp {{
                     constructor(wasm) {{
                         let canvas = document.getElementsByClassName('full_canvas')[0];
-                        this.webgl = new WasmWebGL (wasm, this, canvas);
+                        this.backend = null;
+                        createMakepadWebBackend(wasm, this, canvas).then((backend) => {{
+                            this.backend = backend;
+                        }});
                     }}
                 }}
                 let app = new MyWasmApp(wasm);
@@ -690,6 +699,20 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             cp_brotli(
                 &dep_dir.join("src/os/web/web_gl.js"),
                 &app_dir.join("makepad_platform/web_gl.js"),
+                false,
+                config.brotli,
+            )?;
+
+            cp_brotli(
+                &dep_dir.join("src/os/web/web_gpu.js"),
+                &app_dir.join("makepad_platform/web_gpu.js"),
+                false,
+                config.brotli,
+            )?;
+
+            cp_brotli(
+                &dep_dir.join("src/os/web/web_runtime.js"),
+                &app_dir.join("makepad_platform/web_runtime.js"),
                 false,
                 config.brotli,
             )?;

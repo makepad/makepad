@@ -1,19 +1,5 @@
 const TEXT_DECODER = new TextDecoder();
-const STRING_CHUNK_SIZE = 8192;
-
-function u32_to_string(u32, offset, len) {
-    if (len === 0) {
-        return "";
-    }
-    let out = "";
-    let end = offset + len;
-    for (let pos = offset; pos < end; pos += STRING_CHUNK_SIZE) {
-        let chunk_end = Math.min(pos + STRING_CHUNK_SIZE, end);
-        out += String.fromCodePoint.apply(null, u32.subarray(pos, chunk_end));
-    }
-    return out;
-}
-
+const TEXT_ENCODER = new TextEncoder();
 export function init_env(env) {
     let _wasm = null;
 
@@ -245,7 +231,13 @@ export class WasmBridge {
         this.update_array_buffer_refs();
     }
     u8_to_string(ptr, len) {
-        return TEXT_DECODER.decode(new Uint8Array(this.memory.buffer, ptr, len));
+        const view = new Uint8Array(this.memory.buffer, ptr, len);
+        // Some browsers reject TextDecoder.decode() on SharedArrayBuffer-backed views.
+        // Copy to an unshared ArrayBuffer when needed.
+        if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+            return TEXT_DECODER.decode(view.slice());
+        }
+        return TEXT_DECODER.decode(view);
     }
 
     js_console_log(u8_ptr, len) {
@@ -673,11 +665,22 @@ export class ToWasmMsg {
 
     push_str(str) {
         let app = this.app;
-        this.reserve_u32(str.length + 1);
-        app.u32[this.u32_offset++] = str.length;
-        for (let i = 0; i < str.length; i++) {
-            app.u32[this.u32_offset++] = str.charCodeAt(i)
+        const utf8 = TEXT_ENCODER.encode(str);
+        const bytes_len = utf8.length;
+        const u32_len = (bytes_len + 3) >> 2;
+        this.reserve_u32(u32_len + 1);
+        app.u32[this.u32_offset++] = bytes_len;
+
+        const u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, bytes_len);
+        u8_view.set(utf8);
+
+        const remainder = bytes_len & 3;
+        if (remainder > 0) {
+            const remainder_view = new Uint8Array(app.memory.buffer, (this.u32_offset * 4) + bytes_len, 4 - remainder);
+            remainder_view.fill(0);
         }
+
+        this.u32_offset += u32_len;
     }
 }
 
@@ -701,8 +704,15 @@ export class FromWasmMsg {
     read_str() {
         let app = this.app;
         let len = app.u32[this.u32_offset++];
-        let str = u32_to_string(app.u32, this.u32_offset, len);
-        this.u32_offset += len;
+        let u32_len = (len + 3) >> 2;
+        let u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, len);
+        let str;
+        if (typeof SharedArrayBuffer !== "undefined" && app.memory.buffer instanceof SharedArrayBuffer) {
+            str = TEXT_DECODER.decode(u8_view.slice());
+        } else {
+            str = TEXT_DECODER.decode(u8_view);
+        }
+        this.u32_offset += u32_len;
         return str;
     }
 

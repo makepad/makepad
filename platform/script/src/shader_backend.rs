@@ -652,6 +652,18 @@ impl ShaderBackend {
                     format!("l_{}", base)
                 }
             }
+            Self::Wgsl => {
+                let base = if id == id!(self) {
+                    "_self".to_string()
+                } else {
+                    format!("{}", id)
+                };
+                if shadow > 0 {
+                    format!("l_{}_{}", base, shadow)
+                } else {
+                    format!("l_{}", base)
+                }
+            }
             Self::Rust => {
                 let base = if id == id!(self) {
                     "_self".to_string()
@@ -1153,7 +1165,9 @@ impl ShaderBackend {
             }
             Self::Wgsl => {
                 match name_in {
-                    // WGSL uses dpdx/dpdy, mod is native (%)
+                    // WGSL uses dpdx/dpdy (derivatives) directly.
+                    // NOTE: During WebGPU bring-up we may override derivative emission
+                    // in the call compiler for validity; keep names canonical here.
                     id!(dFdx) => id!(dpdx),
                     id!(dFdy) => id!(dpdy),
                     id!(inverseSqrt) => id!(inverseSqrt),

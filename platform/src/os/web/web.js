@@ -52,7 +52,53 @@ export class WasmWebBrowser extends WasmBridge {
         this.midi_inputs = [];
         this.midi_outputs = [];
 
+        // Lightweight web perf counters (opt-in overlay via `window.makepad_show_perf_hud = true`).
+        this.perf = {
+            last_pump_ms: 0,
+            draw_calls: 0,
+            last_frame_draw_calls: 0,
+            last_snapshot: null,
+            last_active_snapshot: null,
+        };
+        this.perf_hud = null;
+        this.perf_hud_timer = 0;
+        if (typeof window !== "undefined") {
+            window.makepad_web_backend = this;
+            window.makepad_get_perf_snapshot = () => this.get_perf_snapshot();
+        }
+
         this.dispatch_first_msg();
+    }
+
+    get_perf_snapshot() {
+        const perf = this.perf || {};
+        return perf.last_snapshot || {
+            pump_ms: perf.last_pump_ms || 0,
+            draw_calls: perf.last_frame_draw_calls || 0,
+            backend: typeof this.get_backend_perf_snapshot === "function"
+                ? this.get_backend_perf_snapshot()
+                : null,
+            last_active: perf.last_active_snapshot || null,
+        };
+    }
+
+    perf_snapshot_is_active(snapshot) {
+        if (!snapshot) {
+            return false;
+        }
+        if ((snapshot.draw_calls || 0) > 0) {
+            return true;
+        }
+        const backend = snapshot.backend;
+        if (!backend) {
+            return false;
+        }
+        return (backend.passes || 0) > 0 ||
+            (backend.submits || 0) > 0 ||
+            (backend.draw_commands || 0) > 0 ||
+            (backend.buffer_write_bytes || 0) > 0 ||
+            (backend.uniform_write_bytes || 0) > 0 ||
+            (backend.texture_write_bytes || 0) > 0;
     }
 
     emit_location_change() {
@@ -98,6 +144,7 @@ export class WasmWebBrowser extends WasmBridge {
                 small_font_aliases: window.makepad_small_font_aliases === true
             },
             window_info: this.window_info,
+            render_api: this.render_api || 0,
         });
 
         this.do_wasm_pump();
@@ -1214,6 +1261,13 @@ export class WasmWebBrowser extends WasmBridge {
             this.pending_wasm_pump_id = 0;
         }
         let started = performance.now();
+        // Reset per-pump counters. Backends increment `perf.draw_calls`.
+        if (this.perf) {
+            this.perf.draw_calls = 0;
+            if (typeof this.reset_backend_perf === "function") {
+                this.reset_backend_perf();
+            }
+        }
         this.buffer_upload_serial += 1;
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
@@ -1223,8 +1277,78 @@ export class WasmWebBrowser extends WasmBridge {
         }
         finally {
             from_wasm.free();
-            this.update_startup_loader(performance.now() - started);
+            const pump_ms = performance.now() - started;
+            this.update_startup_loader(pump_ms);
+            if (this.perf) {
+                this.perf.last_pump_ms = pump_ms;
+                this.perf.last_frame_draw_calls = this.perf.draw_calls;
+                const snapshot = {
+                    pump_ms: this.perf.last_pump_ms,
+                    draw_calls: this.perf.last_frame_draw_calls,
+                    backend: typeof this.get_backend_perf_snapshot === "function"
+                        ? this.get_backend_perf_snapshot()
+                        : null,
+                    last_active: this.perf.last_active_snapshot || null,
+                };
+                if (this.perf_snapshot_is_active(snapshot)) {
+                    const active_snapshot = {
+                        pump_ms: snapshot.pump_ms,
+                        draw_calls: snapshot.draw_calls,
+                        backend: snapshot.backend,
+                    };
+                    snapshot.last_active = active_snapshot;
+                    this.perf.last_active_snapshot = active_snapshot;
+                }
+                else {
+                    snapshot.last_active = this.perf.last_active_snapshot || null;
+                }
+                this.perf.last_snapshot = snapshot;
+            }
+            this.update_perf_hud();
         }
+    }
+
+    ensure_perf_hud() {
+        if (this.perf_hud || typeof window === "undefined") {
+            return;
+        }
+        const hud = document.createElement("div");
+        hud.style.position = "fixed";
+        hud.style.left = "8px";
+        hud.style.top = "8px";
+        hud.style.padding = "6px 8px";
+        hud.style.font = "12px/1.3 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+        hud.style.color = "white";
+        hud.style.background = "rgba(0,0,0,0.55)";
+        hud.style.borderRadius = "6px";
+        hud.style.zIndex = "999999";
+        hud.style.pointerEvents = "none";
+        hud.textContent = "makepad: …";
+        document.body.appendChild(hud);
+        this.perf_hud = hud;
+    }
+
+    update_perf_hud() {
+        if (typeof window === "undefined" || window.makepad_show_perf_hud !== true) {
+            return;
+        }
+        this.ensure_perf_hud();
+        if (!this.perf_hud || !this.perf) {
+            return;
+        }
+        // Throttle to avoid turning the HUD into a perf problem.
+        const now = performance.now();
+        if (this.perf_hud_timer && now - this.perf_hud_timer < 125) {
+            return;
+        }
+        this.perf_hud_timer = now;
+        this.perf_hud.textContent =
+            "makepad web\n" +
+            "pump: " + this.perf.last_pump_ms.toFixed(2) + "ms\n" +
+            "draw_calls: " + this.perf.last_frame_draw_calls +
+            (typeof this.format_backend_perf_hud === "function"
+                ? this.format_backend_perf_hud()
+                : "");
     }
 
 
@@ -1291,7 +1415,9 @@ export class WasmWebBrowser extends WasmBridge {
         var sw = canvas.width = w * dpi_factor;
         var sh = canvas.height = h * dpi_factor;
 
-        this.gl.viewport(0, 0, sw, sh);
+        if (this.gl && typeof this.gl.viewport === "function") {
+            this.gl.viewport(0, 0, sw, sh);
+        }
 
         this.window_info.dpi_factor = dpi_factor;
         this.window_info.inner_width = canvas.offsetWidth;
@@ -1451,12 +1577,12 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.handlers.on_mouse_move = e => {
             this.to_wasm.ToWasmMouseMove({ was_out: false, mouse: mouse_to_wasm_wmouse(e) });
-            this.do_wasm_pump();
+            this.schedule_wasm_pump();
         }
 
         this.handlers.on_mouse_out = e => {
             this.to_wasm.ToWasmMouseMove({ was_out: true, mouse: mouse_to_wasm_wmouse(e) });
-            this.do_wasm_pump();
+            this.schedule_wasm_pump();
         }
 
         canvas.addEventListener('mousedown', e => this.handlers.on_mouse_down(e))
@@ -1529,7 +1655,7 @@ export class WasmWebBrowser extends WasmBridge {
                 modifiers: pack_key_modifier(e),
                 touches: touches_to_wasm_wtouches(e, 2)
             });
-            this.do_wasm_pump();
+            this.schedule_wasm_pump();
             return false
         }
 
@@ -1584,7 +1710,7 @@ export class WasmWebBrowser extends WasmBridge {
                 scroll_y: e.deltaY * fac,
                 time: e.timeStamp / 1000.0,
             });
-            this.do_wasm_pump();
+            this.schedule_wasm_pump();
         };
         canvas.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e))
     }

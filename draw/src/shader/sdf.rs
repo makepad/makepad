@@ -162,7 +162,8 @@ script_mod! {
             dist: float
 
             fn antialias(p: vec2) -> float {
-                return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));
+                let grad = vec2(length(dFdx(p)), length(dFdy(p)));
+                return 1.0 / max(length(grad), 1.0e-6);
             }
 
             viewport: fn(pos: vec2) -> Self {

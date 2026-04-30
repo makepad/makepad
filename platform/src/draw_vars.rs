@@ -928,8 +928,15 @@ impl DrawVars {
                 }
             }
 
+            let use_webgpu = vm.host.cx().os_type.is_web()
+                && matches!(vm.host.cx().os_type, crate::cx::OsType::Web(ref p) if p.render_api == 1);
+
             let mut output = ShaderOutput::default();
-            output.backend = ShaderBackend::Glsl;
+            output.backend = if use_webgpu {
+                ShaderBackend::Wgsl
+            } else {
+                ShaderBackend::Glsl
+            };
             output.use_vulkan = false;
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -978,12 +985,43 @@ impl DrawVars {
             let mut shared_defs = String::new();
             output.create_struct_defs(vm, &mut shared_defs);
 
-            let mut vertex = String::new();
-            let mut fragment = String::new();
-            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
-            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
-
-            let code = CxDrawShaderCode::Separate { vertex, fragment };
+            let code = if use_webgpu {
+                let wgsl_src = makepad_script::shader_wgsl::compile_draw_shader_wgsl_source(
+                    vm,
+                    io_self,
+                    &output,
+                    false,
+                )
+                .unwrap_or_else(|err| {
+                    crate::error!("WGSL compile failed: {}", err);
+                    // Force an error exit for this shader.
+                    makepad_script::shader_wgsl::WgslDrawShaderSource {
+                        wgsl: String::new(),
+                        dyn_uniform_binding: 2,
+                        texture_binding_base: 0,
+                        sampler_binding_base: 0,
+                        xr_depth_binding: 0,
+                        geometry_slots: 0,
+                        instance_slots: 0,
+                    }
+                });
+                if wgsl_src.wgsl.is_empty() {
+                    return;
+                }
+                CxDrawShaderCode::Wgsl {
+                    wgsl: wgsl_src.wgsl,
+                    dyn_uniform_binding: wgsl_src.dyn_uniform_binding,
+                    texture_binding_base: wgsl_src.texture_binding_base,
+                    sampler_binding_base: wgsl_src.sampler_binding_base,
+                    xr_depth_binding: wgsl_src.xr_depth_binding,
+                }
+            } else {
+                let mut vertex = String::new();
+                let mut fragment = String::new();
+                output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+                output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+                CxDrawShaderCode::Separate { vertex, fragment }
+            };
 
             {
                 let cx = vm.host.cx();

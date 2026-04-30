@@ -213,12 +213,14 @@ impl<'a> ToWasmMsgRef<'a> {
     }
 
     pub fn read_string(&mut self) -> String {
-        let chars = self.read_u32();
-        let mut out = String::new();
-        for _ in 0..chars {
-            out.push(char::from_u32(self.read_u32()).unwrap_or('?'));
+        let bytes_len = self.read_u32() as usize;
+        let u32_len = (bytes_len + 3) >> 2;
+        let mut out = Vec::with_capacity(u32_len * 4);
+        for _ in 0..u32_len {
+            out.extend_from_slice(&self.read_u32().to_le_bytes());
         }
-        out
+        out.truncate(bytes_len);
+        String::from_utf8(out).unwrap_or_else(|_| String::new())
     }
 
     pub fn was_last_block(&mut self) -> bool {

@@ -355,8 +355,7 @@ impl Cx {
                         &sh.mapping,
                         &self.os_type,
                     );
-                    let Some(shgl) = shp
-                        .gl_shader[shader_variant]
+                    let Some(shgl) = shp.gl_shader[shader_variant]
                         .as_ref()
                         .and_then(GlShaderState::as_ready)
                     else {
@@ -1140,11 +1139,7 @@ impl PendingGlShader {
     fn is_complete(&self, gl: &LibGl) -> bool {
         unsafe {
             let mut complete = 0;
-            (gl.glGetProgramiv)(
-                self.program,
-                gl_sys::COMPLETION_STATUS_KHR,
-                &mut complete,
-            );
+            (gl.glGetProgramiv)(self.program, gl_sys::COMPLETION_STATUS_KHR, &mut complete);
             complete == gl_sys::TRUE as i32
         }
     }
@@ -1240,8 +1235,7 @@ impl GlShader {
         let supported = get_gl_string(gl, gl_sys::EXTENSIONS)
             .split_whitespace()
             .any(|ext| {
-                ext == "GL_KHR_parallel_shader_compile"
-                    || ext == "GL_ARB_parallel_shader_compile"
+                ext == "GL_KHR_parallel_shader_compile" || ext == "GL_ARB_parallel_shader_compile"
             });
         if supported {
             static CONFIGURE_PARALLEL_COMPILE: Once = Once::new();
@@ -1256,7 +1250,12 @@ impl GlShader {
     }
 
     #[cfg(ohos_sim)]
-    fn read_program_cache(_gl: &LibGl, _vertex: &str, _pixel: &str, _os_type: &OsType) -> Option<u32> {
+    fn read_program_cache(
+        _gl: &LibGl,
+        _vertex: &str,
+        _pixel: &str,
+        _os_type: &OsType,
+    ) -> Option<u32> {
         None
     }
 
@@ -1438,13 +1437,7 @@ impl GlShader {
     }
 
     #[cfg(not(ohos_sim))]
-    fn write_program_cache(
-        gl: &LibGl,
-        program: u32,
-        vertex: &str,
-        pixel: &str,
-        os_type: &OsType,
-    ) {
+    fn write_program_cache(gl: &LibGl, program: u32, vertex: &str, pixel: &str, os_type: &OsType) {
         if let Some(cache_dir) = os_type.get_cache_dir() {
             unsafe {
                 let mut binary = Vec::new();
@@ -1462,10 +1455,8 @@ impl GlShader {
                         binary.as_mut_ptr() as *mut _,
                     );
                     if return_size != 0 {
-                        let shader_hash =
-                            live_id!(shader).str_append(&vertex).str_append(&pixel);
-                        let mut filename =
-                            format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
+                        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+                        let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
 
                         if let OsType::Android(params) = os_type {
                             filename = format!(
@@ -1988,9 +1979,9 @@ impl CxOsDrawShader {
             &self.pixel[shader_variant],
             os_type,
         );
-        self.gl_shader[shader_variant] = Some(GlShaderState::Ready(
-            GlShader::build_from_program(gl, program, mapping),
-        ));
+        self.gl_shader[shader_variant] = Some(GlShaderState::Ready(GlShader::build_from_program(
+            gl, program, mapping,
+        )));
     }
 
     pub fn is_window_gl_shader_ready(&self) -> bool {

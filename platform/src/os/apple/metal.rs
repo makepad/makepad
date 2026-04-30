@@ -1184,6 +1184,10 @@ impl Cx {
                     crate::error!("Metal does not support separate vertex/fragment sources");
                     continue;
                 }
+                CxDrawShaderCode::Wgsl { .. } => {
+                    crate::error!("Metal backend received WGSL shader code");
+                    continue;
+                }
             };
 
             if cx_shader.mapping.flags.debug_code {

@@ -11,9 +11,9 @@ use crate::plan::{
 };
 use crate::runtime::{
     AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
-    AttentionRopeSpec, DenseGatedFfnSpec, DenseLayerFfnSpec, HybridDecodeSpec,
-    HybridLayerFfnSpec, HybridLayerSpec, HybridPerLayerInputLayerSpec,
-    HybridPerLayerInputProjectSpec, LogitsProbeSpec, ProbeInputKind, RmsNormSpec,
+    AttentionRopeSpec, DenseGatedFfnSpec, DenseLayerFfnSpec, HybridDecodeSpec, HybridLayerFfnSpec,
+    HybridLayerSpec, HybridPerLayerInputLayerSpec, HybridPerLayerInputProjectSpec, LogitsProbeSpec,
+    ProbeInputKind, RmsNormSpec,
 };
 use crate::weights::GgufWeightLayout;
 
@@ -527,7 +527,11 @@ fn gemma4_inventory(tensors: &Gemma4Tensors) -> ModelTensorInventory {
             insert_tensor(&mut entries, "ffn_up", &layer.ffn_up);
             insert_tensor(&mut entries, "ffn_down", &layer.ffn_down);
             insert_tensor(&mut entries, "post_ffw_norm", &layer.post_ffw_norm);
-            insert_optional_tensor(&mut entries, "per_layer_inp_gate", &layer.per_layer_inp_gate);
+            insert_optional_tensor(
+                &mut entries,
+                "per_layer_inp_gate",
+                &layer.per_layer_inp_gate,
+            );
             insert_optional_tensor(&mut entries, "per_layer_proj", &layer.per_layer_proj);
             insert_optional_tensor(
                 &mut entries,
