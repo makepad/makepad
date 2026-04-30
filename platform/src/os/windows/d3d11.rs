@@ -674,6 +674,10 @@ impl Cx {
                     crate::error!("D3D11 does not support separate vertex/fragment sources");
                     continue;
                 }
+                CxDrawShaderCode::Wgsl { .. } => {
+                    crate::error!("D3D11 backend received WGSL shader code");
+                    continue;
+                }
             };
             let cache_key = hlsl_cache_key(code);
             let cached = shader_bytes_cached(cache_dir, cache_key);

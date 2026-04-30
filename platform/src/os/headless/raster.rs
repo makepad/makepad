@@ -793,6 +793,7 @@ impl Cx {
                 CxDrawShaderCode::Separate { fragment, .. } => {
                     fragment.contains("sample_text_pixel")
                 }
+                CxDrawShaderCode::Wgsl { .. } => false,
             };
             if let Some(only) = &only_shader {
                 let keep = match only.as_str() {
