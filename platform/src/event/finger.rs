@@ -761,6 +761,12 @@ pub enum HitTouch {
 #[derive(Clone, Debug, Default)]
 pub struct HitOptions {
     pub margin: Option<Inset>,
+    /// Hit-test margin to use when the event came from a touch device.
+    /// Falls back to `margin` when `None`. Lets a widget widen its grab area
+    /// for fingers without enlarging the mouse hit zone — useful on hybrid
+    /// devices (e.g. touchscreen Windows/Linux laptops) where compile-time
+    /// platform detection isn't enough.
+    pub touch_margin: Option<Inset>,
     pub sweep_area: Area,
     pub capture_overload: bool,
 }
@@ -782,10 +788,26 @@ impl HitOptions {
             ..self
         }
     }
+    pub fn with_touch_margin(self, margin: Inset) -> Self {
+        Self {
+            touch_margin: Some(margin),
+            ..self
+        }
+    }
     pub fn with_capture_overload(self, capture_overload: bool) -> Self {
         Self {
             capture_overload,
             ..self
+        }
+    }
+
+    /// Returns the margin to apply for a hit-test against `device`.
+    /// Touch devices get `touch_margin` if set; everything else uses `margin`.
+    fn margin_for(&self, device: &DigitDevice) -> Option<Inset> {
+        if device.is_touch() && self.touch_margin.is_some() {
+            self.touch_margin
+        } else {
+            self.margin
         }
     }
 }
@@ -979,7 +1001,7 @@ impl Event {
                             // outside its visible bounds. UIKit/AppKit hit-test on the centroid;
                             // we match that. Apps that genuinely need a larger hit zone should
                             // pass it explicitly via `HitOptions::margin`.
-                            if !hit_test(t.abs, &rect, &options.margin) {
+                            if !hit_test(t.abs, &rect, &options.margin_for(&device)) {
                                 continue;
                             }
 
@@ -1045,7 +1067,7 @@ impl Event {
                             if !options.sweep_area.is_empty() {
                                 if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
                                     if capture.switch_capture.is_none()
-                                        && hit_test(t.abs, &rect, &options.margin)
+                                        && hit_test(t.abs, &rect, &options.margin_for(&device))
                                     {
                                         if t.handled.get().is_empty() {
                                             t.handled.set(area);
@@ -1103,6 +1125,7 @@ impl Event {
                                     }
                                 }
                             } else if let Some(capture) = cx.fingers.find_area_capture(area) {
+                                let is_over = hit_test(t.abs, &rect, &options.margin_for(&device));
                                 return Hit::FingerMove(FingerMoveEvent {
                                     window_id: e.window_id,
                                     abs: t.abs,
@@ -1114,7 +1137,7 @@ impl Event {
                                     time: e.time,
                                     abs_start: capture.abs_start,
                                     rect,
-                                    is_over: hit_test(t.abs, &rect, &options.margin),
+                                    is_over,
                                 });
                             }
                         }

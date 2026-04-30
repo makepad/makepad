@@ -90,7 +90,20 @@ impl TabCloseButton {
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> TabCloseButtonAction {
         self.animator_handle_event(cx, event);
-        match event.hits(cx, self.draw_button.area()) {
+        // The close button glyph is only 10x10 px — fingers can't aim that
+        // precisely, so widen the hit area on touch only. Mouse hits stay
+        // exact so we don't accidentally close tabs from nearby clicks.
+        let touch_slop = Inset {
+            left: 4.0,
+            right: 4.0,
+            top: 4.0,
+            bottom: 4.0,
+        };
+        match event.hits_with_options(
+            cx,
+            self.draw_button.area(),
+            HitOptions::new().with_touch_margin(touch_slop),
+        ) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
                 return TabCloseButtonAction::HoverIn;
