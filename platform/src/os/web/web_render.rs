@@ -373,11 +373,9 @@ impl Cx {
             &mut cmd_buf,
         );
         self.os.render_cmd_buf = cmd_buf;
-        if !self.os.render_cmd_buf.is_empty() {
-            self.os.from_wasm(FromWasmRenderCommandBuffer {
-                words: WasmPtrU32::new(&self.os.render_cmd_buf),
-            });
-        }
+        self.os.from_wasm(FromWasmRenderCommandBuffer {
+            words: WasmPtrU32::new(&self.os.render_cmd_buf),
+        });
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
@@ -461,11 +459,9 @@ impl Cx {
             &mut cmd_buf,
         );
         self.os.render_cmd_buf = cmd_buf;
-        if !self.os.render_cmd_buf.is_empty() {
-            self.os.from_wasm(FromWasmRenderCommandBuffer {
-                words: WasmPtrU32::new(&self.os.render_cmd_buf),
-            });
-        }
+        self.os.from_wasm(FromWasmRenderCommandBuffer {
+            words: WasmPtrU32::new(&self.os.render_cmd_buf),
+        });
     }
 }
 

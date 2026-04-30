@@ -670,10 +670,10 @@ export class ToWasmMsg {
         const u32_len = (bytes_len + 3) >> 2;
         this.reserve_u32(u32_len + 1);
         app.u32[this.u32_offset++] = bytes_len;
-        
+
         const u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, bytes_len);
         u8_view.set(utf8);
-        
+
         const remainder = bytes_len & 3;
         if (remainder > 0) {
             const remainder_view = new Uint8Array(app.memory.buffer, (this.u32_offset * 4) + bytes_len, 4 - remainder);

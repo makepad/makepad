@@ -26,4 +26,3 @@ export async function createMakepadWebBackend(wasm, dispatch, canvas) {
   console.log("[makepad] backend=webgl2");
   return new WasmWebGL(wasm, dispatch, canvas);
 }
-
