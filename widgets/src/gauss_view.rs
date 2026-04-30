@@ -264,20 +264,21 @@ script_mod! {
                 let t2 = t * t
                 let t3 = t2 * t
 
-                // Cubic B-spline reconstruction keeps blur changes continuous across mip boundaries.
-                let w0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) * 0.16666667
-                let w1 = (4.0 - 6.0 * t2 + 3.0 * t3) * 0.16666667
-                let w2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) * 0.16666667
-                let w3 = t3 * 0.16666667
                 let l0 = max(base_level - 1.0, 0.0)
                 let l1 = base_level
                 let l2 = min(base_level + 1.0, 6.0)
-                let l3 = min(base_level + 1.5, 6.0)
+                let l3 = min(base_level + 2.0, 6.0)
+                let c0 = self.sample_level(l0, uv)
+                let c1 = self.sample_level(l1, uv)
+                let c2 = self.sample_level(l2, uv)
+                let c3 = self.sample_level(l3, uv)
 
-                return self.sample_level(l0, uv) * w0
-                    + self.sample_level(l1, uv) * w1
-                    + self.sample_level(l2, uv) * w2
-                    + self.sample_level(l3, uv) * w3
+                return (
+                    c1 * 2.0
+                    + (c2 - c0) * t
+                    + (c0 * 2.0 - c1 * 5.0 + c2 * 4.0 - c3) * t2
+                    + (c3 - c0 + (c1 - c2) * 3.0) * t3
+                ) * 0.5
             }
 
             sample_gauss: fn(uv: vec2) -> vec4 {
