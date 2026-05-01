@@ -317,12 +317,13 @@ impl CxMediaApi for Cx {
     }
 
     fn video_encoder_push_frame(&mut self, index: usize, frame: CameraFrameRef<'_>) {
-        self.os
-            .media
-            .av_capture()
-            .lock()
-            .unwrap()
-            .video_encoder_push_frame(index, frame);
+        // Don't lazily create AvCaptureAccess here — that fires the iOS camera
+        // permission prompt. If no encoder's been configured the call would be
+        // a no-op anyway (push without an encoder is silently dropped).
+        let Some(av_capture) = self.os.media.av_capture.as_ref() else {
+            return;
+        };
+        av_capture.lock().unwrap().video_encoder_push_frame(index, frame);
     }
 
     fn video_encoder_capture_texture_frame(
@@ -330,21 +331,24 @@ impl CxMediaApi for Cx {
         index: usize,
         timestamp_ns: u64,
     ) -> Result<(), VideoEncodeError> {
-        self.os
-            .media
-            .av_capture()
+        // Don't lazily create AvCaptureAccess here — that fires the iOS camera
+        // permission prompt every frame for apps that never use the camera.
+        // The inner call would have returned EncoderNotStarted anyway.
+        let Some(av_capture) = self.os.media.av_capture.as_ref() else {
+            return Err(VideoEncodeError::EncoderNotStarted);
+        };
+        av_capture
             .lock()
             .unwrap()
             .video_encoder_capture_texture_frame(index, timestamp_ns, &mut self.textures)
     }
 
     fn video_encoder_request_keyframe(&mut self, index: usize) -> Result<(), VideoEncodeError> {
-        self.os
-            .media
-            .av_capture()
-            .lock()
-            .unwrap()
-            .video_encoder_request_keyframe(index)
+        // Same reason as above: no encoder configured ⇒ no AvCaptureAccess yet.
+        let Some(av_capture) = self.os.media.av_capture.as_ref() else {
+            return Err(VideoEncodeError::EncoderNotStarted);
+        };
+        av_capture.lock().unwrap().video_encoder_request_keyframe(index)
     }
 
     fn video_capabilities(&self) -> VideoCapabilities {

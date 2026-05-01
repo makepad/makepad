@@ -451,21 +451,27 @@ impl Cx {
             }
         }
 
-        let timestamp_ns = self
-            .os
-            .start_time
-            .map(|start| Instant::now().duration_since(start).as_nanos() as u64)
-            .unwrap_or(0);
-        for index in 0..MAX_VIDEO_DEVICE_INDEX {
-            if let Err(err) = self.video_encoder_capture_texture_frame(index, timestamp_ns) {
-                if err != crate::video::VideoEncodeError::UnsupportedSource
-                    && err != crate::video::VideoEncodeError::EncoderNotStarted
-                {
-                    crate::error!(
-                        "ios video texture capture failed on slot {}: {:?}",
-                        index,
-                        err
-                    );
+        // Only sweep encoder slots if an encoder's actually been set up.
+        // Otherwise we'd burn 32 mutex locks per frame on every iOS app,
+        // and the very first call would lazy-init AvCaptureAccess and
+        // trigger the camera permission prompt for apps that never use it.
+        if self.os.media.av_capture.is_some() {
+            let timestamp_ns = self
+                .os
+                .start_time
+                .map(|start| Instant::now().duration_since(start).as_nanos() as u64)
+                .unwrap_or(0);
+            for index in 0..MAX_VIDEO_DEVICE_INDEX {
+                if let Err(err) = self.video_encoder_capture_texture_frame(index, timestamp_ns) {
+                    if err != crate::video::VideoEncodeError::UnsupportedSource
+                        && err != crate::video::VideoEncodeError::EncoderNotStarted
+                    {
+                        crate::error!(
+                            "ios video texture capture failed on slot {}: {:?}",
+                            index,
+                            err
+                        );
+                    }
                 }
             }
         }
