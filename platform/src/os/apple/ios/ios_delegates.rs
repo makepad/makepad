@@ -97,11 +97,51 @@ pub fn define_ios_app_delegate() -> *const Class {
         YES
     }
 
+    extern "C" fn application_will_enter_foreground(_: &Object, _: Sel, _: ObjcId) {
+        IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Foreground);
+    }
+
+    extern "C" fn application_did_enter_background(_: &Object, _: Sel, _: ObjcId) {
+        IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Background);
+    }
+
+    extern "C" fn application_will_resign_active(_: &Object, _: Sel, _: ObjcId) {
+        IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Pause);
+    }
+
+    extern "C" fn application_did_become_active(_: &Object, _: Sel, _: ObjcId) {
+        IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Resume);
+    }
+
+    extern "C" fn application_will_terminate(_: &Object, _: Sel, _: ObjcId) {
+        IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::Shutdown);
+    }
+
     unsafe {
         decl.add_method(
             sel!(application: didFinishLaunchingWithOptions:),
             did_finish_launching_with_options
                 as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
+        );
+        decl.add_method(
+            sel!(applicationWillEnterForeground:),
+            application_will_enter_foreground as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(applicationDidEnterBackground:),
+            application_did_enter_background as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(applicationWillResignActive:),
+            application_will_resign_active as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(applicationDidBecomeActive:),
+            application_did_become_active as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(applicationWillTerminate:),
+            application_will_terminate as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
 
