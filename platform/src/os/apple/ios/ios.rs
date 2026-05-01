@@ -563,7 +563,26 @@ impl Cx {
                 self.display_context.safe_area_insets = geom.safe_area_insets;
                 self.update_safe_inset_script_values(geom.safe_area_insets);
                 self.call_event_handler(&Event::Startup);
+                self.call_event_handler(&Event::Foreground);
                 self.redraw_all();
+            }
+            IosEvent::Foreground => {
+                self.call_event_handler(&Event::Foreground);
+                self.redraw_all();
+            }
+            IosEvent::Background => {
+                self.call_event_handler(&Event::Background);
+            }
+            IosEvent::Pause => {
+                self.call_event_handler(&Event::Pause);
+            }
+            IosEvent::Resume => {
+                self.call_event_handler(&Event::Resume);
+                self.redraw_all();
+            }
+            IosEvent::Shutdown => {
+                self.call_event_handler(&Event::Shutdown);
+                return EventFlow::Exit;
             }
             IosEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus

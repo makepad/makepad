@@ -14,6 +14,9 @@ pub mod cx_shared;
 
 pub mod shared_framebuf;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) mod termination_signal;
+
 #[cfg(headless)]
 pub mod headless;
 
