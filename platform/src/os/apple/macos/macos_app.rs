@@ -106,7 +106,8 @@ pub struct MacosApp {
     pasteboard: ObjcId,
     startup_focus_hack_ran: bool,
     event_callback: Option<Box<dyn FnMut(MacosEvent) -> EventFlow>>,
-    event_flow: EventFlow,
+    pub(crate) event_flow: EventFlow,
+    pub(crate) terminating_from_app_delegate: bool,
 
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
@@ -141,6 +142,7 @@ impl MacosApp {
                 event_callback: Some(event_callback),
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
+                terminating_from_app_delegate: false,
                 //current_ns_event: None,
             }
         }
@@ -631,8 +633,11 @@ impl MacosApp {
         let cb = with_macos_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
-            with_macos_app(|app| app.event_flow = event_flow);
-            if let EventFlow::Exit = event_flow {
+            let should_terminate = with_macos_app(|app| {
+                app.event_flow = event_flow;
+                event_flow == EventFlow::Exit && !app.terminating_from_app_delegate
+            });
+            if should_terminate {
                 unsafe {
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![ns_app, terminate: nil];

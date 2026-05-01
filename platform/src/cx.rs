@@ -331,6 +331,9 @@ impl OsType {
 
 impl Cx {
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        crate::os::termination_signal::install();
+
         //#[cfg(any(target_arch = "wasm32", target_os = "android"))]
         //crate::makepad_error_log::set_panic_hook();
         // the null texture

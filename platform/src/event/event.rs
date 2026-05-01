@@ -58,6 +58,14 @@ pub enum Event {
     /// [`onDestroy`]: https://developer.android.com/reference/android/app/Activity#onDestroy()
     Shutdown,
 
+    /// The application has been asked to quit.
+    ///
+    /// This is sent before [`Event::Shutdown`] for graceful quit requests such
+    /// as application-menu Quit and polite process termination signals.
+    /// Handlers may set `handled` to `true` to defer or cancel the quit, for
+    /// example while showing a confirmation dialog.
+    QuitRequested(QuitRequestedEvent),
+
     /// The application has been started in the foreground and is now visible to the user,
     /// but is not yet actively receiving user input.
     ///
@@ -262,6 +270,7 @@ impl Event {
         match v {
             1 => "Startup",
             2 => "Shutdown",
+            67 => "QuitRequested",
 
             3 => "Foreground",
             4 => "Background",
@@ -346,6 +355,7 @@ impl Event {
         match self {
             Self::Startup => 1,
             Self::Shutdown => 2,
+            Self::QuitRequested(_) => 67,
 
             Self::Foreground => 3,
             Self::Background => 4,
@@ -437,6 +447,35 @@ impl Event {
             }
         }
         false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitReason {
+    /// The app requested a quit programmatically.
+    App,
+    /// The user chose a native/application menu Quit command.
+    Menu,
+    /// The process received a polite termination signal, such as Ctrl+C or SIGTERM.
+    Signal,
+}
+
+#[derive(Debug)]
+pub struct QuitRequestedEvent {
+    pub reason: QuitReason,
+    pub handled: Cell<bool>,
+}
+
+impl QuitRequestedEvent {
+    pub fn new(reason: QuitReason) -> Self {
+        Self {
+            reason,
+            handled: Cell::new(false),
+        }
+    }
+
+    pub fn handle(&self) {
+        self.handled.set(true);
     }
 }
 

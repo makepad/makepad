@@ -4,6 +4,9 @@ use crate::{Cx2d, CxDraw};
 pub trait MatchEvent {
     fn handle_startup(&mut self, _cx: &mut Cx) {}
     fn handle_shutdown(&mut self, _cx: &mut Cx) {}
+    fn handle_quit_requested(&mut self, _cx: &mut Cx, _e: &QuitRequestedEvent) -> bool {
+        false
+    }
     fn handle_foreground(&mut self, _cx: &mut Cx) {}
     fn handle_background(&mut self, _cx: &mut Cx) {}
     fn handle_pause(&mut self, _cx: &mut Cx) {}
@@ -104,6 +107,10 @@ pub trait MatchEvent {
         match event {
             Event::Startup => self.handle_startup(cx),
             Event::Shutdown => self.handle_shutdown(cx),
+            Event::QuitRequested(e) if !e.handled.get() => {
+                let was_handled = self.handle_quit_requested(cx, e);
+                e.handled.set(was_handled);
+            }
             Event::Foreground => self.handle_foreground(cx),
             Event::Background => self.handle_background(cx),
             Event::Pause => self.handle_pause(cx),

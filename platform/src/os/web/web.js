@@ -48,6 +48,67 @@ export class WasmWebBrowser extends WasmBridge {
         this.dispatch_first_msg();
     }
 
+    emit_app_lifecycle(state) {
+        this.to_wasm.ToWasmAppLifecycle({ state });
+    }
+
+    emit_app_inactive() {
+        if (!this.lifecycle_is_visible) {
+            return;
+        }
+        this.lifecycle_is_visible = false;
+        this.emit_app_lifecycle(2);
+        this.emit_app_lifecycle(1);
+    }
+
+    emit_app_active() {
+        if (this.lifecycle_is_visible) {
+            return;
+        }
+        this.lifecycle_is_visible = true;
+        this.lifecycle_shutdown_sent = false;
+        this.emit_app_lifecycle(0);
+        this.emit_app_lifecycle(3);
+    }
+
+    emit_app_shutdown() {
+        if (this.lifecycle_shutdown_sent) {
+            return;
+        }
+        this.lifecycle_shutdown_sent = true;
+        this.emit_app_lifecycle(4);
+    }
+
+    bind_app_lifecycle() {
+        this.lifecycle_is_visible = !document.hidden;
+        this.lifecycle_shutdown_sent = false;
+
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                this.emit_app_inactive();
+            } else {
+                this.emit_app_active();
+            }
+            this.do_wasm_pump();
+        });
+
+        window.addEventListener("pagehide", (event) => {
+            this.emit_app_inactive();
+            if (!event.persisted) {
+                this.emit_app_shutdown();
+            }
+            this.do_wasm_pump();
+        });
+
+        window.addEventListener("pageshow", (event) => {
+            if (event.persisted) {
+                this.emit_app_active();
+                this.do_wasm_pump();
+            }
+        });
+
+    }
+
     emit_location_change() {
         this.to_wasm.ToWasmLocationChange({
             pathname: location.pathname + "",
@@ -99,6 +160,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.bind_mouse_and_touch();
         this.bind_keyboard();
         this.bind_screen_resize();
+        this.bind_app_lifecycle();
         window.addEventListener("popstate", () => {
             this.emit_location_change();
             this.do_wasm_pump();
