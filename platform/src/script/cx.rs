@@ -9,7 +9,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     set_script_value_to_api!(vm, cx.OsType);
 
     vm.add_method(cx, id_lut!(quit), script_args_def!(), |vm, _args| {
-        vm.cx_mut().quit();
+        vm.cx_mut().request_quit(QuitReason::App);
         NIL
     });
 

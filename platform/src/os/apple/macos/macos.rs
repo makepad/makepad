@@ -10,7 +10,8 @@ use {
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, QuitReason, VideoSource,
+            WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -571,6 +572,13 @@ impl Cx {
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
+            MacosEvent::AppQuitRequested => {
+                self.request_quit(QuitReason::App);
+                if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
+            }
             MacosEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
