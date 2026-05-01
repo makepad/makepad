@@ -99,6 +99,21 @@ pub struct AudioUnitAccess {
     failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
     #[cfg(target_os = "macos")]
     audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
+    #[cfg(target_os = "ios")]
+    ios_session_state: IosSessionState,
+}
+
+/// Tracks how the shared `AVAudioSession` has been configured on iOS so we
+/// only set/upgrade it when the app actually needs input or output, rather
+/// than blanket-activating PlayAndRecord (which would needlessly trigger
+/// the microphone permission prompt on playback-only apps).
+#[cfg(target_os = "ios")]
+#[derive(Default, Clone, Copy, PartialEq)]
+enum IosSessionState {
+    #[default]
+    Inactive,
+    PlaybackOnly,
+    PlayAndRecord,
 }
 
 impl Default for AudioUnitAccess {
@@ -113,6 +128,8 @@ impl Default for AudioUnitAccess {
             failed_devices: Default::default(),
             #[cfg(target_os = "macos")]
             audio_tap: None,
+            #[cfg(target_os = "ios")]
+            ios_session_state: IosSessionState::default(),
         }
     }
 }
@@ -137,8 +154,14 @@ impl AudioUnitAccess {
     pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self>> {
         Self::observe_route_changes(change_signal.clone());
 
-        #[cfg(target_os = "ios")]
-        Self::init_ios_access();
+        // Note: on iOS we used to set the AVAudioSession category to
+        // PlayAndRecord here unconditionally. That's wrong for playback-only
+        // apps — it eventually causes a microphone permission prompt the
+        // first time the session is activated for input, and it forces
+        // VoiceChat mode (VPIO) on apps that just want to play media.
+        // The session is now configured lazily by `ensure_ios_session()`,
+        // which picks the right category based on whether `use_audio_inputs`
+        // or `use_audio_outputs` was called.
 
         #[cfg(target_os = "tvos")]
         Self::init_tvos_access();
@@ -156,6 +179,8 @@ impl AudioUnitAccess {
             audio_outputs: Default::default(),
             #[cfg(target_os = "macos")]
             audio_tap,
+            #[cfg(target_os = "ios")]
+            ios_session_state: IosSessionState::Inactive,
         }))
     }
 
@@ -215,25 +240,57 @@ impl AudioUnitAccess {
         }
     }
 
+    /// Configure and activate the shared `AVAudioSession` for the requested
+    /// usage. Idempotent: a no-op if the session is already at this level
+    /// (or higher — once upgraded to PlayAndRecord we never downgrade).
     #[cfg(target_os = "ios")]
-    pub fn init_ios_access() {
+    fn ensure_ios_session(&mut self, for_input: bool) {
+        let target = if for_input {
+            IosSessionState::PlayAndRecord
+        } else {
+            IosSessionState::PlaybackOnly
+        };
+        // Don't downgrade an already-recording session, and don't redo work
+        // when we're already at the target state.
+        if self.ios_session_state == IosSessionState::PlayAndRecord
+            || self.ios_session_state == target
+        {
+            return;
+        }
+        Self::configure_ios_session(for_input);
+        self.ios_session_state = target;
+    }
+
+    #[cfg(target_os = "ios")]
+    fn configure_ios_session(for_input: bool) {
         unsafe {
             let session: ObjcId = msg_send![class!(AVAudioSession), sharedInstance];
             let mut error: ObjcId = nil;
-            let _success: bool = msg_send![
-                session,
-                setCategory:AVAudioSessionCategoryPlayAndRecord
-                withOptions:AVAudioSessionCategoryOption::DefaultToSpeaker as usize | AVAudioSessionCategoryOption::AllowBluetooth as usize
-                error:&mut error
-            ];
-            // Use VoiceChat mode with VoiceProcessingIO for both input and output
-            // This provides AEC/AGC/NS with proper volume
-            let mode: ObjcId = str_to_nsstring("AVAudioSessionModeVoiceChat");
-            let () = msg_send![session, setMode: mode error:&mut error];
-            // Prefer 48 kHz to avoid 48k↔44.1k drift on AirPods, however this might
-            // be overriden by the system or some other configuration.
-            let () = msg_send![session, setPreferredSampleRate: 48000.0 error:&mut error];
-            let () = msg_send![session, setPreferredIOBufferDuration:0.005 error:&mut error];
+            if for_input {
+                let _success: bool = msg_send![
+                    session,
+                    setCategory: AVAudioSessionCategoryPlayAndRecord
+                    withOptions: AVAudioSessionCategoryOption::DefaultToSpeaker as usize
+                        | AVAudioSessionCategoryOption::AllowBluetooth as usize
+                    error: &mut error
+                ];
+                // VoiceChat mode pairs with VoiceProcessingIO for AEC/AGC/NS;
+                // only relevant when we actually have an input.
+                let mode: ObjcId = str_to_nsstring("AVAudioSessionModeVoiceChat");
+                let () = msg_send![session, setMode: mode error: &mut error];
+            } else {
+                // Playback-only: no mic, no VPIO, no permission prompt.
+                let _success: bool = msg_send![
+                    session,
+                    setCategory: AVAudioSessionCategoryPlayback
+                    withOptions: 0usize
+                    error: &mut error
+                ];
+            }
+            // Prefer 48 kHz to avoid 48k↔44.1k drift on AirPods, however this
+            // might be overridden by the system or some other configuration.
+            let () = msg_send![session, setPreferredSampleRate: 48000.0 error: &mut error];
+            let () = msg_send![session, setPreferredIOBufferDuration: 0.005 error: &mut error];
             let () = msg_send![session, setActive: true error: &mut error];
             // Set initial audio route based on connected devices
             Self::update_ios_audio_route();
@@ -255,6 +312,9 @@ impl AudioUnitAccess {
     }
 
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        #[cfg(target_os = "ios")]
+        self.ensure_ios_session(true);
+
         // Handle loopback device separately on macOS
         #[cfg(target_os = "macos")]
         {
@@ -375,6 +435,9 @@ impl AudioUnitAccess {
     }
 
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
+        #[cfg(target_os = "ios")]
+        self.ensure_ios_session(false);
+
         let new = {
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
