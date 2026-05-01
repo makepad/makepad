@@ -363,6 +363,7 @@ impl WaylandCx {
                 let mut cx = self.cx.borrow_mut();
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
+                        cx.handle_termination_signal();
                         cx.handle_media_signals();
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);

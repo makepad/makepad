@@ -291,6 +291,7 @@ impl Cx {
                     }
                 }
                 if SignalToUI::check_and_clear_ui_signal() {
+                    self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
                     self.call_event_handler(&Event::Signal);

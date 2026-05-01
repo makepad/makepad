@@ -11,6 +11,11 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum IosEvent {
     Init,
+    Foreground,
+    Background,
+    Pause,
+    Resume,
+    Shutdown,
     WindowGotFocus(WindowId),
     WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),

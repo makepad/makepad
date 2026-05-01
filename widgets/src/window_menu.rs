@@ -161,7 +161,7 @@ impl Widget for WindowMenu {
         match event {
             Event::MacosMenuCommand(item) => {
                 if *item == live_id!(quit) {
-                    cx.quit();
+                    cx.request_quit(QuitReason::Menu);
                 }
             }
             _ => (),

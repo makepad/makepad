@@ -214,6 +214,30 @@ impl Cx {
                     }
                 }
 
+                live_id!(ToWasmAppLifecycle) => {
+                    let tw = ToWasmAppLifecycle::read_to_wasm(&mut to_wasm);
+                    match tw.state {
+                        0 => {
+                            self.call_event_handler(&Event::Foreground);
+                            self.redraw_all();
+                        }
+                        1 => {
+                            self.call_event_handler(&Event::Background);
+                        }
+                        2 => {
+                            self.call_event_handler(&Event::Pause);
+                        }
+                        3 => {
+                            self.call_event_handler(&Event::Resume);
+                            self.redraw_all();
+                        }
+                        4 => {
+                            self.call_event_handler(&Event::Shutdown);
+                        }
+                        _ => {}
+                    }
+                }
+
                 live_id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
                     let e = TimerEvent {
@@ -860,6 +884,7 @@ impl CxOsApi for Cx {
             ToWasmWebSocketString::to_js_code(),
             ToWasmWebSocketBinary::to_js_code(),*/
             ToWasmSignal::to_js_code(),
+            ToWasmAppLifecycle::to_js_code(),
             ToWasmMidiInputData::to_js_code(),
             ToWasmMidiPortList::to_js_code(),
             ToWasmAudioDeviceList::to_js_code(),

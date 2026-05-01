@@ -11,7 +11,8 @@ use {
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
         event::{
-            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger, VideoSource,
+            video_playback::CameraPreviewMode, DragItem, Event, NextFrame, QuitReason,
+            QuitRequestedEvent, Timer, Trigger, VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -811,6 +812,27 @@ impl Cx {
 
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
+    }
+
+    pub fn request_quit(&mut self, reason: QuitReason) -> bool {
+        let event = Event::QuitRequested(QuitRequestedEvent::new(reason));
+        self.call_event_handler(&event);
+
+        let was_handled = match &event {
+            Event::QuitRequested(e) => e.handled.get(),
+            _ => false,
+        };
+        if !was_handled {
+            self.quit();
+        }
+        was_handled
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    pub(crate) fn handle_termination_signal(&mut self) {
+        if crate::os::termination_signal::take_requested() {
+            self.request_quit(QuitReason::Signal);
+        }
     }
 
     pub fn browser_update_url(&mut self, url: &str, replace: bool) {
