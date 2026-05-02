@@ -55,6 +55,22 @@ pub fn get_macos_class_global() -> &'static MacosClasses {
     unsafe { &*(MACOS_CLASSES) }
 }
 
+/// Reads CFBundleName from `[NSBundle mainBundle]`'s Info.plist. Returns
+/// `None` when the running binary has no bundle metadata (e.g. truly bare
+/// `cargo run` without the platform crate's generated stub Info.plist).
+pub unsafe fn current_bundle_name() -> Option<String> {
+    let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
+    if bundle == nil {
+        return None;
+    }
+    let key = str_to_nsstring("CFBundleName");
+    let name: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: key];
+    if name == nil {
+        return None;
+    }
+    Some(nsstring_to_string(name))
+}
+
 #[derive(Clone)]
 pub struct CocoaTimer {
     timer_id: u64,
@@ -148,15 +164,22 @@ impl MacosApp {
         }
     }
     pub fn init_quit_menu(&mut self) {
+        // Use the running app's CFBundleName (which is what macOS already
+        // shows as the application menu title in the menu bar) so the
+        // submenu and the "Quit X" item label match. NSBundle returns nil
+        // when the binary isn't bundled at all; fall back to a generic
+        // label in that case.
+        let app_name = unsafe { current_bundle_name() }
+            .unwrap_or_else(|| "Application".to_string());
         self.update_macos_menu(&MacosMenu::Main {
             items: vec![MacosMenu::Sub {
-                name: "Makepad".to_string(),
+                name: app_name.clone(),
                 items: vec![MacosMenu::Item {
                     command: live_id!(quit),
                     key: KeyCode::KeyQ,
                     shift: false,
                     enabled: true,
-                    name: "Quit Example".to_string(),
+                    name: format!("Quit {}", app_name),
                 }],
             }],
         });
@@ -221,33 +244,38 @@ impl MacosApp {
                     key,
                     enabled,
                 } => {
+                    // Wire the well-known `quit` command to NSApp's standard
+                    // `terminate:` selector instead of our custom
+                    // `menuAction:` callback. `terminate:` routes through
+                    // `applicationShouldTerminate:`, which dispatches
+                    // `MacosEvent::AppQuitRequested` from the main loop —
+                    // i.e. *outside* any in-flight event handler — so apps
+                    // can call `cx.request_quit` from their `QuitRequested`
+                    // arm without re-entering `call_event_handler` and
+                    // panicking on `event_handler.take().unwrap()`. Other
+                    // commands keep going through `menuAction:` →
+                    // `Event::MacosMenuCommand`.
+                    let is_quit = *command == live_id!(quit);
+                    let action = if is_quit {
+                        sel!(terminate:)
+                    } else {
+                        sel!(menuAction:)
+                    };
                     let sub_item: ObjcId = msg_send![
                         parent_menu,
                         addItemWithTitle: str_to_nsstring(name)
-                        action: sel!(menuAction:)
+                        action: action
                         keyEquivalent: str_to_nsstring(keycode_to_menu_key(*key, *shift))
                     ];
-                    let target: ObjcId = msg_send![menu_target_class, new];
-                    let () = msg_send![sub_item, setTarget: target];
                     let () = msg_send![sub_item, setEnabled: if *enabled {YES}else {NO}];
-                    /*
-                    let command_usize = if let Ok(mut status_map) = status_map.lock() {
-                        if let Some(id) = status_map.command_to_usize.get(&command) {
-                            *id
-                        }
-                        else {
-                            let id = status_map.status_to_usize.len();
-                            status_map.command_to_usize.insert(*command, id);
-                            status_map.usize_to_command.insert(id, *command);
-                            id
-                        }
+                    if !is_quit {
+                        // Leave target nil for `terminate:` so it bubbles up
+                        // to NSApp; for everything else, install the
+                        // MenuTarget instance that re-emits the LiveId.
+                        let target: ObjcId = msg_send![menu_target_class, new];
+                        let () = msg_send![sub_item, setTarget: target];
+                        (*target).set_ivar("command_u64", command.0);
                     }
-                    else {
-                        panic!("cannot lock cmd_map");
-                    };*/
-
-                    //(*target).set_ivar("macos_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("command_u64", command.0);
                 }
                 MacosMenu::Line => {
                     let sep_item: ObjcId = msg_send![class!(NSMenuItem), separatorItem];
@@ -579,7 +607,12 @@ impl MacosApp {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             //let () = msg_send![ns_app, activateIgnoringOtherApps:YES];
             let () = msg_send![ns_app, finishLaunching];
-            // get_macos_app_global().init_quit_menu();
+            // Install a minimal default app menu (just "Quit X" bound to
+            // Cmd+Q) so unbundled `cargo run` apps get the standard macOS
+            // Quit affordance out of the box. Apps that build their own menu
+            // (via `cx.update_macos_menu` or the `WindowMenu` widget) will
+            // overwrite this; the call is harmless either way.
+            with_macos_app(|app| app.init_quit_menu());
             // get_macos_app_global().startup_focus_hack();
 
             loop {
