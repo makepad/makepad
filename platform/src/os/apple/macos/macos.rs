@@ -555,7 +555,21 @@ impl Cx {
                     self.run_live_edit_if_needed("macos");
                     self.handle_networking_events();
                     self.handle_gamepad_events();
-                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
+                    // Propagate Exit from the inner Paint dispatch. The
+                    // signal handling above (Ctrl+C / SIGTERM) calls
+                    // `request_quit`, which queues a `CxOsOp::Quit`; that op
+                    // is drained by `handle_platform_ops` at the top of this
+                    // recursive call and surfaces as `EventFlow::Exit`
+                    // (after `Event::Shutdown` is dispatched). If we ignore
+                    // the return value here and fall through to
+                    // `EventFlow::Wait`, `do_callback` overwrites the just-
+                    // set Exit and the main loop blocks indefinitely on the
+                    // next NSEvent — the symptom being a Ctrl+C that runs
+                    // the user's `QuitRequested` / `Shutdown` handlers but
+                    // never actually exits.
+                    if let EventFlow::Exit = self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows) {
+                        return EventFlow::Exit;
+                    }
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
                     self.with_vm(|vm| {

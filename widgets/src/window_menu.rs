@@ -161,7 +161,16 @@ impl Widget for WindowMenu {
         match event {
             Event::MacosMenuCommand(item) => {
                 if *item == live_id!(quit) {
-                    cx.request_quit(QuitReason::Menu);
+                    // The macOS menu code now wires `live_id!(quit)` items
+                    // to `NSApp terminate:` (see `macos_app.rs`), so this
+                    // arm only fires for app-dispatched menu commands —
+                    // never from the Quit menu item itself. We still can't
+                    // call `cx.request_quit` here: it synchronously calls
+                    // `call_event_handler`, and we're already inside one,
+                    // so it would panic on `event_handler.take().unwrap()`.
+                    // `cx.quit()` just enqueues a `Quit` op for the next
+                    // event-loop tick, which is safe.
+                    cx.quit();
                 }
             }
             _ => (),
