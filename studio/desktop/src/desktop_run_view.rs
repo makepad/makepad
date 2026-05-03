@@ -41,6 +41,7 @@ script_mod! {
             tex: texture_2d(float)
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
+            host_dpi_factor: instance(1.0)
             y_flip: instance(0.0)
             packed_header: instance(1.0)
             pixel: fn() {
@@ -54,7 +55,7 @@ script_mod! {
                 if tp.x <= 0.0 || tp.y <= 0.0 {
                     return #0000
                 }
-                let counter = (self.rect_size * self.draw_pass.dpi_factor) / tp
+                let counter = (self.rect_size * self.host_dpi_factor) / tp
                 let tex_scale = tp / self.tex_size
                 let fb = self.tex.sample(uv * tex_scale * counter)
                 if fb.r == 1.0 && fb.g == 0.0 && fb.b == 1.0 {
@@ -195,6 +196,8 @@ pub struct DesktopRunView {
     #[rust]
     bootstrap_tick_count: u32,
     #[rust]
+    last_trace_bootstrap: Option<(u64, usize, u64, u64, u64)>,
+    #[rust]
     current_target: Option<RunTarget>,
     #[rust]
     swapchain: Option<HostSwapchain>,
@@ -309,6 +312,7 @@ impl DesktopRunView {
         }
         self.last_rect = Rect::default();
         self.last_dpi_factor = 0.0;
+        self.last_trace_bootstrap = None;
         self.bootstrap_pending = target.is_some();
         self.bootstrap_tick_count = 0;
         if target.is_some() {
@@ -698,6 +702,25 @@ impl DesktopRunView {
             self.bootstrap_tick_count = 0;
         }
 
+        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some()
+            && (rect_changed || needs_new_swapchain)
+        {
+            log!(
+                "runview host ensure build={} window={} rect=({}, {}) dpi={} min_px=({}, {}) new_swapchain={} alloc={:?}",
+                target.build_id.0,
+                target.window_id,
+                rect.size.x,
+                rect.size.y,
+                dpi_factor,
+                min_width,
+                min_height,
+                needs_new_swapchain,
+                self.swapchain
+                    .as_ref()
+                    .map(|swapchain| (swapchain.alloc_width, swapchain.alloc_height))
+            );
+        }
+
         self.last_rect = rect;
         self.last_dpi_factor = dpi_factor;
     }
@@ -715,6 +738,29 @@ impl DesktopRunView {
             width: self.last_rect.size.x,
             height: self.last_rect.size.y,
         }];
+
+        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
+            let trace_bootstrap = (
+                target.build_id.0,
+                target.window_id,
+                self.last_rect.size.x.to_bits(),
+                self.last_rect.size.y.to_bits(),
+                self.last_dpi_factor.to_bits(),
+            );
+            if self.last_trace_bootstrap != Some(trace_bootstrap) {
+                self.last_trace_bootstrap = Some(trace_bootstrap);
+                log!(
+                    "runview host bootstrap build={} window={} logical=({}, {}) dpi={} px=({}, {})",
+                    target.build_id.0,
+                    target.window_id,
+                    self.last_rect.size.x,
+                    self.last_rect.size.y,
+                    self.last_dpi_factor,
+                    self.last_rect.size.x * self.last_dpi_factor,
+                    self.last_rect.size.y * self.last_dpi_factor
+                );
+            }
+        }
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         {
@@ -946,11 +992,18 @@ impl DesktopRunView {
     fn default_mouse_button(device: &DigitDevice) -> MouseButton {
         device.mouse_button().unwrap_or(MouseButton::PRIMARY)
     }
+
+    fn host_dpi_factor(cx: &Cx2d) -> f64 {
+        cx.get_current_window_id()
+            .map(|window_id| cx.windows[window_id].window_geom.dpi_factor)
+            .filter(|dpi_factor| dpi_factor.is_finite() && *dpi_factor > 0.0)
+            .unwrap_or_else(|| cx.current_dpi_factor())
+    }
 }
 
 impl Widget for DesktopRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let dpi_factor = cx.current_dpi_factor();
+        let dpi_factor = Self::host_dpi_factor(cx);
         let rect = cx.walk_turtle(walk).dpi_snap(dpi_factor);
         self.draw_bg.draw_abs(cx, rect);
 
@@ -977,6 +1030,9 @@ impl Widget for DesktopRunView {
             self.redraw(cx);
         }
 
+        self.draw_app
+            .draw_vars
+            .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
         self.draw_app.draw_abs(cx, rect);
 
         if let Some(kind) = self.ai_viz_kind {
