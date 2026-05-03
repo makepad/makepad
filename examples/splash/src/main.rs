@@ -1960,8 +1960,8 @@ script_mod! {
                                     draw_bg +: {
                                         blur_level: 0.25
                                         lensing_effect: 1.0
-                                        lensing_strength: 29.0
-                                        lensing_width: 10.0
+                                        lensing_strength: 38.0
+                                        lensing_width: 13.0
                                         corner_radius: 23.0
                                         tint_color: #b8b8b8
                                         tint_alpha: 0.025
@@ -1972,7 +1972,7 @@ script_mod! {
                                         shadow_color: #0009
                                         shadow_radius: 34.0
                                         shadow_offset: vec2(0.0, 14.0)
-                                        diffraction_strength: 3.6
+                                        diffraction_strength: 5.2
                                     }
                                 }
                                 close_glass_lens_button_btn := ButtonFlat{
@@ -2067,9 +2067,15 @@ pub struct App {
     #[rust]
     lens_press_started_at: f64,
     #[rust]
+    lens_release_started_at: f64,
+    #[rust]
+    lens_press_flatten: f32,
+    #[rust]
     lens_pressing: bool,
     #[rust]
     lens_ripple_animating: bool,
+    #[rust]
+    lens_pending_close: bool,
 }
 
 impl App {
@@ -2087,6 +2093,14 @@ impl App {
         {
             glass.set_press_response(cx, flatten, ripple_start, ripple_strength);
         }
+    }
+
+    fn start_focus_lens_release(&mut self, cx: &mut Cx, close_after_rebound: bool) {
+        self.lens_pressing = false;
+        self.lens_ripple_animating = true;
+        self.lens_release_started_at = 0.0;
+        self.lens_pending_close |= close_after_rebound;
+        self.lens_press_next_frame = cx.new_next_frame();
     }
 }
 
@@ -2109,33 +2123,55 @@ impl MatchEvent for App {
             return;
         }
 
-        if self.lens_press_started_at <= 0.0 {
-            self.lens_press_started_at = e.time;
-        }
-        let age = (e.time - self.lens_press_started_at).max(0.0);
-        let release_fade = (1.0 - age / 0.26).max(0.0) as f32;
-        let flatten = if self.lens_pressing {
-            1.0
-        } else {
-            release_fade
-        };
-        let ripple_strength = if self.lens_pressing || age < 0.56 {
-            1.0
-        } else {
-            0.0
-        };
-        self.set_focus_lens_press_response(
-            cx,
-            flatten,
-            self.lens_press_started_at as f32,
-            ripple_strength,
-        );
+        if self.lens_pressing {
+            if self.lens_press_started_at <= 0.0 {
+                self.lens_press_started_at = e.time;
+            }
+            let age = (e.time - self.lens_press_started_at).max(0.0);
+            let t = (age / 0.78).min(1.0) as f32;
+            let flatten = t * t * (3.0 - 2.0 * t);
+            self.lens_press_flatten = flatten;
+            let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * (1.0 - flatten * 0.10);
+            self.set_focus_lens_press_response(
+                cx,
+                flatten,
+                self.lens_press_started_at as f32,
+                ripple_strength,
+            );
 
-        if self.lens_pressing || age < 0.56 {
-            self.lens_press_next_frame = cx.new_next_frame();
+            if age < 1.08 {
+                self.lens_press_next_frame = cx.new_next_frame();
+            } else {
+                self.lens_ripple_animating = false;
+                self.set_focus_lens_press_response(cx, 1.0, self.lens_press_started_at as f32, 0.0);
+            }
         } else {
-            self.lens_ripple_animating = false;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+            if self.lens_release_started_at <= 0.0 {
+                self.lens_release_started_at = e.time;
+            }
+            let age = (e.time - self.lens_release_started_at).max(0.0);
+            let restore = self.lens_press_flatten.clamp(0.0, 1.0);
+            let ripple_strength = ((1.0 - age / 1.05).max(0.0) as f32) * 0.62;
+            self.set_focus_lens_press_response(
+                cx,
+                -restore,
+                self.lens_release_started_at as f32,
+                ripple_strength,
+            );
+
+            if age < 1.08 {
+                self.lens_press_next_frame = cx.new_next_frame();
+            } else {
+                self.lens_ripple_animating = false;
+                self.lens_press_flatten = 0.0;
+                self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
+                if self.lens_pending_close {
+                    self.lens_pending_close = false;
+                    self.ui
+                        .popup_notification(cx, ids!(glass_lens_button_popup))
+                        .close(cx);
+                }
+            }
         }
     }
 
@@ -2237,6 +2273,8 @@ impl MatchEvent for App {
                 .close(cx);
             self.lens_pressing = false;
             self.lens_ripple_animating = false;
+            self.lens_pending_close = false;
+            self.lens_press_flatten = 0.0;
             self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
             self.ui
                 .popup_notification(cx, ids!(glass_lens_button_popup))
@@ -2279,21 +2317,17 @@ impl MatchEvent for App {
             self.lens_pressing = true;
             self.lens_ripple_animating = true;
             self.lens_press_started_at = 0.0;
-            self.set_focus_lens_press_response(cx, 1.0, -1000.0, 0.0);
+            self.lens_release_started_at = 0.0;
+            self.lens_press_flatten = 0.0;
+            self.lens_pending_close = false;
+            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
             self.lens_press_next_frame = cx.new_next_frame();
         }
         if focus_lens_button.released(actions) {
-            self.lens_pressing = false;
-            self.lens_ripple_animating = true;
-            self.lens_press_next_frame = cx.new_next_frame();
+            self.start_focus_lens_release(cx, false);
         }
         if focus_lens_button.clicked(actions) {
-            self.lens_pressing = false;
-            self.lens_ripple_animating = false;
-            self.set_focus_lens_press_response(cx, 0.0, -1000.0, 0.0);
-            self.ui
-                .popup_notification(cx, ids!(glass_lens_button_popup))
-                .close(cx);
+            self.start_focus_lens_release(cx, true);
         }
         if self
             .ui
