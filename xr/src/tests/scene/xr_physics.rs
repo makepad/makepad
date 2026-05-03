@@ -615,7 +615,12 @@ mod tests {
 
         for frame in 0..180 {
             scene.sync_vehicle_query_sources_pre_step();
-            sync_depth_query_surfaces_with_store(&mut retained_hits, Some(&mut scene), &depth_mesh);
+            sync_depth_query_surfaces_with_store(
+                &mut retained_hits,
+                Some(&mut scene),
+                &depth_mesh,
+                None,
+            );
             scene.step();
             let body = scene
                 .bodies

@@ -43,6 +43,7 @@ pub struct Shooter {
 
 const SHOOTER_MAX_EMITS_PER_UPDATE: usize = 2;
 const SHOOTER_PROJECTILE_SPAWN_OFFSET: f32 = 0.064;
+const SHOOTER_INDEX_TIP_FALLBACK_EXTENSION_METERS: f32 = 0.035;
 const SHOOTER_INDEX_BEND_MAX_DEGREES: f32 = 34.0;
 const SHOOTER_INDEX_STRAIGHTNESS_MIN: f32 = 0.78;
 const SHOOTER_INDEX_EXTENSION_RATIO_MIN: f32 = 0.90;
@@ -120,38 +121,51 @@ impl Shooter {
         (delta.length() > 0.0001).then_some(delta.normalize())
     }
 
-    fn hand_index_finger_stretch_metrics(hand: &XrHand) -> Option<ShooterHandEmitMetrics> {
-        let points = hand.finger_chain_positions(XrHand::INDEX_TIP)?;
-        let [base, knuckle1, knuckle2, knuckle3, tip] =
-            [points[0], points[1], points[2], points[3], points[4]];
+    fn hand_index_finger_emit_points(hand: &XrHand) -> Option<SmallVec<[Vec3f; 5]>> {
+        let mut points = SmallVec::<[Vec3f; 5]>::new();
+        points.extend(hand.finger_chain_positions_partial(XrHand::INDEX_TIP)?);
+        if points.len() < 2 {
+            return None;
+        }
+        if let Some(tip) = hand.tip_pos_checked(XrHand::INDEX_TIP) {
+            if (tip - *points.last()?).length() > 0.0001 {
+                points.push(tip);
+                return (points.len() >= 3).then_some(points);
+            }
+        }
+        let prev = points[points.len() - 2];
+        let last = points[points.len() - 1];
+        let direction = Self::normalized_segment_direction(prev, last)?;
+        points.push(last + direction * SHOOTER_INDEX_TIP_FALLBACK_EXTENSION_METERS);
+        (points.len() >= 3).then_some(points)
+    }
 
-        let Some(seg0) = Self::normalized_segment_direction(base, knuckle1) else {
-            return None;
-        };
-        let Some(seg1) = Self::normalized_segment_direction(knuckle1, knuckle2) else {
-            return None;
-        };
-        let Some(seg2) = Self::normalized_segment_direction(knuckle2, knuckle3) else {
-            return None;
-        };
-        let Some(seg3) = Self::normalized_segment_direction(knuckle3, tip) else {
-            return None;
-        };
+    fn hand_index_finger_stretch_metrics_for_points(
+        points: &[Vec3f],
+    ) -> Option<ShooterHandEmitMetrics> {
+        let mut chain_length = 0.0;
+        let mut directions = SmallVec::<[Vec3f; 4]>::new();
+        for segment in points.windows(2) {
+            let delta = segment[1] - segment[0];
+            let length = delta.length();
+            if !length.is_finite() || length <= 0.0001 {
+                return None;
+            }
+            chain_length += length;
+            directions.push(delta / length);
+        }
 
-        let chain_length = (knuckle1 - base).length()
-            + (knuckle2 - knuckle1).length()
-            + (knuckle3 - knuckle2).length()
-            + (tip - knuckle3).length();
         if chain_length <= 0.0001 {
             return None;
         }
-        let direct_length = (tip - base).length();
-        let segment_dots = [seg0.dot(seg1), seg1.dot(seg2), seg2.dot(seg3)];
-        let max_bend_angle_degrees = segment_dots
-            .into_iter()
-            .map(|dot| dot.clamp(-1.0, 1.0).acos().to_degrees())
-            .fold(0.0, f32::max);
-        let straightness = segment_dots.into_iter().fold(1.0, f32::min);
+        let direct_length = (*points.last()? - points[0]).length();
+        let mut max_bend_angle_degrees = 0.0;
+        let mut straightness: f32 = 1.0;
+        for pair in directions.windows(2) {
+            let dot = pair[0].dot(pair[1]).clamp(-1.0, 1.0);
+            max_bend_angle_degrees = max_bend_angle_degrees.max(dot.acos().to_degrees());
+            straightness = straightness.min(dot);
+        }
         Some(ShooterHandEmitMetrics {
             max_bend_angle_degrees,
             straightness,
@@ -159,23 +173,37 @@ impl Shooter {
         })
     }
 
-    fn hand_index_forward_direction(hand: &XrHand) -> Option<Vec3f> {
-        let points = hand.finger_chain_positions(XrHand::INDEX_TIP)?;
-        let [base, knuckle1, knuckle2, knuckle3, tip] =
-            [points[0], points[1], points[2], points[3], points[4]];
+    #[cfg(test)]
+    fn hand_index_finger_stretch_metrics(hand: &XrHand) -> Option<ShooterHandEmitMetrics> {
+        let points = Self::hand_index_finger_emit_points(hand)?;
+        Self::hand_index_finger_stretch_metrics_for_points(&points)
+    }
 
-        let seg0 = Self::normalized_segment_direction(base, knuckle1)?;
-        let seg1 = Self::normalized_segment_direction(knuckle1, knuckle2)?;
-        let seg2 = Self::normalized_segment_direction(knuckle2, knuckle3)?;
-        let seg3 = Self::normalized_segment_direction(knuckle3, tip)?;
-
-        let blended = seg0 * 0.10 + seg1 * 0.20 + seg2 * 0.30 + seg3 * 0.40;
+    fn hand_index_forward_direction_for_points(points: &[Vec3f]) -> Option<Vec3f> {
+        let mut blended = vec3f(0.0, 0.0, 0.0);
+        let mut weight_sum = 0.0;
+        for (index, segment) in points.windows(2).enumerate() {
+            let direction = Self::normalized_segment_direction(segment[0], segment[1])?;
+            let weight = (index + 1) as f32;
+            blended += direction * weight;
+            weight_sum += weight;
+        }
+        if weight_sum > 0.0 {
+            blended /= weight_sum;
+        }
         if blended.length() > 0.0001 {
             return Some(blended.normalize());
         }
-        Self::normalized_segment_direction(base, tip)
+        Self::normalized_segment_direction(points[0], *points.last()?)
     }
 
+    fn hand_emit_metrics_active(metrics: ShooterHandEmitMetrics) -> bool {
+        metrics.max_bend_angle_degrees <= SHOOTER_INDEX_BEND_MAX_DEGREES
+            && metrics.straightness >= SHOOTER_INDEX_STRAIGHTNESS_MIN
+            && metrics.extension_ratio >= SHOOTER_INDEX_EXTENSION_RATIO_MIN
+    }
+
+    #[cfg(test)]
     fn hand_emit_gesture_active(hand: &XrHand) -> bool {
         // Shooter owns its own firing gesture semantics. Do not couple emission to the
         // generic OpenXR hand-grab bit, which represents a broader whole-hand intent and
@@ -186,17 +214,20 @@ impl Shooter {
         let Some(metrics) = Self::hand_index_finger_stretch_metrics(hand) else {
             return false;
         };
-        metrics.max_bend_angle_degrees <= SHOOTER_INDEX_BEND_MAX_DEGREES
-            && metrics.straightness >= SHOOTER_INDEX_STRAIGHTNESS_MIN
-            && metrics.extension_ratio >= SHOOTER_INDEX_EXTENSION_RATIO_MIN
+        Self::hand_emit_metrics_active(metrics)
     }
 
     fn projectile_emitter_pose(hand: &XrHand) -> Option<(Vec3f, Vec3f)> {
-        if !Self::hand_emit_gesture_active(hand) {
+        if !hand.in_view() {
             return None;
         }
-        let tip_position = hand.tip_pos_checked(XrHand::INDEX_TIP)?;
-        let direction = Self::hand_index_forward_direction(hand)?;
+        let points = Self::hand_index_finger_emit_points(hand)?;
+        let metrics = Self::hand_index_finger_stretch_metrics_for_points(&points)?;
+        if !Self::hand_emit_metrics_active(metrics) {
+            return None;
+        }
+        let tip_position = points.last().copied()?;
+        let direction = Self::hand_index_forward_direction_for_points(&points)?;
         Some((tip_position, direction))
     }
 

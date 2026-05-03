@@ -88,6 +88,21 @@ mod tests {
     }
 
     #[test]
+    fn point_gesture_without_tip_length_estimates_fingertip_from_joint_chain() {
+        let mut hand = make_pointing_hand();
+        hand.tips_active &= !(1 << XrHand::INDEX_TIP);
+        hand.tips[XrHand::INDEX_TIP] = 0.0;
+        let (position, direction) = Shooter::projectile_emitter_pose(&hand)
+            .expect("pointing hand should emit from joint-chain fallback");
+        let end_joint = hand.joints[XrHand::INDEX_KNUCKLE3].position;
+        assert!(
+            position.z < end_joint.z - 0.02,
+            "expected fallback fingertip beyond end joint: position={position:?}, end={end_joint:?}"
+        );
+        assert!(direction.z < -0.8, "{direction:?}");
+    }
+
+    #[test]
     fn projectile_direction_follows_finger_chain_not_openxr_aim_ray() {
         let hand = make_pointing_hand_with_sideways_aim_pose();
         let (_, direction) = Shooter::projectile_emitter_pose(&hand)
