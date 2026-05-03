@@ -23,6 +23,7 @@ pub(crate) struct StdinWindow {
     swapchain: Option<HostSwapchain>,
     present_index: usize,
     readback_framebuffer: Option<u32>,
+    last_trace_draw: Option<(u32, u32, u32, u32, u64)>,
 }
 
 impl Cx {
@@ -66,6 +67,31 @@ impl Cx {
                             width: (pass_rect.size.x * dpi_factor) as u32,
                             height: (pass_rect.size.y * dpi_factor) as u32,
                         };
+
+                        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
+                            let trace_draw = (
+                                presentable_draw.width,
+                                presentable_draw.height,
+                                swapchain.alloc_width,
+                                swapchain.alloc_height,
+                                dpi_factor.to_bits(),
+                            );
+                            let should_log = window.last_trace_draw != Some(trace_draw);
+                            window.last_trace_draw = Some(trace_draw);
+                            if should_log {
+                                crate::log!(
+                                    "runview child draw window={} logical=({}, {}) dpi={} frame_px=({}, {}) swapchain_alloc=({}, {})",
+                                    window_id.id(),
+                                    pass_rect.size.x,
+                                    pass_rect.size.y,
+                                    dpi_factor,
+                                    presentable_draw.width,
+                                    presentable_draw.height,
+                                    swapchain.alloc_width,
+                                    swapchain.alloc_height
+                                );
+                            }
+                        }
 
                         if let Some(software_buffer) = current_image.software_buffer.as_mut() {
                             software_buffer.as_bytes_mut().fill(0);
@@ -164,16 +190,32 @@ impl Cx {
         }
     }
 
-    pub fn stdin_event_loop(&mut self) {
-        let aux_chan_client_endpoint = aux_chan::ClientEndpoint::connect_from_studio_env()
-            .expect("failed to acquire auxiliary channel");
+    fn stdin_aux_chan_endpoint(
+        aux_chan_client_endpoint: &mut Option<aux_chan::ClientEndpoint>,
+    ) -> Option<&aux_chan::ClientEndpoint> {
+        if aux_chan_client_endpoint.is_none() {
+            match aux_chan::ClientEndpoint::connect_from_studio_env() {
+                Ok(endpoint) => {
+                    *aux_chan_client_endpoint = Some(endpoint);
+                }
+                Err(err) => {
+                    crate::error!("failed to acquire auxiliary channel: {}", err);
+                    return None;
+                }
+            }
+        }
+        aux_chan_client_endpoint.as_ref()
+    }
 
+    pub fn stdin_event_loop(&mut self) {
         Self::stdin_send_to_host(AppToStudio::BeforeStartup);
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
+        let mut aux_chan_client_endpoint = None;
 
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
+        self.stdin_handle_platform_ops(&mut stdin_windows);
 
         loop {
             if !Self::has_studio_web_socket() {
@@ -191,7 +233,7 @@ impl Cx {
                         for msg in msgs.0 {
                             if self.stdin_handle_host_to_stdin(
                                 msg,
-                                &aux_chan_client_endpoint,
+                                &mut aux_chan_client_endpoint,
                                 &mut stdin_windows,
                             ) {
                                 return;
@@ -210,7 +252,7 @@ impl Cx {
                     if let Ok(msg) = StudioToApp::deserialize_json(&text) {
                         if self.stdin_handle_host_to_stdin(
                             msg,
-                            &aux_chan_client_endpoint,
+                            &mut aux_chan_client_endpoint,
                             &mut stdin_windows,
                         ) {
                             return;
@@ -236,7 +278,7 @@ impl Cx {
     fn stdin_handle_host_to_stdin(
         &mut self,
         msg: StudioToApp,
-        aux_chan_client_endpoint: &aux_chan::ClientEndpoint,
+        aux_chan_client_endpoint: &mut Option<aux_chan::ClientEndpoint>,
         stdin_windows: &mut Vec<StdinWindow>,
     ) -> bool {
         match msg {
@@ -299,11 +341,25 @@ impl Cx {
                     inner_size: dvec2(width, height),
                     ..Default::default()
                 };
-                self.windows[window_id].window_geom = new_geom.clone();
-                if old_geom.dpi_factor != new_geom.dpi_factor
+                let geom_changed = old_geom.dpi_factor != new_geom.dpi_factor
                     || old_geom.inner_size != new_geom.inner_size
-                    || old_geom.position != new_geom.position
-                {
+                    || old_geom.position != new_geom.position;
+                if geom_changed && std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
+                    crate::log!(
+                        "runview child geom window={} logical=({}, {}) dpi={} px=({}, {}) old_logical=({}, {}) old_dpi={}",
+                        window_id.id(),
+                        width,
+                        height,
+                        dpi_factor,
+                        width * dpi_factor,
+                        height * dpi_factor,
+                        old_geom.inner_size.x,
+                        old_geom.inner_size.y,
+                        old_geom.dpi_factor
+                    );
+                }
+                self.windows[window_id].window_geom = new_geom.clone();
+                if geom_changed {
                     self.redraw_all();
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
                         window_id,
@@ -311,8 +367,14 @@ impl Cx {
                         old_geom,
                     }));
                 }
+                let _ = Self::stdin_aux_chan_endpoint(aux_chan_client_endpoint);
             }
             StudioToApp::Swapchain(new_swapchain) => {
+                let Some(aux_chan_client_endpoint) =
+                    Self::stdin_aux_chan_endpoint(aux_chan_client_endpoint)
+                else {
+                    return false;
+                };
                 let window_id = new_swapchain.window_id;
                 let alloc_width = new_swapchain.alloc_width;
                 let alloc_height = new_swapchain.alloc_height;
