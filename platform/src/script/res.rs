@@ -214,14 +214,41 @@ fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
 
 #[cfg(target_arch = "wasm32")]
 fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
+    let mut dep_path = dep_path;
+    let mut base_path = String::new();
     if let crate::cx::OsType::Web(params) = &cx.os_type {
+        base_path = web_resource_base_path(&params.pathname);
         if params.small_font_aliases {
             if let Some(remapped) = remapped_small_font_dependency_path(dep_path) {
-                return remapped.to_string();
+                dep_path = remapped;
             }
         }
     }
-    dep_path.to_string()
+    if base_path.is_empty() {
+        dep_path.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            base_path.trim_end_matches('/'),
+            dep_path.trim_start_matches('/')
+        )
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_resource_base_path(pathname: &str) -> String {
+    let pathname = pathname.trim_end_matches('/');
+    if pathname.is_empty() {
+        return String::new();
+    }
+
+    let last_segment = pathname.rsplit('/').next().unwrap_or_default();
+    let base_path = if last_segment.contains('.') {
+        pathname.rsplit_once('/').map_or("", |(base, _)| base)
+    } else {
+        pathname
+    };
+    base_path.trim_start_matches('/').to_string()
 }
 
 fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
@@ -409,7 +436,10 @@ impl Cx {
 
 #[cfg(test)]
 mod tests {
-    use super::{remapped_small_font_dependency_path, should_skip_eager_resource_load};
+    use super::{
+        remapped_small_font_dependency_path, should_skip_eager_resource_load,
+        web_resource_base_path,
+    };
 
     #[test]
     fn skips_only_heavy_widgets_fallback_fonts() {
@@ -451,6 +481,24 @@ mod tests {
         assert_eq!(
             remapped_small_font_dependency_path("app/resources/LXGWWenKaiRegular.ttf"),
             None
+        );
+    }
+
+    #[test]
+    fn derives_web_resource_base_path_from_browser_pathname() {
+        assert_eq!(web_resource_base_path("/"), "");
+        assert_eq!(web_resource_base_path("/index.html"), "");
+        assert_eq!(
+            web_resource_base_path("/makepad-example-splash/"),
+            "makepad-example-splash"
+        );
+        assert_eq!(
+            web_resource_base_path("/makepad-example-splash/index.html"),
+            "makepad-example-splash"
+        );
+        assert_eq!(
+            web_resource_base_path("/examples/splash/index.html"),
+            "examples/splash"
         );
     }
 }

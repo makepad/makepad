@@ -259,26 +259,19 @@ script_mod! {
 
             sample_blur: fn(level: float, uv: vec2) -> vec4 {
                 let safe_level = clamp(level, 0.0, 6.0)
+                if safe_level >= 5.999 {
+                    return self.sample_level(6.0, uv)
+                }
                 let base_level = floor(safe_level)
                 let t = safe_level - base_level
-                let t2 = t * t
-                let t3 = t2 * t
 
-                let l0 = max(base_level - 1.0, 0.0)
                 let l1 = base_level
                 let l2 = min(base_level + 1.0, 6.0)
-                let l3 = min(base_level + 2.0, 6.0)
-                let c0 = self.sample_level(l0, uv)
+                let blend = t * t * (3.0 - 2.0 * t)
                 let c1 = self.sample_level(l1, uv)
                 let c2 = self.sample_level(l2, uv)
-                let c3 = self.sample_level(l3, uv)
 
-                return (
-                    c1 * 2.0
-                    + (c2 - c0) * t
-                    + (c0 * 2.0 - c1 * 5.0 + c2 * 4.0 - c3) * t2
-                    + (c3 - c0 + (c1 - c2) * 3.0) * t3
-                ) * 0.5
+                return c1.mix(c2, blend)
             }
 
             sample_gauss: fn(uv: vec2) -> vec4 {
@@ -392,15 +385,32 @@ script_mod! {
                 let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
                 let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
                 let ripple_age = max(self.draw_pass.time - self.ripple_start, 0.0)
-                let ripple_life = clamp(1.0 - ripple_age / 0.52, 0.0, 1.0)
-                let lens_aspect = vec2(self.rect_size3.x / max(self.rect_size3.y, 1.0), 1.0)
-                let ripple_dist = length((self.pos - vec2(0.5, 0.5)) * lens_aspect)
-                let ripple_wave = sin((ripple_dist - ripple_age * 1.35) * 32.0) * ripple_life * ripple_life * self.ripple_strength
-                let flatten = clamp(self.press_flatten + max(ripple_wave, 0.0) * 0.28, 0.0, 1.0)
-                let lens = self.rounded_edge_lens(sdf.shape) * (1.0 - flatten * 0.90)
+                let ripple_life = clamp(1.0 - ripple_age / 1.05, 0.0, 1.0)
+                let lens_pos = self.pos * 2.0 - 1.0
+                let ripple_dist = length(lens_pos)
+                let wave_t = clamp(ripple_age / 0.88, 0.0, 1.0)
+                let wave_center = mix(0.0, 1.25, wave_t * wave_t * (3.0 - 2.0 * wave_t))
+                let wave_width = 0.24
+                let wave_delta = ripple_dist - wave_center
+                let wave = exp(-(wave_delta * wave_delta) / (wave_width * wave_width))
+                let wave_mask = smoothstep(0.0, 0.10, ripple_age) * (1.0 - smoothstep(1.16, 1.44, ripple_dist))
+                let ripple_wave = wave * ripple_life * ripple_life * self.ripple_strength * wave_mask
+                let ripple_slope = (-wave_delta / wave_width) * ripple_wave
+                let ripple_dir = lens_pos / max(ripple_dist, 0.001)
+                let press = clamp(self.press_flatten, 0.0, 1.0)
+                let restore = clamp(-self.press_flatten, 0.0, 1.0)
+                let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
+                let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
+                let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
+                let ripple_surface = ripple_slope * 0.85 + ripple_wave * 0.20
+                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.18, 0.0, 1.55)
+                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.15, 0.0, 2.10)
+                let lens = self.rounded_edge_lens(sdf.shape) * lens_depth
                 let normal = self.rounded_edge_normal(sdf.shape)
-                let base_offset = normal * (lens * self.lensing_strength) / max(self.source_size, vec2(1.0, 1.0))
-                let color_offset = normal * (lens * self.diffraction_strength * (1.0 - flatten * 0.65)) / max(self.source_size, vec2(1.0, 1.0))
+                let water_offset = ripple_dir * (ripple_surface * 22.0) / max(self.source_size, vec2(1.0, 1.0))
+                let base_offset = normal * (lens * self.lensing_strength) / max(self.source_size, vec2(1.0, 1.0)) + water_offset
+                let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / max(self.source_size, vec2(1.0, 1.0))
+                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / max(self.source_size, vec2(1.0, 1.0))
                 let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
@@ -415,7 +425,7 @@ script_mod! {
                 let material = base.rgb.mix(self.tint_color.rgb, self.tint_alpha)
                 let edge_uv = abs(self.pos * 2.0 - 1.0)
                 let edge_gradient = clamp((edge_uv.x + edge_uv.y) * 0.5, 0.0, 1.0)
-                let ripple_highlight = max(ripple_wave, 0.0) * 0.08
+                let ripple_highlight = ripple_wave * 0.11
                 let sparkle = edge * self.diffraction_strength * 0.004 * (1.0 - flatten * 0.45)
                 let highlight = self.specular_strength * (0.45 * edge_gradient + 0.55 * edge + 0.30 * (1.0 - self.pos.y)) * (1.0 - flatten * 0.28) + ripple_highlight
                 let noise = (
@@ -587,7 +597,7 @@ impl GaussRoundedView {
         self.view.draw_bg.draw_vars.set_uniform(
             cx,
             live_id!(press_flatten),
-            &[flatten.clamp(0.0, 1.0)],
+            &[flatten.clamp(-1.0, 1.0)],
         );
         self.view
             .draw_bg
@@ -601,7 +611,7 @@ impl GaussRoundedView {
         self.view.draw_bg.draw_vars.set_uniform_on_area(
             cx,
             live_id!(press_flatten),
-            &[flatten.clamp(0.0, 1.0)],
+            &[flatten.clamp(-1.0, 1.0)],
         );
         self.view.draw_bg.draw_vars.set_uniform_on_area(
             cx,

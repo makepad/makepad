@@ -340,12 +340,16 @@ impl XrSceneSyncController {
 
         if !local_body_spawns.is_empty() {
             self.refresh_spawnable_registry(ui, cx, false);
-            if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
-                for spawn in local_body_spawns {
-                    if let Some(spawn) = peer_sync.send_local_body_spawn(spawn) {
-                        self.apply_remote_body_spawn(ui, cx, spawn);
+            for spawn in local_body_spawns {
+                let spawn = {
+                    if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                        // Local emitters must still spawn when shared-object sync is not ready.
+                        peer_sync.send_local_body_spawn(spawn).unwrap_or(spawn)
+                    } else {
+                        spawn
                     }
-                }
+                };
+                self.apply_remote_body_spawn(ui, cx, spawn);
             }
         }
     }
