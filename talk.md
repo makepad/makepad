@@ -211,7 +211,7 @@ Suggested demo:
 - Stream the Splash render.
 - Change the prompt or generated code.
 - Show the CAD output update in realtime.
-- Iterate on shape, proportions, details, and materials.
+- Iterate on the generated CAD behavior.
 
 Talking points:
 
