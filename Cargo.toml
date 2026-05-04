@@ -27,6 +27,7 @@ workspace.members = [
     "examples/windows_blur",
     "examples/floating_panel",
     "examples/xr",
+    "examples/cad",
     "libs/gltf",
     "libs/splat",
     "libs/latex_math",
@@ -70,6 +71,10 @@ workspace.exclude = [
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
+    "libs/csg/csg",
+    "libs/csg/csg_boolean",
+    "libs/csg/csg_exact",
+    "libs/csg/csg_primitives",
     # vendored third-party libs (tests require external dev-deps)
     "libs/ab_glyph_rasterizer",
     "libs/adler2",

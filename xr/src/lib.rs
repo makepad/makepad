@@ -42,5 +42,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     sync::xr_scene_sync_controller::script_mod(vm);
     scene::xr_select::script_mod(vm);
     scene::xr_view::script_mod(vm);
-    scene::xr_root::script_mod(vm)
+    scene::xr_root::script_mod(vm);
+    scene::xr_scene_view::script_mod(vm)
 }

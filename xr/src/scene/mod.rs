@@ -4,6 +4,7 @@ mod xr_gesture;
 pub mod xr_node;
 pub mod xr_permissions_flow;
 pub mod xr_root;
+pub mod xr_scene_view;
 pub mod xr_select;
 pub mod xr_shared_object_sync;
 pub mod xr_view;
@@ -36,6 +37,7 @@ pub use xr_node::{
 };
 pub use xr_permissions_flow::XrPermissionsFlow;
 pub use xr_root::{XrCamera, XrRoot, XrRootAction};
+pub use xr_scene_view::{DrawXrSceneTexture, XrSceneView};
 pub use xr_select::{XrSelect, XrSelectAction};
 pub use xr_shared_object_sync::{
     collect_scene_spawnable_objects, XrLocalSharedObjectSnapshot, XrRemoteSharedObjectSnapshot,

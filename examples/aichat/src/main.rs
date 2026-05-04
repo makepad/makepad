@@ -204,8 +204,9 @@ script_mod! {
                         }
 
                         backend_dropdown := DropDown {
-                            width: 170
-                            labels: ["Claude Splash" "Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
+                            width: 150
+                            labels: ["Claude Splash" "Local OpenAI"]
+                            draw_text.text_style.font_size: 12
                         }
                     }
 
@@ -408,54 +409,13 @@ impl Widget for ChatList {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BackendType {
-    ClaudeSplash,
-    ClaudeAcp,
-    ClaudeApi,
-    Gemini,
-    GeminiSplash,
-    OpenAi,
-}
-
-const ALL_BACKENDS: [BackendType; 6] = [
-    BackendType::ClaudeSplash,
-    BackendType::ClaudeAcp,
-    BackendType::ClaudeApi,
-    BackendType::Gemini,
-    BackendType::GeminiSplash,
-    BackendType::OpenAi,
-];
-
-impl BackendType {
-    fn to_index(self) -> usize {
-        ALL_BACKENDS.iter().position(|&b| b == self).unwrap()
-    }
-
-    fn from_index(index: usize) -> Option<Self> {
-        ALL_BACKENDS.get(index).copied()
-    }
-
-    fn status_label(self) -> &'static str {
-        match self {
-            Self::ClaudeSplash => "Active: Claude Splash (UI Agent via ACP)",
-            Self::ClaudeAcp => "Active: Claude (ACP via Zed)",
-            Self::ClaudeApi => "Active: Claude (API)",
-            Self::Gemini => "Active: Gemini",
-            Self::GeminiSplash => "Active: Gemini Splash (UI Agent)",
-            Self::OpenAi => "Active: OpenAI",
-        }
-    }
-
-    fn system_prompt(self) -> String {
-        match self {
-            Self::ClaudeSplash | Self::GeminiSplash => {
-                let splash_md_path =
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../splash.md");
-                let splash_md = std::fs::read_to_string(&splash_md_path)
-                    .unwrap_or_else(|_| include_str!("../../../splash.md").to_string());
-                format!(
-                    r#"You are an AI agent that can create on-demand UI using Makepad's Splash scripting language.
+fn claude_splash_system_prompt() -> String {
+    let splash_md_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../splash.md");
+    let splash_md = std::fs::read_to_string(&splash_md_path)
+        .unwrap_or_else(|_| include_str!("../../../splash.md").to_string());
+    format!(
+        r#"You are an AI agent that can create on-demand UI using Makepad's Splash scripting language.
 
 You can answer questions normally using markdown. But when it makes sense to show something visually — a layout, a UI mockup, a styled card, a button arrangement, an animation, or anything graphical — you should embed a ```runsplash code block in your markdown response. The content inside a ```runsplash block is live Splash script that will be rendered as real interactive UI inline in the chat.
 
@@ -466,9 +426,37 @@ The block content is Splash script. It gets evaluated and rendered as a live wid
 Here is the complete Splash scripting manual. Follow it exactly:
 
 {splash_md}"#
-                )
-            }
-            _ => "You are a helpful assistant. Be concise but thorough.".to_string(),
+    )
+}
+
+const LOCAL_OPENAI_URL: &str = "http://10.0.0.168:8080/v1/chat/completions";
+const LOCAL_OPENAI_MODEL: &str = "Gemma4Unlim-31B-ModelOptFullAttn-FullCal128.gguf";
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum BackendType {
+    #[default]
+    ClaudeSplash,
+    LocalOpenAi,
+}
+
+const BACKENDS: [BackendType; 2] = [BackendType::ClaudeSplash, BackendType::LocalOpenAi];
+
+impl BackendType {
+    fn to_index(self) -> usize {
+        BACKENDS
+            .iter()
+            .position(|&backend| backend == self)
+            .unwrap()
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        BACKENDS.get(index).copied()
+    }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            Self::ClaudeSplash => "Active: Claude Splash (Claude Code)",
+            Self::LocalOpenAi => "Active: Local OpenAI stream at 10.0.0.168:8080",
         }
     }
 }
@@ -484,96 +472,56 @@ pub struct App {
     #[rust]
     current_prompt: Option<PromptId>,
     #[rust]
-    available_backends: Vec<BackendType>,
+    active_backend: BackendType,
     #[rust]
-    active_backend: Option<BackendType>,
+    backend_available: bool,
     #[rust]
     history_injected: bool,
 }
 
 impl App {
-    fn detect_available_backends() -> Vec<BackendType> {
-        let mut available_backends = vec![];
-        if ClaudeAcpAgent::is_available() {
-            available_backends.push(BackendType::ClaudeSplash);
-            available_backends.push(BackendType::ClaudeAcp);
-        }
-        if Self::read_key_file("ANTHROPIC_API_KEY").is_some() {
-            available_backends.push(BackendType::ClaudeApi);
-        }
-        if Self::read_key_file("GOOGLE_API_KEY").is_some() {
-            available_backends.push(BackendType::Gemini);
-            available_backends.push(BackendType::GeminiSplash);
-        }
-        if Self::read_key_file("OPENAI_API_KEY").is_some() {
-            available_backends.push(BackendType::OpenAi);
-        }
-        available_backends
-    }
+    fn create_backend_session(&mut self, cx: &mut Cx, backend: BackendType) {
+        self.agent = None;
+        self.session_id = None;
+        self.current_prompt = None;
+        self.active_backend = backend;
+        self.history_injected = false;
 
-    fn read_key_file(path: &str) -> Option<String> {
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    fn create_agent(&self, backend: BackendType) -> Option<Box<dyn Agent>> {
-        match backend {
-            BackendType::ClaudeSplash | BackendType::ClaudeAcp => ClaudeAcpAgent::is_available()
-                .then(|| Box::new(ClaudeAcpAgent::new()) as Box<dyn Agent>),
-            BackendType::ClaudeApi => Self::read_key_file("ANTHROPIC_API_KEY").map(|key| {
-                Box::new(StatelessBackendAdapter::new(Box::new(ClaudeBackend::new(
-                    BackendConfig::Claude {
-                        api_key: Some(key),
-                        oauth_token: None,
-                        model: "claude-sonnet-4-5-20250929".to_string(),
-                    },
-                )))) as Box<dyn Agent>
-            }),
-            BackendType::Gemini | BackendType::GeminiSplash => {
-                Self::read_key_file("GOOGLE_API_KEY").map(|key| {
-                    Box::new(StatelessBackendAdapter::new(Box::new(GeminiBackend::new(
-                        BackendConfig::Gemini {
-                            api_key: key,
-                            model: "gemini-3-pro-preview".to_string(),
+        let agent = match backend {
+            BackendType::ClaudeSplash => {
+                self.backend_available = ClaudeCodeAgent::is_available();
+                self.backend_available
+                    .then(|| Box::new(ClaudeCodeAgent::new()) as Box<dyn Agent>)
+            }
+            BackendType::LocalOpenAi => {
+                self.backend_available = true;
+                Some(
+                    Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
+                        BackendConfig::OpenAI {
+                            api_key: String::new(),
+                            model: LOCAL_OPENAI_MODEL.to_string(),
+                            base_url: Some(LOCAL_OPENAI_URL.to_string()),
+                            reasoning_effort: None,
                         },
-                    )))) as Box<dyn Agent>
-                })
+                    )))) as Box<dyn Agent>,
+                )
             }
-            BackendType::OpenAi => Self::read_key_file("OPENAI_API_KEY").map(|key| {
-                Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
-                    BackendConfig::OpenAI {
-                        api_key: key,
-                        model: "gpt-4o".to_string(),
-                        base_url: None,
-                        reasoning_effort: None,
-                    },
-                )))) as Box<dyn Agent>
-            }),
-        }
-    }
+        };
 
-    fn switch_backend(&mut self, cx: &mut Cx, backend: BackendType) {
-        if self.active_backend == Some(backend) {
-            return;
-        }
-        if let Some(agent) = self.create_agent(backend) {
-            self.agent = Some(agent);
-            self.active_backend = Some(backend);
-            self.session_id = None;
-            self.current_prompt = None;
-            self.history_injected = false;
-
-            let config = SessionConfig {
-                system_prompt: Some(backend.system_prompt()),
-                ..Default::default()
-            };
-            if let Some(agent) = &mut self.agent {
-                self.session_id = Some(agent.create_session(cx, config));
-            }
+        let Some(agent) = agent else {
             self.update_status(cx);
+            return;
+        };
+
+        let config = SessionConfig {
+            system_prompt: Some(claude_splash_system_prompt()),
+            ..Default::default()
+        };
+        self.agent = Some(agent);
+        if let Some(agent) = &mut self.agent {
+            self.session_id = Some(agent.create_session(cx, config));
         }
+        self.update_status(cx);
     }
 
     fn clear_chat(&mut self, cx: &mut Cx) {
@@ -584,16 +532,7 @@ impl App {
             data.is_streaming = false;
             data.save_to_disk();
         }
-        self.history_injected = false;
-
-        if let Some(agent) = &mut self.agent {
-            let backend = self.active_backend.unwrap_or(BackendType::Gemini);
-            let config = SessionConfig {
-                system_prompt: Some(backend.system_prompt()),
-                ..Default::default()
-            };
-            self.session_id = Some(agent.create_session(cx, config));
-        }
+        self.create_backend_session(cx, self.active_backend);
         self.ui.redraw(cx);
     }
 
@@ -621,14 +560,13 @@ impl App {
         };
         input.set_text(cx, "");
 
-        // Inject history on first prompt for stateless backends
         if !self.history_injected && agent.is_stateless() {
             let data = CHAT_DATA.read().unwrap();
             let history: Vec<Message> = data.messages[..data.messages.len() - 1]
                 .iter()
-                .map(|m| match m.role {
-                    ChatRole::User => Message::user(&m.text),
-                    ChatRole::Assistant => Message::assistant(&m.text),
+                .map(|message| match message.role {
+                    ChatRole::User => Message::user(&message.text),
+                    ChatRole::Assistant => Message::assistant(&message.text),
                 })
                 .collect();
             drop(data);
@@ -638,15 +576,7 @@ impl App {
             self.history_injected = true;
         }
 
-        // ACP doesn't support system prompts via the protocol, so for ClaudeSplash
-        // we prepend the splash system prompt context to each user message.
-        let prompt_text = if self.active_backend == Some(BackendType::ClaudeSplash) {
-            let system = BackendType::ClaudeSplash.system_prompt();
-            format!("<system>\n{system}\n</system>\n\n{text}")
-        } else {
-            text
-        };
-        self.current_prompt = Some(agent.send_prompt(cx, session_id, &prompt_text));
+        self.current_prompt = Some(agent.send_prompt(cx, session_id, &text));
         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
@@ -677,9 +607,15 @@ impl App {
     }
 
     fn update_status(&self, cx: &mut Cx) {
-        let status = match self.active_backend {
-            Some(b) => b.status_label(),
-            None => "No backend selected",
+        let status = if self.backend_available {
+            self.active_backend.status_label()
+        } else {
+            match self.active_backend {
+                BackendType::ClaudeSplash => {
+                    "Claude Code not found. Set CLAUDE_CODE_PATH or install claude."
+                }
+                BackendType::LocalOpenAi => "Local OpenAI backend unavailable",
+            }
         };
         self.ui.label(cx, ids!(status_label)).set_text(cx, status);
     }
@@ -713,7 +649,10 @@ impl MatchEvent for App {
             .selected(actions)
         {
             if let Some(backend) = BackendType::from_index(index) {
-                self.switch_backend(cx, backend);
+                if backend != self.active_backend {
+                    self.cancel_request(cx);
+                    self.create_backend_session(cx, backend);
+                }
             }
         }
 
@@ -734,20 +673,10 @@ impl MatchEvent for App {
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
-        let default_backend = if self.available_backends.contains(&BackendType::ClaudeSplash) {
-            Some(BackendType::ClaudeSplash)
-        } else if self.available_backends.contains(&BackendType::GeminiSplash) {
-            Some(BackendType::GeminiSplash)
-        } else {
-            self.available_backends.first().copied()
-        };
-        if let Some(backend) = default_backend {
-            self.switch_backend(cx, backend);
-            self.ui
-                .drop_down(cx, ids!(backend_dropdown))
-                .set_selected_item(cx, backend.to_index());
-        }
-        self.update_status(cx);
+        self.create_backend_session(cx, self.active_backend);
+        self.ui
+            .drop_down(cx, ids!(backend_dropdown))
+            .set_selected_item(cx, self.active_backend.to_index());
     }
 }
 
@@ -760,7 +689,8 @@ impl AppMain for App {
 
     fn after_new_from_script(_vm: &mut ScriptVm, app: &mut Self) {
         CHAT_DATA.write().unwrap().messages = ChatData::load_from_disk();
-        app.available_backends = Self::detect_available_backends();
+        app.active_backend = BackendType::ClaudeSplash;
+        app.backend_available = ClaudeCodeAgent::is_available();
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
