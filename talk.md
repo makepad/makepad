@@ -266,6 +266,17 @@ What to emphasize:
 
 The same automation idea applies: generate, run, see, interact, and iterate. The target can be desktop, web, mobile, or XR.
 
+## Local AI
+
+Point to make before the honest framing: Makepad is also a practical place to work on local AI infrastructure.
+
+Talking points:
+
+- Have AI help port AI runtimes.
+- Run models locally where it makes sense.
+- Use an AI Manager to coordinate local and cloud AI.
+- Let local AI manage other cloud AI providers and workflows.
+
 ## Transition Lines
 
 Use these between demos if needed:

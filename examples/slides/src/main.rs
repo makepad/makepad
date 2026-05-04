@@ -209,6 +209,14 @@ script_mod! {
                             TalkBody{text: "- Mixed reality preview"}
                         }
 
+                        local_ai := TalkSlide{
+                            title.text: "Local AI"
+                            TalkBody{text: "- AI ports AI runtimes"}
+                            TalkBody{text: "- Run models locally"}
+                            TalkBody{text: "- AI Manager"}
+                            TalkBody{text: "- Manage cloud AI"}
+                        }
+
                         honest := TalkSlide{
                             title.text: "Honest Framing"
                             TalkBody{text: "- Goals still matter"}
