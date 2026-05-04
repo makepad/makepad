@@ -42,6 +42,9 @@ const LOCAL_OPENAI_MODEL: &str = "Gemma4Unlim-31B-ModelOptFullAttn-FullCal128.gg
 const GENERATED_DIR: &str = "generated";
 const GENERATED_SCRIPT_FILE: &str = "current.cad";
 const GENERATED_OBJ_FILE: &str = "current.obj";
+const DEMO_MAX_CURVE_SEGMENTS: u32 = 16;
+const DEMO_MAX_SPHERE_RINGS: u32 = 12;
+const DEMO_MAX_TORUS_MINOR_SEGMENTS: u32 = 8;
 
 thread_local! {
     static CAD_SCRIPT_OUTPUT: RefCell<Option<Solid>> = RefCell::new(None);
@@ -235,31 +238,6 @@ fn install_cad_binary_handle_method(
     });
 }
 
-fn iphone_camera_cutout_solid(
-    x: f64,
-    y: f64,
-    z: f64,
-    radius: f64,
-    spacing: f64,
-    depth: f64,
-    segments: u32,
-) -> Solid {
-    let radius = radius.abs().max(0.01);
-    let spacing = spacing.abs().max(radius * 2.2);
-    let depth = depth.abs().max(0.05);
-    let segments = segments.clamp(12, 128);
-    let lens_a = Solid::cylinder(radius, depth, segments, true)
-        .rotate_x(90.0)
-        .translate(x, y, z);
-    let lens_b = Solid::cylinder(radius, depth, segments, true)
-        .rotate_x(90.0)
-        .translate(x + spacing, y, z);
-    let lens_c = Solid::cylinder(radius, depth, segments, true)
-        .rotate_x(90.0)
-        .translate(x, y - spacing, z);
-    lens_a.merge(&lens_b).merge(&lens_c)
-}
-
 fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let ty = vm.new_handle_type(id!(cad_solid));
     let cad = vm.new_module(id!(cad));
@@ -281,47 +259,29 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     });
     vm.add_method(cad, id!(sphere), script_args!(), |vm, args| {
         let radius = arg_f64(vm, args, 0, 1.0).abs().max(0.001);
-        let segments = arg_u32(vm, args, 1, 32).clamp(8, 128);
-        let rings = arg_u32(vm, args, 2, 16).clamp(4, 64);
+        let segments = arg_u32(vm, args, 1, 32).clamp(8, DEMO_MAX_CURVE_SEGMENTS);
+        let rings = arg_u32(vm, args, 2, 16).clamp(4, DEMO_MAX_SPHERE_RINGS);
         new_cad_solid(vm, Solid::sphere(radius, segments, rings))
     });
     vm.add_method(cad, id!(cylinder), script_args!(), |vm, args| {
         let radius = arg_f64(vm, args, 0, 1.0).abs().max(0.001);
         let height = arg_f64(vm, args, 1, 1.0).abs().max(0.001);
-        let segments = arg_u32(vm, args, 2, 32).clamp(3, 128);
+        let segments = arg_u32(vm, args, 2, 32).clamp(3, DEMO_MAX_CURVE_SEGMENTS);
         let center = arg_bool(vm, args, 3, true);
         new_cad_solid(vm, Solid::cylinder(radius, height, segments, center))
     });
-    vm.add_method(
-        cad,
-        id!(iphone_camera_cutout),
-        script_args!(),
-        |vm, args| {
-            let x = arg_f64(vm, args, 0, 0.65);
-            let y = arg_f64(vm, args, 1, 2.2);
-            let z = arg_f64(vm, args, 2, 0.0);
-            let radius = arg_f64(vm, args, 3, 0.22);
-            let spacing = arg_f64(vm, args, 4, 0.5);
-            let depth = arg_f64(vm, args, 5, 1.0);
-            let segments = arg_u32(vm, args, 6, 48);
-            new_cad_solid(
-                vm,
-                iphone_camera_cutout_solid(x, y, z, radius, spacing, depth, segments),
-            )
-        },
-    );
     vm.add_method(cad, id!(cone), script_args!(), |vm, args| {
         let radius = arg_f64(vm, args, 0, 1.0).abs().max(0.001);
         let height = arg_f64(vm, args, 1, 1.0).abs().max(0.001);
-        let segments = arg_u32(vm, args, 2, 32).clamp(3, 128);
+        let segments = arg_u32(vm, args, 2, 32).clamp(3, DEMO_MAX_CURVE_SEGMENTS);
         let center = arg_bool(vm, args, 3, true);
         new_cad_solid(vm, Solid::cone(radius, height, segments, center))
     });
     vm.add_method(cad, id!(torus), script_args!(), |vm, args| {
         let major_radius = arg_f64(vm, args, 0, 1.0).abs().max(0.001);
         let minor_radius = arg_f64(vm, args, 1, 0.2).abs().max(0.001);
-        let major_segments = arg_u32(vm, args, 2, 48).clamp(3, 160);
-        let minor_segments = arg_u32(vm, args, 3, 16).clamp(3, 96);
+        let major_segments = arg_u32(vm, args, 2, 48).clamp(3, DEMO_MAX_CURVE_SEGMENTS);
+        let minor_segments = arg_u32(vm, args, 3, 16).clamp(3, DEMO_MAX_TORUS_MINOR_SEGMENTS);
         new_cad_solid(
             vm,
             Solid::torus(major_radius, minor_radius, major_segments, minor_segments),
@@ -331,7 +291,7 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
         let r1 = arg_f64(vm, args, 0, 1.0).abs();
         let r2 = arg_f64(vm, args, 1, 0.5).abs();
         let height = arg_f64(vm, args, 2, 1.0).abs().max(0.001);
-        let segments = arg_u32(vm, args, 3, 32).clamp(3, 128);
+        let segments = arg_u32(vm, args, 3, 32).clamp(3, DEMO_MAX_CURVE_SEGMENTS);
         let center = arg_bool(vm, args, 4, true);
         new_cad_solid(
             vm,
@@ -451,11 +411,47 @@ fn line_let_identifier(line: &str) -> Option<String> {
     after_ident.starts_with('=').then(|| ident.to_string())
 }
 
-fn source_has_output_call(source: &str) -> bool {
-    source.contains("render(")
-        || source.contains(".render(")
-        || source.contains("preview(")
-        || source.contains(".preview(")
+fn line_has_output_call(line: &str) -> bool {
+    line.contains("render(")
+        || line.contains(".render(")
+        || line.contains("preview(")
+        || line.contains(".preview(")
+}
+
+fn is_standalone_output_call(line: &str) -> bool {
+    let line = line.trim();
+    (line.starts_with("render(")
+        || line.starts_with("preview(")
+        || line.ends_with(".render()")
+        || line.ends_with(".preview()"))
+        && !line.starts_with("let ")
+}
+
+fn source_without_intermediate_previews(source: &str) -> String {
+    let last_output_line = source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| is_standalone_output_call(line).then_some(index))
+        .last();
+
+    let Some(last_output_line) = last_output_line else {
+        return source.to_string();
+    };
+
+    let mut output = String::new();
+    for (index, line) in source.lines().enumerate() {
+        if index != last_output_line && is_standalone_output_call(line) {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+    }
+    if source.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn progressive_cad_preview_source(source: &str) -> Option<String> {
@@ -490,16 +486,198 @@ fn progressive_cad_preview_source(source: &str) -> Option<String> {
         return None;
     }
 
-    let prefix = source[..last_good_end].trim_end();
+    let stripped = source_without_intermediate_previews(&source[..last_good_end]);
+    let prefix = stripped.trim_end();
     if prefix.is_empty() {
         return None;
     }
-    if source_has_output_call(prefix) {
+    if prefix
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(line_has_output_call)
+    {
         return Some(prefix.to_string());
     }
 
     let last_ident = prefix.lines().filter_map(line_let_identifier).last()?;
     Some(format!("{}\npreview({})", prefix, last_ident))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progressive_preview_tracks_newest_complete_let_after_prior_preview() {
+        let source = "\
+let outer = cube(3.2, 6.4, 0.55, true)
+preview(outer)
+let shell = outer.difference(cube(2.8, 5.9, 0.5, true))
+preview(shell)
+let final_case = shell.difference(cube(0.85, 0.26, 1.2, true))
+";
+
+        let preview_source = progressive_cad_preview_source(source).unwrap();
+
+        assert!(preview_source.ends_with("preview(final_case)"));
+    }
+
+    #[test]
+    fn progressive_preview_does_not_duplicate_latest_explicit_preview() {
+        let source = "\
+let final_case = cube(1.0, 1.0, 1.0, true)
+preview(final_case)
+";
+
+        let preview_source = progressive_cad_preview_source(source).unwrap();
+
+        assert_eq!(preview_source.matches("preview(final_case)").count(), 1);
+        assert!(preview_source.ends_with("preview(final_case)"));
+    }
+
+    #[test]
+    fn progressive_preview_keeps_latest_explicit_render() {
+        let source = "\
+let final_case = cube(1.0, 1.0, 1.0, true)
+render(final_case)
+";
+
+        let preview_source = progressive_cad_preview_source(source).unwrap();
+
+        assert!(preview_source.ends_with("render(final_case)"));
+        assert!(!preview_source.contains("preview(final_case)"));
+    }
+
+    #[test]
+    fn phone_case_cutters_change_mesh() {
+        let outer = Solid::cube(3.2, 6.4, 0.55, true);
+        let phone_void = Solid::cube(2.8, 5.9, 0.50, true).translate(0.0, -0.08, 0.18);
+        let shell = outer.difference(&phone_void);
+        let camera_plate = Solid::cube(1.6, 1.6, 0.18, true).translate(-0.7, 2.3, -0.36);
+        let shell_with_plate = shell.merge(&camera_plate);
+        let camera_a = Solid::cylinder(0.24, 1.4, 56, true)
+            .rotate_x(90.0)
+            .translate(-0.7, 2.3, 0.0);
+        let camera_b = Solid::cylinder(0.24, 1.4, 56, true)
+            .rotate_x(90.0)
+            .translate(-0.15, 2.3, 0.0);
+        let camera_c = Solid::cylinder(0.24, 1.4, 56, true)
+            .rotate_x(90.0)
+            .translate(-0.7, 1.75, 0.0);
+        let charge_port = Solid::cube(0.85, 0.26, 1.2, true).translate(0.0, -3.15, 0.05);
+        let speaker_left = Solid::cube(0.55, 0.16, 1.2, true).translate(-0.85, -3.15, 0.05);
+        let speaker_right = Solid::cube(0.55, 0.16, 1.2, true).translate(0.85, -3.15, 0.05);
+        let mute_switch = Solid::cube(0.5, 0.22, 1.2, true)
+            .rotate_y(90.0)
+            .translate(-1.65, 2.6, 0.05);
+        let volume_up = Solid::cube(0.5, 0.55, 1.2, true)
+            .rotate_y(90.0)
+            .translate(-1.65, 1.7, 0.05);
+        let volume_down = Solid::cube(0.5, 0.55, 1.2, true)
+            .rotate_y(90.0)
+            .translate(-1.65, 0.95, 0.05);
+        let power_btn = Solid::cube(0.5, 0.7, 1.2, true)
+            .rotate_y(90.0)
+            .translate(1.65, 1.6, 0.05);
+
+        let after_camera_a = shell_with_plate.difference(&camera_a);
+        let after_camera_b = after_camera_a.difference(&camera_b);
+        let after_camera_c = after_camera_b.difference(&camera_c);
+        let after_charge_port = after_camera_c.difference(&charge_port);
+        let after_speaker_left = after_charge_port.difference(&speaker_left);
+        let after_speaker_right = after_speaker_left.difference(&speaker_right);
+        let after_mute_switch = after_speaker_right.difference(&mute_switch);
+        let after_volume_up = after_mute_switch.difference(&volume_up);
+        let after_volume_down = after_volume_up.difference(&volume_down);
+        let final_case = after_volume_down.difference(&power_btn);
+
+        assert_ne!(
+            shell_with_plate.triangle_count(),
+            final_case.triangle_count(),
+            "cutters should change triangle count"
+        );
+    }
+
+    #[test]
+    fn phone_case_script_evaluates_to_final_case() {
+        let source = "\
+let outer = cube(3.2, 6.4, 0.55, true)
+preview(outer)
+let phone_void = cube(2.8, 5.9, 0.50, true).translate(0.0, -0.08, 0.18)
+let shell = outer.difference(phone_void)
+preview(shell)
+let camera_plate = cube(1.6, 1.6, 0.18, true).translate(-0.7, 2.3, -0.36)
+let shell_with_plate = shell.merge(camera_plate)
+preview(shell_with_plate)
+let camera_a = cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.7, 2.3, 0.0)
+let camera_b = cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.15, 2.3, 0.0)
+let camera_c = cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.7, 1.75, 0.0)
+let charge_port = cube(0.85, 0.26, 1.2, true).translate(0.0, -3.15, 0.05)
+let speaker_left = cube(0.55, 0.16, 1.2, true).translate(-0.85, -3.15, 0.05)
+let speaker_right = cube(0.55, 0.16, 1.2, true).translate(0.85, -3.15, 0.05)
+let mute_switch = cube(0.5, 0.22, 1.2, true).rotate_y(90.0).translate(-1.65, 2.6, 0.05)
+let volume_up = cube(0.5, 0.55, 1.2, true).rotate_y(90.0).translate(-1.65, 1.7, 0.05)
+let volume_down = cube(0.5, 0.55, 1.2, true).rotate_y(90.0).translate(-1.65, 0.95, 0.05)
+let power_btn = cube(0.5, 0.7, 1.2, true).rotate_y(90.0).translate(1.65, 1.6, 0.05)
+let final_case = shell_with_plate.difference(camera_a).difference(camera_b).difference(camera_c).difference(charge_port).difference(speaker_left).difference(speaker_right).difference(mute_switch).difference(volume_up).difference(volume_down).difference(power_btn)
+render(final_case)
+";
+        let solid = eval_cad_script(&source, false).unwrap();
+
+        assert!(
+            solid.triangle_count() > 1000,
+            "full script should render the final cut case, not the early shell preview"
+        );
+    }
+
+    #[test]
+    fn preview_output_is_overwritten_after_cylinder_line() {
+        let source = "\
+let base = cube(3.2, 6.4, 0.55, true)
+preview(base)
+let cutter = cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.7, 2.3, 0.0)
+let final_case = base.difference(cutter)
+preview(final_case)
+";
+        let solid = eval_cad_script(source, false).unwrap();
+
+        assert!(solid.triangle_count() > base_cube_triangle_count());
+    }
+
+    #[test]
+    fn cylinder_constructor_renders() {
+        let source = "render(cylinder(0.24, 1.4, 56, true))";
+        let solid = eval_cad_script(source, false).unwrap();
+
+        assert_eq!(solid.triangle_count(), 64);
+    }
+
+    #[test]
+    fn chained_cylinder_transform_renders() {
+        let source = "render(cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.7, 2.3, 0.0))";
+        let solid = eval_cad_script(source, false).unwrap();
+
+        assert_eq!(solid.triangle_count(), 64);
+    }
+
+    #[test]
+    fn difference_with_bound_cutter_renders() {
+        let source = "\
+let base = cube(3.2, 6.4, 0.55, true)
+let cutter = cylinder(0.24, 1.4, 56, true).rotate_x(90.0).translate(-0.7, 2.3, 0.0)
+let final_case = base.difference(cutter)
+render(final_case)
+";
+        let solid = eval_cad_script(source, false).unwrap();
+
+        assert!(solid.triangle_count() > base_cube_triangle_count());
+    }
+
+    fn base_cube_triangle_count() -> usize {
+        Solid::cube(3.2, 6.4, 0.55, true).triangle_count()
+    }
 }
 
 fn eval_cad_script_in_vm(
@@ -510,7 +688,7 @@ fn eval_cad_script_in_vm(
     let source = if allow_progressive_preview {
         progressive_cad_preview_source(source).unwrap_or_else(|| source.to_string())
     } else {
-        source.to_string()
+        source_without_intermediate_previews(source)
     };
     let code = format!("use mod.std.*\nuse mod.cad.*\n{}", source);
     let script_mod = ScriptMod {
@@ -711,6 +889,17 @@ script_mod! {
                                     draw_text +: {
                                         color: #xf3f6f8
                                         text_style +: {font_size: 13.5}
+                                    }
+                                }
+
+                                cad_busy_spinner := LoadingSpinner{
+                                    width: 16
+                                    height: 16
+                                    visible: false
+                                    draw_bg +: {
+                                        color: #x7dd3fc
+                                        stroke_width: 2.0
+                                        rotation_speed: 1.6
                                     }
                                 }
 
@@ -1430,6 +1619,8 @@ pub struct App {
     cad_worker: Option<CadRebuildWorker>,
     #[rust]
     rebuild_seq: u64,
+    #[rust(false)]
+    rebuild_pending: bool,
     #[rust]
     current_prompt_title: String,
     #[rust]
@@ -1449,6 +1640,17 @@ pub struct App {
 }
 
 impl App {
+    fn set_rebuild_pending(&mut self, cx: &mut Cx, pending: bool) {
+        if self.rebuild_pending == pending {
+            return;
+        }
+        self.rebuild_pending = pending;
+        self.ui
+            .view(cx, ids!(cad_busy_spinner))
+            .set_visible(cx, pending);
+        self.ui.redraw(cx);
+    }
+
     fn update_prompt_title(&self, cx: &mut Cx) {
         let title = if self.current_prompt_title.trim().is_empty() {
             "Prompt: default CAD script".to_string()
@@ -1654,7 +1856,6 @@ impl App {
             "cube_uniform(",
             "sphere(",
             "cylinder(",
-            "iphone_camera_cutout(",
             "cone(",
             "torus(",
             "tapered_cylinder(",
@@ -1728,10 +1929,11 @@ impl App {
         }
 
         let status = if self.current_prompt.is_some() {
-            "Building streamed CAD...".to_string()
+            "Computing streamed 3D model...".to_string()
         } else {
-            "Building CAD...".to_string()
+            "Computing 3D model...".to_string()
         };
+        self.set_rebuild_pending(cx, true);
         self.ui.label(cx, ids!(status_label)).set_text(cx, &status);
         self.ui.redraw(cx);
     }
@@ -1751,6 +1953,7 @@ impl App {
             return;
         }
 
+        self.set_rebuild_pending(cx, false);
         match result.payload {
             CadRebuildPayload::Mesh {
                 mesh_data,
@@ -1870,6 +2073,9 @@ impl MatchEvent for App {
             self.request_rebuild(cx, false, self.current_prompt.is_none());
             self.drain_rebuild_results(cx);
             self.drain_agent_events(cx, &Event::Signal);
+            if self.rebuild_pending {
+                self.ui.redraw(cx);
+            }
             if self.current_prompt.is_some() {
                 self.update_ai_status(cx);
                 self.ui.redraw(cx);
