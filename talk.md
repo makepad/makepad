@@ -114,7 +114,48 @@ Before the demos, explain the automation loop briefly:
 
 The demo is not only the final application. The demo is the loop.
 
-## Demo 1: Simple Application Generation
+## Demo 1: Robrix Matrix Client
+
+Goal: show a real Makepad application before showing the AI generation workflow.
+
+Suggested demo:
+
+- Play the Robrix video.
+- Point out that this is a Matrix client, not a toy demo.
+- Use it as evidence that Makepad can support real application surfaces.
+- Transition from the finished app to the UI stack and AI generation loop.
+
+Talking points:
+
+- Robrix gives the audience a concrete production-style reference point.
+- The rest of the talk explains how Makepad and AI can help build toward this kind of application faster.
+
+What to emphasize:
+
+Start with a real app so the AI demos are grounded in an actual UI/runtime target.
+
+## Demo 2: Makepad as a UI Stack
+
+Goal: show Makepad itself before moving into AI generation.
+
+Suggested demo:
+
+- Launch `makepad-example-splash`.
+- Show the widget set.
+- Show layout, styling, controls, panels, and rendering.
+- Point out that this is the UI/runtime stack the AI will generate against.
+
+Talking points:
+
+- Makepad is not a thin wrapper around web UI.
+- The examples show native rendering, custom widgets, and a scriptable design system.
+- This gives the AI a rich target surface before we start generating applications.
+
+What to emphasize:
+
+Before showing AI generation, establish what Makepad can already render and control.
+
+## Demo 3: Simple Application Generation
 
 Goal: show the basic loop with something small and understandable.
 
@@ -136,7 +177,7 @@ What to emphasize:
 
 The AI is now using the application like a user. That is the difference between code generation and automated application generation.
 
-## Demo 2: Streaming AI-Generated Splash UIs in aichat
+## Demo 4: Streaming AI-Generated Splash UIs in aichat
 
 Goal: show A2App-style AI generating live Splash UI while the chat stream is still arriving.
 
@@ -159,7 +200,7 @@ What to emphasize:
 
 The point is the streaming loop: ask, generate, render, inspect, refine.
 
-## Demo 3: Realtime CAD in Splash
+## Demo 5: Realtime CAD in Splash
 
 Goal: show an AI-generated CAD engine producing realtime geometry with a streaming Splash render.
 
@@ -182,7 +223,7 @@ What to emphasize:
 
 The hard part is not the UI around the model. The point is the realtime loop: prompt, generate, render, inspect, refine.
 
-## Demo 4: Map Rendering
+## Demo 6: Map Rendering
 
 Goal: show data-heavy rendering and real navigation patterns.
 
@@ -203,7 +244,7 @@ What to emphasize:
 
 This is the kind of application where a web-only prototype often hits performance limits. Rust and Makepad allow the generated result to stay close to production constraints.
 
-## Demo 5: Quest XR 3D Scene Reconstruction
+## Demo 7: Quest XR 3D Scene Reconstruction
 
 Goal: show the upper end of the ambition: Quest XR world scanning and 3D scene reconstruction.
 
