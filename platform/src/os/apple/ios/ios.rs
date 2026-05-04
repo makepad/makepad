@@ -11,7 +11,7 @@ use {
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
+            Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent, VirtualKeyboardEvent,
         },
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
@@ -499,6 +499,25 @@ impl Cx {
                 if te.timer_id == 0 {
                     let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
                     if let Some(vk) = vk {
+                        // When the keyboard is going away (user pressed iOS's
+                        // "hide keyboard" button, an external keyboard was
+                        // attached, an inputAccessoryView triggered hide,
+                        // etc.), mark the IME as dismissed so the focused
+                        // TextInput's next `show_text_ime_with_config` call
+                        // is a no-op. Without this, the input still has key
+                        // focus, redraws on the same frame, calls
+                        // `show_text_ime`, and the keyboard pops back up
+                        // (sometimes flipping to whatever language was
+                        // selected last). The flag is cleared automatically
+                        // the next time the user taps a field - see
+                        // `CxKeyboard::set_key_focus`.
+                        if matches!(
+                            vk,
+                            VirtualKeyboardEvent::WillHide { .. }
+                                | VirtualKeyboardEvent::DidHide { .. }
+                        ) {
+                            self.keyboard.set_text_ime_dismissed();
+                        }
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
                     // Drain iOS text events as one batch to avoid re-entrancy from UITextInput callbacks.

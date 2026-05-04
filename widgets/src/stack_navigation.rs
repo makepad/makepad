@@ -275,10 +275,19 @@ impl Widget for StackNavigationView {
             // In full screen mode, position at the offset.
             // Use the larger of the safe area inset or the parent's y position
             // so the view respects both mobile safe areas and desktop title bars.
+            //
+            // KeyboardView pans its contents by moving the parent turtle up. If
+            // we clamp directly against `safe_top`, that upward pan is lost
+            // whenever the parent y becomes negative, so fullscreen stack views
+            // stay pinned while the rest of the app moves. Reconstruct the
+            // natural parent y, choose the normal fullscreen anchor, then apply
+            // the keyboard pan back to that anchor.
             let safe_top = cx.display_context.safe_area_insets.top;
+            let keyboard_shift = cx.keyboard_shift.max(0.0);
+            let parent_y_without_keyboard = parent_rect.pos.y + keyboard_shift;
             Vec2d {
                 x: self.offset,
-                y: safe_top.max(parent_rect.pos.y),
+                y: safe_top.max(parent_y_without_keyboard) - keyboard_shift,
             }
         } else {
             // Non-fullscreen: ignore offset, position at parent.

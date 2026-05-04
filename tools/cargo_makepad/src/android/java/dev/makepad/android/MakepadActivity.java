@@ -82,6 +82,131 @@ import java.util.concurrent.CompletableFuture;
 
 //% IMPORTS
 
+class MakepadImeInsets {
+    private static final int MIN_KEYBOARD_HEIGHT_DP = 80;
+
+    private static int keyboardThresholdPx(View view) {
+        return Math.max(1, (int) (view.getResources().getDisplayMetrics().density * MIN_KEYBOARD_HEIGHT_DP));
+    }
+
+    private static int rootHeightPx(View view) {
+        View root = view.getRootView();
+        return root == null ? 0 : root.getHeight();
+    }
+
+    private static int clampToRootHeight(View view, int overlap) {
+        int rootHeight = rootHeightPx(view);
+        if (rootHeight <= 0 || overlap <= 0) {
+            return 0;
+        }
+        return Math.min(overlap, rootHeight);
+    }
+
+    private static boolean isNearFullHeightOverlap(View view, int overlap) {
+        int rootHeight = rootHeightPx(view);
+        return rootHeight > 0 && rootHeight - overlap <= keyboardThresholdPx(view);
+    }
+
+    private static int visibleFrameBottomOverlapPx(View view) {
+        Rect visibleFrame = new Rect();
+        view.getWindowVisibleDisplayFrame(visibleFrame);
+
+        View root = view.getRootView();
+        if (root == null || root.getHeight() <= 0) {
+            return 0;
+        }
+
+        int[] rootLocation = new int[2];
+        root.getLocationOnScreen(rootLocation);
+        if (visibleFrame.isEmpty() || visibleFrame.bottom <= rootLocation[1]) {
+            return 0;
+        }
+
+        int rootBottomOnScreen = rootLocation[1] + root.getHeight();
+        return Math.max(0, rootBottomOnScreen - visibleFrame.bottom);
+    }
+
+    static int bottomOverlapPx(View view, WindowInsets insets) {
+        int imeBottom = 0;
+        if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+            Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
+            imeBottom = clampToRootHeight(view, Math.max(0, imeInsets.bottom));
+        }
+
+        if (imeBottom > 0 && !isNearFullHeightOverlap(view, imeBottom)) {
+            return imeBottom;
+        }
+
+        // Fallback for Android/OEM paths where Type.ime().bottom reports 0,
+        // most commonly landscape keyboards. Using only the bottom edge avoids
+        // counting status-bar differences at the top of the window.
+        int fallback = visibleFrameBottomOverlapPx(view);
+        if (fallback <= keyboardThresholdPx(view)) {
+            return 0;
+        }
+
+        // A visible frame that is basically empty is not a keyboard measurement;
+        // it is a transient/invalid layout result. Do not turn it into a
+        // near-full-screen IME height.
+        if (isNearFullHeightOverlap(view, fallback)) {
+            return 0;
+        }
+        return clampToRootHeight(view, fallback);
+    }
+
+    static boolean isVisible(View view, WindowInsets insets, int bottomOverlapPx) {
+        if (Build.VERSION.SDK_INT >= 30 && insets != null
+                && insets.isVisible(WindowInsets.Type.ime())) {
+            return true;
+        }
+        return bottomOverlapPx > 0;
+    }
+
+    static void report(View view, WindowInsets insets) {
+        int bottomOverlap = bottomOverlapPx(view, insets);
+        boolean visible = isVisible(view, insets, bottomOverlap);
+        MakepadNative.surfaceOnResizeTextIME(bottomOverlap, visible);
+    }
+}
+
+class MakepadSystemInsets {
+    final float top;
+    final float right;
+    final float bottom;
+    final float left;
+
+    private MakepadSystemInsets(float top, float right, float bottom, float left) {
+        this.top = top;
+        this.right = right;
+        this.bottom = bottom;
+        this.left = left;
+    }
+
+    @SuppressWarnings("deprecation")
+    static MakepadSystemInsets from(WindowInsets insets, float density) {
+        if (insets == null) {
+            return new MakepadSystemInsets(0, 0, 0, 0);
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            Insets systemBarInsets = insets.getInsets(
+                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+            );
+            return new MakepadSystemInsets(
+                systemBarInsets.top / density,
+                systemBarInsets.right / density,
+                systemBarInsets.bottom / density,
+                systemBarInsets.left / density
+            );
+        }
+        return new MakepadSystemInsets(
+            insets.getSystemWindowInsetTop() / density,
+            insets.getSystemWindowInsetRight() / density,
+            insets.getSystemWindowInsetBottom() / density,
+            insets.getSystemWindowInsetLeft() / density
+        );
+    }
+}
+
 class MakepadSurface
     extends
         SurfaceView
@@ -280,18 +405,13 @@ class MakepadSurface
 
     @Override
     public void onGlobalLayout() {
+        // Fallback path: the parent ResizingLayout's OnApplyWindowInsetsListener
+        // is the primary source of IME inset updates (it fires per-frame during
+        // the keyboard animation on API 30+). This handler stays as a safety
+        // net for layout changes that arrive without an inset dispatch, for
+        // example, a focus change that retargets the IME to a different field.
         WindowInsets insets = this.getRootWindowInsets();
-        if (insets == null) {
-            return;
-        }
-
-        Rect r = new Rect();
-        this.getWindowVisibleDisplayFrame(r);
-        int screenHeight = this.getRootView().getHeight();
-        int visibleHeight = r.height();
-        int keyboardHeight = screenHeight - visibleHeight;
-
-        MakepadNative.surfaceOnResizeTextIME(keyboardHeight, insets.isVisible(WindowInsets.Type.ime()));
+        MakepadImeInsets.report(this, insets);
     }
 
     // docs says getCharacters are deprecated
@@ -628,24 +748,65 @@ class ResizingLayout
         // and system transition frames that cannot capture the separate surface layer.
         setBackgroundResource(R.drawable.makepad_launch_background);
         setOnApplyWindowInsetsListener(this);
+
+        // The IME animation API (API 30+) gives us an authoritative per-frame
+        // dispatch of the IME inset that does NOT depend on softInputMode or
+        // on the listener returning the right thing. `onApplyWindowInsets`
+        // alone is unreliable across Android versions and orientations
+        // (we've observed it firing in landscape but not portrait, and on
+        // some OEMs not at all). With this callback attached we are
+        // guaranteed to hear about every IME show / hide / animation
+        // progress event.
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            setWindowInsetsAnimationCallback(
+                new android.view.WindowInsetsAnimation.Callback(
+                    android.view.WindowInsetsAnimation.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE
+                ) {
+                    @Override
+                    public android.view.WindowInsets onProgress(
+                        android.view.WindowInsets insets,
+                        java.util.List<android.view.WindowInsetsAnimation> runningAnimations
+                    ) {
+                        MakepadImeInsets.report(ResizingLayout.this, insets);
+                        return insets;
+                    }
+
+                    @Override
+                    public void onEnd(android.view.WindowInsetsAnimation animation) {
+                        // The framework usually delivers a final-state inset
+                        // through onProgress just before onEnd, but on some
+                        // OEM devices it skips that last frame. Fetch the
+                        // current insets directly to make sure native code
+                        // sees the settled state.
+                        android.view.WindowInsets insets = getRootWindowInsets();
+                        if (insets == null) return;
+                        MakepadImeInsets.report(ResizingLayout.this, insets);
+                    }
+                }
+            );
+        }
     }
 
     @Override
     public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
-        Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
-        v.setPadding(0, 0, 0, imeInsets.bottom);
+        // Report IME inset directly to native code. The in-app KeyboardView
+        // is the single source of truth for shifting content above the soft
+        // keyboard. We do not shrink the SurfaceView via setPadding; that
+        // would double-count the obstruction (system shrinks the surface
+        // *and* the KeyboardView shifts). The activity is configured with
+        // `windowSoftInputMode="adjustNothing"` in the manifest, so the
+        // system doesn't auto-resize either.
+        MakepadImeInsets.report(v, insets);
 
         // Compute safe area insets from system bars and display cutout.
         // These are in physical pixels; convert to logical points by dividing by density.
         float density = getResources().getDisplayMetrics().density;
-        Insets systemBarInsets = insets.getInsets(
-            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
-        );
+        MakepadSystemInsets systemBarInsets = MakepadSystemInsets.from(insets, density);
         MakepadNative.surfaceOnSafeAreaInsets(
-            systemBarInsets.top / density,
-            systemBarInsets.right / density,
-            systemBarInsets.bottom / density,
-            systemBarInsets.left / density
+            systemBarInsets.top,
+            systemBarInsets.right,
+            systemBarInsets.bottom,
+            systemBarInsets.left
         );
 
         return insets;
@@ -810,6 +971,10 @@ public class MakepadActivity
         super.onCreate(savedInstanceState);
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        getWindow().setSoftInputMode(
+            LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+                | LayoutParams.SOFT_INPUT_STATE_UNCHANGED
+        );
 
         // Default state: content below system bars (status bar visible).
         // Apps that want fullscreen can request CxOsOp::FullscreenWindow which
@@ -1561,7 +1726,7 @@ public class MakepadActivity
 
     // Update IME text state for programmatic changes - called from Rust
     // Note: This should only be called for programmatic text changes (e.g., clear button),
-    // NOT during normal IME input (which flows Java→Rust via onImeTextStateChanged)
+    // NOT during normal IME input (which flows Java to Rust via onImeTextStateChanged)
     public void updateImeTextState(final String fullText, final int selStart, final int selEnd) {
         runOnUiThread(new Runnable() {
             @Override
