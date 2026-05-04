@@ -96,10 +96,8 @@ That matters especially for the demos in this talk:
 
 - Realtime AI-generated 3D model generation in Splash
 - Streaming AI-generated Splash UIs in aichat
-- 3D rendering
 - Map rendering
-- Vector rendering engines
-- Mixed reality world scanning
+- Quest XR 3D scene reconstruction
 
 These are not simple form demos. They require performance, responsiveness, and control over rendering.
 
@@ -140,11 +138,12 @@ The AI is now using the application like a user. That is the difference between 
 
 ## Demo 2: Streaming AI-Generated Splash UIs in aichat
 
-Goal: show AI generating live Splash UI while the chat stream is still arriving.
+Goal: show A2App-style AI generating live Splash UI while the chat stream is still arriving.
 
 Suggested demo:
 
 - Open aichat.
+- Show the A2App flow.
 - Ask for a small UI or interactive tool.
 - Stream the generated Splash code.
 - Render the UI directly in the chat.
@@ -182,28 +181,7 @@ What to emphasize:
 
 The hard part is not the UI around the model. The point is the realtime loop: prompt, generate, render, inspect, refine.
 
-## Demo 4: AI-Generated 3D
-
-Goal: show high performance rendering and richer visual output.
-
-Suggested demo:
-
-- Generate a 3D scene.
-- Add camera movement or object rotation.
-- Add lighting, materials, and multiple objects.
-- Have the AI verify that the scene is visible and interactive.
-
-Talking points:
-
-- 3D makes visual verification important.
-- A compile-only check is not enough.
-- The AI needs to know whether the object is actually on screen, framed correctly, and responding to input.
-
-What to emphasize:
-
-For visual applications, correctness includes what the user sees. Makepad Studio lets the AI inspect that.
-
-## Demo 5: Map Rendering
+## Demo 4: Map Rendering
 
 Goal: show data-heavy rendering and real navigation patterns.
 
@@ -224,47 +202,27 @@ What to emphasize:
 
 This is the kind of application where a web-only prototype often hits performance limits. Rust and Makepad allow the generated result to stay close to production constraints.
 
-## Demo 6: Vector Engine
+## Demo 5: Quest XR 3D Scene Reconstruction
 
-Goal: show custom rendering and visual design iteration.
-
-Suggested demo:
-
-- Generate a small vector drawing or icon engine.
-- Add paths, fills, strokes, gradients, or animation.
-- Let the AI create several visual variants.
-- Have the AI inspect the output and refine spacing, color, and motion.
-
-Talking points:
-
-- Vector rendering is sensitive to detail.
-- Small rendering mistakes are obvious visually.
-- The AI can iterate against screenshots instead of guessing.
-
-What to emphasize:
-
-AI is strong at producing variations. Makepad gives it a runtime where those variations can be rendered and judged immediately.
-
-## Demo 7: Mixed Reality World Scanning
-
-Goal: show the upper end of the ambition: XR and spatial applications.
+Goal: show the upper end of the ambition: Quest XR world scanning and 3D scene reconstruction.
 
 Suggested demo:
 
 - Show a Quest or XR-oriented Makepad application.
-- Demonstrate world scanning or a 3D spatial view.
-- Add generated UI for inspecting captured geometry or spatial anchors.
+- Demonstrate world scanning.
+- Show reconstructed scene geometry.
+- Add generated UI for inspecting captured geometry.
 - Discuss how the same Rust and Makepad approach can target XR.
 
 Talking points:
 
-- XR applications need performance, low latency, and direct control over rendering.
+- Quest XR applications need performance, low latency, and direct control over rendering.
 - The application is no longer a flat page.
 - AI generation becomes more valuable because spatial UI has many moving parts.
 
 What to emphasize:
 
-The same automation idea applies: generate, run, inspect, interact, and fix. The target can be desktop, web, mobile, or XR.
+The same automation idea applies: generate, run, see, interact, and iterate. The target can be desktop, web, mobile, or XR.
 
 ## Transition Lines
 
@@ -300,7 +258,7 @@ Rust gives us correctness and performance. Makepad gives us a high performance c
 
 The main message of this talk is simple:
 
-We no longer need AI to only write snippets. We can let it build, run, see, click, and improve real high performance Rust applications.
+We no longer need AI to only write snippets. We can let it generate, run, see, interact, and iterate on real high performance Rust applications.
 
 ## Short Version
 
