@@ -71,7 +71,7 @@ script_mod! {
                         anim_speed: 0.86
 
                         intro := TalkChapter{
-                            title.text: "Rapid High Performance Rust Apps"
+                            title.text: "AI-Accelerated\nApplication Development\nfor Rust"
                             TalkBody{text: "- Makepad + AI"}
                             TalkBody{text: "- Visual development loop"}
                             TalkSmall{text: "Left / right arrows"}
