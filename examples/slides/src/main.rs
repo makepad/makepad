@@ -79,10 +79,10 @@ script_mod! {
 
                         thesis := TalkSlide{
                             title.text: "The Core Claim"
-                            TalkBody{text: "- Build"}
+                            TalkBody{text: "- Generate"}
                             TalkBody{text: "- Run"}
                             TalkBody{text: "- See"}
-                            TalkBody{text: "- Click"}
+                            TalkBody{text: "- Interact"}
                             TalkBody{text: "- Iterate"}
                         }
 
@@ -163,6 +163,7 @@ script_mod! {
                         demo_aichat := TalkSlide{
                             title.text: "Demo 2: Streaming Splash UIs"
                             TalkBody{text: "- aichat"}
+                            TalkBody{text: "- A2App"}
                             TalkBody{text: "- Streaming generation"}
                             TalkBody{text: "- Live Splash UI"}
                             TalkBody{text: "- Render while chatting"}
@@ -176,37 +177,20 @@ script_mod! {
                             TalkBody{text: "- Shape, detail, material"}
                         }
 
-                        demo_3d := TalkSlide{
-                            title.text: "Demo 4: AI-Generated 3D"
-                            TalkBody{text: "- Scene"}
-                            TalkBody{text: "- Camera"}
-                            TalkBody{text: "- Lighting"}
-                            TalkBody{text: "- Materials"}
-                            TalkBody{text: "- Visual verification"}
-                        }
-
                         demo_maps := TalkSlide{
-                            title.text: "Demo 5: Map Rendering"
+                            title.text: "Demo 4: Map Rendering"
                             TalkBody{text: "- Map data"}
                             TalkBody{text: "- Pan and zoom"}
                             TalkBody{text: "- Markers and labels"}
                             TalkBody{text: "- Rendering density"}
                         }
 
-                        demo_vectors := TalkSlide{
-                            title.text: "Demo 6: Vector Engine"
-                            TalkBody{text: "- Paths"}
-                            TalkBody{text: "- Fills and strokes"}
-                            TalkBody{text: "- Gradients"}
-                            TalkBody{text: "- Animated variants"}
-                        }
-
                         demo_xr := TalkSlide{
-                            title.text: "Demo 7: Mixed Reality"
+                            title.text: "Demo 5: Quest XR Reconstruction"
                             TalkBody{text: "- Quest target"}
-                            TalkBody{text: "- Spatial UI"}
+                            TalkBody{text: "- Scene reconstruction"}
                             TalkBody{text: "- World scanning"}
-                            TalkBody{text: "- 3D scene inspection"}
+                            TalkBody{text: "- Mixed reality preview"}
                         }
 
                         honest := TalkSlide{
@@ -218,7 +202,7 @@ script_mod! {
                         }
 
                         close := TalkChapter{
-                            title.text: "Build. Run. See. Click. Improve."
+                            title.text: "Generate. Run.\nSee. Interact.\nIterate."
                             TalkBody{text: "- Rust: correctness + performance"}
                             TalkBody{text: "- Makepad: visual runtime"}
                             TalkBody{text: "- AI: full app loop"}
