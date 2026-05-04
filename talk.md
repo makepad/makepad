@@ -36,16 +36,24 @@ Traditional AI coding loop:
 4. Describe the error or screenshot back to the AI.
 5. Repeat.
 
+Agentic AI coding improves this:
+
+1. AI edits files directly.
+2. AI runs commands.
+3. AI reads compiler and test errors.
+4. AI patches the code.
+5. AI repeats without constant manual copy-paste.
+
 Makepad Studio loop:
 
 1. AI edits the application.
-2. AI launches it through Studio.
-3. AI reads compiler errors or runtime state.
+2. AI launches it inside Studio.
+3. AI sees the running graphical app.
 4. AI inspects screenshots and widget trees.
 5. AI clicks, types, and interacts with the app.
-6. AI fixes the code and repeats.
+6. AI fixes visual behavior and repeats.
 
-The important shift is that the AI can observe the running graphical application directly. This makes it possible to iterate on layout, controls, rendering, input, and state without a human manually relaying every detail.
+The important shift beyond generic agentic coding is that the AI can observe the running graphical application directly inside Studio. This makes it possible to iterate on layout, controls, rendering, input, and state without a human manually relaying every detail.
 
 ## Concept 2: Why Rust Works Well Here
 
@@ -64,6 +72,8 @@ The AI can generate code, compile, read precise errors, patch the code, and repe
 ## Concept 3: Why Makepad Changes the Feedback Loop
 
 Makepad is a Rust application framework and IDE for building high performance applications with custom UI and rendering.
+
+It is also a good target for AI because it is a monorepo with minimal external dependency surface. The AI can inspect the framework, understand the relevant layer, and modify the stack itself when the application needs something new.
 
 It is designed around immediate visual feedback and cross-platform deployment:
 
@@ -84,7 +94,8 @@ Makepad is built for high performance rendering and native deployment. The goal 
 
 That matters especially for the demos in this talk:
 
-- CAD-style interaction
+- Realtime AI-generated 3D model generation in Splash
+- Streaming AI-generated Splash UIs in aichat
 - 3D rendering
 - Map rendering
 - Vector rendering engines
@@ -127,29 +138,51 @@ What to emphasize:
 
 The AI is now using the application like a user. That is the difference between code generation and automated application generation.
 
-## Demo 2: AI-Generated CAD
+## Demo 2: Streaming AI-Generated Splash UIs in aichat
 
-Goal: show that the workflow can handle spatial tools and direct manipulation.
+Goal: show AI generating live Splash UI while the chat stream is still arriving.
 
 Suggested demo:
 
-- Generate a small CAD-like editor.
-- Add a canvas.
-- Add tools for points, lines, rectangles, or simple shapes.
-- Add selection and transform controls.
-- Let the AI test by clicking points on the canvas.
+- Open aichat.
+- Ask for a small UI or interactive tool.
+- Stream the generated Splash code.
+- Render the UI directly in the chat.
+- Iterate on layout, controls, and behavior.
 
 Talking points:
 
-- CAD needs precision and interactive feedback.
-- The AI must reason about coordinates, hit testing, drawing, and state.
-- This shows the system moving beyond forms and dashboards.
+- This is not a static answer copied from chat into an IDE.
+- The chat can produce live UI as part of the response.
+- Splash makes visual generation immediate and inspectable.
 
 What to emphasize:
 
-The hard part is not drawing one shape. The hard part is closing the loop between input, rendering, selection, and state. That is exactly where Studio automation helps.
+The point is the streaming loop: ask, generate, render, inspect, refine.
 
-## Demo 3: AI-Generated 3D
+## Demo 3: Realtime AI-Generated 3D Models in Splash
+
+Goal: show realtime AI-generated 3D model generation rendered directly in Splash.
+
+Suggested demo:
+
+- Ask the AI to generate a 3D model.
+- Render the result live in Splash.
+- Change the prompt or generated code.
+- Show the model update in realtime.
+- Iterate on shape, proportions, details, and materials.
+
+Talking points:
+
+- The demo is about immediate AI-to-visual feedback.
+- The AI generates the model and Splash renders it right away.
+- This keeps the audience focused on the fast creative loop.
+
+What to emphasize:
+
+The hard part is not the UI around the model. The point is the realtime loop: prompt, generate, render, inspect, refine.
+
+## Demo 4: AI-Generated 3D
 
 Goal: show high performance rendering and richer visual output.
 
@@ -170,7 +203,7 @@ What to emphasize:
 
 For visual applications, correctness includes what the user sees. Makepad Studio lets the AI inspect that.
 
-## Demo 4: Map Rendering
+## Demo 5: Map Rendering
 
 Goal: show data-heavy rendering and real navigation patterns.
 
@@ -191,7 +224,7 @@ What to emphasize:
 
 This is the kind of application where a web-only prototype often hits performance limits. Rust and Makepad allow the generated result to stay close to production constraints.
 
-## Demo 5: Vector Engine
+## Demo 6: Vector Engine
 
 Goal: show custom rendering and visual design iteration.
 
@@ -212,7 +245,7 @@ What to emphasize:
 
 AI is strong at producing variations. Makepad gives it a runtime where those variations can be rendered and judged immediately.
 
-## Demo 6: Mixed Reality World Scanning
+## Demo 7: Mixed Reality World Scanning
 
 Goal: show the upper end of the ambition: XR and spatial applications.
 
@@ -263,7 +296,7 @@ The old workflow was: write code by hand, compile, run, inspect, fix.
 
 The new workflow is: describe the target, let the AI generate, let the compiler constrain it, let Makepad Studio show it the result, and let it iterate.
 
-Rust gives us correctness and performance. Makepad gives us a high performance cross-platform runtime and a visual IDE that AI can control. Together, they make it possible to generate serious applications quickly: desktop tools, web apps, mobile apps, CAD systems, 3D scenes, map renderers, vector engines, and XR experiences.
+Rust gives us correctness and performance. Makepad gives us a high performance cross-platform runtime and a visual IDE that AI can control. Together, they make it possible to generate serious applications quickly: desktop tools, web apps, mobile apps, realtime 3D scenes, map renderers, vector engines, and XR experiences.
 
 The main message of this talk is simple:
 
@@ -276,7 +309,7 @@ If time is limited, use this sequence:
 1. Explain Rust as the correction mechanism for AI-generated code.
 2. Explain Makepad Studio as the visual feedback loop.
 3. Demo a simple app that the AI generates and interacts with.
-4. Demo one advanced visual example: CAD, 3D, maps, vectors, or XR.
+4. Demo one advanced visual example: realtime 3D in Splash, maps, vectors, or XR.
 5. Close on the idea that AI can now participate in the full application loop.
 
 ## One-Minute Pitch
@@ -287,4 +320,4 @@ Rust is an ideal language for AI generation because of its strong compiler guara
 
 Makepad Studio has automation integration for AI, so the AI can generate code, run the application, see the result, click buttons, type into fields, and iterate completely automatically on visual applications.
 
-Makepad compiles to web, desktop, mobile, and XR. I will show how far we can push AI application generation, including CAD, 3D, map rendering, vector engines, and mixed reality world scanning.
+Makepad compiles to web, desktop, mobile, and XR. I will show how far we can push AI application generation, including realtime 3D model generation in Splash, map rendering, vector engines, and mixed reality world scanning.

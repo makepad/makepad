@@ -72,14 +72,18 @@ script_mod! {
 
                         intro := TalkChapter{
                             title.text: "Rapid High Performance Rust Apps"
-                            TalkBody{text: "Makepad + AI as a complete visual development loop"}
-                            TalkSmall{text: "Use left and right arrow keys to navigate"}
+                            TalkBody{text: "- Makepad + AI"}
+                            TalkBody{text: "- Visual development loop"}
+                            TalkSmall{text: "Left / right arrows"}
                         }
 
                         thesis := TalkSlide{
                             title.text: "The Core Claim"
-                            TalkBody{text: "AI should not only write code. It should build, run, see, click, and iterate."}
-                            TalkBody{text: "Rust gives strong compiler feedback. Makepad Studio gives visual runtime feedback."}
+                            TalkBody{text: "- Build"}
+                            TalkBody{text: "- Run"}
+                            TalkBody{text: "- See"}
+                            TalkBody{text: "- Click"}
+                            TalkBody{text: "- Iterate"}
                         }
 
                         old_loop := TalkSlide{
@@ -91,25 +95,47 @@ script_mod! {
                             TalkBody{text: "5. Repeat"}
                         }
 
+                        agentic_loop := TalkSlide{
+                            title.text: "Agentic AI Coding"
+                            TalkBody{text: "- Edits files"}
+                            TalkBody{text: "- Runs commands"}
+                            TalkBody{text: "- Reads errors"}
+                            TalkBody{text: "- Iterates autonomously"}
+                        }
+
                         studio_loop := TalkSlide{
-                            title.text: "Makepad Studio Loop"
+                            title.text: "Makepad Studio Differentiator"
                             TalkBody{text: "1. AI edits the app"}
-                            TalkBody{text: "2. AI launches it through Studio"}
-                            TalkBody{text: "3. AI reads compiler and runtime feedback"}
-                            TalkBody{text: "4. AI inspects screenshots and widget trees"}
-                            TalkBody{text: "5. AI clicks, types, fixes, and repeats"}
+                            TalkBody{text: "2. Runs it inside Studio"}
+                            TalkBody{text: "3. Sees the live UI"}
+                            TalkBody{text: "4. Clicks and types"}
+                            TalkBody{text: "5. Fixes visual behavior"}
                         }
 
                         rust := TalkSlide{
                             title.text: "Why Rust Works for AI"
-                            TalkBody{text: "Wrong types, missing imports, ownership mistakes, and many runtime bugs become concrete compiler errors."}
-                            TalkBody{text: "For AI, a strict compiler is not friction. It is a steering system."}
+                            TalkBody{text: "- Strong types"}
+                            TalkBody{text: "- Ownership checks"}
+                            TalkBody{text: "- Precise compiler errors"}
+                            TalkBody{text: "- Native performance"}
                         }
 
                         makepad := TalkSlide{
                             title.text: "Why Makepad Matters"
-                            TalkBody{text: "Makepad is a high performance Rust UI and rendering framework with Studio automation."}
-                            TalkBody{text: "The AI can validate visual software in the same loop where it writes the code."}
+                            TalkBody{text: "- High performance UI"}
+                            TalkBody{text: "- Custom rendering"}
+                            TalkBody{text: "- Studio automation"}
+                            TalkBody{text: "- Visual feedback for AI"}
+                        }
+
+                        makepad_monorepo := TalkSlide{
+                            title.text: "Makepad as an AI Target"
+                            TalkBody{text: "- Monorepo"}
+                            TalkBody{text: "- Self-contained stack"}
+                            TalkBody{text: "- Low dependency surface"}
+                            TalkBody{text: "- Easy to inspect"}
+                            TalkBody{text: "- Easy to modify"}
+                            TalkBody{text: "- Adapt the stack itself"}
                         }
 
                         targets := TalkSlide{
@@ -122,57 +148,80 @@ script_mod! {
 
                         demo_setup := TalkChapter{
                             title.text: "The Demos"
-                            TalkBody{text: "The demo is not only the finished app."}
-                            TalkBody{text: "The demo is the automated iteration loop."}
+                            TalkBody{text: "- Not just the final app"}
+                            TalkBody{text: "- The automated loop"}
                         }
 
                         demo_simple := TalkSlide{
                             title.text: "Demo 1: Simple App Generation"
-                            TalkBody{text: "Generate a compact productivity UI with input, buttons, list state, and status text."}
-                            TalkBody{text: "Then let the AI run it, type into it, press return, and verify the UI changed."}
+                            TalkBody{text: "- Input"}
+                            TalkBody{text: "- Buttons"}
+                            TalkBody{text: "- List state"}
+                            TalkBody{text: "- AI types and verifies"}
                         }
 
-                        demo_cad := TalkSlide{
-                            title.text: "Demo 2: AI-Generated CAD"
-                            TalkBody{text: "Generate a CAD-style canvas with points, lines, rectangles, selection, and transforms."}
-                            TalkBody{text: "The AI has to reason about coordinates, hit testing, drawing, input, and state."}
+                        demo_aichat := TalkSlide{
+                            title.text: "Demo 2: Streaming Splash UIs"
+                            TalkBody{text: "- aichat"}
+                            TalkBody{text: "- Streaming generation"}
+                            TalkBody{text: "- Live Splash UI"}
+                            TalkBody{text: "- Render while chatting"}
+                        }
+
+                        demo_splash_3d := TalkSlide{
+                            title.text: "Demo 3: Realtime 3D in Splash"
+                            TalkBody{text: "- Prompt to model"}
+                            TalkBody{text: "- Live Splash render"}
+                            TalkBody{text: "- Realtime updates"}
+                            TalkBody{text: "- Shape, detail, material"}
                         }
 
                         demo_3d := TalkSlide{
-                            title.text: "Demo 3: AI-Generated 3D"
-                            TalkBody{text: "Generate a 3D scene with camera movement, lighting, materials, and visible interaction."}
-                            TalkBody{text: "Compile success is only the first checkpoint. Visual correctness matters."}
+                            title.text: "Demo 4: AI-Generated 3D"
+                            TalkBody{text: "- Scene"}
+                            TalkBody{text: "- Camera"}
+                            TalkBody{text: "- Lighting"}
+                            TalkBody{text: "- Materials"}
+                            TalkBody{text: "- Visual verification"}
                         }
 
                         demo_maps := TalkSlide{
-                            title.text: "Demo 4: Map Rendering"
-                            TalkBody{text: "Render map data with pan, zoom, markers, labels, and density control."}
-                            TalkBody{text: "Maps combine large data, rendering performance, and direct interaction."}
+                            title.text: "Demo 5: Map Rendering"
+                            TalkBody{text: "- Map data"}
+                            TalkBody{text: "- Pan and zoom"}
+                            TalkBody{text: "- Markers and labels"}
+                            TalkBody{text: "- Rendering density"}
                         }
 
                         demo_vectors := TalkSlide{
-                            title.text: "Demo 5: Vector Engine"
-                            TalkBody{text: "Generate paths, fills, strokes, gradients, icons, and animated variants."}
-                            TalkBody{text: "The AI can inspect screenshots and refine the output instead of guessing."}
+                            title.text: "Demo 6: Vector Engine"
+                            TalkBody{text: "- Paths"}
+                            TalkBody{text: "- Fills and strokes"}
+                            TalkBody{text: "- Gradients"}
+                            TalkBody{text: "- Animated variants"}
                         }
 
                         demo_xr := TalkSlide{
-                            title.text: "Demo 6: Mixed Reality"
-                            TalkBody{text: "Target Quest and spatial interfaces with world scanning or 3D scene inspection."}
-                            TalkBody{text: "The same loop applies: generate, run, inspect, interact, and fix."}
+                            title.text: "Demo 7: Mixed Reality"
+                            TalkBody{text: "- Quest target"}
+                            TalkBody{text: "- Spatial UI"}
+                            TalkBody{text: "- World scanning"}
+                            TalkBody{text: "- 3D scene inspection"}
                         }
 
                         honest := TalkSlide{
                             title.text: "Honest Framing"
-                            TalkBody{text: "The AI still needs good goals. It still makes mistakes. Human taste and architecture still matter."}
-                            TalkBody{text: "The shift is that AI can now participate in the full visual application loop."}
+                            TalkBody{text: "- Goals still matter"}
+                            TalkBody{text: "- AI still makes mistakes"}
+                            TalkBody{text: "- Taste still matters"}
+                            TalkBody{text: "- Architecture still matters"}
                         }
 
                         close := TalkChapter{
                             title.text: "Build. Run. See. Click. Improve."
-                            TalkBody{text: "Rust gives correctness and performance."}
-                            TalkBody{text: "Makepad gives a cross-platform visual runtime that AI can control."}
-                            TalkSmall{text: "AI-generated applications no longer need to stop at snippets."}
+                            TalkBody{text: "- Rust: correctness + performance"}
+                            TalkBody{text: "- Makepad: visual runtime"}
+                            TalkBody{text: "- AI: full app loop"}
                         }
                     }
                 }
