@@ -27,24 +27,24 @@ script_mod! {
     use mod.widgets.*
 
     let IconCheck = Vector{width: 18 height: 18 viewbox: vec4(0 0 24 24)
-        Path{d: "M20 6L9 17L4 12" fill: false stroke: theme.color_highlight stroke_width: 2.5
+        Path{d: "M20 6L9 17L4 12" fill: false stroke: #x2563eb stroke_width: 2.5
             stroke_linecap: "round" stroke_linejoin: "round"}
     }
 
     let IconTrash = Vector{width: 14 height: 14 viewbox: vec4(0 0 24 24)
-        Path{d: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" fill: false stroke: theme.color_label_inner_inactive stroke_width: 1.8 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" fill: false stroke: #x64748b stroke_width: 1.8 stroke_linecap: "round" stroke_linejoin: "round"}
     }
 
     let IconRocket = Vector{width: 28 height: 28 viewbox: vec4(0 0 24 24)
-        Path{d: "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" fill: theme.color_bg_highlight_inline stroke: theme.color_highlight stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
-        Path{d: "M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" fill: false stroke: theme.color_highlight stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
-        Path{d: "M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill: false stroke: theme.color_highlight stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" fill: #xdbeafe stroke: #x2563eb stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" fill: false stroke: #x2563eb stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill: false stroke: #x2563eb stroke_width: 1.0 stroke_linecap: "round" stroke_linejoin: "round"}
     }
 
     let IconClipboard = Vector{width: 40 height: 40 viewbox: vec4(0 0 24 24)
-        Path{d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" fill: false stroke: theme.color_label_inner_inactive stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
-        Path{d: "M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v0a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1z" fill: false stroke: theme.color_label_inner_inactive stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
-        Path{d: "M9 12h6M9 16h4" fill: false stroke: theme.color_label_inner_inactive stroke_width: 1.2 stroke_linecap: "round"}
+        Path{d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" fill: false stroke: #x94a3b8 stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v0a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1z" fill: false stroke: #x94a3b8 stroke_width: 1.2 stroke_linecap: "round" stroke_linejoin: "round"}
+        Path{d: "M9 12h6M9 16h4" fill: false stroke: #x94a3b8 stroke_width: 1.2 stroke_linecap: "round"}
     }
 
     let TodoRow = RoundedView{
@@ -52,24 +52,40 @@ script_mod! {
         padding: theme.mspace_2{left: theme.space_3, right: theme.space_3}
         flow: Right spacing: theme.space_2
         align: Align{y: 0.5}
-        draw_bg.color: theme.color_bg_container
-        draw_bg.border_radius: 10.0
+        draw_bg.color: #xffffff
+        draw_bg.border_radius: 8.0
+        draw_bg.border_size: 1.0
+        draw_bg.border_color: #xe2e8f0
 
-        check := CheckBox{text: ""}
+        check := CheckBox{
+            text: ""
+            draw_bg +: {
+                color: #xffffff
+                color_hover: #xf8fafc
+                color_active: #x2563eb
+                color_focus: #xdbeafe
+                border_color: #xcbd5e1
+                border_color_hover: #x94a3b8
+                border_color_active: #x2563eb
+                border_color_focus: #x2563eb
+                mark_color_active: #xffffff
+                mark_color_active_hover: #xffffff
+            }
+        }
         label := Label{
             width: Fill
             text: "task"
-            draw_text.color: theme.color_label_inner
+            draw_text.color: #x0f172a
             draw_text.text_style.font_size: theme.font_size_p
         }
         tag := RoundedView{
             width: Fit height: Fit
             padding: theme.mspace_h_1{left: theme.space_2, right: theme.space_2}
-            draw_bg.color: theme.color_bg_highlight_inline
+            draw_bg.color: #xdbeafe
             draw_bg.border_radius: 4.0
             tag_label := Label{
                 text: ""
-                draw_text.color: theme.color_highlight
+                draw_text.color: #x1d4ed8
                 draw_text.text_style.font_size: theme.font_size_code
                 draw_text.text_style: theme.font_bold{}
             }
@@ -77,8 +93,13 @@ script_mod! {
         delete := ButtonFlatter{
             text: "x"
             width: 28 height: 28
+            draw_bg +: {
+                color_hover: #xf1f5f9
+                border_color_hover: #xe2e8f0
+            }
             draw_text +: {
-                color: theme.color_label_inner_inactive
+                color: #x64748b
+                color_hover: #x0f172a
                 text_style +: {font_size: theme.font_size_p}
             }
         }
@@ -89,8 +110,8 @@ script_mod! {
         align: Center
         flow: Down spacing: theme.space_2
         IconClipboard{}
-        Label{text: "No tasks yet" draw_text.color: theme.color_label_inner_inactive draw_text.text_style.font_size: theme.font_size_4}
-        Label{text: "Add one below to get started" draw_text.color: theme.color_label_inner_inactive * 0.8 draw_text.text_style.font_size: theme.font_size_p}
+        Label{text: "No tasks yet" draw_text.color: #x475569 draw_text.text_style.font_size: theme.font_size_4}
+        Label{text: "Add one below to get started" draw_text.color: #x94a3b8 draw_text.text_style.font_size: theme.font_size_p}
     }
 
     mod.widgets.TodoListBase = #(TodoList::register_widget(vm))
@@ -111,7 +132,7 @@ script_mod! {
     let app = startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                pass.clear_color: theme.color_bg_app
+                pass.clear_color: #xf6f7fb
                 window.inner_size: vec2(520, 720)
                 body +: {
                     width: Fill height: Fill
@@ -123,7 +144,7 @@ script_mod! {
                         padding: theme.mspace_3{left: theme.space_3 * 2, right: theme.space_3 * 2}
                         flow: Right spacing: theme.space_2
                         align: Align{y: 0.5}
-                        draw_bg.color: theme.color_app_caption_bar
+                        draw_bg.color: #xffffff
 
                         IconRocket{}
 
@@ -132,12 +153,12 @@ script_mod! {
                             flow: Down spacing: 4
                             Label{
                                 text: "Todo"
-                                draw_text.color: theme.color_label_inner
+                                draw_text.color: #x0f172a
                                 draw_text.text_style: theme.font_bold{font_size: theme.font_size_2}
                             }
                             Label{
                                 text: "Stay organized, get things done."
-                                draw_text.color: theme.color_label_inner_inactive
+                                draw_text.color: #x64748b
                                 draw_text.text_style.font_size: theme.font_size_p
                             }
                         }
@@ -146,7 +167,7 @@ script_mod! {
                     SolidView{
                         width: Fill height: Fit
                         padding: theme.mspace_2{left: theme.space_3 * 2, right: theme.space_3 * 2}
-                        draw_bg.color: theme.color_bg_container
+                        draw_bg.color: #xf8fafc
 
                         View{
                             width: Fill height: Fit
@@ -157,18 +178,49 @@ script_mod! {
                                 width: Fill height: 9. * theme.space_1
                                 empty_text: "What needs to be done?"
                                 return_key_type: Done
+                                draw_bg +: {
+                                    color: #ffffff
+                                    color_hover: #ffffff
+                                    color_focus: #ffffff
+                                    color_empty: #xffffff
+                                    border_color: #xcbd5e1
+                                    border_color_hover: #x94a3b8
+                                    border_color_focus: #x2563eb
+                                    border_color_empty: #xcbd5e1
+                                    border_radius: 8.0
+                                }
+                                draw_text +: {
+                                    color: #x0f172a
+                                    color_empty: #x94a3b8
+                                    color_empty_hover: #x64748b
+                                    color_empty_focus: #x64748b
+                                }
                             }
                             add_button := Button{
                                 text: "+"
                                 width: 40 height: 34
-                                draw_text +: {text_style +: {font_size: theme.font_size_3}}
+                                draw_bg +: {
+                                    color: #x2563eb
+                                    color_hover: #x1d4ed8
+                                    color_down: #x1e40af
+                                    border_color: #x2563eb
+                                    border_color_hover: #x1d4ed8
+                                    border_color_down: #x1e40af
+                                    border_radius: 8.0
+                                }
+                                draw_text +: {
+                                    color: #xffffff
+                                    color_hover: #xffffff
+                                    color_down: #xffffff
+                                    text_style +: {font_size: theme.font_size_3}
+                                }
                             }
                         }
                     }
 
                     SolidView{
                         width: Fill height: 1
-                        draw_bg.color: theme.color_bg_highlight
+                        draw_bg.color: #xe2e8f0
                     }
 
                     todo_list := mod.widgets.TodoList{}
@@ -176,17 +228,27 @@ script_mod! {
                     SolidView{
                         width: Fill height: Fit
                         padding: theme.mspace_2{left: theme.space_3 * 2, right: theme.space_3 * 2}
-                        draw_bg.color: theme.color_app_caption_bar
+                        draw_bg.color: #xffffff
                         flow: Right
                         align: Align{y: 0.5}
 
                         status := Label{
                             text: ""
-                            draw_text.color: theme.color_label_inner_inactive
+                            draw_text.color: #x64748b
                             draw_text.text_style.font_size: theme.font_size_code
                         }
                         Filler{}
-                        clear_done := ButtonFlatter{text: "Clear completed"}
+                        clear_done := ButtonFlatter{
+                            text: "Clear completed"
+                            draw_bg +: {
+                                color_hover: #xf1f5f9
+                                border_color_hover: #xe2e8f0
+                            }
+                            draw_text +: {
+                                color: #x2563eb
+                                color_hover: #x1d4ed8
+                            }
+                        }
                     }
                 }
             }
@@ -227,7 +289,7 @@ impl Widget for TodoList {
                         };
                         let item = list.item(cx, item_id, id!(Item));
                         item.check_box(cx, ids!(check))
-                            .set_active(cx, todo.done, Animate::Yes);
+                            .set_active(cx, todo.done, Animate::No);
                         item.label(cx, ids!(label)).set_text(cx, &todo.text);
                         item.label(cx, ids!(tag.tag_label)).set_text(cx, &todo.tag);
                         item.view(cx, ids!(tag))
