@@ -480,17 +480,111 @@ pub fn define_ios_timer_delegate() -> *const Class {
 pub fn define_textfield_delegate() -> *const Class {
     let mut decl = ClassDecl::new("NSTextFieldDlg", class!(NSObject)).unwrap();
 
-    // Keyboard notification helpers - used for resizing the canvas when keyboard is shown/hidden
-    fn get_height_delta(notif: ObjcId) -> f64 {
-        unsafe {
-            let info: ObjcId = msg_send![notif, userInfo];
-            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardFrameBeginUserInfoKey];
-            let begin: NSRect = msg_send![obj, CGRectValue];
-            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardFrameEndUserInfoKey];
-            let end: NSRect = msg_send![obj, CGRectValue];
-            begin.origin.y - end.origin.y
+    #[derive(Clone, Copy)]
+    struct KeyboardGeometry {
+        is_visible: bool,
+        bottom_overlap: f64,
+    }
+
+    fn positive_min(a: f64, b: f64) -> Option<f64> {
+        match (a > 0.0, b > 0.0) {
+            (true, true) => Some(a.min(b)),
+            (true, false) => Some(a),
+            (false, true) => Some(b),
+            (false, false) => None,
         }
     }
+
+    /// Returns the keyboard visibility and docked bottom overlap in the
+    /// MTKView's coordinate space, in logical points.
+    ///
+    /// UIKit reports the keyboard frame in screen coordinates. Converting
+    /// through the screen coordinate space keeps the value correct for iPad
+    /// Split View, Slide Over, Stage Manager, rotation, and multi-window
+    /// placements where the app window is not the full screen.
+    fn get_keyboard_geometry_in_view(notif: ObjcId, view: ObjcId) -> KeyboardGeometry {
+        let hidden = KeyboardGeometry {
+            is_visible: false,
+            bottom_overlap: 0.0,
+        };
+        if view.is_null() {
+            return hidden;
+        }
+        unsafe {
+            let info: ObjcId = msg_send![notif, userInfo];
+            let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardFrameEndUserInfoKey];
+            if obj.is_null() {
+                return hidden;
+            }
+            let end_in_screen: NSRect = msg_send![obj, CGRectValue];
+
+            // Prefer the screen's coordinate space (correct for multi-window
+            // iPad). Fall back to window-coords-to-view-coords if anything in
+            // the chain is null. That's only reachable on a not-yet-attached
+            // view during early init, when we wouldn't want to shift anyway.
+            let window: ObjcId = msg_send![view, window];
+            let coord_space: ObjcId = if window.is_null() {
+                std::ptr::null_mut()
+            } else {
+                let screen: ObjcId = msg_send![window, screen];
+                if screen.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    msg_send![screen, coordinateSpace]
+                }
+            };
+            let end_in_view: NSRect = if coord_space.is_null() {
+                msg_send![view, convertRect: end_in_screen fromView: nil as ObjcId]
+            } else {
+                msg_send![view, convertRect: end_in_screen fromCoordinateSpace: coord_space]
+            };
+
+            let view_bounds: NSRect = msg_send![view, bounds];
+            let view_x2 = view_bounds.origin.x + view_bounds.size.width;
+            let view_y2 = view_bounds.origin.y + view_bounds.size.height;
+            let view_left = view_bounds.origin.x.min(view_x2);
+            let view_top = view_bounds.origin.y.min(view_y2);
+            let view_right = view_bounds.origin.x.max(view_x2);
+            let view_bottom = view_bounds.origin.y.max(view_y2);
+            let kbd_x2 = end_in_view.origin.x + end_in_view.size.width;
+            let kbd_y2 = end_in_view.origin.y + end_in_view.size.height;
+            let kbd_left = end_in_view.origin.x.min(kbd_x2);
+            let kbd_top = end_in_view.origin.y.min(kbd_y2);
+            let kbd_right = end_in_view.origin.x.max(kbd_x2);
+            let kbd_bottom = end_in_view.origin.y.max(kbd_y2);
+
+            let visible_width = kbd_right.min(view_right) - kbd_left.max(view_left);
+            let visible_height = kbd_bottom.min(view_bottom) - kbd_top.max(view_top);
+            let is_visible = visible_width > 1.0 && visible_height > 1.0;
+            if !is_visible {
+                return hidden;
+            }
+
+            // A floating or undocked iPad keyboard is visible, but it does not
+            // create a bottom obstruction. Report it as visible with zero
+            // overlap so focus remains intact while KeyboardView clears any
+            // previous docked-keyboard shift.
+            let is_docked = kbd_bottom + 1.0 >= view_bottom;
+            let bottom_overlap = if is_docked {
+                let frame_height = positive_min(
+                    end_in_view.size.height.abs(),
+                    end_in_screen.size.height.abs(),
+                )
+                .unwrap_or(visible_height);
+                visible_height
+                    .max(0.0)
+                    .min(frame_height)
+                    .min((view_bottom - view_top).max(0.0))
+            } else {
+                0.0
+            };
+            KeyboardGeometry {
+                is_visible,
+                bottom_overlap,
+            }
+        }
+    }
+
     fn get_curve_duration(notif: ObjcId) -> (f64, Ease) {
         unsafe {
             let info: ObjcId = msg_send![notif, userInfo];
@@ -498,79 +592,105 @@ pub fn define_textfield_delegate() -> *const Class {
             let duration: f64 = msg_send![obj, doubleValue];
             let obj: ObjcId = msg_send![info, objectForKey: UIKeyboardAnimationCurveUserInfoKey];
             let curve: i64 = msg_send![obj, intValue];
+            let curve = if curve > 3 { curve >> 16 } else { curve };
 
-            let ease = match curve >> 16 {
-                // UIViewAnimationOptionCurveEaseInOut - approximated with bezier
+            let ease = match curve {
+                // UIKit's standard timing curves as cubic-bezier(x1, y1, x2, y2).
                 0 => Ease::Bezier {
-                    cp0: 0.25,
-                    cp1: 0.1,
-                    cp2: 0.25,
-                    cp3: 0.1,
+                    cp0: 0.42,
+                    cp1: 0.0,
+                    cp2: 0.58,
+                    cp3: 1.0,
                 },
-                1 => Ease::InExp,  //UIViewAnimationOptionCurveEaseIn = 1 << 16,
-                2 => Ease::OutExp, //UIViewAnimationOptionCurveEaseOut = 2 << 16,
-                _ => Ease::Linear, //UIViewAnimationOptionCurveLinear = 3 << 16,
+                1 => Ease::Bezier {
+                    cp0: 0.42,
+                    cp1: 0.0,
+                    cp2: 1.0,
+                    cp3: 1.0,
+                },
+                2 => Ease::Bezier {
+                    cp0: 0.0,
+                    cp1: 0.0,
+                    cp2: 0.58,
+                    cp3: 1.0,
+                },
+                _ => Ease::Linear,
             };
             (duration, ease)
         }
     }
 
-    // Required stubs for keyboard frame change notifications (registered with notification center)
-    extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
-    extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
+    /// Pull the MTKView pointer out of the global app state without holding a
+    /// borrow across the UIKit `msg_send`s that need it. Returns null if the
+    /// app isn't initialized yet or the view hasn't been created.
+    fn get_mtk_view() -> ObjcId {
+        try_with_ios_app(|app| app.mtk_view)
+            .flatten()
+            .unwrap_or(std::ptr::null_mut())
+    }
 
-    extern "C" fn keyboard_will_hide(_: &Object, _: Sel, notif: ObjcId) {
-        // Get notification data OUTSIDE the borrow
-        let height = get_height_delta(notif);
+    /// Queue a `Will{Show,Hide}` event keyed off the absolute post-animation
+    /// height. UIKit fires `keyboardWillChangeFrame` for every keyboard frame
+    /// transition: initial show, mid-flight changes (language switch,
+    /// predictive bar toggle, custom inputAccessoryView height changes,
+    /// rotation), and dismissal. This is the single source of truth.
+    extern "C" fn keyboard_will_change_frame(_: &Object, _: Sel, notif: ObjcId) {
+        let view = get_mtk_view();
+        let geometry = get_keyboard_geometry_in_view(notif, view);
         let (duration, ease) = get_curve_duration(notif);
-        // Now borrow to get time and queue event
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
             try_with_ios_app(|app| {
-                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillHide {
-                    time,
-                    ease,
-                    height: -height,
-                    duration,
-                })
+                let event = if geometry.is_visible {
+                    VirtualKeyboardEvent::WillShow {
+                        time,
+                        height: geometry.bottom_overlap,
+                        ease,
+                        duration,
+                    }
+                } else {
+                    VirtualKeyboardEvent::WillHide {
+                        time,
+                        height: 0.0,
+                        ease,
+                        duration,
+                    }
+                };
+                app.queue_virtual_keyboard_event(event)
             });
         }
     }
 
-    extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {
+    /// Settled state corresponding to `keyboard_will_change_frame`. A visible
+    /// floating keyboard is still DidShow, but with zero bottom overlap.
+    extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, notif: ObjcId) {
+        let view = get_mtk_view();
+        let geometry = get_keyboard_geometry_in_view(notif, view);
         if let Some(time) = try_with_ios_app(|app| app.time_now()) {
             try_with_ios_app(|app| {
-                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time })
+                let event = if geometry.is_visible {
+                    VirtualKeyboardEvent::DidShow {
+                        time,
+                        height: geometry.bottom_overlap,
+                    }
+                } else {
+                    VirtualKeyboardEvent::DidHide { time }
+                };
+                app.queue_virtual_keyboard_event(event)
             });
         }
     }
 
-    extern "C" fn keyboard_will_show(_: &Object, _: Sel, notif: ObjcId) {
-        // Get notification data OUTSIDE the borrow
-        let height = get_height_delta(notif);
-        let (duration, ease) = get_curve_duration(notif);
-        // Now borrow to get time and queue event
-        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| {
-                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::WillShow {
-                    time,
-                    height,
-                    ease,
-                    duration,
-                })
-            });
-        }
-    }
-
-    extern "C" fn keyboard_did_show(_: &Object, _: Sel, notif: ObjcId) {
-        // Get notification data OUTSIDE the borrow
-        let height = get_height_delta(notif);
-        // Now borrow to get time and queue event
-        if let Some(time) = try_with_ios_app(|app| app.time_now()) {
-            try_with_ios_app(|app| {
-                app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow { time, height })
-            });
-        }
-    }
+    // The Show/Hide notifications fire *in addition* to ChangeFrame for the
+    // appearing/disappearing transitions, with the same parameters. We keep
+    // the observers registered (so UIKit's notification book-keeping stays
+    // intact) but treat ChangeFrame as authoritative. These are no-ops.
+    // IosApp stores one pending virtual-keyboard event, so even if both
+    // pathways queued, the later write wins. Routing through one path keeps
+    // height-change behavior identical to show/hide behavior.
+    extern "C" fn keyboard_will_hide(_: &Object, _: Sel, _notif: ObjcId) {}
+    extern "C" fn keyboard_did_hide(_: &Object, _: Sel, _notif: ObjcId) {}
+    extern "C" fn keyboard_will_show(_: &Object, _: Sel, _notif: ObjcId) {}
+    extern "C" fn keyboard_did_show(_: &Object, _: Sel, _notif: ObjcId) {}
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
         // When keyboard language changes, reload input views so iOS re-queries
         // autocorrectionType (which dynamically checks CJK vs non-CJK).
