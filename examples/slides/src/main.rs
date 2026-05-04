@@ -152,8 +152,25 @@ script_mod! {
                             TalkBody{text: "- The automated loop"}
                         }
 
+                        demo_robrix := TalkSlide{
+                            title.text: "Demo 1: Robrix"
+                            TalkBody{text: "- Matrix client"}
+                            TalkBody{text: "- Video demo"}
+                            TalkBody{text: "- Real app"}
+                            TalkBody{text: "- Built on Makepad"}
+                        }
+
+                        demo_ui_stack := TalkSlide{
+                            title.text: "Demo 2: Makepad UI Stack"
+                            TalkBody{text: "- makepad-example-splash"}
+                            TalkBody{text: "- Widgets"}
+                            TalkBody{text: "- Styling"}
+                            TalkBody{text: "- Layout"}
+                            TalkBody{text: "- Native rendering"}
+                        }
+
                         demo_simple := TalkSlide{
-                            title.text: "Demo 1: Simple App Generation"
+                            title.text: "Demo 3: Simple App Generation"
                             TalkBody{text: "- Input"}
                             TalkBody{text: "- Buttons"}
                             TalkBody{text: "- List state"}
@@ -161,7 +178,7 @@ script_mod! {
                         }
 
                         demo_aichat := TalkSlide{
-                            title.text: "Demo 2: Streaming Splash UIs"
+                            title.text: "Demo 4: Streaming Splash UIs"
                             TalkBody{text: "- aichat"}
                             TalkBody{text: "- A2App"}
                             TalkBody{text: "- Streaming generation"}
@@ -170,7 +187,7 @@ script_mod! {
                         }
 
                         demo_splash_3d := TalkSlide{
-                            title.text: "Demo 3: Realtime CAD"
+                            title.text: "Demo 5: Realtime CAD"
                             TalkBody{text: "- AI-generated CAD engine"}
                             TalkBody{text: "- Streaming Splash render"}
                             TalkBody{text: "- Realtime updates"}
@@ -178,7 +195,7 @@ script_mod! {
                         }
 
                         demo_maps := TalkSlide{
-                            title.text: "Demo 4: Map Rendering"
+                            title.text: "Demo 6: Map Rendering"
                             TalkBody{text: "- Map data"}
                             TalkBody{text: "- Pan and zoom"}
                             TalkBody{text: "- Markers and labels"}
@@ -186,7 +203,7 @@ script_mod! {
                         }
 
                         demo_xr := TalkSlide{
-                            title.text: "Demo 5: Quest XR Reconstruction"
+                            title.text: "Demo 7: Quest XR Reconstruction"
                             TalkBody{text: "- Quest target"}
                             TalkBody{text: "- Scene reconstruction"}
                             TalkBody{text: "- World scanning"}
