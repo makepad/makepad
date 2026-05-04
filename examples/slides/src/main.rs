@@ -170,9 +170,9 @@ script_mod! {
                         }
 
                         demo_splash_3d := TalkSlide{
-                            title.text: "Demo 3: Realtime 3D in Splash"
-                            TalkBody{text: "- Prompt to model"}
-                            TalkBody{text: "- Live Splash render"}
+                            title.text: "Demo 3: Realtime CAD"
+                            TalkBody{text: "- AI-generated CAD engine"}
+                            TalkBody{text: "- Streaming Splash render"}
                             TalkBody{text: "- Realtime updates"}
                             TalkBody{text: "- Shape, detail, material"}
                         }
