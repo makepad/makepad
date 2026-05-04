@@ -897,23 +897,38 @@ impl Cx {
                 keyboard_height,
                 is_open,
             } => {
-                let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
-                if !is_open {
-                    self.os.keyboard_closed = keyboard_height;
-                }
+                // Java reports the bottom IME occlusion in physical pixels.
+                // Convert to logical points and dedup repeated inset/layout
+                // callbacks. A visible IME may still have zero bottom
+                // occlusion (floating keyboard, transient animation frame);
+                // keep it as a visible zero-height keyboard so KeyboardView can
+                // clear any previous bottom shift without treating focus as
+                // dismissed.
+                let height_logical = (keyboard_height as f64) / self.os.dpi_factor;
+                let time = self.os.timers.time_now();
                 if is_open {
+                    if self.os.last_ime_visible
+                        && (height_logical - self.os.last_ime_height).abs() < 0.5
+                    {
+                        return;
+                    }
+                    self.os.last_ime_visible = true;
+                    self.os.last_ime_height = height_logical;
                     self.call_event_handler(&Event::VirtualKeyboard(
                         VirtualKeyboardEvent::DidShow {
-                            height: keyboard_height - self.os.keyboard_closed,
-                            time: self.os.timers.time_now(),
+                            height: height_logical,
+                            time,
                         },
                     ))
-                } else {
+                } else if !is_open {
+                    if !self.os.last_ime_visible {
+                        return;
+                    }
+                    self.os.last_ime_visible = false;
+                    self.os.last_ime_height = 0.0;
                     self.text_ime_was_dismissed();
                     self.call_event_handler(&Event::VirtualKeyboard(
-                        VirtualKeyboardEvent::DidHide {
-                            time: self.os.timers.time_now(),
-                        },
+                        VirtualKeyboardEvent::DidHide { time },
                     ))
                 }
             }
@@ -3071,7 +3086,8 @@ impl Default for CxOs {
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
             safe_area_insets: Default::default(),
-            keyboard_closed: 0.0,
+            last_ime_height: 0.0,
+            last_ime_visible: false,
             media: CxAndroidMedia::default(),
             display: None,
             surface_alive: false,
@@ -3150,7 +3166,14 @@ pub struct CxOs {
     pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub safe_area_insets: crate::event::SafeAreaInsets,
-    pub keyboard_closed: f64,
+    /// Last reported soft-keyboard height in logical pixels. Used to dedup
+    /// repeated inset notifications from `onApplyWindowInsets` /
+    /// `onGlobalLayout` so we don't re-fire `VirtualKeyboardEvent`s on
+    /// unrelated layout passes.
+    pub last_ime_height: f64,
+    /// Whether the soft keyboard was visible the last time we dispatched a
+    /// `VirtualKeyboardEvent`. Pairs with `last_ime_height` for dedup.
+    pub last_ime_visible: bool,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,

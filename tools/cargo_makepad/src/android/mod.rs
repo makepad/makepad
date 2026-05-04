@@ -69,6 +69,7 @@ impl AndroidVariant {
                     android:configChanges="orientation|screenSize|keyboardHidden"
                     android:exported="true"
                     android:launchMode="singleTask"
+                    android:windowSoftInputMode="adjustNothing|stateUnchanged"
                     android:theme="@style/MakepadLaunchTheme">
                     <intent-filter>
                         <action android:name="android.intent.action.MAIN" />
@@ -154,6 +155,7 @@ impl AndroidVariant {
                         android:exported="true"
                         android:launchMode="singleTask"
                         android:screenOrientation="landscape"
+                        android:windowSoftInputMode="adjustNothing|stateUnchanged"
                         android:theme="@style/MakepadLaunchTheme" 
                         >
                         <intent-filter>
@@ -169,6 +171,7 @@ impl AndroidVariant {
                         android:exported="true"
                         android:launchMode="singleTask"
                         android:screenOrientation="landscape"
+                        android:windowSoftInputMode="adjustNothing|stateUnchanged"
                         android:theme="@style/MakepadLaunchTheme" 
                         >
                         <intent-filter>
