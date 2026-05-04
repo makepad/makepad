@@ -191,7 +191,6 @@ script_mod! {
                             TalkBody{text: "- AI-generated CAD engine"}
                             TalkBody{text: "- Streaming Splash render"}
                             TalkBody{text: "- Realtime updates"}
-                            TalkBody{text: "- Shape, detail, material"}
                         }
 
                         demo_maps := TalkSlide{
