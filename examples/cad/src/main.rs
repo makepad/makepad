@@ -1,17 +1,24 @@
+pub use makepad_ai;
 pub use makepad_code_editor;
 pub use makepad_csg;
 pub use makepad_widgets;
 pub use makepad_xr;
 
+use makepad_ai::*;
 use makepad_code_editor::{
     code_editor::{CodeEditorAction, KeepCursorInView},
     decoration::DecorationSet,
     CodeDocument, CodeEditor, CodeSession,
 };
 use makepad_csg::Solid;
+use makepad_widgets::makepad_platform::{makepad_script::ScriptVmBase, thread::SignalToUI};
 use makepad_widgets::*;
 use makepad_xr::scene::*;
 use std::cell::RefCell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Instant;
 
 app_main!(App);
 
@@ -30,9 +37,48 @@ let top_rib = cube(2.0, 0.24, 0.30, true)
 render(shell.merge(left_boss).merge(right_boss).merge(top_rib))"#;
 
 const LIVE_UPDATE_INTERVAL: f64 = 0.08;
+const LOCAL_OPENAI_URL: &str = "http://10.0.0.168:8080/v1/chat/completions";
+const LOCAL_OPENAI_MODEL: &str = "Gemma4Unlim-31B-ModelOptFullAttn-FullCal128.gguf";
+const GENERATED_DIR: &str = "generated";
+const GENERATED_SCRIPT_FILE: &str = "current.cad";
+const GENERATED_OBJ_FILE: &str = "current.obj";
 
 thread_local! {
     static CAD_SCRIPT_OUTPUT: RefCell<Option<Solid>> = RefCell::new(None);
+}
+
+fn cad_manifest_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+fn cad_generated_dir_path() -> PathBuf {
+    cad_manifest_path().join(GENERATED_DIR)
+}
+
+fn cad_generated_script_path() -> PathBuf {
+    cad_generated_dir_path().join(GENERATED_SCRIPT_FILE)
+}
+
+fn cad_generated_obj_path() -> PathBuf {
+    cad_generated_dir_path().join(GENERATED_OBJ_FILE)
+}
+
+fn load_saved_cad_script() -> Option<String> {
+    fs::read_to_string(cad_generated_script_path())
+        .ok()
+        .filter(|source| !source.trim().is_empty())
+}
+
+fn save_cad_state(source: &str, solid: &Solid) -> Result<(), String> {
+    let dir = cad_generated_dir_path();
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("could not create generated directory: {err}"))?;
+    fs::write(dir.join(GENERATED_SCRIPT_FILE), source)
+        .map_err(|err| format!("could not save CAD script: {err}"))?;
+    solid
+        .write_obj(cad_generated_obj_path().to_string_lossy().as_ref())
+        .map_err(|err| format!("could not save OBJ mesh: {err}"))?;
+    Ok(())
 }
 
 fn set_cad_script_output(solid: Solid) {
@@ -189,6 +235,31 @@ fn install_cad_binary_handle_method(
     });
 }
 
+fn iphone_camera_cutout_solid(
+    x: f64,
+    y: f64,
+    z: f64,
+    radius: f64,
+    spacing: f64,
+    depth: f64,
+    segments: u32,
+) -> Solid {
+    let radius = radius.abs().max(0.01);
+    let spacing = spacing.abs().max(radius * 2.2);
+    let depth = depth.abs().max(0.05);
+    let segments = segments.clamp(12, 128);
+    let lens_a = Solid::cylinder(radius, depth, segments, true)
+        .rotate_x(90.0)
+        .translate(x, y, z);
+    let lens_b = Solid::cylinder(radius, depth, segments, true)
+        .rotate_x(90.0)
+        .translate(x + spacing, y, z);
+    let lens_c = Solid::cylinder(radius, depth, segments, true)
+        .rotate_x(90.0)
+        .translate(x, y - spacing, z);
+    lens_a.merge(&lens_b).merge(&lens_c)
+}
+
 fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let ty = vm.new_handle_type(id!(cad_solid));
     let cad = vm.new_module(id!(cad));
@@ -221,6 +292,24 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
         let center = arg_bool(vm, args, 3, true);
         new_cad_solid(vm, Solid::cylinder(radius, height, segments, center))
     });
+    vm.add_method(
+        cad,
+        id!(iphone_camera_cutout),
+        script_args!(),
+        |vm, args| {
+            let x = arg_f64(vm, args, 0, 0.65);
+            let y = arg_f64(vm, args, 1, 2.2);
+            let z = arg_f64(vm, args, 2, 0.0);
+            let radius = arg_f64(vm, args, 3, 0.22);
+            let spacing = arg_f64(vm, args, 4, 0.5);
+            let depth = arg_f64(vm, args, 5, 1.0);
+            let segments = arg_u32(vm, args, 6, 48);
+            new_cad_solid(
+                vm,
+                iphone_camera_cutout_solid(x, y, z, radius, spacing, depth, segments),
+            )
+        },
+    );
     vm.add_method(cad, id!(cone), script_args!(), |vm, args| {
         let radius = arg_f64(vm, args, 0, 1.0).abs().max(0.001);
         let height = arg_f64(vm, args, 1, 1.0).abs().max(0.001);
@@ -250,6 +339,13 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
         )
     });
     vm.add_method(cad, id!(render), script_args!(), |vm, args| {
+        let Some(solid) = arg_solid(vm, args, 0) else {
+            return NIL;
+        };
+        set_cad_script_output(solid.clone());
+        new_cad_solid(vm, solid)
+    });
+    vm.add_method(cad, id!(preview), script_args!(), |vm, args| {
         let Some(solid) = arg_solid(vm, args, 0) else {
             return NIL;
         };
@@ -312,6 +408,13 @@ fn cad_script_mod(vm: &mut ScriptVm) -> ScriptValue {
         set_cad_script_output(solid.clone());
         new_cad_solid(vm, solid)
     });
+    vm.add_handle_method(ty, id!(preview), script_args!(), |vm, args| {
+        let Some(solid) = self_solid(vm, args) else {
+            return NIL;
+        };
+        set_cad_script_output(solid.clone());
+        new_cad_solid(vm, solid)
+    });
     NIL
 }
 
@@ -332,7 +435,83 @@ fn script_value_to_string(vm: &mut ScriptVm, value: ScriptValue) -> String {
     out
 }
 
-fn eval_cad_script(cx: &mut Cx, source: &str) -> Result<Solid, String> {
+fn line_let_identifier(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("let ")?;
+    let ident_len = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if ident_len == 0 {
+        return None;
+    }
+    let ident = &rest[..ident_len];
+    let after_ident = rest[ident_len..].trim_start();
+    after_ident.starts_with('=').then(|| ident.to_string())
+}
+
+fn source_has_output_call(source: &str) -> bool {
+    source.contains("render(")
+        || source.contains(".render(")
+        || source.contains("preview(")
+        || source.contains(".preview(")
+}
+
+fn progressive_cad_preview_source(source: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut last_good_end = 0usize;
+    let mut cursor = 0usize;
+
+    for line in source.split_inclusive('\n') {
+        cursor += line.len();
+        for ch in line.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth < 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if depth == 0
+            && !trimmed.is_empty()
+            && !trimmed.ends_with('.')
+            && !trimmed.ends_with(',')
+            && !trimmed.ends_with('=')
+        {
+            last_good_end = cursor;
+        }
+    }
+
+    if last_good_end == 0 {
+        return None;
+    }
+
+    let prefix = source[..last_good_end].trim_end();
+    if prefix.is_empty() {
+        return None;
+    }
+    if source_has_output_call(prefix) {
+        return Some(prefix.to_string());
+    }
+
+    let last_ident = prefix.lines().filter_map(line_let_identifier).last()?;
+    Some(format!("{}\npreview({})", prefix, last_ident))
+}
+
+fn eval_cad_script_in_vm(
+    vm: &mut ScriptVm,
+    source: &str,
+    allow_progressive_preview: bool,
+) -> Result<Solid, String> {
+    let source = if allow_progressive_preview {
+        progressive_cad_preview_source(source).unwrap_or_else(|| source.to_string())
+    } else {
+        source.to_string()
+    };
     let code = format!("use mod.std.*\nuse mod.cad.*\n{}", source);
     let script_mod = ScriptMod {
         cargo_manifest_path: String::new(),
@@ -340,20 +519,29 @@ fn eval_cad_script(cx: &mut Cx, source: &str) -> Result<Solid, String> {
         file: "cad_editor".to_string(),
         line: 1,
         column: 0,
-        code: String::new(),
+        code,
         values: Vec::new(),
     };
     clear_cad_script_output();
-    cx.with_vm(|vm| {
-        let value = vm.eval_with_append_source(script_mod, &code, NIL.into());
-        if value.is_err() {
-            return Err(script_value_to_string(vm, value));
+    let previous_silence_errors = vm.bx.silence_errors;
+    vm.bx.silence_errors = previous_silence_errors || allow_progressive_preview;
+    let value = vm.eval(script_mod);
+    let result = if value.is_err() {
+        Err(script_value_to_string(vm, value))
+    } else if let Some(solid) = take_cad_script_output() {
+        if !solid.is_empty() {
+            Ok(solid)
+        } else {
+            solid_from_value(vm, value).ok_or_else(|| {
+                let value = script_value_to_string(vm, value);
+                if value.is_empty() || value == "nil" {
+                    "script did not call render(solid) or return a CAD solid".to_string()
+                } else {
+                    format!("script returned {}, expected a CAD solid", value)
+                }
+            })
         }
-        if let Some(solid) = take_cad_script_output() {
-            if !solid.is_empty() {
-                return Ok(solid);
-            }
-        }
+    } else {
         solid_from_value(vm, value).ok_or_else(|| {
             let value = script_value_to_string(vm, value);
             if value.is_empty() || value == "nil" {
@@ -362,7 +550,22 @@ fn eval_cad_script(cx: &mut Cx, source: &str) -> Result<Solid, String> {
                 format!("script returned {}, expected a CAD solid", value)
             }
         })
-    })
+    };
+    vm.drain_errors();
+    vm.bx.silence_errors = previous_silence_errors;
+    result
+}
+
+fn eval_cad_script(source: &str, allow_progressive_preview: bool) -> Result<Solid, String> {
+    let mut host = ();
+    let mut std = ();
+    let mut vm = ScriptVm {
+        host: &mut host,
+        std: &mut std,
+        bx: Box::new(ScriptVmBase::new()),
+    };
+    cad_script_mod(&mut vm);
+    eval_cad_script_in_vm(&mut vm, source, allow_progressive_preview)
 }
 
 script_mod! {
@@ -488,30 +691,49 @@ script_mod! {
 
                         header := SolidView{
                             width: Fill
-                            height: 42.0
-                            flow: Right
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 14.0 right: 14.0}
-                            spacing: 16.0
+                            height: 58.0
+                            flow: Down
+                            padding: Inset{left: 14.0 top: 7.0 right: 14.0 bottom: 5.0}
+                            spacing: 2.0
                             draw_bg +: {color: #x171d24}
 
-                            title_label := Label{
-                                width: Fit
+                            title_row := View{
+                                width: Fill
                                 height: Fit
-                                text: "CAD"
-                                draw_text +: {
-                                    color: #xf3f6f8
-                                    text_style +: {font_size: 13.5}
+                                flow: Right
+                                spacing: 16.0
+                                align: Align{x: 0.0 y: 0.5}
+
+                                title_label := Label{
+                                    width: Fit
+                                    height: Fit
+                                    text: "CAD"
+                                    draw_text +: {
+                                        color: #xf3f6f8
+                                        text_style +: {font_size: 13.5}
+                                    }
+                                }
+
+                                status_label := Label{
+                                    width: Fill
+                                    height: Fit
+                                    text: ""
+                                    draw_text +: {
+                                        color: #x9aa8b5
+                                        text_style +: {font_size: 11.5}
+                                    }
                                 }
                             }
 
-                            status_label := Label{
+                            prompt_title_label := Label{
                                 width: Fill
                                 height: Fit
+                                padding: 0.0
                                 text: ""
                                 draw_text +: {
-                                    color: #x9aa8b5
-                                    text_style +: {font_size: 11.5}
+                                    color: #x7f8d9a
+                                    font_scale: 0.92
+                                    text_style +: {font_size: 9.5}
                                 }
                             }
                         }
@@ -548,6 +770,58 @@ script_mod! {
                                 draw_bg +: {color: #x0a0f14}
 
                                 cad_viewport := mod.widgets.CadViewport{}
+                            }
+                        }
+
+                        prompt_panel := SolidView{
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            padding: Inset{left: 12.0 top: 8.0 right: 12.0 bottom: 8.0}
+                            spacing: 6.0
+                            draw_bg +: {color: #x171d24}
+
+                            prompt_row := View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8.0
+                                align: Align{y: 0.5}
+
+                                backend_dropdown := DropDown{
+                                    width: 150.0
+                                    labels: ["Claude Splash" "Local OpenAI"]
+                                    draw_text +: {
+                                        text_style +: {font_size: 11.0}
+                                    }
+                                }
+
+                                cad_prompt_input := TextInput{
+                                    width: Fill
+                                    height: Fit
+                                    empty_text: "Prompt CAD changes... (Enter to generate)"
+                                }
+
+                                ai_generate_button := Button{
+                                    width: 90.0
+                                    text: "Generate"
+                                }
+
+                                ai_cancel_button := Button{
+                                    width: 78.0
+                                    text: "Cancel"
+                                    visible: false
+                                }
+                            }
+
+                            ai_status_label := Label{
+                                width: Fill
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    color: #x9aa8b5
+                                    text_style +: {font_size: 10.5}
+                                }
                             }
                         }
                     }
@@ -615,11 +889,14 @@ struct CadStats {
     max_dimension: f64,
 }
 
-fn update_geometry_from_solid(
-    cx: &mut Cx,
-    geometry: &mut Option<Geometry>,
-    solid: &Solid,
-) -> CadStats {
+#[derive(Default)]
+struct CadMeshData {
+    indices: Vec<u32>,
+    vertices: Vec<f32>,
+    stats: CadStats,
+}
+
+fn cad_mesh_data_from_solid(solid: &Solid) -> CadMeshData {
     let mesh = solid.mesh();
     let mut stats = CadStats {
         vertices: solid.vertex_count(),
@@ -628,14 +905,18 @@ fn update_geometry_from_solid(
     };
 
     if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
-        *geometry = None;
-        return stats;
+        return CadMeshData {
+            stats,
+            ..Default::default()
+        };
     }
 
     let bbox = mesh.bounding_box();
     if bbox.is_empty() {
-        *geometry = None;
-        return stats;
+        return CadMeshData {
+            stats,
+            ..Default::default()
+        };
     }
 
     let center = bbox.center();
@@ -686,13 +967,115 @@ fn update_geometry_from_solid(
     }
 
     if vertices.is_empty() || indices.is_empty() {
+        CadMeshData {
+            stats,
+            ..Default::default()
+        }
+    } else {
+        CadMeshData {
+            indices,
+            vertices,
+            stats,
+        }
+    }
+}
+
+fn update_geometry_from_mesh(
+    cx: &mut Cx,
+    geometry: &mut Option<Geometry>,
+    mesh_data: CadMeshData,
+) -> CadStats {
+    let stats = mesh_data.stats;
+    if mesh_data.vertices.is_empty() || mesh_data.indices.is_empty() {
         *geometry = None;
     } else {
         let geometry = geometry.get_or_insert_with(|| Geometry::new(cx));
-        geometry.update(cx, indices, vertices);
+        geometry.update(cx, mesh_data.indices, mesh_data.vertices);
+    }
+    stats
+}
+
+struct CadRebuildRequest {
+    seq: u64,
+    source: String,
+    allow_progressive_preview: bool,
+    save_output: bool,
+}
+
+enum CadRebuildPayload {
+    Mesh {
+        mesh_data: CadMeshData,
+        saved: bool,
+        save_error: Option<String>,
+    },
+    Error(String),
+}
+
+struct CadRebuildResult {
+    seq: u64,
+    payload: CadRebuildPayload,
+}
+
+struct CadRebuildWorker {
+    request_tx: Sender<CadRebuildRequest>,
+    result_rx: Receiver<CadRebuildResult>,
+}
+
+impl CadRebuildWorker {
+    fn new(cx: &mut Cx) -> Self {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        cx.spawn_thread(move || cad_rebuild_worker_loop(request_rx, result_tx));
+        Self {
+            request_tx,
+            result_rx,
+        }
     }
 
-    stats
+    fn request(&self, request: CadRebuildRequest) {
+        let _ = self.request_tx.send(request);
+    }
+
+    fn try_recv(&self) -> Option<CadRebuildResult> {
+        self.result_rx.try_recv().ok()
+    }
+}
+
+fn cad_rebuild_worker_loop(
+    request_rx: Receiver<CadRebuildRequest>,
+    result_tx: Sender<CadRebuildResult>,
+) {
+    while let Ok(mut request) = request_rx.recv() {
+        while let Ok(newer_request) = request_rx.try_recv() {
+            request = newer_request;
+        }
+
+        let payload = match eval_cad_script(&request.source, request.allow_progressive_preview) {
+            Ok(solid) => {
+                let save_error = if request.save_output {
+                    save_cad_state(&request.source, &solid).err()
+                } else {
+                    None
+                };
+                CadRebuildPayload::Mesh {
+                    mesh_data: cad_mesh_data_from_solid(&solid),
+                    saved: request.save_output && save_error.is_none(),
+                    save_error,
+                }
+            }
+            Err(err) => CadRebuildPayload::Error(err),
+        };
+        if result_tx
+            .send(CadRebuildResult {
+                seq: request.seq,
+                payload,
+            })
+            .is_err()
+        {
+            return;
+        }
+        SignalToUI::set_ui_signal();
+    }
 }
 
 fn ensure_ground_geometry(cx: &mut Cx, geometry: &mut Option<Geometry>) -> GeometryId {
@@ -806,8 +1189,8 @@ impl CadViewport {
         cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
     }
 
-    fn set_solid(&mut self, cx: &mut Cx, solid: &Solid) -> CadStats {
-        let stats = update_geometry_from_solid(cx, &mut self.mesh_geometry, solid);
+    fn set_mesh(&mut self, cx: &mut Cx, mesh_data: CadMeshData) -> CadStats {
+        let stats = update_geometry_from_mesh(cx, &mut self.mesh_geometry, mesh_data);
         self.stats = stats;
         self.area.redraw(cx);
         cx.redraw_all();
@@ -902,6 +1285,35 @@ pub enum CadCodeEditorAction {
     TextDidChange,
     #[default]
     None,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum BackendType {
+    #[default]
+    ClaudeSplash,
+    LocalOpenAi,
+}
+
+const BACKENDS: [BackendType; 2] = [BackendType::ClaudeSplash, BackendType::LocalOpenAi];
+
+impl BackendType {
+    fn to_index(self) -> usize {
+        BACKENDS
+            .iter()
+            .position(|&backend| backend == self)
+            .unwrap_or(0)
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+        BACKENDS.get(index).copied()
+    }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            Self::ClaudeSplash => "Ready: Claude Splash",
+            Self::LocalOpenAi => "Ready: Local OpenAI stream at 10.0.0.168:8080",
+        }
+    }
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
@@ -1014,41 +1426,415 @@ pub struct App {
     live_update_timer: Timer,
     #[rust]
     last_source: String,
+    #[rust]
+    cad_worker: Option<CadRebuildWorker>,
+    #[rust]
+    rebuild_seq: u64,
+    #[rust]
+    current_prompt_title: String,
+    #[rust]
+    agent: Option<Box<dyn Agent>>,
+    #[rust]
+    session_id: Option<SessionId>,
+    #[rust]
+    current_prompt: Option<PromptId>,
+    #[rust]
+    active_backend: BackendType,
+    #[rust]
+    backend_available: bool,
+    #[rust]
+    ai_response_buffer: String,
+    #[rust]
+    ai_prompt_started_at: Option<Instant>,
 }
 
 impl App {
-    fn regenerate(&mut self, cx: &mut Cx) {
+    fn update_prompt_title(&self, cx: &mut Cx) {
+        let title = if self.current_prompt_title.trim().is_empty() {
+            "Prompt: default CAD script".to_string()
+        } else {
+            format!("Prompt: {}", self.current_prompt_title.trim())
+        };
+        self.ui
+            .label(cx, ids!(prompt_title_label))
+            .set_text(cx, &title);
+    }
+
+    fn cad_system_prompt() -> String {
+        let prompt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("system_prompt.md");
+        std::fs::read_to_string(&prompt_path)
+            .unwrap_or_else(|_| include_str!("../system_prompt.md").to_string())
+    }
+
+    fn create_backend_session(&mut self, cx: &mut Cx, backend: BackendType) {
+        self.cancel_ai_prompt(cx);
+        self.agent = None;
+        self.session_id = None;
+        self.current_prompt = None;
+        self.ai_response_buffer.clear();
+        self.ai_prompt_started_at = None;
+        self.active_backend = backend;
+
+        let agent = match backend {
+            BackendType::ClaudeSplash => {
+                self.backend_available = ClaudeCodeAgent::is_available();
+                self.backend_available
+                    .then(|| Box::new(ClaudeCodeAgent::new()) as Box<dyn Agent>)
+            }
+            BackendType::LocalOpenAi => {
+                self.backend_available = true;
+                Some(
+                    Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
+                        BackendConfig::OpenAI {
+                            api_key: String::new(),
+                            model: LOCAL_OPENAI_MODEL.to_string(),
+                            base_url: Some(LOCAL_OPENAI_URL.to_string()),
+                            reasoning_effort: None,
+                        },
+                    )))) as Box<dyn Agent>,
+                )
+            }
+        };
+
+        let Some(agent) = agent else {
+            self.update_ai_status(cx);
+            return;
+        };
+
+        let config = SessionConfig {
+            cwd: Some(env!("CARGO_MANIFEST_DIR").to_string()),
+            system_prompt: Some(Self::cad_system_prompt()),
+            ..Default::default()
+        };
+        self.agent = Some(agent);
+        if let Some(agent) = &mut self.agent {
+            self.session_id = Some(agent.create_session(cx, config));
+        }
+        self.update_ai_status(cx);
+    }
+
+    fn update_ai_status(&self, cx: &mut Cx) {
+        let status = if self.current_prompt.is_some() {
+            let chars = self.ai_response_buffer.len();
+            let elapsed_ms = self
+                .ai_prompt_started_at
+                .map(|started| started.elapsed().as_millis())
+                .unwrap_or(0);
+            let dots = ".".repeat(((elapsed_ms / 350) % 4) as usize);
+            let backend = match self.active_backend {
+                BackendType::ClaudeSplash => "Claude Splash",
+                BackendType::LocalOpenAi => "Local OpenAI",
+            };
+            if chars == 0 {
+                let elapsed = (elapsed_ms / 1000) as u64;
+                if elapsed < 2 {
+                    format!("Starting {}{}", backend, dots)
+                } else {
+                    format!("Thinking{} Waiting for {} ({elapsed}s)", dots, backend)
+                }
+            } else {
+                format!("Streaming code{} {} chars", dots, chars)
+            }
+        } else if self.backend_available {
+            self.active_backend.status_label().to_string()
+        } else {
+            match self.active_backend {
+                BackendType::ClaudeSplash => {
+                    "Claude Code not found. Set CLAUDE_CODE_PATH or install claude.".to_string()
+                }
+                BackendType::LocalOpenAi => "Local OpenAI backend unavailable".to_string(),
+            }
+        };
+        self.ui
+            .label(cx, ids!(ai_status_label))
+            .set_text(cx, &status);
+    }
+
+    fn set_ai_busy(&mut self, cx: &mut Cx, busy: bool) {
+        self.ui
+            .view(cx, ids!(ai_cancel_button))
+            .set_visible(cx, busy);
+        self.ui
+            .view(cx, ids!(ai_generate_button))
+            .set_visible(cx, !busy);
+    }
+
+    fn send_ai_prompt(&mut self, cx: &mut Cx) {
+        if self.current_prompt.is_some() {
+            return;
+        }
+        let prompt_input = self.ui.text_input(cx, ids!(cad_prompt_input));
+        let prompt = prompt_input.text();
+        if prompt.trim().is_empty() {
+            return;
+        }
+        self.current_prompt_title = prompt.trim().to_string();
+        self.update_prompt_title(cx);
+
+        let (agent, session_id) = match (&mut self.agent, self.session_id) {
+            (Some(agent), Some(session_id)) => (agent, session_id),
+            _ => {
+                self.update_ai_status(cx);
+                return;
+            }
+        };
+        if !agent.is_session_ready(session_id) {
+            self.ui
+                .label(cx, ids!(ai_status_label))
+                .set_text(cx, "AI backend is still starting");
+            self.ui.redraw(cx);
+            return;
+        }
+
+        let current_script = self.ui.widget(cx, ids!(cad_editor)).text();
+        let request = format!(
+            "User request:\n{}\n\nCurrent CAD script:\n```cad\n{}\n```\n\nReturn the complete replacement CAD script only.",
+            prompt.trim(),
+            current_script
+        );
+
+        self.ai_response_buffer.clear();
+        self.current_prompt = Some(agent.send_prompt(cx, session_id, &request));
+        self.ai_prompt_started_at = Some(Instant::now());
+        prompt_input.set_text(cx, "");
+        self.set_ai_busy(cx, true);
+        self.update_ai_status(cx);
+        self.ui.redraw(cx);
+    }
+
+    fn cancel_ai_prompt(&mut self, cx: &mut Cx) {
+        let was_busy = self.current_prompt.is_some();
+        if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
+            agent.cancel_prompt(cx, prompt_id);
+        }
+        self.ai_response_buffer.clear();
+        self.ai_prompt_started_at = None;
+        self.set_ai_busy(cx, false);
+        if was_busy {
+            self.ui
+                .label(cx, ids!(ai_status_label))
+                .set_text(cx, "Generation canceled");
+        } else {
+            self.update_ai_status(cx);
+        }
+        self.ui.redraw(cx);
+    }
+
+    fn extract_cad_script(text: &str) -> String {
+        let trimmed = text.trim();
+        if let Some(start) = trimmed.find("```") {
+            let after_open = &trimmed[start + 3..];
+            let code_start = after_open.find('\n').map(|idx| idx + 1).unwrap_or(0);
+            let after_lang = &after_open[code_start..];
+            if let Some(end) = after_lang.find("```") {
+                return after_lang[..end].trim().to_string();
+            }
+        }
+        trimmed.to_string()
+    }
+
+    fn extract_streaming_cad_script(text: &str) -> String {
+        let trimmed = text.trim_start();
+        if let Some(start) = trimmed.find("```") {
+            let after_open = &trimmed[start + 3..];
+            let code_start = after_open.find('\n').map(|idx| idx + 1).unwrap_or(0);
+            let after_lang = &after_open[code_start..];
+            if let Some(end) = after_lang.find("```") {
+                return after_lang[..end].trim_start().to_string();
+            }
+            return after_lang.trim_start().to_string();
+        }
+
+        let mut first_code = None;
+        for needle in [
+            "let ",
+            "render(",
+            "empty()",
+            "cube(",
+            "cube_uniform(",
+            "sphere(",
+            "cylinder(",
+            "iphone_camera_cutout(",
+            "cone(",
+            "torus(",
+            "tapered_cylinder(",
+        ] {
+            if let Some(index) = trimmed.find(needle) {
+                first_code = Some(first_code.map_or(index, |first: usize| first.min(index)));
+            }
+        }
+
+        if let Some(first_code) = first_code {
+            trimmed[first_code..].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn stream_ai_response_to_editor(&mut self, cx: &mut Cx) {
+        let script = Self::extract_streaming_cad_script(&self.ai_response_buffer);
+        if script.trim().is_empty() {
+            return;
+        }
+        let editor = self.ui.widget(cx, ids!(cad_editor));
+        if editor.text() != script {
+            editor.set_text(cx, &script);
+            self.request_rebuild(cx, false, false);
+            self.ui.redraw(cx);
+            cx.redraw_all();
+        }
+    }
+
+    fn apply_ai_response(&mut self, cx: &mut Cx) {
+        let script = Self::extract_cad_script(&self.ai_response_buffer);
+        self.current_prompt = None;
+        self.ai_prompt_started_at = None;
+        self.set_ai_busy(cx, false);
+        if script.trim().is_empty() {
+            self.ui
+                .label(cx, ids!(ai_status_label))
+                .set_text(cx, "AI returned an empty CAD script");
+            return;
+        }
+
+        self.ui.widget(cx, ids!(cad_editor)).set_text(cx, &script);
+        self.request_rebuild(cx, true, true);
+        self.ui
+            .label(cx, ids!(ai_status_label))
+            .set_text(cx, "Generated CAD script applied");
+        self.ai_response_buffer.clear();
+        self.ui.redraw(cx);
+    }
+
+    fn request_rebuild(&mut self, cx: &mut Cx, force: bool, save_output: bool) {
+        if self.cad_worker.is_none() {
+            self.cad_worker = Some(CadRebuildWorker::new(cx));
+        }
         let source = self.ui.widget(cx, ids!(cad_editor)).text();
-        if source == self.last_source {
+        if !force && source == self.last_source {
             return;
         }
         self.last_source = source.clone();
+        self.rebuild_seq = self.rebuild_seq.wrapping_add(1);
+        let seq = self.rebuild_seq;
 
-        match eval_cad_script(cx, &source) {
-            Ok(solid) => {
+        if let Some(worker) = &self.cad_worker {
+            worker.request(CadRebuildRequest {
+                seq,
+                source,
+                allow_progressive_preview: self.current_prompt.is_some(),
+                save_output,
+            });
+        }
+
+        let status = if self.current_prompt.is_some() {
+            "Building streamed CAD...".to_string()
+        } else {
+            "Building CAD...".to_string()
+        };
+        self.ui.label(cx, ids!(status_label)).set_text(cx, &status);
+        self.ui.redraw(cx);
+    }
+
+    fn drain_rebuild_results(&mut self, cx: &mut Cx) {
+        let mut latest = None;
+        if let Some(worker) = &self.cad_worker {
+            while let Some(result) = worker.try_recv() {
+                latest = Some(result);
+            }
+        }
+
+        let Some(result) = latest else {
+            return;
+        };
+        if result.seq != self.rebuild_seq {
+            return;
+        }
+
+        match result.payload {
+            CadRebuildPayload::Mesh {
+                mesh_data,
+                saved,
+                save_error,
+            } => {
                 let stats = if let Some(mut viewport) = self
                     .ui
                     .widget(cx, ids!(cad_viewport))
                     .borrow_mut::<CadViewport>()
                 {
-                    viewport.set_solid(cx, &solid)
+                    viewport.set_mesh(cx, mesh_data)
                 } else {
                     CadStats::default()
+                };
+                let save_status = if let Some(save_error) = save_error {
+                    format!("; save failed: {}", save_error)
+                } else if saved {
+                    "; saved".to_string()
+                } else {
+                    String::new()
                 };
                 self.ui.label(cx, ids!(status_label)).set_text(
                     cx,
                     &format!(
-                        "{} triangles, {} vertices, bounds {:.2}",
-                        stats.triangles, stats.vertices, stats.max_dimension
+                        "{} triangles, {} vertices, bounds {:.2}{}",
+                        stats.triangles, stats.vertices, stats.max_dimension, save_status
                     ),
                 );
                 self.ui.redraw(cx);
             }
-            Err(err) => {
-                self.ui
-                    .label(cx, ids!(status_label))
-                    .set_text(cx, &format!("Error: {}", err));
+            CadRebuildPayload::Error(err) => {
+                let status = if self.current_prompt.is_some() {
+                    "Streaming CAD script...".to_string()
+                } else {
+                    format!("Error: {}", err)
+                };
+                self.ui.label(cx, ids!(status_label)).set_text(cx, &status);
                 self.ui.redraw(cx);
+            }
+        }
+    }
+
+    fn drain_agent_events(&mut self, cx: &mut Cx, event: &Event) {
+        let events = if let Some(agent) = &mut self.agent {
+            agent.handle_event(cx, event)
+        } else {
+            Vec::new()
+        };
+
+        for event in events {
+            match event {
+                AgentEvent::SessionReady { .. } => {
+                    self.update_ai_status(cx);
+                }
+                AgentEvent::SessionError { error, .. } => {
+                    self.backend_available = false;
+                    self.current_prompt = None;
+                    self.ai_prompt_started_at = None;
+                    self.set_ai_busy(cx, false);
+                    self.ui
+                        .label(cx, ids!(ai_status_label))
+                        .set_text(cx, &format!("Error: {}", error));
+                }
+                AgentEvent::TextDelta { text, .. } => {
+                    self.ai_response_buffer.push_str(&text);
+                    self.stream_ai_response_to_editor(cx);
+                    self.update_ai_status(cx);
+                    self.ui.redraw(cx);
+                    cx.redraw_all();
+                }
+                AgentEvent::TurnComplete { .. } => {
+                    self.apply_ai_response(cx);
+                }
+                AgentEvent::PromptError { error, .. } => {
+                    self.current_prompt = None;
+                    self.ai_prompt_started_at = None;
+                    self.set_ai_busy(cx, false);
+                    self.ui
+                        .label(cx, ids!(ai_status_label))
+                        .set_text(cx, &format!("Error: {}", error));
+                    self.ui.redraw(cx);
+                }
+                AgentEvent::ToolRequest { .. } => {}
             }
         }
     }
@@ -1061,22 +1847,76 @@ impl MatchEvent for App {
         }
         self.initialized = true;
         self.live_update_timer = cx.start_interval(LIVE_UPDATE_INTERVAL);
+        let (startup_source, prompt_title, save_loaded_source) =
+            if let Some(saved_source) = load_saved_cad_script() {
+                (saved_source, "saved CAD script", true)
+            } else {
+                (DEFAULT_CAD_SCRIPT.to_string(), "default CAD script", false)
+            };
         self.ui
             .widget(cx, ids!(cad_editor))
-            .set_text(cx, DEFAULT_CAD_SCRIPT);
-        self.regenerate(cx);
+            .set_text(cx, &startup_source);
+        self.current_prompt_title = prompt_title.to_string();
+        self.update_prompt_title(cx);
+        self.ui
+            .drop_down(cx, ids!(backend_dropdown))
+            .set_selected_item(cx, self.active_backend.to_index());
+        self.create_backend_session(cx, self.active_backend);
+        self.request_rebuild(cx, true, save_loaded_source);
     }
 
     fn handle_timer(&mut self, cx: &mut Cx, event: &TimerEvent) {
         if self.live_update_timer.is_timer(event).is_some() {
-            self.regenerate(cx);
+            self.request_rebuild(cx, false, self.current_prompt.is_none());
+            self.drain_rebuild_results(cx);
+            self.drain_agent_events(cx, &Event::Signal);
+            if self.current_prompt.is_some() {
+                self.update_ai_status(cx);
+                self.ui.redraw(cx);
+            }
         }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self
+            .ui
+            .button(cx, ids!(ai_generate_button))
+            .clicked(actions)
+        {
+            self.send_ai_prompt(cx);
+        }
+        if self.ui.button(cx, ids!(ai_cancel_button)).clicked(actions) {
+            self.cancel_ai_prompt(cx);
+        }
+        if self
+            .ui
+            .text_input(cx, ids!(cad_prompt_input))
+            .returned(actions)
+            .is_some()
+        {
+            self.send_ai_prompt(cx);
+        }
+        if self
+            .ui
+            .text_input(cx, ids!(cad_prompt_input))
+            .escaped(actions)
+        {
+            self.cancel_ai_prompt(cx);
+        }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(backend_dropdown))
+            .selected(actions)
+        {
+            if let Some(backend) = BackendType::from_index(index) {
+                if backend != self.active_backend {
+                    self.create_backend_session(cx, backend);
+                }
+            }
+        }
         for action in actions {
             if matches!(action.cast(), CadCodeEditorAction::TextDidChange) {
-                self.regenerate(cx);
+                self.request_rebuild(cx, false, self.current_prompt.is_none());
             }
         }
     }
@@ -1096,7 +1936,9 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
         if self.initialized && !matches!(event, Event::Startup) {
-            self.regenerate(cx);
+            self.drain_rebuild_results(cx);
         }
+
+        self.drain_agent_events(cx, event);
     }
 }
