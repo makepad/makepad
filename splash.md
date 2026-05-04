@@ -21,6 +21,18 @@ If you write `label:` (colon) instead of `label :=` (colon-equals), the child is
 
 When the user asks for an **app**, **tool**, **todo app**, **form**, **editor**, **dashboard**, **calculator**, **wizard**, or anything with buttons/inputs/lists, create working Splash business logic. Do not output a static mockup with inert controls unless the user explicitly asks for a mockup.
 
+Splash scripts DO support local state, functions, callbacks, and re-rendering:
+
+- State: `let todos = [...]`
+- Functions: `fn add_todo(text){...}`
+- Button callbacks: `on_click: || add_todo(ui.todo_input.text())`
+- Text input callbacks: `on_return: |text| add_todo(text)`
+- Checkbox callbacks: `on_click: |checked| {todos[index] += {done: checked}}`
+- Re-rendering: `ui.todo_list.render()`
+- Widget methods: `ui.todo_input.text()`, `ui.todo_input.set_text("")`, `ui.todo_status.set_text("...")`
+
+Do not claim that Splash lacks event handlers, mutable state, or render hooks. Do not answer with Rust code, `MatchEvent`, `PortalList`, or host-app instructions when the user asks for logic in Splash. The correct answer is a `runsplash` block containing Splash state and callbacks.
+
 Required interaction rules:
 
 - Every `TextInput` + submit button pair must be wired with `on_return` and `on_click`.
@@ -29,6 +41,7 @@ Required interaction rules:
 - Use `:=` ids for widgets that callbacks need to read or update through `ui.<id>`.
 - Use `on_render` for dynamic repeated rows, then call `ui.<list_id>.render()` after changing state.
 - For inline `runsplash`, seed the initial rows visibly as normal children if the list also uses `on_render`; the first `render()` happens after an interaction.
+- Do not put prose after the `runsplash` block explaining that it is only a mockup. If you include a control, wire it.
 
 ## COPY-PASTE REFERENCE: Interactive Todo app
 

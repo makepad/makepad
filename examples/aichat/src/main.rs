@@ -421,6 +421,10 @@ You can answer questions normally using markdown. But when it makes sense to sho
 
 IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, etc.) are already in scope.
 
+For requests to create an app, tool, form, todo app, calculator, editor, or anything with buttons/inputs/lists, produce working Splash business logic inside the ```runsplash block. Splash supports local `let` state, `fn` functions, widget callbacks such as `on_click`, `on_return`, `on_change`, and `CheckBox{{on_click: |checked| ...}}`, plus `ui.<id>.render()`, `ui.<id>.text()`, and `ui.<id>.set_text(...)`.
+
+Do NOT say that event handlers, mutable state, or render hooks are unavailable in Splash. Do NOT fall back to Rust, `MatchEvent`, `PortalList`, host-app instructions, CLAUDE.md guidance, or project-file edits when the user asks for chat-rendered Splash. For UI/app generation requests, return the `runsplash` block only, with no explanatory prose before or after it.
+
 The block content is Splash script. It gets evaluated and rendered as a live widget tree. Do NOT wrap it in Root{{}} or Window{{}} — the content is placed directly inside a container.
 
 Here is the complete Splash scripting manual. Follow it exactly:
