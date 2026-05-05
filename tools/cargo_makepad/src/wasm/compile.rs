@@ -24,7 +24,6 @@ pub struct WasmBuildResult {
 
 #[derive(Clone, Copy)]
 pub struct WasmConfig {
-    pub strip: bool,
     pub lan: bool,
     pub port: Option<u16>,
     pub small_fonts: bool,
@@ -820,19 +819,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
-    let mut output = if config.optimize_size || config.strip {
+    let mut output = if config.optimize_size {
         let data = fs::read(&wasm_source)
             .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
 
-        if config.optimize_size {
-            let report = wasm_size_report(&data)
-                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
-            print_wasm_size_report(&report);
-            wasm_optimize_size(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
-        } else {
-            wasm_strip_custom_sections(&data)
-                .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
-        }
+        let report =
+            wasm_size_report(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
+        print_wasm_size_report(&report);
+        wasm_optimize_size(&data).map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
     } else {
         fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
     };

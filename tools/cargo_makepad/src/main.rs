@@ -75,9 +75,6 @@ fn show_help() {
         "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
     );
     println!(
-        "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
-    );
-    println!(
         "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
     );
     println!(

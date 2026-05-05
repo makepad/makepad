@@ -215,7 +215,7 @@ pub fn wasm_strip_debug(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
     rewrite_wasm(buf, |section| !is_debug_section(section))
 }
 
-pub fn wasm_strip_custom_sections(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
+fn wasm_strip_custom_sections(buf: &[u8]) -> Result<Vec<u8>, WasmParseError> {
     rewrite_wasm(buf, |section| !is_custom_section(section))
 }
 

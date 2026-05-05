@@ -126,7 +126,6 @@ cargo makepad wasm build -p makepad-example-splash --release --wasm-opt --strip 
 Notes:
 
 - `--strip` strips custom sections (names, producers, etc.) for smaller binaries.
-- `--strip-custom-sections` preserves the old behavior when you only want to remove custom sections.
 - `--wasm-opt` runs Binaryen `wasm-opt -Os` for IR-level optimization (optional; requires [Binaryen](https://github.com/WebAssembly/binaryen)).
 - `--brotli` compresses `.wasm` and assets with Brotli for delivery.
 - `--profile=small` uses smaller fonts and pairs well with `--strip`.

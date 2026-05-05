@@ -7,16 +7,12 @@ fn should_default_to_small_fonts(config: &WasmConfig) -> bool {
 }
 
 fn enable_strip_pipeline(config: &mut WasmConfig) {
-    config.strip = true;
     config.optimize_size = true;
 }
 
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     if let Some(opt) = v.strip_prefix("--port=") {
         config.port = Some(opt.parse::<u16>().unwrap_or(8010));
-        true
-    } else if v == "--strip-custom-sections" {
-        config.strip = true;
         true
     } else if v == "--strip" {
         enable_strip_pipeline(config);
@@ -56,7 +52,6 @@ fn strip_wasm_options(config: &mut WasmConfig, args: &[String]) -> Vec<String> {
 
 pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
     let mut config = WasmConfig {
-        strip: false,
         lan: false,
         brotli: false,
         port: None,
@@ -116,7 +111,6 @@ mod tests {
             args(&["build", "--no-threads", "-p", "app"]),
         ] {
             let mut config = WasmConfig {
-                strip: false,
                 lan: false,
                 brotli: false,
                 port: None,
@@ -145,7 +139,6 @@ mod tests {
             args(&["run", "--no-threads", "-p", "app"]),
         ] {
             let mut config = WasmConfig {
-                strip: false,
                 lan: false,
                 brotli: false,
                 port: None,
@@ -169,7 +162,6 @@ mod tests {
     #[test]
     fn profile_small_alone_keeps_full_fonts() {
         let mut config = WasmConfig {
-            strip: false,
             lan: false,
             brotli: false,
             port: None,
