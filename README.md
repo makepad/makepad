@@ -105,6 +105,10 @@ cargo makepad wasm install-toolchain
 
 ```bash
 cargo makepad wasm run -p makepad-example-splash --release
+
+OR
+
+cargo run -p cargo-makepad -- wasm run -p makepad-example-splash --release
 ```
 
 For smaller shipped wasm output, use the shipping-size optimization pass. It keeps the post-link size reduction behavior and pairs well with the existing `small` profile:

@@ -43,8 +43,7 @@ fn android_logcat_write(
 
 impl Cx {
     pub fn init_log() {
-        let mut logger = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
-        *logger = log_with_level_makepad_platform;
+        set_log_with_level(log_with_level_makepad_platform);
     }
 }
 
