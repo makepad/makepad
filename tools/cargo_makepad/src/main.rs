@@ -81,9 +81,6 @@ fn show_help() {
         "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
     );
     println!(
-        "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
-    );
-    println!(
         "       --brotli                                  Use brotli to compress the wasm file"
     );
     println!("       --bindgen                                 Enable wasm-bindgen compatibility");

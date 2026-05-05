@@ -33,10 +33,6 @@ pub struct WasmConfig {
     pub threads: bool,
     pub optimize_size: bool,
     pub wasm_opt: bool,
-    pub split: bool,
-    pub split_auto: bool,
-    pub split_functions: bool,
-    pub split_functions_threshold: usize,
     pub hot_reload: bool,
 }
 
@@ -68,13 +64,6 @@ struct WasmRebuildPlan {
     config: WasmConfig,
     args: Vec<String>,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AutoSplitOutcome {
-    NotAttempted,
-    Deferred,
-    StartupPathFallback,
-}
-
 fn format_section_counts(summary: &WasmSectionSummary) -> String {
     if summary.counts.is_empty() {
         return "none".to_string();
@@ -109,14 +98,6 @@ fn print_wasm_size_report(report: &WasmSizeReport) {
         report.custom_sections.total_bytes,
         format_section_counts(&report.custom_sections)
     );
-}
-
-fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: usize) {
-    println!("Wasm split report:");
-    println!("  primary wasm:    {} bytes", primary_bytes);
-    println!("  split data blob: {} bytes", split_bytes);
-    println!("  segment count:   {}", segments);
-    println!("  split total:     {} bytes", primary_bytes + split_bytes);
 }
 
 /// Run Binaryen wasm-opt -Os on the given wasm bytes if the tool is installed.
@@ -176,36 +157,15 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
     data.to_vec()
 }
 
-fn print_brotli_size_report(
-    wasm_bytes: usize,
-    wasm_brotli_bytes: usize,
-    split_bytes: Option<usize>,
-    split_brotli_bytes: Option<usize>,
-) {
+fn print_brotli_size_report(wasm_bytes: usize, wasm_brotli_bytes: usize) {
     println!("Brotli size report:");
     println!(
         "  wasm:            {} -> {} bytes",
         wasm_bytes, wasm_brotli_bytes
     );
-    if let (Some(split_bytes), Some(split_brotli_bytes)) = (split_bytes, split_brotli_bytes) {
-        println!(
-            "  split data blob: {} -> {} bytes",
-            split_bytes, split_brotli_bytes
-        );
-        println!(
-            "  compressed total: {} bytes",
-            wasm_brotli_bytes + split_brotli_bytes
-        );
-    }
 }
 
-pub fn generate_html(
-    wasm: &str,
-    split_data_path: Option<&str>,
-    secondary_wasm_path: Option<&str>,
-    defer_secondary_wasm: bool,
-    config: &WasmConfig,
-) -> String {
+pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
     let init = if config.bindgen {
         format!(
             "
@@ -227,27 +187,12 @@ pub fn generate_html(
             "
         )
     } else {
-        let defer_secondary = if defer_secondary_wasm {
-            ", defer_secondary_wasm: true"
-        } else {
-            ""
-        };
-        let split_options = match (split_data_path, secondary_wasm_path) {
-            (Some(data), Some(funcs)) => format!(
-                ", undefined, {{ split_data_url: '{data}', secondary_wasm_url: '{funcs}'{defer_secondary} }}"
-            ),
-            (Some(data), None) => format!(", undefined, {{ split_data_url: '{data}' }}"),
-            (None, Some(funcs)) => format!(
-                ", undefined, {{ secondary_wasm_url: '{funcs}'{defer_secondary} }}"
-            ),
-            (None, None) => String::new(),
-        };
         format!(
             "
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-                './{wasm}.wasm'{split_options}
+                './{wasm}.wasm'
             );
             "
         )
@@ -896,134 +841,12 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         output = try_wasm_opt(&output, &cwd);
     }
 
-    // `--split` implies function splitting as part of the higher-level split pipeline.
-    let split_functions_enabled = config.split || config.split_functions;
-
-    // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
     let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
-    let mut defer_secondary_wasm = false;
-    let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
-    let secondary_wasm_path = if split_functions_enabled {
-        if config.bindgen {
-            return Err(if config.split {
-                "--split is not supported together with --bindgen".to_string()
-            } else {
-                "--split-functions is not supported together with --bindgen".to_string()
-            });
-        }
-        let result = if config.split_auto && config.split {
-            let cold_result = wasm_split_functions_cold(&output).map_err(|e| {
-                format!(
-                    "Cannot auto split wasm functions {:?}: {:?}",
-                    wasm_source, e
-                )
-            })?;
-            if cold_result.split_count > 0 && cold_result.primary_wasm.len() < output.len() {
-                defer_secondary_wasm = true;
-                auto_split_outcome = AutoSplitOutcome::Deferred;
-                cold_result
-            } else {
-                let fallback = wasm_split_functions(&output, config.split_functions_threshold)
-                    .map_err(|e| {
-                        format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e)
-                    })?;
-                if fallback.split_count > 0 {
-                    auto_split_outcome = AutoSplitOutcome::StartupPathFallback;
-                }
-                fallback
-            }
-        } else {
-            wasm_split_functions(&output, config.split_functions_threshold)
-                .map_err(|e| format!("Cannot split wasm functions {:?}: {:?}", wasm_source, e))?
-        };
-        if result.split_count == 0 {
-            if config.split_auto && config.split {
-                println!(
-                    "Function split: no selectable functions found for automatic split, skipping"
-                );
-            } else {
-                println!(
-                    "Function split: no functions above threshold ({} bytes), skipping",
-                    config.split_functions_threshold
-                );
-            }
-            let _ = fs::remove_file(&secondary_wasm_dest);
-            remove_brotli_artifact(&secondary_wasm_dest);
-            None
-        } else {
-            if config.split_auto && config.split {
-                println!(
-                    "Function split: {} of {} functions split (automatic mode)",
-                    result.split_count, result.total_functions
-                );
-                match auto_split_outcome {
-                    AutoSplitOutcome::Deferred => {
-                        println!("  mode: cold-first split, secondary deferred");
-                    }
-                    AutoSplitOutcome::StartupPathFallback => {
-                        println!("  mode: automatic fallback split, secondary remains on the startup path");
-                    }
-                    AutoSplitOutcome::NotAttempted => {}
-                }
-            } else {
-                println!(
-                    "Function split: {} of {} functions split (threshold: {} bytes)",
-                    result.split_count, result.total_functions, config.split_functions_threshold
-                );
-            }
-            println!("  primary:   {} bytes", result.primary_wasm.len());
-            println!("  secondary: {} bytes", result.secondary_wasm.len());
-            output = result.primary_wasm;
-            fs::write(&secondary_wasm_dest, &result.secondary_wasm)
-                .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
-            if config.brotli {
-                brotli_compress(&secondary_wasm_dest);
-            } else {
-                remove_brotli_artifact(&secondary_wasm_dest);
-            }
-            Some(format!("./{}.secondary.wasm", build_crate))
-        }
-    } else {
-        let _ = fs::remove_file(&secondary_wasm_dest);
-        remove_brotli_artifact(&secondary_wasm_dest);
-        None
-    };
-
     let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
-    let mut split_data_bytes = None;
-    let mut split_brotli_bytes = None;
-    let split_data_path = if config.split {
-        if config.bindgen {
-            return Err("--split is not supported together with --bindgen".to_string());
-        }
-        let split = wasm_split_data_segments(&output)
-            .map_err(|_| format!("Cannot split wasm data section {:?}", wasm_source))?;
-        print_wasm_split_report(
-            split.primary_wasm.len(),
-            split.split_data.len(),
-            split.segment_count,
-        );
-        output = split.primary_wasm;
-        if split.split_data.is_empty() {
-            let _ = fs::remove_file(&split_data_dest);
-            remove_brotli_artifact(&split_data_dest);
-            None
-        } else {
-            split_data_bytes = Some(split.split_data.len());
-            fs::write(&split_data_dest, &split.split_data)
-                .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
-            if config.brotli {
-                split_brotli_bytes = Some(brotli_compress(&split_data_dest));
-            } else {
-                remove_brotli_artifact(&split_data_dest);
-            }
-            Some(format!("./{}.data.bin", build_crate))
-        }
-    } else {
-        let _ = fs::remove_file(&split_data_dest);
-        remove_brotli_artifact(&split_data_dest);
-        None
-    };
+    let _ = fs::remove_file(&secondary_wasm_dest);
+    remove_brotli_artifact(&secondary_wasm_dest);
+    let _ = fs::remove_file(&split_data_dest);
+    remove_brotli_artifact(&split_data_dest);
 
     fs::write(&wasm_dest, output)
         .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
@@ -1038,13 +861,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
     // generate html file
     let index_path = app_dir.join("index.html");
-    let html = generate_html(
-        build_crate,
-        split_data_path.as_deref(),
-        secondary_wasm_path.as_deref(),
-        defer_secondary_wasm,
-        &config,
-    );
+    let html = generate_html(build_crate, &config);
     fs::write(&index_path, &html.as_bytes())
         .map_err(|e| format!("Can't write {:?} {:?} ", index_path, e))?;
     if config.brotli {
@@ -1053,12 +870,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         remove_brotli_artifact(&index_path);
     }
     if let Some(wasm_brotli_bytes) = wasm_brotli_bytes {
-        print_brotli_size_report(
-            wasm_bytes,
-            wasm_brotli_bytes,
-            split_data_bytes,
-            split_brotli_bytes,
-        );
+        print_brotli_size_report(wasm_bytes, wasm_brotli_bytes);
     }
     println!("Created wasm package: {:?}", app_dir);
     if config.threads {

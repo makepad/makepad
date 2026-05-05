@@ -113,16 +113,10 @@ For smaller shipped wasm output, use the shipping-size optimization pass. It kee
 cargo makepad wasm build -p makepad-example-splash --profile=small --strip
 ```
 
-To split the wasm payloads, add `--split`. Bare `--split` uses an automatic cold-first policy: it first moves defer-safe cold functions into a secondary wasm so startup can begin on the primary first, and if there are no useful cold candidates it falls back to the normal function split. To override the function-splitting threshold directly:
-
-```bash
-cargo makepad wasm build -p makepad-example-splash --release --strip --split=200
-```
-
 For maximum size reduction, combine `--wasm-opt` (Binaryen IR optimization) and `--brotli` (compression). Install Binaryen for `--wasm-opt` (e.g. `brew install binaryen` or `apt install binaryen`):
 
 ```bash
-cargo makepad wasm build -p makepad-example-splash --release --wasm-opt --strip --split --brotli
+cargo makepad wasm build -p makepad-example-splash --release --wasm-opt --strip --brotli
 ```
 
 Notes:
@@ -133,11 +127,7 @@ Notes:
 - `--brotli` compresses `.wasm` and assets with Brotli for delivery.
 - `--profile=small` uses smaller fonts and pairs well with `--strip`.
 - `--no-threads` trims the web thread bridge and thread exports when threading is disabled.
-- The wasm linker packs relocations before the post-link size and split passes.
-- `--split` emits a primary wasm plus secondary payloads (`.secondary.wasm`, `.data.bin`) and implies function splitting.
-- Bare `--split` uses an automatic cold-first split policy.
-- Auto mode defers the secondary when it finds defer-safe cold functions, otherwise falls back to the normal startup-path split.
-- `--split=200` switches to an explicit function-body threshold (bytes).
+- The wasm linker packs relocations before the post-link size pass.
 
 3. Open:
 
