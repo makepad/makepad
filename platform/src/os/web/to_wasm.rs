@@ -144,6 +144,11 @@ pub struct ToWasmSignal {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmAppLifecycle {
+    pub state: u32,
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmPaintDirty {}
 
 #[derive(ToWasm)]

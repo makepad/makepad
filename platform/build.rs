@@ -3,6 +3,27 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
 
+/// Best-effort default for the macOS bundle name when MAKEPAD_BUNDLE_NAME isn't
+/// set. Cargo doesn't expose the consuming binary's package name to a
+/// dependency's build script (`CARGO_PKG_NAME` here is "makepad-platform"), so
+/// we walk up from `OUT_DIR` (which is always
+/// `<root>/target/<profile>/build/<crate>-<hash>/out`) to the directory that
+/// contains `target/` and use that directory's name. For a typical project
+/// that's the package or workspace root, which is almost always a meaningful
+/// label. Capitalize the first letter so the menu bar shows "Sample app" rather
+/// than "sample app". Returns `None` if the path doesn't have the expected shape
+/// or the directory name isn't valid UTF-8.
+fn detect_app_name(out_dir: &Path) -> Option<String> {
+    let workspace_root = out_dir.ancestors().nth(5)?;
+    let dir_name = workspace_root.file_name()?.to_str()?;
+    if dir_name.is_empty() {
+        return None;
+    }
+    let mut chars = dir_name.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().collect::<String>() + chars.as_str())
+}
+
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let path = Path::new(&out_dir)
@@ -21,16 +42,31 @@ fn main() {
     let target = env::var("TARGET").unwrap();
 
     if target_os == "macos" {
-        let command_line_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+        // The downstream app can override the bundle name shown in the macOS
+        // application menu by setting MAKEPAD_BUNDLE_NAME — typically via its
+        // `.cargo/config.toml` `[env]` section with `force = true`. macOS uses
+        // CFBundleName from this Info.plist as the first menu bar item title
+        // for unbundled `cargo run` launches, and it overrides whatever NSMenu
+        // title we pass to setMainMenu:. When the env var isn't set, we fall
+        // back to the workspace/package directory name (capitalized), which
+        // is almost always more meaningful than a hardcoded placeholder.
+        let bundle_name = env::var("MAKEPAD_BUNDLE_NAME")
+            .ok()
+            .or_else(|| detect_app_name(Path::new(&out_dir)))
+            .unwrap_or_else(|| "Makepad App".to_string());
+        let bundle_id = env::var("MAKEPAD_BUNDLE_IDENTIFIER")
+            .unwrap_or_else(|_| format!("dev.makepad.{}", bundle_name.to_lowercase().replace(' ', "-")));
+        let command_line_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.makepad.stdin-loop</string>
+    <string>{bundle_id}</string>
     <key>CFBundleName</key>
-    <string>MakepadStdinLoop</string>
+    <string>{bundle_name}</string>
     <key>CFBundleDisplayName</key>
-    <string>MakepadStdinLoop</string>
+    <string>{bundle_name}</string>
     <key>GCSupportsControllerUserInteraction</key>
     <true/>
     <key>GCSupportedGameControllers</key>
@@ -42,7 +78,8 @@ fn main() {
     </array>
 </dict>
 </plist>
-"#;
+"#
+        );
         std::fs::write(path.join("Info.plist"), command_line_plist).unwrap();
     }
 
@@ -86,6 +123,8 @@ pub static CUSTOM_ICON_ICO: &'static [u8] = {};\n",
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,use_gles_3,use_vulkan,linux_direct,quest,no_android_choreographer,ohos_sim,headless,use_unstable_unix_socket_ancillary_data_2021)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     println!("cargo:rerun-if-env-changed=MAKEPAD_PACKAGE_DIR");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_NAME");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_IDENTIFIER");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     for var in icon_vars {
         println!("cargo:rerun-if-env-changed={var}");

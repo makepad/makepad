@@ -10,7 +10,8 @@ use {
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, QuitReason, VideoSource,
+            WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -515,6 +516,7 @@ impl Cx {
 
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
+                        self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
@@ -553,7 +555,21 @@ impl Cx {
                     self.run_live_edit_if_needed("macos");
                     self.handle_networking_events();
                     self.handle_gamepad_events();
-                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
+                    // Propagate Exit from the inner Paint dispatch. The
+                    // signal handling above (Ctrl+C / SIGTERM) calls
+                    // `request_quit`, which queues a `CxOsOp::Quit`; that op
+                    // is drained by `handle_platform_ops` at the top of this
+                    // recursive call and surfaces as `EventFlow::Exit`
+                    // (after `Event::Shutdown` is dispatched). If we ignore
+                    // the return value here and fall through to
+                    // `EventFlow::Wait`, `do_callback` overwrites the just-
+                    // set Exit and the main loop blocks indefinitely on the
+                    // next NSEvent — the symptom being a Ctrl+C that runs
+                    // the user's `QuitRequested` / `Shutdown` handlers but
+                    // never actually exits.
+                    if let EventFlow::Exit = self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows) {
+                        return EventFlow::Exit;
+                    }
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
                     self.with_vm(|vm| {
@@ -570,6 +586,13 @@ impl Cx {
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
+            MacosEvent::AppQuitRequested => {
+                self.request_quit(QuitReason::App);
+                if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
+            }
             MacosEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {

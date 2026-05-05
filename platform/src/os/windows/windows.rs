@@ -324,6 +324,7 @@ impl Cx {
             }
             Win32Event::Signal => {
                 if SignalToUI::check_and_clear_ui_signal() {
+                    self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
                     self.call_event_handler(&Event::Signal);
@@ -336,7 +337,14 @@ impl Cx {
                 self.run_live_edit_if_needed("windows");
                 self.handle_networking_events();
 
-                self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
+                // The recursive Paint pass drains `platform_ops` (e.g. a `CxOsOp::Quit`
+                // pushed by `handle_termination_signal` above). Propagate its `Exit` so
+                // that Ctrl+C/SIGTERM actually terminates the process.
+                if let EventFlow::Exit =
+                    self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows)
+                {
+                    return EventFlow::Exit;
+                }
 
                 return EventFlow::Wait;
             }
