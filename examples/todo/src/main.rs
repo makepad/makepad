@@ -152,7 +152,7 @@ script_mod! {
                             width: Fill height: Fit
                             flow: Down spacing: 4
                             Label{
-                                text: "Todo"
+                                text: "Todo 123"
                                 draw_text.color: #x0f172a
                                 draw_text.text_style: theme.font_bold{font_size: theme.font_size_2}
                             }

@@ -407,7 +407,7 @@ pub fn force_unix_path_separator() {}
 fn main() {
     no_std();
     force_unix_path_separator();
-    println!("cargo:rerun-if-changed=tests");
+    println!("cargo:rerun-if-changed=build.rs");
 
     let tests = gen_tests();
     let out_dir = env::var("OUT_DIR").unwrap();
