@@ -68,4 +68,4 @@ pub fn rustup_toolchain_install() -> Result<(), String> {
     Ok(())
 }
 
-//MAKEPAD=lines RUSTFLAGS="-C codegen-units=1 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer -C opt-level=z" cargo +nightly build $1 $2 --target=wasm32-unknown-unknown --release -Z build-std=panic_abort,std
+//RUSTFLAGS="-C codegen-units=1 -C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer -C opt-level=z" cargo +nightly build $1 $2 --target=wasm32-unknown-unknown --release -Z build-std=panic_abort,std

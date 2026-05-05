@@ -627,7 +627,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
     };
-    let mut env = vec![("RUSTFLAGS", rustflags), ("MAKEPAD", "lines")];
+    let mut env = vec![("RUSTFLAGS", rustflags)];
     // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
     if profile == "small" && !config.threads {
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
