@@ -304,9 +304,6 @@ impl BuildManager {
         child_env
             .entry("RUST_BACKTRACE".to_string())
             .or_insert_with(|| "1".to_string());
-        child_env
-            .entry("MAKEPAD".to_string())
-            .or_insert_with(|| "lines".to_string());
 
         let resolved_studio_host = child_env
             .get("STUDIO_HOST")

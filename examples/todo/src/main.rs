@@ -175,7 +175,9 @@ script_mod! {
                             align: Align{y: 0.5}
 
                             todo_input := TextInput{
-                                width: Fill height: 9. * theme.space_1
+                                width: Fill height: 34
+                                padding: Inset{left: 12.0 right: 12.0 top: 8.0 bottom: 0.0}
+                                label_align: Align{y: 0.5}
                                 empty_text: "What needs to be done?"
                                 return_key_type: Done
                                 draw_bg +: {
@@ -191,9 +193,15 @@ script_mod! {
                                 }
                                 draw_text +: {
                                     color: #x0f172a
+                                    color_hover: #x0f172a
+                                    color_focus: #x0f172a
+                                    color_down: #x0f172a
                                     color_empty: #x94a3b8
                                     color_empty_hover: #x64748b
                                     color_empty_focus: #x64748b
+                                }
+                                draw_cursor +: {
+                                    color: #x0f172a
                                 }
                             }
                             add_button := Button{
