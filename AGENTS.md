@@ -6,6 +6,7 @@
 - Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
+- For UI runnable targets, do not prebuild or precheck the app from the shell before launching it in Studio. Let the Studio `RunItem` build be the single build path so Cargo fingerprints, env vars, target dirs, and flags stay identical.
 - Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
 - `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
 - Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
@@ -135,7 +136,7 @@ Use the Studio bridge runnable-item flow instead of launching UI apps directly f
 
 Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
 
-Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations. They are not a substitute for a fresh Studio re-run.
+Use direct shell cargo commands only for non-UI tasks such as library checks, tests, and file/search operations. Do not run shell `cargo check`, `cargo build`, or `cargo run` for UI runnable targets that will be launched via Studio.
 
 When those non-UI tasks are used for runtime behavior or performance measurements, prefer their release variants (`cargo run --release`, `cargo test --release`, `cargo build --release`).
 
