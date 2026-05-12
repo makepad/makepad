@@ -169,18 +169,8 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
         format!(
             "
             const {{init_env}} = await import('./makepad_wasm_bridge/wasm_bridge.js');
-            const init = (await import('./bindgen.js')).default;
-    
-            let env = {{}};
-            let set_wasm = init_env(env);
-            let module = await WebAssembly.compileStreaming(fetch('./{wasm}.wasm'))
-            let wasm = await init({{module_or_path: module}}, env);
-            set_wasm(wasm);
-
-            wasm._has_thread_support = typeof SharedArrayBuffer !== 'undefined'
-                && wasm.exports.memory.buffer instanceof SharedArrayBuffer;
-            wasm._memory = wasm.exports.memory;
-            wasm._module = module;
+            const {{init_makepad_bindgen}} = await import('./bindgen_adapter.js');
+            const wasm = await init_makepad_bindgen('./{wasm}.wasm', init_env);
             const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
             const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
             "
@@ -211,6 +201,7 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
         "
         <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
         <link rel='modulepreload' href='./bindgen.js'>
+        <link rel='modulepreload' href='./bindgen_adapter.js'>
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
         <link rel='modulepreload' href='./makepad_platform/web_gpu.js'>
         <link rel='modulepreload' href='./makepad_platform/web_runtime.js'>
@@ -491,6 +482,402 @@ pub fn cp_brotli(
     Ok(())
 }
 
+fn copy_bindgen_adapter(app_dir: &Path, brotli: bool) -> Result<(), String> {
+    mkdir(app_dir)?;
+    let adapter = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/wasm/bindgen_adapter.js");
+    cp_brotli(&adapter, &app_dir.join("bindgen_adapter.js"), false, brotli)
+}
+
+fn bindgen_worker_source(js: &str) -> String {
+    format!("import init from '../bindgen.js';\n{js}")
+}
+
+fn is_bare_env_import_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("import") {
+        return false;
+    }
+    let after_import = trimmed["import".len()..].trim_start();
+    let after_star = match after_import.strip_prefix('*') {
+        Some(rest) => rest.trim_start(),
+        None => return false,
+    };
+    let after_as = match after_star.strip_prefix("as") {
+        Some(rest) => rest.trim_start(),
+        None => return false,
+    };
+    let from_index = match after_as.find("from") {
+        Some(index) => index,
+        None => return false,
+    };
+    let source = after_as[from_index + "from".len()..].trim_start();
+    let quote = match source.chars().next() {
+        Some('"') => '"',
+        Some('\'') => '\'',
+        _ => return false,
+    };
+    let source = &source[1..];
+    let source_end = match source.find(quote) {
+        Some(index) => index,
+        None => return false,
+    };
+    &source[..source_end] == "env"
+}
+
+fn is_env_import_mapping_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let mut chars = trimmed.chars();
+    let quote = match chars.next() {
+        Some('"') => '"',
+        Some('\'') => '\'',
+        _ => return false,
+    };
+    let remainder = &trimmed[1..];
+    let remainder = match remainder.strip_prefix("env") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let remainder = match remainder.strip_prefix(quote) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    remainder.trim_start().starts_with(':')
+}
+
+fn replace_one_variant(text: &mut String, from: &str, to: &str) -> bool {
+    if text.contains(from) {
+        *text = text.replace(from, to);
+        true
+    } else {
+        false
+    }
+}
+
+fn insert_env_memory_handoff(js: &mut String) -> bool {
+    for memory_marker in BINDGEN_MEMORY_IMPORT_MARKERS {
+        if let Some(marker_idx) = js.find(memory_marker) {
+            if let Some(close_rel) = js[marker_idx..].find("};\n") {
+                let insert_at = marker_idx + close_rel + 3;
+                js.insert_str(
+                    insert_at,
+                    "if(env&&env.memory===undefined)env.memory=import0.memory;\n",
+                );
+                return true;
+            }
+            if let Some(close_rel) = js[marker_idx..].find("};\r\n") {
+                let insert_at = marker_idx + close_rel + 4;
+                js.insert_str(
+                    insert_at,
+                    "if(env&&env.memory===undefined)env.memory=import0.memory;\n",
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+const BINDGEN_MEMORY_IMPORT_MARKERS: [&str; 4] = [
+    "memory:memory||new WebAssembly.Memory(",
+    "memory: memory || new WebAssembly.Memory(",
+    "memory: memory||new WebAssembly.Memory(",
+    "memory:memory || new WebAssembly.Memory(",
+];
+
+fn has_bindgen_imported_memory(js: &str) -> bool {
+    BINDGEN_MEMORY_IMPORT_MARKERS
+        .iter()
+        .any(|marker| js.contains(marker))
+}
+
+fn patch_bindgen_env_imports(js: &str) -> Result<String, String> {
+    let mut patched = String::with_capacity(js.len());
+    let mut removed_env_imports = 0usize;
+    let mut removed_env_mappings = 0usize;
+
+    for line in js.split_inclusive('\n') {
+        if is_bare_env_import_line(line) {
+            removed_env_imports += 1;
+            continue;
+        }
+        if is_env_import_mapping_line(line) {
+            removed_env_mappings += 1;
+            continue;
+        }
+
+        patched.push_str(line);
+    }
+
+    if removed_env_imports == 0 && removed_env_mappings == 0 {
+        return Ok(js.to_string());
+    }
+    let inserted_env_property = replace_one_variant(
+        &mut patched,
+        "return{\n__proto__:null,\n",
+        "return{\n__proto__:null,\nenv,\n",
+    ) || replace_one_variant(
+        &mut patched,
+        "return {\n__proto__:null,\n",
+        "return {\n__proto__:null,\nenv,\n",
+    ) || replace_one_variant(
+        &mut patched,
+        "    return {\n        __proto__: null,\n",
+        "    return {\n        __proto__: null,\n        env,\n",
+    );
+    if removed_env_imports == 0 || removed_env_mappings == 0 || !inserted_env_property {
+        return Err(format!(
+            "expected wasm-bindgen env glue in generated bindgen.js, but the layout changed (removed_env_imports={removed_env_imports}, removed_env_mappings={removed_env_mappings}, inserted_env_property={inserted_env_property})"
+        ));
+    }
+
+    let imports_memory = has_bindgen_imported_memory(&patched);
+    if imports_memory && !insert_env_memory_handoff(&mut patched) {
+        return Err(
+            "failed to insert env.memory handoff into __wbg_get_imports in generated bindgen.js"
+                .to_string(),
+        );
+    }
+
+    let mut patched = patched;
+    let rewrote_get_imports_signature = replace_one_variant(
+        &mut patched,
+        "function __wbg_get_imports(memory){",
+        "function __wbg_get_imports(memory, env){",
+    );
+    let rewrote_get_imports_signature_spaced = replace_one_variant(
+        &mut patched,
+        "function __wbg_get_imports(memory) {",
+        "function __wbg_get_imports(memory, env) {",
+    );
+    let rewrote_get_imports_signature_no_memory = replace_one_variant(
+        &mut patched,
+        "function __wbg_get_imports(){",
+        "function __wbg_get_imports(env){",
+    );
+    let rewrote_get_imports_signature_no_memory_spaced = replace_one_variant(
+        &mut patched,
+        "function __wbg_get_imports() {",
+        "function __wbg_get_imports(env) {",
+    );
+    let rewrote_init_sync_signature = replace_one_variant(
+        &mut patched,
+        "function initSync(module,memory){",
+        "function initSync(module,memory,env){",
+    );
+    let rewrote_init_sync_signature_spaced = replace_one_variant(
+        &mut patched,
+        "function initSync(module, memory){",
+        "function initSync(module, memory, env){",
+    );
+    let rewrote_init_sync_signature_spaced_braced = replace_one_variant(
+        &mut patched,
+        "function initSync(module,memory) {",
+        "function initSync(module,memory,env) {",
+    );
+    let rewrote_init_sync_signature_spaced_braced_with_space = replace_one_variant(
+        &mut patched,
+        "function initSync(module, memory) {",
+        "function initSync(module, memory, env) {",
+    );
+    let rewrote_init_sync_signature_no_memory = replace_one_variant(
+        &mut patched,
+        "function initSync(module){",
+        "function initSync(module,env){",
+    );
+    let rewrote_init_sync_signature_no_memory_spaced = replace_one_variant(
+        &mut patched,
+        "function initSync(module) {",
+        "function initSync(module, env) {",
+    );
+    let rewrote_async_init_signature = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path,memory){",
+        "async function __wbg_init(module_or_path,env){",
+    );
+    let rewrote_async_init_signature_spaced = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path, memory){",
+        "async function __wbg_init(module_or_path, env){",
+    );
+    let rewrote_async_init_signature_spaced_braced = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path,memory) {",
+        "async function __wbg_init(module_or_path,env) {",
+    );
+    let rewrote_async_init_signature_spaced_braced_with_space = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path, memory) {",
+        "async function __wbg_init(module_or_path, env) {",
+    );
+    let rewrote_async_init_signature_no_memory = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path){",
+        "async function __wbg_init(module_or_path,env){",
+    );
+    let rewrote_async_init_signature_no_memory_spaced = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path) {",
+        "async function __wbg_init(module_or_path, env) {",
+    );
+    let rewrote_async_init_memory_decl = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path,env){\nif(wasm!==undefined)return wasm;\nlet thread_stack_size",
+        "async function __wbg_init(module_or_path,env){\nif(wasm!==undefined)return wasm;\nlet memory;\nlet thread_stack_size",
+    );
+    let rewrote_async_init_memory_decl_spaced = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path, env) {\n    if (wasm !== undefined) return wasm;\n\n    let thread_stack_size",
+        "async function __wbg_init(module_or_path, env) {\n    if (wasm !== undefined) return wasm;\n\n    let memory;\n    let thread_stack_size",
+    );
+    let rewrote_async_init_memory_decl_spaced_no_blank = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path, env) {\n    if (wasm !== undefined) return wasm;\n    let thread_stack_size",
+        "async function __wbg_init(module_or_path, env) {\n    if (wasm !== undefined) return wasm;\n    let memory;\n    let thread_stack_size",
+    );
+    let rewrote_async_init_memory_decl_spaced_unindented_if = replace_one_variant(
+        &mut patched,
+        "async function __wbg_init(module_or_path, env) {\nif (wasm !== undefined) return wasm;\n\n    let thread_stack_size",
+        "async function __wbg_init(module_or_path, env) {\nif (wasm !== undefined) return wasm;\n\n    let memory;\n    let thread_stack_size",
+    );
+    let rewrote_imports_call = replace_one_variant(
+        &mut patched,
+        "const imports=__wbg_get_imports(memory);",
+        "const imports=__wbg_get_imports(memory, env);",
+    );
+    let rewrote_imports_call_spaced = replace_one_variant(
+        &mut patched,
+        "const imports = __wbg_get_imports(memory);",
+        "const imports = __wbg_get_imports(memory, env);",
+    );
+    let rewrote_imports_call_no_memory = replace_one_variant(
+        &mut patched,
+        "const imports=__wbg_get_imports();",
+        "const imports=__wbg_get_imports(env);",
+    );
+    let rewrote_imports_call_no_memory_spaced = replace_one_variant(
+        &mut patched,
+        "const imports = __wbg_get_imports();",
+        "const imports = __wbg_get_imports(env);",
+    );
+
+    if !(rewrote_get_imports_signature
+        || rewrote_get_imports_signature_spaced
+        || rewrote_get_imports_signature_no_memory
+        || rewrote_get_imports_signature_no_memory_spaced
+        || rewrote_init_sync_signature
+        || rewrote_init_sync_signature_spaced
+        || rewrote_init_sync_signature_spaced_braced
+        || rewrote_init_sync_signature_spaced_braced_with_space
+        || rewrote_init_sync_signature_no_memory
+        || rewrote_init_sync_signature_no_memory_spaced
+        || rewrote_async_init_signature
+        || rewrote_async_init_signature_spaced
+        || rewrote_async_init_signature_spaced_braced
+        || rewrote_async_init_signature_spaced_braced_with_space
+        || rewrote_async_init_signature_no_memory
+        || rewrote_async_init_signature_no_memory_spaced
+        || rewrote_async_init_memory_decl
+        || rewrote_async_init_memory_decl_spaced
+        || rewrote_async_init_memory_decl_spaced_no_blank
+        || rewrote_async_init_memory_decl_spaced_unindented_if
+        || rewrote_imports_call
+        || rewrote_imports_call_spaced
+        || rewrote_imports_call_no_memory
+        || rewrote_imports_call_no_memory_spaced)
+    {
+        return Err(
+            "expected wasm-bindgen init/import call sites in generated bindgen.js, but none matched the patch pattern"
+                .to_string(),
+        );
+    }
+    if imports_memory && !(rewrote_get_imports_signature || rewrote_get_imports_signature_spaced) {
+        return Err(
+            "failed to rewrite __wbg_get_imports(memory) signature in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if imports_memory && !(rewrote_init_sync_signature
+        || rewrote_init_sync_signature_spaced
+        || rewrote_init_sync_signature_spaced_braced
+        || rewrote_init_sync_signature_spaced_braced_with_space)
+    {
+        return Err(
+            "failed to rewrite initSync(module, memory) signature in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if imports_memory && !(rewrote_async_init_signature
+        || rewrote_async_init_signature_spaced
+        || rewrote_async_init_signature_spaced_braced
+        || rewrote_async_init_signature_spaced_braced_with_space)
+    {
+        return Err(
+            "failed to rewrite __wbg_init(module_or_path, memory) signature in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if imports_memory && !(rewrote_async_init_memory_decl
+        || rewrote_async_init_memory_decl_spaced
+        || rewrote_async_init_memory_decl_spaced_no_blank
+        || rewrote_async_init_memory_decl_spaced_unindented_if)
+    {
+        return Err(
+            "failed to insert local memory declaration into __wbg_init in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if imports_memory && !(rewrote_imports_call || rewrote_imports_call_spaced) {
+        return Err(
+            "failed to rewrite __wbg_get_imports(memory) call sites in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if !imports_memory
+        && !(rewrote_get_imports_signature_no_memory
+            || rewrote_get_imports_signature_no_memory_spaced)
+    {
+        return Err(
+            "failed to rewrite __wbg_get_imports() signature in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if !imports_memory
+        && !(rewrote_init_sync_signature_no_memory
+            || rewrote_init_sync_signature_no_memory_spaced)
+    {
+        return Err(
+            "failed to rewrite initSync(module) signature in generated bindgen.js".to_string(),
+        );
+    }
+    if !imports_memory
+        && !(rewrote_async_init_signature_no_memory
+            || rewrote_async_init_signature_no_memory_spaced)
+    {
+        return Err(
+            "failed to rewrite __wbg_init(module_or_path) signature in generated bindgen.js"
+                .to_string(),
+        );
+    }
+    if !imports_memory
+        && !(rewrote_imports_call_no_memory || rewrote_imports_call_no_memory_spaced)
+    {
+        return Err(
+            "failed to rewrite __wbg_get_imports() call sites in generated bindgen.js".to_string(),
+        );
+    }
+
+    if patched.contains("from\"env\"") || patched.contains("from 'env'") || patched.contains("from\"env'") {
+        return Err("failed to remove bare env imports from generated bindgen.js".to_string());
+    }
+    if patched.contains("\"env\":import") || patched.contains("'env':import") || patched.contains("\"env\": import") || patched.contains("'env': import") {
+        return Err("failed to remove env import alias mappings from generated bindgen.js".to_string());
+    }
+
+    Ok(patched)
+}
+
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
 const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
@@ -591,6 +978,10 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
 
+    if config.bindgen {
+        copy_bindgen_adapter(&app_dir, config.brotli)?;
+    }
+
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
@@ -672,8 +1063,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     .create(true)
                     .open(&tmp)
                     .unwrap();
-                file.write(format!("import init from '../bindgen.js';\n{js}").as_bytes())
-                    .unwrap();
+                file.write(bindgen_worker_source(&js).as_bytes()).unwrap();
                 cp_brotli(
                     &tmp,
                     &app_dir.join("makepad_platform/web_worker.js"),
@@ -762,55 +1152,18 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             ],
         )?;
         let jsfile = build_dir.join("bindgen.js");
-        let patched = std::fs::read_to_string(&jsfile)
-            .map_err(|e| format!("Unable to find wasm-bidngen generated file {e:?}"))?
-            .replace("import * as __wbg_star0 from 'env';", "")
-            .replace("imports['env'] = __wbg_star0;", "")
-            .replace("return wasm;\n}", "return instance;\n}")
-            .replace(
-                "__wbg_init(module_or_path, memory) {",
-                "__wbg_init(module_or_path, env) {let memory;",
-            )
-            .replace(
-                "__wbg_init(module_or_path) {",
-                "__wbg_init(module_or_path, env) {let memory;",
-            )
-            .replace(
-                "imports = __wbg_get_imports();",
-                "imports = __wbg_get_imports(); imports.env = env;",
-            )
-            .replace(
-                "const imports=__wbg_get_imports(memory);",
-                "const imports=__wbg_get_imports(memory);imports.env=env;",
-            )
-            .replace(
-                "const imports = __wbg_get_imports(memory);",
-                "const imports = __wbg_get_imports(memory); imports.env = env;",
-            );
-        let patched = patched
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                let is_env_import = (trimmed.starts_with("import * as __wbg_star")
-                    || trimmed.starts_with("import*as import")
-                    || trimmed.starts_with("import * as import"))
-                    && (trimmed.contains("from 'env'")
-                        || trimmed.contains("from\"env\"")
-                        || trimmed.contains("from \"env\""));
-                let is_env_mapping = (trimmed.starts_with("\"env\":")
-                    || trimmed.starts_with("'env':"))
-                    && trimmed.contains("import");
-                !is_env_import && !is_env_mapping
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&jsfile)
-            .unwrap()
-            .write(patched.as_bytes())
-            .unwrap();
+        if !jsfile.exists() {
+            return Err(format!(
+                "Unable to find wasm-bindgen generated file {:?}",
+                jsfile
+            ));
+        }
+        let js = fs::read_to_string(&jsfile)
+            .map_err(|e| format!("Unable to read wasm-bindgen generated file {:?}: {e}", jsfile))?;
+        let patched_js = patch_bindgen_env_imports(&js)
+            .map_err(|e| format!("Unable to patch wasm-bindgen generated file {:?}: {e}", jsfile))?;
+        fs::write(&jsfile, patched_js)
+            .map_err(|e| format!("Unable to rewrite wasm-bindgen generated file {:?}: {e}", jsfile))?;
         cp_brotli(&jsfile, &app_dir.join("bindgen.js"), false, config.brotli)?;
 
         build_dir.join("bindgen_bg.wasm")
@@ -1921,6 +2274,185 @@ fn client_accepts_brotli(header: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn copy_bindgen_adapter_emits_adapter_file() {
+        let unique = format!(
+            "cargo-makepad-bindgen-adapter-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+        );
+        let temp_dir = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let _guard = TempDirGuard {
+            path: temp_dir.clone(),
+        };
+
+        copy_bindgen_adapter(&temp_dir, false).unwrap();
+
+        let adapter_path = temp_dir.join("bindgen_adapter.js");
+        assert!(adapter_path.exists());
+        let adapter = fs::read_to_string(&adapter_path).unwrap();
+        assert!(adapter.contains("init_makepad_bindgen"));
+    }
+
+    #[test]
+    fn bindgen_worker_source_preserves_prefix_and_worker_body() {
+        let worker = bindgen_worker_source("self.onmessage = () => {};\n");
+
+        assert!(worker.starts_with("import init from '../bindgen.js';\n"));
+        assert!(worker.contains("self.onmessage = () => {};\n"));
+        assert!(!worker.contains("bindgen_adapter.js"));
+    }
+
+    #[test]
+    fn patch_bindgen_env_imports_rewrites_minified_glue() {
+        let input = r#"import*as import1 from"env"
+import*as import2 from"env"
+function __wbg_get_imports(memory){
+const import0={
+__proto__:null,
+"./bindgen_bg.js":import0,
+"env":import1,
+"env":import2,
+memory:memory||new WebAssembly.Memory({initial:36,maximum:32768,shared:true}),
+};
+return{
+__proto__:null,
+"./bindgen_bg.js":import0,
+"env":import1,
+"env":import2,
+};
+}
+function initSync(module,memory){
+const imports=__wbg_get_imports(memory);
+}
+async function __wbg_init(module_or_path,memory){
+if(wasm!==undefined)return wasm;
+let thread_stack_size
+const imports=__wbg_get_imports(memory);
+}
+"#;
+
+        let patched = patch_bindgen_env_imports(input).unwrap();
+
+        assert!(!patched.contains("from\"env\""));
+        assert!(!patched.contains("\"env\":import1"));
+        assert!(!patched.contains("\"env\":import2"));
+        assert!(patched.contains("__proto__:null,\nenv,\n\"./bindgen_bg.js\":import0,"));
+        assert!(patched.contains("function __wbg_get_imports(memory, env){"));
+        assert!(patched.contains("function initSync(module,memory,env){"));
+        assert!(!patched.contains("function initSync(module,memory,env){\nlet memory;"));
+        assert!(patched.contains("async function __wbg_init(module_or_path,env){"));
+        assert!(patched.contains("if(wasm!==undefined)return wasm;\nlet memory;\nlet thread_stack_size"));
+        assert!(patched.contains("const imports=__wbg_get_imports(memory, env);"));
+        assert!(patched.contains("if(env&&env.memory===undefined)env.memory=import0.memory;"));
+        assert!(patched.contains("\"./bindgen_bg.js\":import0,"));
+    }
+
+    #[test]
+    fn patch_bindgen_env_imports_rewrites_spaced_glue() {
+        let input = r#"import * as import1 from "env"
+import * as import2 from 'env'
+function __wbg_get_imports(memory) {
+const import0 = {
+__proto__:null,
+"./bindgen_bg.js": import0,
+"env": import1,
+'env': import2,
+memory: memory || new WebAssembly.Memory({ initial: 36, maximum: 32768, shared: true }),
+};
+return {
+__proto__:null,
+"./bindgen_bg.js": import0,
+"env": import1,
+'env': import2,
+};
+}
+function initSync(module, memory) {
+const imports = __wbg_get_imports(memory);
+}
+async function __wbg_init(module_or_path, memory) {
+if (wasm !== undefined) return wasm;
+
+    let thread_stack_size
+const imports = __wbg_get_imports(memory);
+}
+"#;
+
+        let patched = patch_bindgen_env_imports(input).unwrap();
+
+        assert!(!patched.contains("from \"env\""));
+        assert!(!patched.contains("from 'env'"));
+        assert!(!patched.contains("\"env\": import1"));
+        assert!(!patched.contains("'env': import2"));
+        assert!(patched.contains("__proto__:null,\nenv,\n\"./bindgen_bg.js\": import0,"));
+        assert!(patched.contains("function __wbg_get_imports(memory, env) {"));
+        assert!(patched.contains("function initSync(module, memory, env) {"));
+        assert!(!patched.contains("function initSync(module, memory, env) {\n    let memory;"));
+        assert!(patched.contains("async function __wbg_init(module_or_path, env) {"));
+        assert!(patched.contains("if (wasm !== undefined) return wasm;\n\n    let memory;\n    let thread_stack_size"));
+        assert!(patched.contains("const imports = __wbg_get_imports(memory, env);"));
+        assert!(patched.contains("if(env&&env.memory===undefined)env.memory=import0.memory;"));
+        assert!(patched.contains("\"./bindgen_bg.js\": import0,"));
+    }
+
+    #[test]
+    fn patch_bindgen_env_imports_rewrites_single_threaded_glue() {
+        let input = r#"import * as import1 from "env"
+import * as import2 from "env"
+function __wbg_get_imports() {
+    const import0 = {
+        __proto__: null,
+        __wbindgen_init_externref_table: function() {},
+    };
+    return {
+        __proto__: null,
+        "./bindgen_bg.js": import0,
+        "env": import1,
+        "env": import2,
+    };
+}
+function initSync(module) {
+    const imports = __wbg_get_imports();
+}
+async function __wbg_init(module_or_path) {
+    if (wasm !== undefined) return wasm;
+    const imports = __wbg_get_imports();
+}
+"#;
+
+        let patched = patch_bindgen_env_imports(input).unwrap();
+
+        assert!(!patched.contains("from \"env\""));
+        assert!(!patched.contains("\"env\": import1"));
+        assert!(!patched.contains("\"env\": import2"));
+        assert!(patched.contains("function __wbg_get_imports(env) {"));
+        assert!(patched.contains("function initSync(module, env) {"));
+        assert!(patched.contains("async function __wbg_init(module_or_path, env) {"));
+        assert!(patched.contains("const imports = __wbg_get_imports(env);"));
+        assert!(!patched.contains("let memory;"));
+        assert!(!patched.contains("env.memory=import0.memory"));
+    }
 
     #[test]
     fn script_mod_extraction_ignores_non_code_segments() {

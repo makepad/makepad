@@ -1,6 +1,7 @@
 mod compile;
 mod sdk;
-use compile::WasmConfig;
+#[allow(unused_imports)]
+pub use compile::{generate_html, WasmConfig};
 
 fn should_default_to_small_fonts(config: &WasmConfig) -> bool {
     config.optimize_size || config.brotli || !config.threads
@@ -50,7 +51,7 @@ fn strip_wasm_options(config: &mut WasmConfig, args: &[String]) -> Vec<String> {
     out
 }
 
-pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
+pub(crate) fn handle_wasm(mut args: &[String]) -> Result<(), String> {
     let mut config = WasmConfig {
         lan: false,
         brotli: false,

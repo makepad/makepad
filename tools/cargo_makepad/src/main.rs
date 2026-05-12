@@ -80,7 +80,9 @@ fn show_help() {
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
     );
-    println!("       --bindgen                                 Enable wasm-bindgen compatibility");
+    println!(
+        "       --bindgen                                 Generate wasm-bindgen glue for browser crate compatibility"
+    );
     println!(
         "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)"
     );

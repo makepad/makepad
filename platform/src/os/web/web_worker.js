@@ -357,9 +357,11 @@ onmessage = async function (e) {
             }
         });
     };
+    // Secondary workers use wasm-bindgen's generated init directly; the main
+    // thread adapter owns Makepad env setup before thread creation.
     if (thread_info.wasm_bindgen) {
-        let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
-        await doit(inner_wasm);
+        const exports = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
+        await doit({ exports });
     } else {
         WebAssembly.instantiate(thread_info.module, { env }).then(doit, error => {
             console.error("Cannot instantiate wasm" + error);
