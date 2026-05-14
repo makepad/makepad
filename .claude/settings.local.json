@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(agent-spec parse *)",
+      "Bash(agent-spec lint *)"
+    ]
+  }
+}

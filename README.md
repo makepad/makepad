@@ -158,7 +158,7 @@ cargo run -p cargo-makepad --release -- android --target=all toolchain-install
 2. Run an example:
 
 ```bash
-cargo run -p cargo-makepad --release -- android run -p makepad-example-ironfish
+cargo run -p cargo-makepad --release -- android run -p makepad-example-pdf
 ```
 
 ## Notes

@@ -1,0 +1,28 @@
+[package]
+name = "makepad-gif"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.62"
+authors = ["The image-rs Developers"]
+description = "Vendored pure-Rust GIF decoder for Makepad"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/image-rs/image-gif"
+
+[features]
+color_quant = ["dep:color_quant"]
+default = ["raii_no_panic", "std"]
+raii_no_panic = []
+std = []
+
+[lib]
+name = "makepad_gif"
+path = "src/lib.rs"
+
+[dependencies.color_quant]
+version = "1.1"
+optional = true
+path = "color_quant"
+
+[dependencies.weezl]
+version = "0.1.12"
+path = "weezl"

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-example-audio-playback-decode-probe"
+version = "1.0.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }

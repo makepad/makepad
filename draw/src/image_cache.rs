@@ -1,4 +1,5 @@
 use crate::makepad_platform::*;
+use makepad_gif::{ColorOutput, DecodeOptions, DisposalMethod};
 use makepad_webp::WebPDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+pub use makepad_gif::DecodingError as GifDecodeErrors;
 pub use makepad_webp::DecodingError as WebpDecodeErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 pub use makepad_zune_png::error::PngDecodeErrors;
@@ -233,6 +235,110 @@ impl ImageBuffer {
         Self::new(&buf, width as usize, height as usize)
     }
 
+    pub fn from_gif(data: &[u8]) -> Result<Self, ImageError> {
+        let mut options = DecodeOptions::new();
+        options.set_color_output(ColorOutput::RGBA);
+        let mut decoder = options
+            .read_info(std::io::Cursor::new(data))
+            .map_err(ImageError::GifDecode)?;
+        let width = decoder.width() as usize;
+        let height = decoder.height() as usize;
+        let mut frames = Vec::new();
+        let mut canvas = vec![0u8; width * height * 4];
+
+        while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
+            let restore = (frame.dispose == DisposalMethod::Previous).then(|| canvas.clone());
+            let frame_left = frame.left as usize;
+            let frame_top = frame.top as usize;
+            let frame_width = frame.width as usize;
+            let frame_height = frame.height as usize;
+            for y in 0..frame_height {
+                let dst_y = frame_top + y;
+                if dst_y >= height {
+                    continue;
+                }
+                for x in 0..frame_width {
+                    let dst_x = frame_left + x;
+                    if dst_x >= width {
+                        continue;
+                    }
+                    let src = (y * frame_width + x) * 4;
+                    let dst = (dst_y * width + dst_x) * 4;
+                    let rgba = &frame.buffer[src..src + 4];
+                    if rgba[3] != 0 {
+                        canvas[dst..dst + 4].copy_from_slice(rgba);
+                    }
+                }
+            }
+
+            frames.push(canvas.clone());
+
+            match frame.dispose {
+                DisposalMethod::Background => {
+                    for y in 0..frame_height {
+                        let dst_y = frame_top + y;
+                        if dst_y >= height {
+                            continue;
+                        }
+                        for x in 0..frame_width {
+                            let dst_x = frame_left + x;
+                            if dst_x >= width {
+                                continue;
+                            }
+                            let dst = (dst_y * width + dst_x) * 4;
+                            canvas[dst..dst + 4].fill(0);
+                        }
+                    }
+                }
+                DisposalMethod::Previous => {
+                    if let Some(restore) = restore {
+                        canvas = restore;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if frames.len() <= 1 {
+            let rgba = frames.first().map(Vec::as_slice).unwrap_or(&canvas);
+            return Self::new(rgba, width, height);
+        }
+
+        let fits_horizontal = Cx::max_texture_width() / width;
+        let total_width = fits_horizontal * width;
+        let total_height = ((frames.len() / fits_horizontal) + 1) * height;
+        let mut final_buffer = ImageBuffer::default();
+        final_buffer.data.resize(total_width * total_height, 0);
+        final_buffer.width = total_width;
+        final_buffer.height = total_height;
+        final_buffer.animation = Some(TextureAnimation {
+            width,
+            height,
+            num_frames: frames.len(),
+        });
+        let mut cx = 0;
+        let mut cy = 0;
+        for frame in frames {
+            for y in 0..height {
+                for x in 0..width {
+                    let src = (y * width + x) * 4;
+                    let r = frame[src];
+                    let g = frame[src + 1];
+                    let b = frame[src + 2];
+                    let a = frame[src + 3];
+                    final_buffer.data[(y + cy) * total_width + (x + cx)] =
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                }
+            }
+            cx += width;
+            if cx >= total_width {
+                cy += height;
+                cx = 0;
+            }
+        }
+        Ok(final_buffer)
+    }
+
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
         let mut decoder = JpegDecoder::new(cursor);
@@ -291,6 +397,7 @@ pub enum ImageError {
     JpgDecode(JpgDecodeErrors),
     PathNotFound(PathBuf),
     PngDecode(PngDecodeErrors),
+    GifDecode(GifDecodeErrors),
     WebpDecode(WebpDecodeErrors),
     UnsupportedFormat,
     Http(String),
@@ -356,6 +463,15 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
         Some("jpg")
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         Some("webp")
+    } else if data.len() >= 6
+        && data[0] == 0x47
+        && data[1] == 0x49
+        && data[2] == 0x46
+        && data[3] == 0x38
+        && (data[4] == 0x37 || data[4] == 0x39)
+        && data[5] == 0x61
+    {
+        Some("gif")
     } else {
         None
     }
@@ -377,6 +493,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
         Some("webp") => Some("webp"),
+        Some("gif") => Some("gif"),
         _ => None,
     }
 }
@@ -388,6 +505,7 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
         "jpg" => ImageBuffer::from_jpg(data),
         "png" => ImageBuffer::from_png(data),
         "webp" => ImageBuffer::from_webp(data),
+        "gif" => ImageBuffer::from_gif(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -423,6 +541,21 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
             let (width, height) = decoder.dimensions();
             Ok((width as usize, height as usize))
         }
+        "gif" => {
+            let image = ImageBuffer::from_gif(data)?;
+            Ok((
+                image
+                    .animation
+                    .as_ref()
+                    .map(|a| a.width)
+                    .unwrap_or(image.width),
+                image
+                    .animation
+                    .as_ref()
+                    .map(|a| a.height)
+                    .unwrap_or(image.height),
+            ))
+        }
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -430,6 +563,125 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
 fn ensure_image_cache_inner(cx: &mut Cx) {
     if !cx.has_global::<ImageCache>() {
         cx.set_global(ImageCache::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_gif::{Encoder, Frame};
+    use std::borrow::Cow;
+
+    fn single_frame_gif() -> Vec<u8> {
+        let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];
+        let pixels = [0, 1, 1, 0];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            let mut frame = Frame::default();
+            frame.width = 2;
+            frame.height = 2;
+            frame.buffer = Cow::Borrowed(&pixels);
+            encoder.write_frame(&frame).unwrap();
+        }
+        data
+    }
+
+    fn animated_gif() -> Vec<u8> {
+        let palette = [
+            0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff,
+        ];
+        let frames = [[0, 1, 1, 0], [1, 2, 2, 1], [2, 3, 3, 2], [3, 0, 0, 3]];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            for pixels in frames {
+                let mut frame = Frame::default();
+                frame.width = 2;
+                frame.height = 2;
+                frame.buffer = Cow::Borrowed(&pixels);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn test_detect_image_format_recognises_gif89a() {
+        assert_eq!(detect_image_format(b"GIF89a"), Some("gif"));
+    }
+
+    #[test]
+    fn test_detect_image_format_recognises_gif87a() {
+        assert_eq!(detect_image_format(b"GIF87a"), Some("gif"));
+    }
+
+    #[test]
+    fn test_detect_image_format_still_recognises_png_after_gif_branch() {
+        assert_eq!(detect_image_format(b"\x89PNG\r\n\x1a\n"), Some("png"));
+    }
+
+    #[test]
+    fn test_detect_image_format_from_path_and_data_falls_back_to_gif_extension() {
+        assert_eq!(
+            detect_image_format_from_path_and_data(Path::new("sticker.gif"), &[]),
+            Some("gif")
+        );
+    }
+
+    #[test]
+    fn test_from_gif_decodes_single_frame() {
+        let image = ImageBuffer::from_gif(&single_frame_gif()).unwrap();
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 2);
+        assert!(image.animation.is_none());
+    }
+
+    #[test]
+    fn test_from_gif_packs_animated_frames_into_atlas() {
+        let image = ImageBuffer::from_gif(&animated_gif()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert_eq!(animation.width, 2);
+        assert_eq!(animation.height, 2);
+        assert_eq!(animation.num_frames, 4);
+        assert!(image.width >= 2 * 4);
+        assert!(image.height >= 2);
+    }
+
+    #[test]
+    fn test_from_gif_rejects_truncated_data() {
+        assert!(matches!(
+            ImageBuffer::from_gif(&[0x47, 0x49, 0x46, 0x38]),
+            Err(ImageError::GifDecode(_))
+        ));
+    }
+
+    #[test]
+    fn test_decode_image_buffer_rejects_random_bytes_as_unsupported() {
+        assert!(matches!(
+            decode_image_buffer(Path::new("sticker"), &[0; 16]),
+            Err(ImageError::UnsupportedFormat)
+        ));
+    }
+
+    #[test]
+    fn test_makepad_gif_is_only_a_dependency_of_makepad_draw() {
+        let lock_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("Cargo.lock");
+        let lock = std::fs::read_to_string(lock_path).unwrap();
+        let consumers: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|block| block.contains("\"makepad-gif\""))
+            .filter_map(|block| {
+                block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
+            })
+            .filter(|name| *name != "makepad-gif")
+            .collect();
+        assert_eq!(consumers, ["makepad-draw"]);
     }
 }
 
