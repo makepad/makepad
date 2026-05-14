@@ -26,7 +26,6 @@ workspace.members = [
     "examples/camera",
     "examples/windows_blur",
     "examples/floating_panel",
-    "examples/audio_playback_decode_probe",
     "examples/xr",
     "examples/cad",
     "examples/hello_world",
