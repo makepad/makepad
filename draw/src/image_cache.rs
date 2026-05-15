@@ -160,6 +160,7 @@ impl ImageBuffer {
             width,
             height,
             num_frames: actl_info.num_frames as usize,
+            frame_delays: Vec::new(),
         });
         let mut previous_frame = None;
         while decoder.more_frames() {
@@ -244,9 +245,15 @@ impl ImageBuffer {
         let width = decoder.width() as usize;
         let height = decoder.height() as usize;
         let mut frames = Vec::new();
+        let mut frame_delays = Vec::new();
         let mut canvas = vec![0u8; width * height * 4];
 
         while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
+            let delay = if frame.delay == 0 {
+                0.1
+            } else {
+                f64::from(frame.delay) * 0.01
+            };
             let restore = (frame.dispose == DisposalMethod::Previous).then(|| canvas.clone());
             let frame_left = frame.left as usize;
             let frame_top = frame.top as usize;
@@ -272,6 +279,7 @@ impl ImageBuffer {
             }
 
             frames.push(canvas.clone());
+            frame_delays.push(delay);
 
             match frame.dispose {
                 DisposalMethod::Background => {
@@ -315,6 +323,7 @@ impl ImageBuffer {
             width,
             height,
             num_frames: frames.len(),
+            frame_delays,
         });
         let mut cx = 0;
         let mut cy = 0;
@@ -599,11 +608,131 @@ mod tests {
                 let mut frame = Frame::default();
                 frame.width = 2;
                 frame.height = 2;
+                frame.delay = 5;
                 frame.buffer = Cow::Borrowed(&pixels);
                 encoder.write_frame(&frame).unwrap();
             }
         }
         data
+    }
+
+    fn zero_delay_gif() -> Vec<u8> {
+        let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];
+        let frames = [[0, 1, 1, 0], [1, 0, 0, 1]];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            for pixels in frames {
+                let mut frame = Frame::default();
+                frame.width = 2;
+                frame.height = 2;
+                frame.delay = 0;
+                frame.buffer = Cow::Borrowed(&pixels);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        data
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffff;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn adler32(bytes: &[u8]) -> u32 {
+        let mut a = 1u32;
+        let mut b = 0u32;
+        for byte in bytes {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
+        let len = bytes.len() as u16;
+        let mut out = vec![0x78, 0x01, 0x01];
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(&adler32(bytes).to_be_bytes());
+        out
+    }
+
+    fn push_chunk(png: &mut Vec<u8>, name: &[u8; 4], payload: &[u8]) {
+        png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        png.extend_from_slice(name);
+        png.extend_from_slice(payload);
+        let mut crc_data = Vec::with_capacity(name.len() + payload.len());
+        crc_data.extend_from_slice(name);
+        crc_data.extend_from_slice(payload);
+        png.extend_from_slice(&crc32(&crc_data).to_be_bytes());
+    }
+
+    fn rgba_frame(color: [u8; 4]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for _ in 0..2 {
+            data.push(0);
+            data.extend_from_slice(&color);
+            data.extend_from_slice(&color);
+        }
+        data
+    }
+
+    fn fctl(seq: u32, delay_num: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&seq.to_be_bytes());
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&delay_num.to_be_bytes());
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
+    fn animated_png() -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        push_chunk(&mut png, b"IHDR", &ihdr);
+
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&4u32.to_be_bytes());
+        actl.extend_from_slice(&0u32.to_be_bytes());
+        push_chunk(&mut png, b"acTL", &actl);
+
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ];
+        push_chunk(&mut png, b"fcTL", &fctl(0, 5));
+        push_chunk(&mut png, b"IDAT", &zlib_stored(&rgba_frame(colors[0])));
+        let mut seq = 1;
+        for color in colors.iter().skip(1) {
+            push_chunk(&mut png, b"fcTL", &fctl(seq, 5));
+            seq += 1;
+            let mut fdat = Vec::new();
+            fdat.extend_from_slice(&seq.to_be_bytes());
+            fdat.extend_from_slice(&zlib_stored(&rgba_frame(*color)));
+            push_chunk(&mut png, b"fdAT", &fdat);
+            seq += 1;
+        }
+        push_chunk(&mut png, b"IEND", &[]);
+        png
     }
 
     #[test]
@@ -644,8 +773,33 @@ mod tests {
         assert_eq!(animation.width, 2);
         assert_eq!(animation.height, 2);
         assert_eq!(animation.num_frames, 4);
+        assert_eq!(animation.frame_delays.len(), 4);
+        assert!(animation
+            .frame_delays
+            .iter()
+            .all(|delay| (*delay - 0.05).abs() < f64::EPSILON));
         assert!(image.width >= 2 * 4);
         assert!(image.height >= 2);
+    }
+
+    #[test]
+    fn test_from_gif_single_frame_has_no_frame_delays() {
+        let image = ImageBuffer::from_gif(&single_frame_gif()).unwrap();
+        assert!(image.animation.is_none());
+    }
+
+    #[test]
+    fn test_from_gif_zero_delay_normalised_to_100ms() {
+        let image = ImageBuffer::from_gif(&zero_delay_gif()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert_eq!(animation.frame_delays, vec![0.1, 0.1]);
+    }
+
+    #[test]
+    fn test_from_png_animated_does_not_populate_frame_delays() {
+        let image = ImageBuffer::from_png(&animated_png()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert!(animation.frame_delays.is_empty());
     }
 
     #[test]

@@ -1,7 +1,5 @@
 pub use makepad_widgets;
 
-use std::{path::Path, sync::Arc};
-
 use makepad_widgets::*;
 
 app_main!(App);
@@ -49,10 +47,14 @@ script_mod! {
                                 align: Center
 
                                 Label{text: "Single frame"}
-                                single_gif_image := Image{
+                                single_gif_image := AnimatedImageGif{
                                     width: 96
                                     height: 96
-                                    fit: ImageFit.Stretch
+                                    inner: Image{
+                                        fit: ImageFit.Stretch
+                                        width: Fill
+                                        height: Fill
+                                    }
                                 }
                             }
 
@@ -64,10 +66,14 @@ script_mod! {
                                 align: Center
 
                                 Label{text: "Animated"}
-                                animated_gif_image := Image{
+                                animated_gif_image := AnimatedImageGif{
                                     width: 96
                                     height: 96
-                                    fit: ImageFit.Stretch
+                                    inner: Image{
+                                        fit: ImageFit.Stretch
+                                        width: Fill
+                                        height: Fill
+                                    }
                                 }
                             }
                         }
@@ -107,20 +113,12 @@ impl MatchEvent for App {
 
         let _ = self
             .ui
-            .image(cx, ids!(single_gif_image))
-            .load_image_from_data_async(
-                cx,
-                Path::new("hello-world-single.gif"),
-                Arc::new(SINGLE_FRAME_GIF.to_vec()),
-            );
+            .animated_image_gif(cx, ids!(single_gif_image))
+            .load_gif_from_data(cx, SINGLE_FRAME_GIF);
         let _ = self
             .ui
-            .image(cx, ids!(animated_gif_image))
-            .load_image_from_data_async(
-                cx,
-                Path::new("hello-world-animated.gif"),
-                Arc::new(ANIMATED_GIF.to_vec()),
-            );
+            .animated_image_gif(cx, ids!(animated_gif_image))
+            .load_gif_from_data(cx, ANIMATED_GIF);
     }
 }
 
