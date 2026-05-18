@@ -1,4 +1,5 @@
 use crate::makepad_platform::*;
+use makepad_gif::{ColorOutput, DecodeOptions, DisposalMethod};
 use makepad_webp::WebPDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+pub use makepad_gif::DecodingError as GifDecodeErrors;
 pub use makepad_webp::DecodingError as WebpDecodeErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 pub use makepad_zune_png::error::PngDecodeErrors;
@@ -158,6 +160,7 @@ impl ImageBuffer {
             width,
             height,
             num_frames: actl_info.num_frames as usize,
+            frame_delays: Vec::new(),
         });
         let mut previous_frame = None;
         while decoder.more_frames() {
@@ -233,6 +236,118 @@ impl ImageBuffer {
         Self::new(&buf, width as usize, height as usize)
     }
 
+    pub fn from_gif(data: &[u8]) -> Result<Self, ImageError> {
+        let mut options = DecodeOptions::new();
+        options.set_color_output(ColorOutput::RGBA);
+        let mut decoder = options
+            .read_info(std::io::Cursor::new(data))
+            .map_err(ImageError::GifDecode)?;
+        let width = decoder.width() as usize;
+        let height = decoder.height() as usize;
+        let mut frames = Vec::new();
+        let mut frame_delays = Vec::new();
+        let mut canvas = vec![0u8; width * height * 4];
+
+        while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
+            let delay = if frame.delay == 0 {
+                0.1
+            } else {
+                f64::from(frame.delay) * 0.01
+            };
+            let restore = (frame.dispose == DisposalMethod::Previous).then(|| canvas.clone());
+            let frame_left = frame.left as usize;
+            let frame_top = frame.top as usize;
+            let frame_width = frame.width as usize;
+            let frame_height = frame.height as usize;
+            for y in 0..frame_height {
+                let dst_y = frame_top + y;
+                if dst_y >= height {
+                    continue;
+                }
+                for x in 0..frame_width {
+                    let dst_x = frame_left + x;
+                    if dst_x >= width {
+                        continue;
+                    }
+                    let src = (y * frame_width + x) * 4;
+                    let dst = (dst_y * width + dst_x) * 4;
+                    let rgba = &frame.buffer[src..src + 4];
+                    if rgba[3] != 0 {
+                        canvas[dst..dst + 4].copy_from_slice(rgba);
+                    }
+                }
+            }
+
+            frames.push(canvas.clone());
+            frame_delays.push(delay);
+
+            match frame.dispose {
+                DisposalMethod::Background => {
+                    for y in 0..frame_height {
+                        let dst_y = frame_top + y;
+                        if dst_y >= height {
+                            continue;
+                        }
+                        for x in 0..frame_width {
+                            let dst_x = frame_left + x;
+                            if dst_x >= width {
+                                continue;
+                            }
+                            let dst = (dst_y * width + dst_x) * 4;
+                            canvas[dst..dst + 4].fill(0);
+                        }
+                    }
+                }
+                DisposalMethod::Previous => {
+                    if let Some(restore) = restore {
+                        canvas = restore;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if frames.len() <= 1 {
+            let rgba = frames.first().map(Vec::as_slice).unwrap_or(&canvas);
+            return Self::new(rgba, width, height);
+        }
+
+        let fits_horizontal = Cx::max_texture_width() / width;
+        let total_width = fits_horizontal * width;
+        let total_height = ((frames.len() / fits_horizontal) + 1) * height;
+        let mut final_buffer = ImageBuffer::default();
+        final_buffer.data.resize(total_width * total_height, 0);
+        final_buffer.width = total_width;
+        final_buffer.height = total_height;
+        final_buffer.animation = Some(TextureAnimation {
+            width,
+            height,
+            num_frames: frames.len(),
+            frame_delays,
+        });
+        let mut cx = 0;
+        let mut cy = 0;
+        for frame in frames {
+            for y in 0..height {
+                for x in 0..width {
+                    let src = (y * width + x) * 4;
+                    let r = frame[src];
+                    let g = frame[src + 1];
+                    let b = frame[src + 2];
+                    let a = frame[src + 3];
+                    final_buffer.data[(y + cy) * total_width + (x + cx)] =
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                }
+            }
+            cx += width;
+            if cx >= total_width {
+                cy += height;
+                cx = 0;
+            }
+        }
+        Ok(final_buffer)
+    }
+
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
         let mut decoder = JpegDecoder::new(cursor);
@@ -291,6 +406,7 @@ pub enum ImageError {
     JpgDecode(JpgDecodeErrors),
     PathNotFound(PathBuf),
     PngDecode(PngDecodeErrors),
+    GifDecode(GifDecodeErrors),
     WebpDecode(WebpDecodeErrors),
     UnsupportedFormat,
     Http(String),
@@ -356,6 +472,15 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
         Some("jpg")
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         Some("webp")
+    } else if data.len() >= 6
+        && data[0] == 0x47
+        && data[1] == 0x49
+        && data[2] == 0x46
+        && data[3] == 0x38
+        && (data[4] == 0x37 || data[4] == 0x39)
+        && data[5] == 0x61
+    {
+        Some("gif")
     } else {
         None
     }
@@ -377,6 +502,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
         Some("webp") => Some("webp"),
+        Some("gif") => Some("gif"),
         _ => None,
     }
 }
@@ -388,6 +514,7 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
         "jpg" => ImageBuffer::from_jpg(data),
         "png" => ImageBuffer::from_png(data),
         "webp" => ImageBuffer::from_webp(data),
+        "gif" => ImageBuffer::from_gif(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -423,6 +550,21 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
             let (width, height) = decoder.dimensions();
             Ok((width as usize, height as usize))
         }
+        "gif" => {
+            let image = ImageBuffer::from_gif(data)?;
+            Ok((
+                image
+                    .animation
+                    .as_ref()
+                    .map(|a| a.width)
+                    .unwrap_or(image.width),
+                image
+                    .animation
+                    .as_ref()
+                    .map(|a| a.height)
+                    .unwrap_or(image.height),
+            ))
+        }
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -430,6 +572,270 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
 fn ensure_image_cache_inner(cx: &mut Cx) {
     if !cx.has_global::<ImageCache>() {
         cx.set_global(ImageCache::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_gif::{Encoder, Frame};
+    use std::borrow::Cow;
+
+    fn single_frame_gif() -> Vec<u8> {
+        let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];
+        let pixels = [0, 1, 1, 0];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            let mut frame = Frame::default();
+            frame.width = 2;
+            frame.height = 2;
+            frame.buffer = Cow::Borrowed(&pixels);
+            encoder.write_frame(&frame).unwrap();
+        }
+        data
+    }
+
+    fn animated_gif() -> Vec<u8> {
+        let palette = [
+            0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0xff,
+        ];
+        let frames = [[0, 1, 1, 0], [1, 2, 2, 1], [2, 3, 3, 2], [3, 0, 0, 3]];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            for pixels in frames {
+                let mut frame = Frame::default();
+                frame.width = 2;
+                frame.height = 2;
+                frame.delay = 5;
+                frame.buffer = Cow::Borrowed(&pixels);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        data
+    }
+
+    fn zero_delay_gif() -> Vec<u8> {
+        let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];
+        let frames = [[0, 1, 1, 0], [1, 0, 0, 1]];
+        let mut data = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut data, 2, 2, &palette).unwrap();
+            for pixels in frames {
+                let mut frame = Frame::default();
+                frame.width = 2;
+                frame.height = 2;
+                frame.delay = 0;
+                frame.buffer = Cow::Borrowed(&pixels);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        data
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffff;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn adler32(bytes: &[u8]) -> u32 {
+        let mut a = 1u32;
+        let mut b = 0u32;
+        for byte in bytes {
+            a = (a + u32::from(*byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    fn zlib_stored(bytes: &[u8]) -> Vec<u8> {
+        let len = bytes.len() as u16;
+        let mut out = vec![0x78, 0x01, 0x01];
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(&adler32(bytes).to_be_bytes());
+        out
+    }
+
+    fn push_chunk(png: &mut Vec<u8>, name: &[u8; 4], payload: &[u8]) {
+        png.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        png.extend_from_slice(name);
+        png.extend_from_slice(payload);
+        let mut crc_data = Vec::with_capacity(name.len() + payload.len());
+        crc_data.extend_from_slice(name);
+        crc_data.extend_from_slice(payload);
+        png.extend_from_slice(&crc32(&crc_data).to_be_bytes());
+    }
+
+    fn rgba_frame(color: [u8; 4]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for _ in 0..2 {
+            data.push(0);
+            data.extend_from_slice(&color);
+            data.extend_from_slice(&color);
+        }
+        data
+    }
+
+    fn fctl(seq: u32, delay_num: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&seq.to_be_bytes());
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&delay_num.to_be_bytes());
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload
+    }
+
+    fn animated_png() -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        push_chunk(&mut png, b"IHDR", &ihdr);
+
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&4u32.to_be_bytes());
+        actl.extend_from_slice(&0u32.to_be_bytes());
+        push_chunk(&mut png, b"acTL", &actl);
+
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ];
+        push_chunk(&mut png, b"fcTL", &fctl(0, 5));
+        push_chunk(&mut png, b"IDAT", &zlib_stored(&rgba_frame(colors[0])));
+        let mut seq = 1;
+        for color in colors.iter().skip(1) {
+            push_chunk(&mut png, b"fcTL", &fctl(seq, 5));
+            seq += 1;
+            let mut fdat = Vec::new();
+            fdat.extend_from_slice(&seq.to_be_bytes());
+            fdat.extend_from_slice(&zlib_stored(&rgba_frame(*color)));
+            push_chunk(&mut png, b"fdAT", &fdat);
+            seq += 1;
+        }
+        push_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    #[test]
+    fn test_detect_image_format_recognises_gif89a() {
+        assert_eq!(detect_image_format(b"GIF89a"), Some("gif"));
+    }
+
+    #[test]
+    fn test_detect_image_format_recognises_gif87a() {
+        assert_eq!(detect_image_format(b"GIF87a"), Some("gif"));
+    }
+
+    #[test]
+    fn test_detect_image_format_still_recognises_png_after_gif_branch() {
+        assert_eq!(detect_image_format(b"\x89PNG\r\n\x1a\n"), Some("png"));
+    }
+
+    #[test]
+    fn test_detect_image_format_from_path_and_data_falls_back_to_gif_extension() {
+        assert_eq!(
+            detect_image_format_from_path_and_data(Path::new("sticker.gif"), &[]),
+            Some("gif")
+        );
+    }
+
+    #[test]
+    fn test_from_gif_decodes_single_frame() {
+        let image = ImageBuffer::from_gif(&single_frame_gif()).unwrap();
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 2);
+        assert!(image.animation.is_none());
+    }
+
+    #[test]
+    fn test_from_gif_packs_animated_frames_into_atlas() {
+        let image = ImageBuffer::from_gif(&animated_gif()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert_eq!(animation.width, 2);
+        assert_eq!(animation.height, 2);
+        assert_eq!(animation.num_frames, 4);
+        assert_eq!(animation.frame_delays.len(), 4);
+        assert!(animation
+            .frame_delays
+            .iter()
+            .all(|delay| (*delay - 0.05).abs() < f64::EPSILON));
+        assert!(image.width >= 2 * 4);
+        assert!(image.height >= 2);
+    }
+
+    #[test]
+    fn test_from_gif_single_frame_has_no_frame_delays() {
+        let image = ImageBuffer::from_gif(&single_frame_gif()).unwrap();
+        assert!(image.animation.is_none());
+    }
+
+    #[test]
+    fn test_from_gif_zero_delay_normalised_to_100ms() {
+        let image = ImageBuffer::from_gif(&zero_delay_gif()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert_eq!(animation.frame_delays, vec![0.1, 0.1]);
+    }
+
+    #[test]
+    fn test_from_png_animated_does_not_populate_frame_delays() {
+        let image = ImageBuffer::from_png(&animated_png()).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert!(animation.frame_delays.is_empty());
+    }
+
+    #[test]
+    fn test_from_gif_rejects_truncated_data() {
+        assert!(matches!(
+            ImageBuffer::from_gif(&[0x47, 0x49, 0x46, 0x38]),
+            Err(ImageError::GifDecode(_))
+        ));
+    }
+
+    #[test]
+    fn test_decode_image_buffer_rejects_random_bytes_as_unsupported() {
+        assert!(matches!(
+            decode_image_buffer(Path::new("sticker"), &[0; 16]),
+            Err(ImageError::UnsupportedFormat)
+        ));
+    }
+
+    #[test]
+    fn test_makepad_gif_is_only_a_dependency_of_makepad_draw() {
+        let lock_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("Cargo.lock");
+        let lock = std::fs::read_to_string(lock_path).unwrap();
+        let consumers: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|block| block.contains("\"makepad-gif\""))
+            .filter_map(|block| {
+                block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
+            })
+            .filter(|name| *name != "makepad-gif")
+            .collect();
+        assert_eq!(consumers, ["makepad-draw"]);
     }
 }
 
