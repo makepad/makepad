@@ -517,6 +517,21 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Remap an absolute coordinate from the OS-reported logical-point space
+    /// into the layout's logical-point space when a `dpi_override` is active
+    /// on the given window. No-op if no override is set or `os_dpi_factor`
+    /// hasn't been recorded yet.
+    ///
+    /// Platform-specific event handlers call this on every `abs` field of
+    /// pointer/touch/scroll events so input still hits the right widget when
+    /// zoom is active. Android/OpenHarmony don't need it because they divide
+    /// raw pixels by the override-aware `dpi_factor` at the source — so this
+    /// helper is dead code on those builds, hence the `allow(dead_code)`.
+    #[allow(dead_code)]
+    pub(crate) fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
+        *pos = self.windows[window_id].remap_dpi_override(*pos);
+    }
+
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
         use makepad_script::trap::NoTrap;
         let Some(vm) = self.script_vm.as_mut() else {

@@ -883,10 +883,6 @@ impl Cx {
         }
     }
 
-    fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
-        *pos = self.windows[window_id].remap_dpi_override(*pos)
-    }
-
     fn handle_platform_ops(
         &mut self,
         metal_windows: &mut Vec<MetalWindow>,

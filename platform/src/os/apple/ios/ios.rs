@@ -622,8 +622,18 @@ impl Cx {
             }
             IosEvent::WindowGeomChange(mut re) => {
                 let window_id = CxWindowPool::id_zero();
-                let window = &mut self.windows[window_id];
-                window.window_geom = re.new_geom.clone();
+                // Stash the OS-reported scale factor so dpi_override coordinate
+                // remapping (input events) can recover it later.
+                self.windows[window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
+                // If a dpi_override is set, rewrite the geom to use it. The
+                // logical inner_size scales inversely with the new factor so
+                // the same physical screen ends up with fewer (override > os)
+                // or more (override < os) logical points.
+                if let Some(dpi_override) = self.windows[window_id].dpi_override {
+                    re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
+                    re.new_geom.dpi_factor = dpi_override;
+                }
+                self.windows[window_id].window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
             }

@@ -147,7 +147,11 @@ impl Cx {
                 }
 
                 live_id!(ToWasmTouchUpdate) => {
-                    let e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
+                    let mut e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
+                    let window_id = e.window_id;
+                    for touch in e.touches.iter_mut() {
+                        self.dpi_override_scale(&mut touch.abs, window_id);
+                    }
                     self.fingers.process_touch_update_start(e.time, &e.touches);
                     let e = Event::TouchUpdate(e);
                     self.call_event_handler(&e);
@@ -160,21 +164,24 @@ impl Cx {
                 }
 
                 live_id!(ToWasmMouseDown) => {
-                    let e: MouseDownEvent = ToWasmMouseDown::read_to_wasm(&mut to_wasm).into();
+                    let mut e: MouseDownEvent = ToWasmMouseDown::read_to_wasm(&mut to_wasm).into();
+                    self.dpi_override_scale(&mut e.abs, e.window_id);
                     self.fingers.process_tap_count(e.abs, e.time);
                     self.fingers.mouse_down(e.button, e.window_id);
                     self.call_event_handler(&Event::MouseDown(e))
                 }
 
                 live_id!(ToWasmMouseMove) => {
-                    let e: MouseMoveEvent = ToWasmMouseMove::read_to_wasm(&mut to_wasm).into();
+                    let mut e: MouseMoveEvent = ToWasmMouseMove::read_to_wasm(&mut to_wasm).into();
+                    self.dpi_override_scale(&mut e.abs, e.window_id);
                     self.call_event_handler(&Event::MouseMove(e.into()));
                     self.fingers.cycle_hover_area(live_id!(mouse).into());
                     self.fingers.switch_captures();
                 }
 
                 live_id!(ToWasmMouseUp) => {
-                    let e: MouseUpEvent = ToWasmMouseUp::read_to_wasm(&mut to_wasm).into();
+                    let mut e: MouseUpEvent = ToWasmMouseUp::read_to_wasm(&mut to_wasm).into();
+                    self.dpi_override_scale(&mut e.abs, e.window_id);
                     let button = e.button;
                     self.call_event_handler(&Event::MouseUp(e.into()));
                     self.fingers.mouse_up(button);
@@ -182,7 +189,8 @@ impl Cx {
                 }
 
                 live_id!(ToWasmScroll) => {
-                    let e: ScrollEvent = ToWasmScroll::read_to_wasm(&mut to_wasm).into();
+                    let mut e: ScrollEvent = ToWasmScroll::read_to_wasm(&mut to_wasm).into();
+                    self.dpi_override_scale(&mut e.abs, e.window_id);
                     self.call_event_handler(&Event::Scroll(e.into()));
                 }
 
@@ -575,8 +583,14 @@ impl Cx {
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
+                    // Inherit the OS-reported scale factor recorded by
+                    // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
+                    // freshly-created window's `dpi_override` machinery has
+                    // a baseline.
+                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
                     {
                         let window = &mut self.windows[window_id];
+                        window.os_dpi_factor = id_zero_os_dpi;
                         window.window_geom = self.os.window_geom.clone();
                     }
 
@@ -596,11 +610,13 @@ impl Cx {
                     size,
                     grab_keyboard,
                 } => {
+                    let parent_os_dpi = self.windows[parent_window_id].os_dpi_factor;
                     let mut geom = self.os.window_geom.clone();
                     geom.position = position;
                     geom.inner_size = size;
                     geom.outer_size = size;
                     let window = &mut self.windows[window_id];
+                    window.os_dpi_factor = parent_os_dpi;
                     window.window_geom = geom;
                     window.is_popup = true;
                     window.popup_parent = Some(parent_window_id);
