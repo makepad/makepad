@@ -5,6 +5,7 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
+            keyboard::{CharOffset, FullTextState},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
@@ -499,6 +500,9 @@ impl Cx {
                 if te.timer_id == 0 {
                     let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
                     if let Some(vk) = vk {
+                        let window_id = CxWindowPool::id_zero();
+                        let vk =
+                            self.windows[window_id].native_virtual_keyboard_event_to_layout(vk);
                         // When the keyboard is going away (user pressed iOS's
                         let window_id = CxWindowPool::id_zero();
                         let vk =
@@ -541,6 +545,16 @@ impl Cx {
                                 self.call_event_handler(&Event::TextRangeReplace(
                                     TextRangeReplaceEvent { start, end, text },
                                 ));
+                            }
+                            ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
+                                self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                    full_state_sync: Some(FullTextState {
+                                        text,
+                                        selection: CharOffset(start)..CharOffset(end),
+                                        composition: None,
+                                    }),
+                                    ..Default::default()
+                                }));
                             }
                             ios_app::IosTextInputEvent::KeyEvent(key_code) => {
                                 self.call_event_handler(&Event::KeyDown(KeyEvent {
@@ -623,6 +637,8 @@ impl Cx {
             IosEvent::WindowGeomChange(mut re) => {
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
+                window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                re.new_geom = window.native_window_geom_to_layout(re.new_geom);
                 window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
@@ -634,8 +650,6 @@ impl Cx {
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
                             Some(Ok(prepared)) => {
-                window.os_dpi_factor = Some(re.new_geom.dpi_factor);
-                re.new_geom = window.native_window_geom_to_layout(re.new_geom);
                                 let PlaybackPrepared {
                                     width,
                                     height,
@@ -951,6 +965,8 @@ impl Cx {
                     window.is_created = true;
                 }
                 CxOsOp::ShowTextIME(_area, pos, config) => {
+                    let window_id = CxWindowPool::id_zero();
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     IosApp::set_ime_position(pos);
                     IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
@@ -962,10 +978,8 @@ impl Cx {
                     text,
                     selection,
                     composition: _,
-                    let window_id = CxWindowPool::id_zero();
-                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                 } => {
-                    IosApp::set_ime_text(text, selection.end.0);
+                    IosApp::set_ime_text(text, selection.start.0, selection.end.0);
                 }
                 CxOsOp::StartTimer {
                     timer_id,
@@ -1003,6 +1017,10 @@ impl Cx {
                     rect,
                     keyboard_shift,
                 } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let rect = window.layout_rect_to_native_points(rect);
+                    let keyboard_shift = window.layout_points_to_native_points(keyboard_shift);
                     IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
                 }
                 CxOsOp::HideClipboardActions => {
@@ -1013,13 +1031,17 @@ impl Cx {
                 }
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => {
-                    IosApp::show_selection_handles(start, end);
                     let window_id = CxWindowPool::id_zero();
                     let window = &self.windows[window_id];
-                    let rect = window.layout_rect_to_native_points(rect);
-                    let keyboard_shift = window.layout_points_to_native_points(keyboard_shift);
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
+                    IosApp::show_selection_handles(start, end);
                 }
                 CxOsOp::UpdateSelectionHandles { start, end } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
                     IosApp::update_selection_handles(start, end);
                 }
                 CxOsOp::HideSelectionHandles => {
@@ -1028,17 +1050,9 @@ impl Cx {
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::FullscreenWindow(_window_id) => {
                     IosApp::set_fullscreen(true);
-                    let window_id = CxWindowPool::id_zero();
-                    let window = &self.windows[window_id];
-                    let start = window.layout_vec2d_to_native_points(start);
-                    let end = window.layout_vec2d_to_native_points(end);
                 }
                 CxOsOp::NormalizeWindow(_window_id) => {
                     IosApp::set_fullscreen(false);
-                    let window_id = CxWindowPool::id_zero();
-                    let window = &self.windows[window_id];
-                    let start = window.layout_vec2d_to_native_points(start);
-                    let end = window.layout_vec2d_to_native_points(end);
                 }
                 CxOsOp::SetCursor(_) => {
                     // no need

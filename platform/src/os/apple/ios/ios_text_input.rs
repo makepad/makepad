@@ -75,6 +75,23 @@ fn char_to_utf16_index(text: &str, char_index: usize) -> usize {
     text.chars().take(char_index).map(|c| c.len_utf16()).sum()
 }
 
+fn char_index_to_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn utf16_range_to_string(text: &str, start: usize, end: usize) -> String {
+    let utf16_len = text.encode_utf16().count();
+    let start = start.min(utf16_len);
+    let end = end.min(utf16_len).max(start);
+    let (char_start, char_end) = utf16_indices_to_char_offsets(text, start, end);
+    let byte_start = char_index_to_byte_index(text, char_start);
+    let byte_end = char_index_to_byte_index(text, char_end);
+    text[byte_start..byte_end].to_string()
+}
+
 /// Defines a custom UITextPosition subclass.
 /// UITextInput protocol requires custom position/range classes (token-based, not integer-based).
 pub fn define_makepad_text_position() -> *const Class {
@@ -315,6 +332,7 @@ pub fn define_text_input_view() -> *const Class {
 
     // Instance variables for text input state
     decl.add_ivar::<ObjcId>("markedText"); // NSMutableAttributedString
+    decl.add_ivar::<i64>("markedTextStart"); // UTF-16 start offset of active marked text
     decl.add_ivar::<ObjcId>("textBuffer"); // NSMutableString - tracks text for iOS context
     decl.add_ivar::<i64>("cursorPosition"); // Current cursor position
     decl.add_ivar::<i64>("selectionStart"); // Selection start
@@ -388,45 +406,156 @@ pub fn define_text_input_view() -> *const Class {
         new_buffer
     }
 
+    unsafe fn normalized_selection_range(this: &Object) -> (u64, u64) {
+        let buffer = get_text_buffer(this);
+        let buffer_len: u64 = msg_send![buffer, length];
+        let cursor: i64 = *this.get_ivar("cursorPosition");
+        let sel_start: i64 = *this.get_ivar("selectionStart");
+        let sel_end: i64 = *this.get_ivar("selectionEnd");
+
+        let start = if sel_start != sel_end {
+            sel_start
+        } else {
+            cursor
+        };
+        let end = if sel_start != sel_end {
+            sel_end
+        } else {
+            cursor
+        };
+
+        let start = (start.max(0) as u64).min(buffer_len);
+        let end = (end.max(0) as u64).min(buffer_len);
+        (start.min(end), start.max(end))
+    }
+
+    unsafe fn set_selection_utf16(this: &Object, start: u64, end: u64) {
+        let this = this as *const _ as *mut Object;
+        (*this).set_ivar("selectionStart", start as i64);
+        (*this).set_ivar("selectionEnd", end as i64);
+        (*this).set_ivar("cursorPosition", end as i64);
+    }
+
+    unsafe fn has_active_marked_text(this: &Object) -> bool {
+        let marked_text: ObjcId = *this.get_ivar("markedText");
+        if marked_text == nil {
+            return false;
+        }
+        let len: u64 = msg_send![marked_text, length];
+        len > 0
+    }
+
+    unsafe fn marked_text_utf16_len(this: &Object) -> u64 {
+        let marked_text: ObjcId = *this.get_ivar("markedText");
+        if marked_text == nil {
+            return 0;
+        }
+        msg_send![marked_text, length]
+    }
+
+    unsafe fn visible_text_utf16_len(this: &Object) -> i64 {
+        let buffer = get_text_buffer(this);
+        let buffer_len: u64 = msg_send![buffer, length];
+        (buffer_len + marked_text_utf16_len(this)) as i64
+    }
+
+    unsafe fn visible_text_string(this: &Object) -> String {
+        let buffer = get_text_buffer(this);
+        let buffer_string = nsstring_to_string(buffer);
+        let mut visible_text = buffer_string.clone();
+
+        let marked_text: ObjcId = *this.get_ivar("markedText");
+        if marked_text != nil {
+            let marked_len: u64 = msg_send![marked_text, length];
+            if marked_len > 0 {
+                let marked_start: i64 = *this.get_ivar("markedTextStart");
+                let text_string: ObjcId = msg_send![marked_text, string];
+                let marked_string = nsstring_to_string(text_string);
+                let insert_utf16 =
+                    (marked_start.max(0) as usize).min(buffer_string.encode_utf16().count());
+                let (insert_char, _) =
+                    utf16_indices_to_char_offsets(&buffer_string, insert_utf16, insert_utf16);
+                let insert_byte = char_index_to_byte_index(&visible_text, insert_char);
+                visible_text.insert_str(insert_byte, &marked_string);
+            }
+        }
+
+        visible_text
+    }
+
+    unsafe fn send_selection_changed(this: &Object, start: i64, end: i64) {
+        if has_active_marked_text(this) {
+            return;
+        }
+
+        let buffer = get_text_buffer(this);
+        let buffer_string = nsstring_to_string(buffer);
+        let buffer_utf16_len = buffer_string.encode_utf16().count() as i64;
+        let start = start.clamp(0, buffer_utf16_len) as usize;
+        let end = end.clamp(0, buffer_utf16_len) as usize;
+        let (char_start, char_end) =
+            utf16_indices_to_char_offsets(&buffer_string, start.min(end), start.max(end));
+        IosApp::send_text_selection_changed(buffer_string, char_start, char_end);
+    }
+
+    unsafe fn replace_buffer_range(this: &Object, start: u64, end: u64, text: ObjcId) -> u64 {
+        let buffer = get_text_buffer(this);
+        let buffer_len: u64 = msg_send![buffer, length];
+        let start = start.min(buffer_len);
+        let end = end.min(buffer_len).max(start);
+
+        if start < end {
+            let delete_range = NSRange {
+                location: start,
+                length: end - start,
+            };
+            let () = msg_send![buffer, deleteCharactersInRange: delete_range];
+        }
+
+        let insert_len: u64 = if text != nil {
+            msg_send![text, length]
+        } else {
+            0
+        };
+        if insert_len > 0 {
+            let new_len: u64 = msg_send![buffer, length];
+            let insert_pos = start.min(new_len);
+            let () = msg_send![buffer, insertString: text atIndex: insert_pos];
+        }
+
+        let new_cursor = start + insert_len;
+        set_selection_utf16(this, new_cursor, new_cursor);
+        new_cursor
+    }
+
+    unsafe fn string_object_from_plain_or_attributed_text(text: ObjcId) -> ObjcId {
+        if text == nil {
+            return str_to_nsstring("");
+        }
+        let is_attributed: BOOL = msg_send![text, isKindOfClass: class!(NSAttributedString)];
+        if is_attributed == YES {
+            msg_send![text, string]
+        } else {
+            text
+        }
+    }
+
+    unsafe fn make_placeholder_object() -> ObjcId {
+        let obj: ObjcId = msg_send![class!(NSObject), new];
+        let obj: ObjcId = msg_send![obj, autorelease];
+        obj
+    }
+
     extern "C" fn insert_text(this: &Object, _: Sel, text: ObjcId) {
         unsafe {
             let string = nsstring_to_string(text);
 
             // Handle Enter/Return key specially
             if string == "\n" {
-                // Get inputDelegate for notifications
-                let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
-
-                // Notify that text will change
-                if input_delegate != nil {
-                    let () = msg_send![input_delegate, textWillChange: this as *const _ as ObjcId];
-                    let () =
-                        msg_send![input_delegate, selectionWillChange: this as *const _ as ObjcId];
-                }
-
-                // Send the newline as TextInput to Makepad so buffers stay synchronized
-                // This is critical for multiline editing, without it, iOS's buffer has "\n"
-                // but Makepad's doesn't, causing cursor position desyncs for autocorrect
-                IosApp::send_text_input(string.clone(), false);
-
-                // Insert newline at cursor position (not append!)
-                let buffer = get_text_buffer(this);
-                let cursor: i64 = *this.get_ivar("cursorPosition");
-                let buffer_len: u64 = msg_send![buffer, length];
-                let insert_pos = (cursor.max(0) as u64).min(buffer_len);
-                let () = msg_send![buffer, insertString: text atIndex: insert_pos];
-
-                let new_cursor = cursor + 1; // newline is 1 UTF-16 code unit
-                (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
-
-                // Notify that text did change
-                if input_delegate != nil {
-                    let () =
-                        msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
-                    let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
-                }
-
-                // Also send Return key event for widgets that need to know Enter was pressed
+                // Let the widget decide whether Return submits or inserts a
+                // newline. Sending both text input and a Return key causes
+                // single-line fields to receive stray newlines and multiline
+                // fields to double-insert.
                 IosApp::send_return_key();
                 return;
             }
@@ -439,30 +568,51 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![input_delegate, selectionWillChange: this as *const _ as ObjcId];
             }
 
-            // Clear marked text BEFORE sending to Makepad
+            let buffer = get_text_buffer(this);
+            let buffer_string = nsstring_to_string(buffer);
             let marked_text: ObjcId = *this.get_ivar("markedText");
+            let had_marked = if marked_text != nil {
+                let len: u64 = msg_send![marked_text, length];
+                len > 0
+            } else {
+                false
+            };
+            let (range_start, range_end) = if had_marked {
+                let marked_start: i64 = *this.get_ivar("markedTextStart");
+                let marked_start =
+                    (marked_start.max(0) as u64).min(buffer_string.encode_utf16().count() as u64);
+                (marked_start, marked_start)
+            } else {
+                normalized_selection_range(this)
+            };
+
+            // Clear marked text BEFORE sending to Makepad
             if marked_text != nil {
                 let len: u64 = msg_send![marked_text, length];
                 if len > 0 {
                     let mutable_string: ObjcId = msg_send![marked_text, mutableString];
                     let empty = str_to_nsstring("");
                     let () = msg_send![mutable_string, setString: empty];
+                    (*(this as *const _ as *mut Object)).set_ivar("markedTextStart", 0i64);
                 }
             }
 
-            // Send the text input event to Makepad
-            IosApp::send_text_input(string.clone(), false);
+            // If UIKit selected an existing range before insertText (common for
+            // autocorrect and replacement suggestions), send an explicit range
+            // replacement. A plain TextInput event relies on the Rust widget's
+            // current selection, which may lag UIKit's internal selection.
+            if !had_marked && range_start != range_end {
+                let (char_start, char_end) = utf16_indices_to_char_offsets(
+                    &buffer_string,
+                    range_start as usize,
+                    range_end as usize,
+                );
+                IosApp::send_text_range_replace(char_start, char_end, string.clone());
+            } else {
+                IosApp::send_text_input(string.clone(), false);
+            }
 
-            // Update text buffer - insert at cursor position, not append
-            let buffer = get_text_buffer(this);
-            let cursor: i64 = *this.get_ivar("cursorPosition");
-            let buffer_len: u64 = msg_send![buffer, length];
-            let insert_pos = (cursor.max(0) as u64).min(buffer_len);
-            let () = msg_send![buffer, insertString: text atIndex: insert_pos];
-
-            // Update cursor position using UTF-16 code units (matches iOS NSString.length)
-            let new_cursor = cursor + utf16_len(&string);
-            (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
+            replace_buffer_range(this, range_start, range_end, text);
 
             // Notify that text and selection did change
             if input_delegate != nil {
@@ -472,10 +622,58 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
+    extern "C" fn insert_text_with_alternatives(
+        this: &Object,
+        _: Sel,
+        text: ObjcId,
+        _alternatives: ObjcId,
+        _style: i64,
+    ) {
+        insert_text(this, sel!(insertText:), text);
+    }
+
+    extern "C" fn insert_input_suggestion(this: &Object, _: Sel, input_suggestion: ObjcId) {
+        if input_suggestion == nil {
+            return;
+        }
+        unsafe {
+            let responds: BOOL =
+                msg_send![input_suggestion, respondsToSelector: sel!(localizedSuggestion)];
+            if responds == YES {
+                let text: ObjcId = msg_send![input_suggestion, localizedSuggestion];
+                if text != nil {
+                    insert_text(this, sel!(insertText:), text);
+                }
+            }
+        }
+    }
+
+    extern "C" fn insert_attributed_text(this: &Object, _: Sel, text: ObjcId) {
+        unsafe {
+            let string = string_object_from_plain_or_attributed_text(text);
+            insert_text(this, sel!(insertText:), string);
+        }
+    }
+
     extern "C" fn delete_backward(this: &Object, _: Sel) {
         unsafe {
             let buffer = get_text_buffer(this);
             let buffer_len: u64 = msg_send![buffer, length];
+            let (sel_start, sel_end) = normalized_selection_range(this);
+
+            if sel_start != sel_end {
+                let buffer_string = nsstring_to_string(buffer);
+                let (char_start, char_end) = utf16_indices_to_char_offsets(
+                    &buffer_string,
+                    sel_start as usize,
+                    sel_end as usize,
+                );
+                let empty = str_to_nsstring("");
+                replace_buffer_range(this, sel_start, sel_end, empty);
+                IosApp::send_text_range_replace(char_start, char_end, String::new());
+                return;
+            }
+
             let cursor: i64 = *this.get_ivar("cursorPosition");
 
             // Clamp cursor to valid range to handle out-of-sync states
@@ -504,30 +702,18 @@ pub fn define_text_input_view() -> *const Class {
                             length: delete_len,
                         };
                         let () = msg_send![buffer, deleteCharactersInRange: range];
-                        (*(this as *const _ as *mut Object))
-                            .set_ivar("cursorPosition", prev_char_utf16_start as i64);
+                        set_selection_utf16(this, prev_char_utf16_start, prev_char_utf16_start);
                     }
                 }
             } else if cursor != 0 {
                 // Reset cursor if buffer is empty but cursor wasn't at 0
-                (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", 0i64);
+                set_selection_utf16(this, 0, 0);
             }
         }
 
-        // Send backspace event immediately (not queued) for held delete support
-        let time = try_with_ios_app(|app| app.time_now()).unwrap_or(0.0);
-        IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
-            key_code: KeyCode::Backspace,
-            is_repeat: false,
-            modifiers: Default::default(),
-            time,
-        }));
-        IosApp::do_callback(IosEvent::KeyUp(KeyEvent {
-            key_code: KeyCode::Backspace,
-            is_repeat: false,
-            modifiers: Default::default(),
-            time,
-        }));
+        // Queue the backspace so any preceding UIKit selection update in the
+        // same callback burst is applied before Rust handles deletion.
+        IosApp::send_backspace();
     }
 
     // ==========================================================================
@@ -557,9 +743,9 @@ pub fn define_text_input_view() -> *const Class {
             }
             let len: u64 = msg_send![marked_text, length];
             if len > 0 {
-                let cursor: i64 = *this.get_ivar("cursorPosition");
+                let marked_start: i64 = *this.get_ivar("markedTextStart");
                 let range_class = get_ios_class_global().text_range;
-                msg_send![range_class, rangeWithStart: cursor end: cursor + (len as i64)]
+                msg_send![range_class, rangeWithStart: marked_start end: marked_start + (len as i64)]
             } else {
                 nil
             }
@@ -570,7 +756,7 @@ pub fn define_text_input_view() -> *const Class {
         this: &mut Object,
         _: Sel,
         marked_text_input: ObjcId,
-        _selected_range: NSRange,
+        selected_range: NSRange,
     ) {
         unsafe {
             // Notify inputDelegate that text will change
@@ -579,10 +765,27 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![input_delegate, textWillChange: this as *const _ as ObjcId];
             }
 
-            let marked_text_ref: &mut ObjcId = this.get_mut_ivar("markedText");
+            let previous_marked: ObjcId = *this.get_ivar("markedText");
+            let had_marked = if previous_marked != nil {
+                let len: u64 = msg_send![previous_marked, length];
+                len > 0
+            } else {
+                false
+            };
 
-            if *marked_text_ref != nil {
-                let () = msg_send![*marked_text_ref, release];
+            if !had_marked {
+                let (sel_start, sel_end) = normalized_selection_range(this);
+                if sel_start != sel_end {
+                    let empty = str_to_nsstring("");
+                    replace_buffer_range(this, sel_start, sel_end, empty);
+                    set_selection_utf16(this, sel_start, sel_start);
+                }
+                this.set_ivar("markedTextStart", sel_start as i64);
+            }
+
+            let old_marked: ObjcId = *this.get_ivar("markedText");
+            if old_marked != nil {
+                let () = msg_send![old_marked, release];
             }
 
             // Create new marked text storage
@@ -600,7 +803,7 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![new_marked, init];
             }
 
-            *marked_text_ref = new_marked;
+            this.set_ivar("markedText", new_marked);
 
             // Send marked text to Makepad for inline display
             let text_string: ObjcId = msg_send![new_marked, string];
@@ -608,6 +811,16 @@ pub fn define_text_input_view() -> *const Class {
 
             // Always send with replace_last=true - empty string clears composition preview
             IosApp::send_text_input(marked_string, true);
+
+            let marked_start: i64 = *this.get_ivar("markedTextStart");
+            let marked_len: u64 = msg_send![new_marked, length];
+            let sel_start = (selected_range.location).min(marked_len);
+            let sel_end = (selected_range.location + selected_range.length).min(marked_len);
+            set_selection_utf16(
+                this,
+                (marked_start.max(0) as u64) + sel_start,
+                (marked_start.max(0) as u64) + sel_end,
+            );
 
             // Notify inputDelegate that text did change
             if input_delegate != nil {
@@ -645,19 +858,20 @@ pub fn define_text_input_view() -> *const Class {
 
             // Update text buffer
             let buffer = get_text_buffer(this);
-            let cursor: i64 = *this.get_ivar("cursorPosition");
+            let marked_start: i64 = *this.get_ivar("markedTextStart");
             let buffer_len: u64 = msg_send![buffer, length];
-            let insert_pos = (cursor.max(0) as u64).min(buffer_len);
+            let insert_pos = (marked_start.max(0) as u64).min(buffer_len);
             let () = msg_send![buffer, insertString: text_string atIndex: insert_pos];
 
             // Update cursor position using UTF-16 code units (matches iOS NSString.length)
-            let new_cursor = cursor + utf16_len(&string);
-            (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
+            let new_cursor = insert_pos + utf16_len(&string) as u64;
+            set_selection_utf16(this, new_cursor, new_cursor);
 
             // Clear the marked text
             let mutable_string: ObjcId = msg_send![marked_text, mutableString];
             let empty = str_to_nsstring("");
             let () = msg_send![mutable_string, setString: empty];
+            (*(this as *const _ as *mut Object)).set_ivar("markedTextStart", 0i64);
 
             // Notify that text did change
             if input_delegate != nil {
@@ -708,11 +922,33 @@ pub fn define_text_input_view() -> *const Class {
             let start: ObjcId = msg_send![range, start];
             let end: ObjcId = msg_send![range, end];
             if start != nil && end != nil {
+                let buffer_len = visible_text_utf16_len(this);
                 let start_offset: i64 = msg_send![start, offset];
                 let end_offset: i64 = msg_send![end, offset];
+                let start_offset = start_offset.clamp(0, buffer_len);
+                let end_offset = end_offset.clamp(0, buffer_len);
+                let current_start: i64 = *this.get_ivar("selectionStart");
+                let current_end: i64 = *this.get_ivar("selectionEnd");
+                if current_start == start_offset && current_end == end_offset {
+                    return;
+                }
+
+                let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
+                if input_delegate != nil {
+                    let () =
+                        msg_send![input_delegate, selectionWillChange: this as *const _ as ObjcId];
+                }
+
                 this.set_ivar("selectionStart", start_offset);
                 this.set_ivar("selectionEnd", end_offset);
                 this.set_ivar("cursorPosition", end_offset);
+
+                send_selection_changed(this, start_offset, end_offset);
+
+                if input_delegate != nil {
+                    let () =
+                        msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
+                }
             }
         }
     }
@@ -740,40 +976,26 @@ pub fn define_text_input_view() -> *const Class {
                 return str_to_nsstring("");
             }
 
-            let buffer = get_text_buffer(this);
-            let buffer_len: u64 = msg_send![buffer, length];
-            let cursor: i64 = *this.get_ivar("cursorPosition");
+            // Include active marked text in the visible text model. UIKit often
+            // queries ranges that cross the marked-text boundary while building
+            // candidate lists or applying autocorrect.
+            let visible_text = visible_text_string(this);
 
-            // Check if this is querying the marked text range
-            let marked_text: ObjcId = *this.get_ivar("markedText");
-            if marked_text != nil {
-                let marked_len: u64 = msg_send![marked_text, length];
-                if marked_len > 0 {
-                    // Marked text is at cursor position
-                    let marked_start = cursor;
-                    let marked_end = cursor + marked_len as i64;
+            str_to_nsstring(&utf16_range_to_string(
+                &visible_text,
+                start_offset.max(0) as usize,
+                end_offset.max(0) as usize,
+            ))
+        }
+    }
 
-                    // If query overlaps with marked text range, return marked text
-                    if start_offset >= marked_start && end_offset <= marked_end {
-                        let text_string: ObjcId = msg_send![marked_text, string];
-                        return text_string;
-                    }
-                }
-            }
-
-            // Otherwise return from buffer
-            let start_idx = (start_offset.max(0) as u64).min(buffer_len);
-            let end_idx = (end_offset.max(0) as u64).min(buffer_len);
-
-            if start_idx >= end_idx {
-                return str_to_nsstring("");
-            }
-
-            let range = NSRange {
-                location: start_idx,
-                length: end_idx - start_idx,
-            };
-            msg_send![buffer, substringWithRange: range]
+    extern "C" fn attributed_text_in_range(this: &Object, sel: Sel, range: ObjcId) -> ObjcId {
+        unsafe {
+            let string = text_in_range(this, sel, range);
+            let attributed: ObjcId = msg_send![class!(NSAttributedString), alloc];
+            let attributed: ObjcId = msg_send![attributed, initWithString: string];
+            let attributed: ObjcId = msg_send![attributed, autorelease];
+            attributed
         }
     }
 
@@ -797,6 +1019,7 @@ pub fn define_text_input_view() -> *const Class {
                     let mutable_string: ObjcId = msg_send![marked_text, mutableString];
                     let empty = str_to_nsstring("");
                     let () = msg_send![mutable_string, setString: empty];
+                    (*(this as *const _ as *mut Object)).set_ivar("markedTextStart", 0i64);
                 }
             }
 
@@ -869,13 +1092,34 @@ pub fn define_text_input_view() -> *const Class {
 
             // Update cursor position to end of inserted text (using UTF-16 code units)
             let new_cursor = range_start as i64 + utf16_len(&new_string);
-            (*(this as *const _ as *mut Object)).set_ivar("cursorPosition", new_cursor);
+            set_selection_utf16(this, new_cursor as u64, new_cursor as u64);
 
             if input_delegate != nil {
                 let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
                 let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
             }
         }
+    }
+
+    extern "C" fn replace_range_with_attributed_text(
+        this: &Object,
+        _: Sel,
+        range: ObjcId,
+        text: ObjcId,
+    ) {
+        unsafe {
+            let string = string_object_from_plain_or_attributed_text(text);
+            replace_range_with_text(this, sel!(replaceRange:withText:), range, string);
+        }
+    }
+
+    extern "C" fn should_change_text_in_range(
+        _: &Object,
+        _: Sel,
+        _range: ObjcId,
+        _replacement_text: ObjcId,
+    ) -> BOOL {
+        YES
     }
 
     // ==========================================================================
@@ -891,17 +1135,15 @@ pub fn define_text_input_view() -> *const Class {
 
     extern "C" fn end_of_document(this: &Object, _: Sel) -> ObjcId {
         unsafe {
-            // Return the actual buffer length. The iOS text buffer is kept in sync
-            // with text input operations, so this should match reality.
-            let buffer = get_text_buffer(this);
-            let buffer_len: i64 = msg_send![buffer, length];
+            // Return the visible text length, including active marked text.
+            let buffer_len = visible_text_utf16_len(this);
             let pos_class = get_ios_class_global().text_position;
             msg_send![pos_class, positionWithOffset: buffer_len]
         }
     }
 
     extern "C" fn position_from_position_offset(
-        _: &Object,
+        this: &Object,
         _: Sel,
         position: ObjcId,
         offset: i64,
@@ -911,7 +1153,8 @@ pub fn define_text_input_view() -> *const Class {
         }
         unsafe {
             let pos: i64 = msg_send![position, offset];
-            let new_pos = pos + offset;
+            let buffer_len = visible_text_utf16_len(this);
+            let new_pos = (pos + offset).clamp(0, buffer_len);
             if new_pos < 0 {
                 return nil;
             }
@@ -921,7 +1164,7 @@ pub fn define_text_input_view() -> *const Class {
     }
 
     extern "C" fn position_from_position_in_direction_offset(
-        _: &Object,
+        this: &Object,
         _: Sel,
         position: ObjcId,
         direction: i64,
@@ -934,7 +1177,8 @@ pub fn define_text_input_view() -> *const Class {
             let pos: i64 = msg_send![position, offset];
             // UITextLayoutDirection: 0=right, 1=left, 2=up, 3=down
             let actual_offset = if direction == 1 { -offset } else { offset };
-            let new_pos = pos + actual_offset;
+            let buffer_len = visible_text_utf16_len(this);
+            let new_pos = (pos + actual_offset).clamp(0, buffer_len);
             if new_pos < 0 {
                 return nil;
             }
@@ -1016,19 +1260,86 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
-    extern "C" fn character_range_by_extending_position_in_direction(
+    extern "C" fn position_within_range_at_character_offset(
+        _: &Object,
+        _: Sel,
+        range: ObjcId,
+        offset: i64,
+    ) -> ObjcId {
+        if range == nil {
+            return nil;
+        }
+        unsafe {
+            let start: ObjcId = msg_send![range, start];
+            let end: ObjcId = msg_send![range, end];
+            if start == nil || end == nil {
+                return nil;
+            }
+            let start_offset: i64 = msg_send![start, offset];
+            let end_offset: i64 = msg_send![end, offset];
+            let range_start = start_offset.min(end_offset);
+            let range_end = start_offset.max(end_offset);
+            let new_offset = (range_start + offset).clamp(range_start, range_end);
+            let pos_class = get_ios_class_global().text_position;
+            msg_send![pos_class, positionWithOffset: new_offset]
+        }
+    }
+
+    extern "C" fn character_offset_of_position_within_range(
         _: &Object,
         _: Sel,
         position: ObjcId,
-        _direction: i64,
+        range: ObjcId,
+    ) -> i64 {
+        if position == nil || range == nil {
+            return 0;
+        }
+        unsafe {
+            let start: ObjcId = msg_send![range, start];
+            let end: ObjcId = msg_send![range, end];
+            if start == nil || end == nil {
+                return 0;
+            }
+            let pos_offset: i64 = msg_send![position, offset];
+            let start_offset: i64 = msg_send![start, offset];
+            let end_offset: i64 = msg_send![end, offset];
+            let range_start = start_offset.min(end_offset);
+            let range_end = start_offset.max(end_offset);
+            pos_offset.clamp(range_start, range_end) - range_start
+        }
+    }
+
+    extern "C" fn character_range_by_extending_position_in_direction(
+        this: &Object,
+        _: Sel,
+        position: ObjcId,
+        direction: i64,
     ) -> ObjcId {
         if position == nil {
             return nil;
         }
-        // Return a zero-width range at the position
         unsafe {
+            let pos: i64 = msg_send![position, offset];
+            let buffer_string = visible_text_string(this);
+            let utf16_len = buffer_string.encode_utf16().count() as i64;
+            let pos = pos.clamp(0, utf16_len) as usize;
+            let char_at_pos = utf16_indices_to_char_offsets(&buffer_string, pos, pos).0;
+            let (start, end) = if direction == 1 {
+                let char_start = char_at_pos.saturating_sub(1);
+                (
+                    char_to_utf16_index(&buffer_string, char_start) as i64,
+                    char_to_utf16_index(&buffer_string, char_at_pos) as i64,
+                )
+            } else {
+                let char_count = buffer_string.chars().count();
+                let char_end = (char_at_pos + 1).min(char_count);
+                (
+                    char_to_utf16_index(&buffer_string, char_at_pos) as i64,
+                    char_to_utf16_index(&buffer_string, char_end) as i64,
+                )
+            };
             let range_class = get_ios_class_global().text_range;
-            msg_send![range_class, rangeWithStartPosition: position endPosition: position]
+            msg_send![range_class, rangeWithStart: start end: end]
         }
     }
 
@@ -1150,14 +1461,14 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
-    /// Returns position 0 (no hit testing). Proper implementation would require
-    /// access to text layout from the Rust side, which lives in the widget layer,
-    /// not the platform layer. As a result, system text cursor drag (moving the
-    /// cursor by dragging the iOS loupe/magnifier) won't work.
-    extern "C" fn closest_position_to_point(_: &Object, _: Sel, _point: NSPoint) -> ObjcId {
+    /// Returns the current cursor position. Exact hit testing requires text
+    /// layout from the widget layer; returning the active cursor is less
+    /// disruptive than jumping UIKit-managed interactions to document start.
+    extern "C" fn closest_position_to_point(this: &Object, _: Sel, _point: NSPoint) -> ObjcId {
         unsafe {
+            let cursor: i64 = *this.get_ivar("cursorPosition");
             let pos_class = get_ios_class_global().text_position;
-            msg_send![pos_class, positionWithOffset: 0i64]
+            msg_send![pos_class, positionWithOffset: cursor]
         }
     }
 
@@ -1176,6 +1487,17 @@ pub fn define_text_input_view() -> *const Class {
 
     extern "C" fn character_range_at_point(_: &Object, _: Sel, _point: NSPoint) -> ObjcId {
         nil
+    }
+
+    extern "C" fn unobscured_content_rect(this: &Object, _: Sel) -> NSRect {
+        unsafe {
+            let view = this as *const _ as ObjcId;
+            msg_send![view, bounds]
+        }
+    }
+
+    extern "C" fn text_input_view(this: &Object, _: Sel) -> ObjcId {
+        this as *const _ as ObjcId
     }
 
     // ==========================================================================
@@ -1305,6 +1627,111 @@ pub fn define_text_input_view() -> *const Class {
         nil // No specific content type
     }
 
+    extern "C" fn selection_affinity(_: &Object, _: Sel) -> i64 {
+        0 // UITextStorageDirectionForward
+    }
+
+    extern "C" fn set_selection_affinity(_: &mut Object, _: Sel, _affinity: i64) {
+        // We keep a direction-neutral selection model.
+    }
+
+    extern "C" fn text_styling_at_position(
+        _: &Object,
+        _: Sel,
+        _position: ObjcId,
+        _direction: i64,
+    ) -> ObjcId {
+        nil
+    }
+
+    extern "C" fn supports_adaptive_image_glyph(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+
+    extern "C" fn insert_dictation_result(this: &Object, _: Sel, dictation_result: ObjcId) {
+        if dictation_result == nil {
+            return;
+        }
+        unsafe {
+            let count: usize = msg_send![dictation_result, count];
+            let mut result = String::new();
+            for index in 0..count {
+                let phrase: ObjcId = msg_send![dictation_result, objectAtIndex: index];
+                if phrase == nil {
+                    continue;
+                }
+
+                let is_string: BOOL = msg_send![phrase, isKindOfClass: class!(NSString)];
+                if is_string == YES {
+                    result.push_str(&nsstring_to_string(phrase));
+                    continue;
+                }
+
+                let responds_to_text: BOOL = msg_send![phrase, respondsToSelector: sel!(text)];
+                if responds_to_text == YES {
+                    let text: ObjcId = msg_send![phrase, text];
+                    if text != nil {
+                        let text = nsstring_to_string(text);
+                        if !text.is_empty() {
+                            result.push_str(&text);
+                            continue;
+                        }
+                    }
+                }
+
+                let responds_to_alternatives: BOOL =
+                    msg_send![phrase, respondsToSelector: sel!(alternativeInterpretations)];
+                if responds_to_alternatives == YES {
+                    let alternatives: ObjcId = msg_send![phrase, alternativeInterpretations];
+                    if alternatives != nil {
+                        let alternative_count: usize = msg_send![alternatives, count];
+                        if alternative_count > 0 {
+                            let text: ObjcId = msg_send![alternatives, objectAtIndex: 0usize];
+                            if text != nil {
+                                result.push_str(&nsstring_to_string(text));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !result.is_empty() {
+                let text = str_to_nsstring(&result);
+                insert_text(this, sel!(insertText:), text);
+            }
+        }
+    }
+
+    extern "C" fn insert_dictation_result_placeholder(_: &Object, _: Sel) -> ObjcId {
+        unsafe { make_placeholder_object() }
+    }
+
+    extern "C" fn frame_for_dictation_result_placeholder(
+        this: &Object,
+        sel: Sel,
+        _placeholder: ObjcId,
+    ) -> NSRect {
+        first_rect_for_range(this, sel, nil)
+    }
+
+    extern "C" fn remove_dictation_result_placeholder(
+        _: &Object,
+        _: Sel,
+        _placeholder: ObjcId,
+        _will_insert_result: BOOL,
+    ) {
+    }
+
+    extern "C" fn dictation_recognition_failed(_: &Object, _: Sel) {}
+
+    extern "C" fn dictation_recording_did_end(_: &Object, _: Sel) {}
+
+    extern "C" fn insert_text_placeholder_with_size(_: &Object, _: Sel, _size: NSSize) -> ObjcId {
+        unsafe { make_placeholder_object() }
+    }
+
+    extern "C" fn remove_text_placeholder(_: &Object, _: Sel, _placeholder: ObjcId) {}
+
     // ==========================================================================
     // UITextInput protocol - Floating cursor methods (keyboard trackpad)
     // ==========================================================================
@@ -1421,6 +1848,18 @@ pub fn define_text_input_view() -> *const Class {
             insert_text as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
+            sel!(insertText:alternatives:style:),
+            insert_text_with_alternatives as extern "C" fn(&Object, Sel, ObjcId, ObjcId, i64),
+        );
+        decl.add_method(
+            sel!(insertInputSuggestion:),
+            insert_input_suggestion as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(insertAttributedText:),
+            insert_attributed_text as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
             sel!(deleteBackward),
             delete_backward as extern "C" fn(&Object, Sel),
         );
@@ -1436,6 +1875,10 @@ pub fn define_text_input_view() -> *const Class {
         );
         decl.add_method(
             sel!(setMarkedText:selectedRange:),
+            set_marked_text as extern "C" fn(&mut Object, Sel, ObjcId, NSRange),
+        );
+        decl.add_method(
+            sel!(setAttributedMarkedText:selectedRange:),
             set_marked_text as extern "C" fn(&mut Object, Sel, ObjcId, NSRange),
         );
         decl.add_method(sel!(unmarkText), unmark_text as extern "C" fn(&Object, Sel));
@@ -1464,8 +1907,20 @@ pub fn define_text_input_view() -> *const Class {
             text_in_range as extern "C" fn(&Object, Sel, ObjcId) -> ObjcId,
         );
         decl.add_method(
+            sel!(attributedTextInRange:),
+            attributed_text_in_range as extern "C" fn(&Object, Sel, ObjcId) -> ObjcId,
+        );
+        decl.add_method(
             sel!(replaceRange:withText:),
             replace_range_with_text as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(replaceRange:withAttributedText:),
+            replace_range_with_attributed_text as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(shouldChangeTextInRange:replacementText:),
+            should_change_text_in_range as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
         );
 
         // UITextInput - Position/Range
@@ -1505,6 +1960,16 @@ pub fn define_text_input_view() -> *const Class {
                 as extern "C" fn(&Object, Sel, ObjcId, i64) -> ObjcId,
         );
         decl.add_method(
+            sel!(positionWithinRange:atCharacterOffset:),
+            position_within_range_at_character_offset
+                as extern "C" fn(&Object, Sel, ObjcId, i64) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(characterOffsetOfPosition:withinRange:),
+            character_offset_of_position_within_range
+                as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> i64,
+        );
+        decl.add_method(
             sel!(characterRangeByExtendingPosition:inDirection:),
             character_range_by_extending_position_in_direction
                 as extern "C" fn(&Object, Sel, ObjcId, i64) -> ObjcId,
@@ -1535,6 +2000,14 @@ pub fn define_text_input_view() -> *const Class {
         decl.add_method(
             sel!(characterRangeAtPoint:),
             character_range_at_point as extern "C" fn(&Object, Sel, NSPoint) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(unobscuredContentRect),
+            unobscured_content_rect as extern "C" fn(&Object, Sel) -> NSRect,
+        );
+        decl.add_method(
+            sel!(textInputView),
+            text_input_view as extern "C" fn(&Object, Sel) -> ObjcId,
         );
 
         // UITextInput - Writing direction
@@ -1609,6 +2082,56 @@ pub fn define_text_input_view() -> *const Class {
         decl.add_method(
             sel!(textContentType),
             text_content_type as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(selectionAffinity),
+            selection_affinity as extern "C" fn(&Object, Sel) -> i64,
+        );
+        decl.add_method(
+            sel!(setSelectionAffinity:),
+            set_selection_affinity as extern "C" fn(&mut Object, Sel, i64),
+        );
+        decl.add_method(
+            sel!(textStylingAtPosition:inDirection:),
+            text_styling_at_position as extern "C" fn(&Object, Sel, ObjcId, i64) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(supportsAdaptiveImageGlyph),
+            supports_adaptive_image_glyph as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+
+        // UITextInput - Dictation and placeholders
+        decl.add_method(
+            sel!(insertDictationResult:),
+            insert_dictation_result as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(insertDictationResultPlaceholder),
+            insert_dictation_result_placeholder as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(frameForDictationResultPlaceholder:),
+            frame_for_dictation_result_placeholder as extern "C" fn(&Object, Sel, ObjcId) -> NSRect,
+        );
+        decl.add_method(
+            sel!(removeDictationResultPlaceholder:willInsertResult:),
+            remove_dictation_result_placeholder as extern "C" fn(&Object, Sel, ObjcId, BOOL),
+        );
+        decl.add_method(
+            sel!(dictationRecognitionFailed),
+            dictation_recognition_failed as extern "C" fn(&Object, Sel),
+        );
+        decl.add_method(
+            sel!(dictationRecordingDidEnd),
+            dictation_recording_did_end as extern "C" fn(&Object, Sel),
+        );
+        decl.add_method(
+            sel!(insertTextPlaceholderWithSize:),
+            insert_text_placeholder_with_size as extern "C" fn(&Object, Sel, NSSize) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(removeTextPlaceholder:),
+            remove_text_placeholder as extern "C" fn(&Object, Sel, ObjcId),
         );
 
         // UITextInput - Floating cursor (keyboard trackpad)
