@@ -1,0 +1,18 @@
+[package]
+name = "weezl"
+version = "0.1.12"
+edition = "2018"
+authors = ["The image-rs Developers"]
+description = "Fast LZW compression and decompression."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/image-rs/weezl"
+
+[features]
+alloc = []
+async = ["std"]
+default = ["std"]
+std = ["alloc"]
+
+[lib]
+name = "weezl"
+path = "src/lib.rs"
