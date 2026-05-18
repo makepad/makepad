@@ -500,6 +500,9 @@ impl Cx {
                     let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
                     if let Some(vk) = vk {
                         // When the keyboard is going away (user pressed iOS's
+                        let window_id = CxWindowPool::id_zero();
+                        let vk =
+                            self.windows[window_id].native_virtual_keyboard_event_to_layout(vk);
                         // "hide keyboard" button, an external keyboard was
                         // attached, an inputAccessoryView triggered hide,
                         // etc.), mark the IME as dismissed so the focused
@@ -619,18 +622,10 @@ impl Cx {
             }
             IosEvent::WindowGeomChange(mut re) => {
                 let window_id = CxWindowPool::id_zero();
-                // Stash the OS-reported scale factor so dpi_override coordinate
-                // remapping (input events) can recover it later.
-                self.windows[window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
-                // If a dpi_override is set, rewrite the geom to use it. The
-                // logical inner_size scales inversely with the new factor so
-                // the same physical screen ends up with fewer (override > os)
-                // or more (override < os) logical points.
-                if let Some(dpi_override) = self.windows[window_id].dpi_override {
-                    re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                    re.new_geom.dpi_factor = dpi_override;
-                }
-                self.windows[window_id].window_geom = re.new_geom.clone();
+                let window = &mut self.windows[window_id];
+                window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                re.new_geom = window.native_window_geom_to_layout(re.new_geom);
+                window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
             }
@@ -777,12 +772,10 @@ impl Cx {
                 self.handle_repaint(metal_cx);
             }
             IosEvent::TouchUpdate(mut e) => {
-                // Touch coords arrive in the OS-reported logical-point space.
-                // If a dpi_override is active the rendered layout uses a
-                // different scale, so remap each touch back into that space.
-                let window_id = e.window_id;
+                let window = &self.windows[e.window_id];
                 for touch in e.touches.iter_mut() {
-                    self.dpi_override_scale(&mut touch.abs, window_id);
+                    touch.abs = window.native_vec2d_to_layout(touch.abs);
+                    touch.radius = window.native_vec2d_to_layout(touch.radius);
                 }
                 // Check for outside-click popup dismiss on touch start
                 if e.touches
@@ -844,11 +837,11 @@ impl Cx {
                 self.fingers.process_touch_update_end(&e.touches);
             }
             IosEvent::LongPress(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+                e.abs = self.windows[e.window_id].native_vec2d_to_layout(e.abs);
                 self.call_event_handler(&Event::LongPress(e.into()));
             }
             IosEvent::MouseDown(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+                e.abs = self.windows[e.window_id].native_vec2d_to_layout(e.abs);
                 // Check for outside-click popup dismiss
                 if let Some(popup_window_id) = self.find_popup_to_dismiss_on_mouse(e.abs) {
                     self.dismiss_popup_window(
@@ -861,25 +854,26 @@ impl Cx {
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
             IosEvent::MouseMove(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+                e.abs = self.windows[e.window_id].native_vec2d_to_layout(e.abs);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
             IosEvent::MouseUp(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+                e.abs = self.windows[e.window_id].native_vec2d_to_layout(e.abs);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
             IosEvent::Scroll(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
-                self.call_event_handler(&Event::Scroll(e.into()))
+                e.abs = self.windows[e.window_id].native_vec2d_to_layout(e.abs);
+                self.call_event_handler(&Event::Scroll(e.into()));
             }
             IosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             IosEvent::TextRangeReplace(e) => self.call_event_handler(&Event::TextRangeReplace(e)),
-            IosEvent::SelectionHandleDrag(e) => {
+            IosEvent::SelectionHandleDrag(mut e) => {
+                e.abs = self.windows[CxWindowPool::id_zero()].native_vec2d_to_layout(e.abs);
                 self.call_event_handler(&Event::SelectionHandleDrag(e))
             }
 
@@ -957,6 +951,8 @@ impl Cx {
                     window.is_created = true;
                 }
                 CxOsOp::ShowTextIME(_area, pos, config) => {
+                    let window_id = CxWindowPool::id_zero();
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     IosApp::set_ime_position(pos);
                     IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
@@ -1007,6 +1003,10 @@ impl Cx {
                     rect,
                     keyboard_shift,
                 } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let rect = window.layout_rect_to_native_points(rect);
+                    let keyboard_shift = window.layout_points_to_native_points(keyboard_shift);
                     IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
                 }
                 CxOsOp::HideClipboardActions => {
@@ -1017,9 +1017,17 @@ impl Cx {
                 }
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
                     IosApp::show_selection_handles(start, end);
                 }
                 CxOsOp::UpdateSelectionHandles { start, end } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
                     IosApp::update_selection_handles(start, end);
                 }
                 CxOsOp::HideSelectionHandles => {

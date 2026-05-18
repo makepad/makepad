@@ -496,7 +496,8 @@ pub fn define_textfield_delegate() -> *const Class {
     }
 
     /// Returns the keyboard visibility and docked bottom overlap in the
-    /// MTKView's coordinate space, in logical points.
+    /// MTKView's coordinate space, in native UIKit points. `ios.rs` converts
+    /// queued keyboard events into Makepad layout points before dispatch.
     ///
     /// UIKit reports the keyboard frame in screen coordinates. Converting
     /// through the screen coordinate space keeps the value correct for iPad

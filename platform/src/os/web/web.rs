@@ -100,17 +100,15 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
-                    let mut new_geom: WindowGeom = tw.window_info.into();
                     let id_zero = CxWindowPool::id_zero();
-                    // Stash the OS-reported scale factor so dpi_override
-                    // input-coord remapping and `set_window_dpi_override(None)`
-                    // reverts can recover the native scale.
-                    self.windows[id_zero].os_dpi_factor = Some(new_geom.dpi_factor);
-                    if let Some(dpi_override) = self.windows[id_zero].dpi_override {
-                        new_geom.inner_size *= new_geom.dpi_factor / dpi_override;
-                        new_geom.dpi_factor = dpi_override;
+                    let mut new_geom: WindowGeom = tw.window_info.into();
+                    {
+                        let window = &mut self.windows[id_zero];
+                        window.os_dpi_factor = Some(new_geom.dpi_factor);
+                        new_geom = window.native_window_geom_to_layout(new_geom);
                     }
-                    self.os.window_geom = new_geom;
+                    self.os.window_geom = new_geom.clone();
+                    self.windows[id_zero].window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.call_event_handler(&Event::Startup);
@@ -123,10 +121,10 @@ impl Cx {
                     let old_geom = self.os.window_geom.clone();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     let id_zero = CxWindowPool::id_zero();
-                    self.windows[id_zero].os_dpi_factor = Some(new_geom.dpi_factor);
-                    if let Some(dpi_override) = self.windows[id_zero].dpi_override {
-                        new_geom.inner_size *= new_geom.dpi_factor / dpi_override;
-                        new_geom.dpi_factor = dpi_override;
+                    {
+                        let window = &mut self.windows[id_zero];
+                        window.os_dpi_factor = Some(new_geom.dpi_factor);
+                        new_geom = window.native_window_geom_to_layout(new_geom);
                     }
                     if old_geom != new_geom {
                         self.os.window_geom = new_geom.clone();
@@ -643,6 +641,8 @@ impl Cx {
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
+                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     self.os
                         .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });
                 }

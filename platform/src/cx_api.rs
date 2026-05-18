@@ -24,7 +24,7 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::WindowId,
+        window::{CxWindow, WindowId},
         window::WindowVisuals,
     },
     std::{
@@ -532,60 +532,6 @@ impl Cx {
         *pos = self.windows[window_id].remap_dpi_override(*pos);
     }
 
-    /// Set or clear a window's `dpi_override` at runtime, rewrite its
-    /// `window_geom` accordingly, and queue a synthetic `WindowGeomChange`
-    /// event so every listener (`AdaptiveView`, `display_context`, custom
-    /// widgets) reacts the same way it would to an OS-driven change.
-    ///
-    /// `dpi_override = Some(f)` makes the entire UI render as if the OS had
-    /// reported `f` as its scale factor: `inner_size` is recomputed inversely
-    /// so the same physical screen ends up with fewer logical points (UI
-    /// appears bigger) or more logical points (UI appears smaller). Pass
-    /// `None` to revert to the OS-reported scale factor.
-    ///
-    /// **Re-entrancy:** safe to call from inside an event handler. The
-    /// synthetic event isn't dispatched directly (that would panic on the
-    /// `event_handler.take()` in `cx_shared.rs`); it's queued onto
-    /// `pending_window_geom_changes` and drained by `call_event_handler`
-    /// after the active handler has fully returned, in the same cycle as
-    /// `handle_actions` / `handle_triggers`.
-    ///
-    /// The platform-side `WindowGeomChange` handlers also apply `dpi_override`
-    /// when the OS itself emits a geom change (e.g. orientation, resize, move
-    /// across monitors), so this helper is only needed when the override
-    /// itself changes — typically driven by a user-facing zoom/scale setting.
-    pub fn set_window_dpi_override(
-        &mut self,
-        window_id: WindowId,
-        dpi_override: Option<f64>,
-    ) {
-        let window = &mut self.windows[window_id];
-        let current_dpi = window.window_geom.dpi_factor;
-        let target_dpi = dpi_override
-            .or(window.os_dpi_factor)
-            .unwrap_or(current_dpi);
-        if target_dpi <= 0.0 || (target_dpi - current_dpi).abs() < f64::EPSILON {
-            // Even if the effective scale didn't change, store the override
-            // value itself so future OS-driven geom changes reapply it.
-            window.dpi_override = dpi_override;
-            return;
-        }
-        let scale = current_dpi / target_dpi;
-        let old_geom = window.window_geom.clone();
-        window.dpi_override = dpi_override;
-        window.window_geom.inner_size *= scale;
-        window.window_geom.dpi_factor = target_dpi;
-        let new_geom = window.window_geom.clone();
-
-        self.pending_window_geom_changes
-            .push(crate::event::WindowGeomChangeEvent {
-                window_id,
-                old_geom,
-                new_geom,
-            });
-        self.redraw_all();
-    }
-
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
         use makepad_script::trap::NoTrap;
         let Some(vm) = self.script_vm.as_mut() else {
@@ -965,6 +911,49 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
+    /// Set or clear a window's `dpi_override` at runtime.
+    ///
+    /// This rewrites the stored `WindowGeom` from the previous effective DPI to
+    /// the new effective DPI, including every in-window metric that must remain
+    /// physically fixed: inner/outer size, safe-area insets, and native chrome
+    /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
+    /// this can be called from inside normal event/action handlers.
+    pub fn set_window_dpi_override(
+        &mut self,
+        window_id: WindowId,
+        dpi_override: Option<f64>,
+    ) {
+        let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
+        let window = &mut self.windows[window_id];
+        let current_dpi = window.effective_dpi_factor();
+        let target_dpi = dpi_override.unwrap_or_else(|| window.native_dpi_factor());
+
+        if (target_dpi - current_dpi).abs() < f64::EPSILON {
+            window.dpi_override = dpi_override;
+            window.window_geom.dpi_factor = target_dpi;
+            return;
+        }
+
+        let old_geom = window.window_geom.clone();
+        let scale = current_dpi / target_dpi;
+        window.dpi_override = dpi_override;
+        window.window_geom.inner_size *= scale;
+        window.window_geom.outer_size *= scale;
+        window.window_geom.safe_area_insets = window.window_geom.safe_area_insets.scale(scale);
+        window.window_geom.window_chrome_buttons =
+            CxWindow::scale_rect(window.window_geom.window_chrome_buttons, scale);
+        window.window_geom.dpi_factor = target_dpi;
+        let new_geom = window.window_geom.clone();
+
+        self.pending_window_geom_changes
+            .push(crate::event::WindowGeomChangeEvent {
+                window_id,
+                old_geom,
+                new_geom,
+            });
+        self.redraw_all();
+    }
+
     /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
     ///
     /// Displays a platform-specific floating menu with text editing actions. The menu items
@@ -975,8 +964,8 @@ impl Cx {
     ///
     /// # Parameters
     /// * `has_selection` - Whether text is currently selected (enables Copy/Cut actions)
-    /// * `rect` - Selection bounding box in logical pixels (for menu positioning)
-    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in logical pixels)
+    /// * `rect` - Selection bounding box in Makepad layout points (for menu positioning)
+    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in Makepad layout points)
     ///
     /// # Platform Support
     /// - Android: Uses ActionMode with floating toolbar
@@ -1148,6 +1137,12 @@ impl Cx {
             return self.get_delegated_dpi_factor(draw_pass_id);
         }
         return 1.0;
+    }
+
+    pub fn get_window_id_of(&self, area: &Area) -> Option<WindowId> {
+        let draw_list_id = area.draw_list_id()?;
+        let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id?;
+        self.get_pass_window_id(draw_pass_id)
     }
 
     pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {

@@ -131,6 +131,8 @@ pub enum FromJavaMessage {
         is_open: bool,
     },
     SafeAreaInsets {
+        // Native Android logical points (`px / density`). Rust converts these
+        // through the active window before exposing them as Makepad layout points.
         top: f64,
         right: f64,
         bottom: f64,
@@ -1387,7 +1389,7 @@ pub unsafe fn to_java_show_clipboard_actions(
     dpi_factor: f64,
 ) {
     let env = attach_jni_env();
-    // Apply DPI scaling
+    // Convert Makepad layout points to Android physical pixels.
     let left = (rect.pos.x * dpi_factor) as i32;
     let top = (rect.pos.y * dpi_factor) as i32;
     let right = ((rect.pos.x + rect.size.x) * dpi_factor) as i32;
@@ -1947,6 +1949,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         InputMode::Email => 5,
         InputMode::Decimal => 6,
         InputMode::Search => 7,
+        InputMode::None => 8,
     };
 
     let autocapitalize = match config.soft_keyboard.autocapitalize {
@@ -1967,7 +1970,15 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         ReturnKeyType::Go => 1,
         ReturnKeyType::Search => 2,
         ReturnKeyType::Send => 3,
+        ReturnKeyType::Next => 4,
         ReturnKeyType::Done => 5,
+        ReturnKeyType::None => 6,
+        ReturnKeyType::Previous => 7,
+        // Android does not expose these iOS-specific labels. Map them to the
+        // closest semantic action instead of dropping the requested behavior.
+        ReturnKeyType::Google | ReturnKeyType::Yahoo => 2,
+        ReturnKeyType::Join | ReturnKeyType::Route | ReturnKeyType::Continue => 1,
+        ReturnKeyType::EmergencyCall => 5,
     };
 
     ndk_utils::call_void_method!(
@@ -1989,6 +2000,8 @@ pub unsafe fn to_java_update_ime_text_state(
     full_text: &str,
     selection_start: i32,
     selection_end: i32,
+    composing_start: i32,
+    composing_end: i32,
 ) {
     let env = attach_jni_env();
     let text_cstr = CString::new(full_text).unwrap();
@@ -1998,10 +2011,12 @@ pub unsafe fn to_java_update_ime_text_state(
         env,
         get_activity(),
         "updateImeTextState",
-        "(Ljava/lang/String;II)V",
+        "(Ljava/lang/String;IIII)V",
         text_jstr,
         selection_start as jni_sys::jint,
-        selection_end as jni_sys::jint
+        selection_end as jni_sys::jint,
+        composing_start as jni_sys::jint,
+        composing_end as jni_sys::jint
     );
 
     (**env).DeleteLocalRef.unwrap()(env, text_jstr);
