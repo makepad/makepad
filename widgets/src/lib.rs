@@ -597,7 +597,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
-    // Safe area inset values (in logical points). Populated from the platform's
+    // Safe area inset values (in Makepad layout points). Populated from the platform's
     // display_context which is set before Startup on iOS/Android. On desktop
     // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
     {

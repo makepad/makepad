@@ -32,7 +32,7 @@ pub struct KeyboardView {
     outer_walk: Walk,
     #[live]
     keyboard_walk: Walk,
-    /// Minimum gap (in logical pixels) preserved between the focused IME field's
+    /// Minimum gap (in Makepad layout points) preserved between the focused IME field's
     /// bottom edge and the top of the on-screen keyboard. Acts as breathing room
     /// so the cursor isn't pressed flush against the keyboard.
     #[live]
@@ -40,10 +40,10 @@ pub struct KeyboardView {
     #[rust]
     next_frame: NextFrame,
 
-    /// Current vertical scroll offset applied to the inner content (logical pixels).
+    /// Current vertical scroll offset applied to the inner content (Makepad layout points).
     #[rust]
     keyboard_shift: f64,
-    /// Last known on-screen keyboard height in logical pixels. Stored so the
+    /// Last known on-screen keyboard height in Makepad layout points. Stored so the
     /// shift can be recomputed when the focused IME area moves due to a layout
     /// reflow that happens while the keyboard stays open.
     #[rust]
@@ -75,7 +75,7 @@ enum AnimState {
 
 impl KeyboardView {
     /// Compute the vertical scroll required to keep the focused IME field above
-    /// an on-screen keyboard of `keyboard_height` logical pixels.
+    /// an on-screen keyboard of `keyboard_height` Makepad layout points.
     ///
     /// The keyboard is a window-level obstruction occupying the bottom strip of
     /// the active window, so the calculation is anchored to the window's inner

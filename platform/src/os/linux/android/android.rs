@@ -285,7 +285,11 @@ impl Cx {
         self.gpu_info.performance = GpuPerformance::Tier1;
         // Populate display_context and script heap with the initial display
         // metrics BEFORE Startup, so app script_mod! definitions can use them.
-        let insets = self.os.safe_area_insets;
+        // No window DPI override exists before Startup creates the first
+        // window, so native Android points are layout points for this initial
+        // script heap population. Window creation will publish converted
+        // values through WindowGeomChange once an override can be known.
+        let insets = self.os.native_safe_area_insets;
         let dpi_factor = if self.os.dpi_factor > 0.0 {
             self.os.dpi_factor
         } else {
@@ -687,8 +691,8 @@ impl Cx {
                 window.os_dpi_factor = Some(self.os.dpi_factor);
                 let old_geom = window.window_geom.clone();
 
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                let size = self.os.display_size / dpi_factor;
+                let dpi_factor = window.effective_dpi_factor();
+                let size = window.physical_vec2d_to_layout(self.os.display_size);
                 window.window_geom = WindowGeom {
                     dpi_factor,
                     can_fullscreen: false,
@@ -698,7 +702,8 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
-                    safe_area_insets: self.os.safe_area_insets,
+                    safe_area_insets: window
+                        .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
                     ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
@@ -719,10 +724,9 @@ impl Cx {
                 pointer_id,
                 time,
             } => {
-                let window = &mut self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let window = &self.windows[CxWindowPool::id_zero()];
                 let e = Event::LongPress(LongPressEvent {
-                    abs: abs / dpi_factor,
+                    abs: window.physical_vec2d_to_layout(abs),
                     uid: pointer_id,
                     window_id: CxWindowPool::id_zero(),
                     time,
@@ -731,11 +735,10 @@ impl Cx {
             }
             FromJavaMessage::Touch(mut touches) => {
                 let time = touches[0].time;
-                let window = &mut self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let window = &self.windows[CxWindowPool::id_zero()];
                 for touch in &mut touches {
-                    touch.abs /= dpi_factor;
-                    touch.radius /= dpi_factor;
+                    touch.abs = window.physical_vec2d_to_layout(touch.abs);
+                    touch.radius = window.physical_vec2d_to_layout(touch.radius);
                 }
 
                 // Check for outside-click popup dismiss on touch start
@@ -905,13 +908,14 @@ impl Cx {
                 is_open,
             } => {
                 // Java reports the bottom IME occlusion in physical pixels.
-                // Convert to logical points and dedup repeated inset/layout
+                // Convert to Makepad layout points and dedup repeated inset/layout
                 // callbacks. A visible IME may still have zero bottom
                 // occlusion (floating keyboard, transient animation frame);
                 // keep it as a visible zero-height keyboard so KeyboardView can
                 // clear any previous bottom shift without treating focus as
                 // dismissed.
-                let height_logical = (keyboard_height as f64) / self.os.dpi_factor;
+                let height_logical = self.windows[CxWindowPool::id_zero()]
+                    .physical_pixels_to_layout(keyboard_height as f64);
                 let time = self.os.timers.time_now();
                 if is_open {
                     if self.os.last_ime_visible
@@ -1270,11 +1274,10 @@ impl Cx {
                 time,
             } => {
                 let window = &self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                 let e = Event::SelectionHandleDrag(SelectionHandleDragEvent {
                     handle,
                     phase,
-                    abs: abs / dpi_factor,
+                    abs: window.physical_vec2d_to_layout(abs),
                     time,
                 });
                 self.call_event_handler(&e);
@@ -1325,13 +1328,14 @@ impl Cx {
                     bottom,
                     left,
                 };
-                if self.os.safe_area_insets != new_insets {
-                    self.os.safe_area_insets = new_insets;
+                if self.os.native_safe_area_insets != new_insets {
+                    self.os.native_safe_area_insets = new_insets;
                     // Update the WindowGeom with the new safe area insets
                     let window_id = CxWindowPool::id_zero();
                     let window = &mut self.windows[window_id];
                     let old_geom = window.window_geom.clone();
-                    window.window_geom.safe_area_insets = new_insets;
+                    let safe_area_insets = window.native_safe_area_insets_to_layout(new_insets);
+                    window.window_geom.safe_area_insets = safe_area_insets;
                     let new_geom = window.window_geom.clone();
                     if old_geom != new_geom {
                         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -2232,8 +2236,8 @@ impl Cx {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
                     window.os_dpi_factor = Some(self.os.dpi_factor);
-                    let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                    let size = self.os.display_size / dpi_factor;
+                    let dpi_factor = window.effective_dpi_factor();
+                    let size = window.physical_vec2d_to_layout(self.os.display_size);
                     window.window_geom = WindowGeom {
                         dpi_factor,
                         can_fullscreen: false,
@@ -2243,7 +2247,8 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
-                        safe_area_insets: self.os.safe_area_insets,
+                        safe_area_insets: window
+                            .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
                         ..Default::default()
                     };
                     window.is_created = true;
@@ -2264,9 +2269,7 @@ impl Cx {
                     size,
                     grab_keyboard,
                 } => {
-                    let dpi_factor = self.windows[parent_window_id]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    let dpi_factor = self.windows[parent_window_id].effective_dpi_factor();
                     let window = &mut self.windows[window_id];
                     window.os_dpi_factor = Some(self.os.dpi_factor);
                     window.window_geom = WindowGeom {
@@ -2320,15 +2323,26 @@ impl Cx {
                 CxOsOp::SyncImeState {
                     text,
                     selection,
-                    composition: _,
+                    composition,
                 } => {
                     let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
                     let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
+                    let (comp_start_utf16, comp_end_utf16) = if let Some(composition) = composition
+                    {
+                        (
+                            composition.start.to_utf16_index(&text) as i32,
+                            composition.end.to_utf16_index(&text) as i32,
+                        )
+                    } else {
+                        (-1, -1)
+                    };
                     unsafe {
                         android_jni::to_java_update_ime_text_state(
                             &text,
                             sel_start_utf16,
                             sel_end_utf16,
+                            comp_start_utf16,
+                            comp_end_utf16,
                         );
                     }
                 }
@@ -2337,22 +2351,18 @@ impl Cx {
                 },
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => unsafe {
-                    // Rust positions are in logical points; Android overlay APIs expect physical pixels.
-                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    // Rust positions are in Makepad layout points; Android overlay APIs expect physical pixels.
+                    let window = &self.windows[CxWindowPool::id_zero()];
                     android_jni::to_java_show_selection_handles(
-                        start * dpi_factor,
-                        end * dpi_factor,
+                        window.layout_vec2d_to_physical_pixels(start),
+                        window.layout_vec2d_to_physical_pixels(end),
                     );
                 },
                 CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
-                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    let window = &self.windows[CxWindowPool::id_zero()];
                     android_jni::to_java_update_selection_handles(
-                        start * dpi_factor,
-                        end * dpi_factor,
+                        window.layout_vec2d_to_physical_pixels(start),
+                        window.layout_vec2d_to_physical_pixels(end),
                     );
                 },
                 CxOsOp::HideSelectionHandles => unsafe {
@@ -2364,11 +2374,12 @@ impl Cx {
                     rect,
                     keyboard_shift,
                 } => unsafe {
+                    let dpi_factor = self.windows[CxWindowPool::id_zero()].effective_dpi_factor();
                     android_jni::to_java_show_clipboard_actions(
                         has_selection,
                         rect,
                         keyboard_shift,
-                        self.os.dpi_factor,
+                        dpi_factor,
                     );
                 },
                 CxOsOp::HideClipboardActions => unsafe {
@@ -2376,10 +2387,12 @@ impl Cx {
                 },
                 CxOsOp::AttachCameraNativePreview { video_id, area } => {
                     let rect = area.clipped_rect(self);
-                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
-                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
-                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
-                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    let rect =
+                        self.windows[CxWindowPool::id_zero()].layout_rect_to_physical_pixels(rect);
+                    let left = rect.pos.x as i32;
+                    let top = rect.pos.y as i32;
+                    let right = (rect.pos.x + rect.size.x) as i32;
+                    let bottom = (rect.pos.y + rect.size.y) as i32;
                     unsafe {
                         android_jni::to_java_attach_camera_preview(
                             video_id, left, top, right, bottom,
@@ -2392,10 +2405,12 @@ impl Cx {
                     visible,
                 } => {
                     let rect = area.clipped_rect(self);
-                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
-                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
-                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
-                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    let rect =
+                        self.windows[CxWindowPool::id_zero()].layout_rect_to_physical_pixels(rect);
+                    let left = rect.pos.x as i32;
+                    let top = rect.pos.y as i32;
+                    let right = (rect.pos.x + rect.size.x) as i32;
+                    let bottom = (rect.pos.y + rect.size.y) as i32;
                     unsafe {
                         android_jni::to_java_update_camera_preview(
                             video_id, left, top, right, bottom, visible,
@@ -3094,7 +3109,7 @@ impl Default for CxOs {
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
-            safe_area_insets: Default::default(),
+            native_safe_area_insets: Default::default(),
             last_ime_height: 0.0,
             last_ime_visible: false,
             media: CxAndroidMedia::default(),
@@ -3174,8 +3189,10 @@ pub struct CxOs {
     pub refresh_surface_snapshot_after_first_present: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
-    pub safe_area_insets: crate::event::SafeAreaInsets,
-    /// Last reported soft-keyboard height in logical pixels. Used to dedup
+    /// Safe area insets in native Android logical points (`px / density`).
+    /// Convert through `CxWindow` before exposing them to widgets.
+    pub native_safe_area_insets: crate::event::SafeAreaInsets,
+    /// Last reported soft-keyboard height in Makepad layout points. Used to dedup
     /// repeated inset notifications from `onApplyWindowInsets` /
     /// `onGlobalLayout` so we don't re-fire `VirtualKeyboardEvent`s on
     /// unrelated layout passes.
