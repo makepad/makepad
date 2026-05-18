@@ -758,11 +758,38 @@ impl Cx {
         }
     }
 
+    /// Dispatch any `WindowGeomChange` events queued by code that ran during
+    /// the current event dispatch (typically `Cx::set_window_dpi_override`
+    /// called from a widget handler). Drained the same way as `handle_actions`
+    /// — swap, dispatch each, repeat until quiescent. Each dispatch is a
+    /// fresh `inner_call_event_handler` call after the previous one's handler
+    /// has been put back, so the `event_handler.take()` is safe.
+    pub fn handle_pending_window_geom_changes(&mut self) {
+        let mut counter = 0;
+        while !self.pending_window_geom_changes.is_empty() {
+            counter += 1;
+            let mut events = Vec::new();
+            std::mem::swap(&mut self.pending_window_geom_changes, &mut events);
+            for event in events {
+                self.inner_call_event_handler(&Event::WindowGeomChange(event));
+                self.inner_key_focus_change();
+            }
+            if counter > 100 {
+                crate::error!("WindowGeomChange feedback loop detected");
+                break;
+            }
+        }
+    }
+
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
         self.inner_call_event_handler(event);
+        // Dispatch any synthetic geom changes queued during the original
+        // handler (e.g. runtime dpi_override updates) before triggers and
+        // actions, so layout-dependent reactions see the new geometry.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
@@ -770,6 +797,7 @@ impl Cx {
         // widget->script calls run immediately instead of waiting for tick/timer paths.
         self.handle_script_tasks();
         // Script callbacks can enqueue actions/triggers; flush them in the same cycle.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();

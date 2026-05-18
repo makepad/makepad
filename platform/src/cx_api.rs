@@ -517,6 +517,75 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Remap an absolute coordinate from the OS-reported logical-point space
+    /// into the layout's logical-point space when a `dpi_override` is active
+    /// on the given window. No-op if no override is set or `os_dpi_factor`
+    /// hasn't been recorded yet.
+    ///
+    /// Platform-specific event handlers call this on every `abs` field of
+    /// pointer/touch/scroll events so input still hits the right widget when
+    /// zoom is active. Android/OpenHarmony don't need it because they divide
+    /// raw pixels by the override-aware `dpi_factor` at the source — so this
+    /// helper is dead code on those builds, hence the `allow(dead_code)`.
+    #[allow(dead_code)]
+    pub(crate) fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
+        *pos = self.windows[window_id].remap_dpi_override(*pos);
+    }
+
+    /// Set or clear a window's `dpi_override` at runtime, rewrite its
+    /// `window_geom` accordingly, and queue a synthetic `WindowGeomChange`
+    /// event so every listener (`AdaptiveView`, `display_context`, custom
+    /// widgets) reacts the same way it would to an OS-driven change.
+    ///
+    /// `dpi_override = Some(f)` makes the entire UI render as if the OS had
+    /// reported `f` as its scale factor: `inner_size` is recomputed inversely
+    /// so the same physical screen ends up with fewer logical points (UI
+    /// appears bigger) or more logical points (UI appears smaller). Pass
+    /// `None` to revert to the OS-reported scale factor.
+    ///
+    /// **Re-entrancy:** safe to call from inside an event handler. The
+    /// synthetic event isn't dispatched directly (that would panic on the
+    /// `event_handler.take()` in `cx_shared.rs`); it's queued onto
+    /// `pending_window_geom_changes` and drained by `call_event_handler`
+    /// after the active handler has fully returned, in the same cycle as
+    /// `handle_actions` / `handle_triggers`.
+    ///
+    /// The platform-side `WindowGeomChange` handlers also apply `dpi_override`
+    /// when the OS itself emits a geom change (e.g. orientation, resize, move
+    /// across monitors), so this helper is only needed when the override
+    /// itself changes — typically driven by a user-facing zoom/scale setting.
+    pub fn set_window_dpi_override(
+        &mut self,
+        window_id: WindowId,
+        dpi_override: Option<f64>,
+    ) {
+        let window = &mut self.windows[window_id];
+        let current_dpi = window.window_geom.dpi_factor;
+        let target_dpi = dpi_override
+            .or(window.os_dpi_factor)
+            .unwrap_or(current_dpi);
+        if target_dpi <= 0.0 || (target_dpi - current_dpi).abs() < f64::EPSILON {
+            // Even if the effective scale didn't change, store the override
+            // value itself so future OS-driven geom changes reapply it.
+            window.dpi_override = dpi_override;
+            return;
+        }
+        let scale = current_dpi / target_dpi;
+        let old_geom = window.window_geom.clone();
+        window.dpi_override = dpi_override;
+        window.window_geom.inner_size *= scale;
+        window.window_geom.dpi_factor = target_dpi;
+        let new_geom = window.window_geom.clone();
+
+        self.pending_window_geom_changes
+            .push(crate::event::WindowGeomChangeEvent {
+                window_id,
+                old_geom,
+                new_geom,
+            });
+        self.redraw_all();
+    }
+
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
         use makepad_script::trap::NoTrap;
         let Some(vm) = self.script_vm.as_mut() else {
