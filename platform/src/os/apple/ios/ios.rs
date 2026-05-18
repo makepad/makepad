@@ -622,18 +622,10 @@ impl Cx {
             }
             IosEvent::WindowGeomChange(mut re) => {
                 let window_id = CxWindowPool::id_zero();
-                // Stash the OS-reported scale factor so dpi_override coordinate
-                // remapping (input events) can recover it later.
-                self.windows[window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
-                // If a dpi_override is set, rewrite the geom to use it. The
-                // logical inner_size scales inversely with the new factor so
-                // the same physical screen ends up with fewer (override > os)
-                // or more (override < os) logical points.
-                if let Some(dpi_override) = self.windows[window_id].dpi_override {
-                    re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                    re.new_geom.dpi_factor = dpi_override;
-                }
-                self.windows[window_id].window_geom = re.new_geom.clone();
+                let window = &mut self.windows[window_id];
+                window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                re.new_geom = window.native_window_geom_to_layout(re.new_geom);
+                window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
             }
@@ -644,8 +636,6 @@ impl Cx {
                     for (_video_id, player) in self.os.video_players.iter_mut() {
                         match player.check_prepared() {
                             Some(Ok(prepared)) => {
-                window.os_dpi_factor = Some(re.new_geom.dpi_factor);
-                re.new_geom = window.native_window_geom_to_layout(re.new_geom);
                                 let PlaybackPrepared {
                                     width,
                                     height,
@@ -961,6 +951,8 @@ impl Cx {
                     window.is_created = true;
                 }
                 CxOsOp::ShowTextIME(_area, pos, config) => {
+                    let window_id = CxWindowPool::id_zero();
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     IosApp::set_ime_position(pos);
                     IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
@@ -972,8 +964,6 @@ impl Cx {
                     text,
                     selection,
                     composition: _,
-                    let window_id = CxWindowPool::id_zero();
-                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                 } => {
                     IosApp::set_ime_text(text, selection.end.0);
                 }
@@ -1013,6 +1003,10 @@ impl Cx {
                     rect,
                     keyboard_shift,
                 } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let rect = window.layout_rect_to_native_points(rect);
+                    let keyboard_shift = window.layout_points_to_native_points(keyboard_shift);
                     IosApp::show_clipboard_actions(has_selection, rect, keyboard_shift);
                 }
                 CxOsOp::HideClipboardActions => {
@@ -1023,13 +1017,17 @@ impl Cx {
                 }
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => {
-                    IosApp::show_selection_handles(start, end);
                     let window_id = CxWindowPool::id_zero();
                     let window = &self.windows[window_id];
-                    let rect = window.layout_rect_to_native_points(rect);
-                    let keyboard_shift = window.layout_points_to_native_points(keyboard_shift);
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
+                    IosApp::show_selection_handles(start, end);
                 }
                 CxOsOp::UpdateSelectionHandles { start, end } => {
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &self.windows[window_id];
+                    let start = window.layout_vec2d_to_native_points(start);
+                    let end = window.layout_vec2d_to_native_points(end);
                     IosApp::update_selection_handles(start, end);
                 }
                 CxOsOp::HideSelectionHandles => {
@@ -1038,17 +1036,9 @@ impl Cx {
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::FullscreenWindow(_window_id) => {
                     IosApp::set_fullscreen(true);
-                    let window_id = CxWindowPool::id_zero();
-                    let window = &self.windows[window_id];
-                    let start = window.layout_vec2d_to_native_points(start);
-                    let end = window.layout_vec2d_to_native_points(end);
                 }
                 CxOsOp::NormalizeWindow(_window_id) => {
                     IosApp::set_fullscreen(false);
-                    let window_id = CxWindowPool::id_zero();
-                    let window = &self.windows[window_id];
-                    let start = window.layout_vec2d_to_native_points(start);
-                    let end = window.layout_vec2d_to_native_points(end);
                 }
                 CxOsOp::SetCursor(_) => {
                     // no need
