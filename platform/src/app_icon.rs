@@ -5,6 +5,14 @@ use makepad_zune_png::PngDecoder;
 include!(concat!(env!("OUT_DIR"), "/app_icon_gen.rs"));
 
 pub fn window_icon() -> WindowIcon {
+    // When a packaged app bundle is running, skip the runtime override
+    // so the app bundle's icon doesn't get changed.
+    if option_env!("MAKEPAD_PACKAGE_DIR").is_some() {
+        return WindowIcon {
+            name: None,
+            buffers: Vec::new(),
+        };
+    }
     let icon32 = decode_png(CUSTOM_ICON_PNG_32, 1);
     let icon64 = decode_png(CUSTOM_ICON_PNG_64, 1);
     let icon128 = decode_png(CUSTOM_ICON_PNG_128, 2);
