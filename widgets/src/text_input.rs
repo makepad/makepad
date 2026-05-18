@@ -2148,6 +2148,8 @@ impl Widget for TextInput {
                     self.last_sent_ime_sel_end = sel_end_byte;
                     self.ime_update_frame = cx.redraw_id();
 
+                    // This path bypasses apply_edit(), so keep placeholder/color state in sync.
+                    self.check_text_is_empty(cx);
                     self.draw_bg.redraw(cx);
                     if text_changed {
                         self.emit_change(cx, uid);
