@@ -682,6 +682,12 @@ impl Cx {
                 self.os.display_size = dvec2(width as f64, height as f64);
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
+                // Stash the OS-reported scale factor so a later
+                // `set_window_dpi_override(None)` can recover the native scale,
+                // and so `remap_dpi_override` (used by `dpi_override_scale`
+                // on platforms whose touch coords aren't already in
+                // override-points) has a baseline. Android itself converts
+                // touch coords at the source, so the helper is a no-op here.
                 window.os_dpi_factor = Some(self.os.dpi_factor);
                 let old_geom = window.window_geom.clone();
 

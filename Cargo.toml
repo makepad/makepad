@@ -28,6 +28,8 @@ workspace.members = [
     "examples/floating_panel",
     "examples/xr",
     "examples/cad",
+    "examples/hello_world",
+    "libs/gif",
     "libs/gltf",
     "libs/splat",
     "libs/latex_math",

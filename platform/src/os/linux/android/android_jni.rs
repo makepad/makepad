@@ -1950,6 +1950,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         InputMode::Email => 5,
         InputMode::Decimal => 6,
         InputMode::Search => 7,
+        InputMode::None => 8,
     };
 
     let autocapitalize = match config.soft_keyboard.autocapitalize {
@@ -1970,7 +1971,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
         ReturnKeyType::None => 6,
         ReturnKeyType::Go => 1,
         ReturnKeyType::Google => 2,
-        ReturnKeyType::Join => 5,
+        ReturnKeyType::Join => 1,
         ReturnKeyType::Next => 4,
         ReturnKeyType::Route => 1,
         ReturnKeyType::Search => 2,

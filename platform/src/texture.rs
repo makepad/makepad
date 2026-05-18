@@ -273,6 +273,19 @@ pub struct TextureAnimation {
     pub width: usize,
     pub height: usize,
     pub num_frames: usize,
+    pub frame_delays: Vec<f64>,
+}
+
+#[cfg(test)]
+mod texture_animation_tests {
+    use super::*;
+
+    #[test]
+    fn test_texture_animation_default_frame_delays_is_empty() {
+        let animation = TextureAnimation::default();
+        assert!(animation.frame_delays.is_empty());
+        assert_eq!(animation.frame_delays.len(), 0);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
