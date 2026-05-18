@@ -173,6 +173,12 @@ impl Cx {
                 self.os.display_size = dvec2(width as f64, height as f64);
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
+                // Stash the OS-reported scale factor so a later
+                // `set_window_dpi_override(None)` can recover the native scale.
+                // OpenHarmony converts touch coords at the source so the
+                // helper-based remap is unnecessary, but this field is also
+                // consulted by `Cx::set_window_dpi_override`.
+                window.os_dpi_factor = Some(self.os.dpi_factor);
                 let old_geom = window.window_geom.clone();
 
                 let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
@@ -516,6 +522,7 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
+                    window.os_dpi_factor = Some(self.os.dpi_factor);
                     let size = dvec2(
                         self.os.display_size.x / self.os.dpi_factor,
                         self.os.display_size.y / self.os.dpi_factor,

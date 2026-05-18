@@ -126,6 +126,11 @@ impl Cx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    // Stash the OS-reported scale factor so dpi_override
+                    // input-coord remapping (mouse/scroll/drag-query) and
+                    // `Cx::set_window_dpi_override(None)` reverts can recover
+                    // the native scale.
+                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
                     if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
                         re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
                         re.new_geom.dpi_factor = dpi_override;
@@ -261,29 +266,39 @@ impl Cx {
 
                 self.handle_repaint(d3d11_windows, d3d11_cx);
             }
-            Win32Event::MouseDown(e) => {
+            Win32Event::MouseDown(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            Win32Event::MouseMove(e) => {
+            Win32Event::MouseMove(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            Win32Event::MouseUp(e) => {
+            Win32Event::MouseUp(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            Win32Event::MouseLeave(e) => {
+            Win32Event::MouseLeave(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseLeave(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            Win32Event::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
-            Win32Event::WindowDragQuery(e) => self.call_event_handler(&Event::WindowDragQuery(e)),
+            Win32Event::Scroll(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::Scroll(e.into()))
+            }
+            Win32Event::WindowDragQuery(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::WindowDragQuery(e))
+            }
             Win32Event::WindowCloseRequested(e) => {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }

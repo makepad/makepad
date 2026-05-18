@@ -617,10 +617,20 @@ impl Cx {
             IosEvent::WindowLostFocus(window_id) => {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
-            IosEvent::WindowGeomChange(re) => {
+            IosEvent::WindowGeomChange(mut re) => {
                 let window_id = CxWindowPool::id_zero();
-                let window = &mut self.windows[window_id];
-                window.window_geom = re.new_geom.clone();
+                // Stash the OS-reported scale factor so dpi_override coordinate
+                // remapping (input events) can recover it later.
+                self.windows[window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
+                // If a dpi_override is set, rewrite the geom to use it. The
+                // logical inner_size scales inversely with the new factor so
+                // the same physical screen ends up with fewer (override > os)
+                // or more (override < os) logical points.
+                if let Some(dpi_override) = self.windows[window_id].dpi_override {
+                    re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
+                    re.new_geom.dpi_factor = dpi_override;
+                }
+                self.windows[window_id].window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
             }
@@ -766,7 +776,14 @@ impl Cx {
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
             }
-            IosEvent::TouchUpdate(e) => {
+            IosEvent::TouchUpdate(mut e) => {
+                // Touch coords arrive in the OS-reported logical-point space.
+                // If a dpi_override is active the rendered layout uses a
+                // different scale, so remap each touch back into that space.
+                let window_id = e.window_id;
+                for touch in e.touches.iter_mut() {
+                    self.dpi_override_scale(&mut touch.abs, window_id);
+                }
                 // Check for outside-click popup dismiss on touch start
                 if e.touches
                     .iter()
@@ -826,10 +843,12 @@ impl Cx {
 
                 self.fingers.process_touch_update_end(&e.touches);
             }
-            IosEvent::LongPress(e) => {
+            IosEvent::LongPress(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::LongPress(e.into()));
             }
-            IosEvent::MouseDown(e) => {
+            IosEvent::MouseDown(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 // Check for outside-click popup dismiss
                 if let Some(popup_window_id) = self.find_popup_to_dismiss_on_mouse(e.abs) {
                     self.dismiss_popup_window(
@@ -841,18 +860,23 @@ impl Cx {
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            IosEvent::MouseMove(e) => {
+            IosEvent::MouseMove(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            IosEvent::MouseUp(e) => {
+            IosEvent::MouseUp(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            IosEvent::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
+            IosEvent::Scroll(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::Scroll(e.into()))
+            }
             IosEvent::TextInput(e) => self.call_event_handler(&Event::TextInput(e)),
             IosEvent::TextRangeReplace(e) => self.call_event_handler(&Event::TextRangeReplace(e)),
             IosEvent::SelectionHandleDrag(e) => {

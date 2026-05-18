@@ -137,23 +137,29 @@ impl Cx {
                 self.handle_repaint(direct_app);
                 //profile_end("paint openGL", p);
             }
-            DirectEvent::MouseDown(e) => {
+            DirectEvent::MouseDown(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, CxWindowPool::id_zero());
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            DirectEvent::MouseMove(e) => {
+            DirectEvent::MouseMove(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            DirectEvent::MouseUp(e) => {
+            DirectEvent::MouseUp(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            DirectEvent::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
+            DirectEvent::Scroll(mut e) => {
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::Scroll(e.into()))
+            }
             DirectEvent::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
@@ -273,12 +279,18 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
+                    window.os_dpi_factor = Some(direct_app.dpi_factor);
+                    // Honor a preset `dpi_override` (e.g. set in the DSL on
+                    // the Window block) by using it as the effective scale.
+                    // `Cx::set_window_dpi_override` at runtime hits the same
+                    // field and re-emits the geom directly.
+                    let dpi_factor = window.dpi_override.unwrap_or(direct_app.dpi_factor);
                     let size = dvec2(
-                        direct_app.drm.width as f64 / direct_app.dpi_factor,
-                        direct_app.drm.height as f64 / direct_app.dpi_factor,
+                        direct_app.drm.width as f64 / dpi_factor,
+                        direct_app.drm.height as f64 / dpi_factor,
                     );
                     window.window_geom = WindowGeom {
-                        dpi_factor: direct_app.dpi_factor,
+                        dpi_factor,
                         can_fullscreen: false,
                         xr_is_presenting: false,
                         is_fullscreen: true,
@@ -298,8 +310,10 @@ impl Cx {
                     grab_keyboard,
                 } => {
                     let window = &mut self.windows[window_id];
+                    window.os_dpi_factor = Some(direct_app.dpi_factor);
+                    let dpi_factor = window.dpi_override.unwrap_or(direct_app.dpi_factor);
                     window.window_geom = WindowGeom {
-                        dpi_factor: direct_app.dpi_factor,
+                        dpi_factor,
                         can_fullscreen: false,
                         xr_is_presenting: false,
                         is_fullscreen: false,
