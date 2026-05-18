@@ -126,14 +126,10 @@ impl Cx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
-                    // Stash the OS-reported scale factor so dpi_override
-                    // input-coord remapping (mouse/scroll/drag-query) and
-                    // `Cx::set_window_dpi_override(None)` reverts can recover
-                    // the native scale.
-                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
-                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
-                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                        re.new_geom.dpi_factor = dpi_override;
+                    {
+                        let cx_window = &mut self.windows[re.window_id];
+                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
 
                     window.window_geom = re.new_geom.clone();
@@ -266,39 +262,29 @@ impl Cx {
 
                 self.handle_repaint(d3d11_windows, d3d11_cx);
             }
-            Win32Event::MouseDown(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+            Win32Event::MouseDown(e) => {
                 self.fingers.process_tap_count(e.abs, e.time);
                 self.fingers.mouse_down(e.button, e.window_id);
                 self.call_event_handler(&Event::MouseDown(e.into()))
             }
-            Win32Event::MouseMove(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+            Win32Event::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            Win32Event::MouseUp(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+            Win32Event::MouseUp(e) => {
                 let button = e.button;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            Win32Event::MouseLeave(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
+            Win32Event::MouseLeave(e) => {
                 self.call_event_handler(&Event::MouseLeave(e.into()));
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
-            Win32Event::Scroll(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
-                self.call_event_handler(&Event::Scroll(e.into()))
-            }
-            Win32Event::WindowDragQuery(mut e) => {
-                self.dpi_override_scale(&mut e.abs, e.window_id);
-                self.call_event_handler(&Event::WindowDragQuery(e))
-            }
+            Win32Event::Scroll(e) => self.call_event_handler(&Event::Scroll(e.into())),
+            Win32Event::WindowDragQuery(e) => self.call_event_handler(&Event::WindowDragQuery(e)),
             Win32Event::WindowCloseRequested(e) => {
                 self.call_event_handler(&Event::WindowCloseRequested(e))
             }
@@ -616,6 +602,8 @@ impl Cx {
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
+                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     d3d11_windows.iter_mut().for_each(|w| {
                         w.win32_window.set_ime_active(true);
                         w.win32_window.set_ime_spot(pos);

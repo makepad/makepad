@@ -11,7 +11,10 @@ use {
         draw_matrix::CxDrawMatrixPool,
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
-        event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger, WindowGeomChangeEvent},
+        event::{
+            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
+            WindowGeomChangeEvent,
+        },
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -145,13 +148,7 @@ pub struct Cx {
     /// as a shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
 
-    /// `WindowGeomChange` events queued by code that runs *during* an event
-    /// dispatch (e.g. `set_window_dpi_override` invoked from a settings
-    /// widget reacting to a dropdown). Synthesizing the event inline would
-    /// re-enter `call_event_handler` and panic on the `event_handler.take()`,
-    /// so the dispatcher drains this vec after each top-level dispatch via
-    /// `handle_pending_window_geom_changes` — listeners then see the event
-    /// normally on the same event-loop iteration.
+    /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
 
     pub debug: Debug,
@@ -465,7 +462,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_live_edit_request: false,
-            pending_window_geom_changes: Vec::new(),
+            pending_window_geom_changes: Default::default(),
 
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),
