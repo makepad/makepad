@@ -758,11 +758,32 @@ impl Cx {
         }
     }
 
+    /// Dispatch any `WindowGeomChange` events queued by code that ran during
+    /// the current event dispatch, such as runtime DPI override updates from a
+    /// widget action handler.
+    pub fn handle_pending_window_geom_changes(&mut self) {
+        let mut counter = 0;
+        while !self.pending_window_geom_changes.is_empty() {
+            counter += 1;
+            let mut events = Vec::new();
+            std::mem::swap(&mut self.pending_window_geom_changes, &mut events);
+            for event in events {
+                self.inner_call_event_handler(&Event::WindowGeomChange(event));
+                self.inner_key_focus_change();
+            }
+            if counter > 100 {
+                crate::error!("WindowGeomChange feedback loop detected");
+                break;
+            }
+        }
+    }
+
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
         self.inner_call_event_handler(event);
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
@@ -770,6 +791,7 @@ impl Cx {
         // widget->script calls run immediately instead of waiting for tick/timer paths.
         self.handle_script_tasks();
         // Script callbacks can enqueue actions/triggers; flush them in the same cycle.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();

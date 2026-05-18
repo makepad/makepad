@@ -11,8 +11,8 @@ pub struct DisplayContext {
     pub updated_on_event_id: u64,
     /// The current screen size
     pub screen_size: Vec2d,
-    /// Safe area insets for the current window (non-zero on devices with notches,
-    /// rounded corners, home indicators, etc.)
+    /// Safe area insets for the current window in Makepad layout points
+    /// (non-zero on devices with notches, rounded corners, home indicators, etc.)
     pub safe_area_insets: SafeAreaInsets,
 }
 

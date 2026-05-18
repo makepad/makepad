@@ -11,7 +11,10 @@ use {
         draw_matrix::CxDrawMatrixPool,
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
-        event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger},
+        event::{
+            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
+            WindowGeomChangeEvent,
+        },
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -144,6 +147,9 @@ pub struct Cx {
     /// so prefer `pending_script_reapply` whenever the change can be modeled
     /// as a shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+
+    /// `WindowGeomChange` events queued up during an event dispatch.
+    pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
 
     pub debug: Debug,
 
@@ -456,6 +462,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_live_edit_request: false,
+            pending_window_geom_changes: Default::default(),
 
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),

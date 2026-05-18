@@ -24,7 +24,7 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::WindowId,
+        window::{CxWindow, WindowId},
         window::WindowVisuals,
     },
     std::{
@@ -896,6 +896,49 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
+    /// Set or clear a window's `dpi_override` at runtime.
+    ///
+    /// This rewrites the stored `WindowGeom` from the previous effective DPI to
+    /// the new effective DPI, including every in-window metric that must remain
+    /// physically fixed: inner/outer size, safe-area insets, and native chrome
+    /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
+    /// this can be called from inside normal event/action handlers.
+    pub fn set_window_dpi_override(
+        &mut self,
+        window_id: WindowId,
+        dpi_override: Option<f64>,
+    ) {
+        let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
+        let window = &mut self.windows[window_id];
+        let current_dpi = window.effective_dpi_factor();
+        let target_dpi = dpi_override.unwrap_or_else(|| window.native_dpi_factor());
+
+        if (target_dpi - current_dpi).abs() < f64::EPSILON {
+            window.dpi_override = dpi_override;
+            window.window_geom.dpi_factor = target_dpi;
+            return;
+        }
+
+        let old_geom = window.window_geom.clone();
+        let scale = current_dpi / target_dpi;
+        window.dpi_override = dpi_override;
+        window.window_geom.inner_size *= scale;
+        window.window_geom.outer_size *= scale;
+        window.window_geom.safe_area_insets = window.window_geom.safe_area_insets.scale(scale);
+        window.window_geom.window_chrome_buttons =
+            CxWindow::scale_rect(window.window_geom.window_chrome_buttons, scale);
+        window.window_geom.dpi_factor = target_dpi;
+        let new_geom = window.window_geom.clone();
+
+        self.pending_window_geom_changes
+            .push(crate::event::WindowGeomChangeEvent {
+                window_id,
+                old_geom,
+                new_geom,
+            });
+        self.redraw_all();
+    }
+
     /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
     ///
     /// Displays a platform-specific floating menu with text editing actions. The menu items
@@ -906,8 +949,8 @@ impl Cx {
     ///
     /// # Parameters
     /// * `has_selection` - Whether text is currently selected (enables Copy/Cut actions)
-    /// * `rect` - Selection bounding box in logical pixels (for menu positioning)
-    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in logical pixels)
+    /// * `rect` - Selection bounding box in Makepad layout points (for menu positioning)
+    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in Makepad layout points)
     ///
     /// # Platform Support
     /// - Android: Uses ActionMode with floating toolbar
@@ -1079,6 +1122,12 @@ impl Cx {
             return self.get_delegated_dpi_factor(draw_pass_id);
         }
         return 1.0;
+    }
+
+    pub fn get_window_id_of(&self, area: &Area) -> Option<WindowId> {
+        let draw_list_id = area.draw_list_id()?;
+        let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id?;
+        self.get_pass_window_id(draw_pass_id)
     }
 
     pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {
