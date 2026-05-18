@@ -238,22 +238,28 @@ impl Win32App {
         }
     }
 
-    /// Create big/small default icons for the window class.
     fn create_default_icons() -> (HICON, HICON) {
         let icon = crate::app_icon::window_icon();
 
         let pick = |target: u32| icon.buffers.iter().min_by_key(|b| b.width.abs_diff(target));
 
+        let load_exe_or_default = || unsafe {
+            let from_exe = GetModuleHandleW(None).ok().and_then(
+                |h| LoadIconW(Some(h.into()), PCWSTR(1 as *const u16)).ok()
+            );
+            from_exe.unwrap_or_else(|| LoadIconW(None, IDI_WINLOGO).unwrap())
+        };
+
         let big = if let Some(buf) = pick(64).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
         } else {
-            unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }
+            load_exe_or_default()
         };
 
         let small = if let Some(buf) = pick(32).or_else(|| icon.buffers.first()) {
             Self::create_icon_from_rgba(buf.width, buf.height, &buf.data)
         } else {
-            unsafe { LoadIconW(None, IDI_WINLOGO).unwrap() }
+            load_exe_or_default()
         };
 
         (big, small)
