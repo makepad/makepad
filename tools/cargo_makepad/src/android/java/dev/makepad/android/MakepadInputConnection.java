@@ -608,12 +608,25 @@ public class MakepadInputConnection extends BaseInputConnection {
         // Samsung may respond to imm.updateSelection() by calling setSelection() again
         int currentStart = Selection.getSelectionStart(editable);
         int currentEnd = Selection.getSelectionEnd(editable);
-        if (currentStart == start && currentEnd == end) {
+        int compStart = BaseInputConnection.getComposingSpanStart(editable);
+        int compEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        boolean clearsComposition = false;
+        if (compStart >= 0 && compEnd >= 0) {
+            int compMin = Math.min(compStart, compEnd);
+            int compMax = Math.max(compStart, compEnd);
+            int selMin = Math.min(start, end);
+            int selMax = Math.max(start, end);
+            clearsComposition = selMin < compMin || selMax > compMax;
+        }
+        if (currentStart == start && currentEnd == end && !clearsComposition) {
             return true;  // Already there, no notifications needed
         }
 
         // Let BaseInputConnection handle selection on Editable
         boolean result = super.setSelection(start, end);
+        if (clearsComposition) {
+            BaseInputConnection.removeComposingSpans(editable);
+        }
 
         notifyStateChanged();
 

@@ -734,6 +734,7 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.needs_scroll_to_cursor = true;
+        self.clear_composition();
         self.history.force_new_edit_group();
         self.draw_bg.redraw(cx);
     }
@@ -1289,6 +1290,17 @@ impl TextInput {
 
     fn has_composition(&self) -> bool {
         self.composition_end > self.composition_start
+    }
+
+    fn clear_composition(&mut self) {
+        if self.composition_start == 0 && self.composition_end == 0 {
+            return;
+        }
+        self.composition_start = 0;
+        self.composition_end = 0;
+        // Force the next focused draw to sync `composition: None` to the platform.
+        self.last_sent_ime_sel_start = usize::MAX;
+        self.last_sent_ime_sel_end = usize::MAX;
     }
 
     fn get_ime_config(&self) -> TextInputConfig {
