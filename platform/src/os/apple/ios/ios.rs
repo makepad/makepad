@@ -5,6 +5,7 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
+            keyboard::{CharOffset, FullTextState},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
@@ -499,6 +500,9 @@ impl Cx {
                 if te.timer_id == 0 {
                     let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
                     if let Some(vk) = vk {
+                        let window_id = CxWindowPool::id_zero();
+                        let vk =
+                            self.windows[window_id].native_virtual_keyboard_event_to_layout(vk);
                         // When the keyboard is going away (user pressed iOS's
                         let window_id = CxWindowPool::id_zero();
                         let vk =
@@ -541,6 +545,16 @@ impl Cx {
                                 self.call_event_handler(&Event::TextRangeReplace(
                                     TextRangeReplaceEvent { start, end, text },
                                 ));
+                            }
+                            ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
+                                self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                    full_state_sync: Some(FullTextState {
+                                        text,
+                                        selection: CharOffset(start)..CharOffset(end),
+                                        composition: None,
+                                    }),
+                                    ..Default::default()
+                                }));
                             }
                             ios_app::IosTextInputEvent::KeyEvent(key_code) => {
                                 self.call_event_handler(&Event::KeyDown(KeyEvent {
@@ -965,7 +979,7 @@ impl Cx {
                     selection,
                     composition: _,
                 } => {
-                    IosApp::set_ime_text(text, selection.end.0);
+                    IosApp::set_ime_text(text, selection.start.0, selection.end.0);
                 }
                 CxOsOp::StartTimer {
                     timer_id,

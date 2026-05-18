@@ -1941,6 +1941,7 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
     let env = attach_jni_env();
 
     let input_mode = match config.soft_keyboard.input_mode {
+        InputMode::None => 8,
         InputMode::Text => 0,
         InputMode::Ascii => 1,
         InputMode::Url => 2,
@@ -1967,18 +1968,19 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
 
     let return_key_type = match config.soft_keyboard.return_key_type {
         ReturnKeyType::Default => 0,
+        ReturnKeyType::None => 6,
         ReturnKeyType::Go => 1,
+        ReturnKeyType::Google => 2,
+        ReturnKeyType::Join => 1,
+        ReturnKeyType::Next => 4,
+        ReturnKeyType::Route => 1,
         ReturnKeyType::Search => 2,
         ReturnKeyType::Send => 3,
-        ReturnKeyType::Next => 4,
+        ReturnKeyType::Yahoo => 2,
         ReturnKeyType::Done => 5,
-        ReturnKeyType::None => 6,
-        ReturnKeyType::Previous => 7,
-        // Android does not expose these iOS-specific labels. Map them to the
-        // closest semantic action instead of dropping the requested behavior.
-        ReturnKeyType::Google | ReturnKeyType::Yahoo => 2,
-        ReturnKeyType::Join | ReturnKeyType::Route | ReturnKeyType::Continue => 1,
         ReturnKeyType::EmergencyCall => 5,
+        ReturnKeyType::Continue => 4,
+        ReturnKeyType::Previous => 7,
     };
 
     ndk_utils::call_void_method!(

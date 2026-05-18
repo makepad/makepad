@@ -232,6 +232,7 @@ class MakepadSurface
     static final int INPUT_MODE_EMAIL = 5;
     static final int INPUT_MODE_DECIMAL = 6;
     static final int INPUT_MODE_SEARCH = 7;
+    static final int INPUT_MODE_NONE = 8;
 
     // Autocapitalize constants (must match Rust Autocapitalize enum)
     static final int AUTOCAP_NONE = 0;
@@ -251,6 +252,8 @@ class MakepadSurface
     static final int RETURN_KEY_SEND = 3;
     static final int RETURN_KEY_NEXT = 4;
     static final int RETURN_KEY_DONE = 5;
+    static final int RETURN_KEY_NONE = 6;
+    static final int RETURN_KEY_PREVIOUS = 7;
 
     // Keyboard configuration (set by Rust via configureKeyboard)
     private int mInputMode = INPUT_MODE_TEXT;
@@ -434,7 +437,7 @@ class MakepadSurface
             int character = event.getUnicodeChar();
             if (character == 0) {
                 String characters = event.getCharacters();
-                if (characters != null && characters.length() >= 0) {
+                if (characters != null && characters.length() > 0) {
                     character = characters.charAt(0);
                 }
             }
@@ -461,6 +464,9 @@ class MakepadSurface
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
+            case INPUT_MODE_NONE:
+                inputType = InputType.TYPE_NULL;
+                break;
             case INPUT_MODE_ASCII:
                 // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
                 // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
@@ -509,6 +515,7 @@ class MakepadSurface
             // Autocorrect
             switch (mAutocorrect) {
                 case AUTOCORRECT_DEFAULT:
+                    break;
                 case AUTOCORRECT_YES:
                     inputType |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
                     break;
@@ -535,6 +542,9 @@ class MakepadSurface
 
         // Return key type
         switch (mReturnKeyType) {
+            case RETURN_KEY_NONE:
+                imeOptions |= EditorInfo.IME_ACTION_NONE;
+                break;
             case RETURN_KEY_GO:
                 imeOptions |= EditorInfo.IME_ACTION_GO;
                 break;
@@ -550,9 +560,14 @@ class MakepadSurface
             case RETURN_KEY_DONE:
                 imeOptions |= EditorInfo.IME_ACTION_DONE;
                 break;
+            case RETURN_KEY_PREVIOUS:
+                imeOptions |= EditorInfo.IME_ACTION_PREVIOUS;
+                break;
             default: // RETURN_KEY_DEFAULT
                 if (!mIsMultiline) {
                     imeOptions |= EditorInfo.IME_ACTION_DONE;
+                } else {
+                    imeOptions |= EditorInfo.IME_FLAG_NO_ENTER_ACTION;
                 }
                 break;
         }
@@ -574,6 +589,7 @@ class MakepadSurface
         int selEnd = Selection.getSelectionEnd(mEditable);
         outAttrs.initialSelStart = Math.max(0, selStart);
         outAttrs.initialSelEnd = Math.max(0, selEnd);
+        outAttrs.setInitialSurroundingSubText(mEditable, 0);
 
         // Create InputConnection with fullEditor=true since we have an Editable
         mInputConnection = new MakepadInputConnection(this, true);
@@ -607,7 +623,8 @@ class MakepadSurface
     }
 
     // Called from Rust to update text state (for programmatic changes, not IME input)
-    public void updateImeTextState(String fullText, int selStart, int selEnd) {
+    public void updateImeTextState(String fullText, int selStart, int selEnd,
+                                   int composingStart, int composingEnd) {
         String currentText = mEditable.toString();
         boolean textChanged = !currentText.equals(fullText);
 
@@ -627,12 +644,23 @@ class MakepadSurface
         int textLen = textChanged ? fullText.length() : currentText.length();
         selStart = Math.max(0, Math.min(selStart, textLen));
         selEnd = Math.max(selStart, Math.min(selEnd, textLen));
+        boolean hasComposition = composingStart >= 0 && composingEnd >= composingStart;
+        if (hasComposition) {
+            composingStart = Math.max(0, Math.min(composingStart, textLen));
+            composingEnd = Math.max(composingStart, Math.min(composingEnd, textLen));
+        } else {
+            composingStart = -1;
+            composingEnd = -1;
+        }
 
         if (textChanged) {
             // Text content changed - update Editable and notify IME
             BaseInputConnection.removeComposingSpans(mEditable);
             mEditable.replace(0, mEditable.length(), fullText);
             Selection.setSelection(mEditable, selStart, selEnd);
+            if (hasComposition && mInputConnection != null) {
+                mInputConnection.setComposingRegion(composingStart, composingEnd);
+            }
 
             // ECHO PREVENTION: Clear the sent buffer after applying Rust's authoritative
             // state update. This ensures the next text we send to Rust won't be incorrectly
@@ -655,21 +683,27 @@ class MakepadSurface
                         et.selectionEnd = selEnd;
                         imm.updateExtractedText(this, mInputConnection.mExtractedTextToken, et);
                     }
-                    imm.updateSelection(this, selStart, selEnd, -1, -1);
+                    imm.updateSelection(this, selStart, selEnd, composingStart, composingEnd);
                 }
             }
         } else {
             // Only selection changed - just update selection, no restart needed
             int currentSelStart = Selection.getSelectionStart(mEditable);
             int currentSelEnd = Selection.getSelectionEnd(mEditable);
-            if (currentSelStart != selStart || currentSelEnd != selEnd) {
+            int currentCompStart = BaseInputConnection.getComposingSpanStart(mEditable);
+            int currentCompEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
+            if (currentSelStart != selStart || currentSelEnd != selEnd
+                    || currentCompStart != composingStart || currentCompEnd != composingEnd) {
+                if (hasComposition && mInputConnection != null) {
+                    mInputConnection.setComposingRegion(composingStart, composingEnd);
+                } else {
+                    BaseInputConnection.removeComposingSpans(mEditable);
+                }
                 Selection.setSelection(mEditable, selStart, selEnd);
                 // Notify IME of selection change without restart
                 InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
                 if (imm != null) {
-                    int compStart = BaseInputConnection.getComposingSpanStart(mEditable);
-                    int compEnd = BaseInputConnection.getComposingSpanEnd(mEditable);
-                    imm.updateSelection(this, selStart, selEnd, compStart, compEnd);
+                    imm.updateSelection(this, selStart, selEnd, composingStart, composingEnd);
                 }
             }
         }
@@ -1715,6 +1749,9 @@ public class MakepadActivity
             @Override
             public void run() {
                 if (show) {
+                    if (view != null && view.getInputMode() == MakepadSurface.INPUT_MODE_NONE) {
+                        return;
+                    }
                     InputMethodManager imm = (InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE);
                     imm.showSoftInput(view, 0);
                 } else {
@@ -1728,12 +1765,19 @@ public class MakepadActivity
     // Update IME text state for programmatic changes - called from Rust
     // Note: This should only be called for programmatic text changes (e.g., clear button),
     // NOT during normal IME input (which flows Java to Rust via onImeTextStateChanged)
-    public void updateImeTextState(final String fullText, final int selStart, final int selEnd) {
+    public void updateImeTextState(final String fullText, final int selStart, final int selEnd,
+                                   final int composingStart, final int composingEnd) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 if (view != null) {
-                    view.updateImeTextState(fullText, selStart, selEnd);
+                    view.updateImeTextState(
+                        fullText,
+                        selStart,
+                        selEnd,
+                        composingStart,
+                        composingEnd
+                    );
                 }
             }
         });
