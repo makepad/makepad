@@ -6,7 +6,11 @@ use {
 
 /// Safe area insets describing regions of the screen that should not contain
 /// interactive content (e.g., notch/Dynamic Island, home indicator, rounded corners).
-/// Values are in logical points (not physical pixels).
+///
+/// Values exposed through [`WindowGeom`] are in Makepad layout points, i.e. after
+/// any window DPI override has been applied. Platform backends that receive raw
+/// physical pixels or native OS points must convert them through `CxWindow`
+/// before publishing them to widgets or apps.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SafeAreaInsets {
     pub top: f64,
@@ -15,8 +19,21 @@ pub struct SafeAreaInsets {
     pub left: f64,
 }
 
+impl SafeAreaInsets {
+    pub fn scale(self, scale: f64) -> Self {
+        Self {
+            top: self.top * scale,
+            right: self.right * scale,
+            bottom: self.bottom * scale,
+            left: self.left * scale,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowGeom {
+    /// Effective Makepad layout DPI for this window. This is the OS DPI unless
+    /// `dpi_override` is active, in which case it is the override value.
     pub dpi_factor: f64,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
@@ -25,12 +42,13 @@ pub struct WindowGeom {
     pub position: Vec2d,
     pub inner_size: Vec2d,
     pub outer_size: Vec2d,
-    /// Safe area insets for this window (non-zero on devices with notches,
-    /// rounded corners, home indicators, etc.)
+    /// Safe area insets for this window in Makepad layout points. Non-zero on
+    /// devices with notches, rounded corners, home indicators, etc.
     pub safe_area_insets: SafeAreaInsets,
-    /// Bounding box of the window-chrome buttons drawn by this window, in logical
-    /// pixels with a top-left origin at the top-left corner of the content view
-    /// (Y increases downward — Makepad's standard coordinate system).
+    /// Bounding box of the window-chrome buttons drawn by this window, in
+    /// Makepad layout points with a top-left origin at the top-left corner of
+    /// the content view (Y increases downward — Makepad's standard coordinate
+    /// system).
     ///
     /// **Per-platform values:**
     /// - **macOS** — bounding box of the three traffic-light buttons (close /

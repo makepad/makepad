@@ -799,7 +799,8 @@ class ResizingLayout
         MakepadImeInsets.report(v, insets);
 
         // Compute safe area insets from system bars and display cutout.
-        // These are in physical pixels; convert to logical points by dividing by density.
+        // These are in native Android logical points (`px / density`); Rust
+        // converts them to Makepad layout points after applying dpi_override.
         float density = getResources().getDisplayMetrics().density;
         MakepadSystemInsets systemBarInsets = MakepadSystemInsets.from(insets, density);
         MakepadNative.surfaceOnSafeAreaInsets(

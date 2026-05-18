@@ -1000,18 +1000,21 @@ impl Ease {
 pub enum VirtualKeyboardEvent {
     WillShow {
         time: f64,
+        /// Keyboard bottom occlusion in Makepad layout points.
         height: f64,
         duration: f64,
         ease: Ease,
     },
     WillHide {
         time: f64,
+        /// Keyboard bottom occlusion in Makepad layout points.
         height: f64,
         duration: f64,
         ease: Ease,
     },
     DidShow {
         time: f64,
+        /// Keyboard bottom occlusion in Makepad layout points.
         height: f64,
     },
     DidHide {

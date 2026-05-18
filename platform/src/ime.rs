@@ -18,6 +18,7 @@ script_mod! {
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq)]
 pub enum InputMode {
+    None,
     #[pick]
     Text,
     Ascii,
@@ -59,10 +60,19 @@ pub enum AutoCorrect {
 pub enum ReturnKeyType {
     #[pick]
     Default,
+    None,
     Go,
+    Google,
+    Join,
+    Next,
+    Route,
     Search,
     Send,
+    Yahoo,
     Done,
+    EmergencyCall,
+    Continue,
+    Previous,
 }
 
 impl Default for InputMode {
