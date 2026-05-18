@@ -1,17 +1,26 @@
 package dev.makepad.android;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.os.Bundle;
 import android.os.Build;
+import android.text.Editable;
 import android.text.Selection;
+import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.CompletionInfo;
+import android.view.inputmethod.CorrectionInfo;
 import android.view.inputmethod.CursorAnchorInfo;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
-import android.text.Editable;
+import android.view.inputmethod.SurroundingText;
+import android.view.inputmethod.TextAttribute;
+import android.view.inputmethod.TextSnapshot;
 
 /**
  * IME InputConnection implementation for Makepad.
@@ -25,6 +34,7 @@ public class MakepadInputConnection extends BaseInputConnection {
 
     // Batch edit nesting count
     private int mBatchEditNestCount = 0;
+    private boolean mPendingStateNotification = false;
     // For getExtractedText monitoring
     ExtractedTextRequest mExtractedTextRequest = null;
     int mExtractedTextToken = 0;
@@ -46,6 +56,71 @@ public class MakepadInputConnection extends BaseInputConnection {
     // Record text as sent to Rust
     private void recordSentToRust(String text) {
         mLastSentText = text;
+    }
+
+    private int clampIndex(int index, int length) {
+        if (index < 0) return length;
+        return Math.max(0, Math.min(index, length));
+    }
+
+    private int selectionStart(Editable editable) {
+        int length = editable.length();
+        int start = clampIndex(Selection.getSelectionStart(editable), length);
+        int end = clampIndex(Selection.getSelectionEnd(editable), length);
+        return Math.min(start, end);
+    }
+
+    private int selectionEnd(Editable editable) {
+        int length = editable.length();
+        int start = clampIndex(Selection.getSelectionStart(editable), length);
+        int end = clampIndex(Selection.getSelectionEnd(editable), length);
+        return Math.max(start, end);
+    }
+
+    private int selectionStartRaw(Editable editable) {
+        return clampIndex(Selection.getSelectionStart(editable), editable.length());
+    }
+
+    private int selectionEndRaw(Editable editable) {
+        return clampIndex(Selection.getSelectionEnd(editable), editable.length());
+    }
+
+    private SurroundingText surroundingTextForLengths(int beforeLength, int afterLength) {
+        if (beforeLength < 0 || afterLength < 0) {
+            throw new IllegalArgumentException("beforeLength and afterLength must be non-negative");
+        }
+
+        Editable editable = mSurface.getEditable();
+        int textLength = editable.length();
+        int selStart = selectionStart(editable);
+        int selEnd = selectionEnd(editable);
+        int surroundingStart = Math.max(0, selStart - beforeLength);
+        int surroundingEnd = Math.min(textLength, selEnd + afterLength);
+
+        surroundingStart = adjustStartForSurrogate(editable, surroundingStart);
+        surroundingEnd = adjustEndForSurrogate(editable, surroundingEnd);
+
+        CharSequence text = editable.subSequence(surroundingStart, surroundingEnd);
+        return new SurroundingText(
+            text,
+            selectionStartRaw(editable) - surroundingStart,
+            selectionEndRaw(editable) - surroundingStart,
+            surroundingStart);
+    }
+
+    private void notifyStateChanged() {
+        if (mBatchEditNestCount > 0) {
+            mPendingStateNotification = true;
+            return;
+        }
+        notifyImeOfSelectionUpdate();
+        notifyRustOfTextState();
+    }
+
+    private boolean isTextKey(KeyEvent event) {
+        return event.getUnicodeChar() != 0
+            && !event.isCtrlPressed()
+            && !event.isAltPressed();
     }
 
     // Clear sent buffer (e.g., after applying genuine Rust update)
@@ -122,8 +197,9 @@ public class MakepadInputConnection extends BaseInputConnection {
             mBatchEditNestCount--;
         }
         // Notify Rust when batch edit completes
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+        if (mBatchEditNestCount == 0 && mPendingStateNotification) {
+            mPendingStateNotification = false;
+            notifyStateChanged();
         }
         return mBatchEditNestCount > 0;
     }
@@ -143,18 +219,30 @@ public class MakepadInputConnection extends BaseInputConnection {
         ExtractedText et = new ExtractedText();
         et.text = editable.toString();
         et.startOffset = 0;
-        et.selectionStart = Selection.getSelectionStart(editable);
-        et.selectionEnd = Selection.getSelectionEnd(editable);
+        et.selectionStart = clampIndex(Selection.getSelectionStart(editable), editable.length());
+        et.selectionEnd = clampIndex(Selection.getSelectionEnd(editable), editable.length());
+        et.partialStartOffset = -1;
+        et.partialEndOffset = -1;
 
         return et;
     }
 
     @Override
     public boolean setComposingRegion(int start, int end) {
+        Editable editable = mSurface.getEditable();
+        int textLength = editable.length();
+        start = clampIndex(start, textLength);
+        end = clampIndex(end, textLength);
+
         // Let BaseInputConnection handle span management on Editable
-        boolean result = super.setComposingRegion(start, end);
+        boolean result = super.setComposingRegion(Math.min(start, end), Math.max(start, end));
         // Don't notify Rust here - wait for actual text change
         return result;
+    }
+
+    @Override
+    public boolean setComposingRegion(int start, int end, TextAttribute textAttribute) {
+        return setComposingRegion(start, end);
     }
 
     @Override
@@ -165,6 +253,18 @@ public class MakepadInputConnection extends BaseInputConnection {
             sendCursorUpdate();
         }
         return true;
+    }
+
+    @Override
+    public boolean requestCursorUpdates(int cursorUpdateMode, int cursorUpdateFilter) {
+        return requestCursorUpdates(cursorUpdateMode);
+    }
+
+    @Override
+    public int getCursorCapsMode(int reqModes) {
+        Editable editable = mSurface.getEditable();
+        int cursor = clampIndex(Selection.getSelectionEnd(editable), editable.length());
+        return TextUtils.getCapsMode(editable, cursor, reqModes);
     }
 
     private void sendCursorUpdate() {
@@ -178,8 +278,8 @@ public class MakepadInputConnection extends BaseInputConnection {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             CursorAnchorInfo.Builder builder = new CursorAnchorInfo.Builder();
-            int cursorStart = Selection.getSelectionStart(editable);
-            int cursorEnd = Selection.getSelectionEnd(editable);
+            int cursorStart = clampIndex(Selection.getSelectionStart(editable), editable.length());
+            int cursorEnd = clampIndex(Selection.getSelectionEnd(editable), editable.length());
             builder.setSelectionRange(cursorStart, cursorEnd);
             builder.setMatrix(new android.graphics.Matrix());
             imm.updateCursorAnchorInfo(mSurface, builder.build());
@@ -197,6 +297,16 @@ public class MakepadInputConnection extends BaseInputConnection {
         int selEnd = Selection.getSelectionEnd(editable);
         int compStart = BaseInputConnection.getComposingSpanStart(editable);
         int compEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        int textLength = editable.length();
+        selStart = clampIndex(selStart, textLength);
+        selEnd = clampIndex(selEnd, textLength);
+        if (compStart < 0 || compEnd < 0) {
+            compStart = -1;
+            compEnd = -1;
+        } else {
+            compStart = clampIndex(compStart, textLength);
+            compEnd = clampIndex(compEnd, textLength);
+        }
         imm.updateSelection(mSurface, selStart, selEnd, compStart, compEnd);
     }
 
@@ -204,10 +314,18 @@ public class MakepadInputConnection extends BaseInputConnection {
     private void notifyRustOfTextState() {
         Editable editable = mSurface.getEditable();
         String fullText = editable.toString();
-        int selStart = Selection.getSelectionStart(editable);
-        int selEnd = Selection.getSelectionEnd(editable);
+        int textLength = editable.length();
+        int selStart = clampIndex(Selection.getSelectionStart(editable), textLength);
+        int selEnd = clampIndex(Selection.getSelectionEnd(editable), textLength);
         int compStart = BaseInputConnection.getComposingSpanStart(editable);
         int compEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        if (compStart < 0 || compEnd < 0) {
+            compStart = -1;
+            compEnd = -1;
+        } else {
+            compStart = clampIndex(compStart, textLength);
+            compEnd = clampIndex(compEnd, textLength);
+        }
 
         // ECHO PREVENTION: Record text before sending to Rust so we can detect
         // if Rust echoes it back via updateImeTextState(). See architecture comment
@@ -236,26 +354,69 @@ public class MakepadInputConnection extends BaseInputConnection {
     }
 
     @Override
+    public SurroundingText getSurroundingText(int beforeLength, int afterLength, int flags) {
+        return surroundingTextForLengths(beforeLength, afterLength);
+    }
+
+    @Override
+    public TextSnapshot takeSnapshot() {
+        Editable editable = mSurface.getEditable();
+        SurroundingText surroundingText = new SurroundingText(
+            editable.toString(),
+            selectionStartRaw(editable),
+            selectionEndRaw(editable),
+            0);
+        int compStart = BaseInputConnection.getComposingSpanStart(editable);
+        int compEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        int textLength = editable.length();
+        if (compStart < 0 || compEnd < 0) {
+            compStart = -1;
+            compEnd = -1;
+        } else {
+            compStart = clampIndex(compStart, textLength);
+            compEnd = clampIndex(compEnd, textLength);
+        }
+        return new TextSnapshot(
+            surroundingText,
+            compStart,
+            compEnd,
+            getCursorCapsMode(TextUtils.CAP_MODE_CHARACTERS
+                | TextUtils.CAP_MODE_WORDS
+                | TextUtils.CAP_MODE_SENTENCES));
+    }
+
+    @Override
     public boolean setComposingText(CharSequence text, int newCursorPosition) {
-        // Let BaseInputConnection handle the Editable manipulation
-        boolean result = super.setComposingText(text, newCursorPosition);
-
-        // Notify IME of state change
-        notifyImeOfSelectionUpdate();
-
-        // Notify Rust (unless in batch edit)
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+        CharSequence filtered = filterInput(text);
+        if (filtered == null) {
+            filtered = "";
+        }
+        if (filtered.length() == 0 && text != null && text.length() > 0) {
+            return true;
         }
 
+        // Let BaseInputConnection handle the Editable manipulation
+        boolean result = super.setComposingText(filtered, newCursorPosition);
+
+        notifyStateChanged();
+
         return result;
+    }
+
+    @Override
+    public boolean setComposingText(
+            CharSequence text, int newCursorPosition, TextAttribute textAttribute) {
+        return setComposingText(text, newCursorPosition);
     }
 
     @Override
     public boolean commitText(CharSequence text, int newCursorPosition) {
         // Filter input based on input mode (e.g., prevent emojis in numeric fields)
         CharSequence filtered = filterInput(text);
-        if (filtered.length() == 0 && text.length() > 0) {
+        if (filtered == null) {
+            filtered = "";
+        }
+        if (filtered.length() == 0 && text != null && text.length() > 0) {
             // All characters were filtered out - consume but don't insert
             return true;
         }
@@ -263,14 +424,38 @@ public class MakepadInputConnection extends BaseInputConnection {
         // Let BaseInputConnection handle the Editable manipulation
         boolean result = super.commitText(filtered, newCursorPosition);
 
-        // Notify IME of state change
-        notifyImeOfSelectionUpdate();
+        notifyStateChanged();
 
-        // Notify Rust (unless in batch edit)
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+        return result;
+    }
+
+    @Override
+    public boolean commitText(
+            CharSequence text, int newCursorPosition, TextAttribute textAttribute) {
+        return commitText(text, newCursorPosition);
+    }
+
+    // API 34 adds this to InputConnection. Keep the method present even when
+    // compiling against API 33, which is Makepad's bundled SDK level.
+    public boolean replaceText(
+            int start,
+            int end,
+            CharSequence text,
+            int newCursorPosition,
+            TextAttribute textAttribute) {
+        Editable editable = mSurface.getEditable();
+        int textLength = editable.length();
+        start = clampIndex(start, textLength);
+        end = clampIndex(end, textLength);
+        beginBatchEdit();
+        boolean result;
+        try {
+            finishComposingText();
+            setSelection(Math.min(start, end), Math.max(start, end));
+            result = commitText(text, newCursorPosition);
+        } finally {
+            endBatchEdit();
         }
-
         return result;
     }
 
@@ -282,12 +467,10 @@ public class MakepadInputConnection extends BaseInputConnection {
         // Let BaseInputConnection clear the composing spans
         boolean result = super.finishComposingText();
 
-        // Notify IME
-        notifyImeOfSelectionUpdate();
-
-        // Notify Rust if there was a composition
-        if (hadComposition && mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+        if (hadComposition) {
+            notifyStateChanged();
+        } else {
+            notifyImeOfSelectionUpdate();
         }
 
         return result;
@@ -295,61 +478,258 @@ public class MakepadInputConnection extends BaseInputConnection {
 
     @Override
     public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-        // Let BaseInputConnection handle the Editable manipulation
-        boolean result = super.deleteSurroundingText(beforeLength, afterLength);
+        Editable editable = mSurface.getEditable();
+        int start = selectionStart(editable);
+        int end = selectionEnd(editable);
 
-        // Notify IME of state change
-        notifyImeOfSelectionUpdate();
+        if (start == end) {
+            int deleteStart = adjustStartForSurrogate(
+                editable, Math.max(0, start - Math.max(0, beforeLength)));
+            int deleteEnd = adjustEndForSurrogate(
+                editable, Math.min(editable.length(), end + Math.max(0, afterLength)));
+            if (deleteStart < deleteEnd) {
+                editable.delete(deleteStart, deleteEnd);
+                Selection.setSelection(editable, deleteStart, deleteStart);
+                BaseInputConnection.removeComposingSpans(editable);
+            }
+        } else {
+            // The InputConnection contract deletes surrounding text outside the
+            // selection, not the selection itself.
+            int beforeStart = adjustStartForSurrogate(
+                editable, Math.max(0, start - Math.max(0, beforeLength)));
+            int afterEnd = adjustEndForSurrogate(
+                editable, Math.min(editable.length(), end + Math.max(0, afterLength)));
 
-        // Notify Rust (unless in batch edit)
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+            if (end < afterEnd) {
+                editable.delete(end, afterEnd);
+            }
+            if (beforeStart < start) {
+                editable.delete(beforeStart, start);
+                int newEnd = beforeStart + (end - start);
+                Selection.setSelection(editable, beforeStart, newEnd);
+            } else {
+                Selection.setSelection(editable, start, end);
+            }
+            if (beforeStart < start || end < afterEnd) {
+                BaseInputConnection.removeComposingSpans(editable);
+            }
         }
 
-        return result;
+        notifyStateChanged();
+
+        return true;
     }
 
     @Override
     public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
-        // Use code point deletion which properly handles surrogate pairs (emoji, etc.)
-        // This is called by sendKeyEvent for backspace/delete to avoid corrupting strings
-        boolean result = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
+        Editable editable = mSurface.getEditable();
+        int start = selectionStart(editable);
+        int end = selectionEnd(editable);
 
-        // Notify IME of state change
-        notifyImeOfSelectionUpdate();
+        if (start == end) {
+            int deleteStart = moveByCodePoints(editable, start, -Math.max(0, beforeLength));
+            int deleteEnd = moveByCodePoints(editable, end, Math.max(0, afterLength));
+            if (deleteStart < deleteEnd) {
+                editable.delete(deleteStart, deleteEnd);
+                Selection.setSelection(editable, deleteStart, deleteStart);
+                BaseInputConnection.removeComposingSpans(editable);
+            }
+        } else {
+            int beforeStart = moveByCodePoints(editable, start, -Math.max(0, beforeLength));
+            int afterEnd = moveByCodePoints(editable, end, Math.max(0, afterLength));
 
-        // Notify Rust (unless in batch edit)
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+            if (end < afterEnd) {
+                editable.delete(end, afterEnd);
+            }
+            if (beforeStart < start) {
+                editable.delete(beforeStart, start);
+                int newEnd = beforeStart + (end - start);
+                Selection.setSelection(editable, beforeStart, newEnd);
+            } else {
+                Selection.setSelection(editable, start, end);
+            }
+            if (beforeStart < start || end < afterEnd) {
+                BaseInputConnection.removeComposingSpans(editable);
+            }
         }
 
-        return result;
+        notifyStateChanged();
+
+        return true;
+    }
+
+    private int adjustStartForSurrogate(CharSequence text, int index) {
+        if (index > 0
+                && index < text.length()
+                && Character.isLowSurrogate(text.charAt(index))
+                && Character.isHighSurrogate(text.charAt(index - 1))) {
+            return index - 1;
+        }
+        return index;
+    }
+
+    private int adjustEndForSurrogate(CharSequence text, int index) {
+        if (index > 0
+                && index < text.length()
+                && Character.isLowSurrogate(text.charAt(index))
+                && Character.isHighSurrogate(text.charAt(index - 1))) {
+            return index + 1;
+        }
+        return index;
+    }
+
+    private int moveByCodePoints(CharSequence text, int index, int codePointDelta) {
+        int length = text.length();
+        index = Math.max(0, Math.min(index, length));
+
+        if (codePointDelta > 0) {
+            for (int i = 0; i < codePointDelta && index < length; i++) {
+                int codePoint = Character.codePointAt(text, index);
+                index += Character.charCount(codePoint);
+            }
+        } else {
+            for (int i = 0; i < -codePointDelta && index > 0; i++) {
+                int codePoint = Character.codePointBefore(text, index);
+                index -= Character.charCount(codePoint);
+            }
+        }
+
+        return index;
     }
 
     @Override
     public boolean setSelection(int start, int end) {
         Editable editable = mSurface.getEditable();
+        int textLength = editable.length();
+        start = clampIndex(start, textLength);
+        end = clampIndex(end, textLength);
 
         // Short-circuit if already at this selection (prevents Samsung keyboard loop)
         // Samsung may respond to imm.updateSelection() by calling setSelection() again
         int currentStart = Selection.getSelectionStart(editable);
         int currentEnd = Selection.getSelectionEnd(editable);
-        if (currentStart == start && currentEnd == end) {
+        int compStart = BaseInputConnection.getComposingSpanStart(editable);
+        int compEnd = BaseInputConnection.getComposingSpanEnd(editable);
+        boolean clearsComposition = false;
+        if (compStart >= 0 && compEnd >= 0) {
+            int compMin = Math.min(compStart, compEnd);
+            int compMax = Math.max(compStart, compEnd);
+            int selMin = Math.min(start, end);
+            int selMax = Math.max(start, end);
+            clearsComposition = selMin < compMin || selMax > compMax;
+        }
+        if (currentStart == start && currentEnd == end && !clearsComposition) {
             return true;  // Already there, no notifications needed
         }
 
         // Let BaseInputConnection handle selection on Editable
         boolean result = super.setSelection(start, end);
-
-        // Notify IME
-        notifyImeOfSelectionUpdate();
-
-        // Notify Rust
-        if (mBatchEditNestCount == 0) {
-            notifyRustOfTextState();
+        if (clearsComposition) {
+            BaseInputConnection.removeComposingSpans(editable);
         }
 
+        notifyStateChanged();
+
         return result;
+    }
+
+    @Override
+    public boolean performContextMenuAction(int id) {
+        Editable editable = mSurface.getEditable();
+        int start = selectionStart(editable);
+        int end = selectionEnd(editable);
+
+        if (id == android.R.id.selectAll) {
+            Selection.setSelection(editable, 0, editable.length());
+            notifyStateChanged();
+            return true;
+        }
+
+        if (id == android.R.id.copy || id == android.R.id.cut) {
+            if (start < end) {
+                ClipboardManager clipboard = (ClipboardManager)
+                    mSurface.getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    CharSequence selected = editable.subSequence(start, end);
+                    clipboard.setPrimaryClip(ClipData.newPlainText("text", selected));
+                }
+            }
+
+            if (id == android.R.id.cut) {
+                if (start < end) {
+                    return commitText("", 1);
+                }
+                return true;
+            }
+
+            return true;
+        }
+
+        if (id == android.R.id.paste) {
+            ClipboardManager clipboard = (ClipboardManager)
+                mSurface.getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip() != null) {
+                CharSequence text = clipboard.getPrimaryClip().getItemAt(0)
+                    .coerceToText(mSurface.getContext());
+                if (text != null) {
+                    return commitText(text, 1);
+                }
+            }
+            return true;
+        }
+
+        return super.performContextMenuAction(id);
+    }
+
+    @Override
+    public boolean commitCompletion(CompletionInfo text) {
+        if (text == null) {
+            return true;
+        }
+        CharSequence completion = text.getText();
+        if (completion == null) {
+            return true;
+        }
+        return commitText(completion, 1);
+    }
+
+    @Override
+    public boolean commitCorrection(CorrectionInfo correctionInfo) {
+        // Android uses this as an editor notification that a correction happened.
+        // Keyboards that need text changes also send commitText/setComposingText,
+        // so acknowledging here avoids double-applying the correction.
+        return true;
+    }
+
+    @Override
+    public boolean performPrivateCommand(String action, Bundle data) {
+        // Private commands are only meaningful when an editor and IME have an
+        // explicit app-specific protocol. Makepad does not advertise one, but
+        // acknowledging keeps IMEs that send benign probes from treating the
+        // connection as broken.
+        return true;
+    }
+
+    @Override
+    public boolean performSpellCheck() {
+        // The editor can ignore this request; text mutation remains driven by
+        // subsequent commitText/setComposingText/replaceText calls.
+        return true;
+    }
+
+    @Override
+    public boolean setImeConsumesInput(boolean imeConsumesInput) {
+        return true;
+    }
+
+    @Override
+    public boolean clearMetaKeyStates(int states) {
+        return true;
+    }
+
+    @Override
+    public boolean reportFullscreenMode(boolean enabled) {
+        return true;
     }
 
     @Override
@@ -365,8 +745,18 @@ public class MakepadInputConnection extends BaseInputConnection {
         // We use deleteSurroundingTextInCodePoints (API 24+) instead of deleteSurroundingText
         // because emoji characters are surrogate pairs (2 UTF-16 code units) and we need to
         // delete the full code point, not just one code unit which would corrupt the string.
-        if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            int keyCode = event.getKeyCode();
+        int action = event.getAction();
+        int keyCode = event.getKeyCode();
+        boolean handledTextKey = keyCode == KeyEvent.KEYCODE_DEL
+            || keyCode == KeyEvent.KEYCODE_FORWARD_DEL
+            || keyCode == KeyEvent.KEYCODE_ENTER
+            || isTextKey(event);
+
+        if (action == KeyEvent.ACTION_UP && handledTextKey) {
+            return true;
+        }
+
+        if (action == KeyEvent.ACTION_DOWN) {
             Editable editable = mSurface.getEditable();
 
             if (keyCode == KeyEvent.KEYCODE_DEL) {
@@ -406,6 +796,11 @@ public class MakepadInputConnection extends BaseInputConnection {
                 // The action button (Done/Go/etc) is handled via performEditorAction
                 return true;
             }
+
+            if (isTextKey(event)) {
+                int unicode = event.getUnicodeChar();
+                return commitText(new String(Character.toChars(unicode)), 1);
+            }
         }
 
         // For other keys (e.g., arrows), use default behavior
@@ -427,6 +822,13 @@ public class MakepadInputConnection extends BaseInputConnection {
             // Some IMEs (e.g. SwiftKey) call performEditorAction(IME_ACTION_UNSPECIFIED)
             // instead of sendKeyEvent(KEYCODE_ENTER) or commitText("\n").
             return commitText("\n", 1);
+        }
+
+        if (!mSurface.isMultiline() && actionCode <= EditorInfo.IME_ACTION_NONE) {
+            // Some keyboards report the visually configured "Done" key as an
+            // unspecified action for custom editors. Treat it as Done for
+            // single-line fields so accepting the action never inserts text.
+            actionCode = EditorInfo.IME_ACTION_DONE;
         }
 
         // Notify Rust about the editor action

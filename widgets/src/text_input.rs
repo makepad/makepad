@@ -734,6 +734,7 @@ impl TextInput {
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
         self.needs_scroll_to_cursor = true;
+        self.clear_composition();
         self.history.force_new_edit_group();
         self.draw_bg.redraw(cx);
     }
@@ -1291,20 +1292,35 @@ impl TextInput {
         self.composition_end > self.composition_start
     }
 
+    fn clear_composition(&mut self) {
+        if self.composition_start == 0 && self.composition_end == 0 {
+            return;
+        }
+        self.composition_start = 0;
+        self.composition_end = 0;
+        // Force the next focused draw to sync `composition: None` to the platform.
+        self.last_sent_ime_sel_start = usize::MAX;
+        self.last_sent_ime_sel_end = usize::MAX;
+    }
+
     fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
             soft_keyboard: SoftKeyboardConfig {
-                input_mode: if self.is_numeric_only && self.input_mode == InputMode::Text {
-                    InputMode::Decimal
-                } else {
-                    self.input_mode
-                },
+                input_mode: self.effective_input_mode(),
                 autocapitalize: self.autocapitalize,
                 autocorrect: self.autocorrect,
                 return_key_type: self.return_key_type,
             },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
+        }
+    }
+
+    fn effective_input_mode(&self) -> InputMode {
+        if self.is_numeric_only && self.input_mode == InputMode::Text {
+            InputMode::Decimal
+        } else {
+            self.input_mode
         }
     }
 
@@ -1402,12 +1418,7 @@ impl TextInput {
             return String::new();
         }
         // Use input_mode for filtering; fall back to is_numeric_only for backwards compat
-        let effective_mode = if self.is_numeric_only && self.input_mode == InputMode::Text {
-            InputMode::Decimal
-        } else {
-            self.input_mode
-        };
-        match effective_mode {
+        match self.effective_input_mode() {
             InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
             InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
             InputMode::Decimal => {
@@ -1436,9 +1447,11 @@ impl TextInput {
                     c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
                 })
                 .collect(),
-            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
-                input.to_string()
-            }
+            InputMode::None
+            | InputMode::Text
+            | InputMode::Url
+            | InputMode::Email
+            | InputMode::Search => input.to_string(),
         }
     }
 
@@ -1571,14 +1584,16 @@ impl Widget for TextInput {
                 self.update_ime_context(cx);
             }
             let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
-            cx.show_text_ime_with_config(
-                self.draw_bg.area(),
-                dvec2(
-                    cursor_bottom_pos.x - self.scroll_x,
-                    cursor_bottom_pos.y - self.scroll_y,
-                ),
-                self.get_ime_config(),
-            );
+            if self.effective_input_mode() != InputMode::None {
+                cx.show_text_ime_with_config(
+                    self.draw_bg.area(),
+                    dvec2(
+                        cursor_bottom_pos.x - self.scroll_x,
+                        cursor_bottom_pos.y - self.scroll_y,
+                    ),
+                    self.get_ime_config(),
+                );
+            }
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -2145,9 +2160,11 @@ impl Widget for TextInput {
                     self.last_sent_ime_sel_end = sel_end_byte;
                     self.ime_update_frame = cx.redraw_id();
 
+                    // This path bypasses apply_edit(), so keep placeholder/color state in sync.
+                    self.check_text_is_empty(cx);
                     self.draw_bg.redraw(cx);
-                    self.emit_change(cx, uid);
                     if text_changed {
+                        self.emit_change(cx, uid);
                         cx.hide_clipboard_actions();
                     }
                     return;
@@ -2277,6 +2294,12 @@ impl Widget for TextInput {
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
+                let filtered_text = self.filter_input(&event.text, false);
+                if filtered_text.is_empty() && !event.text.is_empty() {
+                    self.update_ime_context(cx);
+                    return;
+                }
+
                 // Convert character indices to byte indices
                 let byte_start = self
                     .text
@@ -2304,13 +2327,15 @@ impl Widget for TextInput {
                     Edit {
                         start: byte_start,
                         end: byte_end,
-                        replace_with: event.text.clone(),
+                        replace_with: filtered_text,
                     },
                 );
 
+                self.ime_update_frame = cx.redraw_id();
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
@@ -2339,10 +2364,10 @@ impl Widget for TextInput {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
                         cx.hide_text_ime();
                         cx.set_key_focus(Area::Empty);
-                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                        self.emit_return(cx, uid, mods);
                     }
                     ImeAction::Next | ImeAction::Previous => {
-                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                        self.emit_return(cx, uid, mods);
                     }
                     ImeAction::Unspecified | ImeAction::None => {}
                 }
