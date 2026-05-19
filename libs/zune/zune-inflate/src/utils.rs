@@ -1,11 +1,3 @@
-/*
- * Copyright (c) 2023.
- *
- * This software is free software;
- *
- * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
- */
-
 use core::cell::Cell;
 
 /// make_decode_table_entry() creates a decode table entry for the given symbol
@@ -16,17 +8,15 @@ use core::cell::Cell;
 /// In all cases, we add 'len' to each of the two low-order bytes to create the
 /// appropriately-formatted decode table entry.  See the definitions of the
 /// *_decode_results[] arrays below, where the entry format is described.
-pub(crate) fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32 {
+pub(crate) fn make_decode_table_entry(decode_results: &[u32], sym: usize, len: u32) -> u32
+{
     decode_results[sym] + (len << 8) + len
 }
 
 /// A safe version of src.copy_within that helps me because I tend to always
 /// confuse the arguments
-pub fn fixed_copy_within<const SIZE: usize>(
-    dest: &mut [u8],
-    src_offset: usize,
-    dest_offset: usize,
-) {
+pub fn fixed_copy_within<const SIZE: usize>(dest: &mut [u8], src_offset: usize, dest_offset: usize)
+{
     // for debug builds ensure we don't go out of bounds
     debug_assert!(
         dest_offset + SIZE <= dest.len(),
@@ -39,7 +29,8 @@ pub fn fixed_copy_within<const SIZE: usize>(
 }
 
 #[inline(always)]
-pub fn copy_rep_matches(dest: &mut [u8], offset: usize, dest_offset: usize, length: usize) {
+pub fn copy_rep_matches(dest: &mut [u8], offset: usize, dest_offset: usize, length: usize)
+{
     // This is a slightly complicated rep match copier that has
     // no bounds check.
 
@@ -77,7 +68,8 @@ pub const fn const_min_usize(a: usize, b: usize) -> usize
 /// Calculate the adler hash of a piece of data.
 #[inline(never)]
 #[cfg(feature = "zlib")]
-pub fn calc_adler_hash(data: &[u8]) -> u32 {
+pub fn calc_adler_hash(data: &[u8]) -> u32
+{
     use simd_adler32::Adler32;
     let mut hasher = Adler32::new();
 

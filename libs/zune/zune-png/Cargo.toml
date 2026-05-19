@@ -1,8 +1,9 @@
 [package]
 name = "makepad-zune-png"
-version = "0.5.1"
+version = "0.5.2"
 authors = ["caleb <etemesicaleb@gmail.com>"]
 edition = "2021"
+rust-version = "1.87.0"
 repository = "https://github.com/etemesi254/zune-image/tree/dev/zune-png"
 license = "MIT OR Apache-2.0 OR Zlib"
 keywords = ["png", "png-decoder", "decoder"]
@@ -19,4 +20,4 @@ default = ["sse", "std"]
 
 [dependencies]
 makepad-zune-core = { path = "../zune-core", version = "0.5.1" }
-makepad-zune-inflate = { path = "../zune-inflate", version = "0.2", default-features = false, features = ["zlib"] }
+makepad-zune-inflate = { path = "../zune-inflate", version = "0.2.54", default-features = false, features = ["zlib"] }

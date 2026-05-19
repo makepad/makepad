@@ -1,5 +1,6 @@
 #![cfg(feature = "portable-simd")]
 use core::simd::prelude::*;
+use core::simd::Select;
 #[allow(unused_assignments)]
 pub fn defilter_sub_generic<const SIZE: usize>(raw: &[u8], current: &mut [u8]) {
     let mut zero = [0; 16];

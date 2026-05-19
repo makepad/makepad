@@ -1,47 +1,43 @@
-/*
- * Copyright (c) 2023.
- *
- * This software is free software;
- *
- * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
- */
-
 //! `BitStreamReader` API
 //!
 //! This module provides an interface to read and write bits (and bytes) for
 //! huffman
 
-pub struct BitStreamReader<'src> {
+pub struct BitStreamReader<'src>
+{
     // buffer from which we are pulling in bits from
     // used in decompression.
-    pub src: &'src [u8],
+    pub src:       &'src [u8],
     // position in our buffer,
-    pub position: usize,
+    pub position:  usize,
     pub bits_left: u8,
-    pub buffer: u64,
-    pub over_read: usize,
+    pub buffer:    u64,
+    pub over_read: usize
 }
 
-impl<'src> BitStreamReader<'src> {
+impl<'src> BitStreamReader<'src>
+{
     /// Create a new `BitStreamReader` instance
     ///
     /// # Expectations
     /// The buffer must be padded with fill bytes in the end,
     /// if not, this becomes UB in the refill phase.
-    pub fn new(in_buffer: &'src [u8]) -> BitStreamReader<'src> {
+    pub fn new(in_buffer: &'src [u8]) -> BitStreamReader<'src>
+    {
         BitStreamReader {
             bits_left: 0,
-            buffer: 0,
-            src: in_buffer,
-            position: 0,
-            over_read: 0,
+            buffer:    0,
+            src:       in_buffer,
+            position:  0,
+            over_read: 0
         }
     }
     /// Refill the bitstream ensuring the buffer has bits between
     /// 56 and 63.
     ///
     #[inline(always)]
-    pub fn refill(&mut self) {
+    pub fn refill(&mut self)
+    {
         /*
          * The refill always guarantees refills between 56-63
          *
@@ -49,8 +45,10 @@ impl<'src> BitStreamReader<'src> {
          */
         let mut buf = [0; 8];
 
-        match self.src.get(self.position..self.position + 8) {
-            Some(bytes) => {
+        match self.src.get(self.position..self.position + 8)
+        {
+            Some(bytes) =>
+            {
                 buf.copy_from_slice(bytes);
                 // create a u64 from an array of u8's
                 let new_buffer = u64::from_le_bytes(buf);
@@ -64,11 +62,12 @@ impl<'src> BitStreamReader<'src> {
                 // bits left are now between 56-63
                 self.bits_left |= 56;
             }
-            None => self.refill_slow(),
+            None => self.refill_slow()
         }
     }
     #[inline(always)]
-    pub fn refill_inner_loop(&mut self) {
+    pub fn refill_inner_loop(&mut self)
+    {
         /*
          * The refill always guarantees refills between 56-63
          *
@@ -76,7 +75,8 @@ impl<'src> BitStreamReader<'src> {
          */
         let mut buf = [0; 8];
 
-        if let Some(bytes) = self.src.get(self.position..self.position + 8) {
+        if let Some(bytes) = self.src.get(self.position..self.position + 8)
+        {
             {
                 buf.copy_from_slice(bytes);
                 // create a u64 from an array of u8's
@@ -94,11 +94,14 @@ impl<'src> BitStreamReader<'src> {
         }
     }
     #[inline(never)]
-    fn refill_slow(&mut self) {
+    fn refill_slow(&mut self)
+    {
         let bytes = &self.src[self.position..];
 
-        for byte in bytes {
-            if self.bits_left >= 56 {
+        for byte in bytes
+        {
+            if self.bits_left >= 56
+            {
                 break;
             }
 
@@ -106,25 +109,29 @@ impl<'src> BitStreamReader<'src> {
             self.bits_left += 8;
             self.position += 1;
         }
-        while self.bits_left < 56 {
+        while self.bits_left < 56
+        {
             self.bits_left += 8;
             self.over_read += 1;
         }
     }
 
     #[inline(always)]
-    pub fn peek_bits<const LOOKAHEAD: usize>(&self) -> usize {
+    pub fn peek_bits<const LOOKAHEAD: usize>(&self) -> usize
+    {
         debug_assert!(self.bits_left >= LOOKAHEAD as u8);
         (self.buffer & ((1 << LOOKAHEAD) - 1)) as usize
     }
     #[inline(always)]
-    pub fn peek_var_bits(&self, lookahead: usize) -> usize {
+    pub fn peek_var_bits(&self, lookahead: usize) -> usize
+    {
         debug_assert!(self.bits_left >= lookahead as u8);
         (self.buffer & ((1 << lookahead) - 1)) as usize
     }
 
     #[inline(always)]
-    pub fn get_bits(&mut self, num_bits: u8) -> u64 {
+    pub fn get_bits(&mut self, num_bits: u8) -> u64
+    {
         debug_assert!(self.bits_left >= num_bits);
 
         let mask = (1_u64 << num_bits) - 1;
@@ -138,29 +145,34 @@ impl<'src> BitStreamReader<'src> {
         value
     }
     /// Get number of bits left in the bit buffer.
-    pub const fn get_bits_left(&self) -> u8 {
+    pub const fn get_bits_left(&self) -> u8
+    {
         self.bits_left
     }
     /// Get position the stream is in this buffer
     /// Or alternatively, number of bits read.
-    pub fn get_position(&self) -> usize {
+    pub fn get_position(&self) -> usize
+    {
         self.position
             .saturating_sub(usize::from(self.bits_left >> 3))
     }
 
     /// Reset buffer and bits left to zero.
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self)
+    {
         self.buffer = 0;
         self.bits_left = 0;
     }
     /// Return true if the bit buffer can satisfy
     /// `bits` read without refilling,
-    pub const fn has(&self, bits: u8) -> bool {
+    pub const fn has(&self, bits: u8) -> bool
+    {
         self.bits_left >= bits
     }
 
     #[inline(always)]
-    pub fn drop_bits(&mut self, bits: u8) {
+    pub fn drop_bits(&mut self, bits: u8)
+    {
         debug_assert!(self.bits_left >= bits);
         self.bits_left -= bits;
         self.buffer >>= bits;
@@ -169,7 +181,8 @@ impl<'src> BitStreamReader<'src> {
     ///
     /// This does not consider bits in the bit-buffer hence
     /// may not be accurate
-    pub const fn remaining_bytes(&self) -> usize {
+    pub const fn remaining_bytes(&self) -> usize
+    {
         self.src.len().saturating_sub(self.position)
     }
 }
