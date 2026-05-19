@@ -381,7 +381,7 @@ script_mod! {
                     stop_date: "2999-12-31"
                     start_time: "00:00:00"
                     contents: [{
-                        image_url: "http://" + local_ip + ":" + local_port + "/image"
+                        image_url: "http://" + local_ip + ":" + local_port + "/image?" + file_id
                         file_id: file_id
                         file_path: "/home/owner/content/Downloads/vxtplayer/epaper/mobile/contents/" + file_id + "/" + (file_id + ".png")
                         duration: 91326
@@ -421,11 +421,14 @@ script_mod! {
                 read_timeout_ms: 250
                 write_timeout_ms: 5000
             })
+            let finish_upload = |result| {
+                socket.close()
+                result
+            }
 
             let greeting = mod.edmx.wait_for_socket_text(socket, "MDCSTART<<TLS>>", "", "")
             if greeting == ""{
-                socket.close()
-                return {is_ok:false error:"EDMX error: missing TLS greeting"}
+                return finish_upload({is_ok:false error:"EDMX error: missing TLS greeting"})
             }
 
             socket.start_tls(display.ip true)
@@ -438,30 +441,26 @@ script_mod! {
                 "MDCAUTH<<FAIL:0x02>>"
             )
             if auth_result == "MDCAUTH<<FAIL:0x01>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: incorrect pin"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: incorrect pin"})
             }
             if auth_result == "MDCAUTH<<FAIL:0x02>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: blocked"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: blocked"})
             }
             if auth_result != "MDCAUTH<<PASS>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: missing pass marker"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: missing pass marker"})
             }
 
             socket.send_mdc_set_content_download(content_url 0)
 
             let response = mod.edmx.mdc_wait_for_command(socket, 199)
-            socket.close()
 
             if response == nil{
-                return {is_ok:false error:"EDMX error: missing MDC response"}
+                return finish_upload({is_ok:false error:"EDMX error: missing MDC response"})
             }
             if !response.ack{
-                return {is_ok:false error:"EDMX NAK payload: " + response.payload.to_string()}
+                return finish_upload({is_ok:false error:"EDMX NAK payload: " + response.payload.to_string()})
             }
-            {is_ok:true}
+            finish_upload({is_ok:true})
         }
     }
 }

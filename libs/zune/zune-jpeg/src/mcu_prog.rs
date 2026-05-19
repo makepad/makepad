@@ -49,8 +49,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     )]
     #[inline(never)]
     pub(crate) fn decode_mcu_ycbcr_progressive(
-        &mut self,
-        pixels: &mut [u8],
+        &mut self, pixels: &mut [u8]
     ) -> Result<(), DecodeErrors> {
         setup_component_params(self)?;
 
@@ -141,7 +140,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         self.succ_high,
                         self.succ_low,
                         self.spec_start,
-                        self.spec_end,
+                        self.spec_end
                     );
                     // after every SOS, marker, parse data for that scan.
                     let result = self.parse_entropy_coded_data(&mut stream, &mut block);
@@ -215,18 +214,12 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         self.components.iter_mut().for_each(|x| x.dc_pred = 0);
 
         // Also reset JPEG restart intervals
-        self.todo = if self.restart_interval != 0 {
-            self.restart_interval
-        } else {
-            usize::MAX
-        };
+        self.todo = if self.restart_interval != 0 { self.restart_interval } else { usize::MAX };
     }
 
     #[allow(clippy::too_many_lines, clippy::cast_sign_loss)]
     fn parse_entropy_coded_data(
-        &mut self,
-        stream: &mut BitStream,
-        buffer: &mut [Vec<i16>; MAX_COMPONENTS],
+        &mut self, stream: &mut BitStream, buffer: &mut [Vec<i16>; MAX_COMPONENTS]
     ) -> Result<(), DecodeErrors> {
         self.reset_prog_params(stream);
 
@@ -241,7 +234,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // Safety checks
             if self.spec_end != 0 && self.spec_start == 0 {
                 return Err(DecodeErrors::FormatStatic(
-                    "Can't merge DC and AC corrupt jpeg",
+                    "Can't merge DC and AC corrupt jpeg"
                 ));
             }
             // non interleaved data, process one block at a time in trivial scanline order
@@ -256,10 +249,8 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // For non-interleaved scans, iterate over the component's actual data-unit grid.
             let component = &self.components[k];
 
-            let mcu_width =
-                (self.info.width as usize * component.horizontal_sample).div_ceil(self.h_max * 8);
-            let mcu_height =
-                (self.info.height as usize * component.vertical_sample).div_ceil(self.v_max * 8);
+            let mcu_width = (self.info.width as usize * component.horizontal_sample).div_ceil(self.h_max * 8);
+            let mcu_height = (self.info.height as usize * component.vertical_sample).div_ceil(self.v_max * 8);
 
             for i in 0..mcu_height {
                 for j in 0..mcu_width {
@@ -283,11 +274,11 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                 .dc_huffman_tables
                                 .get(pos)
                                 .ok_or(DecodeErrors::FormatStatic(
-                                    "No huffman table for DC component",
+                                    "No huffman table for DC component"
                                 ))?
                                 .as_ref()
                                 .ok_or(DecodeErrors::FormatStatic(
-                                    "Huffman table at index  {} not initialized",
+                                    "Huffman table at index  {} not initialized"
                                 ))?;
 
                             let dc_pred = &mut self.components[k].dc_pred;
@@ -298,7 +289,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                     &mut self.stream,
                                     dc_table,
                                     &mut data[0],
-                                    dc_pred,
+                                    dc_pred
                                 )?;
                             } else {
                                 // refining scans for this MCU
@@ -346,7 +337,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
         } else {
             if self.spec_end != 0 {
                 return Err(DecodeErrors::HuffmanDecode(
-                    "Can't merge dc and AC corrupt jpeg".to_string(),
+                    "Can't merge dc and AC corrupt jpeg".to_string()
                 ));
             }
             // process scan n elements in order
@@ -396,7 +387,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                             .ok_or(DecodeErrors::FormatStatic("No huffman table for component"))?
                             .as_ref()
                             .ok_or(DecodeErrors::FormatStatic(
-                                "Huffman table at index not initialized",
+                                "Huffman table at index not initialized"
                             ))?;
 
                         for v_samp in 0..component.vertical_sample {
@@ -417,7 +408,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                                         &mut self.stream,
                                         huff_table,
                                         data,
-                                        &mut component.dc_pred,
+                                        &mut component.dc_pred
                                     )?;
                                 } else {
                                     stream.decode_prog_dc_refine(&mut self.stream, data)?;
@@ -480,9 +471,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::needless_range_loop, clippy::cast_sign_loss)]
     fn finish_progressive_decoding(
-        &mut self,
-        block: &[Vec<i16>; MAX_COMPONENTS],
-        pixels: &mut [u8],
+        &mut self, block: &[Vec<i16>; MAX_COMPONENTS], pixels: &mut [u8]
     ) -> Result<(), DecodeErrors> {
         // This function is complicated because we need to replicate
         // the function in mcu.rs
@@ -527,7 +516,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
             // components.
             if min(
                 self.options.jpeg_get_out_colorspace().num_components() - 1,
-                pos,
+                pos
             ) == pos
                 || self.input_colorspace == ColorSpace::YCCK
                 || self.input_colorspace == ColorSpace::CMYK
@@ -586,7 +575,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                         // See https://github.com/etemesi254/zune-image/issues/262 sample 3.
                         let Some(qt_slice) = slice.get(start..start + 64) else {
                             return Err(DecodeErrors::FormatStatic(
-                                "Invalid slice , would panic, invalid image",
+                                "Invalid slice , would panic, invalid image"
                             ));
                         };
                         // dequantize
@@ -621,7 +610,7 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
                 width,
                 padded_width,
                 &mut pixels_written,
-                &mut upsampler_scratch_space,
+                &mut upsampler_scratch_space
             )?;
         }
 
@@ -652,11 +641,10 @@ impl<T: ZByteReaderTrait> JpegDecoder<T> {
 ///
 /// This reads until it gets a marker or end of file is encountered
 pub fn get_marker<T>(
-    reader: &mut ZReader<T>,
-    stream: &mut BitStream,
+    reader: &mut ZReader<T>, stream: &mut BitStream
 ) -> Result<Marker, DecodeErrors>
 where
-    T: ZByteReaderTrait,
+    T: ZByteReaderTrait
 {
     if let Some(marker) = stream.marker {
         stream.marker = None;
@@ -685,42 +673,76 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::JpegDecoder;
+mod tests{
     use makepad_zune_core::bytestream::ZCursor;
+    use crate::JpegDecoder;
 
     #[test]
-    fn make_test() {
-        let img = "/Users/etemesi/Downloads/wrong_sampling.jpeg";
-        let data = ZCursor::new([
-            255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 0, 2, 0, 28, 0, 28, 0, 0, 255, 219, 0,
-            67, 0, 40, 28, 30, 20, 30, 25, 40, 35, 33, 35, 45, 43, 40, 48, 60, 100, 65, 60, 55, 55,
-            60, 123, 88, 93, 65, 100, 145, 128, 153, 150, 143, 128, 140, 138, 160, 180, 230, 195,
-            160, 170, 218, 173, 138, 140, 200, 255, 203, 218, 255, 238, 245, 255, 101, 0, 62, 8,
-            255, 255, 250, 255, 230, 253, 255, 17, 255, 219, 0, 67, 1, 43, 45, 45, 42, 60, 48, 60,
-            118, 65, 65, 118, 248, 165, 140, 165, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            241, 255, 255, 255, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 8, 0, 32, 0, 32, 3, 2, 17, 0, 1, 34, 1,
-            3, 17, 1, 255, 196, 0, 24, 0, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 3, 0,
-            1, 4, 255, 196, 0, 37, 16, 0, 2, 2, 1, 4, 1, 3, 5, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 17,
-            0, 4, 18, 33, 48, 34, 65, 81, 113, 19, 20, 51, 97, 161, 255, 196, 0, 22, 1, 1, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 255, 196, 0, 26, 17, 1, 0, 2, 3, 1, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 17, 18, 38, 65, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3,
-            17, 0, 63, 0, 175, 119, 49, 197, 184, 2, 0, 0, 0, 16, 13, 129, 103, 161, 102, 178, 115,
-            125, 202, 68, 236, 173, 25, 42, 164, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0,
-            38, 0, 0, 0, 0, 250, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 67, 1, 43, 45, 45, 60, 48, 60,
-            118, 65, 65, 118, 248, 165, 140, 165, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            241, 255, 255, 255, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 248, 248,
-            248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248,
-            248, 248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 8, 0, 32, 0, 32, 3, 1, 34, 0, 2,
-            17, 1, 3, 17, 1, 255, 196, 0, 24, 0, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            2, 0, 126, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 198,
-        ]);
+    fn test_progressive_dri_420_color() {
+        // 16x16 progressive 4:2:0 JPEG with DRI (restart markers)
+        // Original: R=x*16, G=y*16, B=128
+        // Bug: all three conditions (progressive + DRI + 4:2:0) produced grayscale
+        const JPEG: &[u8] = &[
+            0xff, 0xd8, 0xff, 0xdb, 0x00, 0xc5, 0x00, 0x03, 0x04, 0x04, 0x06, 0x04, 0x06, 0x06,
+            0x06, 0x06, 0x06, 0x07, 0x06, 0x06, 0x06, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07, 0x07,
+            0x08, 0x07, 0x08, 0x07, 0x08, 0x07, 0x08, 0x08, 0x09, 0x08, 0x09, 0x09, 0x08, 0x09,
+            0x08, 0x09, 0x08, 0x0a, 0x0a, 0x0a, 0x08, 0x09, 0x09, 0x0a, 0x0a, 0x0a, 0x0a, 0x09,
+            0x0a, 0x0c, 0x0c, 0x0c, 0x0a, 0x0c, 0x0b, 0x0b, 0x0c, 0x0d, 0x0c, 0x0d, 0x0b, 0x0b,
+            0x09, 0x01, 0x02, 0x04, 0x04, 0x07, 0x06, 0x07, 0x08, 0x07, 0x07, 0x08, 0x07, 0x08,
+            0x08, 0x08, 0x07, 0x0a, 0x0b, 0x0d, 0x0d, 0x0b, 0x0a, 0x0d, 0x0b, 0x0b, 0x0c, 0x0b,
+            0x0b, 0x0d, 0x15, 0x18, 0x13, 0x0c, 0x0c, 0x13, 0x18, 0x15, 0x10, 0x49, 0x12, 0x0d,
+            0x12, 0x49, 0x10, 0x12, 0x15, 0x0b, 0x0b, 0x15, 0x12, 0x1d, 0x0b, 0x15, 0x0b, 0x1d,
+            0x2a, 0x20, 0x20, 0x2a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x50, 0x02, 0x03, 0x03, 0x03,
+            0x05, 0x04, 0x05, 0x05, 0x05, 0x05, 0x05, 0x06, 0x04, 0x05, 0x04, 0x06, 0x05, 0x05,
+            0x05, 0x05, 0x05, 0x05, 0x06, 0x05, 0x05, 0x04, 0x05, 0x05, 0x06, 0x07, 0x06, 0x05,
+            0x06, 0x06, 0x05, 0x06, 0x07, 0x06, 0x06, 0x06, 0x04, 0x06, 0x06, 0x06, 0x06, 0x06,
+            0x07, 0x07, 0x06, 0x06, 0x07, 0x05, 0x06, 0x05, 0x07, 0x07, 0x07, 0x07, 0x07, 0x0a,
+            0x0b, 0x0a, 0x0a, 0x0a, 0x52, 0xff, 0xc2, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10,
+            0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x02, 0xff, 0xc4, 0x00, 0x17,
+            0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x07, 0x02, 0x05, 0x08, 0xff, 0xdd, 0x00, 0x04, 0x00, 0x04, 0xff,
+            0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xca, 0xac, 0xcc, 0x4c, 0xdf,
+            0xff, 0xda, 0x00, 0x08, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0xb0, 0xff, 0xda, 0x00,
+            0x08, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x8f, 0xff, 0xc4, 0x00, 0x1f, 0x10, 0x00,
+            0x01, 0x04, 0x02, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x05, 0x06, 0x21, 0x31, 0x07, 0xf1, 0x20, 0x61, 0xa1, 0xc1, 0xe1, 0xff,
+            0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x02, 0x00, 0x49, 0x6a, 0x24, 0xb5, 0x12,
+            0x5a, 0x89, 0x2d, 0x4f, 0xff, 0xda, 0x00, 0x08, 0x01, 0x02, 0x00, 0x01, 0x02, 0x00,
+            0x59, 0x78, 0x7f, 0xff, 0xda, 0x00, 0x08, 0x01, 0x03, 0x00, 0x01, 0x02, 0x00, 0xc3,
+            0xd9, 0x47, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x03, 0x3f, 0x02, 0xe1, 0xff,
+            0xda, 0x00, 0x08, 0x01, 0x02, 0x00, 0x03, 0x3f, 0x02, 0x3f, 0xff, 0xda, 0x00, 0x08,
+            0x01, 0x03, 0x00, 0x03, 0x3f, 0x02, 0xa9, 0x3f, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01,
+            0x00, 0x03, 0x3f, 0x21, 0xa8, 0x3a, 0x2a, 0x0a, 0x83, 0xff, 0xda, 0x00, 0x08, 0x01,
+            0x02, 0x00, 0x03, 0x3f, 0x21, 0xec, 0xff, 0xda, 0x00, 0x08, 0x01, 0x03, 0x00, 0x03,
+            0x3f, 0x21, 0xf1, 0x1f, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x03, 0x3f, 0x10,
+            0xd2, 0x57, 0xa9, 0xa4, 0xd2, 0x7f, 0xff, 0xda, 0x00, 0x08, 0x01, 0x02, 0x00, 0x03,
+            0x3f, 0x10, 0xb3, 0xff, 0xda, 0x00, 0x08, 0x01, 0x03, 0x00, 0x03, 0x3f, 0x10, 0xfa,
+            0x8f, 0xff, 0xd9,
+        ];
+
+        let mut decoder = JpegDecoder::new(ZCursor::new(JPEG));
+        let pixels = decoder.decode().unwrap();
+        let (w, h) = decoder.dimensions().unwrap();
+        assert_eq!((w, h), (16, 16));
+
+        // The image has color — R varies 0-240, G varies 0-240, B≈128
+        // If the decoder produces R==G==B for every pixel, it's outputting grayscale
+        let all_gray = pixels.chunks(3).all(|p| p[0] == p[1] && p[1] == p[2]);
+        assert!(
+            !all_gray,
+            "Output is grayscale (R==G==B for all pixels). \
+             Expected color output for progressive 4:2:0 JPEG with DRI."
+        );
+
+        // Verify first pixel is close to expected (R≈0, G≈0, B≈128)
+        assert!(pixels[2] > 100, "Blue channel should be around 128, got {}", pixels[2]);
+    }
+
+    #[test]
+    fn make_test(){
+        let data = ZCursor::new([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 0, 2, 0, 28, 0, 28, 0, 0, 255, 219, 0, 67, 0, 40, 28, 30, 20, 30, 25, 40, 35, 33, 35, 45, 43, 40, 48, 60, 100, 65, 60, 55, 55, 60, 123, 88, 93, 65, 100, 145, 128, 153, 150, 143, 128, 140, 138, 160, 180, 230, 195, 160, 170, 218, 173, 138, 140, 200, 255, 203, 218, 255, 238, 245, 255, 101, 0, 62, 8, 255, 255, 250, 255, 230, 253, 255, 17, 255, 219, 0, 67, 1, 43, 45, 45, 42, 60, 48, 60, 118, 65, 65, 118, 248, 165, 140, 165, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 241, 255, 255, 255, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 8, 0, 32, 0, 32, 3, 2, 17, 0, 1, 34, 1, 3, 17, 1, 255, 196, 0, 24, 0, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 3, 0, 1, 4, 255, 196, 0, 37, 16, 0, 2, 2, 1, 4, 1, 3, 5, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 17, 0, 4, 18, 33, 48, 34, 65, 81, 113, 19, 20, 51, 97, 161, 255, 196, 0, 22, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 255, 196, 0, 26, 17, 1, 0, 2, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 17, 18, 38, 65, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 175, 119, 49, 197, 184, 2, 0, 0, 0, 16, 13, 129, 103, 161, 102, 178, 115, 125, 202, 68, 236, 173, 25, 42, 164, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 38, 0, 0, 0, 0, 250, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 67, 1, 43, 45, 45, 60, 48, 60, 118, 65, 65, 118, 248, 165, 140, 165, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 241, 255, 255, 255, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 248, 255, 192, 0, 17, 8, 0, 32, 0, 32, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 24, 0, 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 126, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 198]);
         let mut decoder = JpegDecoder::new(data);
         decoder.decode().unwrap();
+
     }
 }

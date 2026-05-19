@@ -11,12 +11,8 @@ use core::arch::aarch64::*;
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-pub fn upsample_horizontal_neon(
-    input: &[i16],
-    in_near: &[i16],
-    in_far: &[i16],
-    scratch: &mut [i16],
-    output: &mut [i16],
+pub unsafe fn upsample_horizontal_neon(
+    input: &[i16], in_near: &[i16], in_far: &[i16], scratch: &mut [i16], output: &mut [i16]
 ) {
     assert_eq!(input.len() * 2, output.len());
     assert!(input.len() > 2);
@@ -43,7 +39,7 @@ pub fn upsample_horizontal_neon(
             (
                 vld1q_s16(in_ptr),
                 vld1q_s16(in_ptr.add(1)),
-                vld1q_s16(in_ptr.add(2)),
+                vld1q_s16(in_ptr.add(2))
             )
         };
 
@@ -84,12 +80,8 @@ pub fn upsample_horizontal_neon(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-pub fn upsample_vertical_neon(
-    input: &[i16],
-    in_near: &[i16],
-    in_far: &[i16],
-    scratch: &mut [i16],
-    output: &mut [i16],
+pub unsafe fn upsample_vertical_neon(
+    input: &[i16], in_near: &[i16], in_far: &[i16], scratch: &mut [i16], output: &mut [i16]
 ) {
     assert_eq!(input.len() * 2, output.len());
     assert_eq!(in_near.len(), input.len());
@@ -117,7 +109,7 @@ pub fn upsample_vertical_neon(
             (
                 vld1q_s16(input.as_ptr()),
                 vld1q_s16(in_near.as_ptr()),
-                vld1q_s16(in_far.as_ptr()),
+                vld1q_s16(in_far.as_ptr())
             )
         };
 
@@ -145,7 +137,7 @@ pub fn upsample_vertical_neon(
             in_near.try_into().unwrap(),
             in_far.try_into().unwrap(),
             out_top.try_into().unwrap(),
-            out_bottom.try_into().unwrap(),
+            out_bottom.try_into().unwrap()
         );
     }
 
@@ -165,27 +157,26 @@ pub fn upsample_vertical_neon(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-pub fn upsample_hv_neon(
-    input: &[i16],
-    in_near: &[i16],
-    in_far: &[i16],
-    scratch_space: &mut [i16],
-    output: &mut [i16],
+pub unsafe fn upsample_hv_neon(
+    input: &[i16], in_near: &[i16], in_far: &[i16], scratch_space: &mut [i16], output: &mut [i16]
 ) {
     assert_eq!(input.len() * 4, output.len());
 
     assert!(input.len() * 2 <= scratch_space.len());
     let scratch_space = &mut scratch_space[..input.len() * 2];
 
-    upsample_vertical_neon(input, in_near, in_far, &mut [], scratch_space);
+    // SAFETY: caller guarantees NEON is available
+    unsafe {
+        upsample_vertical_neon(input, in_near, in_far, &mut [], scratch_space);
 
-    let scratch_half = scratch_space.len() / 2;
-    let output_half = output.len() / 2;
+        let scratch_half = scratch_space.len() / 2;
+        let output_half = output.len() / 2;
 
-    let (scratch_top, scratch_bottom) = scratch_space.split_at_mut(scratch_half);
-    let (out_top, out_bottom) = output.split_at_mut(output_half);
+        let (scratch_top, scratch_bottom) = scratch_space.split_at_mut(scratch_half);
+        let (out_top, out_bottom) = output.split_at_mut(output_half);
 
-    let mut t = [0];
-    upsample_horizontal_neon(scratch_top, &[], &[], &mut t, out_top);
-    upsample_horizontal_neon(scratch_bottom, &[], &[], &mut t, out_bottom);
+        let mut t = [0];
+        upsample_horizontal_neon(scratch_top, &[], &[], &mut t, out_top);
+        upsample_horizontal_neon(scratch_bottom, &[], &[], &mut t, out_bottom);
+    }
 }

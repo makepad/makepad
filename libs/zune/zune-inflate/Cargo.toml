@@ -1,6 +1,6 @@
 [package]
 name = "makepad-zune-inflate"
-version = "0.2.0"
+version = "0.2.54"
 edition = "2021"
 repository = "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-inflate"
 description = "A heavily optimized deflate decompressor in Pure Rust"
@@ -17,4 +17,4 @@ std = ["simd-adler32/std"]
 default = ["zlib", "gzip", "std"]
 
 [dependencies]
-simd-adler32 = { version = "0.3.8", path = "../../simd-adler32", optional = true, default-features = false }
+simd-adler32 = { version = "0.3.9", path = "../../simd-adler32", optional = true, default-features = false }
