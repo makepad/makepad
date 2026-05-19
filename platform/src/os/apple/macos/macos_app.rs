@@ -128,6 +128,10 @@ pub struct MacosApp {
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
     //current_ns_event: Option<ObjcId>,
+
+    /// Set by `send_command_event()` to avoid sending keyboard events
+    /// for keyboard shortcuts that trigger a macOS menu command.
+    pub(crate) menu_command_fired: bool,
 }
 
 impl MacosApp {
@@ -160,6 +164,7 @@ impl MacosApp {
                 current_cursor: MouseCursor::Default,
                 terminating_from_app_delegate: false,
                 //current_ns_event: None,
+                menu_command_fired: false,
             }
         }
     }
@@ -378,6 +383,9 @@ impl MacosApp {
         let ev_type: NSEventType = msg_send![ns_event, type];
 
         let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        // Clear the menu-consumed marker so we can tell after `sendEvent:`
+        // whether the main menu took this NSEvent as a key equivalent.
+        with_macos_app(|app| app.menu_command_fired = false);
         let () = msg_send![ns_app, sendEvent: ns_event];
 
         if ev_type as u64 == 21 {
@@ -404,6 +412,9 @@ impl MacosApp {
                 }
             }
             NSEventType::NSKeyDown => {
+                if with_macos_app(|app| app.menu_command_fired) {
+                    return;
+                }
                 if let Some(key_code) = get_event_keycode(ns_event) {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
@@ -818,6 +829,7 @@ impl MacosApp {
     }*/
 
     pub fn send_command_event(command: LiveId) {
+        with_macos_app(|app| app.menu_command_fired = true);
         MacosApp::do_callback(MacosEvent::MacosMenuCommand(command));
         MacosApp::do_callback(MacosEvent::Paint);
     }
