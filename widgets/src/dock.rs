@@ -203,7 +203,15 @@ pub struct Dock {
     dragging_tab: Option<DraggingTab>,
     #[rust]
     dock_item_iter_stack: Vec<(LiveId, usize)>,
+    /// Monotonic counter for drag/drop-allocated container IDs. Lives in the
+    /// reserved range above INTERNAL_ID_FLOOR so it can't collide with DSL hashes.
+    #[rust]
+    next_internal_id: u64,
 }
+
+/// Floor for internally-generated dock-item IDs. Name-hash LiveIds are 46 bits,
+/// so bit 47 keeps our generated IDs safely out of their range.
+const INTERNAL_ID_FLOOR: u64 = 1 << 47;
 
 /// Holds a clone of the tab being dragged so we can render it as a ghost overlay.
 struct DraggingTab {
@@ -618,6 +626,22 @@ impl Dock {
         id
     }
 
+    /// Hands out a fresh LiveId for a drag/drop-created Tabs or Splitter.
+    /// First call after load_state scans the loaded state to seed past the max
+    /// existing ID, so subsequent allocations can't collide.
+    fn next_internal_id(&mut self) -> LiveId {
+        if self.next_internal_id < INTERNAL_ID_FLOOR {
+            let max = self.dock_items.keys()
+                .map(|k| k.0)
+                .filter(|v| *v >= INTERNAL_ID_FLOOR)
+                .max();
+            self.next_internal_id = max.map(|m| m + 1).unwrap_or(INTERNAL_ID_FLOOR);
+        }
+        let id = LiveId(self.next_internal_id);
+        self.next_internal_id += 1;
+        id
+    }
+
     pub fn compact_dump(&self, cx: &Cx) -> DockCompactDump {
         let mut tabs = Vec::new();
         let mut tab_headers = Vec::new();
@@ -992,27 +1016,37 @@ impl Dock {
 
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
         self.needs_save = true;
-        for (splitter_id, item) in self.dock_items.iter_mut() {
-            match *item {
-                DockItem::Splitter { a, b, .. } => {
-                    let splitter_id = *splitter_id;
-                    if tabs_id == a {
-                        self.set_parent_split(splitter_id, b);
-                        self.dock_items.remove(&splitter_id);
-                        self.dock_items.remove(&tabs_id);
-                        self.redraw_item(cx, b);
-                        return;
-                    } else if tabs_id == b {
-                        self.set_parent_split(splitter_id, a);
-                        self.dock_items.remove(&splitter_id);
-                        self.dock_items.remove(&tabs_id);
-                        self.redraw_item(cx, a);
-                        return;
-                    }
+
+        let mut found: Option<(LiveId, LiveId)> = None;
+        for (splitter_id, item) in self.dock_items.iter() {
+            if let DockItem::Splitter { a, b, .. } = item {
+                if tabs_id == *a {
+                    found = Some((*splitter_id, *b));
+                    break;
+                } else if tabs_id == *b {
+                    found = Some((*splitter_id, *a));
+                    break;
                 }
-                _ => (),
             }
         }
+        let Some((splitter_id, sibling_id)) = found else { return };
+
+        if splitter_id == id!(root) {
+            // Can't just remove root, the walking code starts there. Copy the
+            // sibling's content into the root slot instead, and drop the sibling.
+            if let Some(sibling_item) = self.dock_items.get(&sibling_id).cloned() {
+                self.dock_items.insert(splitter_id, sibling_item);
+                self.dock_items.remove(&sibling_id);
+                self.dock_items.remove(&tabs_id);
+                self.redraw_item(cx, splitter_id);
+            }
+            return;
+        }
+
+        self.set_parent_split(splitter_id, sibling_id);
+        self.dock_items.remove(&splitter_id);
+        self.dock_items.remove(&tabs_id);
+        self.redraw_item(cx, sibling_id);
     }
 
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
@@ -1148,7 +1182,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    let new_tabs = self.unique_id(self.dock_items.len() as u64);
+                    let new_tabs = self.next_internal_id();
                     self.dock_items.insert(
                         new_tabs,
                         DockItem::Tabs {
@@ -1158,7 +1192,7 @@ impl Dock {
                             selected: 0,
                         },
                     );
-                    let new_split = self.unique_id(self.dock_items.len() as u64);
+                    let new_split = self.next_internal_id();
                     self.set_parent_split(pos.id, new_split);
                     self.dock_items.insert(
                         new_split,
@@ -1414,6 +1448,8 @@ impl Dock {
         self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
+        // Reset so the next next_internal_id call re-seeds from loaded state.
+        self.next_internal_id = 0;
         self.area.redraw(cx);
         self.create_all_items(cx);
     }
