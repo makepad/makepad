@@ -8,11 +8,7 @@
 use crate::filters::portable_simd;
 #[allow(clippy::manual_memcpy)]
 pub fn handle_avg(
-    prev_row: &[u8],
-    raw: &[u8],
-    current: &mut [u8],
-    components: usize,
-    use_sse4: bool,
+    prev_row: &[u8], raw: &[u8], current: &mut [u8], components: usize, use_sse4: bool
 ) {
     if raw.len() < components || current.len() < components {
         return;
@@ -25,7 +21,7 @@ pub fn handle_avg(
             4 => return portable_simd::defilter_avg_generic::<4>(prev_row, raw, current),
             6 => return portable_simd::defilter_avg_generic::<6>(prev_row, raw, current),
             8 => return portable_simd::defilter_avg_generic::<8>(prev_row, raw, current),
-            _ => (),
+            _ => ()
         }
     }
 
@@ -39,7 +35,7 @@ pub fn handle_avg(
                 4 => return crate::filters::sse4::defilter_avg_sse::<4>(prev_row, raw, current),
                 6 => return crate::filters::sse4::defilter_avg_sse::<6>(prev_row, raw, current),
                 8 => return crate::filters::sse4::defilter_avg_sse::<8>(prev_row, raw, current),
-                _ => (),
+                _ => ()
             }
         }
     }
@@ -84,7 +80,7 @@ pub fn handle_sub(raw: &[u8], current: &mut [u8], components: usize, use_sse2: b
             4 => return portable_simd::defilter_sub_generic::<4>(raw, current),
             6 => return portable_simd::defilter_sub_generic::<6>(raw, current),
             8 => return portable_simd::defilter_sub_generic::<8>(raw, current),
-            _ => (),
+            _ => ()
         }
     }
     #[cfg(feature = "sse")]
@@ -96,7 +92,7 @@ pub fn handle_sub(raw: &[u8], current: &mut [u8], components: usize, use_sse2: b
                 4 => return crate::filters::sse4::de_filter_sub_sse2::<4>(raw, current),
                 6 => return crate::filters::sse4::de_filter_sub_sse2::<6>(raw, current),
                 8 => return crate::filters::sse4::de_filter_sub_sse2::<8>(raw, current),
-                _ => (),
+                _ => ()
             }
         }
     }
@@ -115,11 +111,7 @@ pub fn handle_sub(raw: &[u8], current: &mut [u8], components: usize, use_sse2: b
 
 #[allow(clippy::manual_memcpy)]
 pub fn handle_paeth(
-    prev_row: &[u8],
-    raw: &[u8],
-    current: &mut [u8],
-    components: usize,
-    use_sse4: bool,
+    prev_row: &[u8], raw: &[u8], current: &mut [u8], components: usize, use_sse4: bool
 ) {
     if raw.len() < components || current.len() < components {
         return;
@@ -130,25 +122,25 @@ pub fn handle_paeth(
         match components {
             3 => {
                 return crate::filters::portable_simd::defilter_paeth_generic::<3>(
-                    prev_row, raw, current,
+                    prev_row, raw, current
                 )
             }
             4 => {
                 return crate::filters::portable_simd::defilter_paeth_generic::<4>(
-                    prev_row, raw, current,
+                    prev_row, raw, current
                 )
             }
             6 => {
                 return crate::filters::portable_simd::defilter_paeth_generic::<6>(
-                    prev_row, raw, current,
+                    prev_row, raw, current
                 )
             }
             8 => {
                 return crate::filters::portable_simd::defilter_paeth_generic::<8>(
-                    prev_row, raw, current,
+                    prev_row, raw, current
                 )
             }
-            _ => (),
+            _ => ()
         }
     }
 
@@ -169,7 +161,7 @@ pub fn handle_paeth(
                 8 => {
                     return crate::filters::sse4::de_filter_paeth_sse41::<8>(prev_row, raw, current)
                 }
-                _ => (),
+                _ => ()
             }
         }
     }
@@ -190,7 +182,7 @@ pub fn handle_paeth(
         let paeth_res = paeth(
             current[i - components],
             prev_row[i],
-            prev_row[i - components],
+            prev_row[i - components]
         );
         current[i] = raw[i].wrapping_add(paeth_res)
     }

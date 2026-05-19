@@ -1,11 +1,3 @@
-/*
- * Copyright (c) 2023.
- *
- * This software is free software;
- *
- * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
- */
-
 #![cfg(feature = "gzip")]
 
 use crate::crc::crc_tables::{CRC32_SLICE1_TABLE, CRC32_SLICE8_TABLE};
@@ -14,9 +6,11 @@ mod crc_tables;
 
 /// Calculate crc for a data and an initial crc value
 #[allow(clippy::identity_op, clippy::zero_prefixed_literal)]
-pub fn crc32(data: &[u8], mut crc: u32) -> u32 {
+pub fn crc32(data: &[u8], mut crc: u32) -> u32
+{
     // main loop
-    for chunk in data.chunks_exact(8) {
+    for chunk in data.chunks_exact(8)
+    {
         let chunk_loaded = u64::from_le_bytes(chunk.try_into().unwrap());
 
         let v1 = (chunk_loaded & u64::from(u32::MAX)) as u32;
@@ -32,7 +26,8 @@ pub fn crc32(data: &[u8], mut crc: u32) -> u32 {
             ^ CRC32_SLICE8_TABLE[0x000 + (((v2 >> 24) & 0xFF) as usize)];
     }
     // handle remainder
-    for remainder in data.chunks_exact(8).remainder() {
+    for remainder in data.chunks_exact(8).remainder()
+    {
         crc = (crc >> 8) ^ CRC32_SLICE1_TABLE[((crc & 0xFF) ^ u32::from(*remainder)) as usize];
     }
 

@@ -50,7 +50,7 @@ macro_rules! permute_store {
 
         // Clamp the values after packing, we can clamp more values at once
         let b = clamp_avx(a);
-
+        let mut tmp = [0;8];
         // /Undo shuffling
         let c = _mm256_permute4x64_epi64(b, shuffle(3, 1, 2, 0));
 
@@ -58,7 +58,7 @@ macro_rules! permute_store {
         _mm_storeu_si128(
             ($out)
                 .get_mut($index..$index + 8)
-                .unwrap()
+                .unwrap_or(&mut tmp)
                 .as_mut_ptr()
                 .cast(),
             _mm256_extractf128_si256::<0>(c),
@@ -86,7 +86,9 @@ macro_rules! permute_store {
     unused_assignments,
     clippy::zero_prefixed_literal
 )]
-pub unsafe fn idct_avx2(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize) {
+pub unsafe fn idct_avx2(
+    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize,
+) {
     let mut pos = 0;
 
     // load into registers
@@ -245,6 +247,7 @@ pub unsafe fn idct_avx2(in_vector: &mut [i32; 64], out_vector: &mut [i16], strid
     permute_store!((row6.mm256), (row7.mm256), pos, out_vector, stride);
 }
 
+
 #[target_feature(enable = "avx2")]
 #[allow(
     clippy::too_many_lines,
@@ -254,7 +257,9 @@ pub unsafe fn idct_avx2(in_vector: &mut [i32; 64], out_vector: &mut [i16], strid
     unused_assignments,
     clippy::zero_prefixed_literal
 )]
-pub unsafe fn idct_avx2_4x4(in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize) {
+pub unsafe fn idct_avx2_4x4(
+    in_vector: &mut [i32; 64], out_vector: &mut [i16], stride: usize,
+) {
     let rw0 = _mm256_loadu_si256(in_vector[00..].as_ptr().cast());
     let rw1 = _mm256_loadu_si256(in_vector[08..].as_ptr().cast());
     let rw2 = _mm256_loadu_si256(in_vector[16..].as_ptr().cast());
