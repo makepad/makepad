@@ -504,9 +504,6 @@ impl Cx {
                         let vk =
                             self.windows[window_id].native_virtual_keyboard_event_to_layout(vk);
                         // When the keyboard is going away (user pressed iOS's
-                        let window_id = CxWindowPool::id_zero();
-                        let vk =
-                            self.windows[window_id].native_virtual_keyboard_event_to_layout(vk);
                         // "hide keyboard" button, an external keyboard was
                         // attached, an inputAccessoryView triggered hide,
                         // etc.), mark the IME as dismissed so the focused
