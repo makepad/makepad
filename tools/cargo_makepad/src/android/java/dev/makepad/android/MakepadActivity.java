@@ -589,7 +589,14 @@ class MakepadSurface
         int selEnd = Selection.getSelectionEnd(mEditable);
         outAttrs.initialSelStart = Math.max(0, selStart);
         outAttrs.initialSelEnd = Math.max(0, selEnd);
-        outAttrs.setInitialSurroundingSubText(mEditable, 0);
+        // EditorInfo.setInitialSurroundingSubText is API 30+. It's only an
+        // optimization (it hands the IME the surrounding text up-front); on
+        // older devices the IME just queries it on demand through the
+        // InputConnection. Calling it unconditionally crashes API 26-29 with
+        // NoSuchMethodError.
+        if (Build.VERSION.SDK_INT >= 30) {
+            outAttrs.setInitialSurroundingSubText(mEditable, 0);
+        }
 
         // Create InputConnection with fullEditor=true since we have an Editable
         mInputConnection = new MakepadInputConnection(this, true);
@@ -1615,9 +1622,15 @@ public class MakepadActivity
         View decorView = getWindow().getDecorView();
 
         if (fullscreen) {
-            // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3 (API 30+), fall back to SHORT_EDGES
-            getWindow().getAttributes().layoutInDisplayCutoutMode =
-                Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            // WindowManager.LayoutParams.layoutInDisplayCutoutMode is API 28+
+            // (display cutouts didn't exist before Android 9). Touching the
+            // field at all on API 26-27 throws NoSuchFieldError, so guard it.
+            // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3 is API 30+; on 28-29 we
+            // fall back to SHORT_EDGES.
+            if (Build.VERSION.SDK_INT >= 28) {
+                getWindow().getAttributes().layoutInDisplayCutoutMode =
+                    Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            }
             if (Build.VERSION.SDK_INT >= 30) {
                 getWindow().setDecorFitsSystemWindows(false);
                 android.view.WindowInsetsController controller = getWindow().getInsetsController();

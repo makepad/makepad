@@ -2252,8 +2252,13 @@ impl Cx {
                         ..Default::default()
                     };
                     window.is_created = true;
-                    //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
-                    //crate::log!("{}",ret);
+                    // To request a specific surface frame rate here, use
+                    // `ANativeWindow_setFrameRate` — but note it is API 30+.
+                    // It must be `dlsym`-resolved from libandroid.so and gated
+                    // on `sdk_version >= 30` (the same pattern as the
+                    // Choreographer callbacks in `ndk_sys.rs` / `android_jni.rs`),
+                    // never declared as a plain `extern "C"`, or it breaks
+                    // `dlopen` of libmakepad.so on API 26-29 devices.
                     let new_geom = window.window_geom.clone();
                     let old_geom = window.window_geom.clone();
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
