@@ -203,7 +203,15 @@ pub struct Dock {
     dragging_tab: Option<DraggingTab>,
     #[rust]
     dock_item_iter_stack: Vec<(LiveId, usize)>,
+    /// Monotonic counter for drag/drop-allocated container IDs. Lives in the
+    /// reserved range above INTERNAL_ID_FLOOR so it can't collide with DSL hashes.
+    #[rust]
+    next_internal_id: u64,
 }
+
+/// Floor for internally-generated dock-item IDs. Name-hash LiveIds are 46 bits,
+/// so bit 47 keeps our generated IDs safely out of their range.
+const INTERNAL_ID_FLOOR: u64 = 1 << 47;
 
 /// Holds a clone of the tab being dragged so we can render it as a ghost overlay.
 struct DraggingTab {
@@ -618,6 +626,22 @@ impl Dock {
         id
     }
 
+    /// Hands out a fresh LiveId for a drag/drop-created Tabs or Splitter.
+    /// First call after load_state scans the loaded state to seed past the max
+    /// existing ID, so subsequent allocations can't collide.
+    fn next_internal_id(&mut self) -> LiveId {
+        if self.next_internal_id < INTERNAL_ID_FLOOR {
+            let max = self.dock_items.keys()
+                .map(|k| k.0)
+                .filter(|v| *v >= INTERNAL_ID_FLOOR)
+                .max();
+            self.next_internal_id = max.map(|m| m + 1).unwrap_or(INTERNAL_ID_FLOOR);
+        }
+        let id = LiveId(self.next_internal_id);
+        self.next_internal_id += 1;
+        id
+    }
+
     pub fn compact_dump(&self, cx: &Cx) -> DockCompactDump {
         let mut tabs = Vec::new();
         let mut tab_headers = Vec::new();
@@ -924,31 +948,260 @@ impl Dock {
         }
     }
 
-    fn set_parent_split(&mut self, what_item: LiveId, replace_item: LiveId) {
-        for item in self.dock_items.values_mut() {
+    fn set_parent_split_in_items(
+        dock_items: &mut HashMap<LiveId, DockItem>,
+        what_item: LiveId,
+        replace_item: LiveId,
+    ) -> bool {
+        for item in dock_items.values_mut() {
             match item {
                 DockItem::Splitter { a, b, .. } => {
                     if what_item == *a {
                         *a = replace_item;
-                        return;
+                        return true;
                     } else if what_item == *b {
                         *b = replace_item;
-                        return;
+                        return true;
                     }
                 }
                 _ => (),
             }
         }
+        false
+    }
+
+    fn remove_tabs_container_from_tree(
+        dock_items: &mut HashMap<LiveId, DockItem>,
+        tabs_id: LiveId,
+    ) -> Option<LiveId> {
+        let mut found: Option<(LiveId, LiveId)> = None;
+        for (splitter_id, item) in dock_items.iter() {
+            if let DockItem::Splitter { a, b, .. } = item {
+                if tabs_id == *a {
+                    found = Some((*splitter_id, *b));
+                    break;
+                } else if tabs_id == *b {
+                    found = Some((*splitter_id, *a));
+                    break;
+                }
+            }
+        }
+        let (splitter_id, sibling_id) = found?;
+        if !dock_items.contains_key(&sibling_id) {
+            return None;
+        }
+
+        if splitter_id == id!(root) {
+            // Can't just remove root, the walking code starts there. Copy the
+            // sibling's content into the root slot instead, and drop the sibling.
+            if let Some(sibling_item) = dock_items.remove(&sibling_id) {
+                dock_items.insert(splitter_id, sibling_item);
+                dock_items.remove(&tabs_id);
+                return Some(splitter_id);
+            }
+            return None;
+        }
+
+        if !Self::set_parent_split_in_items(dock_items, splitter_id, sibling_id) {
+            return None;
+        }
+        dock_items.remove(&splitter_id);
+        dock_items.remove(&tabs_id);
+        Some(sibling_id)
+    }
+
+    fn split_tabs_container_in_items(
+        dock_items: &mut HashMap<LiveId, DockItem>,
+        target_tabs_id: LiveId,
+        new_tabs_id: LiveId,
+        new_split_id: LiveId,
+        old_root_id: Option<LiveId>,
+        part: DropPart,
+    ) -> bool {
+        if !matches!(
+            part,
+            DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom
+        ) {
+            return false;
+        }
+        if !matches!(dock_items.get(&target_tabs_id), Some(DockItem::Tabs { .. })) {
+            return false;
+        }
+        if new_tabs_id == target_tabs_id
+            || !matches!(dock_items.get(&new_tabs_id), Some(DockItem::Tabs { .. }))
+        {
+            return false;
+        }
+
+        let root = id!(root);
+        if target_tabs_id == root {
+            let Some(old_root_id) = old_root_id else {
+                return false;
+            };
+            if dock_items.contains_key(&old_root_id) {
+                return false;
+            }
+        } else if dock_items.contains_key(&new_split_id) {
+            return false;
+        }
+
+        let target_child_id = if target_tabs_id == root {
+            let Some(old_root_id) = old_root_id else {
+                return false;
+            };
+            let Some(old_root_item) = dock_items.remove(&root) else {
+                return false;
+            };
+            dock_items.insert(old_root_id, old_root_item);
+            old_root_id
+        } else {
+            if !Self::set_parent_split_in_items(dock_items, target_tabs_id, new_split_id) {
+                return false;
+            }
+            target_tabs_id
+        };
+
+        let split_id = if target_tabs_id == root { root } else { new_split_id };
+        let split = match part {
+            DropPart::Left => DockItem::Splitter {
+                axis: SplitterAxis::Horizontal,
+                align: SplitterAlign::Weighted(0.5),
+                a: new_tabs_id,
+                b: target_child_id,
+            },
+            DropPart::Right => DockItem::Splitter {
+                axis: SplitterAxis::Horizontal,
+                align: SplitterAlign::Weighted(0.5),
+                a: target_child_id,
+                b: new_tabs_id,
+            },
+            DropPart::Top => DockItem::Splitter {
+                axis: SplitterAxis::Vertical,
+                align: SplitterAlign::Weighted(0.5),
+                a: new_tabs_id,
+                b: target_child_id,
+            },
+            DropPart::Bottom => DockItem::Splitter {
+                axis: SplitterAxis::Vertical,
+                align: SplitterAlign::Weighted(0.5),
+                a: target_child_id,
+                b: new_tabs_id,
+            },
+            _ => unreachable!(),
+        };
+        dock_items.insert(split_id, split);
+        true
+    }
+
+    fn split_tabs_container(
+        &mut self,
+        cx: &mut Cx,
+        target_tabs_id: LiveId,
+        new_tabs_id: LiveId,
+        part: DropPart,
+    ) -> bool {
+        let root = id!(root);
+        let old_root_id = if target_tabs_id == root {
+            Some(self.next_internal_id())
+        } else {
+            None
+        };
+        let new_split_id = if target_tabs_id == root {
+            root
+        } else {
+            self.next_internal_id()
+        };
+        let did_split = Self::split_tabs_container_in_items(
+            &mut self.dock_items,
+            target_tabs_id,
+            new_tabs_id,
+            new_split_id,
+            old_root_id,
+            part,
+        );
+        if did_split {
+            self.redraw_item(cx, if target_tabs_id == root { root } else { new_split_id });
+            self.area.redraw(cx);
+        }
+        did_split
+    }
+
+    fn remap_drop_tabs_after_move_in_items(
+        dock_items: &HashMap<LiveId, DockItem>,
+        tabs_id: LiveId,
+    ) -> Option<LiveId> {
+        if matches!(dock_items.get(&tabs_id), Some(DockItem::Tabs { .. })) {
+            Some(tabs_id)
+        } else if tabs_id != id!(root)
+            && matches!(dock_items.get(&id!(root)), Some(DockItem::Tabs { .. }))
+        {
+            Some(id!(root))
+        } else {
+            None
+        }
+    }
+
+    fn remap_drop_tabs_after_move(&self, tabs_id: LiveId) -> Option<LiveId> {
+        Self::remap_drop_tabs_after_move_in_items(&self.dock_items, tabs_id)
+    }
+
+    fn push_tab_into_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId, tab_id: LiveId) -> bool {
+        if let Some(DockItem::Tabs { tabs, selected, .. }) = self.dock_items.get_mut(&tabs_id) {
+            if let Some(pos) = tabs.iter().position(|id| *id == tab_id) {
+                *selected = pos;
+            } else {
+                tabs.push(tab_id);
+                *selected = tabs.len() - 1;
+            }
+            if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
+                tab_bar.contents_draw_list.redraw(cx);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn insert_tab_before_tab_in_items(
+        dock_items: &mut HashMap<LiveId, DockItem>,
+        target_tab_id: LiveId,
+        tab_id: LiveId,
+    ) -> Option<(LiveId, usize)> {
+        for (tabs_id, item) in dock_items.iter_mut() {
+            if let DockItem::Tabs { tabs, selected, .. } = item {
+                if let Some(pos) = tabs.iter().position(|id| *id == target_tab_id) {
+                    tabs.insert(pos, tab_id);
+                    *selected = pos;
+                    return Some((*tabs_id, pos));
+                }
+            }
+        }
+        None
+    }
+
+    fn insert_tab_before_tab(
+        &mut self,
+        cx: &mut Cx,
+        target_tab_id: LiveId,
+        tab_id: LiveId,
+    ) -> bool {
+        let Some((tab_bar_id, _pos)) =
+            Self::insert_tab_before_tab_in_items(&mut self.dock_items, target_tab_id, tab_id)
+        else {
+            return false;
+        };
+        if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id) {
+            tab_bar.contents_draw_list.redraw(cx);
+        }
+        true
     }
 
     fn redraw_item(&mut self, cx: &mut Cx, what_item_id: LiveId) {
         if let Some(tab_bar) = self.tab_bars.get_mut(&what_item_id) {
             tab_bar.contents_draw_list.redraw(cx);
         }
-        for (item_id, (_kind, item)) in self.items.iter_mut() {
-            if *item_id == what_item_id {
-                item.redraw(cx);
-            }
+        if let Some((_kind, item)) = self.items.get_mut(&what_item_id) {
+            item.redraw(cx);
         }
     }
 
@@ -992,26 +1245,11 @@ impl Dock {
 
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
         self.needs_save = true;
-        for (splitter_id, item) in self.dock_items.iter_mut() {
-            match *item {
-                DockItem::Splitter { a, b, .. } => {
-                    let splitter_id = *splitter_id;
-                    if tabs_id == a {
-                        self.set_parent_split(splitter_id, b);
-                        self.dock_items.remove(&splitter_id);
-                        self.dock_items.remove(&tabs_id);
-                        self.redraw_item(cx, b);
-                        return;
-                    } else if tabs_id == b {
-                        self.set_parent_split(splitter_id, a);
-                        self.dock_items.remove(&splitter_id);
-                        self.dock_items.remove(&tabs_id);
-                        self.redraw_item(cx, a);
-                        return;
-                    }
-                }
-                _ => (),
-            }
+        if let Some(replacement_id) =
+            Self::remove_tabs_container_from_tree(&mut self.dock_items, tabs_id)
+        {
+            self.redraw_item(cx, replacement_id);
+            self.area.redraw(cx);
         }
     }
 
@@ -1062,8 +1300,8 @@ impl Dock {
         }
     }
 
-    fn find_tab_bar_of_tab(&mut self, tab_id: LiveId) -> Option<(LiveId, usize)> {
-        for (tabs_id, item) in self.dock_items.iter_mut() {
+    fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<(LiveId, usize)> {
+        for (tabs_id, item) in self.dock_items.iter() {
             match item {
                 DockItem::Tabs { tabs, .. } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
@@ -1121,8 +1359,8 @@ impl Dock {
         None
     }
 
-    fn check_drop_is_noop(&mut self, tab_id: LiveId, item_id: LiveId) -> bool {
-        for (tabs_id, item) in self.dock_items.iter_mut() {
+    fn check_drop_is_noop(&self, tab_id: LiveId, item_id: LiveId) -> bool {
+        for (tabs_id, item) in self.dock_items.iter() {
             match item {
                 DockItem::Tabs { tabs, .. } => {
                     if tabs.iter().any(|v| *v == tab_id) {
@@ -1138,7 +1376,10 @@ impl Dock {
     }
 
     fn handle_drop(&mut self, cx: &mut Cx, abs: Vec2d, item: LiveId, is_move: bool) -> bool {
-        if let Some(pos) = self.find_drop_position(cx, abs) {
+        if is_move && self.find_tab_bar_of_tab(item).is_none() {
+            return false;
+        }
+        if let Some(mut pos) = self.find_drop_position(cx, abs) {
             self.needs_save = true;
             match pos.part {
                 DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom => {
@@ -1147,8 +1388,14 @@ impl Dock {
                             return false;
                         }
                         self.close_tab(cx, item, true);
+                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
+                            return false;
+                        };
+                        pos.id = remapped_id;
+                    } else if !matches!(self.dock_items.get(&pos.id), Some(DockItem::Tabs { .. })) {
+                        return false;
                     }
-                    let new_tabs = self.unique_id(self.dock_items.len() as u64);
+                    let new_tabs = self.next_internal_id();
                     self.dock_items.insert(
                         new_tabs,
                         DockItem::Tabs {
@@ -1158,38 +1405,10 @@ impl Dock {
                             selected: 0,
                         },
                     );
-                    let new_split = self.unique_id(self.dock_items.len() as u64);
-                    self.set_parent_split(pos.id, new_split);
-                    self.dock_items.insert(
-                        new_split,
-                        match pos.part {
-                            DropPart::Left => DockItem::Splitter {
-                                axis: SplitterAxis::Horizontal,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: new_tabs,
-                                b: pos.id,
-                            },
-                            DropPart::Right => DockItem::Splitter {
-                                axis: SplitterAxis::Horizontal,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: pos.id,
-                                b: new_tabs,
-                            },
-                            DropPart::Top => DockItem::Splitter {
-                                axis: SplitterAxis::Vertical,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: new_tabs,
-                                b: pos.id,
-                            },
-                            DropPart::Bottom => DockItem::Splitter {
-                                axis: SplitterAxis::Vertical,
-                                align: SplitterAlign::Weighted(0.5),
-                                a: pos.id,
-                                b: new_tabs,
-                            },
-                            _ => panic!(),
-                        },
-                    );
+                    if !self.split_tabs_container(cx, pos.id, new_tabs, pos.part) {
+                        self.dock_items.remove(&new_tabs);
+                        return false;
+                    }
 
                     return true;
                 }
@@ -1199,17 +1418,12 @@ impl Dock {
                             return false;
                         }
                         self.close_tab(cx, item, true);
+                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
+                            return false;
+                        };
+                        pos.id = remapped_id;
                     }
-                    if let Some(DockItem::Tabs { tabs, selected, .. }) =
-                        self.dock_items.get_mut(&pos.id)
-                    {
-                        tabs.push(item);
-                        *selected = tabs.len() - 1;
-                        if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
-                            tab_bar.contents_draw_list.redraw(cx);
-                        }
-                    }
-                    return true;
+                    return self.push_tab_into_tabs(cx, pos.id, item);
                 }
                 DropPart::TabBar => {
                     if is_move {
@@ -1217,17 +1431,12 @@ impl Dock {
                             return false;
                         }
                         self.close_tab(cx, item, true);
+                        let Some(remapped_id) = self.remap_drop_tabs_after_move(pos.id) else {
+                            return false;
+                        };
+                        pos.id = remapped_id;
                     }
-                    if let Some(DockItem::Tabs { tabs, selected, .. }) =
-                        self.dock_items.get_mut(&pos.id)
-                    {
-                        tabs.push(item);
-                        *selected = tabs.len() - 1;
-                        if let Some(tab_bar) = self.tab_bars.get(&pos.id) {
-                            tab_bar.contents_draw_list.redraw(cx);
-                        }
-                    }
-                    return true;
+                    return self.push_tab_into_tabs(cx, pos.id, item);
                 }
                 DropPart::Tab => {
                     if is_move {
@@ -1236,19 +1445,7 @@ impl Dock {
                         }
                         self.close_tab(cx, item, true);
                     }
-                    let (tab_bar_id, pos) = self.find_tab_bar_of_tab(pos.id).unwrap();
-                    if let Some(DockItem::Tabs { tabs, selected, .. }) =
-                        self.dock_items.get_mut(&tab_bar_id)
-                    {
-                        let old = tabs[pos];
-                        tabs[pos] = item;
-                        tabs.push(old);
-                        *selected = pos;
-                        if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id) {
-                            tab_bar.contents_draw_list.redraw(cx);
-                        }
-                    }
-                    return true;
+                    return self.insert_tab_before_tab(cx, pos.id, item);
                 }
             }
         }
@@ -1414,6 +1611,8 @@ impl Dock {
         self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
+        // Reset so the next next_internal_id call re-seeds from loaded state.
+        self.next_internal_id = 0;
         self.area.redraw(cx);
         self.create_all_items(cx);
     }
@@ -1864,7 +2063,7 @@ impl DockRef {
     }
 
     pub fn find_tab_bar_of_tab(&self, tab_id: LiveId) -> Option<(LiveId, usize)> {
-        if let Some(mut dock) = self.borrow_mut() {
+        if let Some(dock) = self.borrow() {
             return dock.find_tab_bar_of_tab(tab_id);
         }
         None
@@ -1939,3 +2138,4 @@ impl DockRef {
         cx.start_dragging(vec![item]);
     }
 }
+
