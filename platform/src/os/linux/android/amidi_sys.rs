@@ -1,12 +1,23 @@
+//! Android MIDI (AMidi) FFI bindings.
+//!
+//! `libamidi.so` was added in Android 10 / API 29. To allow Makepad apps to
+//! target a lower `minSdkVersion` (e.g. API 26 for broader device coverage),
+//! we **don't** statically link against `libamidi.so`. Instead, the symbols
+//! are resolved at runtime via `dlopen(libamidi.so)` + `dlsym(...)`. On
+//! devices below API 29 the library isn't present and every entry point
+//! below returns an error, gracefully disabling MIDI; on API 29+ devices
+//! they call through to the OS implementation.
+//!
+//! Callers don't need to know about this — the public `pub unsafe fn`
+//! signatures match the original `extern "C"` block, and a missing symbol
+//! is reported as `media_status_t = -1`.
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+use crate::os::linux::module_loader::ModuleLoader;
 use jni_sys::*;
 use makepad_jni_sys as jni_sys;
-use std::{
-    os::raw::{c_char, c_int, c_long, c_ulong, c_void},
-    ptr,
-    sync::OnceLock,
-};
+use std::os::raw::{c_long, c_ulong};
+use std::sync::OnceLock;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -27,23 +38,23 @@ pub struct AMidiOutputPort {
 }
 
 pub type media_status_t = std::os::raw::c_int;
+/// Error returned when libamidi.so is not present (i.e. device API < 29).
+const AMIDI_UNAVAILABLE: media_status_t = -1;
 
-const AMEDIA_ERROR_UNKNOWN: media_status_t = -10000;
-const RTLD_NOW: c_int = 2;
-const RTLD_LOCAL: c_int = 0;
-
-type AMidiDeviceFromJava =
+type Fn_AMidiDevice_fromJava =
     unsafe extern "C" fn(*mut JNIEnv, jobject, *mut *mut AMidiDevice) -> media_status_t;
-type AMidiDeviceRelease = unsafe extern "C" fn(*const AMidiDevice) -> media_status_t;
-type AMidiDeviceGetNumPorts = unsafe extern "C" fn(*const AMidiDevice) -> c_long;
-type AMidiOutputPortOpen =
+type Fn_AMidiDevice_release = unsafe extern "C" fn(*const AMidiDevice) -> media_status_t;
+type Fn_AMidiDevice_getNumInputPorts = unsafe extern "C" fn(*const AMidiDevice) -> c_long;
+type Fn_AMidiDevice_getNumOutputPorts = unsafe extern "C" fn(*const AMidiDevice) -> c_long;
+type Fn_AMidiOutputPort_open =
     unsafe extern "C" fn(*const AMidiDevice, i32, *mut *mut AMidiOutputPort) -> media_status_t;
-type AMidiOutputPortClose = unsafe extern "C" fn(*const AMidiOutputPort);
-type AMidiInputPortOpen =
+type Fn_AMidiOutputPort_close = unsafe extern "C" fn(*const AMidiOutputPort);
+type Fn_AMidiInputPort_open =
     unsafe extern "C" fn(*const AMidiDevice, i32, *mut *mut AMidiInputPort) -> media_status_t;
-type AMidiInputPortSend = unsafe extern "C" fn(*const AMidiInputPort, *const u8, c_ulong) -> c_long;
-type AMidiInputPortClose = unsafe extern "C" fn(*const AMidiInputPort);
-type AMidiOutputPortReceive = unsafe extern "C" fn(
+type Fn_AMidiInputPort_send =
+    unsafe extern "C" fn(*const AMidiInputPort, *const u8, c_ulong) -> c_long;
+type Fn_AMidiInputPort_close = unsafe extern "C" fn(*const AMidiInputPort);
+type Fn_AMidiOutputPort_receive = unsafe extern "C" fn(
     *const AMidiOutputPort,
     *mut i32,
     *mut u8,
@@ -52,115 +63,92 @@ type AMidiOutputPortReceive = unsafe extern "C" fn(
     *mut i64,
 ) -> c_long;
 
-#[link(name = "dl")]
-extern "C" {
-    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+struct AMidiVtable {
+    device_from_java: Fn_AMidiDevice_fromJava,
+    device_release: Fn_AMidiDevice_release,
+    device_get_num_input_ports: Fn_AMidiDevice_getNumInputPorts,
+    device_get_num_output_ports: Fn_AMidiDevice_getNumOutputPorts,
+    output_port_open: Fn_AMidiOutputPort_open,
+    output_port_close: Fn_AMidiOutputPort_close,
+    input_port_open: Fn_AMidiInputPort_open,
+    input_port_send: Fn_AMidiInputPort_send,
+    input_port_close: Fn_AMidiInputPort_close,
+    output_port_receive: Fn_AMidiOutputPort_receive,
 }
 
-struct AMidiSymbols {
-    _handle: *mut c_void,
-    device_from_java: AMidiDeviceFromJava,
-    device_release: AMidiDeviceRelease,
-    device_get_num_input_ports: AMidiDeviceGetNumPorts,
-    device_get_num_output_ports: AMidiDeviceGetNumPorts,
-    output_port_open: AMidiOutputPortOpen,
-    output_port_close: AMidiOutputPortClose,
-    input_port_open: AMidiInputPortOpen,
-    input_port_send: AMidiInputPortSend,
-    input_port_close: AMidiInputPortClose,
-    output_port_receive: AMidiOutputPortReceive,
+// All fields are raw fn pointers, which are Send+Sync.
+unsafe impl Send for AMidiVtable {}
+unsafe impl Sync for AMidiVtable {}
+
+/// Cached vtable for `libamidi.so`. `None` means the library couldn't be loaded
+/// (typically because we're on API < 29 and the OS doesn't provide it).
+static AMIDI: OnceLock<Option<AMidiVtable>> = OnceLock::new();
+
+fn vtable() -> Option<&'static AMidiVtable> {
+    AMIDI
+        .get_or_init(|| {
+            // Try to load libamidi.so. If it isn't available we cache the None and
+            // every entry point becomes a graceful no-op for the rest of the
+            // process lifetime.
+            let lib = ModuleLoader::load("libamidi.so").ok()?;
+            let vt = AMidiVtable {
+                device_from_java: lib.get_symbol("AMidiDevice_fromJava").ok()?,
+                device_release: lib.get_symbol("AMidiDevice_release").ok()?,
+                device_get_num_input_ports: lib.get_symbol("AMidiDevice_getNumInputPorts").ok()?,
+                device_get_num_output_ports: lib
+                    .get_symbol("AMidiDevice_getNumOutputPorts")
+                    .ok()?,
+                output_port_open: lib.get_symbol("AMidiOutputPort_open").ok()?,
+                output_port_close: lib.get_symbol("AMidiOutputPort_close").ok()?,
+                input_port_open: lib.get_symbol("AMidiInputPort_open").ok()?,
+                input_port_send: lib.get_symbol("AMidiInputPort_send").ok()?,
+                input_port_close: lib.get_symbol("AMidiInputPort_close").ok()?,
+                output_port_receive: lib.get_symbol("AMidiOutputPort_receive").ok()?,
+            };
+            // Leak the ModuleLoader so libamidi.so stays mapped for the symbol
+            // pointers we just captured. dlclose() in Drop would only decrement
+            // the refcount, but this avoids relying on libamidi being kept alive
+            // by anyone else — and we want to load it exactly once anyway.
+            std::mem::forget(lib);
+            Some(vt)
+        })
+        .as_ref()
 }
 
-unsafe impl Send for AMidiSymbols {}
-unsafe impl Sync for AMidiSymbols {}
-
-static AMIDI: OnceLock<Option<AMidiSymbols>> = OnceLock::new();
-
-macro_rules! load_symbol {
-    ($handle:expr, $name:literal, $ty:ty) => {{
-        let ptr = unsafe { dlsym($handle, concat!($name, "\0").as_ptr() as *const c_char) };
-        if ptr.is_null() {
-            return None;
-        }
-        unsafe { std::mem::transmute::<*mut c_void, $ty>(ptr) }
-    }};
-}
-
-fn amidi_symbols() -> Option<&'static AMidiSymbols> {
-    AMIDI.get_or_init(load_amidi_symbols).as_ref()
-}
-
-fn load_amidi_symbols() -> Option<AMidiSymbols> {
-    let handle = unsafe {
-        dlopen(
-            b"libamidi.so\0".as_ptr() as *const c_char,
-            RTLD_NOW | RTLD_LOCAL,
-        )
-    };
-    if handle.is_null() {
-        return None;
-    }
-    Some(AMidiSymbols {
-        _handle: handle,
-        device_from_java: load_symbol!(handle, "AMidiDevice_fromJava", AMidiDeviceFromJava),
-        device_release: load_symbol!(handle, "AMidiDevice_release", AMidiDeviceRelease),
-        device_get_num_input_ports: load_symbol!(
-            handle,
-            "AMidiDevice_getNumInputPorts",
-            AMidiDeviceGetNumPorts
-        ),
-        device_get_num_output_ports: load_symbol!(
-            handle,
-            "AMidiDevice_getNumOutputPorts",
-            AMidiDeviceGetNumPorts
-        ),
-        output_port_open: load_symbol!(handle, "AMidiOutputPort_open", AMidiOutputPortOpen),
-        output_port_close: load_symbol!(handle, "AMidiOutputPort_close", AMidiOutputPortClose),
-        input_port_open: load_symbol!(handle, "AMidiInputPort_open", AMidiInputPortOpen),
-        input_port_send: load_symbol!(handle, "AMidiInputPort_send", AMidiInputPortSend),
-        input_port_close: load_symbol!(handle, "AMidiInputPort_close", AMidiInputPortClose),
-        output_port_receive: load_symbol!(
-            handle,
-            "AMidiOutputPort_receive",
-            AMidiOutputPortReceive
-        ),
-    })
-}
+// Wrapper functions matching the original extern "C" signatures. Each one
+// looks up the cached symbol; when the library isn't loaded (API < 29) it
+// returns an error code so callers can no-op gracefully.
 
 pub unsafe fn AMidiDevice_fromJava(
     env: *mut JNIEnv,
     midiDeviceObj: jobject,
     outDevicePtrPtr: *mut *mut AMidiDevice,
 ) -> media_status_t {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.device_from_java)(env, midiDeviceObj, outDevicePtrPtr) };
+    match vtable() {
+        Some(vt) => (vt.device_from_java)(env, midiDeviceObj, outDevicePtrPtr),
+        None => AMIDI_UNAVAILABLE,
     }
-    if !outDevicePtrPtr.is_null() {
-        unsafe { *outDevicePtrPtr = ptr::null_mut() };
-    }
-    AMEDIA_ERROR_UNKNOWN
 }
 
 pub unsafe fn AMidiDevice_release(midiDevice: *const AMidiDevice) -> media_status_t {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.device_release)(midiDevice) };
+    match vtable() {
+        Some(vt) => (vt.device_release)(midiDevice),
+        None => AMIDI_UNAVAILABLE,
     }
-    AMEDIA_ERROR_UNKNOWN
 }
 
 pub unsafe fn AMidiDevice_getNumInputPorts(device: *const AMidiDevice) -> c_long {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.device_get_num_input_ports)(device) };
+    match vtable() {
+        Some(vt) => (vt.device_get_num_input_ports)(device),
+        None => 0,
     }
-    0
 }
 
 pub unsafe fn AMidiDevice_getNumOutputPorts(device: *const AMidiDevice) -> c_long {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.device_get_num_output_ports)(device) };
+    match vtable() {
+        Some(vt) => (vt.device_get_num_output_ports)(device),
+        None => 0,
     }
-    0
 }
 
 pub unsafe fn AMidiOutputPort_open(
@@ -168,18 +156,15 @@ pub unsafe fn AMidiOutputPort_open(
     portNumber: i32,
     outOutputPortPtr: *mut *mut AMidiOutputPort,
 ) -> media_status_t {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.output_port_open)(device, portNumber, outOutputPortPtr) };
+    match vtable() {
+        Some(vt) => (vt.output_port_open)(device, portNumber, outOutputPortPtr),
+        None => AMIDI_UNAVAILABLE,
     }
-    if !outOutputPortPtr.is_null() {
-        unsafe { *outOutputPortPtr = ptr::null_mut() };
-    }
-    AMEDIA_ERROR_UNKNOWN
 }
 
 pub unsafe fn AMidiOutputPort_close(outputPort: *const AMidiOutputPort) {
-    if let Some(symbols) = amidi_symbols() {
-        unsafe { (symbols.output_port_close)(outputPort) };
+    if let Some(vt) = vtable() {
+        (vt.output_port_close)(outputPort);
     }
 }
 
@@ -188,13 +173,10 @@ pub unsafe fn AMidiInputPort_open(
     portNumber: i32,
     outInputPortPtr: *mut *mut AMidiInputPort,
 ) -> media_status_t {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.input_port_open)(device, portNumber, outInputPortPtr) };
+    match vtable() {
+        Some(vt) => (vt.input_port_open)(device, portNumber, outInputPortPtr),
+        None => AMIDI_UNAVAILABLE,
     }
-    if !outInputPortPtr.is_null() {
-        unsafe { *outInputPortPtr = ptr::null_mut() };
-    }
-    AMEDIA_ERROR_UNKNOWN
 }
 
 pub unsafe fn AMidiInputPort_send(
@@ -202,15 +184,17 @@ pub unsafe fn AMidiInputPort_send(
     buffer: *const u8,
     numBytes: c_ulong,
 ) -> c_long {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe { (symbols.input_port_send)(inputPort, buffer, numBytes) };
+    match vtable() {
+        Some(vt) => (vt.input_port_send)(inputPort, buffer, numBytes),
+        // Return -1 to indicate failure (matches AMidi convention for the
+        // "send" family).
+        None => -1,
     }
-    -1
 }
 
 pub unsafe fn AMidiInputPort_close(inputPort: *const AMidiInputPort) {
-    if let Some(symbols) = amidi_symbols() {
-        unsafe { (symbols.input_port_close)(inputPort) };
+    if let Some(vt) = vtable() {
+        (vt.input_port_close)(inputPort);
     }
 }
 
@@ -222,20 +206,16 @@ pub unsafe fn AMidiOutputPort_receive(
     numBytesReceivedPtr: *mut c_ulong,
     outTimestampPtr: *mut i64,
 ) -> c_long {
-    if let Some(symbols) = amidi_symbols() {
-        return unsafe {
-            (symbols.output_port_receive)(
-                outputPort,
-                opcodePtr,
-                buffer,
-                maxBytes,
-                numBytesReceivedPtr,
-                outTimestampPtr,
-            )
-        };
+    match vtable() {
+        Some(vt) => (vt.output_port_receive)(
+            outputPort,
+            opcodePtr,
+            buffer,
+            maxBytes,
+            numBytesReceivedPtr,
+            outTimestampPtr,
+        ),
+        // 0 received messages is a valid AMidi response.
+        None => 0,
     }
-    if !numBytesReceivedPtr.is_null() {
-        unsafe { *numBytesReceivedPtr = 0 };
-    }
-    -1
 }

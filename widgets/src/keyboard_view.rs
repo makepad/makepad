@@ -48,6 +48,12 @@ pub struct KeyboardView {
     /// reflow that happens while the keyboard stays open.
     #[rust]
     keyboard_height: f64,
+    /// The `keyboard_height` observed by the previous post-draw reconcile. Lets
+    /// the reconcile distinguish a live keyboard-animation frame (height still
+    /// changing) from a settle-time correction (height stable, only the
+    /// focused field's measured rect moved).
+    #[rust]
+    last_reconciled_keyboard_height: f64,
     #[rust(AnimState::Closed)]
     anim_state: AnimState,
     #[rust]
@@ -260,13 +266,24 @@ impl Widget for KeyboardView {
                         self.view.handle_event(cx, event, scope);
                         return;
                     }
-                    // Android reports per-frame IME insets via this settled
-                    // event path. Keep `keyboard_shift` paired with the IME
-                    // area from the last draw; post-draw reconciliation below
-                    // computes the pan after the focused input registers its
-                    // current rect.
                     self.keyboard_height = *height;
                     self.anim_state = AnimState::Open;
+                    // Apply the content shift here, at event time, *before*
+                    // the draw this redraw schedules. The focused field's IME
+                    // `Area` is still valid right now (the upcoming draw has
+                    // not yet bumped `redraw_id`), so `compute_target_shift`
+                    // reads a real rect. Applying it now means that draw
+                    // paints the content at the correct offset with no
+                    // one-frame lag — and, crucially, no late catch-up jump
+                    // when the keyboard's final per-frame height arrives and
+                    // the next draw is delayed (Android can stall redraws for
+                    // >200ms once the IME event stream goes quiet). If the IME
+                    // area is not valid yet, fall back to the post-draw
+                    // reconcile below.
+                    if cx.get_ime_area_rect().size.y > 0.0 {
+                        let target = self.compute_target_shift(*height, cx);
+                        self.set_keyboard_shift(cx, target);
+                    }
                     self.redraw(cx);
                 }
                 VirtualKeyboardEvent::DidHide { time } => {
@@ -318,16 +335,37 @@ impl Widget for KeyboardView {
         // Cost: one frame (~16 ms) of unshifted content on first show.
         // Acceptable, and matches what users tolerate elsewhere.
         if matches!(self.anim_state, AnimState::Open) && self.keyboard_height > 0.0 {
-            let new_target = self.compute_target_shift(self.keyboard_height, cx);
-            if (new_target - self.keyboard_shift).abs() > KEYBOARD_SHIFT_EPSILON {
-                let time = cx.time();
-                self.animate_to_shift(
-                    cx,
-                    time,
-                    new_target,
-                    KEYBOARD_RECONCILE_DURATION,
-                    KEYBOARD_RECONCILE_EASE,
-                );
+            // Only reconcile on frames where the focused IME field actually
+            // redrew. If it did not, `cx.get_ime_area_rect()` reads a stale
+            // `Area` whose `rect()` is a zero rect; `compute_target_shift`
+            // would then collapse to 0 and the reconcile would briefly
+            // un-shift the already-settled content — a visible jump a fraction
+            // of a second after the keyboard is fully up (e.g. when a cursor
+            // blink redraws the KeyboardView but not the field). A genuine
+            // field move always redraws the field, so this never misses one.
+            if cx.get_ime_area_rect().size.y > 0.0 {
+                let height_changed = (self.keyboard_height
+                    - self.last_reconciled_keyboard_height)
+                    .abs()
+                    > KEYBOARD_SHIFT_EPSILON;
+                self.last_reconciled_keyboard_height = self.keyboard_height;
+                let new_target = self.compute_target_shift(self.keyboard_height, cx);
+                if (new_target - self.keyboard_shift).abs() > KEYBOARD_SHIFT_EPSILON {
+                    let time = cx.time();
+                    // While the keyboard height is still arriving frame-by-frame
+                    // (Android streams one `DidShow` per animation frame), snap
+                    // so the content tracks the keyboard exactly — easing on top
+                    // of that per-frame stream only makes the shift lag behind.
+                    // Once the height has settled, a later target change is a
+                    // one-off correction (the focused field's measured rect
+                    // settling a beat later); ease that so it is not jarring.
+                    let duration = if height_changed {
+                        0.0
+                    } else {
+                        KEYBOARD_RECONCILE_DURATION
+                    };
+                    self.animate_to_shift(cx, time, new_target, duration, KEYBOARD_RECONCILE_EASE);
+                }
             }
         }
         DrawStep::done()
