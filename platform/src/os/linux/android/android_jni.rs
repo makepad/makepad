@@ -1977,7 +1977,6 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
     let env = attach_jni_env();
 
     let input_mode = match config.soft_keyboard.input_mode {
-        InputMode::None => 8,
         InputMode::Text => 0,
         InputMode::Ascii => 1,
         InputMode::Url => 2,
