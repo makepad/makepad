@@ -332,6 +332,11 @@ pub struct Window {
     /// `None` means no geometry has been reported by the platform yet.
     #[rust]
     system_caption_bar_height: Option<f64>,
+    /// The last system-bar (status/navigation bar) icon tint pushed to the
+    /// platform: `Some(true)` for dark icons, `Some(false)` for light icons.
+    /// Used to only emit a platform op when the resolved value actually changes.
+    #[rust]
+    system_bar_dark_icons: Option<bool>,
     #[deref]
     view: View,
 
@@ -704,11 +709,38 @@ impl Window {
         }
     }
 
+    /// Resolves the desired system-bar (status/navigation bar) icon tint and,
+    /// when it changes, asks the platform to apply it.
+    ///
+    /// In `Auto` mode the tint follows the window background luminance: a light
+    /// background needs dark icons for contrast, and vice versa. `DarkIcons` /
+    /// `LightIcons` force the choice. Currently only Android honors this.
+    fn sync_system_bar_appearance(&mut self, cx: &mut Cx) {
+        if !matches!(cx.os_type(), OsType::Android(_)) {
+            return;
+        }
+        let dark_icons = match cx.display_context.system_bar_appearance {
+            SystemBarAppearance::DarkIcons => true,
+            SystemBarAppearance::LightIcons => false,
+            SystemBarAppearance::Auto => {
+                let c = self.pass.clear_color;
+                // Rec.709 luma as a perceptual brightness estimate.
+                let luma = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+                luma > 0.5
+            }
+        };
+        if self.system_bar_dark_icons != Some(dark_icons) {
+            self.system_bar_dark_icons = Some(dark_icons);
+            cx.push_unique_platform_op(CxOsOp::SetSystemBarDarkIcons(dark_icons));
+        }
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
         self.sync_caption_centering(cx);
+        self.sync_system_bar_appearance(cx);
 
         if self.initialized {
             return;

@@ -5,6 +5,7 @@ use {
         area::Area,
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType, XrCapabilities},
+        display_context::SystemBarAppearance,
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
@@ -259,6 +260,9 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
+    /// Tints the system bar (status/navigation bar) icons: `true` requests
+    /// dark icons, `false` requests light icons. Currently only Android.
+    SetSystemBarDarkIcons(bool),
 
     ShowTextIME(Area, Vec2d, TextInputConfig),
     HideTextIME,
@@ -416,6 +420,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
+            Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
@@ -869,6 +874,21 @@ impl Cx {
     // You can remove the dock icon by setting this value to false.
     pub fn show_in_dock(&mut self, show: bool) {
         self.platform_ops.push(CxOsOp::ShowInDock(show));
+    }
+
+    /// Controls how the system bars (status bar and navigation bar) icons and
+    /// text are tinted, on platforms that support it (currently Android only).
+    ///
+    /// The default is [`SystemBarAppearance::Auto`], which picks dark or light
+    /// system-bar icons automatically from the luminance of the window's
+    /// background color (`clear_color`): a light background gets dark icons, a
+    /// dark background gets light icons. Pass [`SystemBarAppearance::DarkIcons`]
+    /// or [`SystemBarAppearance::LightIcons`] to override that automatic choice.
+    ///
+    /// The request is resolved and applied by the `Window` widget on its next
+    /// event cycle.
+    pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
+        self.display_context.system_bar_appearance = appearance;
     }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {

@@ -9,8 +9,23 @@ use std::{
 
 use crate::{android::*, makepad_shell::*};
 
+#[derive(Clone, Copy)]
 pub struct AndroidSDKUrls {
+    /// API level the NDK clang toolchain targets (`<arch>-linux-android<N>-clang`)
+    /// and the value emitted as `android:minSdkVersion`. This is the floor for
+    /// device compatibility — the lowest API level the resulting native binary
+    /// will load on.
+    ///
+    /// Note: this is *not* the compile SDK. The Java side is compiled against
+    /// `android.jar` from `platform` / `build_tools_version` (typically a higher
+    /// API), which lets Java call API > sdk_version classes guarded by runtime
+    /// `Build.VERSION.SDK_INT` checks.
     pub sdk_version: usize,
+    /// API level declared as `android:targetSdkVersion` in the manifest. Independent
+    /// from `sdk_version`: it sets runtime behavior compatibility, not what the binary
+    /// links against. Play Store requires this to be ≥34 (≥35 for Aug 2025 updates),
+    /// while `sdk_version` can stay lower for broader device coverage.
+    pub target_sdk_version: usize,
     pub sdk_extension: &'static str,
     pub platform: &'static str,
     pub build_tools_version: &'static str,
@@ -32,7 +47,25 @@ pub const BUILD_TOOLS_DIR: &str = "build-tools";
 pub const PLATFORMS_DIR: &str = "platforms";
 
 pub const ANDROID_SDK_URLS_33: AndroidSDKUrls = AndroidSDKUrls {
-    sdk_version: 33,
+    // NDK clang triple targets API 26 (Android 8.0 Oreo). The compiled .so will
+    // load on API 26+ devices, ~96-97% of the active Android population. The
+    // NDK r28 toolchain still supports compiling for API 21+ on arm64; we pick
+    // 26 because that's the lowest API where every NDK Camera2/AAudio/etc.
+    // entry point Makepad uses is stably available without weak-linkage hacks.
+    //
+    // Java code is gated with `if (Build.VERSION.SDK_INT >= N)` everywhere it
+    // calls API > 26 methods. Native code that touches API 29+ entry points
+    // (Choreographer postFrameCallback64 / postVsyncCallback) is dispatched via
+    // dlsym + version-checked function pointers in `android_jni.rs`.
+    sdk_version: 26,
+    // Manifest declares `targetSdkVersion=35` (Android 15), the current Play
+    // Store floor for new submissions. Independent of `sdk_version`: target
+    // controls runtime-behavior compat, not what the binary links against.
+    target_sdk_version: 35,
+    // Build-tools and platform stay at API 33 — that's our *compile* SDK, used
+    // for `android.jar` (Java compile classpath) and aapt2. Java code can call
+    // API 33 classes at compile time; runtime version checks keep older devices
+    // from actually executing those paths.
     build_tools_version: "33.0.1",
     sdk_extension: "ext4",
     platform: "android-33-ext4",
@@ -58,27 +91,32 @@ const URL_OPENJDK_17_0_2_MACOS_AARCH64: &str = "https://download.java.net/java/G
 const URL_OPENJDK_17_0_2_MACOS_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_macos-x64_bin.tar.gz";
 const URL_OPENJDK_17_0_2_LINUX_X64: &str = "https://download.java.net/java/GA/jdk17.0.2/dfd4a8d0985749f896bed50d7138ee7f/8/GPL/openjdk-17.0.2_linux-x64_bin.tar.gz";
 
+/// Bundletool is needed to package a base module zip into an AAB. Single jar.
+pub const URL_BUNDLETOOL: &str =
+    "https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar";
+/// Local relative path under the SDK root where bundletool.jar is installed.
+pub const BUNDLETOOL_JAR_REL: &str = "bundletool/bundletool.jar";
+
 fn url_file_name(url: &str) -> &str {
     url.rsplit_once('/').unwrap().1
 }
 
 pub fn rustup_toolchain_install(targets: &[AndroidTarget]) -> Result<(), String> {
     println!("Installing Rust toolchains for android");
-    println!("Installing nightly");
-    shell_env(
-        &[],
-        &std::env::current_dir().unwrap(),
-        "rustup",
-        &["install", "nightly"],
-    )?;
+    // Android targets are all tier-2 (prebuilt std, no `-Z build-std`), so they
+    // build on stable. Only install stable if it's missing — don't force-update.
+    crate::utils::ensure_rust_toolchain_installed("stable")?;
     for target in targets {
         let toolchain = target.toolchain();
-        println!("Installing rust nightly for {}", toolchain);
+        println!("Adding rust stable target {}", toolchain);
+        // `rustup target add` is idempotent and only fetches the target's std
+        // component; it does not update the compiler, so it's safe to run every
+        // time without the missing-only check.
         shell_env(
             &[],
             &std::env::current_dir().unwrap(),
             "rustup",
-            &["target", "add", toolchain, "--toolchain", "nightly"],
+            &["target", "add", toolchain, "--toolchain", "stable"],
         )?;
     }
     Ok(())
@@ -94,49 +132,59 @@ pub fn download_sdk(
     let src_dir = &sdk_dir.join("sources");
     mkdir(src_dir)?;
 
-    fn curl(step: usize, src_dir: &Path, url: &str) -> Result<(), String> {
+    fn curl(step: usize, total: usize, src_dir: &Path, url: &str) -> Result<(), String> {
         //let https = HttpsConnection::connect("https://makepad.dev","https");
-        println!("{step}/5: Downloading: {}", url);
+        println!("{step}/{total}: Downloading: {}", url);
+        // -L follows redirects (bundletool's GitHub release URL 302s to a CDN).
         shell(
             src_dir,
             "curl",
             &[
                 url,
                 "-#",
+                "-L",
                 "--output",
                 src_dir.join(url_file_name(url)).to_str().unwrap(),
             ],
         )?;
         Ok(())
     }
-    curl(1, src_dir, urls.platform_dl)?;
+    let total = 6;
+    curl(1, total, src_dir, urls.platform_dl)?;
     match host_os {
         HostOs::WindowsX64 => {
-            curl(2, src_dir, urls.build_tools_windows)?;
-            curl(3, src_dir, urls.platform_tools_windows)?;
-            curl(4, src_dir, urls.ndk_windows)?;
-            curl(5, src_dir, URL_OPENJDK_17_0_2_WINDOWS_X64)?;
+            curl(2, total, src_dir, urls.build_tools_windows)?;
+            curl(3, total, src_dir, urls.platform_tools_windows)?;
+            curl(4, total, src_dir, urls.ndk_windows)?;
+            curl(5, total, src_dir, URL_OPENJDK_17_0_2_WINDOWS_X64)?;
         }
         HostOs::MacosX64 | HostOs::MacosAarch64 => {
-            curl(2, src_dir, urls.build_tools_macos)?;
-            curl(3, src_dir, urls.platform_tools_macos)?;
-            curl(4, src_dir, urls.ndk_macos)?;
+            curl(2, total, src_dir, urls.build_tools_macos)?;
+            curl(3, total, src_dir, urls.platform_tools_macos)?;
+            curl(4, total, src_dir, urls.ndk_macos)?;
             if host_os == HostOs::MacosX64 {
-                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_X64)?;
+                curl(5, total, src_dir, URL_OPENJDK_17_0_2_MACOS_X64)?;
             } else {
-                curl(5, src_dir, URL_OPENJDK_17_0_2_MACOS_AARCH64)?;
+                curl(5, total, src_dir, URL_OPENJDK_17_0_2_MACOS_AARCH64)?;
             }
         }
         HostOs::LinuxX64 => {
-            curl(2, src_dir, urls.build_tools_linux)?;
-            curl(3, src_dir, urls.platform_tools_linux)?;
-            curl(4, src_dir, urls.ndk_linux)?;
-            curl(5, src_dir, URL_OPENJDK_17_0_2_LINUX_X64)?;
+            curl(2, total, src_dir, urls.build_tools_linux)?;
+            curl(3, total, src_dir, urls.platform_tools_linux)?;
+            curl(4, total, src_dir, urls.ndk_linux)?;
+            curl(5, total, src_dir, URL_OPENJDK_17_0_2_LINUX_X64)?;
         }
         HostOs::Unsupported => panic!(),
     }
-    // alright lets parse the sdk_path option
+    curl(6, total, src_dir, URL_BUNDLETOOL)?;
     Ok(())
+}
+
+/// Copy the downloaded bundletool jar into the SDK directory at a stable path.
+fn install_bundletool(sdk_dir: &Path) -> Result<(), String> {
+    let src = sdk_dir.join("sources").join(url_file_name(URL_BUNDLETOOL));
+    let dst = sdk_dir.join(BUNDLETOOL_JAR_REL);
+    cp(&src, &dst, false)
 }
 
 pub fn remove_sdk_sources(
@@ -446,6 +494,14 @@ pub fn expand_sdk(
                         &copy_map(
                             "android-13",
                             &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt2.exe",
+                        ),
+                        false,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
                             "zipalign.exe",
                         ),
                         false,
@@ -685,6 +741,8 @@ pub fn expand_sdk(
                     (&copy_map(JDK_IN, JDK_OUT, "bin/java.exe"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/jar.exe"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/javac.exe"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jarsigner.exe"), false),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/keytool.exe"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/jli.dll"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/java.dll"), false),
@@ -774,6 +832,14 @@ pub fn expand_sdk(
                             "android-13",
                             &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
                             "aapt",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt2",
                         ),
                         true,
                     ),
@@ -879,6 +945,8 @@ pub fn expand_sdk(
                     (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jarsigner"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/keytool"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.dylib"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
                     (
@@ -971,6 +1039,14 @@ pub fn expand_sdk(
                             "android-13",
                             &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
                             "aapt",
+                        ),
+                        true,
+                    ),
+                    (
+                        &copy_map(
+                            "android-13",
+                            &format!("{BUILD_TOOLS_DIR}/{ANDROID_BUILD_TOOLS_VERSION}"),
+                            "aapt2",
                         ),
                         true,
                     ),
@@ -1094,6 +1170,8 @@ pub fn expand_sdk(
                     (&copy_map(JDK_IN, JDK_OUT, "bin/java"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/jar"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "bin/javac"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/jarsigner"), true),
+                    (&copy_map(JDK_IN, JDK_OUT, "bin/keytool"), true),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/libjli.so"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/jvm.cfg"), false),
                     (&copy_map(JDK_IN, JDK_OUT, "lib/server/libjsig.so"), false),
@@ -1158,6 +1236,22 @@ pub fn expand_sdk(
             )?;
         }
         HostOs::Unsupported => panic!(),
+    }
+
+    // Install bundletool at <sdk>/bundletool/bundletool.jar so the AAB build
+    // pipeline can find it. Tolerate a missing source jar so users with older
+    // `download-sdk` runs can re-run `download-sdk` without re-running the
+    // whole `expand-sdk` step.
+    if sdk_dir
+        .join("sources")
+        .join(url_file_name(URL_BUNDLETOOL))
+        .is_file()
+    {
+        install_bundletool(sdk_dir)?;
+    } else {
+        eprintln!(
+            "warning: bundletool jar not found in sources; re-run `cargo makepad android download-sdk` to enable AAB builds"
+        );
     }
     Ok(())
 }

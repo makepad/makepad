@@ -516,34 +516,30 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     #[allow(unused)]
     #[cfg(not(no_android_choreographer))]
     {
-        // Otherwise use the actual Choreographer
+        // Otherwise use the actual Choreographer.
         CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
-        let lib = ModuleLoader::load("libandroid.so").ok();
-        if sdk_version >= 33 {
-            let func: Option<ndk_sys::AChoreographerPostCallbackFn> = lib
-                .as_ref()
-                .and_then(|lib| lib.get_symbol("AChoreographer_postVsyncCallback").ok());
-            // Some runtimes/NDK combos may not expose postVsyncCallback even on API 33+.
-            // Fall back to the older frame callback to keep rendering alive.
-            CHOREOGRAPHER_POST_CALLBACK_FN = func.or_else(|| {
-                lib.as_ref()
-                    .and_then(|lib| lib.get_symbol("AChoreographer_postFrameCallback64").ok())
-            });
-        } else if sdk_version >= 29 {
-            CHOREOGRAPHER_POST_CALLBACK_FN = lib
-                .as_ref()
-                .and_then(|lib| lib.get_symbol("AChoreographer_postFrameCallback64").ok());
-        } else {
-            init_simple_render_loop(device_refresh_rate);
+        // AChoreographer_postFrameCallback64 (API 29) and
+        // AChoreographer_postVsyncCallback (API 33) must be resolved via dlsym,
+        // never declared as `extern "C"` — see the note in ndk_sys.rs. On API
+        // 26-28 neither symbol exists, so the callback fn stays None and we
+        // fall back to the manual frame loop below.
+        if sdk_version >= 29 {
+            if let Ok(lib) = ModuleLoader::load("libandroid.so") {
+                // Prefer the newer vsync callback (API 33+); fall back to the
+                // API 29 frame callback when it isn't available.
+                let vsync: Option<ndk_sys::AChoreographerPostCallbackFn> = if sdk_version >= 33 {
+                    lib.get_symbol("AChoreographer_postVsyncCallback").ok()
+                } else {
+                    None
+                };
+                let frame_callback_64: Option<ndk_sys::AChoreographerPostCallbackFn> =
+                    lib.get_symbol("AChoreographer_postFrameCallback64").ok();
+                CHOREOGRAPHER_POST_CALLBACK_FN = vsync.or(frame_callback_64);
+            }
         }
-        let has_choreographer_callback = match CHOREOGRAPHER_POST_CALLBACK_FN {
-            Some(_) => true,
-            None => false,
-        };
-        if has_choreographer_callback {
-            post_vsync_callback();
-        } else {
-            init_simple_render_loop(device_refresh_rate);
+        match CHOREOGRAPHER_POST_CALLBACK_FN {
+            Some(_) => post_vsync_callback(),
+            None => init_simple_render_loop(device_refresh_rate),
         }
     }
 }
@@ -566,11 +562,36 @@ pub unsafe fn post_vsync_callback() {
     }
 }
 
+/// Fallback render loop used when the Android Choreographer isn't available
+/// (API < 29, and `no_android_choreographer` builds such as OHOS). A dedicated
+/// thread paces frames manually, since there is no system vsync callback.
 fn init_simple_render_loop(device_refresh_rate: f32) {
     std::thread::spawn(move || {
         let mut last_frame_time = std::time::Instant::now();
         let target_frame_time = std::time::Duration::from_secs_f32(1.0 / device_refresh_rate);
         loop {
+            // Exit the thread once the app has shut down and the Java->native
+            // message channel has been torn down by `from_java_messages_clear()`
+            // (called when the main event loop quits). This mirrors
+            // `post_vsync_callback`, which likewise stops re-arming the
+            // Choreographer once `from_java_messages_already_set()` is false.
+            //
+            // Without this, the thread spins forever after the activity is
+            // destroyed, sending `RenderLoop` into a dead channel and spamming
+            // "Receiving message from java whilst already shutdown" until the
+            // OS reclaims the process.
+            //
+            // This check is safe at startup: `MESSAGES_TX` is installed
+            // synchronously in the JNI bootstrap (`jni_set_from_java_tx`),
+            // before the Makepad thread is spawned and well before
+            // `initChoreographer` spawns this loop — so it is always `Some`
+            // here on the first iteration and only becomes `None` at genuine
+            // shutdown. The check is at the top of the loop, before the send,
+            // so a shutdown during the sleep produces no stray send.
+            if !from_java_messages_already_set() {
+                break;
+            }
+
             let now = std::time::Instant::now();
             let elapsed = now - last_frame_time;
 
@@ -1303,6 +1324,16 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     );
 }
 
+pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_icons: bool) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setSystemBarAppearance",
+        "(Z)V",
+        dark_icons as i32
+    );
+}
+
 pub unsafe fn to_java_set_surface_cover_visible(visible: bool) {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(
@@ -1946,7 +1977,6 @@ pub unsafe fn to_java_configure_keyboard(config: &TextInputConfig) {
     let env = attach_jni_env();
 
     let input_mode = match config.soft_keyboard.input_mode {
-        InputMode::None => 8,
         InputMode::Text => 0,
         InputMode::Ascii => 1,
         InputMode::Url => 2,

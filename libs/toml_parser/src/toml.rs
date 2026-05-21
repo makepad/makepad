@@ -47,6 +47,10 @@ pub enum Toml {
     Num(f64, TomlSpan),
     Date(String, TomlSpan),
     Array(Vec<Toml>),
+    /// An inline table `{ k = v, ... }` encountered in a value position (e.g.
+    /// an array element). Top-level inline tables in `key = { ... }` form are
+    /// instead flattened into dotted keys by `parse_key_value`.
+    Table(HashMap<String, Toml>),
 }
 
 impl Toml {
@@ -87,37 +91,12 @@ pub fn parse_toml(data: &str) -> Result<HashMap<String, Toml>, TomlErr> {
                 return Ok(out);
             }
             TomlTok::BlockOpen => {
-                // its a scope
-                // we should expect an ident or a string
-                let tok = t.next_tok(i)?;
-                let (tok, double_block) = if let TomlTok::BlockOpen = tok.tok {
-                    (t.next_tok(i)?, true)
-                } else {
-                    (tok, false)
-                };
-
-                match tok.tok {
-                    TomlTok::Str(key) => {
-                        // a key
-                        local_scope = key;
-                    }
-                    TomlTok::Ident(key) => {
-                        // also a key
-                        local_scope = key;
-                    }
-                    _ => return Err(t.err_token(tok)),
-                }
-                let tok = t.next_tok(i)?;
-
-                if tok.tok != TomlTok::BlockClose {
-                    return Err(t.err_token(tok));
-                }
-                if double_block {
-                    let tok = t.next_tok(i)?;
-                    if tok.tok != TomlTok::BlockClose {
-                        return Err(t.err_token(tok));
-                    }
-                }
+                // A `[table]` or `[[array-of-tables]]` header. `next_tok`
+                // consumed the first `[`; `read_table_header` handles an
+                // optional second `[`, the dotted key path (each segment a
+                // bare key or a quoted string, e.g. `patch."https://..."` or
+                // `target.'cfg(...)'`), and the closing `]` / `]]`.
+                local_scope = t.read_table_header(i)?;
             }
             TomlTok::Str(key) => {
                 // a key
@@ -150,6 +129,29 @@ impl TomlParser {
                     }
                 }
                 Ok(Toml::Array(vals))
+            }
+            TomlTok::ObjectOpen => {
+                // An inline table `{ key = val, ... }` in value position —
+                // e.g. an array element like `resources = [{ src = "..." }]`.
+                let mut map = HashMap::new();
+                loop {
+                    let tok = self.next_tok(i)?;
+                    match tok.tok {
+                        TomlTok::ObjectClose | TomlTok::Eof => break,
+                        TomlTok::Comma => {}
+                        TomlTok::Str(key) | TomlTok::Ident(key) => {
+                            let eq = self.next_tok(i)?;
+                            if eq.tok != TomlTok::Equals {
+                                return Err(self.err_token(eq));
+                            }
+                            let val_tok = self.next_tok(i)?;
+                            let val = self.to_val(val_tok, i)?;
+                            map.insert(key, val);
+                        }
+                        _ => return Err(self.err_token(tok)),
+                    }
+                }
+                Ok(Toml::Table(map))
             }
             TomlTok::Str(v) => Ok(Toml::Str(v, tok.span)),
             TomlTok::U64(v) => Ok(Toml::Num(v as f64, tok.span)),
@@ -496,19 +498,38 @@ impl TomlParser {
             }
 
             '"' => {
-                let mut val = String::new();
                 self.next(i);
-                while self.cur != '"' {
-                    if self.cur == '\\' {
+                // Distinguish `"..."` (basic) from `"""..."""` (multi-line basic),
+                // and the empty string `""`.
+                let multiline = if self.cur == '"' {
+                    self.next(i);
+                    if self.cur == '"' {
+                        self.next(i);
+                        true
+                    } else {
+                        // `""` — an empty single-line basic string.
+                        return Ok(TomlTokWithSpan {
+                            tok: TomlTok::Str(String::new()),
+                            span: TomlSpan {
+                                start,
+                                len: self.pos - start,
+                            },
+                        });
+                    }
+                } else {
+                    false
+                };
+                if multiline {
+                    // A newline immediately following the opening `"""` is
+                    // trimmed (TOML spec).
+                    if self.cur == '\r' {
                         self.next(i);
                     }
-                    if self.cur == '\0' {
-                        return Err(self.err_parse("string"));
+                    if self.cur == '\n' {
+                        self.next(i);
                     }
-                    val.push(self.cur);
-                    self.next(i);
                 }
-                self.next(i);
+                let val = self.read_basic_string(i, multiline)?;
                 Ok(TomlTokWithSpan {
                     tok: TomlTok::Str(val),
                     span: TomlSpan {
@@ -518,19 +539,36 @@ impl TomlParser {
                 })
             }
             '\'' => {
-                let mut val = String::new();
                 self.next(i);
-                while self.cur != '\'' {
-                    if self.cur == '\\' {
+                // Distinguish `'...'` (literal) from `'''...'''` (multi-line
+                // literal), and the empty string `''`.
+                let multiline = if self.cur == '\'' {
+                    self.next(i);
+                    if self.cur == '\'' {
+                        self.next(i);
+                        true
+                    } else {
+                        // `''` — an empty single-line literal string.
+                        return Ok(TomlTokWithSpan {
+                            tok: TomlTok::Str(String::new()),
+                            span: TomlSpan {
+                                start,
+                                len: self.pos - start,
+                            },
+                        });
+                    }
+                } else {
+                    false
+                };
+                if multiline {
+                    if self.cur == '\r' {
                         self.next(i);
                     }
-                    if self.cur == '\0' {
-                        return Err(self.err_parse("string"));
+                    if self.cur == '\n' {
+                        self.next(i);
                     }
-                    val.push(self.cur);
-                    self.next(i);
                 }
-                self.next(i);
+                let val = self.read_literal_string(i, multiline)?;
                 Ok(TomlTokWithSpan {
                     tok: TomlTok::Str(val),
                     span: TomlSpan {
@@ -541,5 +579,313 @@ impl TomlParser {
             }
             _ => Err(self.err_parse("tokenizer")),
         }
+    }
+
+    /// Read a `[table]` / `[[array-of-tables]]` header. `next_tok` has already
+    /// consumed the first `[`. Handles an optional second `[`, a dotted key
+    /// path whose segments may each be a bare key or a quoted string, and the
+    /// closing `]` / `]]`. Returns the dotted path with quotes stripped, so
+    /// `[a."b".c]` and `[a.b.c]` both yield `a.b.c`.
+    pub fn read_table_header(&mut self, i: &mut Chars) -> Result<String, TomlErr> {
+        let double = self.cur == '[';
+        if double {
+            self.next(i);
+        }
+        let mut path = String::new();
+        loop {
+            while self.cur == ' ' || self.cur == '\t' {
+                self.next(i);
+            }
+            match self.cur {
+                '\0' | '\n' | '\r' => return Err(self.err_parse("table header")),
+                ']' => {
+                    self.next(i);
+                    if double {
+                        if self.cur != ']' {
+                            return Err(self.err_parse("table header"));
+                        }
+                        self.next(i);
+                    }
+                    return Ok(path);
+                }
+                // Dot separates segments; nothing to collect.
+                '.' => {
+                    self.next(i);
+                }
+                '"' => {
+                    self.next(i);
+                    let seg = self.read_basic_string(i, false)?;
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&seg);
+                }
+                '\'' => {
+                    self.next(i);
+                    let seg = self.read_literal_string(i, false)?;
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&seg);
+                }
+                _ => {
+                    // A bare-key segment: read until a separator.
+                    let mut seg = String::new();
+                    while !matches!(
+                        self.cur,
+                        '.' | ']' | ' ' | '\t' | '\0' | '\n' | '\r'
+                    ) {
+                        seg.push(self.cur);
+                        self.next(i);
+                    }
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&seg);
+                }
+            }
+        }
+    }
+
+    /// Read a basic (double-quoted) string body. The opening delimiter — `"`
+    /// for single-line, `"""` for multi-line — has already been consumed, as
+    /// has the newline that immediately follows a `"""`. Processes backslash
+    /// escape sequences. `multiline` selects which closing delimiter to expect.
+    pub fn read_basic_string(
+        &mut self,
+        i: &mut Chars,
+        multiline: bool,
+    ) -> Result<String, TomlErr> {
+        let mut val = String::new();
+        loop {
+            match self.cur {
+                '\0' => return Err(self.err_parse("string")),
+                // A raw newline can't appear in a single-line basic string.
+                '\n' | '\r' if !multiline => return Err(self.err_parse("string")),
+                '"' => {
+                    if !multiline {
+                        self.next(i);
+                        return Ok(val);
+                    }
+                    // Multi-line: the closing delimiter is a run of >= 3 `"`.
+                    // Quotes beyond the final three belong to the content.
+                    let mut quotes = 0;
+                    while self.cur == '"' {
+                        quotes += 1;
+                        self.next(i);
+                    }
+                    if quotes >= 3 {
+                        for _ in 0..(quotes - 3) {
+                            val.push('"');
+                        }
+                        return Ok(val);
+                    }
+                    for _ in 0..quotes {
+                        val.push('"');
+                    }
+                }
+                '\\' => {
+                    self.next(i);
+                    match self.cur {
+                        'b' => {
+                            val.push('\u{0008}');
+                            self.next(i);
+                        }
+                        't' => {
+                            val.push('\t');
+                            self.next(i);
+                        }
+                        'n' => {
+                            val.push('\n');
+                            self.next(i);
+                        }
+                        'f' => {
+                            val.push('\u{000C}');
+                            self.next(i);
+                        }
+                        'r' => {
+                            val.push('\r');
+                            self.next(i);
+                        }
+                        '"' => {
+                            val.push('"');
+                            self.next(i);
+                        }
+                        '\\' => {
+                            val.push('\\');
+                            self.next(i);
+                        }
+                        'u' | 'U' => {
+                            let digits = if self.cur == 'u' { 4 } else { 8 };
+                            self.next(i);
+                            let mut code: u32 = 0;
+                            for _ in 0..digits {
+                                let d = self
+                                    .cur
+                                    .to_digit(16)
+                                    .ok_or_else(|| self.err_parse("unicode escape"))?;
+                                code = code * 16 + d;
+                                self.next(i);
+                            }
+                            val.push(
+                                char::from_u32(code)
+                                    .ok_or_else(|| self.err_parse("unicode escape"))?,
+                            );
+                        }
+                        // Multi-line "line-ending backslash": a `\` followed by
+                        // whitespace trims that whitespace, newlines included.
+                        ' ' | '\t' | '\n' | '\r' if multiline => {
+                            while matches!(self.cur, ' ' | '\t' | '\n' | '\r') {
+                                self.next(i);
+                            }
+                        }
+                        '\0' => return Err(self.err_parse("string")),
+                        // Unknown escape: keep the char, drop the backslash.
+                        _ => {
+                            val.push(self.cur);
+                            self.next(i);
+                        }
+                    }
+                }
+                c => {
+                    val.push(c);
+                    self.next(i);
+                }
+            }
+        }
+    }
+
+    /// Read a literal (single-quoted) string body. The opening delimiter — `'`
+    /// for single-line, `'''` for multi-line — has already been consumed, as
+    /// has the newline that immediately follows a `'''`. Literal strings do NO
+    /// escape processing: every character is taken verbatim.
+    pub fn read_literal_string(
+        &mut self,
+        i: &mut Chars,
+        multiline: bool,
+    ) -> Result<String, TomlErr> {
+        let mut val = String::new();
+        loop {
+            match self.cur {
+                '\0' => return Err(self.err_parse("string")),
+                '\n' | '\r' if !multiline => return Err(self.err_parse("string")),
+                '\'' => {
+                    if !multiline {
+                        self.next(i);
+                        return Ok(val);
+                    }
+                    let mut quotes = 0;
+                    while self.cur == '\'' {
+                        quotes += 1;
+                        self.next(i);
+                    }
+                    if quotes >= 3 {
+                        for _ in 0..(quotes - 3) {
+                            val.push('\'');
+                        }
+                        return Ok(val);
+                    }
+                    for _ in 0..quotes {
+                        val.push('\'');
+                    }
+                }
+                c => {
+                    val.push(c);
+                    self.next(i);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_str<'a>(map: &'a HashMap<String, Toml>, key: &str) -> Option<&'a str> {
+        match map.get(key) {
+            Some(Toml::Str(v, _)) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parses_single_line_strings() {
+        let map = parse_toml("[package]\nname = \"robrix\"\nx = 'literal'\n").unwrap();
+        assert_eq!(get_str(&map, "package.name"), Some("robrix"));
+        assert_eq!(get_str(&map, "package.x"), Some("literal"));
+    }
+
+    #[test]
+    fn parses_multiline_basic_string_and_following_keys() {
+        // A `"""` value must not derail parsing of keys that come after it.
+        let toml = "[package]\n\
+                    version = \"1.0.0-alpha.1\"\n\
+                    long_description = \"\"\"\n\
+                    line one\n\
+                    line two\n\
+                    \"\"\"\n\
+                    identifier = \"rs.robius.robrix\"\n";
+        let map = parse_toml(toml).expect("multi-line basic string should parse");
+        assert_eq!(get_str(&map, "package.version"), Some("1.0.0-alpha.1"));
+        assert_eq!(get_str(&map, "package.identifier"), Some("rs.robius.robrix"));
+        // Leading newline after `"""` is trimmed.
+        assert_eq!(
+            get_str(&map, "package.long_description"),
+            Some("line one\nline two\n")
+        );
+    }
+
+    #[test]
+    fn parses_multiline_literal_string() {
+        let toml = "[package]\n\
+                    cmd = '''\n\
+                    raw \\n not an escape\n\
+                    '''\n\
+                    after = \"ok\"\n";
+        let map = parse_toml(toml).expect("multi-line literal string should parse");
+        // Literal strings do not process escapes.
+        assert_eq!(
+            get_str(&map, "package.cmd"),
+            Some("raw \\n not an escape\n")
+        );
+        assert_eq!(get_str(&map, "package.after"), Some("ok"));
+    }
+
+    #[test]
+    fn parses_quoted_section_headers() {
+        // `[patch."url"]` and `[target.'cfg(...)']` must not break parsing.
+        let toml = "[patch.\"https://github.com/kevinaboos/makepad\"]\n\
+                    makepad-widgets = \"1.0\"\n\
+                    [target.'cfg(target_os = \"ios\")'.dependencies]\n\
+                    foo = \"2.0\"\n\
+                    [package.metadata.packager]\n\
+                    identifier = \"rs.robius.robrix\"\n";
+        let map = parse_toml(toml).expect("quoted section headers should parse");
+        assert_eq!(
+            get_str(&map, "package.metadata.packager.identifier"),
+            Some("rs.robius.robrix")
+        );
+        // Quoted segments have their quotes stripped.
+        assert_eq!(
+            get_str(
+                &map,
+                "patch.https://github.com/kevinaboos/makepad.makepad-widgets"
+            ),
+            Some("1.0")
+        );
+    }
+
+    #[test]
+    fn basic_string_escapes_are_processed() {
+        let map = parse_toml("[s]\na = \"tab\\there\"\nb = \"q\\\"q\"\n").unwrap();
+        assert_eq!(get_str(&map, "s.a"), Some("tab\there"));
+        assert_eq!(get_str(&map, "s.b"), Some("q\"q"));
+    }
+
+    #[test]
+    fn array_of_tables_header_still_parses() {
+        let map = parse_toml("[[bin]]\nname = \"app\"\n").unwrap();
+        assert_eq!(get_str(&map, "bin.name"), Some("app"));
     }
 }
