@@ -6,12 +6,10 @@ use {
     },
     crate::makepad_platform::*,
     fxhash::{FxHashMap, FxHashSet},
-    std::cmp::Ordering,
 };
 
 const CURVE_TEX_WIDTH: usize = 2048;
 const BAND_TEX_WIDTH: usize = 2048;
-const DEFAULT_NUM_BANDS: usize = 24;
 const CUBIC_TO_QUAD_TOLERANCE: f32 = 0.05;
 const MAX_CUBIC_SPLIT_DEPTH: usize = 12;
 const RGBA_F32_TEXEL_FLOATS: usize = 4;
@@ -295,9 +293,10 @@ impl SlugAtlas {
             ]);
         }
 
-        let (band_offset, band_count) = self.build_bands(curve_offset, &curves, DEFAULT_NUM_BANDS);
+        // Text rendering uses the full-curve scan path. The band-accelerated
+        // path has shown correctness issues on some GPU shader compilers.
+        let (band_offset, band_count) = (0, 0);
         self.curve_dirty = true;
-        self.band_dirty = true;
         self.cache_generation = self.cache_generation.wrapping_add(1);
 
         Some(SlugGlyphInfo {
@@ -309,93 +308,6 @@ impl SlugAtlas {
             band_count,
             fill_flags: 0,
         })
-    }
-
-    fn build_bands(
-        &mut self,
-        curve_offset: usize,
-        curves: &[QuadCurve],
-        num_bands: usize,
-    ) -> (usize, usize) {
-        if curves.is_empty() || num_bands == 0 {
-            return (0, 0);
-        }
-
-        let band_offset = self.band_data.len() / 4;
-        let metadata_floats = num_bands * 2 * 4;
-        self.band_data
-            .resize(self.band_data.len() + metadata_floats, 0.0);
-        let mut horizontal_bands = vec![Vec::<usize>::new(); num_bands];
-        let mut vertical_bands = vec![Vec::<usize>::new(); num_bands];
-        let bands_f = num_bands as f32;
-        let epsilon = 1.0 / 1024.0;
-
-        for (curve_index, curve) in curves.iter().enumerate() {
-            if !curve_is_horizontal(curve) {
-                if let Some((lo, hi)) = band_range(
-                    curve.p0.y.min(curve.p1.y).min(curve.p2.y) - epsilon,
-                    curve.p0.y.max(curve.p1.y).max(curve.p2.y) + epsilon,
-                    bands_f,
-                    num_bands,
-                ) {
-                    for band in lo..=hi {
-                        horizontal_bands[band].push(curve_index);
-                    }
-                }
-            }
-
-            if !curve_is_vertical(curve) {
-                if let Some((lo, hi)) = band_range(
-                    curve.p0.x.min(curve.p1.x).min(curve.p2.x) - epsilon,
-                    curve.p0.x.max(curve.p1.x).max(curve.p2.x) + epsilon,
-                    bands_f,
-                    num_bands,
-                ) {
-                    for band in lo..=hi {
-                        vertical_bands[band].push(curve_index);
-                    }
-                }
-            }
-        }
-
-        for list in &mut horizontal_bands {
-            list.sort_by(|a, b| {
-                curve_max_x(curves[*b])
-                    .partial_cmp(&curve_max_x(curves[*a]))
-                    .unwrap_or(Ordering::Equal)
-            });
-        }
-        for list in &mut vertical_bands {
-            list.sort_by(|a, b| {
-                curve_max_y(curves[*b])
-                    .partial_cmp(&curve_max_y(curves[*a]))
-                    .unwrap_or(Ordering::Equal)
-            });
-        }
-
-        let mut list_texel_offset = band_offset + num_bands * 2;
-        for (band, list) in horizontal_bands
-            .into_iter()
-            .chain(vertical_bands.into_iter())
-            .enumerate()
-        {
-            let meta = (band_offset + band) * 4;
-            self.band_data[meta] = list_texel_offset as f32;
-            self.band_data[meta + 1] = list.len() as f32;
-            self.band_data[meta + 2] = 0.0;
-            self.band_data[meta + 3] = 0.0;
-
-            for chunk in list.chunks(4) {
-                let mut texel = [0.0f32; 4];
-                for (i, value) in chunk.iter().enumerate() {
-                    texel[i] = (curve_offset + *value) as f32;
-                }
-                self.band_data.extend_from_slice(&texel);
-                list_texel_offset += 1;
-            }
-        }
-
-        (band_offset, num_bands)
     }
 }
 
@@ -499,42 +411,6 @@ fn normalize_point(point: P2, bounds: Rect<f32>, inv_w: f32, inv_h: f32) -> P2 {
         // Font outlines are Y-up, but DrawGlyph normalized quad space is Y-down.
         y: (bounds.origin.y + bounds.size.height - point.y) * inv_h,
     }
-}
-
-fn band_range(
-    min_value: f32,
-    max_value: f32,
-    bands_f: f32,
-    num_bands: usize,
-) -> Option<(usize, usize)> {
-    if num_bands == 0 {
-        return None;
-    }
-    let max_band = (num_bands - 1) as isize;
-    let mut lo = (min_value.clamp(0.0, 1.0) * bands_f).floor() as isize;
-    let mut hi = (max_value.clamp(0.0, 1.0) * bands_f).floor() as isize;
-    lo = lo.clamp(0, max_band);
-    hi = hi.clamp(0, max_band);
-    if hi < lo {
-        std::mem::swap(&mut lo, &mut hi);
-    }
-    Some((lo as usize, hi as usize))
-}
-
-fn curve_is_horizontal(curve: &QuadCurve) -> bool {
-    (curve.p0.y - curve.p1.y).abs() <= 0.000001 && (curve.p0.y - curve.p2.y).abs() <= 0.000001
-}
-
-fn curve_is_vertical(curve: &QuadCurve) -> bool {
-    (curve.p0.x - curve.p1.x).abs() <= 0.000001 && (curve.p0.x - curve.p2.x).abs() <= 0.000001
-}
-
-fn curve_max_x(curve: QuadCurve) -> f32 {
-    curve.p0.x.max(curve.p1.x).max(curve.p2.x)
-}
-
-fn curve_max_y(curve: QuadCurve) -> f32 {
-    curve.p0.y.max(curve.p1.y).max(curve.p2.y)
 }
 
 fn same_point(a: P2, b: P2) -> bool {
@@ -833,6 +709,31 @@ mod tests {
                     panic!("unexpected unavailable result for {ch:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn text_slug_glyphs_use_full_curve_scan() {
+        let font = load_test_font();
+        let face = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0)
+            .expect("font face should parse");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut atlas = SlugAtlas::new(&mut cx);
+
+        for ch in ['A', 'g', 'W', 'S', 'L'] {
+            let glyph_id = face
+                .glyph_index(ch)
+                .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
+                .0;
+            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true) {
+                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
+                | SlugGlyphCacheResult::Ready(glyph) => glyph,
+                other => panic!("unexpected glyph build result for {ch:?}: {other:?}"),
+            };
+            assert_eq!(
+                glyph.band_count, 0,
+                "text SLUG glyph {ch:?} should force the shader full-curve scan path"
+            );
         }
     }
 
