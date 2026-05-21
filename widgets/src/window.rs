@@ -108,9 +108,11 @@ script_mod! {
     set_type_default() do #(DrawGaussScene::script_shader(vm)){
         ..mod.draw.DrawQuad
         scene_texture: texture_2d(float)
+        source_y_flip: uniform(0.0)
 
         pixel: fn() {
-            return self.scene_texture.sample_as_bgra(clamp(self.pos, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
+            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
     }
 
@@ -395,6 +397,13 @@ struct GaussStack {
     levels: Vec<GaussStackLevel>,
 }
 
+fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
+    match os_type {
+        OsType::Android(_) => 1.0,
+        _ => 0.0,
+    }
+}
+
 impl GaussStack {
     fn new(cx: &mut Cx) -> Self {
         let scene_pass = DrawPass::new_with_name(cx, "gauss_scene");
@@ -475,7 +484,7 @@ impl GaussStack {
         cx.end_pass(&self.scene_pass);
     }
 
-    fn snapshot(&self, root_size: Vec2d, dpi_factor: f64) -> GaussBlurSnapshot {
+    fn snapshot(&self, root_size: Vec2d, source_y_flip: f32, dpi_factor: f64) -> GaussBlurSnapshot {
         GaussBlurSnapshot {
             scene_texture: self.scene_texture.clone(),
             mip_textures: self
@@ -491,6 +500,7 @@ impl GaussStack {
                 })
                 .collect(),
             source_size: root_size,
+            source_y_flip,
             dpi_factor,
         }
     }
@@ -588,6 +598,10 @@ impl GaussStack {
     }
 
     fn draw_scene(&mut self, cx: &mut Cx2d, scene: &mut DrawGaussScene, root_size: Vec2d) {
+        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        scene
+            .draw_vars
+            .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
         scene.draw_vars.set_texture(0, &self.scene_texture);
         scene.draw_abs(
             cx,
@@ -737,8 +751,12 @@ impl Window {
         cx.begin_root_turtle(size, Layout::flow_overlay());
         let window_id = self.window.handle.window_id();
         self.use_gauss_capture = window_wants_gauss_capture(cx, window_id);
+        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
         let gauss_snapshot = if self.use_gauss_capture {
-            Some(self.gauss_stack.snapshot(size, cx.current_dpi_factor()))
+            Some(
+                self.gauss_stack
+                    .snapshot(size, source_y_flip, cx.current_dpi_factor()),
+            )
         } else {
             None
         };
@@ -861,6 +879,20 @@ impl Window {
 
     pub fn position(&self, cx: &Cx) -> Vec2d {
         self.window.handle.get_position(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gauss_render_texture_y_flip_is_platform_specific() {
+        assert_eq!(gauss_render_texture_y_flip_for_os(&OsType::Macos), 0.0);
+        assert_eq!(
+            gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
+            1.0
+        );
     }
 }
 

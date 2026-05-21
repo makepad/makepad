@@ -7,6 +7,7 @@ pub struct GaussBlurSnapshot {
     pub scene_texture: Texture,
     pub mip_textures: Vec<Texture>,
     pub source_size: Vec2d,
+    pub source_y_flip: f32,
     pub dpi_factor: f64,
 }
 
@@ -108,6 +109,7 @@ script_mod! {
 
             has_gauss: uniform(0.0)
             source_size: uniform(vec2(1.0, 1.0))
+            source_y_flip: uniform(0.0)
             blur_level: uniform(5.0)
             gradient_blur_edge: uniform(0.0)
             gradient_blur_edge_width: uniform(0.16)
@@ -151,7 +153,8 @@ script_mod! {
             }
 
             sample_level: fn(level: float, uv: vec2) -> vec4 {
-                let safe_uv = clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
+                let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 if level < 0.5 {
                     return self.scene_texture.sample_as_bgra(safe_uv)
                 }
@@ -546,12 +549,14 @@ impl GaussRoundedView {
                 live_id!(source_size),
                 &[snapshot.source_size.x as f32, snapshot.source_size.y as f32],
             );
+            draw_bg.set_uniform(cx, live_id!(source_y_flip), &[snapshot.source_y_flip]);
             draw_bg.set_uniform(cx, live_id!(has_gauss), &[1.0]);
         } else {
             for slot in 0..=GAUSS_VIEW_LEVELS {
                 draw_bg.empty_texture(slot);
             }
             draw_bg.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+            draw_bg.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
             draw_bg.set_uniform(cx, live_id!(has_gauss), &[0.0]);
         }
     }
