@@ -667,9 +667,12 @@ pub fn build(
     let target_dir_arg = format!("--target-dir={target_dir_str}");
     let target_opt = format!("--target={}", apple_target.toolchain());
 
+    // Channel resolution lives on AppleTarget: tvOS always nightly (build-std),
+    // iOS stable unless `--nightly`. This keeps the build channel consistent
+    // with what `install-toolchain` provisioned for the same target.
     let base_args = &[
         "run",
-        if stable { "stable" } else { "nightly" },
+        apple_target.rust_channel(stable),
         "cargo",
         "build",
         &target_opt,

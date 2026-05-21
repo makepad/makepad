@@ -58,6 +58,7 @@ use {
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
+        ime::TextInputConfig,
         makepad_live_id::*,
         makepad_math::*,
         media_api::CxMediaApi,
@@ -932,6 +933,9 @@ impl Cx {
                         },
                     ))
                 } else if !is_open {
+                    // Java says the keyboard is down; forget the last shown
+                    // config so the next `ShowTextIME` re-issues the request.
+                    self.os.last_ime_config = None;
                     if !self.os.last_ime_visible {
                         return;
                     }
@@ -2252,8 +2256,13 @@ impl Cx {
                         ..Default::default()
                     };
                     window.is_created = true;
-                    //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
-                    //crate::log!("{}",ret);
+                    // To request a specific surface frame rate here, use
+                    // `ANativeWindow_setFrameRate` — but note it is API 30+.
+                    // It must be `dlsym`-resolved from libandroid.so and gated
+                    // on `sdk_version >= 30` (the same pattern as the
+                    // Choreographer callbacks in `ndk_sys.rs` / `android_jni.rs`),
+                    // never declared as a plain `extern "C"`, or it breaks
+                    // `dlopen` of libmakepad.so on API 26-29 devices.
                     let new_geom = window.window_geom.clone();
                     let old_geom = window.window_geom.clone();
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -2314,11 +2323,28 @@ impl Cx {
                     self.os.timers.timers.remove(&timer_id);
                 }
                 CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
-                    android_jni::to_java_configure_keyboard(&config);
-                    android_jni::to_java_show_keyboard(true);
+                    // A focused `TextInput` re-issues `ShowTextIME` on every
+                    // draw. Calling into Java each time thrashes the IME:
+                    // `configure_keyboard` can restart the input connection,
+                    // and under the edge-to-edge insets of targetSdk 35 the
+                    // resulting inset change triggers a `redraw_all()`, which
+                    // re-draws the `TextInput`, which re-issues `ShowTextIME`
+                    // — a loop that flickers the soft keyboard open then shut.
+                    // Only touch Java when the requested config actually
+                    // changes; `last_ime_config` is cleared whenever the
+                    // keyboard goes down (here or via `ResizeTextIME`).
+                    if self.os.last_ime_config != Some(config) {
+                        android_jni::to_java_configure_keyboard(&config);
+                        android_jni::to_java_show_keyboard(true);
+                        self.os.last_ime_config = Some(config);
+                    }
                 },
                 CxOsOp::HideTextIME => unsafe {
+                    // Unconditional on purpose: unlike `ShowTextIME` this is not
+                    // issued per-frame, so there is no thrash to dedup — and a
+                    // skipped hide would leave the soft keyboard stuck open.
                     android_jni::to_java_show_keyboard(false);
+                    self.os.last_ime_config = None;
                 },
                 CxOsOp::SyncImeState {
                     text,
@@ -2848,6 +2874,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_system_bar_appearance(env, dark_icons);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -3112,6 +3144,7 @@ impl Default for CxOs {
             native_safe_area_insets: Default::default(),
             last_ime_height: 0.0,
             last_ime_visible: false,
+            last_ime_config: None,
             media: CxAndroidMedia::default(),
             display: None,
             surface_alive: false,
@@ -3200,6 +3233,13 @@ pub struct CxOs {
     /// Whether the soft keyboard was visible the last time we dispatched a
     /// `VirtualKeyboardEvent`. Pairs with `last_ime_height` for dedup.
     pub last_ime_visible: bool,
+    /// The `TextInputConfig` last sent to the Android IME via `ShowTextIME`,
+    /// or `None` while the keyboard is requested-hidden. A focused `TextInput`
+    /// re-issues `ShowTextIME` every draw; this dedups those so the JNI IME
+    /// calls (and the inset-driven redraw loop they trigger) fire only on a
+    /// real change. Reset to `None` on `HideTextIME` and when Java reports the
+    /// keyboard closed.
+    pub last_ime_config: Option<TextInputConfig>,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,

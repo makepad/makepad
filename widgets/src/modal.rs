@@ -182,6 +182,15 @@ impl Modal {
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
+        // Closing an already-closed modal must be a no-op. App code routinely
+        // calls `close()` defensively (handlers that dismiss a modal whether
+        // or not it happens to be open). Without this guard the
+        // `revert_key_focus()` below would still run and yank key focus away
+        // from an unrelated widget — e.g. a text field the user just tapped,
+        // which on mobile then dismisses the soft keyboard.
+        if !self.is_open {
+            return;
+        }
         // Inform the inner modal content that its modal is being dismissed.
         let content = self.view.widget(cx, ids!(content));
         content.handle_event(

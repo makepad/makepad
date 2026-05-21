@@ -113,15 +113,28 @@ impl Cx {
     ///
     /// This will produce a bare action, *not* a widget action,
     /// so you cannot use `as_widget_action()` when handling this action.
+    ///
+    /// If there is no live `Cx` to receive the action — because one has not
+    /// been created yet, or (commonly on mobile) because the app is shutting
+    /// down or being backgrounded and the `Cx` was already dropped — the
+    /// action is silently discarded. A background thread (a tokio task, a
+    /// `robius-*` crate callback, etc.) racing app teardown is normal and
+    /// must not panic the whole process.
     pub fn post_action(action: impl ActionTrait + Send) {
-        ACTION_SENDER_GLOBAL
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .send(Box::new(action))
-            .unwrap();
-        SignalToUI::set_action_signal();
+        let Ok(mut sender_guard) = ACTION_SENDER_GLOBAL.lock() else {
+            // The mutex is poisoned (a thread panicked while holding it).
+            // Nothing useful we can do — drop the action.
+            return;
+        };
+        let Some(sender) = sender_guard.as_mut() else {
+            // No `Cx` has installed an action sender (yet / anymore).
+            return;
+        };
+        // `send` fails once the `Cx`'s receiver has been dropped at shutdown.
+        // Only signal the UI when the action was actually enqueued.
+        if sender.send(Box::new(action)).is_ok() {
+            SignalToUI::set_action_signal();
+        }
     }
 
     pub fn action(&mut self, action: impl ActionTrait) {

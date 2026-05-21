@@ -22,6 +22,19 @@ impl AppleTarget {
             _ => false,
         }
     }
+    /// rustup channel used to build this target.
+    ///
+    /// tier-3 targets (tvOS) require `-Z build-std`, which is nightly-only, so
+    /// they always resolve to `nightly` regardless of `prefer_stable`. tier-2
+    /// targets (iOS) have prebuilt std and build on `stable` unless the caller
+    /// explicitly opted into nightly (`--nightly`).
+    fn rust_channel(&self, prefer_stable: bool) -> &'static str {
+        if self.needs_build_std() || !prefer_stable {
+            "nightly"
+        } else {
+            "stable"
+        }
+    }
     fn os(&self) -> AppleOs {
         match self {
             Self::aarch64_tvos | Self::aarch64_tvos_sim | Self::x86_64_tvos_sim => AppleOs::Tvos,
@@ -73,7 +86,10 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
     let mut device_identifier = None;
     let mut app = None;
     let mut org = None;
-    let mut stable = false;
+    // Default to the stable toolchain. iOS targets build fine on stable; tvOS
+    // targets transparently fall back to nightly (see AppleTarget::rust_channel)
+    // because they need `-Z build-std`. Pass `--nightly` to force nightly.
+    let mut stable = true;
     if args.len() < 1 {
         return Err(format!("not enough args"));
     }
@@ -116,7 +132,7 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
                 AppleTarget::sim_target(apple_os),
                 AppleTarget::device_target(apple_os),
             ];
-            sdk::rustup_toolchain_install(&toolchains)
+            sdk::rustup_toolchain_install(&toolchains, stable)
         }
         "build" => {
             let build_crate = get_build_crate_from_args(&args[1..])?;
