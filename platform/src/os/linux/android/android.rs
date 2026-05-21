@@ -2853,6 +2853,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_system_bar_appearance(env, dark_icons);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }

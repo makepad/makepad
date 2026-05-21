@@ -52,6 +52,7 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 import android.view.inputmethod.BaseInputConnection;
@@ -884,6 +885,10 @@ public class MakepadActivity
     static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
     private boolean mIsSwitchingActivity = false;
 
+    // Desired system-bar (status/navigation bar) icon tint, set from Rust via
+    // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
+    private boolean mSystemBarDarkIcons = false;
+
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
     private boolean mHasSelection = false;
@@ -1326,6 +1331,51 @@ public class MakepadActivity
             });
     }
 
+    // Tints the system bar (status/navigation bar) icons and text. A "light"
+    // system bar has a light background, so it needs dark icons for contrast;
+    // we therefore request dark icons when the app's background is light.
+    public void setSystemBarAppearance(final boolean darkIcons) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    mSystemBarDarkIcons = darkIcons;
+                    applySystemBarAppearance();
+                }
+            });
+    }
+
+    // Applies the currently desired system-bar icon tint (mSystemBarDarkIcons)
+    // to the window. Safe to call repeatedly. It is also re-invoked from
+    // applyFullScreen(), because the legacy (pre-API-30) fullscreen path
+    // rewrites the whole systemUiVisibility bitmask and would otherwise drop
+    // the light-status/navigation-bar bits.
+    @SuppressWarnings("deprecation")
+    private void applySystemBarAppearance() {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(mSystemBarDarkIcons ? mask : 0, mask);
+            }
+        } else {
+            View decorView = window.getDecorView();
+            int lightBars = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            int flags = decorView.getSystemUiVisibility();
+            if (mSystemBarDarkIcons) {
+                flags |= lightBars;
+            } else {
+                flags &= ~lightBars;
+            }
+            decorView.setSystemUiVisibility(flags);
+        }
+    }
+
     private boolean canCaptureSurfaceSnapshot() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return false;
@@ -1660,6 +1710,12 @@ public class MakepadActivity
                 decorView.setSystemUiVisibility(0);
             }
         }
+
+        // The legacy (pre-API-30) branches above replace the entire
+        // systemUiVisibility bitmask, so re-assert the system-bar icon tint
+        // on top of the new flags. On API 30+ this is an independent,
+        // idempotent re-apply.
+        applySystemBarAppearance();
 
         // Force a layout pass so the SurfaceView gets the new dimensions
         if (view != null) {

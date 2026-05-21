@@ -1324,6 +1324,16 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     );
 }
 
+pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_icons: bool) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setSystemBarAppearance",
+        "(Z)V",
+        dark_icons as i32
+    );
+}
+
 pub unsafe fn to_java_set_surface_cover_visible(visible: bool) {
     let env = attach_jni_env();
     ndk_utils::call_void_method!(
