@@ -563,6 +563,7 @@ fn rust_build(
     android_targets: &[AndroidTarget],
     variant: &AndroidVariant,
     urls: &AndroidSDKUrls,
+    prefer_dynamic: bool,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let target_root = cargo_target_root(&cwd);
@@ -646,8 +647,11 @@ fn rust_build(
 
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
-        let rustflags =
-            compose_android_rustflags(std::env::var("RUSTFLAGS").ok().as_deref(), &cfg_flag);
+        let rustflags = compose_android_rustflags(
+            std::env::var("RUSTFLAGS").ok().as_deref(),
+            &cfg_flag,
+            prefer_dynamic,
+        );
 
         let makepad_env = if let AndroidVariant::Quest = variant {
             Some(match std::env::var("MAKEPAD") {
@@ -731,22 +735,32 @@ fn rust_build(
     Ok(())
 }
 
-fn compose_android_rustflags(existing: Option<&str>, cfg_flag: &str) -> String {
+/// Builds the `RUSTFLAGS` value for an Android `cargo rustc` invocation.
+///
+/// `prefer_dynamic`: APK/dev builds pass `true` (dynamically linked `std`
+/// keeps incremental relinks fast). AAB builds pass `false` — `prefer-dynamic`
+/// makes Rust ship `std` as a separate `libstd-<hash>.so`, and the toolchain's
+/// prebuilt copy of that library is only 4 KB-page aligned, which fails Google
+/// Play's 16 KB page-size requirement for apps targeting Android 15+. Static
+/// `std` keeps the app a single self-contained, NDK-linked (16 KB-aligned) `.so`.
+fn compose_android_rustflags(existing: Option<&str>, cfg_flag: &str, prefer_dynamic: bool) -> String {
     let mut rustflags = existing.unwrap_or_default().trim().to_string();
-    let has_prefer_dynamic = rustflags
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair == ["-C", "prefer-dynamic"])
-        || rustflags
+    if prefer_dynamic {
+        let has_prefer_dynamic = rustflags
             .split_whitespace()
-            .any(|token| token == "-Cprefer-dynamic");
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["-C", "prefer-dynamic"])
+            || rustflags
+                .split_whitespace()
+                .any(|token| token == "-Cprefer-dynamic");
 
-    if !has_prefer_dynamic {
-        if !rustflags.is_empty() {
-            rustflags.push(' ');
+        if !has_prefer_dynamic {
+            if !rustflags.is_empty() {
+                rustflags.push(' ');
+            }
+            rustflags.push_str("-C prefer-dynamic");
         }
-        rustflags.push_str("-C prefer-dynamic");
     }
     if !cfg_flag.trim().is_empty() {
         if !rustflags.is_empty() {
@@ -2529,6 +2543,10 @@ pub fn build_aab(
         android_targets,
         variant,
         urls,
+        // AAB: statically link `std` so the bundle has no separate libstd.so
+        // (the toolchain's prebuilt one is only 4 KB-page aligned, which fails
+        // Play's 16 KB page-size requirement).
+        false,
     )?;
     // AABs uploaded to Play Store must have `android:debuggable="false"`. Force
     // it here regardless of cargo profile so we never produce an unshippable AAB.
@@ -2686,6 +2704,8 @@ pub fn build(
         android_targets,
         variant,
         urls,
+        // APK/dev builds keep `-C prefer-dynamic` for faster incremental relinks.
+        true,
     )?;
     // For APK builds, debuggable matches the cargo profile: release -> false,
     // anything else -> true (matches the historical behavior of `cargo makepad
@@ -3113,7 +3133,7 @@ default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
     #[test]
     fn compose_android_rustflags_adds_prefer_dynamic() {
         assert_eq!(
-            compose_android_rustflags(None, "--cfg android_target=\"aarch64\""),
+            compose_android_rustflags(None, "--cfg android_target=\"aarch64\"", true),
             "-C prefer-dynamic --cfg android_target=\"aarch64\""
         );
     }
@@ -3121,7 +3141,7 @@ default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
     #[test]
     fn compose_android_rustflags_preserves_existing_flags() {
         assert_eq!(
-            compose_android_rustflags(Some("-C debuginfo=1"), "--cfg android_target=\"aarch64\""),
+            compose_android_rustflags(Some("-C debuginfo=1"), "--cfg android_target=\"aarch64\"", true),
             "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\""
         );
     }
@@ -3131,9 +3151,22 @@ default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
         assert_eq!(
             compose_android_rustflags(
                 Some("-C prefer-dynamic -C debuginfo=1"),
-                "--cfg android_target=\"aarch64\""
+                "--cfg android_target=\"aarch64\"",
+                true,
             ),
             "-C prefer-dynamic -C debuginfo=1 --cfg android_target=\"aarch64\""
+        );
+    }
+
+    #[test]
+    fn compose_android_rustflags_omits_prefer_dynamic_when_disabled() {
+        assert_eq!(
+            compose_android_rustflags(
+                Some("-C debuginfo=1"),
+                "--cfg android_target=\"aarch64\"",
+                false,
+            ),
+            "-C debuginfo=1 --cfg android_target=\"aarch64\""
         );
     }
 }

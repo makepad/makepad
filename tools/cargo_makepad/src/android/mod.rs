@@ -472,7 +472,8 @@ Custom AndroidManifest:\n\
   Drop a template at `<crate>/resources/android/AndroidManifest.xml.template` to\n\
   override the built-in manifest (lets you tailor permissions/features for the\n\
   Play Store). Tokens replaced: {package_id}, {label}, {class_name},\n\
-  {target_sdk_version}, {version_code}, {version_name}, {debuggable}.\n\
+  {min_sdk_version}, {target_sdk_version}, {version_code}, {version_name},\n\
+  {debuggable}.\n\
 \n\
 build-aab signing options (defaults: bundled debug.keystore — Play Store will reject):\n\
   --keystore=<path>                       JKS/PKCS12 keystore file (alias auto-discovered\n\
