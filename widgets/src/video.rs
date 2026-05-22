@@ -501,7 +501,7 @@ impl ScriptHook for Video {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
