@@ -578,6 +578,23 @@ impl VideoRef {
         }
     }
 
+    /// Returns the most recent known playback position in milliseconds.
+    pub fn current_position_ms(&self) -> u128 {
+        if let Some(inner) = self.borrow() {
+            inner.current_position_ms
+        } else {
+            0
+        }
+    }
+
+    /// Seeks playback to the given position in milliseconds. Has no effect if the
+    /// underlying player has not yet been prepared.
+    pub fn seek_to(&self, cx: &mut Cx, position_ms: u64) {
+        if let Some(inner) = self.borrow() {
+            cx.seek_video_playback(inner.id, position_ms);
+        }
+    }
+
     /// Updates the source of the video data. Currently it only proceeds if the video is in Unprepared state.
     pub fn set_source(&self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {
