@@ -505,6 +505,9 @@ impl ScriptHook for Video {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        // Gate the side-effects in on_after_apply so they don't run for animator-driven applies. E.g. Mouse hover in.
+        // If not, apply_thumbnail_settings will flush the thumbnail texture when mouse hover in.
+        if apply.is_animate() { return; }
         vm.with_cx_mut(|cx| {
             self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
