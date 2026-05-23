@@ -501,10 +501,13 @@ impl ScriptHook for Video {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        // Gate the side-effects in on_after_apply so they don't run for animator-driven applies. E.g. Mouse hover in.
+        // If not, apply_thumbnail_settings will flush the thumbnail texture when mouse hover in.
+        if apply.is_animate() { return; }
         vm.with_cx_mut(|cx| {
             self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
@@ -572,6 +575,23 @@ impl VideoRef {
     pub fn stop_and_cleanup_resources(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.stop_and_cleanup_resources(cx);
+        }
+    }
+
+    /// Returns the most recent known playback position in milliseconds.
+    pub fn current_position_ms(&self) -> u128 {
+        if let Some(inner) = self.borrow() {
+            inner.current_position_ms
+        } else {
+            0
+        }
+    }
+
+    /// Seeks playback to the given position in milliseconds. Has no effect if the
+    /// underlying player has not yet been prepared.
+    pub fn seek_to(&self, cx: &mut Cx, position_ms: u64) {
+        if let Some(inner) = self.borrow() {
+            cx.seek_video_playback(inner.id, position_ms);
         }
     }
 
