@@ -564,6 +564,7 @@ impl LayoutContext {
 struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
+    font_size_in_lpxs: f32,
     lens: Vec<usize>,
     widths_in_lpxs: Vec<f32>,
 }
@@ -600,6 +601,7 @@ impl Fitter {
         Self {
             text,
             font_family,
+            font_size_in_lpxs,
             lens,
             widths_in_lpxs,
         }
@@ -626,16 +628,20 @@ impl Fitter {
                 max_count = mid_count;
             }
         }
-        if let Some(best_count) = best_count {
-            let best_len = self.lens[..best_count].iter().sum();
-            let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
-            self.lens.drain(..best_count);
-            self.widths_in_lpxs.drain(..best_count);
-            self.text = self.text.substr(best_len..);
-            Some(best_text)
-        } else {
-            None
+        if let Some(mut best_count) = best_count {
+            while best_count > 0 {
+                let best_len = self.lens[..best_count].iter().sum();
+                let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
+                if best_text.width_in_ems * self.font_size_in_lpxs <= wrap_width_in_lpxs {
+                    self.lens.drain(..best_count);
+                    self.widths_in_lpxs.drain(..best_count);
+                    self.text = self.text.substr(best_len..);
+                    return Some(best_text);
+                }
+                best_count -= 1;
+            }
         }
+        None
     }
 
     fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
@@ -645,10 +651,8 @@ impl Fitter {
         // cumulative substrings are unique and always miss the shaper cache,
         // making each call a full HarfBuzz shape operation.
         //
-        // The sum of individual segment widths is a close approximation of the
-        // actual shaped width (it doesn't account for inter-word kerning, but
-        // that's negligible for wrap-width decisions). The final shaped text
-        // in `fit()` uses get_or_shape() for the exact result.
+        // The final candidate is shaped and checked exactly in `fit()` before it
+        // is accepted, so this estimate can never allow an overflowing row.
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
         estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
