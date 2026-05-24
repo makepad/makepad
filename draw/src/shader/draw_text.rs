@@ -2120,12 +2120,7 @@ impl DrawText {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
-        let turtle_rect = cx.turtle().inner_rect();
-        let mut max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
+        let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
 
         // For Fit-width containers with a max bound, resolve the bound so that
         // ellipsis truncation and max_lines clamping can work. Without this, Fit
@@ -2150,6 +2145,15 @@ impl DrawText {
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
+    }
+
+    fn max_layout_width_for_walk(&self, cx: &mut Cx2d, walk: Walk) -> Option<f32> {
+        let width = cx.turtle().max_width(walk).or_else(|| {
+            let turtle_rect = cx.turtle().inner_rect();
+            (!turtle_rect.size.x.is_nan()).then_some(turtle_rect.size.x)
+        })?;
+
+        Some((width.max(0.0) as f32) / self.font_scale.max(0.0001))
     }
 
     pub fn draw_walk_laidout(
