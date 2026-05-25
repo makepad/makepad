@@ -48,6 +48,7 @@ impl Splash {
             column: 0,
             code: String::new(),
             values: vec![],
+            cfg_fragments: Vec::new(),
         };
 
         cx.with_vm(|vm| {

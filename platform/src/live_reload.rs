@@ -47,6 +47,21 @@ struct ExtractedScriptMod {
     rust_value_count: usize,
     first_token_line: usize,
     first_token_column: usize,
+    /// Recursive chunk tree, populated only when the body contains any
+    /// `#[cfg(...)]` attribute (at any depth). Empty otherwise — callers fall
+    /// back to the legacy verbatim `code` comparison path.
+    chunks: Vec<ExtractedChunk>,
+}
+
+/// Mirror of the proc-macro's `Chunk` type on the extractor side.
+/// `Conditional` chunks can be nested — they're discovered at any depth in
+/// the source body, and their pre-order count must match the compiled-in
+/// `cfg_fragments` length.
+#[derive(Clone, Debug)]
+enum ExtractedChunk {
+    Text(String),
+    Placeholder,
+    Conditional(Vec<ExtractedChunk>),
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +70,9 @@ struct CompiledScriptModSite {
     file_name: String,
     original_code: String,
     values: Vec<ScriptValue>,
+    /// Copy of `ScriptMod.cfg_fragments` from the compiled site. Empty when the
+    /// site has no top-level cfg attributes.
+    cfg_fragments: Vec<bool>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -239,15 +257,50 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
             return false;
         }
 
+        // Compute per-site the *effective* extracted (code, rust_value_count).
+        // For sites with no top-level cfg fragments this is just the legacy
+        // (`extracted.code`, `extracted.rust_value_count`). For cfg-aware sites
+        // we filter the structured fragments by `site.cfg_fragments` and
+        // renumber `#(N)` placeholders globally — see `compute_filtered_code`.
+        let mut effective: Vec<(String, usize)> = Vec::with_capacity(compiled_sites.len());
+        let mut cfg_mismatch = false;
         for (site, extracted) in compiled_sites.iter().zip(extracted.iter()) {
-            if extracted.rust_value_count != site.values.len() {
+            if site.cfg_fragments.is_empty() {
+                effective.push((extracted.code.clone(), extracted.rust_value_count));
+            } else {
+                match compute_filtered_code(extracted, &site.cfg_fragments) {
+                    Ok(pair) => effective.push(pair),
+                    Err(detail) => {
+                        log_live_reload_file_error(
+                            &file_name,
+                            format!(
+                                "hot reload could not match cfg fragments for {}: {} — rebuild required",
+                                file_name, detail
+                            ),
+                        );
+                        cfg_mismatch = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if cfg_mismatch {
+            return false;
+        }
+
+        for ((site, extracted), (effective_code, effective_value_count)) in compiled_sites
+            .iter()
+            .zip(extracted.iter())
+            .zip(effective.iter())
+        {
+            if *effective_value_count != site.values.len() {
                 log_live_reload_file_error(
                     &file_name,
                     format!(
                         "hot reload placeholder mismatch in {}: expected {} #(…) values, found {}",
                         file_name,
                         site.values.len(),
-                        extracted.rust_value_count
+                        effective_value_count
                     ),
                 );
                 return false;
@@ -258,15 +311,21 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
                 .map(String::as_str)
                 .unwrap_or(site.original_code.as_str());
 
-            if extracted.code == current_effective {
+            if effective_code == current_effective {
                 continue;
             }
 
-            if extracted.code == site.original_code {
+            if effective_code == &site.original_code {
                 continue;
             }
 
-            if !validate_extracted_script_mod(script_vm, site, extracted) {
+            if !validate_extracted_script_mod_with(
+                script_vm,
+                site,
+                extracted,
+                effective_code,
+                *effective_value_count,
+            ) {
                 crate::error!(
                     "live_reload validation failed for {}",
                     format_script_mod_site(site)
@@ -275,11 +334,15 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
             }
         }
 
-        for (site, extracted) in compiled_sites.into_iter().zip(extracted.into_iter()) {
-            if extracted.code == site.original_code {
+        for ((site, _extracted), (effective_code, _effective_value_count)) in compiled_sites
+            .into_iter()
+            .zip(extracted.into_iter())
+            .zip(effective.into_iter())
+        {
+            if effective_code == site.original_code {
                 next_overrides.remove(&site.key);
             } else {
-                next_overrides.insert(site.key, extracted.code);
+                next_overrides.insert(site.key, effective_code);
             }
         }
     }
@@ -326,6 +389,7 @@ fn collect_compiled_sites_for_file(
             file_name: compiled_file_name,
             original_code: script_mod.code.clone(),
             values: script_mod.values.clone(),
+            cfg_fragments: script_mod.cfg_fragments.clone(),
         });
     }
 
@@ -333,14 +397,16 @@ fn collect_compiled_sites_for_file(
     sites
 }
 
-fn validate_extracted_script_mod(
+fn validate_extracted_script_mod_with(
     script_vm: &mut crate::makepad_script::ScriptVmBase,
     site: &CompiledScriptModSite,
     extracted: &ExtractedScriptMod,
+    effective_code: &str,
+    _effective_value_count: usize,
 ) -> bool {
     let mut tokenizer = ScriptTokenizer::default();
     let mut parser = ScriptParser::default();
-    tokenizer.tokenize(&extracted.code, &mut script_vm.heap);
+    tokenizer.tokenize(effective_code, &mut script_vm.heap);
     parser.parse(
         &tokenizer,
         &site.file_name,
@@ -716,12 +782,380 @@ fn normalize_script_mod_body(
     out.push(';');
     let first_token = first_token.unwrap_or(start_pos);
 
+    // Second pass: walk the body recursively and produce a chunk tree that
+    // mirrors the proc-macro's view. `chunks` is empty when the body contains
+    // no `#[cfg(...)]` attribute at any depth — consumers then use the
+    // legacy verbatim `code` comparison.
+    let chunks = extract_chunks(file_name, body)?;
+
     Ok(ExtractedScriptMod {
         code: out,
         rust_value_count,
         first_token_line: first_token.line,
         first_token_column: first_token.column,
+        chunks,
     })
+}
+
+/// Second pass over the body: walk recursively and produce a chunk tree that
+/// matches what the proc-macro builds (`Chunk::Text` / `Chunk::Placeholder` /
+/// `Chunk::Conditional` with nested children).
+///
+/// When the body contains no `#[cfg(...)]` attribute at any depth, the
+/// returned vec is empty — callers fall back to the legacy `code` comparison.
+fn extract_chunks(file_name: &str, body: &str) -> Result<Vec<ExtractedChunk>, String> {
+    let bytes = body.as_bytes();
+    let mut walker = ChunkWalker {
+        file_name,
+        body,
+        bytes,
+        saw_cfg: false,
+    };
+    let mut i = 0usize;
+    let chunks = walker.walk(&mut i, bytes.len())?;
+    if !walker.saw_cfg {
+        return Ok(Vec::new());
+    }
+    Ok(chunks)
+}
+
+struct ChunkWalker<'a> {
+    file_name: &'a str,
+    body: &'a str,
+    bytes: &'a [u8],
+    saw_cfg: bool,
+}
+
+impl<'a> ChunkWalker<'a> {
+    /// Walk byte range `[i .. end)` producing a chunk list. Updates `*i` to
+    /// point past the last consumed byte. Recurses into nested cfg bodies; the
+    /// caller's enclosing structure (braces, parens) is preserved verbatim as
+    /// Text.
+    fn walk(&mut self, i: &mut usize, end: usize) -> Result<Vec<ExtractedChunk>, String> {
+        let mut chunks: Vec<ExtractedChunk> = Vec::new();
+        let mut buf = String::new();
+
+        let flush = |buf: &mut String, chunks: &mut Vec<ExtractedChunk>| {
+            if !buf.is_empty() {
+                chunks.push(ExtractedChunk::Text(std::mem::take(buf)));
+            }
+        };
+
+        while *i < end {
+            if let Some(skip_end) = try_skip_passthrough(self.bytes, *i)? {
+                buf.push_str(&self.body[*i..skip_end]);
+                *i = skip_end;
+                continue;
+            }
+
+            if self.bytes[*i] == b'#' {
+                // `#[cfg(...)]` outer attribute at this depth.
+                if let Some(cfg_end) = try_match_cfg_attr(self.bytes, *i)? {
+                    self.saw_cfg = true;
+                    // The gap whitespace from the previous accumulated token
+                    // to the cfg attribute's `#` is already in `buf` (it was
+                    // pushed verbatim during the byte-level walk). Flush
+                    // without trimming — the gap is the DSL separator between
+                    // pre-text and the conditional body.
+                    flush(&mut buf, &mut chunks);
+
+                    *i = cfg_end;
+                    *i = skip_ascii_whitespace(self.bytes, *i);
+                    if *i >= end {
+                        return Err(format!(
+                            "hot reload: #[cfg(...)] has no following item in {}",
+                            self.file_name
+                        ));
+                    }
+
+                    let body_chunks = if self.bytes[*i] == b'{' {
+                        // Brace-grouped form: recurse into the inner range.
+                        let close = find_matching_delim(self.bytes, *i, b'{', b'}')?;
+                        let inner_start = *i + 1;
+                        let mut inner_i = inner_start;
+                        let inner_chunks = self.walk(&mut inner_i, close)?;
+                        *i = close + 1;
+                        inner_chunks
+                    } else {
+                        // Single-statement form: walk a bounded range.
+                        let stmt_end = find_single_statement_end(self.bytes, *i, end)?;
+                        let mut inner_i = *i;
+                        let inner_chunks = self.walk(&mut inner_i, stmt_end)?;
+                        *i = stmt_end;
+                        inner_chunks
+                    };
+
+                    let trimmed = trim_chunks(body_chunks);
+                    chunks.push(ExtractedChunk::Conditional(trimmed));
+                    continue;
+                }
+
+                // `#( ... )` placeholder.
+                if let Some(open_paren) = placeholder_open_paren(self.bytes, *i)? {
+                    let segment_end = find_matching_delim(self.bytes, open_paren, b'(', b')')? + 1;
+                    flush(&mut buf, &mut chunks);
+                    chunks.push(ExtractedChunk::Placeholder);
+                    *i = segment_end;
+                    continue;
+                }
+            }
+
+            let ch = self.body[*i..].chars().next().ok_or_else(|| {
+                format!("hot reload could not decode utf-8 in {}", self.file_name)
+            })?;
+            let next = *i + ch.len_utf8();
+            buf.push(ch);
+            *i = next;
+        }
+
+        if !buf.is_empty() {
+            chunks.push(ExtractedChunk::Text(buf));
+        }
+        Ok(chunks)
+    }
+}
+
+/// Find the byte offset where a `#[cfg(...)]` single-statement scope ends:
+/// either after the close of the first top-level brace group encountered, or
+/// at the next depth-zero newline. Multi-line scopes without a brace group
+/// are rejected up the call chain by the proc-macro (the extractor mirrors).
+fn find_single_statement_end(bytes: &[u8], start: usize, max: usize) -> Result<usize, String> {
+    let mut i = start;
+    let mut depth: u32 = 0;
+    while i < max {
+        if let Some(skip_end) = try_skip_passthrough(bytes, i)? {
+            i = skip_end;
+            continue;
+        }
+        match bytes[i] {
+            b'(' | b'[' | b'{' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                if depth == 0 {
+                    return Ok(i);
+                }
+            }
+            b'\n' if depth == 0 => return Ok(i),
+            _ => {
+                let ch_len = utf8_char_len(bytes[i]);
+                i += ch_len;
+            }
+        }
+    }
+    Ok(i)
+}
+
+/// Strip leading whitespace from the first leaf Text chunk and trailing
+/// whitespace from the last leaf Text chunk. Matches the macro's behaviour of
+/// not emitting whitespace before the first or after the last token of a
+/// fragment body.
+fn trim_chunks(mut chunks: Vec<ExtractedChunk>) -> Vec<ExtractedChunk> {
+    if let Some(first) = chunks.first_mut() {
+        trim_leading(first);
+    }
+    if let Some(last) = chunks.last_mut() {
+        trim_trailing(last);
+    }
+    chunks
+}
+
+fn trim_leading(chunk: &mut ExtractedChunk) {
+    match chunk {
+        ExtractedChunk::Text(s) => {
+            let trimmed = s.trim_start();
+            if trimmed.len() != s.len() {
+                *s = trimmed.to_string();
+            }
+        }
+        ExtractedChunk::Placeholder => {}
+        ExtractedChunk::Conditional(inner) => {
+            if let Some(first) = inner.first_mut() {
+                trim_leading(first);
+            }
+        }
+    }
+}
+
+fn trim_trailing(chunk: &mut ExtractedChunk) {
+    match chunk {
+        ExtractedChunk::Text(s) => {
+            let trimmed = s.trim_end();
+            if trimmed.len() != s.len() {
+                *s = trimmed.to_string();
+            }
+        }
+        ExtractedChunk::Placeholder => {}
+        ExtractedChunk::Conditional(inner) => {
+            if let Some(last) = inner.last_mut() {
+                trim_trailing(last);
+            }
+        }
+    }
+}
+
+/// Compute the filtered DSL code for an extracted chunk tree using the site's
+/// pre-order `cfg_fragments` boolean vec. Returns `(code, value_count)` so the
+/// caller can also verify the placeholder count.
+fn compute_filtered_code(
+    extracted: &ExtractedScriptMod,
+    site_cfg_fragments: &[bool],
+) -> Result<(String, usize), String> {
+    let total = count_conditionals(&extracted.chunks);
+    if total != site_cfg_fragments.len() {
+        return Err(format!(
+            "file has {} cfg fragments, compiled binary has {}",
+            total,
+            site_cfg_fragments.len()
+        ));
+    }
+
+    let mut code = String::new();
+    let mut value_count: usize = 0;
+    let mut cond_idx: usize = 0;
+    walk_filter(
+        &extracted.chunks,
+        site_cfg_fragments,
+        &mut cond_idx,
+        true,
+        &mut code,
+        &mut value_count,
+    );
+    code.push(';');
+    Ok((code, value_count))
+}
+
+fn count_conditionals(chunks: &[ExtractedChunk]) -> usize {
+    let mut n = 0;
+    for c in chunks {
+        if let ExtractedChunk::Conditional(inner) = c {
+            n += 1 + count_conditionals(inner);
+        }
+    }
+    n
+}
+
+fn walk_filter(
+    chunks: &[ExtractedChunk],
+    cfg_fragments: &[bool],
+    cond_idx: &mut usize,
+    active: bool,
+    out: &mut String,
+    value_count: &mut usize,
+) {
+    use std::fmt::Write as _;
+    for chunk in chunks {
+        match chunk {
+            ExtractedChunk::Text(s) => {
+                if active {
+                    out.push_str(s);
+                }
+            }
+            ExtractedChunk::Placeholder => {
+                if active {
+                    let _ = write!(out, "#({})", *value_count);
+                    *value_count += 1;
+                }
+            }
+            ExtractedChunk::Conditional(inner) => {
+                let this = cfg_fragments[*cond_idx];
+                *cond_idx += 1;
+                walk_filter(
+                    inner,
+                    cfg_fragments,
+                    cond_idx,
+                    active && this,
+                    out,
+                    value_count,
+                );
+            }
+        }
+    }
+}
+
+
+/// Returns the byte offset just past `#[cfg(...)]` if the bytes at `i` form an
+/// outer `#[cfg(...)]` attribute. Recognised at any depth — nested cfg is
+/// supported, mirroring the proc-macro. `#![...]`, `#[cfg_attr(...)]`,
+/// `#[doc = ...]`, and other attribute shapes return `None`.
+fn try_match_cfg_attr(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
+    debug_assert_eq!(bytes[i], b'#');
+    // Reject inner attribute `#![...]`.
+    let mut j = i + 1;
+    if bytes.get(j) == Some(&b'!') {
+        return Ok(None);
+    }
+    j = skip_ws_and_comments(bytes, j)?;
+    if bytes.get(j) != Some(&b'[') {
+        return Ok(None);
+    }
+    let bracket_open = j;
+    let bracket_close = find_matching_delim(bytes, bracket_open, b'[', b']')?;
+    // Inside the brackets, the first non-ws/comment ident must be `cfg` (not
+    // `cfg_attr`, not `doc`, not `derive`, etc.).
+    let mut k = skip_ws_and_comments(bytes, bracket_open + 1)?;
+    let ident_start = k;
+    while k < bracket_close && (is_ident_continue(bytes[k]) || (k == ident_start && is_ident_start(bytes[k]))) {
+        k += 1;
+    }
+    if k == ident_start {
+        return Ok(None);
+    }
+    let ident = std::str::from_utf8(&bytes[ident_start..k]).map_err(|_| {
+        "hot reload: invalid UTF-8 in #[...] attribute name".to_string()
+    })?;
+    if ident != "cfg" {
+        return Ok(None);
+    }
+    // Expect `(` for the cfg predicate.
+    k = skip_ws_and_comments(bytes, k)?;
+    if bytes.get(k) != Some(&b'(') {
+        return Ok(None);
+    }
+    let paren_close = find_matching_delim(bytes, k, b'(', b')')?;
+    // After the cfg paren, only whitespace/comments before the bracket close.
+    let after_paren = skip_ws_and_comments(bytes, paren_close + 1)?;
+    if after_paren != bracket_close {
+        return Ok(None);
+    }
+    Ok(Some(bracket_close + 1))
+}
+
+/// Try to skip over any non-DSL-source segment (line/block comments, string
+/// literals, raw string literals, char/byte-char literals). Returns the byte
+/// offset just past the segment, or `None` if the bytes at `i` are ordinary.
+fn try_skip_passthrough(bytes: &[u8], i: usize) -> Result<Option<usize>, String> {
+    if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+        return Ok(Some(skip_line_comment(bytes, i)));
+    }
+    if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+        return Ok(Some(skip_block_comment(bytes, i)?));
+    }
+    if let Some((prefix_len, hashes)) = raw_string_prefix(bytes, i) {
+        return Ok(Some(skip_raw_string(bytes, i, prefix_len, hashes)?));
+    }
+    if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"') {
+        return Ok(Some(skip_quoted(bytes, i, 1, b'"')?));
+    }
+    if bytes[i] == b'"' {
+        return Ok(Some(skip_quoted(bytes, i, 0, b'"')?));
+    }
+    if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'') {
+        if let Some(end) = char_literal_end(bytes, i, 1) {
+            return Ok(Some(end));
+        }
+    }
+    if let Some(end) = char_literal_end(bytes, i, 0) {
+        return Ok(Some(end));
+    }
+    Ok(None)
 }
 
 fn position_after_index(source: &str, index: usize) -> FilePos {
@@ -1062,6 +1496,256 @@ mod tests {
         assert!(code.contains("text: \"/* not a comment */\""));
         assert!(code.contains("value: #(0)"));
         assert!(!code.contains("ignored"));
+    }
+
+    #[test]
+    fn no_cfg_attr_yields_empty_chunks() {
+        let source = r#"
+        script_mod! {
+            use mod.prelude.widgets.*
+            let X = 1
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].chunks.is_empty());
+    }
+
+    #[test]
+    fn cfg_attr_produces_chunks_tree() {
+        let source = r#"
+        script_mod! {
+            use mod.prelude.widgets.*
+            #[cfg(feature = "ai")]
+            use mod.ai_widgets.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(count_conditionals(&extracted[0].chunks), 1);
+    }
+
+    #[test]
+    fn filtered_code_with_true_matches_full_body() {
+        let source = r#"
+        script_mod! {
+            use mod.prelude.widgets.*
+            #[cfg(feature = "ai")]
+            use mod.ai_widgets.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        let (code, count) = compute_filtered_code(&extracted[0], &[true]).unwrap();
+        assert!(code.contains("use mod.prelude.widgets.*"));
+        assert!(code.contains("use mod.ai_widgets.*"));
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn filtered_code_with_false_omits_conditional_body() {
+        let source = r#"
+        script_mod! {
+            use mod.prelude.widgets.*
+            #[cfg(feature = "ai")]
+            use mod.ai_widgets.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        let (code, count) = compute_filtered_code(&extracted[0], &[false]).unwrap();
+        assert!(code.contains("use mod.prelude.widgets.*"));
+        assert!(!code.contains("ai_widgets"), "conditional body leaked: {}", code);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn cfg_count_mismatch_errors() {
+        // Source has 2 conditionals; compiled binary had 1.
+        let source = r#"
+        script_mod! {
+            #[cfg(feature = "a")]
+            let A = 1
+            #[cfg(feature = "b")]
+            let B = 2
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        let err = compute_filtered_code(&extracted[0], &[true]).unwrap_err();
+        assert!(err.contains("file has 2 cfg fragments, compiled binary has 1"), "{}", err);
+    }
+
+    #[test]
+    fn cfg_count_mismatch_zero_to_one_errors() {
+        // Source has no conditionals (fragments empty) but compiled binary
+        // expected 1. The mismatch is detected up the call chain — here we
+        // exercise the empty-fragments case explicitly: with no fragments,
+        // compute_filtered_code reports 0 vs N.
+        let source = r#"
+        script_mod! {
+            use mod.foo.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert!(extracted[0].chunks.is_empty());
+        let err = compute_filtered_code(&extracted[0], &[true]).unwrap_err();
+        assert!(err.contains("file has 0 cfg fragments, compiled binary has 1"), "{}", err);
+    }
+
+    #[test]
+    fn brace_grouped_form_strips_outer_braces() {
+        let source = r#"
+        script_mod! {
+            use mod.prelude.widgets.*
+            #[cfg(feature = "ai")] {
+                use mod.ai_widgets.*
+                let Z = 1
+            }
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        let (code, _) = compute_filtered_code(&extracted[0], &[true]).unwrap();
+        // The outer `{`/`}` of the brace-grouped form must not appear at top
+        // level — only the contents.
+        assert!(code.contains("use mod.ai_widgets.*"));
+        assert!(code.contains("let Z = 1"));
+        // Specifically check no spurious `{}` at the start of a line.
+        for line in code.lines() {
+            let t = line.trim();
+            assert!(
+                t != "{" && t != "}",
+                "brace-grouped outer braces leaked: line={:?} code={:?}",
+                line,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn cfg_inside_string_literal_is_not_detected() {
+        let source = r#"
+        script_mod! {
+            label: "use #[cfg(feature = \"x\")] inline"
+            let X = 1
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        // The `#[cfg(...)]` inside the string literal must NOT be treated as a
+        // cfg attribute — chunks stays empty.
+        assert!(extracted[0].chunks.is_empty(), "chunks={:?}", extracted[0].chunks);
+    }
+
+    #[test]
+    fn inner_cfg_attribute_is_not_detected() {
+        // `#![cfg(...)]` is an inner attribute and should be ignored by the
+        // extractor (the proc-macro rejects it at compile time, so a compiled
+        // site can never carry it in `cfg_fragments`).
+        let source = r#"
+        script_mod! {
+            #![cfg(feature = "x")]
+            use mod.foo.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert!(extracted[0].chunks.is_empty());
+    }
+
+    #[test]
+    fn lexical_parity_with_awkward_spacing() {
+        // Whitespace and comments between `#`, `[`, `cfg`, `(...)`, `]` should
+        // still be recognised.
+        let source = r#"
+        script_mod! {
+            use mod.foo.*
+            #  [  cfg  (  feature  =  "x"  )  ]
+            use mod.bar.*
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(count_conditionals(&extracted[0].chunks), 1);
+    }
+
+    #[test]
+    fn nested_cfg_inside_group_is_recognised() {
+        // Nested `#[cfg(...)]` inside a brace group must be detected. Total
+        // pre-order conditional count = 1 for this body.
+        let source = r#"
+        script_mod! {
+            ui: Root {
+                #[cfg(feature = "pro")]
+                pro_button := Button {}
+            }
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(count_conditionals(&extracted[0].chunks), 1);
+    }
+
+    #[test]
+    fn nested_cfg_filters_correctly() {
+        let source = r#"
+        script_mod! {
+            ui: Root {
+                main_button := Button {}
+                #[cfg(feature = "pro")]
+                pro_button := Button {}
+            }
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        let (code_on, _) = compute_filtered_code(&extracted[0], &[true]).unwrap();
+        let (code_off, _) = compute_filtered_code(&extracted[0], &[false]).unwrap();
+        assert!(code_on.contains("pro_button"));
+        assert!(!code_off.contains("pro_button"), "pro_button leaked when off: {}", code_off);
+        assert!(code_off.contains("main_button"));
+    }
+
+    #[test]
+    fn doubly_nested_cfg_counts_in_pre_order() {
+        // Two cfg attrs, one nested inside the other's brace-grouped body.
+        let source = r#"
+        script_mod! {
+            #[cfg(feature = "outer")] {
+                let A = 1
+                #[cfg(feature = "inner")]
+                let B = 2
+            }
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(count_conditionals(&extracted[0].chunks), 2);
+
+        // When outer is true and inner is true → both A and B
+        let (code, _) = compute_filtered_code(&extracted[0], &[true, true]).unwrap();
+        assert!(code.contains("let A = 1"));
+        assert!(code.contains("let B = 2"));
+
+        // When outer is true and inner is false → only A
+        let (code, _) = compute_filtered_code(&extracted[0], &[true, false]).unwrap();
+        assert!(code.contains("let A = 1"));
+        assert!(!code.contains("let B = 2"));
+
+        // When outer is false → neither (regardless of inner)
+        let (code, _) = compute_filtered_code(&extracted[0], &[false, true]).unwrap();
+        assert!(!code.contains("let A = 1"));
+        assert!(!code.contains("let B = 2"));
+    }
+
+    #[test]
+    fn placeholder_renumbering_in_extracted_fragments() {
+        let source = r#"
+        script_mod! {
+            before := #(a)
+            #[cfg(feature = "x")]
+            middle := #(b)
+            after := #(c)
+        }
+        "#;
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        // When the conditional is false, the filtered code references #(0) and
+        // #(1) only — no ghost #(2).
+        let (code, count) = compute_filtered_code(&extracted[0], &[false]).unwrap();
+        assert_eq!(count, 2);
+        assert!(code.contains("#(0)"), "{}", code);
+        assert!(code.contains("#(1)"), "{}", code);
+        assert!(!code.contains("#(2)"), "ghost #(2) found in {}", code);
     }
 
     #[test]

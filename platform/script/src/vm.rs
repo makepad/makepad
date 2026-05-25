@@ -49,6 +49,10 @@ pub struct ScriptMod {
     pub column: usize,
     pub code: String,
     pub values: Vec<ScriptValue>,
+    /// One bool per top-level `#[cfg(...)]`-gated fragment in source order.
+    /// `true` iff the fragment was selected by rustc in this build.
+    /// Empty for blocks with no cfg attributes (the common case).
+    pub cfg_fragments: Vec<bool>,
 }
 
 pub enum ScriptSource {
