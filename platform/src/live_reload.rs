@@ -47,6 +47,14 @@ struct ExtractedScriptMod {
     rust_value_count: usize,
     first_token_line: usize,
     first_token_column: usize,
+    /// Position of the `script_mod` identifier itself. Used to match compiled
+    /// sites against file extractions — compiled `ScriptMod.line/column` come
+    /// from `line!()`/`column!()` at the macro invocation site, which equal
+    /// the position of `script_mod`. Other macros (`script_eval!`, `script!`)
+    /// also produce `ScriptMod` runtime entries but at different positions,
+    /// so this lets us ignore them.
+    macro_line: usize,
+    macro_column: usize,
     /// Recursive chunk tree, populated only when the body contains any
     /// `#[cfg(...)]` attribute (at any depth). Empty otherwise — callers fall
     /// back to the legacy verbatim `code` comparison path.
@@ -231,8 +239,8 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
     let mut processed_files = 0usize;
     for (file_name, content) in latest_by_file {
         processed_files += 1;
-        let compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
-        if compiled_sites.is_empty() {
+        let all_compiled_sites = collect_compiled_sites_for_file(script_vm, &file_name);
+        if all_compiled_sites.is_empty() {
             continue;
         }
 
@@ -244,11 +252,29 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
             }
         };
 
+        // Filter the runtime sites to only those whose `(line, column)` came
+        // from a `script_mod!` invocation in this file. Other macros that
+        // produce `ScriptMod` runtime entries — `script_eval!`, `script!` —
+        // sit at different positions, so we drop them; they're not
+        // hot-reload targets (the file extractor only finds `script_mod!`).
+        let macro_positions: HashSet<(usize, usize)> = extracted
+            .iter()
+            .map(|e| (e.macro_line, e.macro_column))
+            .collect();
+        let compiled_sites: Vec<CompiledScriptModSite> = all_compiled_sites
+            .into_iter()
+            .filter(|site| macro_positions.contains(&(site.key.line, site.key.column)))
+            .collect();
+
+        if compiled_sites.is_empty() {
+            continue;
+        }
+
         if extracted.len() != compiled_sites.len() {
             log_live_reload_file_error(
                 &file_name,
                 format!(
-                    "hot reload could not match script_mod! blocks for {}: runtime has {}, file has {}",
+                    "hot reload could not match script_mod! blocks for {}: runtime has {} after filtering, file has {}",
                     file_name,
                     compiled_sites.len(),
                     extracted.len()
@@ -653,7 +679,11 @@ fn extract_script_mods_from_rust_file(
                         let body_start = j + 1;
                         let body = &source[body_start..end];
                         let body_pos = position_after_index(source, j);
-                        extracted.push(normalize_script_mod_body(file_name, body, body_pos)?);
+                        let macro_pos = position_at_index(source, ident_start);
+                        let mut block = normalize_script_mod_body(file_name, body, body_pos)?;
+                        block.macro_line = macro_pos.line;
+                        block.macro_column = macro_pos.column;
+                        extracted.push(block);
                         i = end + 1;
                         continue;
                     }
@@ -793,6 +823,8 @@ fn normalize_script_mod_body(
         rust_value_count,
         first_token_line: first_token.line,
         first_token_column: first_token.column,
+        macro_line: 0,
+        macro_column: 0,
         chunks,
     })
 }
@@ -1162,6 +1194,17 @@ fn position_after_index(source: &str, index: usize) -> FilePos {
     let mut pos = FilePos { line: 1, column: 1 };
     if index < source.len() {
         bump_pos_bytes(&mut pos, &source.as_bytes()[..=index]);
+    }
+    pos
+}
+
+/// Position AT the given byte index (one past the previous byte). This is what
+/// `line!()` / `column!()` evaluate to when emitted with the proc-macro's
+/// call-site span: the position of the macro identifier's first character.
+fn position_at_index(source: &str, index: usize) -> FilePos {
+    let mut pos = FilePos { line: 1, column: 1 };
+    if index <= source.len() {
+        bump_pos_bytes(&mut pos, &source.as_bytes()[..index]);
     }
     pos
 }
@@ -1726,6 +1769,21 @@ mod tests {
         let (code, _) = compute_filtered_code(&extracted[0], &[false, true]).unwrap();
         assert!(!code.contains("let A = 1"));
         assert!(!code.contains("let B = 2"));
+    }
+
+    #[test]
+    fn macro_position_records_ident_start() {
+        // The extractor must record the (line, column) of the `script_mod`
+        // identifier itself, so the apply path can match compiled-runtime
+        // ScriptMod entries (whose line/column come from `line!()`/`column!()`
+        // at the macro call-site) and skip entries from other macros like
+        // `script_eval!` / `script!`.
+        let source = "\n\n    script_mod! {\n        use mod.foo.*\n    }\n";
+        let extracted = extract_script_mods_from_rust_file("/tmp/test.rs", source).unwrap();
+        assert_eq!(extracted.len(), 1);
+        // `script_mod` starts on line 3, column 5 (1-based).
+        assert_eq!(extracted[0].macro_line, 3);
+        assert_eq!(extracted[0].macro_column, 5);
     }
 
     #[test]
