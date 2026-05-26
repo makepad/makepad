@@ -505,12 +505,11 @@ impl ScriptHook for Video {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        // Gate the side-effects in on_after_apply so they don't run for animator-driven applies. E.g. Mouse hover in.
-        // If not, apply_thumbnail_settings will flush the thumbnail texture when mouse hover in.
-        eprintln!("[VID-DBG] on_after_apply id={:?} apply={:?} state={:?} autoplay={} show_idle_thumbnail={} should_prepare_playback={}",
-            self.id, apply, self.playback_state, self.autoplay, self.show_idle_thumbnail, self.should_prepare_playback);
+        // Skip widget-level side effects for animator-driven applies (hover/seek
+        // indicator transitions fire one apply per frame). Otherwise
+        // apply_thumbnail_settings would re-decode the PNG/JPG thumbnail and
+        // allocate a fresh GPU texture on every animator frame.
         if apply.is_animate() {
-            eprintln!("[VID-DBG]   -> EARLY RETURN on Apply::Animate (gate active)");
             return;
         }
         vm.with_cx_mut(|cx| {
@@ -1043,7 +1042,10 @@ impl Video {
 
     fn apply_thumbnail_settings(&mut self, cx: &mut Cx) {
         self.lazy_create_image_cache(cx);
-        //self.thumbnail_texture = Some(Texture::new(cx));
+        // Don't pre-allocate an empty thumbnail texture here: load_thumbnail_image
+        // (via load_png_from_data / load_jpg_from_data) already calls set_texture
+        // with a fresh GPU texture containing the decoded image. Allocating a
+        // throwaway Texture::new(cx) first was just churning GPU resources.
 
         let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
         let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
@@ -1244,14 +1246,11 @@ impl Video {
                 }
             }
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
-                eprintln!("[VID-DBG] FingerUp abs={:?} dragging={} should_show_center_play={} interactable={} state={:?}",
-                    fe.abs, self.is_dragging_progress, self.should_show_center_play(), self.controls_interactable(), self.playback_state);
                 if self.is_dragging_progress {
                     self.is_dragging_progress = false;
                     self.seek_to_position_from_x(cx, fe.abs.x);
                 } else if self.should_show_center_play() && fe.tap_count < 2 {
                     // Center play button is showing — tap anywhere to start playback
-                    eprintln!("[VID-DBG]   FingerUp -> center play branch");
                     self.toggle_play_pause(cx);
                 } else if self.controls_interactable() && self.hit_test_controls_click(cx, fe.abs) {
                     // Control click handled
@@ -1376,24 +1375,16 @@ impl Video {
     }
 
     fn pause_playback(&mut self, cx: &mut Cx) {
-        eprintln!("[VID-DBG] pause_playback ENTER id={:?} state={:?}", self.id, self.playback_state);
         if self.playback_state != PlaybackState::Paused {
             cx.pause_video_playback(self.id);
             self.playback_state = PlaybackState::Paused;
-            eprintln!("[VID-DBG] pause_playback POSTED CxOsOp::PauseVideoPlayback({:?}), state now Paused", self.id);
-        } else {
-            eprintln!("[VID-DBG] pause_playback SKIPPED (already Paused)");
         }
     }
 
     fn resume_playback(&mut self, cx: &mut Cx) {
-        eprintln!("[VID-DBG] resume_playback ENTER id={:?} state={:?}", self.id, self.playback_state);
         if self.playback_state == PlaybackState::Paused {
             cx.resume_video_playback(self.id);
             self.playback_state = PlaybackState::Playing;
-            eprintln!("[VID-DBG] resume_playback POSTED CxOsOp::ResumeVideoPlayback({:?}), state now Playing", self.id);
-        } else {
-            eprintln!("[VID-DBG] resume_playback SKIPPED (state != Paused)");
         }
     }
 
@@ -1806,18 +1797,13 @@ impl Video {
     }
 
     fn hit_test_controls_click(&mut self, cx: &mut Cx, abs: Vec2d) -> bool {
-        let in_controls = self.hit_test_controls(cx, abs);
-        eprintln!("[VID-DBG] hit_test_controls_click abs={:?} in_controls={} interactable={} controls_hover={} controls_visible={}",
-            abs, in_controls, self.controls_interactable(), self.controls_hover, self.controls_visible);
-        if !in_controls {
+        if !self.hit_test_controls(cx, abs) {
             return false;
         }
 
         // Play/pause button — use the draw area from layout
         let play_rect = self.draw_play_icon.area().rect(cx);
-        eprintln!("[VID-DBG]   play_rect={:?} click_x={}", play_rect, abs.x);
         if abs.x >= play_rect.pos.x && abs.x <= play_rect.pos.x + play_rect.size.x {
-            eprintln!("[VID-DBG]   -> play/pause button hit, calling toggle_play_pause");
             self.toggle_play_pause(cx);
             return true;
         }
@@ -1852,7 +1838,6 @@ impl Video {
     }
 
     fn toggle_play_pause(&mut self, cx: &mut Cx) {
-        eprintln!("[VID-DBG] toggle_play_pause id={:?} state={:?}", self.id, self.playback_state);
         match self.playback_state {
             PlaybackState::Playing => self.pause_playback(cx),
             PlaybackState::Paused => self.resume_playback(cx),
