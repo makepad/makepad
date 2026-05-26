@@ -1607,10 +1607,12 @@ impl Cx {
     }
 
     pub fn pause_video_playback(&mut self, video_id: LiveId) {
+        eprintln!("[VID-DBG] Cx::pause_video_playback id={:?} (enqueueing CxOsOp::PauseVideoPlayback)", video_id);
         self.platform_ops.push(CxOsOp::PauseVideoPlayback(video_id));
     }
 
     pub fn resume_video_playback(&mut self, video_id: LiveId) {
+        eprintln!("[VID-DBG] Cx::resume_video_playback id={:?} (enqueueing CxOsOp::ResumeVideoPlayback)", video_id);
         self.platform_ops
             .push(CxOsOp::ResumeVideoPlayback(video_id));
     }
