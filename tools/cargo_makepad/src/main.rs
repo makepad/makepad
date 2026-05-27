@@ -146,7 +146,7 @@ fn show_help() {
     println!("Android commands:");
     println!();
     println!(
-        "    android [options] install-toolchain          Download and install the android sdk and rust toolchains"
+        "    android [options] install-toolchain          Download the Android SDK and add selected Rust targets"
     );
     println!(
         "    android [options] run <cargo args>           Run an android project on a connected android device via adb"
@@ -183,7 +183,7 @@ fn show_help() {
         "                                                 Host OS is autodetected but can be overridden here"
     );
     println!("    [Android install-toolchain separated steps]");
-    println!("    android [options] rustup-install-toolchain");
+    println!("    android [options] rustup-install-toolchain   Add selected Android Rust targets with rustup");
     println!("    android [options] download-sdk");
     println!("    android [options] expand-sdk");
     println!("    android [options] remove-sdk-sources");

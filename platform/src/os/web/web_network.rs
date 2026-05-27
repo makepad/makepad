@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 
+#[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn js_network_http_request(
         request_id_lo: u32,

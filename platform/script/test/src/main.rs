@@ -643,6 +643,35 @@ pub fn main() {
         assert(ret_vs_expr(0) == 0)
         assert(ret_vs_expr(5) == 1)
 
+        // Pattern 11: statement-only guard return followed by locals
+        fn ret_guard_then_local(x) {
+            if x < 0 return -1
+            let val = x + 1
+            let result = val + 1
+            return result
+        }
+        assert(ret_guard_then_local(-5) == -1)
+        assert(ret_guard_then_local(5) == 7)
+
+        // Pattern 12: braced guard return followed by locals
+        fn ret_braced_guard_then_local(x) {
+            if x < 0 { return -1 }
+            let val = x + 1
+            let result = val + 1
+            return result
+        }
+        assert(ret_braced_guard_then_local(-5) == -1)
+        assert(ret_braced_guard_then_local(5) == 7)
+
+        // Pattern 13: statement-only nil guard return followed by locals
+        fn ret_nil_guard_then_local(x) {
+            if x < 0 return
+            let val = x + 1
+            let result = val + 1
+            return result
+        }
+        assert(ret_nil_guard_then_local(5) == 7)
+
         // for loop destructuring tests (interpreter)
         // Semantics:
         //   for v in set        - value only (array, object, range)
@@ -4376,6 +4405,12 @@ pub fn main() {
 
     vm.eval(code);
     println!("Duration {}", dt.elapsed().as_secs_f64());
+
+    let runaway = script! {
+        loop {}
+    };
+    let runaway_value = vm.with_instruction_limit(1024, |vm| vm.eval(runaway));
+    assert!(runaway_value.is_err());
 
     println!("Test done");
 

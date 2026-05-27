@@ -183,6 +183,53 @@ impl<'a> ScriptVm<'a> {
             .set(Some(ScriptTrapOn::Bail(err)));
     }
 
+    fn handle_trap_on(&mut self, trap_on: ScriptTrapOn) -> ScriptValue {
+        match trap_on {
+            ScriptTrapOn::Pause => NIL,
+            ScriptTrapOn::Return(value) => {
+                self.bx.threads.cur().instruction_limit_remaining = None;
+                value
+            }
+            ScriptTrapOn::Bail(value) => {
+                // Stack corruption or resource limits: unwind calls to find our
+                // root frame and truncate all stacks back to a clean state.
+                loop {
+                    if let Some(call) = self.bx.threads.cur().calls.pop() {
+                        self.bx
+                            .threads
+                            .cur()
+                            .truncate_bases(call.bases, &mut self.bx.heap);
+                        if call.return_ip.is_none() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                self.bx.threads.cur().instruction_limit_remaining = None;
+                value
+            }
+        }
+    }
+
+    pub fn with_instruction_limit<R>(
+        &mut self,
+        instruction_limit: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_remaining = self.bx.threads.cur_ref().instruction_limit_remaining;
+        self.bx.threads.cur().instruction_limit_remaining = Some(
+            previous_remaining
+                .map(|remaining| remaining.min(instruction_limit))
+                .unwrap_or(instruction_limit),
+        );
+        let result = f(self);
+        if !self.bx.threads.cur_ref().is_paused() {
+            self.bx.threads.cur().instruction_limit_remaining = previous_remaining;
+        }
+        result
+    }
+
     pub fn heap(&self) -> &ScriptHeap {
         &self.bx.heap
     }
@@ -526,6 +573,31 @@ impl<'a> ScriptVm<'a> {
         let mut opcodes_len: usize = 0;
 
         loop {
+            let instruction_limit_exceeded = if let Some(remaining) =
+                self.bx.threads.cur().instruction_limit_remaining.as_mut()
+            {
+                if *remaining == 0 {
+                    true
+                } else {
+                    *remaining -= 1;
+                    false
+                }
+            } else {
+                false
+            };
+            if instruction_limit_exceeded {
+                let err = script_err_limit!(
+                    self.bx.threads.cur_ref().trap,
+                    "script instruction limit exceeded"
+                );
+                if self.bx.silence_errors {
+                    self.bx.threads.cur().trap.err.borrow_mut().clear();
+                } else {
+                    self.drain_errors();
+                }
+                return self.handle_trap_on(ScriptTrapOn::Bail(err));
+            }
+
             let thread = self.bx.threads.cur();
             let body_index = thread.trap.ip.body as usize;
             let ip_index = thread.trap.ip.index as usize;
@@ -561,28 +633,8 @@ impl<'a> ScriptVm<'a> {
                 }
                 // Check with get() first to avoid unnecessary write in common case (None)
                 if self.bx.threads.cur().trap.on.get().is_some() {
-                    match self.bx.threads.cur().trap.on.take().unwrap() {
-                        ScriptTrapOn::Pause => return NIL,
-                        ScriptTrapOn::Return(value) => return value,
-                        ScriptTrapOn::Bail(value) => {
-                            // Stack corruption — unwind calls to find our root frame
-                            // and truncate all stacks back to clean state
-                            loop {
-                                if let Some(call) = self.bx.threads.cur().calls.pop() {
-                                    self.bx
-                                        .threads
-                                        .cur()
-                                        .truncate_bases(call.bases, &mut self.bx.heap);
-                                    if call.return_ip.is_none() {
-                                        break; // found the root of this run_core
-                                    }
-                                } else {
-                                    break; // calls stack empty
-                                }
-                            }
-                            return value;
-                        }
-                    }
+                    let trap_on = self.bx.threads.cur().trap.on.take().unwrap();
+                    return self.handle_trap_on(trap_on);
                 }
             } else {
                 // its a direct value-to-stack

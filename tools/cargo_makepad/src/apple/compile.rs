@@ -1017,38 +1017,43 @@ pub fn copy_resources(
             cp_all(source_dir, &dst_dir, false)?;
             Ok(())
         };
-    let add_font_assets_dir = |crate_name: &str, source_dir: &Path, resource_dir: &Path| -> Result<(), String> {
-        if !source_dir.is_dir() {
-            return Ok(());
-        }
-        let crate_name = crate_name.replace('-', "_");
-        let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
-        let assets = ls(source_dir)?;
-        for path in &assets {
-            let ext = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.to_ascii_lowercase());
-            if !matches!(
-                ext.as_deref(),
-                Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
-            ) {
-                continue;
+    let add_font_assets_dir =
+        |crate_name: &str, source_dir: &Path, resource_dir: &Path| -> Result<(), String> {
+            if !source_dir.is_dir() {
+                return Ok(());
             }
-            // Skip files that already ship from the sibling `resources/` dir —
-            // otherwise the same TTF lands in the bundle twice. The widgets crate
-            // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
-            if resource_dir.join(path).is_file() {
-                continue;
+            let crate_name = crate_name.replace('-', "_");
+            let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
+            let assets = ls(source_dir)?;
+            for path in &assets {
+                let ext = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase());
+                if !matches!(
+                    ext.as_deref(),
+                    Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
+                ) {
+                    continue;
+                }
+                // Skip files that already ship from the sibling `resources/` dir —
+                // otherwise the same TTF lands in the bundle twice. The widgets crate
+                // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
+                if resource_dir.join(path).is_file() {
+                    continue;
+                }
+                cp(&source_dir.join(path), &dst_dir.join(path), false)?;
             }
-            cp(&source_dir.join(path), &dst_dir.join(path), false)?;
-        }
-        Ok(())
-    };
+            Ok(())
+        };
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     add_assets_dir(build_crate, &build_crate_dir.join("resources"), "resources")?;
-    add_font_assets_dir(build_crate, &build_crate_dir.join("fonts"), &build_crate_dir.join("resources"))?;
+    add_font_assets_dir(
+        build_crate,
+        &build_crate_dir.join("fonts"),
+        &build_crate_dir.join("resources"),
+    )?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
     for (name, dep_dir) in deps.iter() {
