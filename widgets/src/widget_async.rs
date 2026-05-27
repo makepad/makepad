@@ -1,7 +1,7 @@
 use {
     crate::makepad_draw::*,
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
-    crate::widget::WidgetUid,
+    crate::widget::{WidgetRef, WidgetUid},
     crate::widget_tree::CxWidgetExt,
     std::any::Any,
     std::collections::{HashMap, VecDeque},
@@ -9,6 +9,7 @@ use {
 };
 
 static SCRIPT_ASYNC_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub(crate) const WIDGET_SCRIPT_INSTRUCTION_LIMIT: usize = 200_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScriptAsyncId(u64);
@@ -296,7 +297,9 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         let ui_handle = self.build_ui_handle_for_uid(target_uid);
         let call_args =
             self.make_call_args_object_with_context(source.as_object(), ui_handle, args);
-        let result = self.call_with_args_object_with_me(script_fn.clone().into(), call_args, me);
+        let result = self.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+            vm.call_with_args_object_with_me(script_fn.clone().into(), call_args, me)
+        });
 
         let thread = self.bx.threads.cur_ref();
         if thread.is_paused() {
@@ -582,7 +585,21 @@ fn register_ui_handle(vm: &mut ScriptVm) {
 
             // Script UI handles intentionally use upward flood search semantics:
             // look in current subtree first, then expand outward through ancestors.
-            let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(target_uid, &[prop]));
+            let child_ref = vm.with_cx(|cx| {
+                let child_ref = cx.widget_tree().find_flood(target_uid, &[prop]);
+                if !child_ref.is_empty() {
+                    return child_ref;
+                }
+
+                let mut matches = cx
+                    .widget_tree()
+                    .find_all_anywhere_including_skipped(&[prop]);
+                if matches.len() == 1 {
+                    return matches.pop().unwrap();
+                }
+
+                WidgetRef::empty()
+            });
             if child_ref.is_empty() {
                 return script_err_not_found!(vm.trap(), "widget '{:?}' not found in tree", prop);
             }
@@ -687,11 +704,13 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                         ui_handle,
                         req.args,
                     );
-                    let _ = vm.call_with_args_object_with_me(
-                        req.script_fn.clone().into(),
-                        call_args,
-                        req.me,
-                    );
+                    let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                        vm.call_with_args_object_with_me(
+                            req.script_fn.clone().into(),
+                            call_args,
+                            req.me,
+                        )
+                    });
                 }
             });
             continue;

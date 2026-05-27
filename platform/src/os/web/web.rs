@@ -1080,6 +1080,7 @@ impl Cx {
     }
 }
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_time_now() -> f64;
 }
