@@ -1377,6 +1377,9 @@ impl Cx {
                 CxOsOp::StartDragging(items) => {
                     self.os.internal_drag_items = Some(Arc::new(items));
                 }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
+                    IosApp::set_status_bar_dark_icons(dark_icons);
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
