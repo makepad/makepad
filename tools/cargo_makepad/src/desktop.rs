@@ -362,8 +362,7 @@ fn sign_macos_artifacts(args: &[String], sign: &MacosSignOptions) -> Result<(), 
     let binary_name =
         get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
     let identity = resolve_codesign_identity(sign.cert.as_deref())?;
-    let entitlements =
-        maybe_write_generated_entitlements(args, build_crate, &binary_name, sign)?;
+    let entitlements = maybe_write_generated_entitlements(args, build_crate, &binary_name, sign)?;
     let entitlements_ref = entitlements.as_deref();
 
     let bin = binary_path(args, &binary_name);
@@ -375,14 +374,27 @@ fn sign_macos_artifacts(args: &[String], sign: &MacosSignOptions) -> Result<(), 
             binary_name
         ));
     }
-    codesign_path(&bin, &identity, entitlements_ref, sign.runtime || sign.debugger)?;
+    codesign_path(
+        &bin,
+        &identity,
+        entitlements_ref,
+        sign.runtime || sign.debugger,
+    )?;
     println!("[cargo-makepad] macOS signed binary: {}", bin.display());
 
     let profile = get_profile_from_args(args);
     let app_dir = macos_app_bundle_path_for(&binary_name, &profile);
     if app_dir.is_dir() {
-        codesign_path(&app_dir, &identity, entitlements_ref, sign.runtime || sign.debugger)?;
-        println!("[cargo-makepad] macOS signed app bundle: {}", app_dir.display());
+        codesign_path(
+            &app_dir,
+            &identity,
+            entitlements_ref,
+            sign.runtime || sign.debugger,
+        )?;
+        println!(
+            "[cargo-makepad] macOS signed app bundle: {}",
+            app_dir.display()
+        );
     }
 
     Ok(())

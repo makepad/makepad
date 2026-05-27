@@ -3137,6 +3137,20 @@ impl ScriptParser {
                 }
             }
             State::BeginExpr { required } => {
+                if !required
+                    && matches!(
+                        self.state.last(),
+                        Some(State::EmitReturn { .. } | State::EmitBreak { .. })
+                    )
+                    && (id == id!(let)
+                        || id == id!(var)
+                        || id == id!(use)
+                        || id == id!(return)
+                        || id == id!(break)
+                        || id == id!(continue))
+                {
+                    return 0;
+                }
                 if let Some(index) = tok.as_rust_value() {
                     self.push_code(values[index as usize], self.index);
                     self.state.push(State::EndExpr);
@@ -3986,7 +4000,7 @@ impl ScriptParser {
                 steps_zero = 0;
             }
             // println!("{:?} {:?}", self.code, self.state);
-            if self.state.len() <= 1 && steps_zero > 1000 {
+            if steps_zero > 1000 {
                 error!(
                     self,
                     tokenizer,
@@ -4163,7 +4177,7 @@ impl ScriptParser {
             } else {
                 steps_zero = 0;
             }
-            if self.state.len() <= 1 && steps_zero > 1000 {
+            if steps_zero > 1000 {
                 error!(
                     self,
                     tokenizer,

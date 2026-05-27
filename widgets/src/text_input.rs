@@ -630,7 +630,12 @@ impl TextInput {
             let text = self.text.clone();
             cx.with_vm(|vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
-                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
             });
         }
     }
@@ -641,7 +646,12 @@ impl TextInput {
             let text = self.text.clone();
             cx.with_vm(|vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
-                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
             });
         }
     }

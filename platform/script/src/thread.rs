@@ -94,6 +94,7 @@ pub struct ScriptThread {
     pub(crate) stack: Vec<ScriptValue>,
     pub(crate) calls: Vec<CallFrame>,
     pub(crate) mes: Vec<ScriptMe>,
+    pub(crate) instruction_limit_remaining: Option<usize>,
     pub trap: ScriptTrapInner,
     //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
@@ -113,6 +114,7 @@ impl ScriptThread {
             stack: vec![],
             calls: vec![],
             mes: vec![],
+            instruction_limit_remaining: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
         }

@@ -115,9 +115,7 @@ impl KeyboardView {
         let keyboard_top = window_inner_size.y - keyboard_height;
         let ime_natural_bottom = ime_rect.pos.y + ime_rect.size.y + self.keyboard_shift;
         let needed = ime_natural_bottom + self.keyboard_min_shift - keyboard_top;
-        needed
-            .max(0.0)
-            .min(keyboard_height)
+        needed.max(0.0).min(keyboard_height)
     }
 
     fn set_keyboard_shift(&mut self, cx: &mut Cx, shift: f64) {

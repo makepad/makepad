@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -13,15 +13,24 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Splash {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[deref]
-    pub view: View,
+    #[find]
+    #[live]
+    pub view: WidgetRef,
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[walk]
+    walk: Walk,
     #[live]
     body: ArcStringMut,
 }
 
 const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
+const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
 
 impl Splash {
     /// Stable identity for the streaming script body, based on pointer address.
@@ -51,11 +60,14 @@ impl Splash {
         };
 
         cx.with_vm(|vm| {
-            let value = vm.eval_with_append_source(script_mod, &code, NIL.into());
+            let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+                vm.eval_with_append_source(script_mod, &code, NIL.into())
+            });
             if !value.is_err() && !value.is_nil() {
-                self.view = View::script_from_value(vm, value);
+                self.view = WidgetRef::script_from_value(vm, value);
             }
         });
+        cx.widget_tree_mark_dirty(self.uid);
     }
 }
 
