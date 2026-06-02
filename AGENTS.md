@@ -13,6 +13,7 @@
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
 - Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
+- When adding a new example crate, update both the Cargo workspace and `makepad.splash` so Studio exposes the new example as a runnable item.
 
 ## Assumptions
 - Studio is started manually by the user.

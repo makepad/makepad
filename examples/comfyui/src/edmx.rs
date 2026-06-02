@@ -344,19 +344,27 @@ script_mod! {
     use mod.std
     use mod.net
 
-    mod.edmx = {
-        http_body: "
-        <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:20;background:#fff;color:#000;display:flex;height:100vh;overflow:hidden'>
-        <b id='d' style='font:5vw sans-serif'></b>
-        <script>
-        u = location.origin + location.pathname + '?' + location.pathname.slice(1);
-        f = () => {
-            fetch(u)
-            .then(r => r.ok ? r.text() : null)
-            .then(t => { if (t !== null) d.innerText = t })
-            .catch(e => 0)
-            .finally(() => setTimeout(f, 1000));
-        };
+	    mod.edmx = {
+	        http_body: "
+	        <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:0;background:#fff;color:#000;width:100vw;height:100vh;overflow:hidden'>
+	        <img id='i' style='width:100vw;height:100vh;object-fit:contain;display:block'>
+	        <b id='d' style='position:absolute;left:20px;right:20px;bottom:20px;font:3vw sans-serif;background:rgba(255,255,255,.8)'></b>
+	        <script>
+	        last = '';
+	        f = () => {
+	            fetch(location.origin + '/current.txt?' + Date.now(), {cache:'no-store'})
+	            .then(r => r.ok ? r.text() : '')
+	            .then(t => {
+	                t = (t || '').trim();
+	                if (t && t !== last) {
+	                    last = t;
+	                    i.src = location.origin + '/image?' + encodeURIComponent(t);
+	                    d.innerText = '';
+	                }
+	            })
+	            .catch(e => 0)
+	            .finally(() => setTimeout(f, 1000));
+	        };
         f();
         </script>
         </body>
@@ -396,7 +404,7 @@ script_mod! {
                 program_id: "com.samsung.ios.ePaper"
                 content_type: "ImageContent"
                 deploy_type: "MOBILE"
-            }.to_json()
+            }.to_json().replace(regex("/", "g"), "\\/")
         }
 
         mdc_wait_for_command: |socket, command_id| {

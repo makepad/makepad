@@ -19,7 +19,7 @@ use {
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         scroll_bar::{ScrollAxis, ScrollBar},
         widget::*,
-        widget_async::ScriptAsyncResult,
+        widget_async::{CxSplashVmExt, ScriptAsyncResult},
     },
     std::rc::Rc,
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
@@ -628,7 +628,8 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
         if let Some(handler) = self.on_change.as_object() {
             let text = self.text.clone();
-            cx.with_vm(|vm| {
+            let vm_id = cx.widget_vm_id(uid);
+            cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
@@ -644,7 +645,8 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
         if let Some(handler) = self.on_return.as_object() {
             let text = self.text.clone();
-            cx.with_vm(|vm| {
+            let vm_id = cx.widget_vm_id(uid);
+            cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(
                     crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
