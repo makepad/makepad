@@ -41,6 +41,8 @@ pub fn define_makepad_view_controller() -> *const Class {
 
     decl.add_ivar::<BOOL>("_prefersStatusBarHidden");
     decl.add_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden");
+    // UIStatusBarStyle raw value: 0 = Default, 1 = LightContent, 3 = DarkContent.
+    decl.add_ivar::<i64>("_preferredStatusBarStyle");
 
     extern "C" fn prefers_status_bar_hidden(this: &Object, _: Sel) -> BOOL {
         unsafe { *this.get_ivar("_prefersStatusBarHidden") }
@@ -48,6 +50,10 @@ pub fn define_makepad_view_controller() -> *const Class {
 
     extern "C" fn prefers_home_indicator_auto_hidden(this: &Object, _: Sel) -> BOOL {
         unsafe { *this.get_ivar("_prefersHomeIndicatorAutoHidden") }
+    }
+
+    extern "C" fn preferred_status_bar_style(this: &Object, _: Sel) -> i64 {
+        unsafe { *this.get_ivar("_preferredStatusBarStyle") }
     }
 
     // Called by iOS when the safe area insets change (e.g., device rotation).
@@ -73,6 +79,10 @@ pub fn define_makepad_view_controller() -> *const Class {
         decl.add_method(
             sel!(prefersHomeIndicatorAutoHidden),
             prefers_home_indicator_auto_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(preferredStatusBarStyle),
+            preferred_status_bar_style as extern "C" fn(&Object, Sel) -> i64,
         );
         decl.add_method(
             sel!(viewSafeAreaInsetsDidChange),

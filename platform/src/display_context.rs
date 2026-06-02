@@ -4,7 +4,8 @@ use crate::Vec2d;
 const DEFAULT_MIN_DESKTOP_WIDTH: f64 = 860.;
 
 /// Controls how the system bars (status bar and navigation bar) icons and
-/// text are tinted, on platforms that support it (currently Android only).
+/// text are tinted, on platforms that support it (currently Android and iOS;
+/// iOS only has a status bar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SystemBarAppearance {
     /// Pick dark or light system-bar icons automatically based on the
