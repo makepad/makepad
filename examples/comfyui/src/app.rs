@@ -19,7 +19,7 @@ script_mod! {
         Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false}
         Display{mac:"28:07:08:2C:D9:42" ip:"10.0.0.198" landscape:true}
         Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.204" landscape:true}
-        Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true}
+    //    Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true}
     ]
 
     let models = {
@@ -50,10 +50,13 @@ script_mod! {
     let auto_task_pending = false
     let background_tasks = []
     let messages = []
+    let current_file_id = ""
     let current_content_json = "{}"
     let current_image_data = []
     let content_json_by_file = {}
     let image_data_by_file = {}
+    let content_request_count_by_file = {}
+    let image_request_count_by_file = {}
 
     fn ui_log(line){
         let old = ui.log_view.text()
@@ -123,18 +126,36 @@ script_mod! {
         }))
     }
 
-    fn queue_upload(display, content_url){
-        background_tasks.push(std.task(|task| {
-            ui_log("Uploading to EMDX " + display.ip)
-            let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
-            if upload_result == nil || ok{upload_result.is_ok} != true {
-                let err = ok{upload_result.error}
-                if err == nil err = "EDMX upload failed"
-                ui_log("" + err)
-                return
-            }
-            ui_log("Upload done for " + display.ip)
-        }))
+    fn wait_for_image_request(file_id, timeout_seconds){
+        let waited = 0
+        loop{
+            let count = image_request_count_by_file[file_id]
+            if count != nil && count > 0 return true
+            if waited >= timeout_seconds return false
+            sleep_seconds(1)
+            waited += 1
+        }
+    }
+
+    fn upload_to_display(display, content_url, file_id){
+        set_status("Uploading to EMDX " + display.ip)
+        let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
+        if upload_result == nil || ok{upload_result.is_ok} != true {
+            let err = ok{upload_result.error}
+            if err == nil err = "EMDX upload failed"
+            set_status("" + err)
+            return false
+        }
+
+        ui_log("EMDX accepted content for " + display.ip)
+        set_status("Waiting for display image fetch " + display.ip)
+        if wait_for_image_request(file_id, 90){
+            set_status("Upload done for " + display.ip)
+            return true
+        }
+
+        set_status("Timed out waiting for display image fetch " + display.ip)
+        false
     }
 
     fn start_auto_loop(){
@@ -311,17 +332,34 @@ script_mod! {
     }
 
     fn http_response(headers, displays){
-        let requested_file_id = headers.search
+        let requested_file_id = if headers.search != nil && headers.search != "" headers.search else current_file_id
+        if headers.path == "/current.txt"{
+            let body = current_file_id
+            return net.HttpServerResponse{
+                header:
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/plain; charset=utf-8\r\n" +
+                    "Cache-Control: no-store, max-age=0\r\n" +
+                    "Content-Length: " + body.len() + "\r\n" +
+                    "Connection: close\r\n\r\n"
+                body: body
+            }
+        }
         if headers.path == "/content.json"{
-            std.println("Content.json loaded")
             let body = current_content_json
             if requested_file_id != nil && requested_file_id != "" && content_json_by_file[requested_file_id] != nil{
                 body = content_json_by_file[requested_file_id]
+            }
+            if requested_file_id != nil && requested_file_id != ""{
+                let count = content_request_count_by_file[requested_file_id]
+                content_request_count_by_file[requested_file_id] = if count == nil 1 else count + 1
+                std.println("Served content.json " + requested_file_id)
             }
             return net.HttpServerResponse{
                 header:
                     "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Cache-Control: no-store, max-age=0\r\n" +
                     "Content-Length: " + body.len() + "\r\n" +
                     "Connection: close\r\n\r\n"
                 body: body
@@ -333,13 +371,17 @@ script_mod! {
                 body = image_data_by_file[requested_file_id]
             }
             if body.len() > 0{
-                std.println("Uploading image")
+                if requested_file_id != nil && requested_file_id != ""{
+                    let count = image_request_count_by_file[requested_file_id]
+                    image_request_count_by_file[requested_file_id] = if count == nil 1 else count + 1
+                    std.println("Served image " + requested_file_id)
+                }
                 return net.HttpServerResponse{
                     header:
                         "HTTP/1.1 200 OK\r\n" +
                         "Content-Type: image/png\r\n" +
                         "Accept-Ranges: bytes\r\n" +
-                        "Cache-Control: public, max-age=0\r\n" +
+                        "Cache-Control: no-store, max-age=0\r\n" +
                         "Content-Length: " + body.len() + "\r\n" +
                         "Connection: close\r\n\r\n"
                     body: body
@@ -481,19 +523,21 @@ script_mod! {
 
         let file_id = "EDMX" + std.random_u32() + std.random_u32()
         let content_json = mod.edmx.build_content_json(self_ip, "3000", file_id, data.len())
+        current_file_id = file_id
         current_image_data = data
         current_content_json = content_json
         image_data_by_file[file_id] = data
         content_json_by_file[file_id] = content_json
+        image_request_count_by_file[file_id] = 0
+        content_request_count_by_file[file_id] = 0
         set_preview_image(data)
         display.prompt = visual_description + " - " + style_keywords
 
         set_status("Image ready for " + display.ip)
+        let content_url = "http://" + self_ip + ":3000/content.json"
+        let uploaded = upload_to_display(display, content_url, file_id)
         finish_run()
-
-        let content_url = "http://" + self_ip + ":3000/content.json?" + file_id
-        queue_upload(display, content_url)
-        true
+        uploaded
     }
 
     let app = startup() do #(App::script_component(vm)){
