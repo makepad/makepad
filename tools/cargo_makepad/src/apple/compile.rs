@@ -448,12 +448,30 @@ impl Scent {
     }
 }
 
-/// Generate and compile an Asset Catalog with AppIcon from the crate's
-/// `resources/` directory.  Requires a 1024×1024 PNG at minimum
-/// (`icon_1024.png`).  Smaller sizes are optional; iOS will scale down
-/// from the largest available.
+/// Generate and compile an Asset Catalog with AppIcon for iOS.
+///
+/// Two sources are supported, in priority order:
+/// 1. A project-supplied catalog at `<crate>/packaging/ios/icons/Assets.xcassets/`
+///    with an `AppIcon.appiconset/` inside. This is preferred because iOS
+///    icons must be fully opaque with no baked-in rounded corners — the
+///    macOS-style `resources/icon_1024.png` (transparent corners, baked
+///    squircle, drop shadow) renders with a black border on iOS.
+/// 2. Fallback: synthesize a catalog from `resources/icon_1024.png`.
 fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool, String> {
     let crate_dir = get_crate_dir(build_crate)?;
+
+    let project_xcassets = crate_dir
+        .join("packaging")
+        .join("ios")
+        .join("icons")
+        .join("Assets.xcassets");
+    if project_xcassets.join("AppIcon.appiconset").is_dir() {
+        let xcassets = app_dir.join("Assets.xcassets");
+        cp_all(&project_xcassets, &xcassets, false)?;
+        copy_loose_iphone_icons(&xcassets.join("AppIcon.appiconset"), app_dir)?;
+        return compile_xcassets(&xcassets, app_dir);
+    }
+
     let res = crate_dir.join("resources");
     let icon_1024 = res.join("icon_1024.png");
     if !icon_1024.is_file() {
@@ -600,7 +618,35 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
         r#"{"info":{"author":"cargo-makepad","version":1}}"#,
     )?;
 
-    // Compile with actool
+    compile_xcassets(&xcassets, app_dir)
+}
+
+/// Copy the iPhone/iPad primary icon PNGs from a project-supplied
+/// AppIcon.appiconset into the bundle root with iOS's conventional
+/// `<basename>@<scale>x[~ipad].png` filenames. These act as a fallback for
+/// the CFBundleIcons entries actool merges into Info.plist, so iOS can
+/// still find an icon if `Assets.car` is missing, stale, or unreadable.
+/// Source filenames not present are silently skipped.
+fn copy_loose_iphone_icons(appiconset: &Path, app_dir: &Path) -> Result<(), String> {
+    let pairs: &[(&str, &str)] = &[
+        ("AppIcon120x120.png", "AppIcon60x60@2x.png"),
+        ("AppIcon180x180.png", "AppIcon60x60@3x.png"),
+        ("AppIcon152x152.png", "AppIcon76x76@2x~ipad.png"),
+        ("AppIcon167x167.png", "AppIcon83.5x83.5@2x~ipad.png"),
+    ];
+    for (src_name, dst_name) in pairs {
+        let src = appiconset.join(src_name);
+        if src.is_file() {
+            cp(&src, &app_dir.join(dst_name), false)?;
+        }
+    }
+    Ok(())
+}
+
+/// Invoke `actool` to compile an Assets.xcassets directory into `Assets.car`
+/// inside `app_dir`, then merge actool's partial Info.plist (which contains
+/// the CFBundleIcons keys iOS 15 expects) into the app's main Info.plist.
+fn compile_xcassets(xcassets: &Path, app_dir: &Path) -> Result<bool, String> {
     let cwd = std::env::current_dir().unwrap();
     shell_env_cap(
         &[],
@@ -622,12 +668,9 @@ fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool,
         ],
     )?;
 
-    // Merge actool's partial Info.plist (contains CFBundleIcons for iOS 15)
-    // into the main Info.plist.
     let actool_plist = app_dir.join("actool-Info.plist");
     if actool_plist.is_file() {
         let main_plist = app_dir.join("Info.plist");
-        // PlistBuddy Merge copies all keys from source into destination
         shell_env_cap(
             &[],
             &cwd,
