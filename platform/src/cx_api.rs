@@ -261,7 +261,8 @@ pub enum CxOsOp {
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
     /// Tints the system bar (status/navigation bar) icons: `true` requests
-    /// dark icons, `false` requests light icons. Currently only Android.
+    /// dark icons, `false` requests light icons. Honored on Android and iOS
+    /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
 
     ShowTextIME(Area, Vec2d, TextInputConfig),

@@ -263,6 +263,8 @@ impl IosApp {
             let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
             (*view_ctrl_obj).set_ivar::<BOOL>("_prefersStatusBarHidden", NO);
             (*view_ctrl_obj).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", NO);
+            // 0 = UIStatusBarStyleDefault (system-managed light/dark).
+            (*view_ctrl_obj).set_ivar::<i64>("_preferredStatusBarStyle", 0);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -1074,6 +1076,31 @@ impl IosApp {
                 (*vc).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", val);
                 let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
                 let () = msg_send![vc, setNeedsUpdateOfHomeIndicatorAutoHidden];
+            }
+        }
+    }
+
+    /// Sets the iOS status bar icon/text tint: `true` requests dark icons
+    /// (for light backgrounds), `false` requests light icons (for dark
+    /// backgrounds). iOS has no separate navigation bar.
+    pub fn set_status_bar_dark_icons(dark_icons: bool) {
+        // Same re-entrancy guard as set_fullscreen: borrow briefly to grab the
+        // view controller, then make UIKit calls outside the borrow.
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(vc) = vc {
+            // UIStatusBarStyleDarkContent = 3 (iOS 13+), UIStatusBarStyleLightContent = 1.
+            let style: i64 = if dark_icons { 3 } else { 1 };
+            unsafe {
+                (*vc).set_ivar::<i64>("_preferredStatusBarStyle", style);
+                let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
             }
         }
     }

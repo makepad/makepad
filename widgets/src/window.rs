@@ -714,9 +714,10 @@ impl Window {
     ///
     /// In `Auto` mode the tint follows the window background luminance: a light
     /// background needs dark icons for contrast, and vice versa. `DarkIcons` /
-    /// `LightIcons` force the choice. Currently only Android honors this.
+    /// `LightIcons` force the choice. Honored on Android and iOS (iOS has no
+    /// separate navigation bar, so only the status bar is affected).
     fn sync_system_bar_appearance(&mut self, cx: &mut Cx) {
-        if !matches!(cx.os_type(), OsType::Android(_)) {
+        if !matches!(cx.os_type(), OsType::Android(_) | OsType::Ios(_)) {
             return;
         }
         let dark_icons = match cx.display_context.system_bar_appearance {
