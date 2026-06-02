@@ -85,6 +85,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-windows-blur"}
     RunStudioRelease{name: "makepad-example-splash"}
     RunStudioRelease{name: "makepad-example-slides"}
+    RunStudioRelease{name: "makepad-example-isolate"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}

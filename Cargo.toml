@@ -8,6 +8,7 @@ workspace.members = [
     "examples/arracing",
     "examples/splash",
     "examples/slides",
+    "examples/isolate",
     "examples/uizoo",
     "examples/charts",
     "examples/scratchpad",
