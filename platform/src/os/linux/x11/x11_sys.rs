@@ -248,6 +248,17 @@ pub const XK_Left: u32 = 65361;
 pub const XK_Right: u32 = 65363;
 pub const XK_Down: u32 = 65364;
 pub const XK_Up: u32 = 65362;
+pub const XK_Insert: u32 = 0xff63;
+pub const XK_KP_Home: u32 = 0xff95;
+pub const XK_KP_Left: u32 = 0xff96;
+pub const XK_KP_Up: u32 = 0xff97;
+pub const XK_KP_Right: u32 = 0xff98;
+pub const XK_KP_Down: u32 = 0xff99;
+pub const XK_KP_Page_Up: u32 = 0xff9a;
+pub const XK_KP_Page_Down: u32 = 0xff9b;
+pub const XK_KP_End: u32 = 0xff9c;
+pub const XK_KP_Insert: u32 = 0xff9e;
+pub const XK_KP_Delete: u32 = 0xff9f;
 
 pub const LC_CTYPE: c_int = 0;
 
