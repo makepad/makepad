@@ -21,6 +21,8 @@ script_mod! {
         opacity: 1.0
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
+        fit_scale: vec2(1.0, 1.0)
+        fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
         rotation: 0.0
 
@@ -43,7 +45,10 @@ script_mod! {
         }
 
         get_color: fn() {
-            return self.get_color_scale_pan(self.image_scale, self.image_pan)
+            return self.get_color_scale_pan(
+                self.fit_scale * self.image_scale,
+                self.fit_pan * self.image_scale + self.image_pan
+            )
         }
 
         pixel: fn() {
@@ -71,6 +76,10 @@ pub struct DrawImage {
     pub image_scale: Vec2f,
     #[live]
     pub image_pan: Vec2f,
+    #[live]
+    fit_scale: Vec2f,
+    #[live]
+    fit_pan: Vec2f,
     #[live]
     async_load: f32,
     #[live]
@@ -382,6 +391,42 @@ impl Widget for Image {
 }
 
 impl Image {
+    fn set_crop_to_fill_transform(
+        &mut self,
+        source_width: f64,
+        source_height: f64,
+        target_width: f64,
+        target_height: f64,
+    ) {
+        if !source_width.is_finite()
+            || !source_height.is_finite()
+            || !target_width.is_finite()
+            || !target_height.is_finite()
+            || source_width <= 0.0
+            || source_height <= 0.0
+            || target_width <= 0.0
+            || target_height <= 0.0
+        {
+            self.draw_bg.fit_scale = vec2(1.0, 1.0);
+            self.draw_bg.fit_pan = vec2(0.0, 0.0);
+            return;
+        }
+
+        let source_aspect = source_width / source_height;
+        let target_aspect = target_width / target_height;
+        let mut crop_scale = vec2(1.0, 1.0);
+
+        if source_aspect > target_aspect {
+            crop_scale.x = (target_aspect / source_aspect) as f32;
+        } else {
+            crop_scale.y = (source_aspect / target_aspect) as f32;
+        }
+
+        let crop_pan = (vec2(1.0, 1.0) - crop_scale) * 0.5;
+        self.draw_bg.fit_scale = crop_scale;
+        self.draw_bg.fit_pan = crop_pan;
+    }
+
     /// Returns the original size of the image in pixels (not its displayed size).
     ///
     /// Returns `None` if the image has not been loaded into a texture yet.
@@ -453,12 +498,22 @@ impl Image {
         } else {
             rect.size.y.min(height_cap)
         };
+        self.draw_bg.fit_scale = vec2(1.0, 1.0);
+        self.draw_bg.fit_pan = vec2(0.0, 0.0);
         match self.fit {
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
                 walk.height = Size::Fixed(height);
             }
             ImageFit::Stretch => {}
+            ImageFit::CropToFill => {
+                self.set_crop_to_fill_transform(
+                    width,
+                    height,
+                    rect.size.x,
+                    avail_height,
+                );
+            }
             ImageFit::Horizontal => {
                 walk.height = Size::Fixed(rect.size.x / aspect);
             }
