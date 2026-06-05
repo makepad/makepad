@@ -49,6 +49,13 @@ script_mod! {
                 show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
                 Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Biggest}
             }
+
+            Hr{}
+            H4{text: "fit: CropToFill"}
+            View{
+                show_bg: true draw_bg +: {color: uniform(theme.color_inset_1)} width: Fill height: 150
+                Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.CropToFill}
+            }
         }
     }
 }
