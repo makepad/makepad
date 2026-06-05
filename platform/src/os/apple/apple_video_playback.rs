@@ -40,7 +40,14 @@ pub struct AppleVideoPlayer {
     texture_id: TextureId,
     is_prepared: bool,
     prepare_notified: bool,
+    /// "Start playback as soon as the asset is ready." One-shot intent consumed
+    /// in `check_prepared`. Do NOT use to drive stall recovery in `poll_frame` —
+    /// once a user-initiated pause has occurred, autoplay must not resurrect playback.
     autoplay: bool,
+    /// Tracks the most recent user/widget play-vs-pause command. `poll_frame`
+    /// uses this (not `autoplay`) to decide whether a rate-0 AVPlayer should be
+    /// nudged back into playing, so a user-initiated pause sticks.
+    should_play: bool,
     is_looping: bool,
     temp_file_path: Option<std::path::PathBuf>,
 }
@@ -118,6 +125,7 @@ impl AppleVideoPlayer {
                 is_prepared: false,
                 prepare_notified: false,
                 autoplay,
+                should_play: autoplay,
                 is_looping,
                 temp_file_path,
             }
@@ -361,9 +369,12 @@ impl AppleVideoPlayer {
         }
 
         unsafe {
-            // Force play if rate dropped to 0 (e.g. AVPlayer stalled or was never started)
+            // Nudge rate=0 back to playing only when the most recent command was
+            // play/resume; never when the user has paused. Using `autoplay` here
+            // ignored user pause intent and made `[AVPlayer pause]` immediately
+            // overridden by the next poll.
             let rate: f32 = msg_send![self.player.as_id(), rate];
-            if rate == 0.0 && self.autoplay {
+            if rate == 0.0 && self.should_play {
                 let _: () = msg_send![self.player.as_id(), play];
             }
 
@@ -461,19 +472,21 @@ impl AppleVideoPlayer {
         }
     }
 
-    pub fn play(&self) {
+    pub fn play(&mut self) {
+        self.should_play = true;
         unsafe {
             let _: () = msg_send![self.player.as_id(), play];
         }
     }
 
-    pub fn pause(&self) {
+    pub fn pause(&mut self) {
+        self.should_play = false;
         unsafe {
             let _: () = msg_send![self.player.as_id(), pause];
         }
     }
 
-    pub fn resume(&self) {
+    pub fn resume(&mut self) {
         self.play();
     }
 

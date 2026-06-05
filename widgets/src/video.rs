@@ -505,9 +505,13 @@ impl ScriptHook for Video {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        // Gate the side-effects in on_after_apply so they don't run for animator-driven applies. E.g. Mouse hover in.
-        // If not, apply_thumbnail_settings will flush the thumbnail texture when mouse hover in.
-        if apply.is_animate() { return; }
+        // Skip widget-level side effects for animator-driven applies (hover/seek
+        // indicator transitions fire one apply per frame). Otherwise
+        // apply_thumbnail_settings would re-decode the PNG/JPG thumbnail and
+        // allocate a fresh GPU texture on every animator frame.
+        if apply.is_animate() {
+            return;
+        }
         vm.with_cx_mut(|cx| {
             self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
@@ -1038,7 +1042,10 @@ impl Video {
 
     fn apply_thumbnail_settings(&mut self, cx: &mut Cx) {
         self.lazy_create_image_cache(cx);
-        self.thumbnail_texture = Some(Texture::new(cx));
+        // Don't pre-allocate an empty thumbnail texture here: load_thumbnail_image
+        // (via load_png_from_data / load_jpg_from_data) already calls set_texture
+        // with a fresh GPU texture containing the decoded image. Allocating a
+        // throwaway Texture::new(cx) first was just churning GPU resources.
 
         let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
         let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
