@@ -855,8 +855,14 @@ impl IosApp {
             .try_with(|app| {
                 app.try_borrow_mut().ok().and_then(|mut app_ref| {
                     let app = app_ref.as_mut()?;
+                    // Skip the re-park when the caret hasn't moved (blink redraws
+                    // re-emit the same pos), so the candidate window doesn't churn.
+                    if app.ime_position == Some(pos) {
+                        return None;
+                    }
+                    let view = app.text_input_view?;
                     app.ime_position = Some(pos);
-                    app.text_input_view
+                    Some(view)
                 })
             })
             .ok()
