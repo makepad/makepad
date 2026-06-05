@@ -1427,6 +1427,24 @@ struct SlugHelperPrewarmState {
     requested_redraw_id: u64,
 }
 
+/// Returns true only when `area` still references live GPU instances left over from a
+/// *previous* redraw (`instance_count > 0` and a stale `redraw_id`).
+///
+/// The slug/raster text paths use this to decide whether a draw item must be redrawn to
+/// clear stale glyphs when a run switches rendering path. It must reject two cases that
+/// would otherwise cause a per-frame `redraw_area_in_draw` — i.e. a permanent ~100% CPU
+/// continuous-repaint loop:
+///   - count == 0: an empty batch (e.g. a whitespace-only run, whose glyphs have no
+///     raster image) was begun and finished this frame; there is nothing to clear.
+///   - a *valid* (current-redraw) area: the area was already drawn this frame, either by
+///     this run or by another `draw_text` call sharing the same instance (text is drawn
+///     in resumable chunks), so its draw item is up to date.
+/// `Area::is_valid` returns false for count == 0, so the explicit count check is required.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn area_holds_stale_content(area: &Area, cx: &Cx) -> bool {
+    matches!(area, Area::Instance(inst) if inst.instance_count > 0) && !area.is_valid(cx)
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Default)]
 struct SlugPromotionState {
@@ -2669,20 +2687,20 @@ impl DrawText {
                 }
                 if !drew_slug_this_frame {
                     let old_area = slug_draw.draw_vars.area;
-                    if !old_area.is_empty() {
+                    if area_holds_stale_content(&old_area, cx.cx) {
                         cx.cx.redraw_area_in_draw(old_area);
+                        slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                     }
-                    slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
                 self.slug_draw = Some(slug_draw);
             }
             // Don't clobber the outer batch's area if we've handed it back.
             if !drew_raster_this_frame && self.many_instances.is_none() {
                 let old_area = self.draw_vars.area;
-                if !old_area.is_empty() {
+                if area_holds_stale_content(&old_area, cx.cx) {
                     cx.cx.redraw_area_in_draw(old_area);
+                    self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
-                self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
             }
             return;
         }
