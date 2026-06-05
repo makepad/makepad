@@ -15,6 +15,14 @@ pub struct OpenglCx {
 
     pub egl_platform: egl_sys::EGLenum,
     pub egl_platform_display: *mut c_void,
+
+    /// Buffer swap interval requested on the window surface. `1` (the default) enables
+    /// vsync so `eglSwapBuffers` blocks until the next refresh, capping the render loop
+    /// at the display rate. Without this, content that drives a continuous redraw (e.g.
+    /// any shader whose mapping `uses_time`, which forces `demo_time_repaint`) would spin
+    /// the event loop rendering as fast as possible, pinning a CPU/GPU core. Set the
+    /// `MAKEPAD_NO_VSYNC` env var to request `0` (uncapped) for benchmarking.
+    pub swap_interval: egl_sys::EGLint,
 }
 
 fn egl_error_name(error: egl_sys::EGLint) -> &'static str {
@@ -208,6 +216,12 @@ impl OpenglCx {
         })
         .expect("Cant load openGL functions");
 
+        let swap_interval = if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() {
+            0
+        } else {
+            1
+        };
+
         OpenglCx {
             libegl,
             libgl,
@@ -217,6 +231,7 @@ impl OpenglCx {
 
             egl_platform,
             egl_platform_display,
+            swap_interval,
         }
     }
 
@@ -260,6 +275,12 @@ impl Cx {
                     egl_error_name(egl_error)
                 );
                 return;
+            }
+            // Apply the configured swap interval (vsync) on the now-current window surface.
+            // Re-applied per frame because it is surface-scoped and surfaces are recreated
+            // on resize; the call is cheap and idempotent.
+            if let Some(egl_swap_interval) = opengl_cx.libegl.eglSwapInterval {
+                (egl_swap_interval)(opengl_cx.egl_display, opengl_cx.swap_interval);
             }
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }

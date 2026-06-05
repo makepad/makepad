@@ -1048,6 +1048,12 @@ impl WaylandCx {
 
     pub(crate) fn handle_repaint(&self, state: &mut WaylandState) {
         let mut cx = self.cx.borrow_mut();
+        // Skip the eglMakeCurrent + full pass-list scan when there is nothing to draw.
+        // demo_time_repaint forces a redraw of time-animated passes (see
+        // compute_pass_repaint_order), so it must keep us rendering.
+        if !cx.any_passes_dirty() && !cx.demo_time_repaint {
+            return;
+        }
         cx.os.opengl_cx.as_ref().unwrap().make_current();
         let mut passes_todo = Vec::new();
         cx.compute_pass_repaint_order(&mut passes_todo);
