@@ -428,6 +428,16 @@ impl X11Cx {
     }
 
     pub(crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
+        {
+            // Paint is emitted on every idle poll/timer tick. If no pass is dirty there is
+            // nothing to draw, so skip the eglMakeCurrent + full pass-list scan below.
+            // demo_time_repaint forces a redraw of time-animated passes (see
+            // compute_pass_repaint_order), so it must keep us rendering.
+            let cx = self.cx.borrow();
+            if !cx.any_passes_dirty() && !cx.demo_time_repaint {
+                return;
+            }
+        }
         let mut passes_todo = Vec::new();
         {
             let mut cx = self.cx.borrow_mut();
