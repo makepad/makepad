@@ -20,6 +20,7 @@ import android.graphics.Insets;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.input.InputManager;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.MediaCodec;
@@ -38,6 +39,7 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.ActionMode;
 import android.view.Display;
+import android.view.InputDevice;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.KeyEvent;
@@ -553,7 +555,8 @@ class MakepadSurface
     public boolean onKey(View v, int keyCode, KeyEvent event) {
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
-            MakepadNative.surfaceOnKeyDown(keyCode, metaState);
+            boolean isRepeat = event.getRepeatCount() > 0;
+            MakepadNative.surfaceOnKeyDown(keyCode, metaState, isRepeat);
         }
 
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
@@ -1001,6 +1004,9 @@ public class MakepadActivity
 
     private MakepadSurface view;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private InputManager mInputManager;
+    private InputManager.InputDeviceListener mInputDeviceListener;
+    private Boolean mPhysicalKeyboardConnected;
 
     // video playback
     Handler mVideoPlaybackHandler;
@@ -1050,6 +1056,73 @@ public class MakepadActivity
 
     static {
         System.loadLibrary("makepad");
+    }
+
+    private boolean isPhysicalTextKeyboard(InputDevice device) {
+        return device != null
+            && device.isEnabled()
+            && !device.isVirtual()
+            && device.supportsSource(InputDevice.SOURCE_KEYBOARD)
+            && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+    }
+
+    private boolean hasPhysicalTextKeyboard() {
+        if (mInputManager == null) {
+            return false;
+        }
+        for (int id : mInputManager.getInputDeviceIds()) {
+            if (isPhysicalTextKeyboard(mInputManager.getInputDevice(id))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void reportPhysicalKeyboardIfChanged() {
+        boolean connected = hasPhysicalTextKeyboard();
+        if (mPhysicalKeyboardConnected != null
+                && mPhysicalKeyboardConnected.booleanValue() == connected) {
+            return;
+        }
+        mPhysicalKeyboardConnected = Boolean.valueOf(connected);
+        MakepadNative.surfaceOnPhysicalKeyboardChanged(connected);
+    }
+
+    private void registerPhysicalKeyboardListener() {
+        if (mInputManager == null) {
+            mInputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        }
+        if (mInputManager == null) {
+            return;
+        }
+        if (mInputDeviceListener == null) {
+            mInputDeviceListener = new InputManager.InputDeviceListener() {
+                @Override
+                public void onInputDeviceAdded(int deviceId) {
+                    reportPhysicalKeyboardIfChanged();
+                }
+
+                @Override
+                public void onInputDeviceRemoved(int deviceId) {
+                    reportPhysicalKeyboardIfChanged();
+                }
+
+                @Override
+                public void onInputDeviceChanged(int deviceId) {
+                    reportPhysicalKeyboardIfChanged();
+                }
+            };
+            mInputManager.registerInputDeviceListener(mInputDeviceListener, mHandler);
+        }
+        reportPhysicalKeyboardIfChanged();
+    }
+
+    private void unregisterPhysicalKeyboardListener() {
+        if (mInputManager != null && mInputDeviceListener != null) {
+            mInputManager.unregisterInputDeviceListener(mInputDeviceListener);
+        }
+        mInputDeviceListener = null;
+        mInputManager = null;
     }
 
     private void cacheWarmResumeSurfaceSnapshot(Bitmap snapshot) {
@@ -1240,6 +1313,7 @@ public class MakepadActivity
         updateTaskDescription();
 
         MakepadNative.activityOnCreate(this);
+        registerPhysicalKeyboardListener();
 
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
@@ -1281,6 +1355,7 @@ public class MakepadActivity
         restoreSurfaceViewForWarmResumeIfNeeded();
         updateTaskDescription();
         MakepadNative.activityOnResume();
+        reportPhysicalKeyboardIfChanged();
 
         //% MAIN_ACTIVITY_ON_RESUME
     }
@@ -1301,6 +1376,7 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        unregisterPhysicalKeyboardListener();
         if (mCameraPreviewOverlay != null) {
             for (Long videoId : mCameraPreviewViews.keySet()) {
                 MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);

@@ -109,6 +109,7 @@ impl Cx {
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
         let time = Win32Time::new();
+        self.set_physical_keyboard_state(true);
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
 

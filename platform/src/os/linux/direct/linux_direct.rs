@@ -73,6 +73,7 @@ impl Cx {
 
         cx.os_type = OsType::LinuxDirect;
         cx.gpu_info.performance = GpuPerformance::Tier1;
+        cx.set_physical_keyboard_state(true);
 
         cx.call_event_handler(&Event::Startup);
         cx.redraw_all();

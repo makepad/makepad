@@ -46,6 +46,7 @@ impl Cx {
         // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
         cx.borrow_mut().os.d3d11_device = Some(d3d11_cx.borrow().device.clone());
 
+        cx.borrow_mut().set_physical_keyboard_state(true);
         if crate::app_main::should_run_stdin_loop_from_env() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
