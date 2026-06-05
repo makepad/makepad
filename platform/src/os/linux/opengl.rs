@@ -1313,10 +1313,16 @@ impl GlShader {
                                             program as usize,
                                             "",
                                         ) {
-                                            crate::error!(
-                                                "ERROR::SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}",
+                                            // A cached program binary that no longer loads is
+                                            // expected and recoverable (e.g. after a GPU driver
+                                            // update changes the binary format). The caller falls
+                                            // back to compiling from source and overwrites this
+                                            // stale entry, so warn rather than error.
+                                            crate::warning!(
+                                                "Ignoring stale shader cache entry (will recompile): SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}",
                                                 error
                                             );
+                                            (gl.glDeleteProgram)(program);
                                             return None;
                                         }
                                         return Some(program);
