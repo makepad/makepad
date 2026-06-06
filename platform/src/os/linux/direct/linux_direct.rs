@@ -136,6 +136,14 @@ impl Cx {
                 //let p = profile_start();
                 self.handle_repaint(direct_app);
                 //profile_end("paint openGL", p);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend, so the script object heap doesn't grow without bound.
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                    }
+                });
             }
             DirectEvent::MouseDown(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
