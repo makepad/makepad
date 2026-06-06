@@ -638,16 +638,45 @@ pub fn define_cocoa_view_class() -> *const Class {
                 marked_text.init_with_string(string);
             };
             *marked_text_ref = marked_text;
+
+            // Echo the composition (marked) text into the focused TextInput so it
+            // renders inline as the user types with an IME (e.g. CJK pinyin).
+            // `replace_last = true` tells the widget to treat this as a composition
+            // preview, replacing the previous preview; an empty string clears it.
+            // Without this, nothing shows until the IME commits a final character.
+            // (iOS does the equivalent in its own `set_marked_text`.)
+            let characters: ObjcId = if has_attr {
+                msg_send![string, string]
+            } else {
+                string
+            };
+            let composition = nsstring_to_string(characters);
+            get_cocoa_window(this).send_text_input(composition, true);
         }
+    }
+
+    // Clears the stored marked-text ivar and tells the input context the
+    // composition is finished. Does NOT notify the TextInput widget, so callers
+    // that have already updated/committed the widget can use it directly without
+    // emitting a second (and possibly destructive) text-input event.
+    unsafe fn clear_marked_text_ivar(this: &Object) {
+        let marked_text: ObjcId = *this.get_ivar("markedText");
+        let mutable_string = marked_text.mutable_string();
+        let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
+        let input_context: ObjcId = msg_send![this, inputContext];
+        let _: () = msg_send![input_context, discardMarkedText];
     }
 
     extern "C" fn unmark_text(this: &Object, _sel: Sel) {
         unsafe {
-            let marked_text: ObjcId = *this.get_ivar("markedText");
-            let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
-            let input_context: ObjcId = msg_send![this, inputContext];
-            let _: () = msg_send![input_context, discardMarkedText];
+            // AppKit asks us to discard the in-progress composition (e.g. the user
+            // pressed Escape or the input session was interrupted). Remove the
+            // inline preview from the focused TextInput, then clear our state.
+            // (After a commit, `insert_text` clears the ivar directly instead of
+            // routing through here, so this only fires for genuine discards and is
+            // a no-op when the widget has no active composition.)
+            get_cocoa_window(this).send_text_input(String::new(), true);
+            clear_marked_text_ivar(this);
         }
     }
 
@@ -719,7 +748,10 @@ pub fn define_cocoa_view_class() -> *const Class {
             let input_context: ObjcId = msg_send![this, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             let () = msg_send![cw.view, setNeedsDisplay: YES];
-            unmark_text(this, _sel);
+            // The commit above already replaced any composition preview in the
+            // widget; just clear our marked-text state (don't route through
+            // `unmark_text`, which would emit a second text-input event).
+            clear_marked_text_ivar(this);
         }
     }
 

@@ -49,8 +49,9 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmAssociateContext, ImmGetContext, ImmReleaseContext,
-                            ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM, HIMC,
+                            ImmAssociateContext, ImmGetCompositionStringW, ImmGetContext,
+                            ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
+                            GCS_COMPSTR, GCS_RESULTSTR, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -80,7 +81,8 @@ use {
                         LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
                         SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
                         WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-                        WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+                        WM_EXITSIZEMOVE, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+                        WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
                         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
                         WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
                         WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -285,6 +287,34 @@ impl Win32Window {
         if self.is_fullscreen {
             self.maximize();
         }
+    }
+
+    /// Reads an IME composition string (`GCS_COMPSTR` for the in-progress
+    /// preedit, or `GCS_RESULTSTR` for the committed text) from the input
+    /// context as a Rust `String`. Returns `Some("")` for an empty string and
+    /// `None` only on error.
+    unsafe fn imm_get_composition_string(himc: HIMC, index: u32) -> Option<String> {
+        // A null buffer makes ImmGetCompositionStringW return the required byte
+        // length (the W variant returns UTF-16 code units, i.e. 2 bytes each).
+        let byte_len = ImmGetCompositionStringW(himc, index, std::ptr::null_mut(), 0);
+        if byte_len < 0 {
+            return None;
+        }
+        if byte_len == 0 {
+            return Some(String::new());
+        }
+        let mut buf = vec![0u16; byte_len as usize / 2];
+        let written = ImmGetCompositionStringW(
+            himc,
+            index,
+            buf.as_mut_ptr() as *mut c_void,
+            byte_len as u32,
+        );
+        if written <= 0 {
+            return Some(String::new());
+        }
+        let len = (written as usize / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
     }
 
     pub unsafe extern "system" fn window_class_proc(
@@ -598,6 +628,59 @@ impl Win32Window {
                         ImmReleaseContext(hwnd, himc).unwrap();
                     }
                 }
+            }
+            WM_IME_COMPOSITION => {
+                let himc = ImmGetContext(hwnd);
+                if !himc.is_invalid() {
+                    let flags = lparam.0 as u32;
+                    // GCS_RESULTSTR: the finalized text. Commit it with
+                    // `replace_last = false`, which replaces any active composition
+                    // preview and then clears the composition. We commit here (and
+                    // consume the message below) so DefWindowProc does NOT also
+                    // synthesize WM_CHAR for the same result and double-insert.
+                    if flags & GCS_RESULTSTR != 0 {
+                        if let Some(result) =
+                            Self::imm_get_composition_string(himc, GCS_RESULTSTR)
+                        {
+                            if !result.is_empty() {
+                                window.do_callback(Win32Event::TextInput(TextInputEvent {
+                                    input: result,
+                                    was_paste: false,
+                                    replace_last: false,
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+                    }
+                    // GCS_COMPSTR: the in-progress preedit. Show it inline with
+                    // `replace_last = true`; an empty string clears the preview.
+                    if flags & GCS_COMPSTR != 0 {
+                        let comp = Self::imm_get_composition_string(himc, GCS_COMPSTR)
+                            .unwrap_or_default();
+                        window.do_callback(Win32Event::TextInput(TextInputEvent {
+                            input: comp,
+                            was_paste: false,
+                            replace_last: true,
+                            ..Default::default()
+                        }));
+                    }
+                    let _ = ImmReleaseContext(hwnd, himc);
+                }
+                // Falls through to `return LRESULT(1)`, consuming the message so
+                // DefWindowProc draws no default composition window and synthesizes
+                // no WM_CHAR/WM_IME_CHAR for the result handled above.
+            }
+            WM_IME_ENDCOMPOSITION => {
+                // Composition finished or was cancelled. Clear any leftover inline
+                // preview (a no-op if it was already committed/cleared). This
+                // handles IMEs that end composition without first sending an empty
+                // GCS_COMPSTR (e.g. some Escape/cancel paths).
+                window.do_callback(Win32Event::TextInput(TextInputEvent {
+                    input: String::new(),
+                    was_paste: false,
+                    replace_last: true,
+                    ..Default::default()
+                }));
             }
             WM_ENTERSIZEMOVE => {
                 with_win32_app(|app| app.start_resize());

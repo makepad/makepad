@@ -19,6 +19,201 @@ pub fn get_xlib_app_global() -> &'static mut XlibApp {
     unsafe { &mut *(XLIB_APP) }
 }
 
+thread_local! {
+    // Accumulates the XIM on-the-spot preedit (composition) string. The Xlib
+    // callbacks below run synchronously inside `XFilterEvent`, where the event
+    // loop already holds `&mut XlibApp`; to avoid re-entrant access they only
+    // touch this thread-local, and the loop drains it into the focused TextInput
+    // right after `XFilterEvent` returns.
+    static XIM_PREEDIT: RefCell<XimPreedit> = RefCell::new(XimPreedit {
+        text: String::new(),
+        dirty: false,
+    });
+}
+
+struct XimPreedit {
+    text: String,
+    dirty: bool,
+}
+
+// Splice `insert` into `buf`, replacing `char_len` characters starting at
+// character index `char_first` (XIM preedit change indices are in characters).
+fn xim_preedit_replace(buf: &mut String, char_first: usize, char_len: usize, insert: &str) {
+    let byte_start = buf
+        .char_indices()
+        .nth(char_first)
+        .map(|(i, _)| i)
+        .unwrap_or(buf.len());
+    let byte_end = buf
+        .char_indices()
+        .nth(char_first + char_len)
+        .map(|(i, _)| i)
+        .unwrap_or(buf.len());
+    if byte_start <= byte_end {
+        buf.replace_range(byte_start..byte_end, insert);
+    }
+}
+
+// XIM preedit start: reset our buffer and report "no length limit" (-1).
+unsafe extern "C" fn xim_preedit_start(
+    _ic: x11_sys::XIC,
+    _client: x11_sys::XPointer,
+    _call: x11_sys::XPointer,
+) -> c_int {
+    XIM_PREEDIT.with(|p| {
+        let mut p = p.borrow_mut();
+        p.text.clear();
+        p.dirty = false;
+    });
+    -1
+}
+
+// XIM preedit done: composition finished or was cancelled; clear the preview.
+unsafe extern "C" fn xim_preedit_done(
+    _ic: x11_sys::XIC,
+    _client: x11_sys::XPointer,
+    _call: x11_sys::XPointer,
+) {
+    XIM_PREEDIT.with(|p| {
+        let mut p = p.borrow_mut();
+        if !p.text.is_empty() {
+            p.text.clear();
+            p.dirty = true;
+        }
+    });
+}
+
+// XIM preedit caret: the caret moved within the preedit. We render the whole
+// preedit inline with the caret at its end, so there is nothing to do here.
+unsafe extern "C" fn xim_preedit_caret(
+    _ic: x11_sys::XIC,
+    _client: x11_sys::XPointer,
+    _call: x11_sys::XPointer,
+) {
+}
+
+// XIM preedit draw: the IM edits the preedit string in place. Splice the change
+// into our buffer and flag it so the event loop forwards the new preedit.
+unsafe extern "C" fn xim_preedit_draw(
+    _ic: x11_sys::XIC,
+    _client: x11_sys::XPointer,
+    call: x11_sys::XPointer,
+) {
+    if call.is_null() {
+        return;
+    }
+    let draw = &*(call as *const x11_sys::XIMPreeditDrawCallbackStruct);
+    let chg_first = draw.chg_first.max(0) as usize;
+    let chg_length = draw.chg_length.max(0) as usize;
+    let insert = if draw.text.is_null() {
+        // Null text means a pure deletion of `chg_length` characters.
+        String::new()
+    } else {
+        let text = &*draw.text;
+        if text.string.is_null() || text.encoding_is_wchar != 0 {
+            // We only handle the multi-byte (locale-encoded, typically UTF-8)
+            // form; the string is NUL-terminated per Xlib.
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(text.string)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    XIM_PREEDIT.with(|p| {
+        let mut p = p.borrow_mut();
+        xim_preedit_replace(&mut p.text, chg_first, chg_length, &insert);
+        p.dirty = true;
+    });
+}
+
+/// Creates an input context for `window`, preferring XIM on-the-spot
+/// (`XIMPreeditCallbacks`) so the in-progress composition (preedit) text is
+/// delivered to us for inline display. Falls back to `XIMPreeditNothing` (no
+/// inline preview, but committed text still arrives via `Xutf8LookupString`) if
+/// the input method server doesn't support callbacks. Returns `None` if there is
+/// no XIM or context creation fails entirely.
+pub unsafe fn create_xim_input_context(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+) -> Option<x11_sys::XIC> {
+    if xim.is_null() {
+        return None;
+    }
+
+    let start_cb = x11_sys::XIMCallback {
+        client_data: ptr::null_mut(),
+        // The preedit-start callback returns an int (max length); transmute its
+        // signature into the void-returning XIMProc the struct field expects.
+        callback: mem::transmute::<
+            unsafe extern "C" fn(x11_sys::XIC, x11_sys::XPointer, x11_sys::XPointer) -> c_int,
+            x11_sys::XIMProc,
+        >(xim_preedit_start),
+    };
+    let draw_cb = x11_sys::XIMCallback {
+        client_data: ptr::null_mut(),
+        callback: Some(xim_preedit_draw),
+    };
+    let done_cb = x11_sys::XIMCallback {
+        client_data: ptr::null_mut(),
+        callback: Some(xim_preedit_done),
+    };
+    let caret_cb = x11_sys::XIMCallback {
+        client_data: ptr::null_mut(),
+        callback: Some(xim_preedit_caret),
+    };
+
+    // Xlib copies the callback values into the IC, so these locals only need to
+    // outlive XCreateIC.
+    let preedit_attr = x11_sys::XVaCreateNestedList(
+        0,
+        x11_sys::XNPreeditStartCallback.as_ptr(),
+        &start_cb,
+        x11_sys::XNPreeditDrawCallback.as_ptr(),
+        &draw_cb,
+        x11_sys::XNPreeditDoneCallback.as_ptr(),
+        &done_cb,
+        x11_sys::XNPreeditCaretCallback.as_ptr(),
+        &caret_cb,
+        ptr::null_mut::<c_void>(),
+    );
+    if !preedit_attr.is_null() {
+        let xic = x11_sys::XCreateIC(
+            xim,
+            x11_sys::XNInputStyle.as_ptr(),
+            (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as i32,
+            x11_sys::XNClientWindow.as_ptr(),
+            window,
+            x11_sys::XNFocusWindow.as_ptr(),
+            window,
+            x11_sys::XNPreeditAttributes.as_ptr(),
+            preedit_attr,
+            ptr::null_mut::<c_void>(),
+        );
+        x11_sys::XFree(preedit_attr);
+        if !xic.is_null() {
+            return Some(xic);
+        }
+    }
+
+    // Fallback: let the IM server own the preedit display.
+    let xic = x11_sys::XCreateIC(
+        xim,
+        x11_sys::XNInputStyle.as_ptr(),
+        (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
+        x11_sys::XNClientWindow.as_ptr(),
+        window,
+        x11_sys::XNFocusWindow.as_ptr(),
+        window,
+        ptr::null_mut::<c_void>(),
+    );
+    if xic.is_null() {
+        None
+    } else {
+        Some(xic)
+    }
+}
+
 pub fn init_xlib_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) {
     unsafe {
         XLIB_APP = Box::into_raw(Box::new(XlibApp::new(event_callback)));
@@ -102,9 +297,14 @@ impl XlibApp {
             let mut event = mem::MaybeUninit::uninit();
             x11_sys::XNextEvent(self.display, event.as_mut_ptr());
             let mut event = event.assume_init();
-            if x11_sys::XFilterEvent(&mut event as *mut x11_sys::XEvent, x11_sys::None as c_ulong)
-                != 0
-            {
+            let filtered = x11_sys::XFilterEvent(
+                &mut event as *mut x11_sys::XEvent,
+                x11_sys::None as c_ulong,
+            ) != 0;
+            // The IM may have updated the on-the-spot preedit (composition) string
+            // via callbacks during XFilterEvent; forward it before continuing.
+            self.drain_xim_preedit();
+            if filtered {
                 continue;
             }
             match event.type_ as u32 {
@@ -743,6 +943,30 @@ impl XlibApp {
                     }
                 }
             }
+        }
+    }
+
+    // Forward any pending XIM on-the-spot preedit (composition) update collected
+    // by the callbacks to the focused TextInput as an inline preview. Called from
+    // the event loop right after `XFilterEvent`. `replace_last = true` means the
+    // widget treats it as a composition preview (an empty string clears it).
+    fn drain_xim_preedit(&mut self) {
+        let pending = XIM_PREEDIT.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.dirty {
+                p.dirty = false;
+                Some(p.text.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(text) = pending {
+            self.do_callback(XlibEvent::TextInput(TextInputEvent {
+                input: text,
+                replace_last: true,
+                was_paste: false,
+                ..Default::default()
+            }));
         }
     }
 

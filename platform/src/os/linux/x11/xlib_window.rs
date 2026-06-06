@@ -234,20 +234,7 @@ impl XlibWindow {
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
 
-            let xic = if !get_xlib_app_global().xim.is_null() {
-                Some(x11_sys::XCreateIC(
-                    get_xlib_app_global().xim,
-                    x11_sys::XNInputStyle.as_ptr(),
-                    (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                    x11_sys::XNClientWindow.as_ptr(),
-                    window,
-                    x11_sys::XNFocusWindow.as_ptr(),
-                    window,
-                    ptr::null_mut() as *mut c_void,
-                ))
-            } else {
-                None
-            };
+            let xic = create_xim_input_context(get_xlib_app_global().xim, window);
 
             // Create a window
             get_xlib_app_global().window_map.insert(window, self);
@@ -339,23 +326,14 @@ impl XlibWindow {
             x11_sys::XMapRaised(display, window);
             x11_sys::XFlush(display);
 
-            let xic = x11_sys::XCreateIC(
-                get_xlib_app_global().xim,
-                x11_sys::XNInputStyle.as_ptr(),
-                (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                x11_sys::XNClientWindow.as_ptr(),
-                window,
-                x11_sys::XNFocusWindow.as_ptr(),
-                window,
-                ptr::null_mut() as *mut c_void,
-            );
+            let xic = create_xim_input_context(get_xlib_app_global().xim, window);
 
             get_xlib_app_global().window_map.insert(window, self);
 
             self.attributes = Some(attributes);
             self.visual_info = Some(visual_info);
             self.window = Some(window);
-            self.xic = Some(xic);
+            self.xic = xic;
             self.last_window_geom = self.get_window_geom();
 
             let new_geom = self.get_window_geom();

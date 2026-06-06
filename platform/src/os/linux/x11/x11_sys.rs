@@ -1,6 +1,6 @@
 #![allow(non_upper_case_globals)]
 
-use std::os::raw::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_ulong, c_ushort, c_void};
 
 pub type Display = _XDisplay;
 
@@ -101,6 +101,7 @@ pub const VisibilityUnobscured: i32 = 0;
 pub const VisibilityPartiallyObscured: i32 = 1;
 pub const VisibilityFullyObscured: i32 = 2;
 
+pub const XIMPreeditCallbacks: u32 = 2;
 pub const XIMPreeditNothing: u32 = 8;
 pub const XIMStatusNothing: u32 = 1024;
 
@@ -110,6 +111,42 @@ pub const XNFocusWindow: &'static [u8; 12usize] = b"focusWindow\0";
 pub const XNPreeditAttributes: &'static [u8; 18usize] = b"preeditAttributes\0";
 pub const XNSpotLocation: &'static [u8; 13usize] = b"spotLocation\0";
 pub const XNArea: &'static [u8; 5usize] = b"area\0";
+// On-the-spot preedit callback attribute names (sized `&[u8]` slices so we don't
+// have to hand-count the lengths; only `.as_ptr()` is ever used).
+pub const XNPreeditStartCallback: &[u8] = b"preeditStartCallback\0";
+pub const XNPreeditDrawCallback: &[u8] = b"preeditDrawCallback\0";
+pub const XNPreeditDoneCallback: &[u8] = b"preeditDoneCallback\0";
+pub const XNPreeditCaretCallback: &[u8] = b"preeditCaretCallback\0";
+
+// XIM on-the-spot preedit callback structures (see Xlib `XIMText`,
+// `XIMCallback`, `XIMPreeditDrawCallbackStruct`). `#[repr(C)]` reproduces the C
+// field layout (including the padding inserted after `length`/`chg_length`).
+pub type XIMFeedback = c_ulong;
+pub type XIMProc = Option<unsafe extern "C" fn(arg1: XIC, arg2: XPointer, arg3: XPointer)>;
+
+#[repr(C)]
+pub struct XIMCallback {
+    pub client_data: XPointer,
+    pub callback: XIMProc,
+}
+
+#[repr(C)]
+pub struct XIMText {
+    pub length: c_ushort,
+    pub feedback: *mut XIMFeedback,
+    pub encoding_is_wchar: c_int,
+    // C union of `char *multi_byte` / `wchar_t *wide_char`; we only read the
+    // multi-byte form (guarded by `encoding_is_wchar == 0`).
+    pub string: *mut c_char,
+}
+
+#[repr(C)]
+pub struct XIMPreeditDrawCallbackStruct {
+    pub caret: c_int,
+    pub chg_first: c_int,
+    pub chg_length: c_int,
+    pub text: *mut XIMText,
+}
 
 pub const Mod1Mask: u32 = 8;
 pub const ShiftMask: u32 = 1;
