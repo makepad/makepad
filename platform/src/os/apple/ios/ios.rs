@@ -781,6 +781,16 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend, so the script object heap doesn't grow without bound:
+                // every `eval` / `script_apply_eval!` allocates script objects that are
+                // only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                    }
+                });
             }
             IosEvent::TouchUpdate(mut e) => {
                 let window = &self.windows[e.window_id];
