@@ -290,6 +290,19 @@ impl WaylandCx {
                 // ok here we send out to all our childprocesses
 
                 self.handle_repaint(state);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend. Without this the script object heap grows without
+                // bound: every `eval` / `script_apply_eval!` allocates script objects
+                // that are only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
+                {
+                    let mut cx = self.cx.borrow_mut();
+                    cx.with_vm(|vm| {
+                        if vm.heap().needs_gc() {
+                            vm.gc();
+                        }
+                    });
+                }
             }
             XlibEvent::MouseMove(mut e) => {
                 let mut cx = self.cx.borrow_mut();
