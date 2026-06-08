@@ -25,23 +25,28 @@ script_mod! {
         fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
         rotation: 0.0
-
-        rotate_2d_from_center: fn(coord: vec2, angle_deg: float) -> vec2 {
-            let angle = angle_deg * 3.141592653589793 / 180.0
-            let cos_a = cos(-angle)
-            let sin_a = sin(-angle)
-            let centered = coord - vec2(0.5, 0.5)
-            let rotated = vec2(
-                centered.x * cos_a - centered.y * sin_a
-                centered.x * sin_a + centered.y * cos_a
-            )
-            return rotated + vec2(0.5, 0.5)
-        }
+        image_dim_w: 0.0
+        image_dim_h: 0.0
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
+            // When image_dim is set, rotate the image rigidly and aspect-correct:
+            // map each quad pixel back through the rotation into the image's own
+            // pixel rect, so non-square images aren't squished at any angle.
+            if self.image_dim_w > 0.0 {
+                let angle = self.rotation * 3.141592653589793 / 180.0
+                let cos_a = cos(-angle)
+                let sin_a = sin(-angle)
+                let c = (self.pos - vec2(0.5, 0.5)) * self.rect_size
+                let cr = vec2(c.x * cos_a - c.y * sin_a, c.x * sin_a + c.y * cos_a)
+                let iuv = cr / vec2(self.image_dim_w, self.image_dim_h) + vec2(0.5, 0.5)
+                let uv = iuv * scale + pan
+                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                return self.image_texture.sample_as_bgra(uv)
+            }
             let uv = self.pos * scale + pan
-            let rotated_uv = self.rotate_2d_from_center(uv, self.rotation)
-            return self.image_texture.sample_as_bgra(rotated_uv)
+            return self.image_texture.sample_as_bgra(uv)
         }
 
         get_color: fn() {
@@ -84,6 +89,14 @@ pub struct DrawImage {
     async_load: f32,
     #[live]
     pub rotation: f32,
+    /// When non-zero, `get_color` rotates the image rigidly (aspect-correct):
+    /// the image of this pixel size is rotated by `rotation` and inscribed in the
+    /// quad, instead of rotating texture UVs in normalized space (which squishes
+    /// non-square images). The image viewer drives these per frame.
+    #[live]
+    pub image_dim_w: f32,
+    #[live]
+    pub image_dim_h: f32,
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
@@ -148,6 +161,13 @@ pub struct Image {
     async_image_size: Option<(usize, usize)>,
     #[rust]
     texture: Option<Texture>,
+    /// `Some` only while showing an SVG (and `texture` is then `None`); lazily
+    /// allocated, so non-SVG images pay just a pointer, not a whole `DrawSvg`.
+    #[rust]
+    draw_svg: Option<Box<DrawSvg>>,
+    /// Animation clock (seconds) for animated SVGs, advanced via `next_frame`.
+    #[rust]
+    svg_time: f64,
 }
 
 impl ImageCacheImpl for Image {
@@ -157,6 +177,23 @@ impl ImageCacheImpl for Image {
 
     fn set_texture(&mut self, texture: Option<Texture>, _id: usize) {
         self.texture = texture;
+        // Keep the invariant that `draw_svg` is `Some` only while showing an SVG.
+        self.draw_svg = None;
+    }
+
+    fn load_image_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        if looks_like_svg(data) {
+            self.load_svg_from_data(cx, data)
+        } else {
+            let image = decode_image_from_data(data)?;
+            self.set_texture(Some(image.into_new_texture(cx)), id);
+            Ok(())
+        }
     }
 }
 
@@ -294,7 +331,11 @@ impl Widget for Image {
         }
         if let Some(nf) = self.next_frame.is_event(event) {
             // compute the next frame and patch things up
-            if let Some(image_texture) = &self.texture {
+            if self.draw_svg.is_some() {
+                // Animated SVG: advance the clock; the draw step reschedules.
+                self.svg_time = nf.time;
+                self.redraw(cx);
+            } else if let Some(image_texture) = &self.texture {
                 let (texture_width, texture_height) = image_texture
                     .get_format(cx)
                     .vec_width_height()
@@ -431,6 +472,11 @@ impl Image {
     ///
     /// Returns `None` if the image has not been loaded into a texture yet.
     pub fn size_in_pixels(&self, cx: &mut Cx) -> Option<(usize, usize)> {
+        if let Some(draw_svg) = self.draw_svg.as_ref() {
+            return draw_svg
+                .svg_size()
+                .map(|sz| (sz.x as usize, sz.y as usize));
+        }
         self.texture
             .as_ref()
             .and_then(|t| t.get_format(cx).vec_width_height())
@@ -441,8 +487,36 @@ impl Image {
         self.texture.is_some()
     }
 
+    /// Loads an SVG into this `Image` by parsing the UTF-8 SVG `data` and drawing
+    /// it with makepad's native vector engine instead of a raster texture.
+    ///
+    /// The `DrawSvg` is allocated on first use, so images that never show an SVG
+    /// carry only a null pointer.
+    pub fn load_svg_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        let svg_str = std::str::from_utf8(data).map_err(|_| ImageError::UnsupportedFormat)?;
+        if self.draw_svg.is_none() {
+            self.draw_svg = Some(cx.with_vm(|vm| Box::new(DrawSvg::script_new_with_default(vm))));
+        }
+        if let Some(draw_svg) = self.draw_svg.as_mut() {
+            draw_svg.load_from_str(svg_str);
+        }
+        self.texture = None;
+        self.redraw(cx);
+        Ok(())
+    }
+
     pub fn draw_walk_image(&mut self, cx: &mut Cx2d, mut walk: Walk) -> DrawStep {
         if !self.visible {
+            return DrawStep::done();
+        }
+        let svg_time = self.svg_time as f32;
+        if let Some(draw_svg) = self.draw_svg.as_mut() {
+            draw_svg.draw_walk_time(cx, walk, svg_time);
+            let animating = draw_svg.has_animations;
+            if animating {
+                // Keep ticking so SMIL/CSS-animated SVGs advance.
+                self.next_frame = cx.new_next_frame();
+            }
             return DrawStep::done();
         }
         // alright we get a walk. depending on our aspect ratio
@@ -693,6 +767,77 @@ impl ImageRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.lazy_create_image_cache(cx);
             ImageCacheImpl::load_png_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads a BMP into this `ImageRef` by decoding the given encoded BMP `data`.
+    pub fn load_bmp_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_bmp_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads a QOI into this `ImageRef` by decoding the given encoded QOI `data`.
+    pub fn load_qoi_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_qoi_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads an ICO into this `ImageRef` by decoding the given encoded ICO `data`.
+    pub fn load_ico_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_ico_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads a GIF into this `ImageRef` by decoding the given encoded GIF `data`.
+    pub fn load_gif_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_gif_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads a WebP into this `ImageRef` by decoding the given encoded WebP `data`.
+    pub fn load_webp_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_webp_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads an image into this `ImageRef` by decoding the given encoded `data`,
+    /// auto-detecting any image format that makepad supports (including SVG).
+    pub fn load_image_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.lazy_create_image_cache(cx);
+            ImageCacheImpl::load_image_from_data(&mut *inner, cx, data, 0)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// Loads an SVG into this `ImageRef` by rendering the given UTF-8 SVG `data`
+    /// with makepad's native vector engine.
+    pub fn load_svg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.load_svg_from_data(cx, data)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }

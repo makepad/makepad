@@ -107,10 +107,12 @@ workspace.exclude = [
     # vendored image libs (doctests reference original crate names)
     "libs/byteorder-lite",
     "libs/webp",
+    "libs/zune/zune-bmp",
     "libs/zune/zune-core",
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",
     "libs/zune/zune-png",
+    "libs/zune/zune-qoi",
     # vendored Vulkan crates (patched crates.io crates; tests/benches pull
     # upstream-only dev-deps or missing packaged assets)
     "libs/vulkan/arrayvec",

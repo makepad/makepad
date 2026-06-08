@@ -1,9 +1,12 @@
 use crate::makepad_platform::*;
 use makepad_gif::{ColorOutput, DecodeOptions, DisposalMethod};
 use makepad_webp::WebPDecoder;
+use makepad_zune_bmp::BmpDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
+use makepad_zune_png::makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::{post_process_image, PngDecoder};
+use makepad_zune_qoi::QoiDecoder;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -15,8 +18,10 @@ use std::time::Instant;
 
 pub use makepad_gif::DecodingError as GifDecodeErrors;
 pub use makepad_webp::DecodingError as WebpDecodeErrors;
+pub use makepad_zune_bmp::BmpDecoderErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 pub use makepad_zune_png::error::PngDecodeErrors;
+pub use makepad_zune_qoi::QoiErrors;
 
 #[derive(Debug, Default, Clone)]
 pub struct ImageBuffer {
@@ -100,7 +105,9 @@ impl ImageBuffer {
 
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
-        let mut decoder = PngDecoder::new(cursor);
+        // 16-bit PNGs (e.g. HDR iPhone screenshots) decode as u16 and fail our u8 path; strip to 8-bit.
+        let options = DecoderOptions::default().png_set_strip_to_8bit(true);
+        let mut decoder = PngDecoder::new_with_options(cursor, options);
         decoder.decode_headers()?;
 
         if decoder.is_animated() {
@@ -226,14 +233,44 @@ impl ImageBuffer {
         let mut decoder =
             WebPDecoder::new(std::io::BufReader::new(cursor)).map_err(ImageError::WebpDecode)?;
         let (width, height) = decoder.dimensions();
+        let (width, height) = (width as usize, height as usize);
         let buf_size = decoder
             .output_buffer_size()
             .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
-        let mut buf = vec![0u8; buf_size];
-        decoder
-            .read_image(&mut buf)
-            .map_err(ImageError::WebpDecode)?;
-        Self::new(&buf, width as usize, height as usize)
+
+        if !decoder.is_animated() {
+            let mut buf = vec![0u8; buf_size];
+            decoder.read_image(&mut buf).map_err(ImageError::WebpDecode)?;
+            return Self::new(&buf, width, height);
+        }
+
+        // Animated WebP: the decoder composites each frame onto its own canvas,
+        // so we just collect each composited frame (as RGBA) and its delay, then
+        // pack them into an animation atlas like GIF/APNG.
+        let has_alpha = decoder.has_alpha();
+        decoder.reset_animation();
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut frame_delays: Vec<f64> = Vec::new();
+        loop {
+            let mut buf = vec![0u8; buf_size];
+            match decoder.read_frame(&mut buf) {
+                Ok(delay_ms) => {
+                    frame_delays
+                        .push(if delay_ms == 0 { 0.1 } else { f64::from(delay_ms) * 0.001 });
+                    frames.push(if has_alpha { buf } else { rgb_to_rgba(&buf) });
+                }
+                Err(WebpDecodeErrors::NoMoreFrames) => break,
+                Err(err) => return Err(ImageError::WebpDecode(err)),
+            }
+        }
+
+        if frames.len() >= 2 {
+            Ok(Self::pack_animation_atlas(frames, frame_delays, width, height))
+        } else if let Some(frame) = frames.first() {
+            Self::new(frame, width, height)
+        } else {
+            Self::new(&vec![0u8; width * height * 4], width, height)
+        }
     }
 
     pub fn from_gif(data: &[u8]) -> Result<Self, ImageError> {
@@ -311,7 +348,18 @@ impl ImageBuffer {
             let rgba = frames.first().map(Vec::as_slice).unwrap_or(&canvas);
             return Self::new(rgba, width, height);
         }
+        Ok(Self::pack_animation_atlas(frames, frame_delays, width, height))
+    }
 
+    /// Packs multi-frame animation `frames` (each a full-canvas RGBA buffer of
+    /// `width`x`height`) into a single horizontal-grid atlas texture carrying the
+    /// per-frame `frame_delays` as a [`TextureAnimation`].
+    fn pack_animation_atlas(
+        frames: Vec<Vec<u8>>,
+        frame_delays: Vec<f64>,
+        width: usize,
+        height: usize,
+    ) -> ImageBuffer {
         let fits_horizontal = Cx::max_texture_width() / width;
         let total_width = fits_horizontal * width;
         let total_height = ((frames.len() / fits_horizontal) + 1) * height;
@@ -345,7 +393,7 @@ impl ImageBuffer {
                 cx = 0;
             }
         }
-        Ok(final_buffer)
+        final_buffer
     }
 
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
@@ -362,6 +410,44 @@ impl ImageBuffer {
                 ImageBuffer::new(&data, info.width as usize, info.height as usize)
             }
             Err(err) => Err(ImageError::JpgDecode(err)),
+        }
+    }
+
+    pub fn from_bmp(data: &[u8]) -> Result<Self, ImageError> {
+        let cursor = ZCursor::new(data);
+        let mut decoder = BmpDecoder::new(cursor);
+        decoder.decode_headers().map_err(ImageError::BmpDecode)?;
+        let (width, height) =
+            decoder
+                .dimensions()
+                .ok_or(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
+                    "Failed to get BMP image dimensions",
+                )))?;
+        let pixels = decoder.decode().map_err(ImageError::BmpDecode)?;
+        Self::new(&pixels, width, height)
+    }
+
+    pub fn from_qoi(data: &[u8]) -> Result<Self, ImageError> {
+        let cursor = ZCursor::new(data);
+        let mut decoder = QoiDecoder::new(cursor);
+        decoder.decode_headers().map_err(ImageError::QoiDecode)?;
+        let (width, height) =
+            decoder
+                .get_dimensions()
+                .ok_or(ImageError::QoiDecode(QoiErrors::GenericStatic(
+                    "Failed to get QOI image dimensions",
+                )))?;
+        let pixels = decoder.decode().map_err(ImageError::QoiDecode)?;
+        Self::new(&pixels, width, height)
+    }
+
+    pub fn from_ico(data: &[u8]) -> Result<Self, ImageError> {
+        let (offset, len, height) = ico_best_entry(data).ok_or(ImageError::UnsupportedFormat)?;
+        let payload = &data[offset..offset + len];
+        if detect_image_format(payload) == Some("png") {
+            ImageBuffer::from_png(payload)
+        } else {
+            ImageBuffer::from_bmp(&ico_dib_to_bmp(payload, height)?)
         }
     }
 }
@@ -408,6 +494,8 @@ pub enum ImageError {
     PngDecode(PngDecodeErrors),
     GifDecode(GifDecodeErrors),
     WebpDecode(WebpDecodeErrors),
+    BmpDecode(BmpDecoderErrors),
+    QoiDecode(QoiErrors),
     UnsupportedFormat,
     Http(String),
 }
@@ -465,6 +553,78 @@ fn headless_mode_enabled() -> bool {
     })
 }
 
+// Pick the largest image entry from an ICO directory, returning its payload's
+// (offset, length, height). Height comes from the directory entry since the
+// embedded DIB doubles its own height to cover a trailing AND mask.
+fn ico_best_entry(data: &[u8]) -> Option<(usize, usize, u32)> {
+    if data.len() < 6 {
+        return None;
+    }
+    let count = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let mut best: Option<(usize, usize, u32, u32)> = None; // offset, len, height, score
+    for i in 0..count {
+        let e = 6 + i * 16;
+        if e + 16 > data.len() {
+            break;
+        }
+        let width = if data[e] == 0 { 256 } else { data[e] as u32 };
+        let height = if data[e + 1] == 0 { 256 } else { data[e + 1] as u32 };
+        let bit_count = u16::from_le_bytes([data[e + 6], data[e + 7]]) as u32;
+        let len =
+            u32::from_le_bytes([data[e + 8], data[e + 9], data[e + 10], data[e + 11]]) as usize;
+        let offset =
+            u32::from_le_bytes([data[e + 12], data[e + 13], data[e + 14], data[e + 15]]) as usize;
+        if len == 0 || offset.saturating_add(len) > data.len() {
+            continue;
+        }
+        let score = width * height * 64 + bit_count;
+        if best.is_none_or(|(.., s)| score > s) {
+            best = Some((offset, len, height, score));
+        }
+    }
+    best.map(|(offset, len, height, _)| (offset, len, height))
+}
+
+// Wrap an ICO's bare DIB (a BITMAPINFOHEADER and pixels with no BMP file header)
+// into a standalone BMP the BMP decoder can read. The DIB doubles its height for
+// a trailing 1bpp AND mask we skip, so restore the real height from the directory.
+fn ico_dib_to_bmp(dib: &[u8], real_height: u32) -> Result<Vec<u8>, ImageError> {
+    if dib.len() < 40 {
+        return Err(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
+            "ICO DIB header too small",
+        )));
+    }
+    let header_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    let bit_count = u16::from_le_bytes([dib[14], dib[15]]) as u32;
+    let compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    let mut clr_used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]) as usize;
+    if bit_count <= 8 && clr_used == 0 {
+        clr_used = 1usize << bit_count;
+    }
+    let palette_bytes = if bit_count <= 8 { clr_used * 4 } else { 0 };
+    // A plain BITMAPINFOHEADER stores its bitfield masks between the header and pixels.
+    let mask_bytes = if header_size == 40 {
+        match compression {
+            3 => 12,
+            6 => 16,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let data_offset = 14 + header_size + mask_bytes + palette_bytes;
+    let file_size = 14 + dib.len();
+
+    let mut out = Vec::with_capacity(file_size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(file_size as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(data_offset as u32).to_le_bytes());
+    out.extend_from_slice(dib);
+    out[14 + 8..14 + 12].copy_from_slice(&(real_height as i32).to_le_bytes());
+    Ok(out)
+}
+
 fn detect_image_format(data: &[u8]) -> Option<&'static str> {
     if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
         Some("png")
@@ -481,6 +641,12 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
         && data[5] == 0x61
     {
         Some("gif")
+    } else if data.len() >= 2 && data[0] == 0x42 && data[1] == 0x4D {
+        Some("bmp")
+    } else if data.len() >= 4 && &data[0..4] == b"qoif" {
+        Some("qoi")
+    } else if data.len() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1 && data[3] == 0 {
+        Some("ico")
     } else {
         None
     }
@@ -503,8 +669,43 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
         Some("png") => Some("png"),
         Some("webp") => Some("webp"),
         Some("gif") => Some("gif"),
+        Some("bmp") => Some("bmp"),
+        Some("qoi") => Some("qoi"),
+        Some("ico") => Some("ico"),
         _ => None,
     }
+}
+
+/// Decodes an image of any format makepad supports into an [`ImageBuffer`],
+/// auto-detecting the format from the encoded `data`'s magic bytes.
+pub fn decode_image_from_data(data: &[u8]) -> Result<ImageBuffer, ImageError> {
+    decode_image_buffer(Path::new(""), data)
+}
+
+/// Returns true if `data` looks like an SVG document (vs. a raster image).
+///
+/// SVG is a vector format with no magic bytes, so this sniffs for an `<svg>`
+/// root element, optionally preceded by an XML prolog, DOCTYPE, or comment.
+pub fn looks_like_svg(data: &[u8]) -> bool {
+    let data = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data); // strip UTF-8 BOM
+    let Ok(text) = std::str::from_utf8(data) else {
+        return false;
+    };
+    let head = text.trim_start();
+    head.starts_with("<svg")
+        || ((head.starts_with("<?xml")
+            || head.starts_with("<!DOCTYPE")
+            || head.starts_with("<!--"))
+            && text.contains("<svg"))
+}
+
+/// Expands tightly-packed RGB pixels to RGBA with full opacity.
+fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+    for px in rgb.chunks_exact(3) {
+        out.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+    }
+    out
 }
 
 fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, ImageError> {
@@ -515,11 +716,17 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
         "png" => ImageBuffer::from_png(data),
         "webp" => ImageBuffer::from_webp(data),
         "gif" => ImageBuffer::from_gif(data),
+        "bmp" => ImageBuffer::from_bmp(data),
+        "qoi" => ImageBuffer::from_qoi(data),
+        "ico" => ImageBuffer::from_ico(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
 
-fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), ImageError> {
+/// Returns the `(width, height)` in pixels of an encoded image, auto-detecting
+/// the format from the data's magic bytes (falling back to the path's extension).
+/// Reads only headers for most formats; does not fully decode.
+pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), ImageError> {
     let format = detect_image_format_from_path_and_data(image_path, data)
         .ok_or(ImageError::UnsupportedFormat)?;
     match format {
@@ -564,6 +771,26 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
                     .map(|a| a.height)
                     .unwrap_or(image.height),
             ))
+        }
+        "bmp" => {
+            let cursor = ZCursor::new(data);
+            let mut decoder = BmpDecoder::new(cursor);
+            decoder.decode_headers().map_err(ImageError::BmpDecode)?;
+            decoder.dimensions().ok_or(ImageError::BmpDecode(
+                BmpDecoderErrors::GenericStatic("Failed to get BMP image dimensions"),
+            ))
+        }
+        "qoi" => {
+            let cursor = ZCursor::new(data);
+            let mut decoder = QoiDecoder::new(cursor);
+            decoder.decode_headers().map_err(ImageError::QoiDecode)?;
+            decoder.get_dimensions().ok_or(ImageError::QoiDecode(
+                QoiErrors::GenericStatic("Failed to get QOI image dimensions"),
+            ))
+        }
+        "ico" => {
+            let image = ImageBuffer::from_ico(data)?;
+            Ok((image.width, image.height))
         }
         _ => Err(ImageError::UnsupportedFormat),
     }
@@ -836,6 +1063,152 @@ mod tests {
             .filter(|name| *name != "makepad-gif")
             .collect();
         assert_eq!(consumers, ["makepad-draw"]);
+    }
+
+    fn static_png_2x2(color: [u8; 4]) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        push_chunk(&mut png, b"IHDR", &ihdr);
+        push_chunk(&mut png, b"IDAT", &zlib_stored(&rgba_frame(color)));
+        push_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    fn bmp_2x2_24bit(r: u8, g: u8, b: u8) -> Vec<u8> {
+        // Two bottom-up BGR rows, each padded to a 4-byte boundary.
+        let pixels = [b, g, r, b, g, r, 0, 0, b, g, r, b, g, r, 0, 0];
+        let mut info = Vec::new();
+        info.extend_from_slice(&40u32.to_le_bytes()); // header size
+        info.extend_from_slice(&2i32.to_le_bytes()); // width
+        info.extend_from_slice(&2i32.to_le_bytes()); // height
+        info.extend_from_slice(&1u16.to_le_bytes()); // planes
+        info.extend_from_slice(&24u16.to_le_bytes()); // bpp
+        info.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        info.extend_from_slice(&(pixels.len() as u32).to_le_bytes()); // image size
+        info.extend_from_slice(&[0u8; 16]); // ppm x/y, clr used/important
+        let offset = 14 + info.len();
+        let file_size = offset + pixels.len();
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        bmp.extend_from_slice(&(offset as u32).to_le_bytes());
+        bmp.extend_from_slice(&info);
+        bmp.extend_from_slice(&pixels);
+        bmp
+    }
+
+    fn qoi_solid_2x2(r: u8, g: u8, b: u8) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"qoif");
+        data.extend_from_slice(&2u32.to_be_bytes()); // width
+        data.extend_from_slice(&2u32.to_be_bytes()); // height
+        data.push(4); // channels (RGBA)
+        data.push(0); // colorspace (sRGB)
+        data.extend_from_slice(&[0xFE, r, g, b]); // QOI_OP_RGB, alpha stays 255
+        data.push(0xC0 | 2); // QOI_OP_RUN covering the remaining 3 pixels
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]); // end marker
+        data
+    }
+
+    fn ico_dib_2x2_32bit(r: u8, g: u8, b: u8) -> Vec<u8> {
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes()); // header size
+        dib.extend_from_slice(&2i32.to_le_bytes()); // width
+        dib.extend_from_slice(&4i32.to_le_bytes()); // doubled height (color rows + AND mask)
+        dib.extend_from_slice(&1u16.to_le_bytes()); // planes
+        dib.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        dib.extend_from_slice(&[0u8; 24]); // compression, sizes, ppm, clr counts
+        for _ in 0..4 {
+            dib.extend_from_slice(&[b, g, r, 255]); // XOR bitmap, BGRA
+        }
+        dib.extend_from_slice(&[0u8; 8]); // AND mask, fully opaque
+        dib
+    }
+
+    fn ico_wrap(payload: &[u8], width: u8, height: u8, bit_count: u16) -> Vec<u8> {
+        let mut ico = Vec::new();
+        ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // type = icon
+        ico.extend_from_slice(&1u16.to_le_bytes()); // count
+        ico.push(width);
+        ico.push(height);
+        ico.push(0); // color count
+        ico.push(0); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // planes
+        ico.extend_from_slice(&bit_count.to_le_bytes());
+        ico.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // bytes in resource
+        ico.extend_from_slice(&22u32.to_le_bytes()); // offset (6 + 16)
+        ico.extend_from_slice(payload);
+        ico
+    }
+
+    #[test]
+    fn test_detect_image_format_recognises_bmp_qoi_ico() {
+        assert_eq!(detect_image_format(b"BM\x00\x00"), Some("bmp"));
+        assert_eq!(detect_image_format(b"qoif"), Some("qoi"));
+        assert_eq!(detect_image_format(&[0, 0, 1, 0]), Some("ico"));
+    }
+
+    #[test]
+    fn test_from_bmp_decodes_24bit_in_rgb_order() {
+        let image = ImageBuffer::from_bmp(&bmp_2x2_24bit(10, 20, 30)).unwrap();
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.data, vec![0xFF0A_141E; 4]);
+    }
+
+    #[test]
+    fn test_from_qoi_decodes_solid() {
+        let image = ImageBuffer::from_qoi(&qoi_solid_2x2(10, 20, 30)).unwrap();
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.data, vec![0xFF0A_141E; 4]);
+    }
+
+    #[test]
+    fn test_from_ico_decodes_embedded_png() {
+        let ico = ico_wrap(&static_png_2x2([10, 20, 30, 255]), 2, 2, 32);
+        let image = ImageBuffer::from_ico(&ico).unwrap();
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.data[0] & 0x00FF_FFFF, 0x000A_141E);
+    }
+
+    #[test]
+    fn test_from_ico_decodes_embedded_bmp_dib() {
+        let ico = ico_wrap(&ico_dib_2x2_32bit(10, 20, 30), 2, 2, 32);
+        let image = ImageBuffer::from_ico(&ico).unwrap();
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.data[0] & 0x00FF_FFFF, 0x000A_141E);
+    }
+
+    #[test]
+    fn test_decode_image_buffer_dispatches_new_formats() {
+        for data in [
+            bmp_2x2_24bit(10, 20, 30),
+            qoi_solid_2x2(10, 20, 30),
+            ico_wrap(&ico_dib_2x2_32bit(10, 20, 30), 2, 2, 32),
+        ] {
+            let image = decode_image_buffer(Path::new("img"), &data).unwrap();
+            assert_eq!((image.width, image.height), (2, 2));
+        }
+    }
+
+    #[test]
+    fn test_decode_image_from_data_auto_detects_without_path() {
+        for data in [
+            bmp_2x2_24bit(10, 20, 30),
+            qoi_solid_2x2(10, 20, 30),
+            ico_wrap(&static_png_2x2([10, 20, 30, 255]), 2, 2, 32),
+        ] {
+            let image = decode_image_from_data(&data).unwrap();
+            assert_eq!((image.width, image.height), (2, 2));
+        }
+        assert!(matches!(
+            decode_image_from_data(&[0; 16]),
+            Err(ImageError::UnsupportedFormat)
+        ));
     }
 }
 
@@ -1114,6 +1487,72 @@ pub trait ImageCacheImpl {
         id: usize,
     ) -> Result<(), ImageError> {
         let image = ImageBuffer::from_jpg(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_bmp_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = ImageBuffer::from_bmp(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_qoi_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = ImageBuffer::from_qoi(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_ico_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = ImageBuffer::from_ico(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_gif_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = ImageBuffer::from_gif(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_webp_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = ImageBuffer::from_webp(data)?;
+        self.set_texture(Some(image.into_new_texture(cx)), id);
+        Ok(())
+    }
+
+    fn load_image_from_data(
+        &mut self,
+        cx: &mut Cx,
+        data: &[u8],
+        id: usize,
+    ) -> Result<(), ImageError> {
+        let image = decode_image_from_data(data)?;
         self.set_texture(Some(image.into_new_texture(cx)), id);
         Ok(())
     }

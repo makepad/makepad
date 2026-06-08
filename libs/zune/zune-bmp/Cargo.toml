@@ -1,0 +1,25 @@
+[package]
+name = "makepad-zune-bmp"
+version = "0.5.2"
+rust-version = "1.87.0"
+edition = "2021"
+authors = ["caleb <etemesicaleb@gmail.com>"]
+repository = "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-bmp"
+license = "MIT OR Apache-2.0 OR Zlib"
+keywords = ["bmp", "bmp-decoder", "decoder"]
+categories = ["multimedia::images"]
+exclude = ["fuzz/*"]
+description = "A fast BMP decoder"
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+log = ["makepad-zune-core/log"]
+std = ["makepad-zune-core/std"]
+rgb_inverse = []
+default = ["std"]
+
+[dependencies]
+makepad-zune-core = { version = "^0.5.1", path = "../zune-core" }
+log = "0.4"
