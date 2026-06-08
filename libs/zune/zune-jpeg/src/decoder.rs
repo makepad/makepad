@@ -636,11 +636,9 @@ where
                 parse_app13(self)?;
             }
             _ => {
-                warn!(
-                    "Capabilities for processing marker \"{:?}\" not implemented",
-                    m
-                );
-
+                // Skip unrecognized length-prefixed segments (e.g. COM comments
+                // and APPn metadata). They carry no pixel data, so skipping them
+                // is normal and not worth a warning.
                 let length = self.stream.get_u16_be_err()?;
 
                 if length < 2 {
@@ -648,7 +646,7 @@ where
                         "Found a marker with invalid length:{length}\n"
                     )));
                 }
-                warn!("Skipping {} bytes", length - 2);
+                trace!("Skipping {:?} segment ({} bytes)", m, length - 2);
                 self.stream.skip((length - 2) as usize)?;
             }
         }

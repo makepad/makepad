@@ -1,0 +1,21 @@
+[package]
+name = "makepad-zune-qoi"
+version = "0.5.2"
+rust-version = "1.87.0"
+authors = ["caleb <etemesicaleb@gmail.com>"]
+edition = "2021"
+repository = "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-qoi"
+license = "MIT OR Apache-2.0 OR Zlib"
+keywords = ["qoi", "qoi-decoder", "decoder", "qoi-encoder", "encoder"]
+categories = ["multimedia::images"]
+exclude = ["fuzz/*"]
+description = "Quite Ok Image (QOI) decoder and encoder part of the zune-image family"
+
+
+[features]
+log = ["makepad-zune-core/log"]
+std = ["makepad-zune-core/std"]
+default = ["std", "log"]
+[dependencies]
+makepad-zune-core = { path = "../zune-core", version = "^0.5.1" }
+
