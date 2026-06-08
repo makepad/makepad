@@ -16,9 +16,14 @@ pub struct CxKeyboard {
     #[allow(dead_code)]
     pub(crate) keys_down: Vec<KeyEvent>,
     pub(crate) text_ime_dismissed: bool,
+    pub(crate) has_physical_keyboard: bool,
 }
 
 impl CxKeyboard {
+    pub fn has_physical_keyboard(&self) -> bool {
+        self.has_physical_keyboard
+    }
+
     pub fn modifiers(&self) -> KeyModifiers {
         if let Some(key) = self.keys_down.first() {
             key.modifiers
@@ -100,6 +105,23 @@ impl CxKeyboard {
             self.keys_down.remove(pos);
         }
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_physical_keyboard_state(&mut self, connected: bool) {
+        self.has_physical_keyboard = connected;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update_physical_keyboard_state(
+        &mut self,
+        connected: bool,
+    ) -> Option<PhysicalKeyboardEvent> {
+        if self.has_physical_keyboard == connected {
+            return None;
+        }
+        self.has_physical_keyboard = connected;
+        Some(PhysicalKeyboardEvent { connected })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +135,11 @@ pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalKeyboardEvent {
+    pub connected: bool,
+}
+
 /// Event for replacing a specific range of text
 #[derive(Clone, Debug)]
 pub struct TextRangeReplaceEvent {
@@ -122,4 +149,10 @@ pub struct TextRangeReplaceEvent {
     pub end: usize,
     /// Text to insert at the range
     pub text: String,
+    /// Text that the platform saw in the replaced range before editing.
+    ///
+    /// Used to reject or re-anchor stale autocorrection ranges.
+    pub replaced_text: Option<String>,
+    /// If the range no longer matches, treat this as ordinary text input.
+    pub fallback_to_insert: bool,
 }

@@ -111,6 +111,7 @@ impl Cx {
                     self.windows[id_zero].window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
+                    self.set_physical_keyboard_state(true);
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});

@@ -5,14 +5,14 @@ use {
         draw_pass::CxDrawPassParent,
         event::{
             drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
-            keyboard::{CharOffset, FullTextState},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent, VirtualKeyboardEvent,
+            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
+            VirtualKeyboardEvent,
         },
         makepad_live_id::*,
         makepad_objc_sys::objc_block,
@@ -488,6 +488,62 @@ impl Cx {
         }
     }
 
+    fn drain_ios_text_events(&mut self) {
+        let queued_events = with_ios_app(|app| std::mem::take(&mut app.queued_text_events));
+        let time = with_ios_app(|app| app.time_now());
+        for queued_event in queued_events {
+            match queued_event {
+                ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
+                    self.call_event_handler(&Event::TextInput(TextInputEvent {
+                        input,
+                        replace_last,
+                        was_paste: false,
+                        ..Default::default()
+                    }));
+                }
+                ios_app::IosTextInputEvent::RangeReplace {
+                    start,
+                    end,
+                    text,
+                    replaced_text,
+                    fallback_to_insert,
+                } => {
+                    self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
+                        start,
+                        end,
+                        text,
+                        replaced_text,
+                        fallback_to_insert,
+                    }));
+                }
+                ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
+                    self.call_event_handler(&Event::TextInput(TextInputEvent {
+                        full_state_sync: Some(FullTextState {
+                            text,
+                            selection: CharOffset(start)..CharOffset(end),
+                            composition: None,
+                        }),
+                        ..Default::default()
+                    }));
+                }
+                ios_app::IosTextInputEvent::KeyEvent(key_code) => {
+                    self.call_event_handler(&Event::KeyDown(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                    self.call_event_handler(&Event::KeyUp(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                }
+            }
+        }
+    }
+
     fn ios_event_callback(&mut self, event: IosEvent, metal_cx: &mut MetalCx) -> EventFlow {
         self.handle_platform_ops(metal_cx);
 
@@ -520,55 +576,19 @@ impl Cx {
                             VirtualKeyboardEvent::WillHide { .. }
                                 | VirtualKeyboardEvent::DidHide { .. }
                         ) {
-                            self.keyboard.set_text_ime_dismissed();
+                            // With a physical keyboard, iOS auto-hides the soft
+                            // keyboard while the field stays first responder; marking
+                            // the IME dismissed there would freeze set_ime_position
+                            // (and the accent popup) at the focus-time spot.
+                            let has_physical_keyboard =
+                                with_ios_app(|app| app.physical_keyboard_connected());
+                            if !has_physical_keyboard {
+                                self.keyboard.set_text_ime_dismissed();
+                            }
                         }
                         self.call_event_handler(&Event::VirtualKeyboard(vk));
                     }
-                    // Drain iOS text events as one batch to avoid re-entrancy from UITextInput callbacks.
-                    let queued_events =
-                        with_ios_app(|app| std::mem::take(&mut app.queued_text_events));
-                    let time = with_ios_app(|app| app.time_now());
-                    for queued_event in queued_events {
-                        match queued_event {
-                            ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                                self.call_event_handler(&Event::TextInput(TextInputEvent {
-                                    input,
-                                    replace_last,
-                                    was_paste: false,
-                                    ..Default::default()
-                                }));
-                            }
-                            ios_app::IosTextInputEvent::RangeReplace(start, end, text) => {
-                                self.call_event_handler(&Event::TextRangeReplace(
-                                    TextRangeReplaceEvent { start, end, text },
-                                ));
-                            }
-                            ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
-                                self.call_event_handler(&Event::TextInput(TextInputEvent {
-                                    full_state_sync: Some(FullTextState {
-                                        text,
-                                        selection: CharOffset(start)..CharOffset(end),
-                                        composition: None,
-                                    }),
-                                    ..Default::default()
-                                }));
-                            }
-                            ios_app::IosTextInputEvent::KeyEvent(key_code) => {
-                                self.call_event_handler(&Event::KeyDown(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                                self.call_event_handler(&Event::KeyUp(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                            }
-                        }
-                    }
+                    self.drain_ios_text_events();
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
                         self.handle_media_signals();
@@ -582,6 +602,9 @@ impl Cx {
                     self.run_live_edit_if_needed("ios");
                     self.handle_networking_events();
                     self.handle_permission_events();
+                } else if te.timer_id == ios_app::IOS_TEXT_EVENT_DRAIN_TIMER_ID {
+                    with_ios_app(|app| app.text_event_drain_timer_scheduled = false);
+                    self.drain_ios_text_events();
                 }
             }
             _ => (),
@@ -594,6 +617,9 @@ impl Cx {
             }
             IosEvent::Init => {
                 with_ios_app(|app| app.start_timer(0, 0.008, true));
+                let physical_keyboard_connected =
+                    with_ios_app(|app| app.physical_keyboard_connected());
+                self.set_physical_keyboard_state(physical_keyboard_connected);
                 self.start_studio_websocket_delayed();
                 // Populate display_context and script heap with safe area insets
                 // BEFORE Startup, so app script_mod! definitions can use them.
@@ -606,6 +632,9 @@ impl Cx {
                 self.redraw_all();
             }
             IosEvent::Foreground => {
+                if let Some(event) = with_ios_app(|app| app.sync_physical_keyboard_state()) {
+                    self.update_physical_keyboard_state(event.connected);
+                }
                 self.call_event_handler(&Event::Foreground);
                 self.redraw_all();
             }
@@ -616,6 +645,9 @@ impl Cx {
                 self.call_event_handler(&Event::Pause);
             }
             IosEvent::Resume => {
+                if let Some(event) = with_ios_app(|app| app.sync_physical_keyboard_state()) {
+                    self.update_physical_keyboard_state(event.connected);
+                }
                 self.call_event_handler(&Event::Resume);
                 self.redraw_all();
             }
@@ -778,6 +810,11 @@ impl Cx {
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
+                    // The draw just pushed ShowTextIME with the live caret; drain it
+                    // now so set_ime_position re-parks the bridge view this frame
+                    // instead of stranding the op until a later callback (which
+                    // froze the IME caret at its focus-time position).
+                    self.handle_platform_ops(metal_cx);
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
@@ -897,8 +934,14 @@ impl Cx {
                 e.abs = self.windows[CxWindowPool::id_zero()].native_vec2d_to_layout(e.abs);
                 self.call_event_handler(&Event::SelectionHandleDrag(e))
             }
+            IosEvent::PhysicalKeyboard(e) => {
+                self.update_physical_keyboard_state(e.connected);
+            }
 
-            IosEvent::KeyDown(e) => {
+            IosEvent::KeyDown(mut e) => {
+                // A held hardware key can re-fire KeyDown without an intervening
+                // release, so an already-down key marks this event as a repeat.
+                e.is_repeat = self.keyboard.is_key_down(e.key_code);
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e))
             }
@@ -909,7 +952,7 @@ impl Cx {
             IosEvent::TextCopy(e) => self.call_event_handler(&Event::TextCopy(e)),
             IosEvent::TextCut(e) => self.call_event_handler(&Event::TextCut(e)),
             IosEvent::Timer(e) => {
-                if e.timer_id != 0 {
+                if e.timer_id != 0 && e.timer_id != ios_app::IOS_TEXT_EVENT_DRAIN_TIMER_ID {
                     self.handle_script_timer(&e);
                     self.call_event_handler(&Event::Timer(e))
                 }
@@ -971,7 +1014,8 @@ impl Cx {
                     window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(_area, pos, config) => {
+                CxOsOp::ShowTextIME(area, pos, config) => {
+                    let pos = area.clipped_rect(self).pos + pos;
                     let window_id = CxWindowPool::id_zero();
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     IosApp::set_ime_position(pos);

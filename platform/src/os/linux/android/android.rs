@@ -472,6 +472,22 @@ impl Cx {
         }
     }
 
+    // Dispatches a copy or cut to the focused widget and writes the widget's
+    // response to the system clipboard. Shared by the keyboard and menu paths.
+    fn copy_or_cut_to_clipboard(&mut self, cut: bool) {
+        let response = Rc::new(RefCell::new(None));
+        let e = if cut {
+            Event::TextCut(TextClipboardEvent { response: response.clone() })
+        } else {
+            Event::TextCopy(TextClipboardEvent { response: response.clone() })
+        };
+        self.call_event_handler(&e);
+        let text = response.borrow().clone();
+        if let Some(text) = text {
+            unsafe { to_java_copy_to_clipboard(text); }
+        }
+    }
+
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
@@ -823,62 +839,51 @@ impl Cx {
             FromJavaMessage::KeyDown {
                 keycode,
                 meta_state,
+                is_repeat,
             } => {
-                let e: Event;
                 let makepad_keycode = android_to_makepad_key_code(keycode);
                 if !makepad_keycode.is_unknown() {
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                     let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+                    let key_event = KeyEvent {
+                        key_code: makepad_keycode,
+                        is_repeat,
+                        modifiers: KeyModifiers {
+                            shift,
+                            control,
+                            alt,
+                            ..Default::default()
+                        },
+                        time: self.os.timers.time_now(),
+                    };
+                    self.keyboard.process_key_down(key_event.clone());
                     let is_shortcut = control || alt;
-                    if is_shortcut {
-                        if makepad_keycode == KeyCode::KeyC {
-                            let response = Rc::new(RefCell::new(None));
-                            e = Event::TextCopy(TextClipboardEvent {
-                                response: response.clone(),
-                            });
-                            self.call_event_handler(&e);
-                            // let response = response.borrow();
-                            // if let Some(response) = response.as_ref(){
-                            //     to_java.copy_to_clipboard(response);
-                            // }
-                        } else if makepad_keycode == KeyCode::KeyX {
-                            let response = Rc::new(RefCell::new(None));
-                            let e = Event::TextCut(TextClipboardEvent {
-                                response: response.clone(),
-                            });
-                            self.call_event_handler(&e);
-                        } else if makepad_keycode == KeyCode::KeyV {
-                            let content = unsafe { android_jni::to_java_paste_from_clipboard() };
-                            if !content.is_empty() {
-                                e = Event::TextInput(TextInputEvent {
-                                    input: content,
-                                    replace_last: false,
-                                    was_paste: true,
-                                    ..Default::default()
-                                });
-                                self.call_event_handler(&e);
-                            }
+                    // Clipboard shortcuts are consumed here and never reach the
+                    // widget as a key event.
+                    if is_shortcut && makepad_keycode == KeyCode::KeyC {
+                        self.copy_or_cut_to_clipboard(false);
+                    } else if is_shortcut && makepad_keycode == KeyCode::KeyX {
+                        self.copy_or_cut_to_clipboard(true);
+                    } else if is_shortcut && makepad_keycode == KeyCode::KeyV {
+                        let content = unsafe { android_jni::to_java_paste_from_clipboard() };
+                        if !content.is_empty() {
+                            self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                input: content,
+                                replace_last: false,
+                                was_paste: true,
+                                ..Default::default()
+                            }));
                         }
                     } else {
+                        // Everything else reaches the widget as a KeyDown, including
+                        // other Ctrl/Alt shortcuts like Ctrl+Enter or Ctrl+A.
                         if makepad_keycode == KeyCode::Back {
                             self.call_event_handler(&Event::BackPressed {
                                 handled: Cell::new(false),
                             });
                         }
-
-                        e = Event::KeyDown(KeyEvent {
-                            key_code: makepad_keycode,
-                            is_repeat: false,
-                            modifiers: KeyModifiers {
-                                shift,
-                                control,
-                                alt,
-                                ..Default::default()
-                            },
-                            time: self.os.timers.time_now(),
-                        });
-                        self.call_event_handler(&e);
+                        self.call_event_handler(&Event::KeyDown(key_event));
                     }
                 }
             }
@@ -891,7 +896,7 @@ impl Cx {
                 let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                 let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
 
-                let e = Event::KeyUp(KeyEvent {
+                let key_event = KeyEvent {
                     key_code: makepad_keycode,
                     is_repeat: false,
                     modifiers: KeyModifiers {
@@ -901,8 +906,11 @@ impl Cx {
                         ..Default::default()
                     },
                     time: self.os.timers.time_now(),
-                });
-                self.call_event_handler(&e);
+                };
+                if !makepad_keycode.is_unknown() {
+                    self.keyboard.process_key_up(key_event.clone());
+                }
+                self.call_event_handler(&Event::KeyUp(key_event));
             }
             FromJavaMessage::ResizeTextIME {
                 keyboard_height,
@@ -946,6 +954,9 @@ impl Cx {
                         VirtualKeyboardEvent::DidHide { time },
                     ))
                 }
+            }
+            FromJavaMessage::PhysicalKeyboard { connected } => {
+                self.update_physical_keyboard_state(connected);
             }
             FromJavaMessage::HttpResponse {
                 request_id,
@@ -1221,31 +1232,9 @@ impl Cx {
             }
             FromJavaMessage::ClipboardAction { action } => {
                 if action == "copy" {
-                    let response = Rc::new(RefCell::new(None));
-                    let e = Event::TextCopy(TextClipboardEvent {
-                        response: response.clone(),
-                    });
-                    self.call_event_handler(&e);
-                    // Get the copied text from the widget's response
-                    if let Some(text) = response.borrow().as_ref() {
-                        // Copy to clipboard
-                        unsafe {
-                            to_java_copy_to_clipboard(text.clone());
-                        }
-                    };
+                    self.copy_or_cut_to_clipboard(false);
                 } else if action == "cut" {
-                    let response = Rc::new(RefCell::new(None));
-                    let e = Event::TextCut(TextClipboardEvent {
-                        response: response.clone(),
-                    });
-                    self.call_event_handler(&e);
-                    // Get the cut text from the widget's response
-                    if let Some(text) = response.borrow().as_ref() {
-                        // Copy to clipboard
-                        unsafe {
-                            to_java_copy_to_clipboard(text.clone());
-                        }
-                    };
+                    self.copy_or_cut_to_clipboard(true);
                 } else if action == "select_all" {
                     // Simulate Ctrl+A keypress to trigger select_all in widgets
                     let e = Event::KeyDown(KeyEvent {
@@ -1810,6 +1799,7 @@ impl Cx {
 
             let mut initial_params: Option<AndroidParams> = None;
             let mut initial_surface: Option<(*mut ndk_sys::ANativeWindow, i32, i32)> = None;
+            let mut initial_physical_keyboard: Option<bool> = None;
 
             let (window, width, height, android_params) = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
@@ -1843,6 +1833,9 @@ impl Cx {
                             }
                         }
                     }
+                    Ok(FromJavaMessage::PhysicalKeyboard { connected }) => {
+                        initial_physical_keyboard = Some(connected);
+                    }
                     Ok(FromJavaMessage::SurfaceDestroyed { ack }) => {
                         if let Some((old_window, _, _)) = initial_surface.take() {
                             unsafe {
@@ -1865,6 +1858,9 @@ impl Cx {
 
             cx.os.dpi_factor = android_params.density;
             cx.os_type = OsType::Android(android_params);
+            if let Some(connected) = initial_physical_keyboard {
+                cx.set_physical_keyboard_state(connected);
+            }
             cx.os.display_size = dvec2(width as f64, height as f64);
 
             // SAFETY:

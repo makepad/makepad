@@ -213,6 +213,7 @@ impl Cx {
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
         let mut aux_chan_client_endpoint = None;
 
+        self.set_physical_keyboard_state(true);
         self.call_event_handler(&Event::Startup);
         Self::stdin_send_to_host(AppToStudio::AfterStartup);
         self.stdin_handle_platform_ops(&mut stdin_windows);
