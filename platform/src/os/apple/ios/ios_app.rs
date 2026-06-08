@@ -351,6 +351,13 @@ impl IosApp {
                     msg_send![text_input_view, setAccessibilityRespondsToUserInteraction: NO];
             }
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
+            // Opt out of the system focus halo (the FKA ring). Setting it
+            // explicitly is what takes; overriding the getter alone does not. iOS 15+.
+            let responds_to_focus_effect: BOOL =
+                msg_send![text_input_view, respondsToSelector: sel!(setFocusEffect:)];
+            if responds_to_focus_effect == YES {
+                let () = msg_send![text_input_view, setFocusEffect: nil];
+            }
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
 
             // No UITextInteraction needed: arrow nav and auto-repeat come from
@@ -831,22 +838,25 @@ impl IosApp {
         }
     }
 
-    pub fn set_ime_position(pos: DVec2) {
-        // pos is the caret-glyph bottom in MTKView-local native points. UIKit
-        // anchors the press-and-hold accent popup to the bridge view's frame and
-        // clamps the caret rect to its bounds, so the 1xH view must physically sit
-        // at the caret. Park it with its top-left at the glyph top; the geometry
-        // methods then return small in-bounds view-local rects.
+    pub fn set_ime_position(region: Rect, caret: DVec2) {
+        // Frame the proxy to the whole editable region (MTKView-local native
+        // points) so iOS treats it as a real text field: this drives the input
+        // mode list, the language HUD, and Scribble/handwriting targeting, and
+        // stops the FKA focus indicator from rendering as a thin caret over the
+        // glyph. caret is the caret-glyph bottom; store it region-local so the
+        // accent/candidate popup still anchors at the real caret.
         let frame = NSRect {
             origin: NSPoint {
-                x: pos.x,
-                y: pos.y - IOS_TEXT_INPUT_TARGET_HEIGHT,
+                x: region.pos.x,
+                y: region.pos.y,
             },
             size: NSSize {
-                width: 1.0,
-                height: IOS_TEXT_INPUT_TARGET_HEIGHT,
+                width: region.size.x.max(1.0),
+                height: region.size.y.max(1.0),
             },
         };
+        let local_x = caret.x - region.pos.x;
+        let local_y = caret.y - region.pos.y;
 
         // Extract the view pointer inside the borrow, then message UIKit after the
         // borrow is dropped, so a re-entrant IOS_APP borrow can never silently skip
@@ -855,13 +865,13 @@ impl IosApp {
             .try_with(|app| {
                 app.try_borrow_mut().ok().and_then(|mut app_ref| {
                     let app = app_ref.as_mut()?;
-                    // Skip the re-park when the caret hasn't moved (blink redraws
-                    // re-emit the same pos), so the candidate window doesn't churn.
-                    if app.ime_position == Some(pos) {
+                    // Skip when the caret hasn't moved (blink redraws re-emit), so
+                    // we don't churn the frame/candidate window every frame.
+                    if app.ime_position == Some(caret) {
                         return None;
                     }
                     let view = app.text_input_view?;
-                    app.ime_position = Some(pos);
+                    app.ime_position = Some(caret);
                     Some(view)
                 })
             })
@@ -871,9 +881,8 @@ impl IosApp {
         if let Some(text_input_view) = text_input_view {
             unsafe {
                 let () = msg_send![text_input_view, setFrame: frame];
-                // View-local caret anchor: left edge, glyph bottom.
-                (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
-                (*text_input_view).set_ivar::<f64>("ime_pos_y", IOS_TEXT_INPUT_TARGET_HEIGHT);
+                (*text_input_view).set_ivar::<f64>("ime_pos_x", local_x);
+                (*text_input_view).set_ivar::<f64>("ime_pos_y", local_y);
             }
         }
     }
