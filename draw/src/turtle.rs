@@ -1546,6 +1546,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     if turtle.align().x != 0.0 {
                         let inner_effective_width = turtle.effective_inner_width();
                         let align_x = turtle.align().x;
+                        let spacing = turtle.spacing();
                         let finished_rows_start = turtle.finished_rows_start;
                         let finished_rows_end = self.finished_rows.len();
 
@@ -1557,6 +1558,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             for walk_idx in row_walks_start..row_walks_end {
                                 row_width += self.finished_walks[walk_idx].outer_size.x;
                             }
+                            // Include the inter-walk spacing, otherwise a right-aligned row is
+                            // shifted too far right and its last walk overflows the inner edge.
+                            row_width += row_walks_end.saturating_sub(row_walks_start).saturating_sub(1) as f64 * spacing;
                             let row_unused_width = (inner_effective_width - row_width).max(0.0);
                             let dx = align_x * row_unused_width;
 
@@ -1881,7 +1885,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
 
             let outer_origin = match turtle.flow() {
                 Flow::Right { wrap: true, .. }
-                    if outer_size.x > turtle.unused_inner_width_for_current_row() =>
+                    if spacing.x + outer_size.x > turtle.unused_inner_width_for_current_row() =>
                 {
                     self.wrap_turtle(align_list_start);
                     let turtle = self.turtles.last_mut().unwrap();
