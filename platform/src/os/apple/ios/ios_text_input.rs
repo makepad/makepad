@@ -24,15 +24,16 @@ use {
             apple::ios::ios_event::IosEvent,
             apple::ios_app::IosApp,
             apple::ios_app::{
-                get_ios_class_global, UI_TEXT_AUTOCORRECTION_DEFAULT, UI_TEXT_AUTOCORRECTION_NO,
+                get_ios_class_global, IOS_TEXT_INPUT_CARET_HEIGHT,
+                UI_TEXT_AUTOCORRECTION_DEFAULT, UI_TEXT_AUTOCORRECTION_NO,
             },
         },
     },
     makepad_objc_sys::runtime::Protocol,
 };
 
-// Import try_with_ios_app from ios_delegates (shared utility)
-use super::ios_delegates::try_with_ios_app;
+// Import shared iOS helpers from ios_delegates.
+use super::ios_delegates::{dispatch_makepad_key_code, try_with_ios_app};
 
 /// Count UTF-16 code units in a Rust string.
 /// This is needed because iOS NSString uses UTF-16 internally, and UITextInput
@@ -325,6 +326,53 @@ pub fn define_makepad_selection_rect() -> *const Class {
     decl.register()
 }
 
+// iOS 13.4+ UIKeyInput constants for Home/End/PageUp/PageDown. The iOS 11
+// deployment floor can't link them (missing symbols crash at launch on older
+// systems), so resolve them at runtime via dlsym; each is nil if unavailable.
+struct DocNavInputs {
+    home: ObjcId,
+    end: ObjcId,
+    page_up: ObjcId,
+    page_down: ObjcId,
+}
+// The values are immortal, thread-safe NSString singletons.
+unsafe impl Send for DocNavInputs {}
+unsafe impl Sync for DocNavInputs {}
+
+unsafe fn lookup_uikit_string_const(name: &[u8]) -> ObjcId {
+    unsafe extern "C" {
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const i8) -> *mut std::ffi::c_void;
+    }
+    // RTLD_DEFAULT (-2) searches every loaded image; UIKit is already linked.
+    let rtld_default = -2isize as *mut std::ffi::c_void;
+    let sym = dlsym(rtld_default, name.as_ptr() as *const i8);
+    if sym.is_null() {
+        nil
+    } else {
+        // The symbol holds an NSString *const; deref once to read the pointer.
+        *(sym as *const ObjcId)
+    }
+}
+
+fn doc_nav_inputs() -> &'static DocNavInputs {
+    static CACHE: std::sync::OnceLock<DocNavInputs> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| unsafe {
+        DocNavInputs {
+            home: lookup_uikit_string_const(b"UIKeyInputHome\0"),
+            end: lookup_uikit_string_const(b"UIKeyInputEnd\0"),
+            page_up: lookup_uikit_string_const(b"UIKeyInputPageUp\0"),
+            page_down: lookup_uikit_string_const(b"UIKeyInputPageDown\0"),
+        }
+    })
+}
+
+// True once the iOS 13.4+ doc-nav constants resolve (so their UIKeyCommands are
+// registered). ios_delegates gates its focused-skip on this so that on older iOS
+// these keys keep navigating via the one-shot pressesBegan path.
+pub(crate) fn doc_nav_keycommands_available() -> bool {
+    doc_nav_inputs().home != nil
+}
+
 /// Defines the main text input view conforming to UITextInput protocol.
 /// This replaces the hidden UITextField and provides full IME support.
 pub fn define_text_input_view() -> *const Class {
@@ -349,6 +397,7 @@ pub fn define_text_input_view() -> *const Class {
     decl.add_ivar::<i64>("_autocorrection_type"); // UITextAutocorrectionType (-1 = use CJK logic)
     decl.add_ivar::<i64>("_return_key_type"); // UIReturnKeyType
     decl.add_ivar::<bool>("_secure_text_entry"); // isSecureTextEntry
+    decl.add_ivar::<bool>("_is_multiline"); // whether the focused field is multiline
 
     // Floating cursor state (keyboard trackpad)
     decl.add_ivar::<BOOL>("floating_cursor_active");
@@ -361,6 +410,8 @@ pub fn define_text_input_view() -> *const Class {
     decl.add_ivar::<f64>("selection_handle_end_x");
     decl.add_ivar::<f64>("selection_handle_end_y");
     decl.add_ivar::<BOOL>("selection_handles_visible");
+    decl.add_ivar::<BOOL>("accept_system_selection_changes");
+    decl.add_ivar::<BOOL>("suppress_system_selection_changes");
 
     // ==========================================================================
     // UIResponder methods
@@ -368,6 +419,39 @@ pub fn define_text_input_view() -> *const Class {
 
     extern "C" fn can_become_first_responder(_: &Object, _: Sel) -> BOOL {
         YES
+    }
+
+    extern "C" fn can_become_focused(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+
+    extern "C" fn is_accessibility_element(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+
+    extern "C" fn accessibility_elements_hidden(_: &Object, _: Sel) -> BOOL {
+        YES
+    }
+
+    extern "C" fn accessibility_responds_to_user_interaction(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+
+    extern "C" fn accessibility_frame(this: &Object, _: Sel) -> NSRect {
+        unsafe {
+            let view = this as *const _ as ObjcId;
+            let bounds: NSRect = msg_send![view, bounds];
+            msg_send![view, convertRect: bounds toView: nil as ObjcId]
+        }
+    }
+
+    unsafe fn set_suppress_system_selection_changes(this: &Object, value: BOOL) {
+        (*(this as *const _ as *mut Object))
+            .set_ivar::<BOOL>("suppress_system_selection_changes", value);
+    }
+
+    extern "C" fn point_inside(_: &Object, _: Sel, _: NSPoint, _: ObjcId) -> BOOL {
+        NO
     }
 
     // ==========================================================================
@@ -436,15 +520,6 @@ pub fn define_text_input_view() -> *const Class {
         (*this).set_ivar("cursorPosition", end as i64);
     }
 
-    unsafe fn has_active_marked_text(this: &Object) -> bool {
-        let marked_text: ObjcId = *this.get_ivar("markedText");
-        if marked_text == nil {
-            return false;
-        }
-        let len: u64 = msg_send![marked_text, length];
-        len > 0
-    }
-
     unsafe fn marked_text_utf16_len(this: &Object) -> u64 {
         let marked_text: ObjcId = *this.get_ivar("markedText");
         if marked_text == nil {
@@ -481,21 +556,6 @@ pub fn define_text_input_view() -> *const Class {
         }
 
         visible_text
-    }
-
-    unsafe fn send_selection_changed(this: &Object, start: i64, end: i64) {
-        if has_active_marked_text(this) {
-            return;
-        }
-
-        let buffer = get_text_buffer(this);
-        let buffer_string = nsstring_to_string(buffer);
-        let buffer_utf16_len = buffer_string.encode_utf16().count() as i64;
-        let start = start.clamp(0, buffer_utf16_len) as usize;
-        let end = end.clamp(0, buffer_utf16_len) as usize;
-        let (char_start, char_end) =
-            utf16_indices_to_char_offsets(&buffer_string, start.min(end), start.max(end));
-        IosApp::send_text_selection_changed(buffer_string, char_start, char_end);
     }
 
     unsafe fn replace_buffer_range(this: &Object, start: u64, end: u64, text: ObjcId) -> u64 {
@@ -550,16 +610,17 @@ pub fn define_text_input_view() -> *const Class {
         unsafe {
             let string = nsstring_to_string(text);
 
-            // Handle Enter/Return key specially
+            // Return reaches here through UIKit text input. Single-line submits;
+            // multiline inserts a literal newline.
             if string == "\n" {
-                // Let the widget decide whether Return submits or inserts a
-                // newline. Sending both text input and a Return key causes
-                // single-line fields to receive stray newlines and multiline
-                // fields to double-insert.
-                IosApp::send_return_key();
-                return;
+                let is_multiline: bool = *this.get_ivar("_is_multiline");
+                if !is_multiline {
+                    IosApp::send_return_key();
+                    return;
+                }
             }
 
+            set_suppress_system_selection_changes(this, YES);
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
 
             // Notify that text and selection will change
@@ -597,17 +658,21 @@ pub fn define_text_input_view() -> *const Class {
                 }
             }
 
-            // If UIKit selected an existing range before insertText (common for
-            // autocorrect and replacement suggestions), send an explicit range
-            // replacement. A plain TextInput event relies on the Rust widget's
-            // current selection, which may lag UIKit's internal selection.
             if !had_marked && range_start != range_end {
+                let replaced_text =
+                    utf16_range_to_string(&buffer_string, range_start as usize, range_end as usize);
                 let (char_start, char_end) = utf16_indices_to_char_offsets(
                     &buffer_string,
                     range_start as usize,
                     range_end as usize,
                 );
-                IosApp::send_text_range_replace(char_start, char_end, string.clone());
+                IosApp::send_text_range_replace(
+                    char_start,
+                    char_end,
+                    string.clone(),
+                    Some(replaced_text),
+                    true,
+                );
             } else {
                 IosApp::send_text_input(string.clone(), false);
             }
@@ -619,6 +684,7 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
                 let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
             }
+            set_suppress_system_selection_changes(this, NO);
         }
     }
 
@@ -657,6 +723,7 @@ pub fn define_text_input_view() -> *const Class {
 
     extern "C" fn delete_backward(this: &Object, _: Sel) {
         unsafe {
+            set_suppress_system_selection_changes(this, YES);
             let buffer = get_text_buffer(this);
             let buffer_len: u64 = msg_send![buffer, length];
             let (sel_start, sel_end) = normalized_selection_range(this);
@@ -668,9 +735,18 @@ pub fn define_text_input_view() -> *const Class {
                     sel_start as usize,
                     sel_end as usize,
                 );
+                let replaced_text =
+                    utf16_range_to_string(&buffer_string, sel_start as usize, sel_end as usize);
                 let empty = str_to_nsstring("");
                 replace_buffer_range(this, sel_start, sel_end, empty);
-                IosApp::send_text_range_replace(char_start, char_end, String::new());
+                IosApp::send_text_range_replace(
+                    char_start,
+                    char_end,
+                    String::new(),
+                    Some(replaced_text),
+                    false,
+                );
+                set_suppress_system_selection_changes(this, NO);
                 return;
             }
 
@@ -709,6 +785,7 @@ pub fn define_text_input_view() -> *const Class {
                 // Reset cursor if buffer is empty but cursor wasn't at 0
                 set_selection_utf16(this, 0, 0);
             }
+            set_suppress_system_selection_changes(this, NO);
         }
 
         // Queue the backspace so any preceding UIKit selection update in the
@@ -847,6 +924,8 @@ pub fn define_text_input_view() -> *const Class {
 
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
 
+            set_suppress_system_selection_changes(this, YES);
+
             // Notify that text will change
             if input_delegate != nil {
                 let () = msg_send![input_delegate, textWillChange: this as *const _ as ObjcId];
@@ -878,6 +957,7 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
                 let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
             }
+            set_suppress_system_selection_changes(this, NO);
         }
     }
 
@@ -919,6 +999,23 @@ pub fn define_text_input_view() -> *const Class {
             return;
         }
         unsafe {
+            // Makepad owns the actual selection/cursor. Accept UIKit selection
+            // changes while marked text is active, or when they are standalone
+            // text-navigation updates. Suppress selection callbacks that UIKit
+            // emits during insertion/replacement/deletion; those are derived
+            // from the text mutation and can be stale by the time Makepad has
+            // already applied more input.
+            let accept_system_selection: BOOL = *this.get_ivar("accept_system_selection_changes");
+            let suppress_system_selection: BOOL =
+                *this.get_ivar("suppress_system_selection_changes");
+            let has_marked_text = marked_text_utf16_len(this) > 0;
+            if !has_marked_text
+                && accept_system_selection != YES
+                && suppress_system_selection == YES
+            {
+                return;
+            }
+
             let start: ObjcId = msg_send![range, start];
             let end: ObjcId = msg_send![range, end];
             if start != nil && end != nil {
@@ -943,7 +1040,17 @@ pub fn define_text_input_view() -> *const Class {
                 this.set_ivar("selectionEnd", end_offset);
                 this.set_ivar("cursorPosition", end_offset);
 
-                send_selection_changed(this, start_offset, end_offset);
+                if !has_marked_text
+                    && (accept_system_selection == YES || suppress_system_selection != YES)
+                {
+                    let visible_text = visible_text_string(this);
+                    let (char_start, char_end) = utf16_indices_to_char_offsets(
+                        &visible_text,
+                        start_offset as usize,
+                        end_offset as usize,
+                    );
+                    IosApp::send_text_selection_changed(visible_text, char_start, char_end);
+                }
 
                 if input_delegate != nil {
                     let () =
@@ -1004,6 +1111,8 @@ pub fn define_text_input_view() -> *const Class {
             let new_string = nsstring_to_string(text);
 
             let input_delegate: ObjcId = *this.get_ivar("_inputDelegate");
+
+            set_suppress_system_selection_changes(this, YES);
 
             // Notify that text will change
             if input_delegate != nil {
@@ -1087,8 +1196,16 @@ pub fn define_text_input_view() -> *const Class {
             let (char_start, char_end) =
                 utf16_indices_to_char_offsets(&buffer_string, range_start, range_end);
 
+            let replaced_text = utf16_range_to_string(&buffer_string, range_start, range_end);
+
             // Send the range replacement event to Makepad
-            IosApp::send_text_range_replace(char_start, char_end, new_string.clone());
+            IosApp::send_text_range_replace(
+                char_start,
+                char_end,
+                new_string.clone(),
+                Some(replaced_text),
+                false,
+            );
 
             // Update cursor position to end of inserted text (using UTF-16 code units)
             let new_cursor = range_start as i64 + utf16_len(&new_string);
@@ -1098,6 +1215,7 @@ pub fn define_text_input_view() -> *const Class {
                 let () = msg_send![input_delegate, selectionDidChange: this as *const _ as ObjcId];
                 let () = msg_send![input_delegate, textDidChange: this as *const _ as ObjcId];
             }
+            set_suppress_system_selection_changes(this, NO);
         }
     }
 
@@ -1347,13 +1465,58 @@ pub fn define_text_input_view() -> *const Class {
     // UITextInput protocol - Geometry methods
     // ==========================================================================
 
+    const CANDIDATE_RECT_HEIGHT: f64 = 32.0;
+
+    unsafe fn view_local_point(this: &Object, x: f64, y: f64) -> NSPoint {
+        let view = this as *const _ as ObjcId;
+        let view_frame: NSRect = msg_send![view, frame];
+        NSPoint {
+            x: x - view_frame.origin.x,
+            y: y - view_frame.origin.y,
+        }
+    }
+
+    unsafe fn ime_candidate_rect(this: &Object) -> NSRect {
+        // ime_pos_x/y are view-local (the view is parked at the caret). Return a
+        // small in-bounds rect over the glyph so UIKit's bounds-clamp is a no-op.
+        let x: f64 = *this.get_ivar("ime_pos_x");
+        let y: f64 = *this.get_ivar("ime_pos_y");
+
+        NSRect {
+            origin: NSPoint {
+                x,
+                y: y - CANDIDATE_RECT_HEIGHT,
+            },
+            size: NSSize {
+                width: 1.0,
+                height: CANDIDATE_RECT_HEIGHT,
+            },
+        }
+    }
+
+    unsafe fn hidden_caret_rect(this: &Object) -> NSRect {
+        // ime_pos_x/y are view-local (the view is parked at the caret). A small
+        // in-bounds rect over the glyph keeps UIKit from clamping the accent popup.
+        let x: f64 = *this.get_ivar("ime_pos_x");
+        let y: f64 = *this.get_ivar("ime_pos_y");
+
+        NSRect {
+            origin: NSPoint {
+                x,
+                y: y - IOS_TEXT_INPUT_CARET_HEIGHT,
+            },
+            size: NSSize {
+                width: 1.0,
+                height: IOS_TEXT_INPUT_CARET_HEIGHT,
+            },
+        }
+    }
+
     extern "C" fn first_rect_for_range(this: &Object, _: Sel, _range: ObjcId) -> NSRect {
         // Return a rect at the IME position for candidate window placement.
-        // When iOS 16+ native selection display is active, return the bounding
-        // rect for the explicit selection handle anchors provided by Rust.
+        // For explicit selection handles, return the bounding rect provided by
+        // Makepad's selection geometry.
         unsafe {
-            let view = this as *const _ as ObjcId;
-            let view_frame: NSRect = msg_send![view, frame];
             let selection_visible: BOOL = *this.get_ivar("selection_handles_visible");
 
             if selection_visible == YES {
@@ -1361,74 +1524,26 @@ pub fn define_text_input_view() -> *const Class {
                 let sy: f64 = *this.get_ivar("selection_handle_start_y");
                 let ex: f64 = *this.get_ivar("selection_handle_end_x");
                 let ey: f64 = *this.get_ivar("selection_handle_end_y");
-                let y0 = view_frame.size.height - sy;
-                let y1 = view_frame.size.height - ey;
+                let start = view_local_point(this, sx, sy);
+                let end = view_local_point(this, ex, ey);
                 return NSRect {
                     origin: NSPoint {
-                        x: sx.min(ex),
-                        y: y0.min(y1),
+                        x: start.x.min(end.x),
+                        y: start.y.min(end.y),
                     },
                     size: NSSize {
-                        width: (sx - ex).abs().max(1.0),
-                        height: (y0 - y1).abs().max(1.0),
+                        width: (start.x - end.x).abs().max(1.0),
+                        height: (start.y - end.y).abs().max(1.0),
                     },
                 };
             }
 
-            let x: f64 = *this.get_ivar("ime_pos_x");
-            let y: f64 = *this.get_ivar("ime_pos_y");
-
-            NSRect {
-                origin: NSPoint {
-                    x,
-                    y: view_frame.size.height - y,
-                },
-                size: NSSize {
-                    width: 1.0,
-                    height: 20.0,
-                },
-            }
+            ime_candidate_rect(this)
         }
     }
 
-    extern "C" fn caret_rect_for_position(this: &Object, sel: Sel, position: ObjcId) -> NSRect {
-        unsafe {
-            let selection_visible: BOOL = *this.get_ivar("selection_handles_visible");
-            if selection_visible == YES {
-                let view = this as *const _ as ObjcId;
-                let view_frame: NSRect = msg_send![view, frame];
-                let offset: i64 = if position != nil {
-                    msg_send![position, offset]
-                } else {
-                    0
-                };
-
-                let (x, y) = if offset <= 0 {
-                    (
-                        *this.get_ivar::<f64>("selection_handle_start_x"),
-                        *this.get_ivar::<f64>("selection_handle_start_y"),
-                    )
-                } else {
-                    (
-                        *this.get_ivar::<f64>("selection_handle_end_x"),
-                        *this.get_ivar::<f64>("selection_handle_end_y"),
-                    )
-                };
-
-                return NSRect {
-                    origin: NSPoint {
-                        x,
-                        y: view_frame.size.height - y,
-                    },
-                    size: NSSize {
-                        width: 1.0,
-                        height: 20.0,
-                    },
-                };
-            }
-        }
-
-        first_rect_for_range(this, sel, nil)
+    extern "C" fn caret_rect_for_position(this: &Object, _sel: Sel, _position: ObjcId) -> NSRect {
+        unsafe { hidden_caret_rect(this) }
     }
 
     extern "C" fn selection_rects_for_range(this: &Object, _: Sel, _range: ObjcId) -> ObjcId {
@@ -1438,22 +1553,20 @@ pub fn define_text_input_view() -> *const Class {
                 return msg_send![class!(NSArray), array];
             }
 
-            let view = this as *const _ as ObjcId;
-            let view_frame: NSRect = msg_send![view, frame];
             let sx: f64 = *this.get_ivar("selection_handle_start_x");
             let sy: f64 = *this.get_ivar("selection_handle_start_y");
             let ex: f64 = *this.get_ivar("selection_handle_end_x");
             let ey: f64 = *this.get_ivar("selection_handle_end_y");
-            let y0 = view_frame.size.height - sy;
-            let y1 = view_frame.size.height - ey;
+            let start = view_local_point(this, sx, sy);
+            let end = view_local_point(this, ex, ey);
 
             let rect_cls = get_ios_class_global().text_selection_rect;
             let selection_rect: ObjcId = msg_send![
                 rect_cls,
-                rectWithX: sx.min(ex)
-                y: y0.min(y1)
-                w: (sx - ex).abs().max(1.0)
-                h: (y0 - y1).abs().max(1.0)
+                rectWithX: start.x.min(end.x)
+                y: start.y.min(end.y)
+                w: (start.x - end.x).abs().max(1.0)
+                h: (start.y - end.y).abs().max(1.0)
                 containsStart: YES
                 containsEnd: YES
             ];
@@ -1827,6 +1940,122 @@ pub fn define_text_input_view() -> *const Class {
         }
     }
 
+    // The four UITextLayoutDirection arrows plus the modifier combos the widget
+    // maps to navigation. UIKeyModifierFlags share bit positions with the macOS
+    // NSEventModifierFlags, so key_modifiers_from_flags decodes both.
+    const KEY_MOD_SHIFT: u64 = 1 << 17;
+    const KEY_MOD_ALT: u64 = 1 << 19;
+    const KEY_MOD_CMD: u64 = 1 << 20;
+
+    unsafe fn add_nav_key_command(array: ObjcId, input: ObjcId, modifier_flags: u64) {
+        if input == nil {
+            return;
+        }
+        let cmd: ObjcId = msg_send![
+            class!(UIKeyCommand),
+            keyCommandWithInput: input
+            modifierFlags: modifier_flags
+            action: sel!(handleMakepadKeyCommand:)
+        ];
+        // iOS 15+ only; harmless (and skipped) on older systems.
+        let responds: BOOL =
+            msg_send![cmd, respondsToSelector: sel!(setWantsPriorityOverSystemBehavior:)];
+        if responds == YES {
+            let () = msg_send![cmd, setWantsPriorityOverSystemBehavior: YES];
+        }
+        let () = msg_send![array, addObject: cmd];
+    }
+
+    unsafe fn nav_key_code_for_input(input: ObjcId) -> KeyCode {
+        let doc = doc_nav_inputs();
+        let pairs = [
+            (UIKeyInputLeftArrow, KeyCode::ArrowLeft),
+            (UIKeyInputRightArrow, KeyCode::ArrowRight),
+            (UIKeyInputUpArrow, KeyCode::ArrowUp),
+            (UIKeyInputDownArrow, KeyCode::ArrowDown),
+            (doc.home, KeyCode::Home),
+            (doc.end, KeyCode::End),
+            (doc.page_up, KeyCode::PageUp),
+            (doc.page_down, KeyCode::PageDown),
+        ];
+        for (constant, key_code) in pairs {
+            if constant != nil {
+                let eq: BOOL = msg_send![input, isEqualToString: constant];
+                if eq == YES {
+                    return key_code;
+                }
+            }
+        }
+        KeyCode::Unknown
+    }
+
+    // Reclaim hardware arrow keys from UIKit's UITextInput navigation, which
+    // otherwise moves a phantom caret in this proxy and never reaches the widget.
+    // wantsPriorityOverSystemBehavior wins the key over built-in text nav, and
+    // because these arrive as UIKeyCommands UIKit auto-repeats them at the system
+    // rate while held. Each arrow is registered across the modifier combos the
+    // widget maps (bare/Shift move-or-extend, Alt word, Cmd line/doc) so the
+    // modified moves auto-repeat too.
+    extern "C" fn key_commands(_this: &Object, _: Sel) -> ObjcId {
+        unsafe {
+            let array: ObjcId = msg_send![class!(NSMutableArray), array];
+            let arrow_inputs = [
+                UIKeyInputLeftArrow,
+                UIKeyInputRightArrow,
+                UIKeyInputUpArrow,
+                UIKeyInputDownArrow,
+            ];
+            let arrow_masks = [
+                0,
+                KEY_MOD_SHIFT,
+                KEY_MOD_ALT,
+                KEY_MOD_CMD,
+                KEY_MOD_SHIFT | KEY_MOD_ALT,
+                KEY_MOD_SHIFT | KEY_MOD_CMD,
+            ];
+            for input in arrow_inputs {
+                for mask in arrow_masks {
+                    add_nav_key_command(array, input, mask);
+                }
+            }
+
+            // Home/End/PageUp/PageDown (iOS 13.4+, nil-guarded). Home/End also
+            // take the Cmd text-boundary move; the Page keys are bare/Shift only.
+            let doc = doc_nav_inputs();
+            let line_edge_masks = [0, KEY_MOD_SHIFT, KEY_MOD_CMD, KEY_MOD_SHIFT | KEY_MOD_CMD];
+            for input in [doc.home, doc.end] {
+                for mask in line_edge_masks {
+                    add_nav_key_command(array, input, mask);
+                }
+            }
+            for input in [doc.page_up, doc.page_down] {
+                for mask in [0, KEY_MOD_SHIFT] {
+                    add_nav_key_command(array, input, mask);
+                }
+            }
+            array
+        }
+    }
+
+    extern "C" fn handle_makepad_key_command(_this: &Object, _: Sel, sender: ObjcId) {
+        unsafe {
+            let input: ObjcId = msg_send![sender, input];
+            if input == nil {
+                return;
+            }
+            let key_code = nav_key_code_for_input(input);
+            if key_code.is_unknown() {
+                return;
+            }
+            let modifier_flags: u64 = msg_send![sender, modifierFlags];
+            let modifiers =
+                crate::os::apple::apple_util::key_modifiers_from_flags(modifier_flags);
+            // Balanced down/up keeps keys_down clean (mirrors the floating cursor).
+            dispatch_makepad_key_code(key_code, modifiers, true);
+            dispatch_makepad_key_code(key_code, modifiers, false);
+        }
+    }
+
     // ==========================================================================
     // Register all methods
     // ==========================================================================
@@ -1837,7 +2066,39 @@ pub fn define_text_input_view() -> *const Class {
             sel!(canBecomeFirstResponder),
             can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
         );
-
+        // Hardware arrow-key navigation (see key_commands above).
+        decl.add_method(
+            sel!(keyCommands),
+            key_commands as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(handleMakepadKeyCommand:),
+            handle_makepad_key_command as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(canBecomeFocused),
+            can_become_focused as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(isAccessibilityElement),
+            is_accessibility_element as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(accessibilityElementsHidden),
+            accessibility_elements_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(accessibilityRespondsToUserInteraction),
+            accessibility_responds_to_user_interaction as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(accessibilityFrame),
+            accessibility_frame as extern "C" fn(&Object, Sel) -> NSRect,
+        );
+        decl.add_method(
+            sel!(pointInside:withEvent:),
+            point_inside as extern "C" fn(&Object, Sel, NSPoint, ObjcId) -> BOOL,
+        );
         // UIKeyInput
         decl.add_method(
             sel!(hasText),

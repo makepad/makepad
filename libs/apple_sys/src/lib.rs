@@ -85,6 +85,10 @@ extern "C" {
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
     pub static UITextInputCurrentInputModeDidChangeNotification: ObjcId;
+    pub static UIKeyInputUpArrow: ObjcId;
+    pub static UIKeyInputDownArrow: ObjcId;
+    pub static UIKeyInputLeftArrow: ObjcId;
+    pub static UIKeyInputRightArrow: ObjcId;
 }
 
 #[cfg(any(target_os = "ios", target_os = "tvos"))]

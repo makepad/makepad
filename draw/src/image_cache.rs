@@ -1357,7 +1357,6 @@ mod tests {
             Err(ImageError::UnsupportedFormat)
         ));
     }
-
 }
 
 fn ensure_thread_pool(cx: &mut Cx) {

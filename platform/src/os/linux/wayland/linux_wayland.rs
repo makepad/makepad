@@ -62,6 +62,7 @@ impl WaylandCx {
             custom_window_chrome: true,
         });
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
+        cx.borrow_mut().set_physical_keyboard_state(true);
 
         let wayland_cx = Rc::new(RefCell::new(WaylandCx {
             cx: cx.clone(),

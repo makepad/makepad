@@ -1,8 +1,13 @@
 use crate::{
-    event::{Ease, SelectionHandleKind, SelectionHandlePhase, TouchState, VirtualKeyboardEvent},
+    event::{
+        Ease, KeyCode, KeyEvent, KeyModifiers, SelectionHandleKind, SelectionHandlePhase, TouchState,
+        VirtualKeyboardEvent,
+    },
     makepad_math::*,
     os::{
         apple::apple_sys::*,
+        apple::apple_util::key_modifiers_from_flags,
+        apple::ios::ios_event::IosEvent,
         apple::ios_app::IosApp,
         apple::ios_app::{with_ios_app, IOS_APP},
     },
@@ -33,6 +38,257 @@ pub fn try_with_ios_app<R>(
         })
         .ok()
         .flatten()
+}
+
+// Maps a USB HID keyboard usage code (iOS UIKey.keyCode) to a Makepad KeyCode.
+fn hid_usage_to_key_code(usage: u64) -> KeyCode {
+    match usage {
+        0x04 => KeyCode::KeyA,
+        0x05 => KeyCode::KeyB,
+        0x06 => KeyCode::KeyC,
+        0x07 => KeyCode::KeyD,
+        0x08 => KeyCode::KeyE,
+        0x09 => KeyCode::KeyF,
+        0x0A => KeyCode::KeyG,
+        0x0B => KeyCode::KeyH,
+        0x0C => KeyCode::KeyI,
+        0x0D => KeyCode::KeyJ,
+        0x0E => KeyCode::KeyK,
+        0x0F => KeyCode::KeyL,
+        0x10 => KeyCode::KeyM,
+        0x11 => KeyCode::KeyN,
+        0x12 => KeyCode::KeyO,
+        0x13 => KeyCode::KeyP,
+        0x14 => KeyCode::KeyQ,
+        0x15 => KeyCode::KeyR,
+        0x16 => KeyCode::KeyS,
+        0x17 => KeyCode::KeyT,
+        0x18 => KeyCode::KeyU,
+        0x19 => KeyCode::KeyV,
+        0x1A => KeyCode::KeyW,
+        0x1B => KeyCode::KeyX,
+        0x1C => KeyCode::KeyY,
+        0x1D => KeyCode::KeyZ,
+        0x1E => KeyCode::Key1,
+        0x1F => KeyCode::Key2,
+        0x20 => KeyCode::Key3,
+        0x21 => KeyCode::Key4,
+        0x22 => KeyCode::Key5,
+        0x23 => KeyCode::Key6,
+        0x24 => KeyCode::Key7,
+        0x25 => KeyCode::Key8,
+        0x26 => KeyCode::Key9,
+        0x27 => KeyCode::Key0,
+        0x28 => KeyCode::ReturnKey,
+        0x29 => KeyCode::Escape,
+        0x2A => KeyCode::Backspace,
+        0x2B => KeyCode::Tab,
+        0x2C => KeyCode::Space,
+        0x2D => KeyCode::Minus,
+        0x2E => KeyCode::Equals,
+        0x2F => KeyCode::LBracket,
+        0x30 => KeyCode::RBracket,
+        0x31 => KeyCode::Backslash,
+        0x33 => KeyCode::Semicolon,
+        0x34 => KeyCode::Quote,
+        0x35 => KeyCode::Backtick,
+        0x36 => KeyCode::Comma,
+        0x37 => KeyCode::Period,
+        0x38 => KeyCode::Slash,
+        0x39 => KeyCode::Capslock,
+        0x3A => KeyCode::F1,
+        0x3B => KeyCode::F2,
+        0x3C => KeyCode::F3,
+        0x3D => KeyCode::F4,
+        0x3E => KeyCode::F5,
+        0x3F => KeyCode::F6,
+        0x40 => KeyCode::F7,
+        0x41 => KeyCode::F8,
+        0x42 => KeyCode::F9,
+        0x43 => KeyCode::F10,
+        0x44 => KeyCode::F11,
+        0x45 => KeyCode::F12,
+        0x49 => KeyCode::Insert,
+        0x4A => KeyCode::Home,
+        0x4B => KeyCode::PageUp,
+        0x4C => KeyCode::Delete,
+        0x4D => KeyCode::End,
+        0x4E => KeyCode::PageDown,
+        0x4F => KeyCode::ArrowRight,
+        0x50 => KeyCode::ArrowLeft,
+        0x51 => KeyCode::ArrowDown,
+        0x52 => KeyCode::ArrowUp,
+        0x53 => KeyCode::Numlock,
+        0x54 => KeyCode::NumpadDivide,
+        0x55 => KeyCode::NumpadMultiply,
+        0x56 => KeyCode::NumpadSubtract,
+        0x57 => KeyCode::NumpadAdd,
+        0x58 => KeyCode::NumpadEnter,
+        0x59 => KeyCode::Numpad1,
+        0x5A => KeyCode::Numpad2,
+        0x5B => KeyCode::Numpad3,
+        0x5C => KeyCode::Numpad4,
+        0x5D => KeyCode::Numpad5,
+        0x5E => KeyCode::Numpad6,
+        0x5F => KeyCode::Numpad7,
+        0x60 => KeyCode::Numpad8,
+        0x61 => KeyCode::Numpad9,
+        0x62 => KeyCode::Numpad0,
+        0x63 => KeyCode::NumpadDecimal,
+        0x67 => KeyCode::NumpadEquals,
+        _ => KeyCode::Unknown,
+    }
+}
+
+fn is_hardware_navigation_key(key_code: KeyCode) -> bool {
+    matches!(
+        key_code,
+        KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::ArrowUp
+            | KeyCode::ArrowDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    )
+}
+
+// Nav keys owned by the auto-repeating UIKeyCommand path (key_commands in
+// ios_text_input.rs) when an editor is focused; skip them here so they don't
+// also move via the one-shot pressesBegan path.
+fn is_keycommand_nav_key(key_code: KeyCode) -> bool {
+    match key_code {
+        KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown => true,
+        // Home/End/PageUp/PageDown only when their iOS 13.4+ commands resolved;
+        // otherwise they keep navigating via the one-shot pressesBegan path.
+        KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown => {
+            super::ios_text_input::doc_nav_keycommands_available()
+        }
+        _ => false,
+    }
+}
+
+fn text_input_is_first_responder() -> bool {
+    try_with_ios_app(|app| {
+        app.text_input_view
+            .map(|view| unsafe {
+                let is_fr: BOOL = msg_send![view, isFirstResponder];
+                is_fr == YES
+            })
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
+unsafe fn makepad_key_press(press: ObjcId) -> Option<(KeyCode, crate::event::KeyModifiers)> {
+    let key: ObjcId = msg_send![press, key];
+    if key == nil {
+        return None;
+    }
+    let flags: u64 = msg_send![key, modifierFlags];
+    let modifiers = key_modifiers_from_flags(flags);
+    let usage: u64 = msg_send![key, keyCode];
+    let key_code = hid_usage_to_key_code(usage);
+    let is_enter = key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter;
+    if (!is_enter && !modifiers.logo && !is_hardware_navigation_key(key_code)) || key_code.is_unknown() {
+        None
+    } else {
+        Some((key_code, modifiers))
+    }
+}
+
+// Dispatches hardware-keyboard presses we handle (Return/NumpadEnter,
+// navigation keys, and Command shortcuts) as Makepad events. The first pass
+// verifies the whole UIPresses set is consumable; otherwise callers should
+// forward the event to UIKit instead of partially dispatching it.
+pub fn dispatch_makepad_key_code(key_code: KeyCode, modifiers: KeyModifiers, is_down: bool) -> bool {
+    if key_code.is_unknown() {
+        return false;
+    }
+
+    // Cmd+C/X/V route to the shared copy/cut/paste path instead of a
+    // generic key event; KeyUp is swallowed.
+    if modifiers.logo {
+        match key_code {
+            KeyCode::KeyC => {
+                if is_down {
+                    IosApp::send_clipboard_action("copy");
+                }
+                return true;
+            }
+            KeyCode::KeyX => {
+                if is_down {
+                    IosApp::send_clipboard_action("cut");
+                }
+                return true;
+            }
+            KeyCode::KeyV => {
+                if is_down {
+                    IosApp::send_clipboard_paste();
+                }
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    let time = try_with_ios_app(|app| app.time_now()).unwrap_or(0.0);
+    let key_event = KeyEvent {
+        key_code,
+        is_repeat: false,
+        modifiers,
+        time,
+    };
+    if is_down {
+        IosApp::do_callback(IosEvent::KeyDown(key_event));
+    } else {
+        IosApp::do_callback(IosEvent::KeyUp(key_event));
+    }
+    true
+}
+
+pub unsafe fn dispatch_hardware_key_presses(
+    presses: ObjcId,
+    is_down: bool,
+    dispatch_navigation: bool,
+) -> bool {
+    let enumerator: ObjcId = msg_send![presses, objectEnumerator];
+    let mut saw_press = false;
+    loop {
+        let press: ObjcId = msg_send![enumerator, nextObject];
+        if press == nil {
+            break;
+        }
+        saw_press = true;
+        if makepad_key_press(press).is_none() {
+            return false;
+        }
+    }
+    if !saw_press {
+        return false;
+    }
+
+    let enumerator: ObjcId = msg_send![presses, objectEnumerator];
+    let mut handled_press = false;
+    loop {
+        let press: ObjcId = msg_send![enumerator, nextObject];
+        if press == nil {
+            break;
+        }
+        let Some((key_code, modifiers)) = makepad_key_press(press) else {
+            continue;
+        };
+        if is_keycommand_nav_key(key_code) && text_input_is_first_responder() {
+            continue;
+        }
+        if !dispatch_navigation && is_hardware_navigation_key(key_code) {
+            continue;
+        }
+        dispatch_makepad_key_code(key_code, modifiers, is_down);
+        handled_press = true;
+    }
+    handled_press
 }
 
 pub fn define_makepad_view_controller() -> *const Class {
@@ -281,6 +537,40 @@ pub fn define_mtk_view() -> *const Class {
         IosApp::send_touch_update();
     }
 
+    // Hardware-keyboard shortcuts, handled app-wide like desktop (MakepadView is
+    // in the responder chain whether or not a text field is focused).
+    extern "C" fn presses_began(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            if !dispatch_hardware_key_presses(presses, true, true) {
+                let () = msg_send![super(this, class!(MTKView)), pressesBegan: presses withEvent: event];
+            }
+        }
+    }
+
+    extern "C" fn presses_changed(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            if !dispatch_hardware_key_presses(presses, true, true) {
+                let () = msg_send![super(this, class!(MTKView)), pressesChanged: presses withEvent: event];
+            }
+        }
+    }
+
+    extern "C" fn presses_ended(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            if !dispatch_hardware_key_presses(presses, false, true) {
+                let () = msg_send![super(this, class!(MTKView)), pressesEnded: presses withEvent: event];
+            }
+        }
+    }
+
+    extern "C" fn presses_cancelled(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            if !dispatch_hardware_key_presses(presses, false, true) {
+                let () = msg_send![super(this, class!(MTKView)), pressesCancelled: presses withEvent: event];
+            }
+        }
+    }
+
     unsafe {
         decl.add_method(sel!(isOpaque), yes as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(
@@ -331,6 +621,24 @@ pub fn define_mtk_view() -> *const Class {
         decl.add_method(
             sel!(selectAll:),
             select_all_action as extern "C" fn(&Object, Sel, ObjcId),
+        );
+
+        // Hardware keyboard shortcuts (e.g. Cmd+Enter, Cmd +/-)
+        decl.add_method(
+            sel!(pressesBegan: withEvent:),
+            presses_began as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(pressesChanged: withEvent:),
+            presses_changed as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(pressesEnded: withEvent:),
+            presses_ended as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(pressesCancelled: withEvent:),
+            presses_cancelled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
@@ -715,6 +1023,15 @@ pub fn define_textfield_delegate() -> *const Class {
         }
     }
 
+    extern "C" fn physical_keyboard_changed(_: &Object, _: Sel, _notif: ObjcId) {
+        let event = try_with_ios_app(|app| app.sync_physical_keyboard_state()).flatten();
+        if let Some(event) = event {
+            IosApp::do_callback(crate::os::apple::ios::ios_event::IosEvent::PhysicalKeyboard(
+                event,
+            ));
+        }
+    }
+
     unsafe {
         decl.add_method(
             sel!(keyboardDidChangeFrame:),
@@ -743,6 +1060,10 @@ pub fn define_textfield_delegate() -> *const Class {
         decl.add_method(
             sel!(inputModeDidChange:),
             input_mode_did_change as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(physicalKeyboardChanged:),
+            physical_keyboard_changed as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
     decl.add_ivar::<*mut c_void>("display_ptr");
