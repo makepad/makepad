@@ -551,7 +551,8 @@ impl Win32Window {
                 }
                 window.do_callback(Win32Event::KeyDown(KeyEvent {
                     key_code: key_code,
-                    is_repeat: (lparam.0 & 0x7000_0000) > 0,
+                    // lParam bit 30 is the previous key state: set means this is an auto-repeat.
+                    is_repeat: (lparam.0 & 0x4000_0000) != 0,
                     modifiers: modifiers,
                     time: window.time_now(),
                 }));
@@ -559,7 +560,7 @@ impl Win32Window {
             WM_KEYUP | WM_SYSKEYUP => {
                 window.do_callback(Win32Event::KeyUp(KeyEvent {
                     key_code: Self::virtual_key_to_key_code(wparam),
-                    is_repeat: lparam.0 & 0x7fff > 0,
+                    is_repeat: false,
                     modifiers: Self::get_key_modifiers(),
                     time: window.time_now(),
                 }));

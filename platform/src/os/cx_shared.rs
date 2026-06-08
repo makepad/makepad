@@ -803,6 +803,18 @@ impl Cx {
         self.handle_actions();
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn set_physical_keyboard_state(&mut self, connected: bool) {
+        self.keyboard.set_physical_keyboard_state(connected);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update_physical_keyboard_state(&mut self, connected: bool) {
+        if let Some(event) = self.keyboard.update_physical_keyboard_state(connected) {
+            self.call_event_handler(&Event::PhysicalKeyboard(event));
+        }
+    }
+
     // helpers
 
     /*
