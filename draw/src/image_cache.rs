@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -31,19 +32,89 @@ pub struct ImageBuffer {
     pub animation: Option<TextureAnimation>,
 }
 
+/// Hard upper bound on a decoded image's width or height (per side). Matches
+/// zune's default cap; lets us reject decompression-bomb headers before
+/// allocating anything.
+const MAX_IMAGE_DIMENSION: usize = 16384;
+/// Hard upper bound on a decoded image or animation atlas in bytes (the RGBA
+/// size of a 16384x16384 image).
+const MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
+/// Hard upper bound on total pixels in a decoded buffer or animation atlas
+/// (268M px = 1 GiB as RGBA u32).
+const MAX_IMAGE_PIXELS: usize = MAX_IMAGE_DECODED_BYTES / 4;
+/// Hard upper bound on animation frames. Pixel caps alone do not account for
+/// per-frame Vec overhead, which matters for malicious tiny-frame animations.
+const MAX_IMAGE_FRAMES: usize = 4096;
+const MAX_SVG_SNIFF_BYTES: usize = 4096;
+
+fn decoder_options() -> DecoderOptions {
+    DecoderOptions::default()
+        .set_max_width(MAX_IMAGE_DIMENSION)
+        .set_max_height(MAX_IMAGE_DIMENSION)
+}
+
+fn png_decoder_options() -> DecoderOptions {
+    decoder_options().png_set_strip_to_8bit(true)
+}
+
+/// Validates `width`/`height` against the caps and returns `width * height`,
+/// rejecting zero, oversized, or overflowing dimensions before any allocation.
+fn checked_pixel_count(width: usize, height: usize) -> Result<usize, ImageError> {
+    if width == 0 || height == 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+        return Err(ImageError::DimensionsTooLarge { width, height });
+    }
+    width
+        .checked_mul(height)
+        .filter(|&pixels| pixels <= MAX_IMAGE_PIXELS)
+        .ok_or(ImageError::DimensionsTooLarge { width, height })
+}
+
+/// Computes an animation atlas's `(total_width, total_height)` for `frame_count`
+/// frames of `width`x`height`. Rejects zero-width frames (avoids divide-by-zero)
+/// and atlases exceeding [`MAX_IMAGE_PIXELS`] (avoids overflow / OOM from a
+/// malicious frame count).
+fn animation_atlas_layout(
+    frame_count: usize,
+    width: usize,
+    height: usize,
+) -> Result<(usize, usize), ImageError> {
+    checked_pixel_count(width, height)?;
+    if frame_count == 0 || frame_count > MAX_IMAGE_FRAMES {
+        return Err(ImageError::DimensionsTooLarge { width, height });
+    }
+    let fits_horizontal = (Cx::max_texture_width() / width).max(1);
+    let total_width = fits_horizontal * width;
+    let rows = frame_count
+        .checked_add(fits_horizontal - 1)
+        .and_then(|count| count.checked_div(fits_horizontal))
+        .ok_or(ImageError::DimensionsTooLarge { width, height })?;
+    let total_height = rows
+        .checked_mul(height)
+        .ok_or(ImageError::DimensionsTooLarge { width, height })?;
+    if total_width
+        .checked_mul(total_height)
+        .is_none_or(|pixels| pixels > MAX_IMAGE_PIXELS)
+    {
+        return Err(ImageError::DimensionsTooLarge {
+            width: total_width,
+            height: total_height,
+        });
+    }
+    Ok((total_width, total_height))
+}
+
 impl ImageBuffer {
     pub fn new(in_data: &[u8], width: usize, height: usize) -> Result<ImageBuffer, ImageError> {
-        let pixels = width * height;
-        if pixels == 0 {
-            return Ok(ImageBuffer {
-                width,
-                height,
-                data: Vec::new(),
-                animation: None,
-            });
+        let pixels = checked_pixel_count(width, height)?;
+        if in_data.len() % pixels != 0 {
+            return Err(ImageError::InvalidPixelAlignment(in_data.len()));
+        }
+        let components = in_data.len() / pixels;
+        if !(1..=4).contains(&components) {
+            return Err(ImageError::InvalidPixelAlignment(components));
         }
         let mut out = Vec::with_capacity(pixels);
-        match in_data.len() / pixels {
+        match components {
             4 => {
                 for rgba in in_data.chunks_exact(4).take(pixels) {
                     let r = rgba[0];
@@ -106,9 +177,15 @@ impl ImageBuffer {
     pub fn from_png(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
         // 16-bit PNGs (e.g. HDR iPhone screenshots) decode as u16 and fail our u8 path; strip to 8-bit.
-        let options = DecoderOptions::default().png_set_strip_to_8bit(true);
-        let mut decoder = PngDecoder::new_with_options(cursor, options);
+        let mut decoder = PngDecoder::new_with_options(cursor, png_decoder_options());
         decoder.decode_headers()?;
+        let (width, height) =
+            decoder
+                .dimensions()
+                .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                    "Failed to get PNG image dimensions",
+                )))?;
+        checked_pixel_count(width, height)?;
 
         if decoder.is_animated() {
             return Self::decode_animated_png(&mut decoder);
@@ -120,12 +197,6 @@ impl ImageBuffer {
                 .u8()
                 .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to decode PNG image data as a slice of u8 bytes",
-                )))?;
-        let (width, height) =
-            decoder
-                .dimensions()
-                .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                    "Failed to get PNG image dimensions",
                 )))?;
         Self::new(&decoded_data, width, height)
     }
@@ -153,10 +224,18 @@ impl ImageBuffer {
                 )))?;
 
         let num_components = colorspace.num_components();
-        let mut output = vec![0; width * height * num_components];
-        let fits_horizontal = Cx::max_texture_width() / width;
-        let total_width = fits_horizontal * width;
-        let total_height = ((actl_info.num_frames as usize / fits_horizontal) + 1) * height;
+        let frame_pixels = checked_pixel_count(width, height)?;
+        let output_len = frame_pixels
+            .checked_mul(num_components)
+            .filter(|&len| len <= MAX_IMAGE_DECODED_BYTES)
+            .ok_or(ImageError::DimensionsTooLarge { width, height })?;
+        let mut output = vec![0; output_len];
+        // The atlas is sized from the declared `num_frames`; the decode loop below
+        // is driven by the actual fcTL chunks in the stream, which a malicious PNG
+        // can make exceed the declaration. Cap the loop to the allocated count so a
+        // frame can never be written past the atlas bounds.
+        let num_frames = actl_info.num_frames as usize;
+        let (total_width, total_height) = animation_atlas_layout(num_frames, width, height)?;
         let mut final_buffer = ImageBuffer::default();
         final_buffer.data.resize(total_width * total_height, 0);
         final_buffer.width = total_width;
@@ -166,11 +245,16 @@ impl ImageBuffer {
         final_buffer.animation = Some(TextureAnimation {
             width,
             height,
-            num_frames: actl_info.num_frames as usize,
+            num_frames,
             frame_delays: Vec::new(),
         });
         let mut previous_frame = None;
+        let mut frame_index = 0;
         while decoder.more_frames() {
+            if frame_index >= num_frames {
+                break;
+            }
+            frame_index += 1;
             decoder.decode_headers()?;
             let frame = decoder.frame_info().expect("to have already been decoded");
             let pix = decoder.decode_raw()?;
@@ -232,8 +316,10 @@ impl ImageBuffer {
         let cursor = std::io::Cursor::new(data);
         let mut decoder =
             WebPDecoder::new(std::io::BufReader::new(cursor)).map_err(ImageError::WebpDecode)?;
+        decoder.set_memory_limit(MAX_IMAGE_PIXELS * 4);
         let (width, height) = decoder.dimensions();
         let (width, height) = (width as usize, height as usize);
+        let frame_pixels = checked_pixel_count(width, height)?;
         let buf_size = decoder
             .output_buffer_size()
             .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
@@ -248,13 +334,21 @@ impl ImageBuffer {
         // so we just collect each composited frame (as RGBA) and its delay, then
         // pack them into an animation atlas like GIF/APNG.
         let has_alpha = decoder.has_alpha();
+        let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
+        let num_frames = decoder.num_frames() as usize;
+        if num_frames > max_frames {
+            return Err(ImageError::DimensionsTooLarge { width, height });
+        }
         decoder.reset_animation();
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut frame_delays: Vec<f64> = Vec::new();
-        loop {
+        for _ in 0..num_frames {
             let mut buf = vec![0u8; buf_size];
             match decoder.read_frame(&mut buf) {
                 Ok(delay_ms) => {
+                    if frames.len() >= max_frames {
+                        return Err(ImageError::DimensionsTooLarge { width, height });
+                    }
                     frame_delays
                         .push(if delay_ms == 0 { 0.1 } else { f64::from(delay_ms) * 0.001 });
                     frames.push(if has_alpha { buf } else { rgb_to_rgba(&buf) });
@@ -265,11 +359,11 @@ impl ImageBuffer {
         }
 
         if frames.len() >= 2 {
-            Ok(Self::pack_animation_atlas(frames, frame_delays, width, height))
+            Self::pack_animation_atlas(frames, frame_delays, width, height)
         } else if let Some(frame) = frames.first() {
             Self::new(frame, width, height)
         } else {
-            Self::new(&vec![0u8; width * height * 4], width, height)
+            Err(ImageError::WebpDecode(WebpDecodeErrors::NoMoreFrames))
         }
     }
 
@@ -281,11 +375,16 @@ impl ImageBuffer {
             .map_err(ImageError::GifDecode)?;
         let width = decoder.width() as usize;
         let height = decoder.height() as usize;
+        let frame_pixels = checked_pixel_count(width, height)?;
+        let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
         let mut frames = Vec::new();
         let mut frame_delays = Vec::new();
         let mut canvas = vec![0u8; width * height * 4];
 
         while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
+            if frames.len() >= max_frames {
+                return Err(ImageError::DimensionsTooLarge { width, height });
+            }
             let delay = if frame.delay == 0 {
                 0.1
             } else {
@@ -348,7 +447,7 @@ impl ImageBuffer {
             let rgba = frames.first().map(Vec::as_slice).unwrap_or(&canvas);
             return Self::new(rgba, width, height);
         }
-        Ok(Self::pack_animation_atlas(frames, frame_delays, width, height))
+        Self::pack_animation_atlas(frames, frame_delays, width, height)
     }
 
     /// Packs multi-frame animation `frames` (each a full-canvas RGBA buffer of
@@ -359,10 +458,8 @@ impl ImageBuffer {
         frame_delays: Vec<f64>,
         width: usize,
         height: usize,
-    ) -> ImageBuffer {
-        let fits_horizontal = Cx::max_texture_width() / width;
-        let total_width = fits_horizontal * width;
-        let total_height = ((frames.len() / fits_horizontal) + 1) * height;
+    ) -> Result<ImageBuffer, ImageError> {
+        let (total_width, total_height) = animation_atlas_layout(frames.len(), width, height)?;
         let mut final_buffer = ImageBuffer::default();
         final_buffer.data.resize(total_width * total_height, 0);
         final_buffer.width = total_width;
@@ -393,29 +490,26 @@ impl ImageBuffer {
                 cx = 0;
             }
         }
-        final_buffer
+        Ok(final_buffer)
     }
 
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
-        let mut decoder = JpegDecoder::new(cursor);
+        let mut decoder = JpegDecoder::new_with_options(cursor, decoder_options());
+        decoder.decode_headers().map_err(ImageError::JpgDecode)?;
+        let (width, height) = decoder.dimensions().ok_or(ImageError::JpgDecode(
+            JpgDecodeErrors::FormatStatic("Failed to decode JPG image dimensions"),
+        ))?;
+        checked_pixel_count(width, height)?;
         match decoder.decode() {
-            Ok(data) => {
-                let info =
-                    decoder
-                        .info()
-                        .ok_or(ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
-                            "Failed to decode JPG image info",
-                        )))?;
-                ImageBuffer::new(&data, info.width as usize, info.height as usize)
-            }
+            Ok(data) => ImageBuffer::new(&data, width, height),
             Err(err) => Err(ImageError::JpgDecode(err)),
         }
     }
 
     pub fn from_bmp(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
-        let mut decoder = BmpDecoder::new(cursor);
+        let mut decoder = BmpDecoder::new_with_options(cursor, decoder_options());
         decoder.decode_headers().map_err(ImageError::BmpDecode)?;
         let (width, height) =
             decoder
@@ -423,13 +517,14 @@ impl ImageBuffer {
                 .ok_or(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
                     "Failed to get BMP image dimensions",
                 )))?;
+        checked_pixel_count(width, height)?;
         let pixels = decoder.decode().map_err(ImageError::BmpDecode)?;
         Self::new(&pixels, width, height)
     }
 
     pub fn from_qoi(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
-        let mut decoder = QoiDecoder::new(cursor);
+        let mut decoder = QoiDecoder::new_with_options(cursor, decoder_options());
         decoder.decode_headers().map_err(ImageError::QoiDecode)?;
         let (width, height) =
             decoder
@@ -437,12 +532,14 @@ impl ImageBuffer {
                 .ok_or(ImageError::QoiDecode(QoiErrors::GenericStatic(
                     "Failed to get QOI image dimensions",
                 )))?;
+        checked_pixel_count(width, height)?;
         let pixels = decoder.decode().map_err(ImageError::QoiDecode)?;
         Self::new(&pixels, width, height)
     }
 
     pub fn from_ico(data: &[u8]) -> Result<Self, ImageError> {
-        let (offset, len, height) = ico_best_entry(data).ok_or(ImageError::UnsupportedFormat)?;
+        let (offset, len, _width, height) =
+            ico_best_entry(data).ok_or(ImageError::UnsupportedFormat)?;
         let payload = &data[offset..offset + len];
         if detect_image_format(payload) == Some("png") {
             ImageBuffer::from_png(payload)
@@ -496,6 +593,8 @@ pub enum ImageError {
     WebpDecode(WebpDecodeErrors),
     BmpDecode(BmpDecoderErrors),
     QoiDecode(QoiErrors),
+    DimensionsTooLarge { width: usize, height: usize },
+    DataTooLarge { bytes: usize, limit: usize },
     UnsupportedFormat,
     Http(String),
 }
@@ -556,12 +655,12 @@ fn headless_mode_enabled() -> bool {
 // Pick the largest image entry from an ICO directory, returning its payload's
 // (offset, length, height). Height comes from the directory entry since the
 // embedded DIB doubles its own height to cover a trailing AND mask.
-fn ico_best_entry(data: &[u8]) -> Option<(usize, usize, u32)> {
+fn ico_best_entry(data: &[u8]) -> Option<(usize, usize, u32, u32)> {
     if data.len() < 6 {
         return None;
     }
     let count = u16::from_le_bytes([data[4], data[5]]) as usize;
-    let mut best: Option<(usize, usize, u32, u32)> = None; // offset, len, height, score
+    let mut best: Option<(usize, usize, u32, u32, u32)> = None; // offset, len, width, height, score
     for i in 0..count {
         let e = 6 + i * 16;
         if e + 16 > data.len() {
@@ -579,10 +678,10 @@ fn ico_best_entry(data: &[u8]) -> Option<(usize, usize, u32)> {
         }
         let score = width * height * 64 + bit_count;
         if best.is_none_or(|(.., s)| score > s) {
-            best = Some((offset, len, height, score));
+            best = Some((offset, len, width, height, score));
         }
     }
-    best.map(|(offset, len, height, _)| (offset, len, height))
+    best.map(|(offset, len, width, height, _)| (offset, len, width, height))
 }
 
 // Wrap an ICO's bare DIB (a BITMAPINFOHEADER and pixels with no BMP file header)
@@ -595,13 +694,32 @@ fn ico_dib_to_bmp(dib: &[u8], real_height: u32) -> Result<Vec<u8>, ImageError> {
         )));
     }
     let header_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    if header_size < 40 || header_size > dib.len() {
+        return Err(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
+            "ICO DIB header has invalid size",
+        )));
+    }
     let bit_count = u16::from_le_bytes([dib[14], dib[15]]) as u32;
     let compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
     let mut clr_used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]) as usize;
     if bit_count <= 8 && clr_used == 0 {
         clr_used = 1usize << bit_count;
     }
-    let palette_bytes = if bit_count <= 8 { clr_used * 4 } else { 0 };
+    if bit_count <= 8 && clr_used > (1usize << bit_count) {
+        return Err(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
+            "ICO DIB palette is too large",
+        )));
+    }
+    let palette_bytes = if bit_count <= 8 {
+        clr_used
+            .checked_mul(4)
+            .ok_or(ImageError::DimensionsTooLarge {
+                width: dib.len(),
+                height: 1,
+            })?
+    } else {
+        0
+    };
     // A plain BITMAPINFOHEADER stores its bitfield masks between the header and pixels.
     let mask_bytes = if header_size == 40 {
         match compression {
@@ -612,8 +730,26 @@ fn ico_dib_to_bmp(dib: &[u8], real_height: u32) -> Result<Vec<u8>, ImageError> {
     } else {
         0
     };
-    let data_offset = 14 + header_size + mask_bytes + palette_bytes;
-    let file_size = 14 + dib.len();
+    let data_offset = 14usize
+        .checked_add(header_size)
+        .and_then(|offset| offset.checked_add(mask_bytes))
+        .and_then(|offset| offset.checked_add(palette_bytes))
+        .ok_or(ImageError::DimensionsTooLarge {
+            width: dib.len(),
+            height: 1,
+        })?;
+    let file_size = 14usize
+        .checked_add(dib.len())
+        .filter(|&size| size <= u32::MAX as usize)
+        .ok_or(ImageError::DimensionsTooLarge {
+            width: dib.len(),
+            height: 1,
+        })?;
+    if data_offset > file_size {
+        return Err(ImageError::BmpDecode(BmpDecoderErrors::GenericStatic(
+            "ICO DIB pixel data offset exceeds payload",
+        )));
+    }
 
     let mut out = Vec::with_capacity(file_size);
     out.extend_from_slice(b"BM");
@@ -687,6 +823,7 @@ pub fn decode_image_from_data(data: &[u8]) -> Result<ImageBuffer, ImageError> {
 /// SVG is a vector format with no magic bytes, so this sniffs for an `<svg>`
 /// root element, optionally preceded by an XML prolog, DOCTYPE, or comment.
 pub fn looks_like_svg(data: &[u8]) -> bool {
+    let data = &data[..data.len().min(MAX_SVG_SNIFF_BYTES)];
     let data = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data); // strip UTF-8 BOM
     let Ok(text) = std::str::from_utf8(data) else {
         return false;
@@ -709,6 +846,12 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
 }
 
 fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, ImageError> {
+    if data.len() > MAX_IMAGE_DECODED_BYTES {
+        return Err(ImageError::DataTooLarge {
+            bytes: data.len(),
+            limit: MAX_IMAGE_DECODED_BYTES,
+        });
+    }
     let format = detect_image_format_from_path_and_data(image_path, data)
         .ok_or(ImageError::UnsupportedFormat)?;
     match format {
@@ -732,22 +875,24 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
     match format {
         "jpg" => {
             let cursor = ZCursor::new(data);
-            let mut decoder = JpegDecoder::new(cursor);
+            let mut decoder = JpegDecoder::new_with_options(cursor, decoder_options());
             decoder.decode_headers().map_err(ImageError::JpgDecode)?;
-            let image_info = decoder.info().ok_or({
+            let (width, height) = decoder.dimensions().ok_or({
                 ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
-                    "Failed to get JPG image info after decoding headers",
+                    "Failed to get JPG image dimensions after decoding headers",
                 ))
             })?;
-            Ok((image_info.width as usize, image_info.height as usize))
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         "png" => {
             let cursor = ZCursor::new(data);
-            let mut decoder = PngDecoder::new(cursor);
+            let mut decoder = PngDecoder::new_with_options(cursor, png_decoder_options());
             decoder.decode_headers()?;
             let (width, height) = decoder.dimensions().ok_or(ImageError::PngDecode(
                 PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
             ))?;
+            checked_pixel_count(width, height)?;
             Ok((width, height))
         }
         "webp" => {
@@ -755,42 +900,44 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
             let decoder = WebPDecoder::new(std::io::BufReader::new(cursor))
                 .map_err(ImageError::WebpDecode)?;
             let (width, height) = decoder.dimensions();
-            Ok((width as usize, height as usize))
+            let (width, height) = (width as usize, height as usize);
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         "gif" => {
-            let image = ImageBuffer::from_gif(data)?;
-            Ok((
-                image
-                    .animation
-                    .as_ref()
-                    .map(|a| a.width)
-                    .unwrap_or(image.width),
-                image
-                    .animation
-                    .as_ref()
-                    .map(|a| a.height)
-                    .unwrap_or(image.height),
-            ))
+            let decoder = DecodeOptions::new()
+                .read_info(std::io::Cursor::new(data))
+                .map_err(ImageError::GifDecode)?;
+            let width = decoder.width() as usize;
+            let height = decoder.height() as usize;
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         "bmp" => {
             let cursor = ZCursor::new(data);
-            let mut decoder = BmpDecoder::new(cursor);
+            let mut decoder = BmpDecoder::new_with_options(cursor, decoder_options());
             decoder.decode_headers().map_err(ImageError::BmpDecode)?;
-            decoder.dimensions().ok_or(ImageError::BmpDecode(
+            let (width, height) = decoder.dimensions().ok_or(ImageError::BmpDecode(
                 BmpDecoderErrors::GenericStatic("Failed to get BMP image dimensions"),
-            ))
+            ))?;
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         "qoi" => {
             let cursor = ZCursor::new(data);
-            let mut decoder = QoiDecoder::new(cursor);
+            let mut decoder = QoiDecoder::new_with_options(cursor, decoder_options());
             decoder.decode_headers().map_err(ImageError::QoiDecode)?;
-            decoder.get_dimensions().ok_or(ImageError::QoiDecode(
+            let (width, height) = decoder.get_dimensions().ok_or(ImageError::QoiDecode(
                 QoiErrors::GenericStatic("Failed to get QOI image dimensions"),
-            ))
+            ))?;
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         "ico" => {
-            let image = ImageBuffer::from_ico(data)?;
-            Ok((image.width, image.height))
+            let (_, _, width, height) = ico_best_entry(data).ok_or(ImageError::UnsupportedFormat)?;
+            let (width, height) = (width as usize, height as usize);
+            checked_pixel_count(width, height)?;
+            Ok((width, height))
         }
         _ => Err(ImageError::UnsupportedFormat),
     }
@@ -1319,6 +1466,30 @@ pub fn load_image_from_cache(cx: &mut Cx, image_path: &Path) -> Option<Texture> 
     }
 }
 
+fn read_image_file_limited(image_path: &Path) -> Result<Vec<u8>, ImageError> {
+    if let Ok(metadata) = std::fs::metadata(image_path) {
+        if metadata.len() > MAX_IMAGE_DECODED_BYTES as u64 {
+            return Err(ImageError::DataTooLarge {
+                bytes: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+                limit: MAX_IMAGE_DECODED_BYTES,
+            });
+        }
+    }
+    let file =
+        std::fs::File::open(image_path).map_err(|_| ImageError::PathNotFound(image_path.into()))?;
+    let mut data = Vec::new();
+    file.take((MAX_IMAGE_DECODED_BYTES as u64) + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| ImageError::PathNotFound(image_path.into()))?;
+    if data.len() > MAX_IMAGE_DECODED_BYTES {
+        return Err(ImageError::DataTooLarge {
+            bytes: data.len(),
+            limit: MAX_IMAGE_DECODED_BYTES,
+        });
+    }
+    Ok(data)
+}
+
 pub fn load_image_from_data_async(
     cx: &mut Cx,
     image_path: &Path,
@@ -1329,6 +1500,12 @@ pub fn load_image_from_data_async(
         Some(ImageCacheEntry::Loaded(_)) => return Ok(AsyncLoadResult::Loaded),
         Some(ImageCacheEntry::Loading(w, h)) => return Ok(AsyncLoadResult::Loading(*w, *h)),
         None => {}
+    }
+    if data.len() > MAX_IMAGE_DECODED_BYTES {
+        return Err(ImageError::DataTooLarge {
+            bytes: data.len(),
+            limit: MAX_IMAGE_DECODED_BYTES,
+        });
     }
 
     // On wasm, decode synchronously on the UI thread since thread pools
@@ -1373,9 +1550,9 @@ pub fn load_image_file_by_path_async(
     match cx.get_global::<ImageCache>().map.get(image_path) {
         Some(ImageCacheEntry::Loaded(_)) => Ok(AsyncLoadResult::Loaded),
         Some(ImageCacheEntry::Loading(w, h)) => Ok(AsyncLoadResult::Loading(*w, *h)),
-        None => match std::fs::read(image_path) {
+        None => match read_image_file_limited(image_path) {
             Ok(data) => load_image_from_data_async(cx, image_path, Arc::new(data)),
-            Err(_) => Err(ImageError::PathNotFound(image_path.into())),
+            Err(err) => Err(err),
         },
     }
 }
@@ -1440,6 +1617,15 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                         continue;
                     }
                     if let Some(body) = &response.body {
+                        if body.len() > MAX_IMAGE_DECODED_BYTES {
+                            error!(
+                                "image http response too large for {:?}: {} bytes",
+                                image_path,
+                                body.len()
+                            );
+                            cache.map.remove(&image_path);
+                            continue;
+                        }
                         cache.map.remove(&image_path);
                         decode_queue.push((image_path, Arc::new(body.clone())));
                     } else {
@@ -1644,8 +1830,7 @@ pub trait ImageCacheImpl {
             self.set_texture(Some(texture), id);
             return Ok(());
         }
-        let data =
-            std::fs::read(image_path).map_err(|_| ImageError::PathNotFound(image_path.into()))?;
+        let data = read_image_file_limited(image_path)?;
         self.load_image_file_by_path_and_data(cx, &data, id, image_path)
     }
 
