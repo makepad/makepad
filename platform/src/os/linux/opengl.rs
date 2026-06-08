@@ -672,17 +672,38 @@ impl Cx {
                         if let Some(texture) = &draw_call.texture_slots[i] {
                             let texture_id = texture.texture_id();
                             let cxtexture = &mut self.textures[texture_id];
+                            // On Android with VideoExternal: the OES sampler is dead
+                            // code in the main shader after substitution. Bind the
+                            // sampler2D companion (populated each frame by the OES
+                            // blit) so the shader sees actual video frames.
+                            #[cfg(target_os = "android")]
+                            let companion_2d = matches!(
+                                cxtexture.format,
+                                TextureFormat::VideoExternal
+                            )
+                            .then_some(())
+                            .and_then(|_| cxtexture.os.gl_2d_companion);
+                            #[cfg(not(target_os = "android"))]
+                            let companion_2d: Option<u32> = None;
+
                             let bind_target = match cxtexture.format {
                                 #[cfg(target_os = "android")]
-                                TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
+                                TextureFormat::VideoExternal => {
+                                    if companion_2d.is_some() {
+                                        gl_sys::TEXTURE_2D
+                                    } else {
+                                        gl_sys::TEXTURE_EXTERNAL_OES
+                                    }
+                                }
                                 TextureFormat::VecCubeBGRAu8_32 { .. }
                                 | TextureFormat::RenderCubeBGRAu8 { .. } => {
                                     gl_sys::TEXTURE_CUBE_MAP
                                 }
                                 _ => gl_sys::TEXTURE_2D,
                             };
-                            if let Some(texture) = cxtexture.os.gl_texture {
-                                (gl.glBindTexture)(bind_target, texture);
+                            let handle = companion_2d.or(cxtexture.os.gl_texture);
+                            if let Some(handle) = handle {
+                                (gl.glBindTexture)(bind_target, handle);
                             } else {
                                 (gl.glBindTexture)(bind_target, 0);
                             }
@@ -694,15 +715,25 @@ impl Cx {
                             (gl.glUniform1i)(loc, i as i32);
                         }
                         if let Some(gl_bind_sampler) = gl.glBindSampler {
-                            // Do not bind sampler objects for OES external textures;
-                            // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior. Only applies on Android where we use OES.
-                            let is_oes = cfg!(target_os = "android")
+                            // Sampler objects are undefined with OES external textures, so
+                            // we skip binding one whenever the shader slot is OES-typed AND
+                            // the runtime actually bound an OES texture (no 2D companion).
+                            // When the companion is bound instead, the texture target is
+                            // plain GL_TEXTURE_2D and sampler objects are legal again.
+                            let actually_oes_bound = cfg!(target_os = "android")
                                 && matches!(
                                     sh.mapping.textures[i].tex_type,
                                     TextureType::TextureVideo
-                                );
-                            let sampler = if is_oes {
+                                )
+                                && draw_call.texture_slots[i]
+                                    .as_ref()
+                                    .map(|t| {
+                                        let cx = &self.textures[t.texture_id()];
+                                        matches!(cx.format, TextureFormat::VideoExternal)
+                                            && cx.os.gl_2d_companion.is_none()
+                                    })
+                                    .unwrap_or(false);
+                            let sampler = if actually_oes_bound {
                                 0
                             } else {
                                 shgl.samplers
@@ -2005,33 +2036,48 @@ impl CxOsDrawShader {
     }
 
     pub fn new(gl: &LibGl, in_vertex: &str, in_pixel: &str, os_type: &OsType) -> Self {
-        // Check if GL_OES_EGL_image_external extension is available in the current device, otherwise do not attempt to use in the shaders.
-        let available_extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
-        let is_external_texture_supported = available_extensions
-            .split_whitespace()
-            .any(|ext| ext == "GL_OES_EGL_image_external");
+        let can_use_oes = oes_external_texture_supported(gl, os_type);
 
-        // GL_OES_EGL_image_external is not well supported on Android emulators with macOS hosts.
-        // Because there's no bullet-proof way to check the emualtor host at runtime, we're currently disabling external texture support on all emulators.
-        let is_emulator = match os_type {
-            OsType::Android(params) => params.is_emulator,
-            OsType::OpenHarmony(_) => true, // TODO FIXME: detect whether we're running on an OHOS emulator
-            _ => false,
+        // The shader generator in platform/script/src/shader_glsl.rs unconditionally emits
+        // `samplerExternalOES` for TextureType::TextureVideo on Android+OpenGL, and shader
+        // call sites emit `sample2dOES(...)`. If the device cannot use OES external textures
+        // (Adreno driver bug, macOS-hosted emulator, or extension missing), the OES path is
+        // dead code but the shader source still references the symbols and refuses to compile.
+        // Rewrite the source to use `sampler2D` and provide a matching `sample2dOES` helper
+        // so the program compiles. Video frames won't render on these devices, but the rest
+        // of the app runs instead of panicking at shader compile time.
+        let needs_oes_substitution = !can_use_oes
+            && (in_vertex.contains("samplerExternalOES")
+                || in_pixel.contains("samplerExternalOES"));
+
+        let in_vertex_owned = if needs_oes_substitution {
+            in_vertex.replace("samplerExternalOES", "sampler2D")
+        } else {
+            in_vertex.to_string()
         };
+        let in_pixel_owned = if needs_oes_substitution {
+            in_pixel.replace("samplerExternalOES", "sampler2D")
+        } else {
+            in_pixel.to_string()
+        };
+        let in_vertex = in_vertex_owned.as_str();
+        let in_pixel = in_pixel_owned.as_str();
 
-        // Some Android devices running Adreno GPUs suddenly stopped compiling shaders when passing the samplerExternalOES sampler to texture2D functions.
-        // This seems like a driver bug (no confirmation from Qualcomm yet).
-        // Therefore we're disabling the external texture support for Adreno until this is fixed.
-        let is_vendor_adreno = get_gl_string(gl, gl_sys::RENDERER).contains("Adreno");
+        let shader_uses_oes_sampler = in_vertex.contains("samplerExternalOES")
+            || in_pixel.contains("samplerExternalOES");
+        let shader_calls_sample_2d_oes =
+            in_vertex.contains("sample2dOES") || in_pixel.contains("sample2dOES");
 
-        let (tex_ext_import, tex_ext_sampler) = if is_external_texture_supported
-            && !is_vendor_adreno
-            && !is_emulator
-        {
+        let (tex_ext_import, tex_ext_sampler) = if shader_uses_oes_sampler {
             (
-            "#extension GL_OES_EGL_image_external_essl3 : require\n",
-            "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture(sampler, vec2(pos.x, pos.y));}"
-        )
+                "#extension GL_OES_EGL_image_external_essl3 : require\n",
+                "vec4 sample2dOES(samplerExternalOES sampler, vec2 pos){ return texture(sampler, vec2(pos.x, pos.y));}",
+            )
+        } else if shader_calls_sample_2d_oes {
+            (
+                "",
+                "vec4 sample2dOES(sampler2D sampler, vec2 pos){ return texture(sampler, vec2(pos.x, pos.y));}",
+            )
         } else {
             ("", "")
         };
@@ -2171,6 +2217,31 @@ fn get_gl_string(gl: &LibGl, key: gl_sys::GLenum) -> String {
     }
 }
 
+/// True when GL_OES_EGL_image_external (and therefore samplerExternalOES + the
+/// GL_TEXTURE_EXTERNAL_OES texture target) can be used safely on this device.
+/// Returns false on Adreno (driver miscompiles `samplerExternalOES`), Android
+/// emulators with macOS hosts, OpenHarmony, and any device that simply doesn't
+/// advertise the extension. Callers should fall back to the YUV-plane / software
+/// decode path when this returns false.
+pub(crate) fn oes_external_texture_supported(gl: &LibGl, os_type: &OsType) -> bool {
+    let extensions = get_gl_string(gl, gl_sys::EXTENSIONS);
+    let has_ext = extensions
+        .split_whitespace()
+        .any(|ext| ext == "GL_OES_EGL_image_external");
+    if !has_ext {
+        return false;
+    }
+    if get_gl_string(gl, gl_sys::RENDERER).contains("Adreno") {
+        return false;
+    }
+    match os_type {
+        OsType::Android(p) if p.is_emulator => return false,
+        OsType::OpenHarmony(_) => return false,
+        _ => {}
+    }
+    true
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct OpenglAttribute {
     pub name: String,
@@ -2278,6 +2349,14 @@ pub struct CxOsTexture {
     /// True when Makepad owns the GL texture object and must delete it.
     pub gl_texture_owned: bool,
     pub gl_renderbuffer: Option<u32>,
+    /// Android-only: companion GL_TEXTURE_2D used to receive a per-frame blit from
+    /// `gl_texture` (which is bound as GL_TEXTURE_EXTERNAL_OES for SurfaceTexture).
+    /// Makepad's main shaders sample this 2D handle as `sampler2D`, sidestepping
+    /// the Adreno GLSL compiler bug that fires when the larger generated shaders
+    /// declare `samplerExternalOES` directly.
+    pub gl_2d_companion: Option<u32>,
+    pub gl_2d_companion_fbo: Option<u32>,
+    pub gl_2d_companion_size: (i32, i32),
 }
 
 impl Default for CxOsTexture {
@@ -2286,6 +2365,196 @@ impl Default for CxOsTexture {
             gl_texture: None,
             gl_texture_owned: true,
             gl_renderbuffer: None,
+            gl_2d_companion: None,
+            gl_2d_companion_fbo: None,
+            gl_2d_companion_size: (0, 0),
+        }
+    }
+}
+
+/// Minimal ESSL 1.00 OES → sampler2D blit program.
+///
+/// Adreno GPUs miscompile the full Makepad ESSL 3.00 shaders the moment they
+/// declare `samplerExternalOES`. This blit program is intentionally tiny —
+/// `#version 100`, one OES uniform, one inline `texture2D()` call — which is
+/// the exact pattern Android's own CameraX / GLSurfaceView samples ship and is
+/// known to work on essentially every Adreno driver in the wild. After each
+/// SurfaceTexture frame update we render a fullscreen triangle into a FBO
+/// whose color attachment is the companion `GL_TEXTURE_2D`. The main shader
+/// then reads the companion as `sampler2D` and never touches OES.
+#[cfg(target_os = "android")]
+pub struct OesBlitContext {
+    pub program: u32,
+    pub quad_vbo: u32,
+    pub a_pos_loc: u32,
+    pub u_sampler_loc: i32,
+}
+
+#[cfg(target_os = "android")]
+impl OesBlitContext {
+    pub fn try_new(gl: &LibGl) -> Result<Self, String> {
+        // Fullscreen triangle covering the viewport. Vertex shader derives UV
+        // from clip-space position, so no separate UV attribute is needed.
+        const VS_SRC: &str = "#version 100\n\
+            attribute vec2 a_pos;\n\
+            varying vec2 v_uv;\n\
+            void main() {\n\
+                v_uv = a_pos * 0.5 + 0.5;\n\
+                gl_Position = vec4(a_pos, 0.0, 1.0);\n\
+            }\n\0";
+        const FS_SRC: &str = "#version 100\n\
+            #extension GL_OES_EGL_image_external : require\n\
+            precision mediump float;\n\
+            uniform samplerExternalOES u_sampler;\n\
+            varying vec2 v_uv;\n\
+            void main() {\n\
+                gl_FragColor = texture2D(u_sampler, v_uv);\n\
+            }\n\0";
+
+        unsafe fn compile_shader(
+            gl: &LibGl,
+            stage: gl_sys::GLenum,
+            src: &str,
+            label: &str,
+        ) -> Result<u32, String> {
+            let shader = (gl.glCreateShader)(stage);
+            if shader == 0 {
+                return Err(format!("OesBlit: glCreateShader({}) returned 0", label));
+            }
+            let src_ptr = src.as_ptr() as *const c_char;
+            let src_len = (src.len() - 1) as i32; // exclude NUL
+            (gl.glShaderSource)(shader, 1, &src_ptr, &src_len);
+            (gl.glCompileShader)(shader);
+            let mut ok: i32 = 0;
+            (gl.glGetShaderiv)(shader, gl_sys::COMPILE_STATUS, &mut ok);
+            if ok == 0 {
+                let mut len: i32 = 0;
+                (gl.glGetShaderiv)(shader, gl_sys::INFO_LOG_LENGTH, &mut len);
+                let mut log = vec![0u8; len.max(1) as usize];
+                (gl.glGetShaderInfoLog)(shader, len, ptr::null_mut(), log.as_mut_ptr() as *mut _);
+                let msg = String::from_utf8_lossy(&log).trim_end().to_string();
+                (gl.glDeleteShader)(shader);
+                return Err(format!("OesBlit: {} compile failed: {}", label, msg));
+            }
+            Ok(shader)
+        }
+
+        unsafe {
+            let vs = compile_shader(gl, gl_sys::VERTEX_SHADER, VS_SRC, "vertex")?;
+            let fs = match compile_shader(gl, gl_sys::FRAGMENT_SHADER, FS_SRC, "fragment") {
+                Ok(s) => s,
+                Err(e) => {
+                    (gl.glDeleteShader)(vs);
+                    return Err(e);
+                }
+            };
+
+            let program = (gl.glCreateProgram)();
+            if program == 0 {
+                (gl.glDeleteShader)(vs);
+                (gl.glDeleteShader)(fs);
+                return Err("OesBlit: glCreateProgram returned 0".to_string());
+            }
+            (gl.glAttachShader)(program, vs);
+            (gl.glAttachShader)(program, fs);
+            (gl.glLinkProgram)(program);
+            (gl.glDeleteShader)(vs);
+            (gl.glDeleteShader)(fs);
+
+            let mut ok: i32 = 0;
+            (gl.glGetProgramiv)(program, gl_sys::LINK_STATUS, &mut ok);
+            if ok == 0 {
+                let mut len: i32 = 0;
+                (gl.glGetProgramiv)(program, gl_sys::INFO_LOG_LENGTH, &mut len);
+                let mut log = vec![0u8; len.max(1) as usize];
+                (gl.glGetProgramInfoLog)(program, len, ptr::null_mut(), log.as_mut_ptr() as *mut _);
+                let msg = String::from_utf8_lossy(&log).trim_end().to_string();
+                (gl.glDeleteProgram)(program);
+                return Err(format!("OesBlit: link failed: {}", msg));
+            }
+
+            let a_pos_name = b"a_pos\0";
+            let a_pos_loc = (gl.glGetAttribLocation)(program, a_pos_name.as_ptr() as *const c_char);
+            if a_pos_loc < 0 {
+                (gl.glDeleteProgram)(program);
+                return Err("OesBlit: a_pos attribute not found".to_string());
+            }
+            let u_sampler_name = b"u_sampler\0";
+            let u_sampler_loc =
+                (gl.glGetUniformLocation)(program, u_sampler_name.as_ptr() as *const c_char);
+
+            let mut quad_vbo: u32 = 0;
+            (gl.glGenBuffers)(1, &mut quad_vbo);
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, quad_vbo);
+            // Triangle covering the full viewport: (-1,-1), (3,-1), (-1,3).
+            let verts: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
+            (gl.glBufferData)(
+                gl_sys::ARRAY_BUFFER,
+                (verts.len() * std::mem::size_of::<f32>()) as isize,
+                verts.as_ptr() as *const _,
+                gl_sys::STATIC_DRAW,
+            );
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+
+            Ok(Self {
+                program,
+                quad_vbo,
+                a_pos_loc: a_pos_loc as u32,
+                u_sampler_loc,
+            })
+        }
+    }
+
+    /// Render `oes_tex` (bound as GL_TEXTURE_EXTERNAL_OES) into `fbo`'s color
+    /// attachment, which the caller has already configured with the companion
+    /// `GL_TEXTURE_2D` at the given size.
+    ///
+    /// We deliberately don't save/restore GL state here — the surrounding draw
+    /// loop re-binds its framebuffer, viewport, program, vertex buffers, sampler
+    /// objects, and per-slot textures unconditionally at the start of every
+    /// pass. We just leave the framebuffer at 0 so nothing accidentally renders
+    /// into our companion before the next pass overrides it.
+    pub fn blit(&self, gl: &LibGl, oes_tex: u32, fbo: u32, dst_w: i32, dst_h: i32) {
+        unsafe {
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, fbo);
+            (gl.glViewport)(0, 0, dst_w, dst_h);
+            (gl.glUseProgram)(self.program);
+
+            (gl.glActiveTexture)(gl_sys::TEXTURE0);
+            (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, oes_tex);
+            if self.u_sampler_loc >= 0 {
+                (gl.glUniform1i)(self.u_sampler_loc, 0);
+            }
+
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.quad_vbo);
+            (gl.glEnableVertexAttribArray)(self.a_pos_loc);
+            (gl.glVertexAttribPointer)(
+                self.a_pos_loc,
+                2,
+                gl_sys::FLOAT,
+                0, // GL_FALSE
+                0,
+                std::ptr::null(),
+            );
+
+            (gl.glDisable)(gl_sys::DEPTH_TEST);
+            (gl.glDisable)(gl_sys::BLEND);
+            (gl.glDisable)(gl_sys::CULL_FACE);
+
+            (gl.glDrawArrays)(gl_sys::TRIANGLES, 0, 3);
+
+            (gl.glDisableVertexAttribArray)(self.a_pos_loc);
+            (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, 0);
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+            (gl.glUseProgram)(0);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+        }
+    }
+
+    pub fn free(&self, gl: &LibGl) {
+        unsafe {
+            (gl.glDeleteProgram)(self.program);
+            (gl.glDeleteBuffers)(1, &self.quad_vbo);
         }
     }
 }
@@ -2680,13 +2949,6 @@ impl CxTexture {
 
             #[cfg(target_os = "android")]
             unsafe {
-                let gpu_renderer = get_gl_string(gl, gl_sys::RENDERER);
-                if gpu_renderer.contains("Adreno") {
-                    crate::warning!("WARNING: This device is using {gpu_renderer} renderer.
-                    OpenGL external textures (GL_OES_EGL_image_external extension) are currently not working on makepad for most Adreno GPUs.
-                    This is likely due to a driver bug. External texture support is being disabled, which means you won't be able to use the Video widget on this device.");
-                }
-
                 (gl.glBindTexture)(gl_sys::TEXTURE_EXTERNAL_OES, self.os.gl_texture.unwrap());
 
                 (gl.glTexParameteri)(
@@ -2719,6 +2981,11 @@ impl CxTexture {
                     "UPDATE VIDEO TEXTURE ERROR {}",
                     self.os.gl_texture.unwrap()
                 );
+
+                // Allocate the sampler2D companion + FBO that the OES-blit step
+                // renders into. Sized generously at first; can be resized when
+                // VideoPlaybackPrepared arrives with the true video dimensions.
+                self.ensure_2d_companion(gl, 1920, 1080);
             }
 
             #[cfg(not(target_os = "android"))]
@@ -2760,6 +3027,82 @@ impl CxTexture {
             return true;
         }
         false
+    }
+
+    /// Android-only: ensure a `GL_TEXTURE_2D` companion + FBO exist at the requested
+    /// size for this OES video texture. Idempotent: callable from `setup_video_texture`
+    /// at a default size and again from `VideoPlaybackPrepared` once the real video
+    /// dimensions are known. Cheaper than reallocating each frame.
+    #[cfg(target_os = "android")]
+    pub fn ensure_2d_companion(&mut self, gl: &LibGl, width: i32, height: i32) {
+        let target_size = (width.max(1), height.max(1));
+        let already_sized = self.os.gl_2d_companion.is_some()
+            && self.os.gl_2d_companion_fbo.is_some()
+            && self.os.gl_2d_companion_size == target_size;
+        if already_sized {
+            return;
+        }
+        unsafe {
+            if self.os.gl_2d_companion.is_none() {
+                let mut tex: u32 = 0;
+                (gl.glGenTextures)(1, &mut tex);
+                self.os.gl_2d_companion = Some(tex);
+            }
+            if self.os.gl_2d_companion_fbo.is_none() {
+                let mut fbo: u32 = 0;
+                (gl.glGenFramebuffers)(1, &mut fbo);
+                self.os.gl_2d_companion_fbo = Some(fbo);
+            }
+
+            let tex = self.os.gl_2d_companion.unwrap();
+            let fbo = self.os.gl_2d_companion_fbo.unwrap();
+
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, tex);
+            (gl.glTexImage2D)(
+                gl_sys::TEXTURE_2D,
+                0,
+                gl_sys::RGBA as i32,
+                target_size.0,
+                target_size.1,
+                0,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_MIN_FILTER,
+                gl_sys::LINEAR as i32,
+            );
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_MAG_FILTER,
+                gl_sys::LINEAR as i32,
+            );
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_WRAP_S,
+                gl_sys::CLAMP_TO_EDGE as i32,
+            );
+            (gl.glTexParameteri)(
+                gl_sys::TEXTURE_2D,
+                gl_sys::TEXTURE_WRAP_T,
+                gl_sys::CLAMP_TO_EDGE as i32,
+            );
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, fbo);
+            (gl.glFramebufferTexture2D)(
+                gl_sys::FRAMEBUFFER,
+                gl_sys::COLOR_ATTACHMENT0,
+                gl_sys::TEXTURE_2D,
+                tex,
+                0,
+            );
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+
+            self.os.gl_2d_companion_size = target_size;
+        }
     }
 
     pub fn update_render_target(&mut self, gl: &LibGl, width: usize, height: usize) {
@@ -2898,6 +3241,12 @@ impl CxTexture {
             }
             if let Some(gl_renderbuffer) = old_os.gl_renderbuffer.take() {
                 unsafe { (gl.glDeleteRenderbuffers)(1, &gl_renderbuffer) };
+            }
+            if let Some(companion) = old_os.gl_2d_companion.take() {
+                unsafe { (gl.glDeleteTextures)(1, &companion) };
+            }
+            if let Some(fbo) = old_os.gl_2d_companion_fbo.take() {
+                unsafe { (gl.glDeleteFramebuffers)(1, &fbo) };
             }
         }
     }
