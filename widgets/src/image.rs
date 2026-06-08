@@ -10,6 +10,8 @@ use crate::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const MAX_SVG_BYTES: usize = 16 * 1024 * 1024;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
 
@@ -493,6 +495,12 @@ impl Image {
     /// The `DrawSvg` is allocated on first use, so images that never show an SVG
     /// carry only a null pointer.
     pub fn load_svg_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        if data.len() > MAX_SVG_BYTES {
+            return Err(ImageError::DataTooLarge {
+                bytes: data.len(),
+                limit: MAX_SVG_BYTES,
+            });
+        }
         let svg_str = std::str::from_utf8(data).map_err(|_| ImageError::UnsupportedFormat)?;
         if self.draw_svg.is_none() {
             self.draw_svg = Some(cx.with_vm(|vm| Box::new(DrawSvg::script_new_with_default(vm))));

@@ -1,8 +1,12 @@
 use crate::window::{WindowIcon, WindowIconBuffer};
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
+use makepad_zune_png::makepad_zune_core::options::DecoderOptions;
 use makepad_zune_png::PngDecoder;
 
 include!(concat!(env!("OUT_DIR"), "/app_icon_gen.rs"));
+
+const MAX_ICON_DIMENSION: usize = 1024;
+const MAX_ICON_PIXELS: usize = MAX_ICON_DIMENSION * MAX_ICON_DIMENSION;
 
 pub fn window_icon() -> WindowIcon {
     // When a packaged app bundle is running, skip the runtime override
@@ -69,28 +73,36 @@ fn decode_png(png: &[u8], scale: u32) -> Option<WindowIconBuffer> {
     if png.is_empty() {
         return None;
     }
-    let mut dec = PngDecoder::new(ZCursor::new(png));
+    let options = DecoderOptions::default()
+        .set_max_width(MAX_ICON_DIMENSION)
+        .set_max_height(MAX_ICON_DIMENSION);
+    let mut dec = PngDecoder::new_with_options(ZCursor::new(png), options);
     dec.decode_headers().ok()?;
     let (width, height) = dec.dimensions()?;
     let cs = dec.colorspace()?;
+    let pixels = width.checked_mul(height).filter(|&p| p <= MAX_ICON_PIXELS)?;
+    let components = cs.num_components();
     let decoded = dec.decode().ok()?;
     let src = decoded.u8()?;
+    if src.len() < pixels.checked_mul(components)? {
+        return None;
+    }
 
-    let mut rgba = Vec::with_capacity(width * height * 4);
-    match cs.num_components() {
-        4 => rgba.extend_from_slice(&src),
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    match components {
+        4 => rgba.extend_from_slice(&src[..pixels * 4]),
         3 => {
-            for c in src.chunks_exact(3) {
+            for c in src.chunks_exact(3).take(pixels) {
                 rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
             }
         }
         2 => {
-            for c in src.chunks_exact(2) {
+            for c in src.chunks_exact(2).take(pixels) {
                 rgba.extend_from_slice(&[c[0], c[0], c[0], c[1]]);
             }
         }
         1 => {
-            for g in src {
+            for g in src.iter().copied().take(pixels) {
                 rgba.extend_from_slice(&[g, g, g, 255]);
             }
         }
