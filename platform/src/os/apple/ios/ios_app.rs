@@ -58,6 +58,10 @@ pub const UI_RETURN_KEY_DONE: i64 = 9;
 pub const UI_RETURN_KEY_EMERGENCY_CALL: i64 = 10;
 pub const UI_RETURN_KEY_CONTINUE: i64 = 11;
 
+pub(crate) const IOS_TEXT_INPUT_CARET_HEIGHT: f64 = 20.0;
+const IOS_TEXT_INPUT_TARGET_HEIGHT: f64 = 32.0;
+pub const IOS_TEXT_EVENT_DRAIN_TIMER_ID: u64 = u64::MAX - 1;
+
 // this value will be fetched from multiple threads (post signal uses it)
 pub static mut IOS_CLASSES: *const IosClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
@@ -136,8 +140,14 @@ pub enum IosTextInputEvent {
     /// Regular text input (input, replace_last)
     TextInput(String, bool),
     /// Range replacement for autocorrect (start, end, text)
-    RangeReplace(usize, usize, String),
-    /// Selection update from UIKit (text, start, end)
+    RangeReplace {
+        start: usize,
+        end: usize,
+        text: String,
+        replaced_text: Option<String>,
+        fallback_to_insert: bool,
+    },
+    /// Native UITextInput selection update (text, start, end)
     SelectionChanged(String, usize, usize),
     /// Key event (e.g., Backspace, Return)
     KeyEvent(KeyCode),
@@ -150,6 +160,7 @@ pub struct IosApp {
     /// Using a Vec allows batching multiple events (e.g., replaceRange + insertText)
     /// to be processed atomically before SyncImeState can interfere
     pub queued_text_events: Vec<IosTextInputEvent>,
+    pub text_event_drain_timer_scheduled: bool,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
@@ -168,6 +179,7 @@ pub struct IosApp {
     edit_menu_interaction: Option<ObjcId>,
     /// Keyboard notification observer delegate - stored for cleanup
     keyboard_observer_delegate: Option<ObjcId>,
+    physical_keyboard_connected: bool,
     /// Cached keyboard config to avoid redundant reloadInputViews calls
     last_keyboard_config: Option<crate::ime::TextInputConfig>,
     /// Root view controller for status bar / home indicator control
@@ -193,9 +205,11 @@ impl IosApp {
             let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
             let edit_menu_delegate_instance: ObjcId =
                 msg_send![get_ios_class_global().edit_menu_delegate, new];
+            let physical_keyboard_connected = Self::query_physical_keyboard_connected();
             IosApp {
                 virtual_keyboard_event: None,
                 queued_text_events: Vec::new(),
+                text_event_drain_timer_scheduled: false,
                 touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
@@ -212,6 +226,7 @@ impl IosApp {
                 edit_menu_delegate_instance,
                 edit_menu_interaction: None,
                 keyboard_observer_delegate: None,
+                physical_keyboard_connected,
                 last_keyboard_config: None,
                 view_controller: None,
                 camera_preview_layers: HashMap::new(),
@@ -282,7 +297,10 @@ impl IosApp {
             let text_input_view: ObjcId = msg_send![get_ios_class_global().text_input_view, alloc];
             let text_input_view: ObjcId = msg_send![text_input_view, initWithFrame: NSRect {
                 origin: NSPoint { x: 0.0, y: 0.0 },
-                size: NSSize { width: 1.0, height: 1.0 }
+                size: NSSize {
+                    width: 1.0,
+                    height: IOS_TEXT_INPUT_TARGET_HEIGHT,
+                }
             }];
 
             let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
@@ -304,6 +322,7 @@ impl IosApp {
             (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1); // Use CJK detection logic
             (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
             (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
+            (*text_input_view).set_ivar::<bool>("_is_multiline", false);
             // Floating cursor (keyboard trackpad) state
             (*text_input_view).set_ivar::<BOOL>("floating_cursor_active", NO);
             (*text_input_view).set_ivar::<f64>("floating_cursor_last_x", 0.0);
@@ -313,33 +332,31 @@ impl IosApp {
             (*text_input_view).set_ivar::<f64>("selection_handle_end_x", 0.0);
             (*text_input_view).set_ivar::<f64>("selection_handle_end_y", 0.0);
             (*text_input_view).set_ivar::<BOOL>("selection_handles_visible", NO);
+            (*text_input_view).set_ivar::<BOOL>("accept_system_selection_changes", NO);
+            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", NO);
 
+            let clear_color: ObjcId = msg_send![class!(UIColor), clearColor];
+            let () = msg_send![text_input_view, setBackgroundColor: clear_color];
+            let () = msg_send![text_input_view, setTintColor: clear_color];
+            let () = msg_send![text_input_view, setOpaque: NO];
+            let () = msg_send![text_input_view, setAutoresizingMask: 0u64];
+            let () = msg_send![text_input_view, setIsAccessibilityElement: NO];
+            let () = msg_send![text_input_view, setAccessibilityElementsHidden: YES];
+            let responds_to_accessibility_interaction: BOOL = msg_send![
+                text_input_view,
+                respondsToSelector: sel!(setAccessibilityRespondsToUserInteraction:)
+            ];
+            if responds_to_accessibility_interaction == YES {
+                let () =
+                    msg_send![text_input_view, setAccessibilityRespondsToUserInteraction: NO];
+            }
             let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
 
-            // iOS 16+: use UITextSelectionDisplayInteraction when available.
-            // We keep the custom handle overlay as a fallback and event source.
-            let selection_display_cls: ObjcId = makepad_objc_sys::runtime::objc_getClass(
-                b"UITextSelectionDisplayInteraction\0".as_ptr() as *const _,
-            ) as ObjcId;
-            if !selection_display_cls.is_null() {
-                let interaction: ObjcId = msg_send![selection_display_cls, alloc];
-                if interaction != nil {
-                    let can_init: BOOL =
-                        msg_send![interaction, respondsToSelector: sel!(initWithTextInput:)];
-                    if can_init == YES {
-                        let interaction: ObjcId =
-                            msg_send![interaction, initWithTextInput: text_input_view];
-                        if interaction != nil {
-                            let () = msg_send![mtk_view_obj, addInteraction: interaction];
-                            self.native_selection_display_interaction = Some(interaction);
-                            self.has_native_selection_display_api = true;
-                        }
-                    }
-                }
-            }
+            // No UITextInteraction needed: arrow nav and auto-repeat come from
+            // UIKeyCommand (see key_commands in ios_text_input.rs).
 
-            // iOS 15+ custom selection handles (fallback and explicit drag surface).
+            // iOS 15+ custom selection handles (explicit drag surface).
             let selection_handle_start = self.create_selection_handle_view();
             let selection_handle_end = self.create_selection_handle_view();
 
@@ -392,6 +409,10 @@ impl IosApp {
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardDidHide:) name: UIKeyboardDidHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(keyboardWillHide:) name: UIKeyboardWillHideNotification object: nil];
             let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(inputModeDidChange:) name: UITextInputCurrentInputModeDidChangeNotification object: nil];
+            let gc_keyboard_did_connect = str_to_nsstring("GCKeyboardDidConnectNotification");
+            let gc_keyboard_did_disconnect = str_to_nsstring("GCKeyboardDidDisconnectNotification");
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(physicalKeyboardChanged:) name: gc_keyboard_did_connect object: nil];
+            let () = msg_send![notification_center, addObserver: textfield_dlg selector: sel!(physicalKeyboardChanged:) name: gc_keyboard_did_disconnect object: nil];
 
             // Store the delegate for cleanup
             self.keyboard_observer_delegate = Some(textfield_dlg);
@@ -749,6 +770,8 @@ impl IosApp {
                                 (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
                                 (*text_input_view)
                                     .set_ivar::<bool>("_secure_text_entry", config.is_secure);
+                                (*text_input_view)
+                                    .set_ivar::<bool>("_is_multiline", config.is_multiline);
                             }
                             Some(text_input_view)
                         } else {
@@ -809,22 +832,50 @@ impl IosApp {
     }
 
     pub fn set_ime_position(pos: DVec2) {
-        // Avoid re-entrant calls by checking if we're already in a with_ios_app call
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    app.ime_position = Some(pos);
-                    // Also set ivars directly on the text_input_view to avoid re-entrant borrow issues
-                    // when UITextInput callbacks access the position
-                    if let Some(text_input_view) = app.text_input_view {
-                        unsafe {
-                            (*text_input_view).set_ivar::<f64>("ime_pos_x", pos.x);
-                            (*text_input_view).set_ivar::<f64>("ime_pos_y", pos.y);
-                        }
+        // pos is the caret-glyph bottom in MTKView-local native points. UIKit
+        // anchors the press-and-hold accent popup to the bridge view's frame and
+        // clamps the caret rect to its bounds, so the 1xH view must physically sit
+        // at the caret. Park it with its top-left at the glyph top; the geometry
+        // methods then return small in-bounds view-local rects.
+        let frame = NSRect {
+            origin: NSPoint {
+                x: pos.x,
+                y: pos.y - IOS_TEXT_INPUT_TARGET_HEIGHT,
+            },
+            size: NSSize {
+                width: 1.0,
+                height: IOS_TEXT_INPUT_TARGET_HEIGHT,
+            },
+        };
+
+        // Extract the view pointer inside the borrow, then message UIKit after the
+        // borrow is dropped, so a re-entrant IOS_APP borrow can never silently skip
+        // the update (mirrors update_native_selection_display).
+        let text_input_view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow_mut().ok().and_then(|mut app_ref| {
+                    let app = app_ref.as_mut()?;
+                    // Skip the re-park when the caret hasn't moved (blink redraws
+                    // re-emit the same pos), so the candidate window doesn't churn.
+                    if app.ime_position == Some(pos) {
+                        return None;
                     }
-                }
+                    let view = app.text_input_view?;
+                    app.ime_position = Some(pos);
+                    Some(view)
+                })
+            })
+            .ok()
+            .flatten();
+
+        if let Some(text_input_view) = text_input_view {
+            unsafe {
+                let () = msg_send![text_input_view, setFrame: frame];
+                // View-local caret anchor: left edge, glyph bottom.
+                (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
+                (*text_input_view).set_ivar::<f64>("ime_pos_y", IOS_TEXT_INPUT_TARGET_HEIGHT);
             }
-        });
+        }
     }
 
     pub fn set_ime_text(text: String, selection_start: usize, selection_end: usize) {
@@ -861,6 +912,8 @@ impl IosApp {
             // Get inputDelegate for notifications - this is critical for iOS
             // to know the text/cursor has changed (needed for autocorrect positioning)
             let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+
+            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", YES);
 
             // Notify BEFORE changes
             if input_delegate != nil {
@@ -910,6 +963,8 @@ impl IosApp {
                 let () = msg_send![input_delegate, selectionDidChange: text_input_view];
                 let () = msg_send![input_delegate, textDidChange: text_input_view];
             }
+
+            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", NO);
         }
     }
 
@@ -958,6 +1013,37 @@ impl IosApp {
         self.virtual_keyboard_event = Some(event);
     }
 
+    pub fn physical_keyboard_connected(&self) -> bool {
+        self.physical_keyboard_connected
+    }
+
+    pub fn query_physical_keyboard_connected() -> bool {
+        unsafe {
+            let gc_keyboard_class = makepad_objc_sys::runtime::objc_getClass(
+                b"GCKeyboard\0".as_ptr() as *const _,
+            ) as ObjcId;
+            if gc_keyboard_class.is_null() {
+                return false;
+            }
+            let responds: BOOL =
+                msg_send![gc_keyboard_class, respondsToSelector: sel!(coalescedKeyboard)];
+            if responds != YES {
+                return false;
+            }
+            let keyboard: ObjcId = msg_send![gc_keyboard_class, coalescedKeyboard];
+            keyboard != nil
+        }
+    }
+
+    pub fn sync_physical_keyboard_state(&mut self) -> Option<PhysicalKeyboardEvent> {
+        let connected = Self::query_physical_keyboard_connected();
+        if self.physical_keyboard_connected == connected {
+            return None;
+        }
+        self.physical_keyboard_connected = connected;
+        Some(PhysicalKeyboardEvent { connected })
+    }
+
     pub fn stop_timer(&mut self, timer_id: u64) {
         for i in 0..self.timers.len() {
             if self.timers[i].timer_id == timer_id {
@@ -970,6 +1056,14 @@ impl IosApp {
         }
     }
 
+    fn schedule_text_event_drain(&mut self) {
+        if self.text_event_drain_timer_scheduled {
+            return;
+        }
+        self.text_event_drain_timer_scheduled = true;
+        self.start_timer(IOS_TEXT_EVENT_DRAIN_TIMER_ID, 0.0, false);
+    }
+
     pub fn send_text_input(input: String, replace_last: bool) {
         // Queue text input - will be processed on next timer tick
         // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
@@ -979,20 +1073,33 @@ impl IosApp {
                 if let Some(ref mut app) = *app_ref {
                     app.queued_text_events
                         .push(IosTextInputEvent::TextInput(input, replace_last));
+                    app.schedule_text_event_drain();
                 }
             }
         });
     }
 
-    pub fn send_text_range_replace(start: usize, end: usize, text: String) {
+    pub fn send_text_range_replace(
+        start: usize,
+        end: usize,
+        text: String,
+        replaced_text: Option<String>,
+        fallback_to_insert: bool,
+    ) {
         // Queue range replacement for iOS autocorrect
         // Using a Vec queue allows batching with subsequent insertText calls
         // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events
-                        .push(IosTextInputEvent::RangeReplace(start, end, text));
+                    app.queued_text_events.push(IosTextInputEvent::RangeReplace {
+                        start,
+                        end,
+                        text,
+                        replaced_text,
+                        fallback_to_insert,
+                    });
+                    app.schedule_text_event_drain();
                 }
             }
         });
@@ -1004,6 +1111,7 @@ impl IosApp {
                 if let Some(ref mut app) = *app_ref {
                     app.queued_text_events
                         .push(IosTextInputEvent::SelectionChanged(text, start, end));
+                    app.schedule_text_event_drain();
                 }
             }
         });
@@ -1017,6 +1125,7 @@ impl IosApp {
                 if let Some(ref mut app) = *app_ref {
                     app.queued_text_events
                         .push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
+                    app.schedule_text_event_drain();
                 }
             }
         });
@@ -1029,6 +1138,7 @@ impl IosApp {
                 if let Some(ref mut app) = *app_ref {
                     app.queued_text_events
                         .push(IosTextInputEvent::KeyEvent(KeyCode::ReturnKey));
+                    app.schedule_text_event_drain();
                 }
             }
         });
@@ -1546,10 +1656,10 @@ impl IosApp {
                 }
             }
             "select_all" => {
-                // Send Cmd+A keypress to trigger select all in widgets
-                // On Apple platforms, is_primary() checks for logo (Command)
+                // Send Cmd+A keypress to trigger select all in widgets.
+                // On Apple platforms, is_primary() checks for logo (Command).
                 let time = with_ios_app(|app| app.time_now());
-                IosApp::do_callback(IosEvent::KeyDown(KeyEvent {
+                let key_event = KeyEvent {
                     key_code: KeyCode::KeyA,
                     is_repeat: false,
                     modifiers: KeyModifiers {
@@ -1559,7 +1669,10 @@ impl IosApp {
                         logo: true,
                     },
                     time,
-                }));
+                };
+                // Emit a matching KeyUp so the key does not stay in keys_down.
+                IosApp::do_callback(IosEvent::KeyDown(key_event));
+                IosApp::do_callback(IosEvent::KeyUp(key_event));
             }
             _ => {
                 crate::log!("iOS: Unknown clipboard action: {}", action);

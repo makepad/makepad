@@ -121,6 +121,7 @@ pub enum FromJavaMessage {
     KeyDown {
         keycode: u32,
         meta_state: u32,
+        is_repeat: bool,
     },
     KeyUp {
         keycode: u32,
@@ -129,6 +130,9 @@ pub enum FromJavaMessage {
     ResizeTextIME {
         keyboard_height: u32,
         is_open: bool,
+    },
+    PhysicalKeyboard {
+        connected: bool,
     },
     SafeAreaInsets {
         // Native Android logical points (`px / density`). Rust converts these
@@ -837,10 +841,12 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnKeyDown(
     _: jni_sys::jobject,
     keycode: jni_sys::jint,
     meta_state: jni_sys::jint,
+    is_repeat: jni_sys::jboolean,
 ) {
     send_from_java_message(FromJavaMessage::KeyDown {
         keycode: keycode as u32,
         meta_state: meta_state as u32,
+        is_repeat: is_repeat != 0,
     });
 }
 
@@ -878,6 +884,17 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
     send_from_java_message(FromJavaMessage::ResizeTextIME {
         keyboard_height: keyboard_height as u32,
         is_open: is_open != 0,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnPhysicalKeyboardChanged(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    connected: jni_sys::jboolean,
+) {
+    send_from_java_message(FromJavaMessage::PhysicalKeyboard {
+        connected: connected != 0,
     });
 }
 

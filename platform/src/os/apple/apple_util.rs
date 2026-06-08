@@ -114,14 +114,18 @@ pub fn get_event_char(event: ObjcId) -> char {
     }
 }
 
-pub fn get_event_key_modifier(event: ObjcId) -> KeyModifiers {
-    let flags: u64 = unsafe { msg_send![event, modifierFlags] };
+pub fn key_modifiers_from_flags(flags: u64) -> KeyModifiers {
     KeyModifiers {
         shift: flags & NSEventModifierFlags::NSShiftKeyMask as u64 != 0,
         control: flags & NSEventModifierFlags::NSControlKeyMask as u64 != 0,
         alt: flags & NSEventModifierFlags::NSAlternateKeyMask as u64 != 0,
         logo: flags & NSEventModifierFlags::NSCommandKeyMask as u64 != 0,
     }
+}
+
+pub fn get_event_key_modifier(event: ObjcId) -> KeyModifiers {
+    let flags: u64 = unsafe { msg_send![event, modifierFlags] };
+    key_modifiers_from_flags(flags)
 }
 
 pub fn get_event_keycode(event: ObjcId) -> Option<KeyCode> {

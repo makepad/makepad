@@ -25,10 +25,11 @@ public class MakepadNative {
     public static native void surfaceOnLongClick(float x, float y, int pointerId, long timeMillis);
     public static native void surfaceOnTouch(MotionEvent event);
     public native static void surfaceOnSurfaceChanged(Surface surface, int width, int height);
-    public native static void surfaceOnKeyDown(int keycode, int meta_state);
+    public native static void surfaceOnKeyDown(int keycode, int meta_state, boolean is_repeat);
     public native static void surfaceOnKeyUp(int keycode, int meta_state);
     public native static void surfaceOnCharacter(int character);
     public native static void surfaceOnResizeTextIME(int keyboard_height, boolean is_open);
+    public native static void surfaceOnPhysicalKeyboardChanged(boolean connected);
     public native static void surfaceOnSafeAreaInsets(float top, float right, float bottom, float left);
 
     // networking

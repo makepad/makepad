@@ -123,6 +123,17 @@ public class MakepadInputConnection extends BaseInputConnection {
             && !event.isAltPressed();
     }
 
+    private boolean isNavigationKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+            || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+            || keyCode == KeyEvent.KEYCODE_DPAD_UP
+            || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+            || keyCode == KeyEvent.KEYCODE_MOVE_HOME
+            || keyCode == KeyEvent.KEYCODE_MOVE_END
+            || keyCode == KeyEvent.KEYCODE_PAGE_UP
+            || keyCode == KeyEvent.KEYCODE_PAGE_DOWN;
+    }
+
     // Clear sent buffer (e.g., after applying genuine Rust update)
     void clearRecentSentBuffer() {
         mLastSentText = null;
@@ -747,6 +758,16 @@ public class MakepadInputConnection extends BaseInputConnection {
         // delete the full code point, not just one code unit which would corrupt the string.
         int action = event.getAction();
         int keyCode = event.getKeyCode();
+        if (isNavigationKey(keyCode)) {
+            int metaState = event.getMetaState();
+            if (action == KeyEvent.ACTION_DOWN) {
+                MakepadNative.surfaceOnKeyDown(keyCode, metaState, event.getRepeatCount() > 0);
+            } else if (action == KeyEvent.ACTION_UP) {
+                MakepadNative.surfaceOnKeyUp(keyCode, metaState);
+            }
+            return true;
+        }
+
         boolean handledTextKey = keyCode == KeyEvent.KEYCODE_DEL
             || keyCode == KeyEvent.KEYCODE_FORWARD_DEL
             || keyCode == KeyEvent.KEYCODE_ENTER
@@ -803,7 +824,7 @@ public class MakepadInputConnection extends BaseInputConnection {
             }
         }
 
-        // For other keys (e.g., arrows), use default behavior
+        // For other keys, use default behavior.
         return super.sendKeyEvent(event);
     }
 

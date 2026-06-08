@@ -1,6 +1,7 @@
 use crate::{
     event::{
         KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+        PhysicalKeyboardEvent,
         SelectionHandleDragEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
         TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
     },
@@ -32,6 +33,7 @@ pub enum IosEvent {
     TextInput(TextInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
     SelectionHandleDrag(SelectionHandleDragEvent),
+    PhysicalKeyboard(PhysicalKeyboardEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextClipboardEvent),

@@ -349,6 +349,7 @@ impl Cx {
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
 
         //let cx = Rc::new(RefCell::new(self));
+        cx.borrow_mut().set_physical_keyboard_state(true);
         if crate::app_main::should_run_stdin_loop_from_env() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
