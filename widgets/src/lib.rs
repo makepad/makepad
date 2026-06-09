@@ -32,6 +32,7 @@ pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
 
+pub mod animated_image_gif;
 pub mod browser;
 pub mod button;
 pub mod check_box;
@@ -132,6 +133,7 @@ pub mod chart;
 
 pub use crate::{
     adaptive_view::*,
+    animated_image_gif::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
@@ -200,8 +202,8 @@ pub use crate::{
         WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_async::{
-        set_widget_async_trace, CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId,
-        ScriptAsyncResult,
+        set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt, ScriptAsyncCalls,
+        ScriptAsyncId, ScriptAsyncResult, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_match_event::WidgetMatchEvent,
     widget_tree::{set_ui_root, CxWidgetExt},
@@ -517,6 +519,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
     crate::image::script_mod(vm);
+    crate::animated_image_gif::script_mod(vm);
     crate::image_blend::script_mod(vm);
     crate::icon::script_mod(vm);
 
@@ -594,7 +597,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
-    // Safe area inset values (in logical points). Populated from the platform's
+    // Safe area inset values (in Makepad layout points). Populated from the platform's
     // display_context which is set before Startup on iOS/Android. On desktop
     // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
     {
@@ -639,4 +642,22 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 pub fn script_mod(vm: &mut ScriptVm) {
     theme_mod(vm);
     widgets_mod(vm);
+}
+
+#[cfg(test)]
+mod animated_image_gif_registration_tests {
+    #[test]
+    fn test_animated_image_gif_is_registered_separately_from_image() {
+        let lib = include_str!("lib.rs");
+        let gif = include_str!("animated_image_gif.rs");
+        assert!(lib.contains("pub mod animated_image_gif;"));
+        assert!(lib.contains("animated_image_gif::*"));
+        assert!(lib.contains("crate::animated_image_gif::script_mod(vm);"));
+        assert!(gif.contains(
+            "mod.widgets.AnimatedImageGifBase = #(AnimatedImageGif::register_widget(vm))"
+        ));
+        assert!(gif.contains("mod.widgets.AnimatedImageGif = set_type_default()"));
+        assert!(lib.contains("pub mod image;"));
+        assert!(lib.contains("crate::image::script_mod(vm);"));
+    }
 }

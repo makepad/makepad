@@ -10,17 +10,16 @@ script_mod! {
     use mod.edmx
 
     let self_ip = "10.0.0.112"
-    let comfy_ip = "10.0.0.165:8000"
-    let llm_base = "http://10.0.0.217:8080"
+    let comfy_ip = "10.0.0.217:8000"
+    let llm_base = "http://10.0.0.168:8080"
     let prompt_path = "/Users/admin/prompt.txt"
-    let rerun_seconds = 20
     let comfy_client_id = "8a327a3e4961419ea7386c542f0ea491"
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
     let displays = [
         Display{mac:"04-E4-B6-F4-5A-8E" ip:"10.0.0.182" landscape:false}
         Display{mac:"28:07:08:2C:D9:42" ip:"10.0.0.198" landscape:true}
         Display{mac:"B0-f2-f6-60-f6-e1" ip:"10.0.0.204" landscape:true}
-        Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true}
+    //    Display{mac:"04:E4:B6:F4:1D:DC" ip:"10.0.0.124" landscape:true}
     ]
 
     let models = {
@@ -47,11 +46,17 @@ script_mod! {
     let model = models.flux
     let display_iter = 0
     let is_running = false
-    let auto_enabled = false
-    let auto_timer = nil
+    let auto_enabled = true
+    let auto_task_pending = false
+    let background_tasks = []
     let messages = []
+    let current_file_id = ""
     let current_content_json = "{}"
     let current_image_data = []
+    let content_json_by_file = {}
+    let image_data_by_file = {}
+    let content_request_count_by_file = {}
+    let image_request_count_by_file = {}
 
     fn ui_log(line){
         let old = ui.log_view.text()
@@ -109,28 +114,74 @@ script_mod! {
 
     fn schedule_auto_rerun(){
         if !auto_enabled return
-        if auto_timer != nil std.stop_timer(auto_timer)
-        auto_timer = std.start_timeout(rerun_seconds, || {
-            auto_timer = nil
-            if auto_enabled && !is_running post()
-        })
+        if auto_task_pending return
+        auto_task_pending = true
+        ui_log("Auto loop queued next render")
+        background_tasks.push(std.task(|task| {
+            auto_task_pending = false
+            if auto_enabled && !is_running{
+                ui_log("Auto loop starting next run")
+                post()
+            }
+        }))
+    }
+
+    fn wait_for_image_request(file_id, timeout_seconds){
+        let waited = 0
+        loop{
+            let count = image_request_count_by_file[file_id]
+            if count != nil && count > 0 return true
+            if waited >= timeout_seconds return false
+            sleep_seconds(1)
+            waited += 1
+        }
+    }
+
+    fn upload_to_display(display, content_url, file_id){
+        set_status("Uploading to EMDX " + display.ip)
+        let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
+        if upload_result == nil || ok{upload_result.is_ok} != true {
+            let err = ok{upload_result.error}
+            if err == nil err = "EMDX upload failed"
+            set_status("" + err)
+            return false
+        }
+
+        ui_log("EMDX accepted content for " + display.ip)
+        set_status("Waiting for display image fetch " + display.ip)
+        if wait_for_image_request(file_id, 90){
+            set_status("Upload done for " + display.ip)
+            return true
+        }
+
+        set_status("Timed out waiting for display image fetch " + display.ip)
+        false
     }
 
     fn start_auto_loop(){
         if auto_enabled return
         auto_enabled = true
-        if !is_running schedule_auto_rerun()
         refresh_auto_button()
         set_status("Auto loop started")
+    }
+
+    fn resume_auto_loop(){
+        start_auto_loop()
+        if !is_running schedule_auto_rerun()
     }
 
     fn stop_auto_loop(){
         if !auto_enabled return
         auto_enabled = false
-        if auto_timer != nil std.stop_timer(auto_timer)
-        auto_timer = nil
+        auto_task_pending = false
         refresh_auto_button()
         set_status("Auto loop paused")
+    }
+
+    fn finish_run(){
+        is_running = false
+        ui.run_now_btn.set_text("Run Now")
+        if auto_enabled schedule_auto_rerun()
     }
 
     fn sleep_seconds(seconds){
@@ -234,12 +285,11 @@ script_mod! {
         promise
     }
 
-    fn comfy_wait_for_image(prompt_id, model, timeout_seconds){
+    fn comfy_wait_for_image(prompt_id, model){
         let waited = 0
         loop{
             let image = comfy_last_image(prompt_id, model).await()
             if image != nil return image
-            if waited >= timeout_seconds return nil
             waited += 1
             set_progress("waiting " + waited + "s")
             sleep_seconds(1)
@@ -282,28 +332,56 @@ script_mod! {
     }
 
     fn http_response(headers, displays){
+        let requested_file_id = if headers.search != nil && headers.search != "" headers.search else current_file_id
+        if headers.path == "/current.txt"{
+            let body = current_file_id
+            return net.HttpServerResponse{
+                header:
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/plain; charset=utf-8\r\n" +
+                    "Cache-Control: no-store, max-age=0\r\n" +
+                    "Content-Length: " + body.len() + "\r\n" +
+                    "Connection: close\r\n\r\n"
+                body: body
+            }
+        }
         if headers.path == "/content.json"{
-            std.println("Content.json loaded")
             let body = current_content_json
+            if requested_file_id != nil && requested_file_id != "" && content_json_by_file[requested_file_id] != nil{
+                body = content_json_by_file[requested_file_id]
+            }
+            if requested_file_id != nil && requested_file_id != ""{
+                let count = content_request_count_by_file[requested_file_id]
+                content_request_count_by_file[requested_file_id] = if count == nil 1 else count + 1
+                std.println("Served content.json " + requested_file_id)
+            }
             return net.HttpServerResponse{
                 header:
                     "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: application/json; charset=utf-8\r\n" +
+                    "Cache-Control: no-store, max-age=0\r\n" +
                     "Content-Length: " + body.len() + "\r\n" +
                     "Connection: close\r\n\r\n"
                 body: body
             }
         }
         if headers.path == "/image"{
-            if current_image_data.len() > 0{
-                std.println("Uploading image")
-                let body = current_image_data
+            let body = current_image_data
+            if requested_file_id != nil && requested_file_id != "" && image_data_by_file[requested_file_id] != nil{
+                body = image_data_by_file[requested_file_id]
+            }
+            if body.len() > 0{
+                if requested_file_id != nil && requested_file_id != ""{
+                    let count = image_request_count_by_file[requested_file_id]
+                    image_request_count_by_file[requested_file_id] = if count == nil 1 else count + 1
+                    std.println("Served image " + requested_file_id)
+                }
                 return net.HttpServerResponse{
                     header:
                         "HTTP/1.1 200 OK\r\n" +
                         "Content-Type: image/png\r\n" +
                         "Accept-Ranges: bytes\r\n" +
-                        "Cache-Control: public, max-age=0\r\n" +
+                        "Cache-Control: no-store, max-age=0\r\n" +
                         "Content-Length: " + body.len() + "\r\n" +
                         "Connection: close\r\n\r\n"
                     body: body
@@ -355,8 +433,7 @@ script_mod! {
         let prompt = ok{prompt_source.parse_json()}
         if prompt == nil {
             set_status("Invalid prompt JSON in editor")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
@@ -369,15 +446,13 @@ script_mod! {
         let user_text = ok{prompt.prompt}
         if user_text == nil {
             set_status("Missing prompt.prompt in prompt JSON")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
         user_text = ("" + user_text).trim()
         if user_text == "" {
             set_status("prompt.prompt is empty")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
@@ -407,8 +482,7 @@ script_mod! {
         if image_prompt == nil{
             set_status("AI did not return JSON prompt")
             ui_log("AI raw response:\n" + image_prompt_text)
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
@@ -422,23 +496,20 @@ script_mod! {
         let prompt_id = comfy_render(image_prompt display model).await()
         if prompt_id == nil {
             set_status("Comfy render request failed")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
         set_status("Rendering in ComfyUI")
-        let image = comfy_wait_for_image(prompt_id, model, 120)
+        let image = comfy_wait_for_image(prompt_id, model)
         if image == nil {
-            set_status("ComfyUI render timed out")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            set_status("ComfyUI render returned no image")
+            finish_run()
             return false
         }
         if ok{image.filename} == nil || ok{image.subfolder} == nil || ok{image.type} == nil{
             set_status("Comfy history returned invalid image payload")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
@@ -446,34 +517,27 @@ script_mod! {
         let data = comfy_image_download(image).await()
         if data == nil {
             set_status("Failed to download ComfyUI image")
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
+            finish_run()
             return false
         }
 
-        set_status("Uploading to EMDX " + display.ip)
-        current_image_data = data
-        set_preview_image(current_image_data)
         let file_id = "EDMX" + std.random_u32() + std.random_u32()
-        current_content_json = mod.edmx.build_content_json(self_ip, "3000", file_id, current_image_data.len())
-        let content_url = "http://" + self_ip + ":3000/content.json"
-        let upload_result = edmx.upload_image(display, content_url, sleep_seconds)
-        if upload_result == nil || ok{upload_result.is_ok} != true {
-            let err = ok{upload_result.error}
-            if err == nil err = "EDMX upload failed"
-            set_status("" + err)
-            is_running = false
-            ui.run_now_btn.set_text("Run Now")
-            return false
-        }
-
+        let content_json = mod.edmx.build_content_json(self_ip, "3000", file_id, data.len())
+        current_file_id = file_id
+        current_image_data = data
+        current_content_json = content_json
+        image_data_by_file[file_id] = data
+        content_json_by_file[file_id] = content_json
+        image_request_count_by_file[file_id] = 0
+        content_request_count_by_file[file_id] = 0
+        set_preview_image(data)
         display.prompt = visual_description + " - " + style_keywords
 
-        set_status("Done")
-        if auto_enabled schedule_auto_rerun()
-        is_running = false
-        ui.run_now_btn.set_text("Run Now")
-        true
+        set_status("Image ready for " + display.ip)
+        let content_url = "http://" + self_ip + ":3000/content.json"
+        let uploaded = upload_to_display(display, content_url, file_id)
+        finish_run()
+        uploaded
     }
 
     let app = startup() do #(App::script_component(vm)){
@@ -486,7 +550,6 @@ script_mod! {
                 set_preview_path("-")
                 refresh_auto_button()
                 load_prompt_into_ui()
-                start_auto_loop()
                 post()
             }
 
@@ -546,7 +609,7 @@ script_mod! {
                                     text: "Pause Auto"
                                     on_click: || {
                                         if auto_enabled stop_auto_loop()
-                                        else start_auto_loop()
+                                        else resume_auto_loop()
                                     }
                                 }
                             }

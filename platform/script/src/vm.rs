@@ -22,6 +22,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ScriptModKey {
@@ -168,6 +169,33 @@ pub struct ScriptVm<'a> {
     pub bx: Box<ScriptVmBase>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ScriptRunBudget {
+    pub soft_deadline: Instant,
+    pub hard_deadline: Instant,
+    pub sample_interval_instructions: u32,
+    pub instructions_until_sample: u32,
+}
+
+impl ScriptRunBudget {
+    pub fn from_durations(soft: Duration, hard: Duration, sample_interval_instructions: u32) -> Self {
+        let now = Instant::now();
+        let sample_interval_instructions = sample_interval_instructions.max(1);
+        Self {
+            soft_deadline: now + soft,
+            hard_deadline: now + hard,
+            sample_interval_instructions,
+            instructions_until_sample: sample_interval_instructions,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScriptRunBudgetHit {
+    Soft,
+    Hard,
+}
+
 impl<'a> ScriptVm<'a> {
     /// Bail out of the interpreter with a script error.
     /// Use this when a stack (mes, scopes, loops, calls) is unexpectedly empty,
@@ -181,6 +209,24 @@ impl<'a> ScriptVm<'a> {
             .trap
             .on
             .set(Some(ScriptTrapOn::Bail(err)));
+    }
+
+    pub fn with_instruction_limit<R>(
+        &mut self,
+        instruction_limit: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_remaining = self.bx.threads.cur_ref().instruction_limit_remaining;
+        self.bx.threads.cur().instruction_limit_remaining = Some(
+            previous_remaining
+                .map(|remaining| remaining.min(instruction_limit))
+                .unwrap_or(instruction_limit),
+        );
+        let result = f(self);
+        if !self.bx.threads.cur_ref().is_paused() {
+            self.bx.threads.cur().instruction_limit_remaining = previous_remaining;
+        }
+        result
     }
 
     pub fn heap(&self) -> &ScriptHeap {
@@ -519,6 +565,56 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
+    fn check_run_budget(&mut self) -> Option<ScriptRunBudgetHit> {
+        let budget = self.bx.run_budget.as_mut()?;
+        budget.instructions_until_sample = budget.instructions_until_sample.saturating_sub(1);
+        if budget.instructions_until_sample > 0 {
+            return None;
+        }
+        budget.instructions_until_sample = budget.sample_interval_instructions;
+
+        let now = Instant::now();
+        if now >= budget.hard_deadline {
+            return Some(ScriptRunBudgetHit::Hard);
+        }
+        if now >= budget.soft_deadline {
+            return Some(ScriptRunBudgetHit::Soft);
+        }
+        None
+    }
+
+    fn handle_trap_on(&mut self) -> Option<ScriptValue> {
+        if self.bx.threads.cur().trap.on.get().is_none() {
+            return None;
+        }
+        Some(match self.bx.threads.cur().trap.on.take().unwrap() {
+            ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
+            ScriptTrapOn::Return(value) => {
+                self.bx.threads.cur().instruction_limit_remaining = None;
+                value
+            }
+            ScriptTrapOn::Bail(value) => {
+                // Stack corruption or hard failure: unwind calls to find our root frame
+                // and truncate all stacks back to clean state.
+                loop {
+                    if let Some(call) = self.bx.threads.cur().calls.pop() {
+                        self.bx
+                            .threads
+                            .cur()
+                            .truncate_bases(call.bases, &mut self.bx.heap);
+                        if call.return_ip.is_none() {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                self.bx.threads.cur().instruction_limit_remaining = None;
+                value
+            }
+        })
+    }
+
     pub fn run_core(&mut self) -> ScriptValue {
         // Cache opcodes pointer to avoid RefCell borrow on every iteration
         let mut cached_body_index: usize = usize::MAX;
@@ -526,6 +622,68 @@ impl<'a> ScriptVm<'a> {
         let mut opcodes_len: usize = 0;
 
         loop {
+            let instruction_limit_exceeded = if let Some(remaining) =
+                self.bx.threads.cur().instruction_limit_remaining.as_mut()
+            {
+                if *remaining == 0 {
+                    true
+                } else {
+                    *remaining -= 1;
+                    false
+                }
+            } else {
+                false
+            };
+            if instruction_limit_exceeded {
+                let err = script_err_limit!(
+                    self.bx.threads.cur_ref().trap,
+                    "script instruction limit exceeded"
+                );
+                if self.bx.silence_errors {
+                    self.bx.threads.cur().trap.err.borrow_mut().clear();
+                } else {
+                    self.drain_errors();
+                }
+                self.bx
+                    .threads
+                    .cur()
+                    .trap
+                    .on
+                    .set(Some(ScriptTrapOn::Bail(err)));
+                if let Some(value) = self.handle_trap_on() {
+                    return value;
+                }
+            }
+
+            if let Some(hit) = self.check_run_budget() {
+                match hit {
+                    ScriptRunBudgetHit::Soft => {
+                        self.bx.threads.cur().is_paused = true;
+                        self.bx
+                            .threads
+                            .cur()
+                            .trap
+                            .on
+                            .set(Some(ScriptTrapOn::TimeBudgetYield));
+                    }
+                    ScriptRunBudgetHit::Hard => {
+                        let err = script_err_limit!(
+                            self.bx.threads.cur().trap.pass(),
+                            "script time budget exceeded"
+                        );
+                        self.bx
+                            .threads
+                            .cur()
+                            .trap
+                            .on
+                            .set(Some(ScriptTrapOn::Bail(err)));
+                    }
+                }
+                if let Some(value) = self.handle_trap_on() {
+                    return value;
+                }
+            }
+
             let thread = self.bx.threads.cur();
             let body_index = thread.trap.ip.body as usize;
             let ip_index = thread.trap.ip.index as usize;
@@ -559,30 +717,8 @@ impl<'a> ScriptVm<'a> {
                 if !self.bx.threads.cur().trap.err.borrow().is_empty() {
                     self.handle_errors();
                 }
-                // Check with get() first to avoid unnecessary write in common case (None)
-                if self.bx.threads.cur().trap.on.get().is_some() {
-                    match self.bx.threads.cur().trap.on.take().unwrap() {
-                        ScriptTrapOn::Pause => return NIL,
-                        ScriptTrapOn::Return(value) => return value,
-                        ScriptTrapOn::Bail(value) => {
-                            // Stack corruption — unwind calls to find our root frame
-                            // and truncate all stacks back to clean state
-                            loop {
-                                if let Some(call) = self.bx.threads.cur().calls.pop() {
-                                    self.bx
-                                        .threads
-                                        .cur()
-                                        .truncate_bases(call.bases, &mut self.bx.heap);
-                                    if call.return_ip.is_none() {
-                                        break; // found the root of this run_core
-                                    }
-                                } else {
-                                    break; // calls stack empty
-                                }
-                            }
-                            return value;
-                        }
-                    }
+                if let Some(value) = self.handle_trap_on() {
+                    return value;
                 }
             } else {
                 // its a direct value-to-stack
@@ -1161,6 +1297,7 @@ pub struct ScriptVmBase {
     pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
+    pub run_budget: Option<ScriptRunBudget>,
 }
 
 impl ScriptVmBase {
@@ -1174,6 +1311,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            run_budget: None,
         }
     }
 
@@ -1205,6 +1343,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            run_budget: None,
         }
     }
 }

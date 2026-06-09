@@ -11,7 +11,10 @@ use {
         draw_matrix::CxDrawMatrixPool,
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
-        event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger},
+        event::{
+            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
+            WindowGeomChangeEvent,
+        },
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -144,6 +147,9 @@ pub struct Cx {
     /// so prefer `pending_script_reapply` whenever the change can be modeled
     /// as a shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+
+    /// `WindowGeomChange` events queued up during an event dispatch.
+    pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
 
     pub debug: Debug,
 
@@ -309,12 +315,40 @@ impl OsType {
     }
 
     pub fn get_cache_dir(&self) -> Option<String> {
-        if let OsType::Android(params) = self {
-            Some(params.cache_path.clone())
-        } else if let OsType::OpenHarmony(params) = self {
-            Some(params.cache_dir.clone())
-        } else {
-            None
+        match self {
+            OsType::Android(params) => Some(params.cache_path.clone()),
+            OsType::OpenHarmony(params) => Some(params.cache_dir.clone()),
+            // Desktop Linux (windowed or DRM/direct): persist the GL program-binary cache
+            // under the XDG cache directory so compiled shaders survive across launches.
+            // Computed once and memoized (env lookup + directory creation).
+            //
+            // Note: the Windows backend is D3D11 and caches its compiled DXBC separately
+            // via `shader_cache_dir()` in `os/windows/d3d11.rs`, so it does not rely on
+            // this. macOS/iOS use Metal libraries and likewise do not use this path.
+            OsType::LinuxWindow(_) | OsType::LinuxDirect => {
+                use std::sync::OnceLock;
+                static DIR: OnceLock<Option<String>> = OnceLock::new();
+                DIR.get_or_init(|| {
+                    // Resolve the XDG cache base the same way the XDG Base Directory spec
+                    // (and the `robius-directories` crate) do: honor $XDG_CACHE_HOME only
+                    // when it is an *absolute* path, otherwise fall back to $HOME/.cache.
+                    // A relative or empty value is ignored per spec.
+                    let base = std::env::var_os("XDG_CACHE_HOME")
+                        .map(std::path::PathBuf::from)
+                        .filter(|p| p.is_absolute())
+                        .or_else(|| {
+                            std::env::var_os("HOME")
+                                .map(std::path::PathBuf::from)
+                                .filter(|p| p.is_absolute())
+                                .map(|home| home.join(".cache"))
+                        })?;
+                    let dir = base.join("makepad");
+                    std::fs::create_dir_all(&dir).ok()?;
+                    Some(dir.to_string_lossy().into_owned())
+                })
+                .clone()
+            }
+            _ => None,
         }
     }
 
@@ -458,6 +492,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_live_edit_request: false,
+            pending_window_geom_changes: Default::default(),
 
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),

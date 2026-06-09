@@ -501,10 +501,17 @@ impl ScriptHook for Video {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        // Skip widget-level side effects for animator-driven applies (hover/seek
+        // indicator transitions fire one apply per frame). Otherwise
+        // apply_thumbnail_settings would re-decode the PNG/JPG thumbnail and
+        // allocate a fresh GPU texture on every animator frame.
+        if apply.is_animate() {
+            return;
+        }
         vm.with_cx_mut(|cx| {
             self.ensure_primary_texture(cx);
             self.apply_thumbnail_settings(cx);
@@ -572,6 +579,23 @@ impl VideoRef {
     pub fn stop_and_cleanup_resources(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.stop_and_cleanup_resources(cx);
+        }
+    }
+
+    /// Returns the most recent known playback position in milliseconds.
+    pub fn current_position_ms(&self) -> u128 {
+        if let Some(inner) = self.borrow() {
+            inner.current_position_ms
+        } else {
+            0
+        }
+    }
+
+    /// Seeks playback to the given position in milliseconds. Has no effect if the
+    /// underlying player has not yet been prepared.
+    pub fn seek_to(&self, cx: &mut Cx, position_ms: u64) {
+        if let Some(inner) = self.borrow() {
+            cx.seek_video_playback(inner.id, position_ms);
         }
     }
 
@@ -1018,7 +1042,10 @@ impl Video {
 
     fn apply_thumbnail_settings(&mut self, cx: &mut Cx) {
         self.lazy_create_image_cache(cx);
-        self.thumbnail_texture = Some(Texture::new(cx));
+        // Don't pre-allocate an empty thumbnail texture here: load_thumbnail_image
+        // (via load_png_from_data / load_jpg_from_data) already calls set_texture
+        // with a fresh GPU texture containing the decoded image. Allocating a
+        // throwaway Texture::new(cx) first was just churning GPU resources.
 
         let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
         let target_h = self.walk.height.to_fixed().unwrap_or(0.0);

@@ -1427,6 +1427,24 @@ struct SlugHelperPrewarmState {
     requested_redraw_id: u64,
 }
 
+/// Returns true only when `area` still references live GPU instances left over from a
+/// *previous* redraw (`instance_count > 0` and a stale `redraw_id`).
+///
+/// The slug/raster text paths use this to decide whether a draw item must be redrawn to
+/// clear stale glyphs when a run switches rendering path. It must reject two cases that
+/// would otherwise cause a per-frame `redraw_area_in_draw` — i.e. a permanent ~100% CPU
+/// continuous-repaint loop:
+///   - count == 0: an empty batch (e.g. a whitespace-only run, whose glyphs have no
+///     raster image) was begun and finished this frame; there is nothing to clear.
+///   - a *valid* (current-redraw) area: the area was already drawn this frame, either by
+///     this run or by another `draw_text` call sharing the same instance (text is drawn
+///     in resumable chunks), so its draw item is up to date.
+/// `Area::is_valid` returns false for count == 0, so the explicit count check is required.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn area_holds_stale_content(area: &Area, cx: &Cx) -> bool {
+    matches!(area, Area::Instance(inst) if inst.instance_count > 0) && !area.is_valid(cx)
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Default)]
 struct SlugPromotionState {
@@ -2120,12 +2138,7 @@ impl DrawText {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
-        let turtle_rect = cx.turtle().inner_rect();
-        let mut max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
+        let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
 
         // For Fit-width containers with a max bound, resolve the bound so that
         // ellipsis truncation and max_lines clamping can work. Without this, Fit
@@ -2150,6 +2163,15 @@ impl DrawText {
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
+    }
+
+    fn max_layout_width_for_walk(&self, cx: &mut Cx2d, walk: Walk) -> Option<f32> {
+        let width = cx.turtle().max_width(walk).or_else(|| {
+            let turtle_rect = cx.turtle().inner_rect();
+            (!turtle_rect.size.x.is_nan()).then_some(turtle_rect.size.x)
+        })?;
+
+        Some((width.max(0.0) as f32) / self.font_scale.max(0.0001))
     }
 
     pub fn draw_walk_laidout(
@@ -2665,20 +2687,20 @@ impl DrawText {
                 }
                 if !drew_slug_this_frame {
                     let old_area = slug_draw.draw_vars.area;
-                    if !old_area.is_empty() {
+                    if area_holds_stale_content(&old_area, cx.cx) {
                         cx.cx.redraw_area_in_draw(old_area);
+                        slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                     }
-                    slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
                 self.slug_draw = Some(slug_draw);
             }
             // Don't clobber the outer batch's area if we've handed it back.
             if !drew_raster_this_frame && self.many_instances.is_none() {
                 let old_area = self.draw_vars.area;
-                if !old_area.is_empty() {
+                if area_holds_stale_content(&old_area, cx.cx) {
                     cx.cx.redraw_area_in_draw(old_area);
+                    self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
-                self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
             }
             return;
         }

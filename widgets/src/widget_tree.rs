@@ -900,6 +900,16 @@ impl WidgetTree {
         path: &[LiveId],
         exclude_subtree_root: Option<WidgetUid>,
     ) -> WidgetRef {
+        Self::find_within_graph_with_skip(inner, root_uid, path, exclude_subtree_root, true)
+    }
+
+    fn find_within_graph_with_skip(
+        inner: &mut WidgetTreeInner,
+        root_uid: WidgetUid,
+        path: &[LiveId],
+        exclude_subtree_root: Option<WidgetUid>,
+        respect_skip_search: bool,
+    ) -> WidgetRef {
         #[derive(Clone, Copy)]
         struct Frame {
             uid: WidgetUid,
@@ -963,7 +973,7 @@ impl WidgetTree {
                     }
                 }
 
-                if !frame.is_root && skip_search {
+                if respect_skip_search && !frame.is_root && skip_search {
                     continue;
                 }
             }
@@ -998,6 +1008,24 @@ impl WidgetTree {
         path: &[LiveId],
         exclude_subtree_root: Option<WidgetUid>,
         results: &mut Vec<WidgetRef>,
+    ) {
+        Self::collect_within_graph_with_skip(
+            inner,
+            root_uid,
+            path,
+            exclude_subtree_root,
+            results,
+            true,
+        )
+    }
+
+    fn collect_within_graph_with_skip(
+        inner: &mut WidgetTreeInner,
+        root_uid: WidgetUid,
+        path: &[LiveId],
+        exclude_subtree_root: Option<WidgetUid>,
+        results: &mut Vec<WidgetRef>,
+        respect_skip_search: bool,
     ) {
         #[derive(Clone, Copy)]
         struct Frame {
@@ -1058,7 +1086,7 @@ impl WidgetTree {
                     }
                 }
 
-                if !frame.is_root && skip_search {
+                if respect_skip_search && !frame.is_root && skip_search {
                     continue;
                 }
             }
@@ -1601,6 +1629,46 @@ impl WidgetTree {
         Self::find_all_within_cached_graph(&mut inner, root_uid, path)
     }
 
+    pub fn find_all_anywhere_including_skipped(&self, path: &[LiveId]) -> Vec<WidgetRef> {
+        let mut results = Vec::new();
+        if path.is_empty() {
+            return results;
+        }
+
+        self.sync_dirty();
+
+        let mut inner = self.inner.borrow_mut();
+        let mut roots = Vec::new();
+        if inner.root_uid != WidgetUid(0) && inner.graph.contains_key(&inner.root_uid) {
+            roots.push(inner.root_uid);
+        }
+        for (&uid, node) in inner.graph.iter() {
+            if node.parent.is_none() && !roots.iter().any(|entry| *entry == uid) {
+                roots.push(uid);
+            }
+        }
+
+        let mut seen = HashSet::new();
+        for root_uid in roots {
+            let mut root_results = Vec::new();
+            Self::collect_within_graph_with_skip(
+                &mut inner,
+                root_uid,
+                path,
+                None,
+                &mut root_results,
+                false,
+            );
+            for widget in root_results {
+                let uid = widget.widget_uid();
+                if uid != WidgetUid(0) && seen.insert(uid) {
+                    results.push(widget);
+                }
+            }
+        }
+        results
+    }
+
     /// Look up a widget by its UID.
     pub fn widget(&self, uid: WidgetUid) -> WidgetRef {
         let mut inner = self.inner.borrow_mut();
@@ -1643,6 +1711,8 @@ impl WidgetTree {
         if path.is_empty() {
             return WidgetRef::empty();
         }
+
+        self.sync_dirty();
 
         let mut inner = self.inner.borrow_mut();
         let mut visited_roots = HashSet::new();
@@ -1695,6 +1765,8 @@ impl WidgetTree {
         if path.is_empty() {
             return results;
         }
+
+        self.sync_dirty();
 
         let mut inner = self.inner.borrow_mut();
         let mut visited_roots = HashSet::new();
@@ -2897,6 +2969,43 @@ mod tests {
         assert_eq!(found.widget_uid(), target_uid);
     }
 
+    #[test]
+    fn test_find_flood_syncs_dirty_origin_under_skipped_root_scan() {
+        let tree = WidgetTree::default();
+
+        let root_uid = WidgetUid::new();
+        let portal_uid = WidgetUid::new();
+        let item_uid = WidgetUid::new();
+        let splash_uid = WidgetUid::new();
+        let display_uid = WidgetUid::new();
+        let button_uid = WidgetUid::new();
+
+        let display = make_widget(display_uid, vec![]);
+        let button = make_widget(button_uid, vec![]);
+        let splash_children = std::rc::Rc::new(std::cell::RefCell::new(vec![
+            (name("display"), display.clone()),
+            (name("button"), button.clone()),
+        ]));
+        let splash = make_dynamic_widget(splash_uid, splash_children);
+        let item = make_widget(item_uid, vec![(name("splash"), splash.clone())]);
+        let portal = make_widget_skip(portal_uid, vec![(name("item"), item.clone())]);
+        let root = make_widget(root_uid, vec![(name("portal"), portal.clone())]);
+
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(portal_uid, name("portal"), portal.clone(), Some(root_uid));
+        tree.observe_node(item_uid, name("item"), item.clone(), Some(portal_uid));
+        tree.observe_node(splash_uid, name("splash"), splash.clone(), Some(item_uid));
+        stabilize_graph_cache(&tree);
+
+        // This mirrors a hotloaded Splash subtree inside a PortalList item:
+        // the list itself is skipped during root scans, while the callback
+        // target button exists in the live widget but not yet in the tree cache.
+        tree.mark_dirty(splash_uid);
+
+        let found = tree.find_flood(button_uid, &[name("display")]);
+        assert_eq!(found.widget_uid(), display_uid);
+    }
+
     // ------------------------------------------------------------------
     // find_all_within
     // ------------------------------------------------------------------
@@ -2954,6 +3063,29 @@ mod tests {
         // But searching directly from skip_uid finds it (skip_search on root of search is ignored)
         let found = tree.find_within(skip_uid, &[name("hidden")]);
         assert!(!found.is_empty());
+    }
+
+    #[test]
+    fn test_global_including_skipped_finds_unique_widget_under_skipped_subtree() {
+        let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
+        let skip_uid = WidgetUid::new();
+        let hidden_uid = WidgetUid::new();
+
+        let hidden = make_widget(hidden_uid, vec![]);
+        let skip_node = make_widget_skip(skip_uid, vec![(name("hidden"), hidden.clone())]);
+        let root = make_widget(root_uid, vec![(name("skip"), skip_node.clone())]);
+
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(skip_uid, name("skip"), skip_node.clone(), Some(root_uid));
+        tree.observe_node(hidden_uid, name("hidden"), hidden.clone(), Some(skip_uid));
+        stabilize_graph_cache(&tree);
+
+        assert!(tree.find_within(root_uid, &[name("hidden")]).is_empty());
+
+        let matches = tree.find_all_anywhere_including_skipped(&[name("hidden")]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].widget_uid(), hidden_uid);
     }
 
     // ------------------------------------------------------------------

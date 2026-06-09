@@ -12,7 +12,7 @@ script_mod! {
 
     mod.widgets.DemoStackNavigation = UIZooTabLayout_B{
         desc +: {
-            Markdown{body: "# StackNavigation\n\nStackNavigation provides a stack-based navigation pattern with slide-in/slide-out transitions.\n\n## Features\n- Push views onto a navigation stack\n- Pop views with back button or swipe\n- Slide animation transitions (full screen mode)\n- Nested navigation support\n- Built-in header with back button\n\n## Usage\nClick the buttons in the root view to push different views onto the stack. Use the back button (top-left) or mouse back button to pop.\n\n## Note\nThis demo uses `full_screen: false` to stay within the dock tab. In a real app, full-screen mode slides views across the entire window.\n\n## API\n- `push(cx, view_id)` - Navigate to view\n- `pop(cx)` - Go back one level\n- `pop_to_root(cx)` - Return to root\n- `depth()` - Stack depth\n- `can_pop()` - Check if back is possible"}
+            Markdown{body: "# StackNavigation\n\nStackNavigation provides bounded visual push/pop transitions. It keeps only the current visual view and one transition view; callers that need screen history should store it separately.\n\n## Features\n- Push a view with a slide-in transition\n- Pop the current view to root or to a caller-provided previous view\n- Parent-contained slide animation transitions\n- Built-in header with back button\n\n## Usage\nClick the buttons in the root view to push different views. Use the back button (top-left) or mouse back button to pop to the root view.\n\n## API\n- `push(cx, view_id)` - Show a view\n- `pop(cx)` - Return to root\n- `pop_to_view(cx, view_id)` - Reveal a caller-managed previous view\n- `pop_to_root(cx)` - Return to root\n- `depth()` - Visual depth\n- `can_pop()` - Check if a visual view is active"}
         }
         demos +: {
             stack_nav_demo := StackNavigation{
@@ -39,7 +39,6 @@ script_mod! {
                 }
 
                 stack_view_a := StackNavigationView{
-                    full_screen: false
                     header +: {
                         content +: {
                             title_container +: {
@@ -62,7 +61,6 @@ script_mod! {
                 }
 
                 stack_view_b := StackNavigationView{
-                    full_screen: false
                     header +: {
                         content +: {
                             title_container +: {
@@ -85,7 +83,6 @@ script_mod! {
                 }
 
                 stack_view_c := StackNavigationView{
-                    full_screen: false
                     header +: {
                         content +: {
                             title_container +: {
