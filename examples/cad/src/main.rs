@@ -979,7 +979,7 @@ script_mod! {
 
                                 backend_dropdown := DropDown{
                                     width: 150.0
-                                    labels: ["Claude Splash" "Local OpenAI"]
+                                    labels: ["Claude Splash" "Codex Plan" "Local OpenAI"]
                                     draw_text +: {
                                         text_style +: {font_size: 11.0}
                                     }
@@ -1480,10 +1480,15 @@ pub enum CadCodeEditorAction {
 enum BackendType {
     #[default]
     ClaudeSplash,
+    CodexPlan,
     LocalOpenAi,
 }
 
-const BACKENDS: [BackendType; 2] = [BackendType::ClaudeSplash, BackendType::LocalOpenAi];
+const BACKENDS: [BackendType; 3] = [
+    BackendType::ClaudeSplash,
+    BackendType::CodexPlan,
+    BackendType::LocalOpenAi,
+];
 
 impl BackendType {
     fn to_index(self) -> usize {
@@ -1500,6 +1505,7 @@ impl BackendType {
     fn status_label(self) -> &'static str {
         match self {
             Self::ClaudeSplash => "Ready: Claude Splash",
+            Self::CodexPlan => "Ready: Codex Plan",
             Self::LocalOpenAi => "Ready: Local OpenAI stream at 10.0.0.168:8080",
         }
     }
@@ -1683,6 +1689,11 @@ impl App {
                 self.backend_available
                     .then(|| Box::new(ClaudeCodeAgent::new()) as Box<dyn Agent>)
             }
+            BackendType::CodexPlan => {
+                self.backend_available = CodexAgent::is_available();
+                self.backend_available
+                    .then(|| Box::new(CodexAgent::new_plan()) as Box<dyn Agent>)
+            }
             BackendType::LocalOpenAi => {
                 self.backend_available = true;
                 Some(
@@ -1725,6 +1736,7 @@ impl App {
             let dots = ".".repeat(((elapsed_ms / 350) % 4) as usize);
             let backend = match self.active_backend {
                 BackendType::ClaudeSplash => "Claude Splash",
+                BackendType::CodexPlan => "Codex Plan",
                 BackendType::LocalOpenAi => "Local OpenAI",
             };
             if chars == 0 {
@@ -1743,6 +1755,9 @@ impl App {
             match self.active_backend {
                 BackendType::ClaudeSplash => {
                     "Claude Code not found. Set CLAUDE_CODE_PATH or install claude.".to_string()
+                }
+                BackendType::CodexPlan => {
+                    "Codex CLI not found. Set CODEX_PATH or install codex.".to_string()
                 }
                 BackendType::LocalOpenAi => "Local OpenAI backend unavailable".to_string(),
             }
