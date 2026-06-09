@@ -99,19 +99,18 @@ impl Cx {
                         tw.gpu_info.renderer,
                     );
                     self.os_type = tw.browser_info.into();
-                    if let OsType::Web(params) = &mut self.os_type {
-                        params.render_api = tw.render_api;
-                    }
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
-                    {
+                    if self.windows.len() > 0 {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
+                        self.os.window_geom = new_geom.clone();
+                        self.windows[id_zero].window_geom = new_geom;
+                    } else {
+                        self.os.window_geom = new_geom;
                     }
-                    self.os.window_geom = new_geom.clone();
-                    self.windows[id_zero].window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.set_physical_keyboard_state(true);
@@ -125,20 +124,24 @@ impl Cx {
                     let old_geom = self.os.window_geom.clone();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     let id_zero = CxWindowPool::id_zero();
-                    {
+                    if self.windows.len() > 0 {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
-                    }
-                    if old_geom != new_geom {
-                        self.os.window_geom = new_geom.clone();
-                        self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: id_zero,
-                            old_geom: old_geom,
-                            new_geom: new_geom,
-                        }));
-                        self.redraw_all();
+                        if old_geom != new_geom {
+                            self.os.window_geom = new_geom.clone();
+                            self.windows[id_zero].window_geom = new_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                                window_id: id_zero,
+                                old_geom: old_geom,
+                                new_geom: new_geom,
+                            }));
+                            self.redraw_all();
+                        }
+                    } else {
+                        if old_geom != new_geom {
+                            self.os.window_geom = new_geom;
+                        }
                     }
                 }
 
@@ -518,15 +521,7 @@ impl Cx {
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event(time);
-                let render_api = match &self.os_type {
-                    OsType::Web(params) => params.render_api,
-                    _ => 0,
-                };
-                if render_api == 1 {
-                    self.webgpu_compile_shaders();
-                } else {
-                    self.webgl_compile_shaders();
-                }
+                self.webgl_compile_shaders();
             }
             self.handle_repaint(time);
         }
@@ -595,7 +590,7 @@ impl Cx {
                     // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
                     // freshly-created window's `dpi_override` machinery has
                     // a baseline.
-                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
+                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor.or(Some(self.os.window_geom.dpi_factor));
                     {
                         let window = &mut self.windows[window_id];
                         window.os_dpi_factor = id_zero_os_dpi;
@@ -954,7 +949,6 @@ impl CxOsApi for Cx {
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
-            FromWasmCompileWebGPUShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),

@@ -205,7 +205,6 @@ export class WasmWebBrowser extends WasmBridge {
                 small_font_aliases: window.makepad_small_font_aliases === true
             },
             window_info: this.window_info,
-            render_api: this.render_api || 0,
         });
 
         this.do_wasm_pump();

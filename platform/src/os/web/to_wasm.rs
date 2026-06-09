@@ -45,8 +45,6 @@ impl Into<OsType> for WBrowserInfo {
             search: self.search,
             hash: self.hash,
             small_font_aliases: self.small_font_aliases,
-            // Overwritten on ToWasmInit handling (see `platform/src/os/web/web.rs`).
-            render_api: 0,
         })
     }
 }
@@ -104,9 +102,6 @@ pub struct ToWasmInit {
     pub xr_capabilities: WXrCapabilities,
     pub browser_info: WBrowserInfo,
     pub window_info: WWindowInfo,
-    /// Which renderer backend the JS host selected.
-    /// 0 = WebGL2, 1 = WebGPU.
-    pub render_api: u32,
 }
 
 #[cfg(test)]

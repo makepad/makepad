@@ -1,7 +1,6 @@
 //! WebGL2-only path: GLSL shader compilation for wasm (`FromWasmCompileWebGLShader` → `web_gl.js`).
 //!
 //! Shared draw-list encoding and `FromWasm*` buffer/render messages live in [`super::web_render`].
-//! WebGPU WGSL compilation is in [`super::web_gpu`] (`web_gpu.js`).
 
 use crate::{
     cx::Cx,
@@ -21,7 +20,7 @@ impl Cx {
                         (vertex.clone(), fragment.clone())
                     }
                     CxDrawShaderCode::Wgsl { .. } => {
-                        // WebGPU shaders compile elsewhere.
+                        crate::error!("WGSL shader code is not supported on wasm webgl");
                         continue;
                     }
                     CxDrawShaderCode::Combined { .. } => {

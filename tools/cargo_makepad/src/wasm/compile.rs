@@ -168,18 +168,24 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
     let init = if config.bindgen {
         format!(
             "
-            const {{init_env}} = await import('./makepad_wasm_bridge/wasm_bridge.js');
-            const {{init_makepad_bindgen}} = await import('./bindgen_adapter.js');
+            const wasm_bridge = await import('./makepad_wasm_bridge/wasm_bridge.js');
+            const init_env = wasm_bridge.init_env;
+            const bindgen_adapter = await import('./bindgen_adapter.js');
+            const init_makepad_bindgen = bindgen_adapter.init_makepad_bindgen;
             const wasm = await init_makepad_bindgen('./{wasm}.wasm', init_env);
-            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
-            const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
+            const web_gl = await import('./makepad_platform/web_gl.js');
+            const WasmWebGL = web_gl.WasmWebGL;
+            const web_runtime = await import('./makepad_platform/web_runtime.js');
+            const createMakepadWebBackend = web_runtime.createMakepadWebBackend;
             "
         )
     } else {
         format!(
             "
-            const {{WasmWebGL}} = await import('./makepad_platform/web_gl.js');
-            const {{createMakepadWebBackend}} = await import('./makepad_platform/web_runtime.js');
+            const web_gl = await import('./makepad_platform/web_gl.js');
+            const WasmWebGL = web_gl.WasmWebGL;
+            const web_runtime = await import('./makepad_platform/web_runtime.js');
+            const createMakepadWebBackend = web_runtime.createMakepadWebBackend;
             const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
                 './{wasm}.wasm'
             );
@@ -203,13 +209,11 @@ pub fn generate_html(wasm: &str, config: &WasmConfig) -> String {
         <link rel='modulepreload' href='./bindgen.js'>
         <link rel='modulepreload' href='./bindgen_adapter.js'>
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
-        <link rel='modulepreload' href='./makepad_platform/web_gpu.js'>
         <link rel='modulepreload' href='./makepad_platform/web_runtime.js'>
         "
     } else {
         "
         <link rel='modulepreload' href='./makepad_platform/web_gl.js'>
-        <link rel='modulepreload' href='./makepad_platform/web_gpu.js'>
         <link rel='modulepreload' href='./makepad_platform/web_runtime.js'>
         "
     };
@@ -1038,12 +1042,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 config.brotli,
             )?;
 
-            cp_brotli(
-                &dep_dir.join("src/os/web/web_gpu.js"),
-                &app_dir.join("makepad_platform/web_gpu.js"),
-                false,
-                config.brotli,
-            )?;
 
             cp_brotli(
                 &dep_dir.join("src/os/web/web_runtime.js"),

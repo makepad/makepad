@@ -5,7 +5,6 @@ pub mod to_wasm;
 pub mod web_audio;
 pub mod web_render;
 pub mod web_gl;
-pub mod web_gpu;
 pub mod web_media;
 pub mod web_midi;
 pub mod web_network;

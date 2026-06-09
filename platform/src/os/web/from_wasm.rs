@@ -195,30 +195,6 @@ pub struct FromWasmCompileWebGLShader {
     pub textures: Vec<WTextureInput>,
 }
 
-/// Compile a WebGPU WGSL shader module and create a render pipeline.
-#[derive(FromWasm)]
-pub struct FromWasmCompileWebGPUShader {
-    pub shader_id: usize,
-    pub wgsl: String,
-    pub geometry_slots: usize,
-    pub instance_slots: usize,
-    pub textures: Vec<WTextureInput>,
-    pub texture_sampler_indices: Vec<usize>,
-    pub samplers: Vec<WSampler>,
-    pub dyn_uniform_binding: u32,
-    pub texture_binding_base: u32,
-    pub sampler_binding_base: u32,
-    pub xr_depth_binding: u32,
-}
-
-#[derive(FromWasm, Clone, Copy, Default)]
-pub struct WSampler {
-    pub filter: u32,
-    pub address: u32,
-    pub coord: u32,
-    pub is_video: bool,
-}
-
 #[derive(FromWasm)]
 pub struct FromWasmAllocArrayBuffer {
     pub buffer_id: usize,
