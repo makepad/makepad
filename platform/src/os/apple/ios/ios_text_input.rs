@@ -422,7 +422,16 @@ pub fn define_text_input_view() -> *const Class {
     }
 
     extern "C" fn can_become_focused(_: &Object, _: Sel) -> BOOL {
-        NO
+        // Become a real focusable editing client so iOS treats this as a live
+        // text context (FKA passes keys through instead of stealing them for
+        // focus navigation, and native input UI engages).
+        YES
+    }
+
+    // Suppress the Full Keyboard Access focus ring (iOS 15+). makepad draws its
+    // own caret, so the system halo would just double up over the glyph.
+    extern "C" fn focus_effect(_: &Object, _: Sel) -> ObjcId {
+        nil
     }
 
     extern "C" fn is_accessibility_element(_: &Object, _: Sel) -> BOOL {
@@ -2094,6 +2103,10 @@ pub fn define_text_input_view() -> *const Class {
         decl.add_method(
             sel!(accessibilityFrame),
             accessibility_frame as extern "C" fn(&Object, Sel) -> NSRect,
+        );
+        decl.add_method(
+            sel!(focusEffect),
+            focus_effect as extern "C" fn(&Object, Sel) -> ObjcId,
         );
         decl.add_method(
             sel!(pointInside:withEvent:),
