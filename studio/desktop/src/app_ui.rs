@@ -346,16 +346,16 @@ script_mod! {
             }
 
             Label {
-                text: "Swarm Tree"
+                text: "Task Board"
                 draw_text.color: theme.color_label_outer
             }
 
             ai_swarm_scroll := ScrollYView {
                 width: Fill
-                height: 80.0
+                height: 128.0
                 flow: Down
                 show_bg: true
-                padding: Inset {left: 8.0 right: 8.0 top: 6.0 bottom: 6.0}
+                padding: Inset {left: 8.0 right: 8.0 top: 8.0 bottom: 8.0}
                 draw_bg +: {
                     color: theme.color_bg_highlight * 0.76
                 }
@@ -373,13 +373,13 @@ script_mod! {
             }
 
             Label {
-                text: "Live"
+                text: "Live Activity"
                 draw_text.color: theme.color_label_outer
             }
 
             ai_live_scroll := ScrollYView {
                 width: Fill
-                height: 132.0
+                height: 150.0
                 flow: Down
                 show_bg: true
                 padding: Inset {left: 8.0 right: 8.0 top: 8.0 bottom: 8.0}

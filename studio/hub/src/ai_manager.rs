@@ -886,7 +886,16 @@ impl AiManager {
                     ));
                 }
 
-                if previous_mode != "needs-attention" && snapshot.mode == "needs-attention" {
+                if previous_mode != "awaiting-input" && snapshot.mode == "awaiting-input" {
+                    queue.push((
+                        task.id,
+                        format!(
+                            "terminal:{}:awaiting-input:{}",
+                            snapshot.path, task.last_terminal_summary
+                        ),
+                        "Tracked terminal is awaiting input".to_string(),
+                    ));
+                } else if previous_mode != "needs-attention" && snapshot.mode == "needs-attention" {
                     queue.push((
                         task.id,
                         format!(
@@ -2479,9 +2488,15 @@ impl AiManager {
             prompt.push_str(&task.last_terminal_excerpt);
             prompt.push_str("\n```\n");
         }
-        prompt.push_str(
-            "\nContinue supervising this observed terminal task. If it is finished, tell the user briefly. If more work is needed, use terminal tools instead of guessing.",
-        );
+        if task.last_terminal_mode == "awaiting-input" {
+            prompt.push_str(
+                "\nThe observed terminal is awaiting input. Decide the next response for that terminal and use `send_terminal_text` with submit=true to continue it. If it is actually finished, tell the user briefly instead.",
+            );
+        } else {
+            prompt.push_str(
+                "\nContinue supervising this observed terminal task. If it is finished, tell the user briefly. If more work is needed, use terminal tools instead of guessing.",
+            );
+        }
         Some((task.agent_id, prompt))
     }
 
@@ -5463,6 +5478,54 @@ mod tests {
             })
             .count();
         assert_eq!(history_observations, 1);
+    }
+
+    #[test]
+    fn awaiting_input_terminal_queues_orchestrator_reply() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex-plan.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "Working (2s) esc to interrupt\n".to_string(),
+                },
+            )
+            .expect("initial working observation should change state");
+
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex-plan.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n".to_string(),
+                },
+            )
+            .expect("awaiting input observation should dispatch a follow-up");
+
+        let agent = state.active_agent.expect("active orchestrator agent");
+        assert!(agent.pending);
+        assert!(agent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::User)
+                && message.text.starts_with(AI_TASK_EVENT_PREFIX)
+                && message.text.contains("Tracked terminal is awaiting input")
+                && message.text.contains("Terminal mode: awaiting-input")
+                && message.text.contains("send_terminal_text")
+                && message.text.contains("submit=true")
+        }));
     }
 
     #[test]

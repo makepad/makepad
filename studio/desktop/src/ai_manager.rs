@@ -200,8 +200,8 @@ impl App {
             &self
                 .mount_state(&active_mount)
                 .and_then(|mount| mount.ai_state.as_ref())
-                .map(|state| state.live_markdown.as_str())
-                .unwrap_or("_No live AI state yet._"),
+                .map(ai_live_activity_markdown)
+                .unwrap_or_else(|| "_No live AI state yet._".to_string()),
         );
 
         workspace.widget(cx, ids!(ai_swarm_markdown)).set_text(
@@ -209,8 +209,8 @@ impl App {
             &self
                 .mount_state(&active_mount)
                 .and_then(|mount| mount.ai_state.as_ref())
-                .map(|state| ai_swarm_tree_markdown(state))
-                .unwrap_or_else(|| "_No active swarm._".to_string()),
+                .map(ai_task_board_markdown)
+                .unwrap_or_else(|| "_No active tasks._".to_string()),
         );
 
         let Some(state) = self
@@ -1135,12 +1135,22 @@ mod tests {
     }
 }
 
-fn ai_swarm_tree_markdown(state: &AiMountState) -> String {
+fn ai_task_board_markdown(state: &AiMountState) -> String {
     if state.agents.is_empty() {
-        return "_No active swarm._".to_string();
+        return "_No active tasks._".to_string();
     }
 
     let mut markdown = String::new();
+    let active_count = state.agents.iter().filter(|agent| agent.pending).count();
+    let idle_count = state.agents.len().saturating_sub(active_count);
+    let message_count: usize = state.agents.iter().map(|agent| agent.message_count).sum();
+    markdown.push_str(&format!(
+        "**{} chats** - **{} active** - {} idle - {} msgs\n\n",
+        state.agents.len(),
+        active_count,
+        idle_count,
+        message_count
+    ));
 
     let roots: Vec<_> = state
         .agents
@@ -1149,13 +1159,13 @@ fn ai_swarm_tree_markdown(state: &AiMountState) -> String {
         .collect();
 
     for root in roots {
-        render_agent_node(&mut markdown, root, state, 0);
+        render_task_board_agent(&mut markdown, root, state, 0);
     }
 
     markdown
 }
 
-fn render_agent_node(
+fn render_task_board_agent(
     markdown: &mut String,
     agent: &AiAgentSummary,
     state: &AiMountState,
@@ -1168,21 +1178,37 @@ fn render_agent_node(
     };
 
     let is_active = state.active_agent_id == Some(agent.agent_id);
-    let title_fmt = if is_active {
-        format!("**{}** (active)", agent.title)
-    } else {
-        agent.title.clone()
-    };
-
-    let status_fmt = if agent.pending {
-        " [thinking]"
+    let state_label = if agent.pending {
+        "running"
     } else if agent.status == "completed" {
-        " [completed]"
+        "done"
+    } else if agent.status == "cancelled" {
+        "cancelled"
+    } else if agent.status.contains("error") {
+        "error"
     } else {
-        ""
+        "idle"
+    };
+    let role = agent
+        .role
+        .as_deref()
+        .map(|role| format!(" - {}", role))
+        .unwrap_or_default();
+    let title = truncate_inline(&agent.title, 44);
+    let status_chips = if is_active {
+        format!("`selected` `{}`", state_label)
+    } else {
+        format!("`{}`", state_label)
     };
 
-    markdown.push_str(&format!("{}- {}{}\n", indent, title_fmt, status_fmt));
+    markdown.push_str(&format!(
+        "{}- **{}** - {} - {}{}\n",
+        indent,
+        title,
+        status_chips,
+        truncate_inline(&agent.status, 48),
+        role
+    ));
 
     let children: Vec<_> = state
         .agents
@@ -1191,6 +1217,141 @@ fn render_agent_node(
         .collect();
 
     for child in children {
-        render_agent_node(markdown, child, state, depth + 1);
+        render_task_board_agent(markdown, child, state, depth + 1);
+    }
+}
+
+fn ai_live_activity_markdown(state: &AiMountState) -> String {
+    let live = state.live_markdown.trim();
+    if live.is_empty() {
+        return "_No live AI activity yet._".to_string();
+    }
+    live.lines()
+        .map(polish_live_activity_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn polish_live_activity_line(line: &str) -> String {
+    let trimmed = line.trim_end();
+    if trimmed == "**Tasks**" {
+        return "**Tracked Tasks**".to_string();
+    }
+    if trimmed == "**Terminals**" {
+        return "**Observed Terminals**".to_string();
+    }
+    if trimmed == "_No delegated terminal tasks yet._" {
+        return "_No delegated terminal tasks yet. Launch or delegate a terminal task to track progress here._"
+            .to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("- `T") {
+        if let Some((id_and_status, goal)) = rest.split_once(']') {
+            if let Some((id, status)) = id_and_status.split_once("` [") {
+                return format!(
+                    "- Task `T{}` - **{}** - {}",
+                    id,
+                    status,
+                    goal.trim()
+                );
+            }
+        }
+    }
+    if trimmed.trim_start().starts_with("waiting for terminal assignment") {
+        return "  terminal: waiting for assignment".to_string();
+    }
+    if let Some(path_line) = trimmed.trim_start().strip_prefix('`') {
+        if let Some((path, rest)) = path_line.split_once("` [") {
+            return format!("  terminal: `{}` - {}", path, rest.trim_end_matches(']'));
+        }
+    }
+    if let Some(path_line) = trimmed.strip_prefix("- `") {
+        if let Some((path, rest)) = path_line.split_once("` [") {
+            return format!("- Terminal `{}` - {}", path, rest.trim_end_matches(']'));
+        }
+    }
+    if let Some(files) = trimmed.trim_start().strip_prefix("files:") {
+        return format!("  files touched: {}", files.trim());
+    }
+    if let Some(files) = trimmed.trim_start().strip_prefix("expecting:") {
+        return format!("  expected files: {}", files.trim());
+    }
+    trimmed.to_string()
+}
+
+#[cfg(test)]
+mod ai_task_board_tests {
+    use super::*;
+    use makepad_studio_protocol::hub_protocol::AiBackendInfo;
+
+    fn summary(
+        id: u64,
+        title: &str,
+        status: &str,
+        pending: bool,
+        parent: Option<AiAgentId>,
+    ) -> AiAgentSummary {
+        AiAgentSummary {
+            agent_id: AiAgentId(id),
+            title: title.to_string(),
+            backend_id: "chatgpt".to_string(),
+            status: status.to_string(),
+            pending,
+            updated_at: 0.0,
+            message_count: 3,
+            parent_agent_id: parent,
+            role: None,
+        }
+    }
+
+    fn mount_state(agents: Vec<AiAgentSummary>, live_markdown: &str) -> AiMountState {
+        AiMountState {
+            backends: vec![AiBackendInfo {
+                id: "chatgpt".to_string(),
+                label: "ChatGPT".to_string(),
+                detail: "gpt".to_string(),
+                configured: true,
+                configuration_url: None,
+                configuration_hint: None,
+            }],
+            active_backend_id: Some("chatgpt".to_string()),
+            active_agent_id: Some(AiAgentId(1)),
+            agents,
+            active_agent: None,
+            live_markdown: live_markdown.to_string(),
+        }
+    }
+
+    #[test]
+    fn task_board_marks_active_running_and_children() {
+        let state = mount_state(
+            vec![
+                summary(1, "Plan Studio tasks", "thinking...", true, None),
+                summary(2, "Review task UI", "ready", false, Some(AiAgentId(1))),
+            ],
+            "",
+        );
+
+        let markdown = ai_task_board_markdown(&state);
+        assert!(markdown.contains("**2 chats**"));
+        assert!(markdown.contains("**1 active**"));
+        assert!(markdown.contains("`selected` `running`"));
+        assert!(markdown.contains("Plan Studio tasks"));
+        assert!(markdown.contains("Review task UI"));
+        assert!(markdown.contains("6 msgs"));
+    }
+
+    #[test]
+    fn live_activity_polishes_task_and_terminal_labels() {
+        let state = mount_state(
+            Vec::new(),
+            "**Tasks**\n\n- `T1` [working] Build task UI\n  `makepad/.makepad/task.term` [Working]\n  expecting: studio/desktop/src/ai_manager.rs\n\n**Terminals**\n\n- `makepad/.makepad/task.term` [working / codex]\n  Working (3s)",
+        );
+
+        let markdown = ai_live_activity_markdown(&state);
+        assert!(markdown.contains("**Tracked Tasks**"));
+        assert!(markdown.contains("- Task `T1` - **working** - Build task UI"));
+        assert!(markdown.contains("terminal: `makepad/.makepad/task.term` - Working"));
+        assert!(markdown.contains("expected files: studio/desktop/src/ai_manager.rs"));
+        assert!(markdown.contains("- Terminal `makepad/.makepad/task.term` - working / codex"));
     }
 }
