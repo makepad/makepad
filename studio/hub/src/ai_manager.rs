@@ -920,6 +920,7 @@ impl AiManager {
                 if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
                     upsert_terminal_observation_message(&mut agent.messages, &message);
                     upsert_terminal_observation_history(&mut agent.history, &message);
+                    collapse_repeated_tail_messages(&mut agent.messages);
                     agent.updated_at = now_seconds();
                 }
             }
@@ -1921,6 +1922,7 @@ impl AiManager {
                             role: AiMessageRole::Assistant,
                             text: turn.text.clone(),
                         });
+                        collapse_repeated_tail_messages(&mut agent.messages);
                     }
                 }
 
@@ -1939,18 +1941,21 @@ impl AiManager {
                         }
                     } else {
                         if !turn.text.trim().is_empty() {
-                            agent.history.push(ConversationItem::Assistant {
-                                text: turn.text.clone(),
-                                tool_calls: Vec::new(),
-                            });
+                            push_assistant_history_dedup(
+                                &mut agent.history,
+                                turn.text.clone(),
+                                Vec::new(),
+                            );
+                            collapse_repeated_tail_messages(&mut agent.messages);
                         }
                         agent.status = "ready".to_string();
                     }
                 } else {
-                    agent.history.push(ConversationItem::Assistant {
-                        text: turn.text.clone(),
-                        tool_calls: turn.tool_calls.clone(),
-                    });
+                    push_assistant_history_dedup(
+                        &mut agent.history,
+                        turn.text.clone(),
+                        turn.tool_calls.clone(),
+                    );
                     let compact_waiting_read =
                         turn.tool_calls.len() == 1 && turn.tool_calls[0].name == "read_terminal";
                     for tool_call in &turn.tool_calls {
@@ -2392,6 +2397,9 @@ impl AiManager {
         if !snapshot.is_codex {
             return false;
         }
+        if !should_track_observed_terminal_mode(snapshot.mode) {
+            return false;
+        }
         if mount_state
             .tasks
             .iter()
@@ -2545,16 +2553,21 @@ impl AiManager {
 
     fn ai_live_markdown(&self, mount_state: &MountAgents) -> String {
         let mut markdown = String::new();
-        if mount_state.tasks.is_empty() {
-            markdown.push_str("**Tasks**\n\n_No delegated terminal tasks yet._");
+        let visible_tasks = mount_state
+            .tasks
+            .iter()
+            .filter(|task| should_show_live_task(task))
+            .collect::<Vec<_>>();
+        if visible_tasks.is_empty() {
+            markdown.push_str("**Todo**\n\n_No open AI todos._");
         } else {
-            markdown.push_str("**Tasks**\n\n");
-            for task in &mount_state.tasks {
+            markdown.push_str("**Todo**\n\n");
+            for task in visible_tasks {
                 markdown.push_str(&format!(
                     "- `T{}` [{}] {}\n",
                     task.id,
                     task.status,
-                    truncate_inline(&task.goal, 96)
+                    live_task_title(task)
                 ));
                 if let Some(path) = &task.terminal_path {
                     markdown.push_str(&format!(
@@ -2577,13 +2590,14 @@ impl AiManager {
         }
 
         markdown.push_str("\n\n**Terminals**\n\n");
-        if mount_state.terminal_snapshots.is_empty() {
-            markdown.push_str("_No terminal activity yet._");
+        let mut terminals = mount_state
+            .terminal_snapshots
+            .values()
+            .filter(|terminal| should_show_live_terminal(terminal))
+            .collect::<Vec<&AiTerminalSnapshot>>();
+        if terminals.is_empty() {
+            markdown.push_str("_No active terminal activity._");
         } else {
-            let mut terminals = mount_state
-                .terminal_snapshots
-                .values()
-                .collect::<Vec<&AiTerminalSnapshot>>();
             terminals.sort_by(|left, right| left.path.cmp(&right.path));
             for terminal in terminals {
                 markdown.push_str(&format!(
@@ -2792,6 +2806,9 @@ impl AiManager {
             .iter()
             .filter_map(|agent_id| {
                 let agent = mount_state.agents.get(agent_id)?;
+                if is_closed_subagent(agent) {
+                    return None;
+                }
                 Some(AiAgentSummary {
                     agent_id: *agent_id,
                     title: agent.title.clone(),
@@ -2805,8 +2822,18 @@ impl AiManager {
                 })
             })
             .collect::<Vec<_>>();
-        let active_agent = mount_state.active_agent_id.and_then(|agent_id| {
+        let active_agent_id = mount_state.active_agent_id.and_then(|agent_id| {
             let agent = mount_state.agents.get(&agent_id)?;
+            if is_closed_subagent(agent) {
+                return agent.parent_agent_id;
+            }
+            Some(agent_id)
+        });
+        let active_agent = active_agent_id.and_then(|agent_id| {
+            let agent = mount_state.agents.get(&agent_id)?;
+            if is_closed_subagent(agent) {
+                return None;
+            }
             Some(AiAgentState {
                 agent_id,
                 title: agent.title.clone(),
@@ -2822,7 +2849,7 @@ impl AiManager {
         AiMountState {
             backends,
             active_backend_id: Some(mount_state.active_backend_id.clone()),
-            active_agent_id: mount_state.active_agent_id,
+            active_agent_id,
             agents,
             active_agent,
             live_markdown: self.ai_live_markdown(mount_state),
@@ -3715,8 +3742,97 @@ fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<Conversa
     sanitized
 }
 
+fn push_assistant_history_dedup(
+    history: &mut Vec<ConversationItem>,
+    text: String,
+    tool_calls: Vec<ToolCallRecord>,
+) {
+    if tool_calls.is_empty()
+        && history.last().is_some_and(|item| {
+            matches!(
+                item,
+                ConversationItem::Assistant {
+                    text: previous,
+                    tool_calls
+                } if tool_calls.is_empty() && same_visible_text(previous, &text)
+            )
+        })
+    {
+        return;
+    }
+    history.push(ConversationItem::Assistant { text, tool_calls });
+}
+
+fn collapse_repeated_tail_messages(messages: &mut Vec<AiMessage>) {
+    loop {
+        let len = messages.len();
+        if len < 2 {
+            return;
+        }
+        let duplicate = {
+            let previous = &messages[len - 2];
+            let current = &messages[len - 1];
+            matches!(previous.role, AiMessageRole::Assistant)
+                && matches!(current.role, AiMessageRole::Assistant)
+                && same_visible_text(&previous.text, &current.text)
+        };
+        if duplicate {
+            messages.pop();
+        } else {
+            return;
+        }
+    }
+}
+
+fn same_visible_text(left: &str, right: &str) -> bool {
+    left.split_whitespace().collect::<Vec<_>>()
+        == right.split_whitespace().collect::<Vec<_>>()
+}
+
+fn is_closed_subagent(agent: &RunningAgent) -> bool {
+    agent.parent_agent_id.is_some() && matches!(agent.status.as_str(), "completed" | "done")
+}
+
 fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
     text.trim().is_empty() && tool_calls.is_empty()
+}
+
+fn should_track_observed_terminal_mode(mode: &str) -> bool {
+    matches!(mode, "working" | "awaiting-input" | "needs-attention")
+}
+
+fn should_show_live_task(task: &AiTrackedTask) -> bool {
+    !matches!(task.status.as_str(), "done" | "cancelled")
+        && task
+            .terminal_path
+            .as_deref()
+            .map(|_| task.last_terminal_mode != "idle" && task.last_terminal_mode != "done")
+            .unwrap_or(true)
+}
+
+fn should_show_live_terminal(terminal: &AiTerminalSnapshot) -> bool {
+    matches!(
+        terminal.mode,
+        "working" | "awaiting-input" | "needs-attention" | "input"
+    )
+}
+
+fn live_task_title(task: &AiTrackedTask) -> String {
+    if task.goal.starts_with("Observe Codex terminal `") {
+        let terminal = task
+            .terminal_path
+            .as_deref()
+            .map(terminal_display_name)
+            .unwrap_or_else(|| "terminal".to_string());
+        let action = match task.last_terminal_mode.as_str() {
+            "awaiting-input" => "Reply to",
+            "needs-attention" => "Resolve",
+            "working" => "Monitor",
+            _ => "Review",
+        };
+        return format!("{} `{}`", action, terminal);
+    }
+    truncate_inline(&task.goal, 96)
 }
 
 fn append_plain_message(out: &mut String, first_message: &mut bool, role: &str, content: &str) {
@@ -5456,6 +5572,8 @@ mod tests {
         assert!(state
             .live_markdown
             .contains("Working (12s) esc to interrupt"));
+        assert!(state.live_markdown.contains("**Todo**"));
+        assert!(state.live_markdown.contains("**Terminals**"));
     }
 
     #[test]
@@ -5487,9 +5605,7 @@ mod tests {
         assert!(mount_state.tasks[0]
             .goal
             .contains("Observe Codex terminal `manual-codex.term`"));
-        assert!(state
-            .live_markdown
-            .contains("Observe Codex terminal `manual-codex.term`"));
+        assert!(state.live_markdown.contains("Monitor `manual-codex.term`"));
         assert!(state.live_markdown.contains("[working / codex]"));
         let agent = mount_state
             .agents
@@ -5553,6 +5669,38 @@ mod tests {
             })
             .count();
         assert_eq!(history_observations, 1);
+    }
+
+    #[test]
+    fn idle_codex_terminal_does_not_create_live_todo_or_terminal_line() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/idle-codex.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "wheregmis@MacBookPro makepad %\n".to_string(),
+                },
+            )
+            .expect("idle terminal observation should update snapshots");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.tasks.is_empty());
+        assert!(mount_state
+            .terminal_snapshots
+            .contains_key("repo/.makepad/idle-codex.term"));
+        assert!(state.live_markdown.contains("_No open AI todos._"));
+        assert!(state
+            .live_markdown
+            .contains("_No active terminal activity._"));
+        assert!(!state.live_markdown.contains("idle-codex.term"));
     }
 
     #[test]
@@ -5628,7 +5776,10 @@ mod tests {
         assert!(mount_state
             .terminal_snapshots
             .contains_key("repo/.makepad/shell.term"));
-        assert!(state.live_markdown.contains("repo/.makepad/shell.term"));
+        assert!(!state.live_markdown.contains("repo/.makepad/shell.term"));
+        assert!(state
+            .live_markdown
+            .contains("_No active terminal activity._"));
     }
 
     #[test]
@@ -5804,6 +5955,26 @@ mod tests {
     }
 
     #[test]
+    fn repeated_assistant_tail_messages_are_collapsed() {
+        let repeated = "Done — the implementation milestone is complete.";
+        let mut messages = vec![
+            AiMessage {
+                role: AiMessageRole::Assistant,
+                text: repeated.to_string(),
+            },
+            AiMessage {
+                role: AiMessageRole::Assistant,
+                text: format!("{}\n", repeated),
+            },
+        ];
+
+        collapse_repeated_tail_messages(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, repeated);
+    }
+
+    #[test]
     fn spawned_subagent_starts_with_user_task_history() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
@@ -5935,6 +6106,60 @@ mod tests {
                 } if tool_call_id == "call_spawn" && content.contains("Updated the plan.")
             )
         }));
+    }
+
+    #[test]
+    fn snapshot_hides_legacy_completed_subagents() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let parent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let sub_id = manager.alloc_agent_id();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.order.push(sub_id);
+            mount_state.active_agent_id = Some(sub_id);
+            mount_state
+                .agents
+                .get_mut(&parent_id)
+                .unwrap()
+                .subagents
+                .push(sub_id);
+            mount_state.agents.insert(
+                sub_id,
+                RunningAgent {
+                    title: "coder Subagent".to_string(),
+                    backend_id: CHATGPT_BACKEND_ID.to_string(),
+                    status: "completed".to_string(),
+                    pending_request_id: None,
+                    pending_tool_batch: false,
+                    pending_tool_message_start: None,
+                    cancel_requested: false,
+                    run_token: 0,
+                    messages: Vec::new(),
+                    history: Vec::new(),
+                    updated_at: now_seconds(),
+                    parent_agent_id: Some(parent_id),
+                    role: Some("coder".to_string()),
+                    task: Some("Update plan".to_string()),
+                    subagents: Vec::new(),
+                },
+            );
+        }
+
+        let state = manager.snapshot("repo");
+
+        assert_eq!(state.active_agent_id, Some(parent_id));
+        assert!(state.agents.iter().all(|agent| agent.agent_id != sub_id));
+        assert!(state
+            .active_agent
+            .as_ref()
+            .is_some_and(|agent| agent.agent_id == parent_id));
     }
 
     #[test]

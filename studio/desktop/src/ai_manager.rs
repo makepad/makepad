@@ -1234,15 +1234,17 @@ fn ai_live_activity_markdown(state: &AiMountState) -> String {
 
 fn polish_live_activity_line(line: &str) -> String {
     let trimmed = line.trim_end();
-    if trimmed == "**Tasks**" {
-        return "**Tracked Tasks**".to_string();
+    if trimmed == "**Tasks**" || trimmed == "**Todo**" {
+        return "**Todo**".to_string();
     }
     if trimmed == "**Terminals**" {
-        return "**Observed Terminals**".to_string();
+        return "**Active Terminals**".to_string();
     }
     if trimmed == "_No delegated terminal tasks yet._" {
-        return "_No delegated terminal tasks yet. Launch or delegate a terminal task to track progress here._"
-            .to_string();
+        return "_No open AI todos._".to_string();
+    }
+    if trimmed == "_No terminal activity yet._" {
+        return "_No active terminal activity._".to_string();
     }
     if let Some(rest) = trimmed.strip_prefix("- `T") {
         if let Some((id_and_status, goal)) = rest.split_once(']') {
@@ -1348,7 +1350,7 @@ mod ai_task_board_tests {
         );
 
         let markdown = ai_live_activity_markdown(&state);
-        assert!(markdown.contains("**Tracked Tasks**"));
+        assert!(markdown.contains("**Todo**"));
         assert!(markdown.contains("- Task `T1` - **working** - Build task UI"));
         assert!(markdown.contains("terminal: `makepad/.makepad/task.term` - Working"));
         assert!(markdown.contains("expected files: studio/desktop/src/ai_manager.rs"));

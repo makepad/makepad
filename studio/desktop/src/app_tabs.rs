@@ -16,6 +16,70 @@ fn run_preview_splitter_restore_target(
     }
 }
 
+fn editor_tab_titles_for_paths(tab_to_path: &HashMap<LiveId, String>) -> HashMap<LiveId, String> {
+    let mut parts_by_tab: HashMap<LiveId, Vec<String>> = HashMap::new();
+    let mut depth_by_tab: HashMap<LiveId, usize> = HashMap::new();
+    for (tab_id, path) in tab_to_path {
+        let mut parts: Vec<String> = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.to_string())
+            .collect();
+        if parts.is_empty() {
+            parts.push(path.clone());
+        }
+        parts_by_tab.insert(*tab_id, parts);
+        depth_by_tab.insert(*tab_id, 1);
+    }
+
+    loop {
+        let mut title_to_tabs: HashMap<String, Vec<LiveId>> = HashMap::new();
+        for (tab_id, parts) in &parts_by_tab {
+            let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
+            title_to_tabs
+                .entry(App::title_suffix(parts, depth))
+                .or_default()
+                .push(*tab_id);
+        }
+
+        let mut changed = false;
+        for tabs in title_to_tabs.values() {
+            if tabs.len() <= 1 {
+                continue;
+            }
+            let expandable = tabs.iter().any(|tab_id| {
+                let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
+                let part_count = parts_by_tab.get(tab_id).map_or(1, |parts| parts.len());
+                depth < part_count
+            });
+            if !expandable {
+                continue;
+            }
+            for tab_id in tabs {
+                let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
+                let part_count = parts_by_tab.get(tab_id).map_or(1, |parts| parts.len());
+                let next = (depth + 1).min(part_count);
+                if next != depth {
+                    depth_by_tab.insert(*tab_id, next);
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    parts_by_tab
+        .iter()
+        .map(|(tab_id, parts)| {
+            let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
+            (*tab_id, App::title_suffix(parts, depth))
+        })
+        .collect()
+}
+
 impl App {
     pub(super) fn sync_run_preview_splitter(&mut self, cx: &mut Cx, mount: &str) {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
@@ -192,71 +256,16 @@ impl App {
             return;
         }
 
-        let mut parts_by_tab: HashMap<LiveId, Vec<String>> = HashMap::new();
-        let mut depth_by_tab: HashMap<LiveId, usize> = HashMap::new();
-        for (tab_id, path) in &self.data.tab_to_path {
-            let mut parts: Vec<String> = path
-                .split('/')
-                .filter(|segment| !segment.is_empty())
-                .map(|segment| segment.to_string())
-                .collect();
-            if parts.is_empty() {
-                parts.push(path.clone());
-            }
-            parts_by_tab.insert(*tab_id, parts);
-            depth_by_tab.insert(*tab_id, 1);
-        }
-
-        loop {
-            let mut title_to_tabs: HashMap<String, Vec<LiveId>> = HashMap::new();
-            for (tab_id, parts) in &parts_by_tab {
-                let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
-                title_to_tabs
-                    .entry(Self::title_suffix(parts, depth))
-                    .or_default()
-                    .push(*tab_id);
-            }
-
-            let mut changed = false;
-            for tabs in title_to_tabs.values() {
-                if tabs.len() <= 1 {
-                    continue;
-                }
-                let expandable = tabs.iter().any(|tab_id| {
-                    let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
-                    let part_count = parts_by_tab.get(tab_id).map_or(1, |parts| parts.len());
-                    depth < part_count
-                });
-                if !expandable {
-                    continue;
-                }
-                for tab_id in tabs {
-                    let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
-                    let part_count = parts_by_tab.get(tab_id).map_or(1, |parts| parts.len());
-                    let next = (depth + 1).min(part_count);
-                    if next != depth {
-                        depth_by_tab.insert(*tab_id, next);
-                        changed = true;
-                    }
-                }
-            }
-
-            if !changed {
-                break;
-            }
-        }
-
-        for (tab_id, parts) in &parts_by_tab {
-            let depth = depth_by_tab.get(tab_id).copied().unwrap_or(1);
+        for (tab_id, title) in editor_tab_titles_for_paths(&self.data.tab_to_path) {
             let mount = self
                 .data
                 .tab_to_path
-                .get(tab_id)
+                .get(&tab_id)
                 .and_then(|path| Self::mount_from_virtual_path(path))
                 .map(ToOwned::to_owned);
             if let Some(mount) = mount {
                 if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
-                    dock.set_tab_title(cx, *tab_id, Self::title_suffix(parts, depth));
+                    dock.set_tab_title(cx, tab_id, title);
                 }
             }
         }
@@ -1267,6 +1276,10 @@ impl App {
 mod tests {
     use super::*;
 
+    fn tab(name: &str) -> LiveId {
+        LiveId::from_str(name)
+    }
+
     fn assert_weighted(align: Option<SplitterAlign>, expected: f64) {
         match align {
             Some(SplitterAlign::Weighted(actual)) => {
@@ -1278,6 +1291,68 @@ mod tests {
             Some(other) => panic!("expected weighted splitter align, got {:?}", other),
             None => panic!("expected weighted splitter align, got none"),
         }
+    }
+
+    #[test]
+    fn editor_tab_titles_use_file_names_when_unique() {
+        let paths = HashMap::from([
+            (tab("a"), "makepad/studio/desktop/src/main.rs".to_string()),
+            (tab("b"), "makepad/studio/hub/src/lib.rs".to_string()),
+        ]);
+
+        let titles = editor_tab_titles_for_paths(&paths);
+
+        assert_eq!(titles.get(&tab("a")).map(String::as_str), Some("main.rs"));
+        assert_eq!(titles.get(&tab("b")).map(String::as_str), Some("lib.rs"));
+    }
+
+    #[test]
+    fn editor_tab_titles_expand_only_colliding_suffixes() {
+        let paths = HashMap::from([
+            (
+                tab("desktop"),
+                "makepad/studio/desktop/src/main.rs".to_string(),
+            ),
+            (tab("hub"), "makepad/studio/hub/src/main.rs".to_string()),
+            (
+                tab("protocol"),
+                "makepad/platform/studio/src/lib.rs".to_string(),
+            ),
+        ]);
+
+        let titles = editor_tab_titles_for_paths(&paths);
+
+        assert_eq!(
+            titles.get(&tab("desktop")).map(String::as_str),
+            Some("desktop/src/main.rs")
+        );
+        assert_eq!(
+            titles.get(&tab("hub")).map(String::as_str),
+            Some("hub/src/main.rs")
+        );
+        assert_eq!(
+            titles.get(&tab("protocol")).map(String::as_str),
+            Some("lib.rs")
+        );
+    }
+
+    #[test]
+    fn editor_tab_titles_fall_back_to_full_paths_for_identical_paths() {
+        let paths = HashMap::from([
+            (tab("one"), "makepad/studio/src/main.rs".to_string()),
+            (tab("two"), "makepad/studio/src/main.rs".to_string()),
+        ]);
+
+        let titles = editor_tab_titles_for_paths(&paths);
+
+        assert_eq!(
+            titles.get(&tab("one")).map(String::as_str),
+            Some("makepad/studio/src/main.rs")
+        );
+        assert_eq!(
+            titles.get(&tab("two")).map(String::as_str),
+            Some("makepad/studio/src/main.rs")
+        );
     }
 
     #[test]
