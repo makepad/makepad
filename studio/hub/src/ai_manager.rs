@@ -1747,6 +1747,7 @@ impl AiManager {
                     let sub_id = pre_sub_id.unwrap();
                     let sub_run_token = pre_sub_run_token.unwrap();
                     let title = format!("{} Subagent", args.role);
+                    let kickoff_prompt = subagent_kickoff_prompt(&args.role, &args.task);
 
                     let sub_agent = RunningAgent {
                         title: title.clone(),
@@ -1757,11 +1758,19 @@ impl AiManager {
                         pending_tool_message_start: None,
                         cancel_requested: false,
                         run_token: sub_run_token,
-                        messages: vec![AiMessage {
-                            role: AiMessageRole::Thinking,
-                            text: String::new(),
+                        messages: vec![
+                            AiMessage {
+                                role: AiMessageRole::User,
+                                text: kickoff_prompt.clone(),
+                            },
+                            AiMessage {
+                                role: AiMessageRole::Thinking,
+                                text: String::new(),
+                            },
+                        ],
+                        history: vec![ConversationItem::User {
+                            text: kickoff_prompt,
                         }],
-                        history: Vec::new(),
                         updated_at: now_seconds(),
                         parent_agent_id: Some(agent_id),
                         role: Some(args.role),
@@ -3409,6 +3418,14 @@ fn backend_configuration_message(backend: &AiBackendConfig) -> String {
         message.push_str(url);
     }
     message
+}
+
+fn subagent_kickoff_prompt(role: &str, task: &str) -> String {
+    format!(
+        "You are the `{}` subagent.\n\nTask:\n{}\n\nWork only on this task. Use tools as needed. When finished, call `complete_task` with success and a concise summary so the parent agent can continue.",
+        role.trim(),
+        task.trim()
+    )
 }
 
 fn chatgpt_model_from_str(model: &str) -> ChatGptModel {
@@ -5725,6 +5742,60 @@ mod tests {
                 && message
                     .text
                     .contains("AI backend returned an empty assistant response")
+        }));
+    }
+
+    #[test]
+    fn spawned_subagent_starts_with_user_task_history() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+        }
+
+        manager.complete_assistant_turn(
+            "repo",
+            agent_id,
+            run_token,
+            AssistantTurn {
+                text: "I will ask a planner to update this.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_spawn".to_string(),
+                    name: "spawn_subagent".to_string(),
+                    arguments_json: r#"{"role":"planner","task":"Update the Makepad Studio refactor plan with the latest UI/task tracking changes."}"#.to_string(),
+                }],
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let parent = mount_state.agents.get(&agent_id).unwrap();
+        let sub_id = parent.subagents[0];
+        let sub_agent = mount_state.agents.get(&sub_id).unwrap();
+        let ConversationItem::User { text } = &sub_agent.history[0] else {
+            panic!("subagent should start with a user kickoff message");
+        };
+        assert!(text.contains("You are the `planner` subagent."));
+        assert!(text.contains("Update the Makepad Studio refactor plan"));
+        assert!(text.contains("complete_task"));
+        assert!(sub_agent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::User)
+                && message.text.contains("You are the `planner` subagent.")
         }));
     }
 
