@@ -149,6 +149,7 @@ pub struct AppData {
     pub pending_log_jumps: HashMap<String, (usize, usize)>,
     /// Last non-collapsed `editor_split` ratio, used when reopening the Run preview column.
     pub run_panel_split_restore: HashMap<String, SplitterAlign>,
+    pub model_search_filter: String,
 }
 
 #[derive(Clone)]

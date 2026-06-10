@@ -311,46 +311,40 @@ script_mod! {
                     text: "x"
                 }
             }
-
-            View {
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                align: Align {x: 0.0 y: 0.5}
-
-                Label {
-                    text: "AI backend:"
-                    draw_text.color: theme.color_label_outer
-                }
-
-                ai_backend_dropdown := DropDown {
-                    width: Fill
-                    labels: ["local"]
-                }
-
-                ai_backend_configure_button := ButtonFlat {
-                    width: Fit
-                    text: "Configure"
-                }
-            }
         }
 
-        RectView {
-            width: Fill
-            height: Fit
-            flow: Down
-            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
-            draw_bg +: {
-                color: theme.color_bg_highlight
-            }
 
-            Label {
-                text: "Task Board"
-                draw_text.color: theme.color_label_outer
-            }
 
-            ai_swarm_scroll := ScrollYView {
+        ai_swarm_fold := FoldHeader {
+            animator +: {
+                active +: {
+                    default: @off
+                }
+            }
+            header: RectView {
+                width: Fill
+                height: 28.0
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+                spacing: theme.space_1
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.94
+                }
+                fold_button := FoldButton {
+                    animator +: {
+                        active +: {
+                            default: @off
+                        }
+                    }
+                }
+                Label {
+                    text: "Task Board"
+                    draw_text.color: theme.color_label_outer
+                }
+            }
+            body_walk: Walk {width: Fill, height: Fit}
+            body: ScrollYView {
                 width: Fill
                 height: 128.0
                 flow: Down
@@ -363,21 +357,36 @@ script_mod! {
             }
         }
 
-        RectView {
-            width: Fill
-            height: Fit
-            flow: Down
-            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 0.0}
-            draw_bg +: {
-                color: theme.color_bg_highlight
+        ai_live_fold := FoldHeader {
+            animator +: {
+                active +: {
+                    default: @off
+                }
             }
-
-            Label {
-                text: "Live Activity"
-                draw_text.color: theme.color_label_outer
+            header: RectView {
+                width: Fill
+                height: 28.0
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+                spacing: theme.space_1
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.94
+                }
+                fold_button := FoldButton {
+                    animator +: {
+                        active +: {
+                            default: @off
+                        }
+                    }
+                }
+                Label {
+                    text: "Live Activity"
+                    draw_text.color: theme.color_label_outer
+                }
             }
-
-            ai_live_scroll := ScrollYView {
+            body_walk: Walk {width: Fill, height: Fit}
+            body: ScrollYView {
                 width: Fill
                 height: 150.0
                 flow: Down
@@ -409,16 +418,75 @@ script_mod! {
         RectView {
             width: Fill
             height: Fit
-            flow: Right
-            spacing: theme.space_2
-            align: Align {x: 0.0 y: 1.0}
+            flow: Down
             padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
             draw_bg +: {
                 color: theme.color_bg_highlight
             }
 
-            ai_prompt_input := AiPromptInput {}
-            ai_run_button := AiRunButton {}
+            prompt_card := RectView {
+                width: Fill
+                height: Fit
+                flow: Down
+                padding: Inset {left: 1.0 right: 1.0 top: 1.0 bottom: 1.0}
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.72
+                    radius: 7.0
+                }
+
+                ai_prompt_input := AiPromptInput {
+                    width: Fill
+                    height: 80.0
+                    padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 8.0}
+                    draw_bg +: {
+                        color: #0000
+                        color_hover: #0000
+                        color_focus: #0000
+                        color_down: #0000
+                        border_color: #0000
+                    }
+                }
+
+                actions_row := View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align {x: 0.0 y: 0.5}
+                    padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 8.0}
+
+                    ai_model_picker_button := ButtonFlat {
+                        width: Fit
+                        height: 24.0
+                        text: "local ⌃"
+                        draw_bg +: {
+                            color: theme.color_bg_highlight * 0.88
+                            color_hover: theme.color_bg_highlight * 0.98
+                            color_focus: theme.color_bg_highlight * 1.02
+                            color_down: theme.color_bg_highlight * 0.88
+                            radius: 4.0
+                        }
+                        draw_text +: {
+                            color: theme.color_label_inner
+                            font_size: 9.0
+                        }
+                    }
+
+                    View { width: Fill }
+
+                    ai_run_button := AiRunButton {
+                        width: 28.0
+                        height: 24.0
+                        draw_bg +: {
+                            radius: 4.0
+                        }
+                        draw_text +: {
+                            text_style: theme.font_bold {
+                                font_size: 9.5
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -835,177 +903,269 @@ script_mod! {
         body +: {
             width: Fill
             height: Fill
-            flow: Down
+            flow: Overlay
             spacing: 0.0
             padding: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 10.0}
 
-            RoundedView {
-                visible: false
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: Inset {left: 10.0 right: 10.0 top: 6.0 bottom: 6.0}
-                draw_bg.color: #x1B2332
-                draw_bg.border_radius: 6.0
-
-                status_label := Label {
-                    width: Fit
-                    text: "Starting backend..."
-                    draw_text.color: #xD5E4FF
-                }
-                Filler {}
-                current_file_label := Label {
-                    width: Fit
-                    text: "No file"
-                    draw_text.color: #x89A0C7
-                }
-            }
-
-            mount_dock := StudioDock {
+            main_work_area := View {
                 width: Fill
                 height: Fill
+                flow: Down
+                spacing: 0.0
 
-                tab_bar +: {
-                    MountTab := MountTab {}
-                }
-
-                root := DockTabs {
-                    tabs: [@mount_first]
-                    selected: 0
-                    closable: false
-                }
-
-                mount_first := DockTab {
-                    name: "makepad"
-                    template: @MountTab
-                    kind: @MountWorkspace
-                }
-
-                MountWorkspace := View {
+                RoundedView {
+                    visible: false
                     width: Fill
-                    height: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: theme.space_2
+                    padding: Inset {left: 10.0 right: 10.0 top: 6.0 bottom: 6.0}
+                    draw_bg.color: #x1B2332
+                    draw_bg.border_radius: 6.0
 
-                    dock := StudioDock {
-                        width: Fill
-                        height: Fill
-
-                        tab_bar +: {
-                            FilesTab := FilesTab {}
-                            RunListTab := RunListTab {}
-                            AiTab := AiTab {}
-                            EditorFirstTab := EditorFirstTab {}
-                            EditorTab := EditorTab {}
-                            RunFirstTab := RunFirstTab {}
-                            RunAppTab := RunAppTab {}
-                            LogFirstTab := LogFirstTab {}
-                            LogTab := LogTab {}
-                            TerminalTab := TerminalTab {}
-                            TerminalCloseableTab := TerminalCloseableTab {}
-                        }
-
-                        root := DockSplitter {
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.FromA(310.0)
-                            a: @tree_tabs
-                            b: @main_split
-                        }
-
-                        main_split := DockSplitter {
-                            axis: SplitterAxis.Vertical
-                            align: SplitterAlign.FromB(220.0)
-                            a: @editor_split
-                            b: @bottom_panel_tabs
-                        }
-
-                        editor_split := DockSplitter {
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.Weighted(0.62)
-                            a: @editor_tabs
-                            b: @run_tabs
-                        }
-
-                        bottom_panel_tabs := DockTabs {
-                            tabs: [@log_first @terminal_first]
-                            selected: 0
-                            closable: false
-                        }
-
-                        tree_tabs := DockTabs {
-                            tabs: [@tree_tab @run_list_tab @ai_tab]
-                            selected: 0
-                            closable: false
-                        }
-
-                        editor_tabs := DockTabs {
-                            tabs: [@editor_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        run_tabs := DockTabs {
-                            tabs: [@run_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        tree_tab := DockTab {
-                            name: "Files"
-                            template: @FilesTab
-                            kind: @FileTreePane
-                        }
-
-                        run_list_tab := DockTab {
-                            name: "Run"
-                            template: @RunListTab
-                            kind: @RunListPane
-                        }
-
-                        ai_tab := DockTab {
-                            name: "AI"
-                            template: @AiTab
-                            kind: @AiPane
-                        }
-
-                        editor_first := DockTab {
-                            name: ""
-                            template: @EditorFirstTab
-                            kind: @EditorFirstPane
-                        }
-
-                        run_first := DockTab {
-                            name: ""
-                            template: @RunFirstTab
-                            kind: @RunFirstPane
-                        }
-
-                        log_first := DockTab {
-                            name: "Logs"
-                            template: @LogFirstTab
-                            kind: @LogFirstPane
-                        }
-
-                        terminal_first := DockTab {
-                            name: "Terminal"
-                            template: @TerminalTab
-                            kind: @TerminalFirstPane
-                        }
-
-                        FileTreePane := FileTreePane {}
-                        RunListPane := RunListPane {}
-                        AiPane := AiPane {}
-                        CodeEditorPane := CodeEditorPane {}
-                        EditorFirstPane := EditorFirstPane {}
-                        RunningAppPane := RunningAppPane {}
-                        RunFirstPane := RunFirstPane {}
-                        LogFirstPane := LogFirstPane {}
-                        LogPane := LogPane {}
-                        ProfilerPane := ProfilerPane {}
-                        TerminalFirstPane := TerminalFirstPane {}
-                        TerminalPane := TerminalPane {}
+                    status_label := Label {
+                        width: Fit
+                        text: "Starting backend..."
+                        draw_text.color: #xD5E4FF
+                    }
+                    Filler {}
+                    current_file_label := Label {
+                        width: Fit
+                        text: "No file"
+                        draw_text.color: #x89A0C7
                     }
                 }
 
+                mount_dock := StudioDock {
+                    width: Fill
+                    height: Fill
+
+                    tab_bar +: {
+                        MountTab := MountTab {}
+                    }
+
+                    root := DockTabs {
+                        tabs: [@mount_first]
+                        selected: 0
+                        closable: false
+                    }
+
+                    mount_first := DockTab {
+                        name: "makepad"
+                        template: @MountTab
+                        kind: @MountWorkspace
+                    }
+
+                    MountWorkspace := View {
+                        width: Fill
+                        height: Fill
+
+                        dock := StudioDock {
+                            width: Fill
+                            height: Fill
+
+                            tab_bar +: {
+                                FilesTab := FilesTab {}
+                                RunListTab := RunListTab {}
+                                AiTab := AiTab {}
+                                EditorFirstTab := EditorFirstTab {}
+                                EditorTab := EditorTab {}
+                                RunFirstTab := RunFirstTab {}
+                                RunAppTab := RunAppTab {}
+                                LogFirstTab := LogFirstTab {}
+                                LogTab := LogTab {}
+                                TerminalTab := TerminalTab {}
+                                TerminalCloseableTab := TerminalCloseableTab {}
+                            }
+
+                            root := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.FromA(310.0)
+                                a: @tree_tabs
+                                b: @main_split
+                            }
+
+                            main_split := DockSplitter {
+                                axis: SplitterAxis.Vertical
+                                align: SplitterAlign.FromB(220.0)
+                                a: @editor_split
+                                b: @bottom_panel_tabs
+                            }
+
+                            editor_split := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.Weighted(0.62)
+                                a: @editor_tabs
+                                b: @run_tabs
+                            }
+
+                            bottom_panel_tabs := DockTabs {
+                                tabs: [@log_first @terminal_first]
+                                selected: 0
+                                closable: false
+                            }
+
+                            tree_tabs := DockTabs {
+                                tabs: [@tree_tab @run_list_tab @ai_tab]
+                                selected: 0
+                                closable: false
+                            }
+
+                            editor_tabs := DockTabs {
+                                tabs: [@editor_first]
+                                selected: 0
+                                closable: true
+                            }
+
+                            run_tabs := DockTabs {
+                                tabs: [@run_first]
+                                selected: 0
+                                closable: true
+                            }
+
+                            tree_tab := DockTab {
+                                name: "Files"
+                                template: @FilesTab
+                                kind: @FileTreePane
+                            }
+
+                            run_list_tab := DockTab {
+                                name: "Run"
+                                template: @RunListTab
+                                kind: @RunListPane
+                            }
+
+                            ai_tab := DockTab {
+                                name: "AI"
+                                template: @AiTab
+                                kind: @AiPane
+                            }
+
+                            editor_first := DockTab {
+                                name: ""
+                                template: @EditorFirstTab
+                                kind: @EditorFirstPane
+                            }
+
+                            run_first := DockTab {
+                                name: ""
+                                template: @RunFirstTab
+                                kind: @RunFirstPane
+                            }
+
+                            log_first := DockTab {
+                                name: "Logs"
+                                template: @LogFirstTab
+                                kind: @LogFirstPane
+                            }
+
+                            terminal_first := DockTab {
+                                name: "Terminal"
+                                template: @TerminalTab
+                                kind: @TerminalFirstPane
+                            }
+
+                            FileTreePane := FileTreePane {}
+                            RunListPane := RunListPane {}
+                            AiPane := AiPane {}
+                            CodeEditorPane := CodeEditorPane {}
+                            EditorFirstPane := EditorFirstPane {}
+                            RunningAppPane := RunningAppPane {}
+                            RunFirstPane := RunFirstPane {}
+                            LogFirstPane := LogFirstPane {}
+                            LogPane := LogPane {}
+                            ProfilerPane := ProfilerPane {}
+                            TerminalFirstPane := TerminalFirstPane {}
+                            TerminalPane := TerminalPane {}
+                        }
+                    }
+                }
+            }
+
+            model_picker_modal := Modal {
+                content +: {
+                    width: 320
+                    height: 360
+                    align: Center
+
+                    RoundedView {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        show_bg: true
+                        draw_bg +: {
+                            color: #x080A0D
+                            radius: 8.0
+                            border_color: theme.color_bg_highlight * 1.5
+                            border_width: 1.0
+                        }
+                        padding: Inset {left: 4.0 right: 4.0 top: 8.0 bottom: 8.0}
+                        spacing: theme.space_1
+
+                        model_search_input := TextInput {
+                            width: Fill
+                            height: 36.0
+                            empty_text: "Select a model..."
+                            margin: Inset {left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+                            draw_bg +: {
+                                color: theme.color_bg_highlight * 0.8
+                                border_color: theme.color_bg_highlight * 1.2
+                                border_radius: 5.0
+                            }
+                            draw_text +: {
+                                color: theme.color_label_outer
+                                font_size: 11.5
+                            }
+                        }
+
+                        Divider := View {
+                            width: Fill
+                            height: 1.0
+                            show_bg: true
+                            draw_bg.color: theme.color_bg_highlight * 1.5
+                            margin: Inset {left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
+                        }
+
+                        desktop_model_picker := DesktopModelPicker {
+                            width: Fill
+                            height: Fill
+                        }
+
+                        Divider2 := View {
+                            width: Fill
+                            height: 1.0
+                            show_bg: true
+                            draw_bg.color: theme.color_bg_highlight * 1.5
+                            margin: Inset {left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
+                        }
+
+                        bottom_bar := View {
+                            width: Fill
+                            height: 34.0
+                            flow: Right
+                            align: Align {x: 0.5 y: 0.5}
+                            padding: Inset {left: 8.0 right: 8.0}
+
+                            configure_button := ButtonFlat {
+                                width: Fill
+                                height: 26.0
+                                text: "Configure ⌥⌘C"
+                                draw_bg +: {
+                                    color: theme.color_bg_highlight
+                                    color_hover: theme.color_bg_highlight * 1.1
+                                    color_focus: theme.color_bg_highlight * 1.2
+                                    color_down: theme.color_bg_highlight * 0.95
+                                    radius: 4.0
+                                }
+                                draw_text +: {
+                                    color: theme.color_label_inner
+                                    font_size: 9.5
+                                    text_style: theme.font_bold
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

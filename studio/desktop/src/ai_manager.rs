@@ -224,11 +224,8 @@ impl App {
                 .drop_down(cx, ids!(ai_agent_dropdown))
                 .set_selected_item(cx, 0);
             workspace
-                .drop_down(cx, ids!(ai_backend_dropdown))
-                .set_labels(cx, vec!["Loading backends...".to_string()]);
-            workspace
-                .drop_down(cx, ids!(ai_backend_dropdown))
-                .set_selected_item(cx, 0);
+                .button(cx, ids!(ai_model_picker_button))
+                .set_text(cx, "Loading... ⌃");
             workspace
                 .widget(cx, ids!(ai_chat_markdown))
                 .set_text(cx, "_No AI state yet._");
@@ -269,51 +266,25 @@ impl App {
             .drop_down(cx, ids!(ai_agent_dropdown))
             .set_selected_item(cx, agent_selected);
 
-        let backend_labels = state
-            .backends
-            .iter()
-            .map(|backend| {
-                if !backend.detail.is_empty() {
-                    format!("{} ({})", backend.label, backend.detail)
-                } else {
-                    backend.label.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let backend_selected = state
+        let active_backend = state
             .active_backend_id
             .as_ref()
             .and_then(|active_id| {
                 state
                     .backends
                     .iter()
-                    .position(|backend| &backend.id == active_id)
-            })
-            .unwrap_or(0);
-        let active_backend_configured = state
-            .backends
-            .get(backend_selected)
+                    .find(|backend| &backend.id == active_id)
+            });
+        let active_backend_label = active_backend
+            .map(|backend| backend.label.clone())
+            .unwrap_or_else(|| "local".to_string());
+        let active_backend_configured = active_backend
             .map(|backend| backend.configured)
             .unwrap_or(true);
+
         workspace
-            .drop_down(cx, ids!(ai_backend_dropdown))
-            .set_labels(cx, non_empty_labels(backend_labels, "local"));
-        workspace
-            .drop_down(cx, ids!(ai_backend_dropdown))
-            .set_selected_item(cx, backend_selected);
-        workspace
-            .button(cx, ids!(ai_backend_configure_button))
-            .set_enabled(cx, !active_backend_configured);
-        workspace
-            .widget(cx, ids!(ai_backend_configure_button))
-            .set_text(
-                cx,
-                if active_backend_configured {
-                    "Configured"
-                } else {
-                    "Configure"
-                },
-            );
+            .button(cx, ids!(ai_model_picker_button))
+            .set_text(cx, &format!("{} ⌃", active_backend_label));
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace
@@ -420,6 +391,12 @@ impl App {
                     workspace
                         .text_input(cx, ids!(ai_prompt_input))
                         .set_key_focus(cx);
+                    workspace
+                        .fold_header(cx, ids!(ai_swarm_fold))
+                        .set_is_open(cx, true, Animate::Yes);
+                    workspace
+                        .fold_header(cx, ids!(ai_live_fold))
+                        .set_is_open(cx, true, Animate::Yes);
                 }
                 self.schedule_ai_chat_scroll_to_bottom(cx);
             }
