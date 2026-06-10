@@ -244,10 +244,15 @@ script_mod! {
     let AiPane = RectView {
         width: Fill
         height: Fill
-        flow: Down
+        flow: Overlay
         draw_bg +: {
             color: theme.color_bg_container
         }
+
+        ai_panel_content := View {
+            width: Fill
+            height: Fill
+            flow: Down
 
         RectView {
             width: Fill
@@ -417,77 +422,135 @@ script_mod! {
 
         RectView {
             width: Fill
-            height: Fit
-            flow: Down
+            height: Fill
+            flow: Overlay
             padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
             draw_bg +: {
                 color: theme.color_bg_highlight
             }
 
-            prompt_card := RectView {
+            composer_anchor := View {
                 width: Fill
-                height: Fit
+                height: Fill
                 flow: Down
-                padding: Inset {left: 1.0 right: 1.0 top: 1.0 bottom: 1.0}
-                draw_bg +: {
-                    color: theme.color_bg_highlight * 0.72
-                    radius: 7.0
-                }
 
-                ai_prompt_input := AiPromptInput {
-                    width: Fill
-                    height: 80.0
-                    padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 8.0}
-                    draw_bg +: {
-                        color: #0000
-                        color_hover: #0000
-                        color_focus: #0000
-                        color_down: #0000
-                        border_color: #0000
-                    }
-                }
+                Filler {}
 
-                actions_row := View {
+                prompt_card := RectView {
                     width: Fill
                     height: Fit
-                    flow: Right
-                    align: Align {x: 0.0 y: 0.5}
-                    padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 8.0}
+                    flow: Down
+                    padding: Inset {left: 1.0 right: 1.0 top: 1.0 bottom: 1.0}
+                    draw_bg +: {
+                        color: theme.color_bg_highlight * 0.72
+                        radius: 7.0
+                    }
 
-                    ai_model_picker_button := ButtonFlat {
-                        width: Fit
-                        height: 24.0
-                        text: "local ⌃"
+                    ai_prompt_input := AiPromptInput {
+                        width: Fill
+                        height: 80.0
+                        padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 8.0}
                         draw_bg +: {
-                            color: theme.color_bg_highlight * 0.88
-                            color_hover: theme.color_bg_highlight * 0.98
-                            color_focus: theme.color_bg_highlight * 1.02
-                            color_down: theme.color_bg_highlight * 0.88
-                            radius: 4.0
-                        }
-                        draw_text +: {
-                            color: theme.color_label_inner
-                            font_size: 9.0
+                            color: #0000
+                            color_hover: #0000
+                            color_focus: #0000
+                            color_down: #0000
+                            border_color: #0000
                         }
                     }
 
-                    View { width: Fill }
+                    actions_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        align: Align {x: 0.0 y: 0.5}
+                        padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 8.0}
 
-                    ai_run_button := AiRunButton {
-                        width: 28.0
-                        height: 24.0
-                        draw_bg +: {
-                            radius: 4.0
+                        ai_model_picker := DropDown {
+                            width: Fit
+                            height: 24.0
+                            margin: Inset {}
+                            padding: Inset {left: 8.0 right: 18.0 top: 0.0 bottom: 0.0}
+                            align: Align {x: 0.0 y: 0.5}
+                            labels: ["local"]
+                            popup_menu_position: AboveInput
+                            draw_bg +: {
+                                color: theme.color_bg_highlight * 0.88
+                                color_hover: theme.color_bg_highlight * 0.98
+                                color_focus: theme.color_bg_highlight * 1.02
+                                color_down: theme.color_bg_highlight * 0.88
+                                border_color: theme.color_u_hidden
+                                border_color_hover: theme.color_u_hidden
+                                border_color_focus: theme.color_u_hidden
+                                border_color_down: theme.color_u_hidden
+                                border_color_disabled: theme.color_u_hidden
+                                border_color_2: theme.color_u_hidden
+                                border_color_2_hover: theme.color_u_hidden
+                                border_color_2_focus: theme.color_u_hidden
+                                border_color_2_down: theme.color_u_hidden
+                                border_color_2_disabled: theme.color_u_hidden
+                                border_radius: 4.0
+                            }
+                            draw_text +: {
+                                color: theme.color_label_inner
+                                text_style: theme.font_regular {
+                                    font_size: 9.0
+                                }
+                            }
                         }
-                        draw_text +: {
-                            text_style: theme.font_bold {
-                                font_size: 9.5
+
+                        ai_configure_button := ButtonFlat {
+                            width: Fit
+                            height: 24.0
+                            margin: Inset {}
+                            padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+                            text: "⚙"
+                            draw_bg +: {
+                                color: theme.color_bg_highlight * 0.88
+                                color_hover: theme.color_bg_highlight * 0.98
+                                color_focus: theme.color_bg_highlight * 1.02
+                                color_down: theme.color_bg_highlight * 0.88
+                                border_color: theme.color_u_hidden
+                                border_color_hover: theme.color_u_hidden
+                                border_color_focus: theme.color_u_hidden
+                                border_color_down: theme.color_u_hidden
+                                border_color_disabled: theme.color_u_hidden
+                                border_color_2: theme.color_u_hidden
+                                border_color_2_hover: theme.color_u_hidden
+                                border_color_2_focus: theme.color_u_hidden
+                                border_color_2_down: theme.color_u_hidden
+                                border_color_2_disabled: theme.color_u_hidden
+                                border_radius: 4.0
+                            }
+                            draw_text +: {
+                                color: theme.color_label_inner
+                                font_size: 11.0
+                            }
+                        }
+
+                        View { width: Fill }
+
+                        ai_run_button := AiRunButton {
+                            width: 28.0
+                            height: 24.0
+                            draw_bg +: {
+                                radius: 4.0
+                            }
+                            draw_text +: {
+                                text_style: theme.font_bold {
+                                    font_size: 9.5
+                                }
                             }
                         }
                     }
                 }
             }
+
         }
+
+        }
+
+
     }
 
     let FileTreePane = View {
@@ -1082,91 +1145,6 @@ script_mod! {
                 }
             }
 
-            model_picker_modal := Modal {
-                content +: {
-                    width: 320
-                    height: 360
-                    align: Center
-
-                    RoundedView {
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        show_bg: true
-                        draw_bg +: {
-                            color: #x080A0D
-                            radius: 8.0
-                            border_color: theme.color_bg_highlight * 1.5
-                            border_width: 1.0
-                        }
-                        padding: Inset {left: 4.0 right: 4.0 top: 8.0 bottom: 8.0}
-                        spacing: theme.space_1
-
-                        model_search_input := TextInput {
-                            width: Fill
-                            height: 36.0
-                            empty_text: "Select a model..."
-                            margin: Inset {left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
-                            draw_bg +: {
-                                color: theme.color_bg_highlight * 0.8
-                                border_color: theme.color_bg_highlight * 1.2
-                                border_radius: 5.0
-                            }
-                            draw_text +: {
-                                color: theme.color_label_outer
-                                font_size: 11.5
-                            }
-                        }
-
-                        Divider := View {
-                            width: Fill
-                            height: 1.0
-                            show_bg: true
-                            draw_bg.color: theme.color_bg_highlight * 1.5
-                            margin: Inset {left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
-                        }
-
-                        desktop_model_picker := DesktopModelPicker {
-                            width: Fill
-                            height: Fill
-                        }
-
-                        Divider2 := View {
-                            width: Fill
-                            height: 1.0
-                            show_bg: true
-                            draw_bg.color: theme.color_bg_highlight * 1.5
-                            margin: Inset {left: 0.0 right: 0.0 top: 4.0 bottom: 4.0}
-                        }
-
-                        bottom_bar := View {
-                            width: Fill
-                            height: 34.0
-                            flow: Right
-                            align: Align {x: 0.5 y: 0.5}
-                            padding: Inset {left: 8.0 right: 8.0}
-
-                            configure_button := ButtonFlat {
-                                width: Fill
-                                height: 26.0
-                                text: "Configure ⌥⌘C"
-                                draw_bg +: {
-                                    color: theme.color_bg_highlight
-                                    color_hover: theme.color_bg_highlight * 1.1
-                                    color_focus: theme.color_bg_highlight * 1.2
-                                    color_down: theme.color_bg_highlight * 0.95
-                                    radius: 4.0
-                                }
-                                draw_text +: {
-                                    color: theme.color_label_inner
-                                    font_size: 9.5
-                                    text_style: theme.font_bold
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

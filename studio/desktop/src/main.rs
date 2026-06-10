@@ -4,7 +4,7 @@ pub mod app_ui;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
-pub mod desktop_model_picker;
+
 pub mod desktop_profiler_view;
 pub mod desktop_run_list;
 pub mod desktop_run_view;
@@ -25,7 +25,6 @@ use crate::{
     desktop_code_editor::*,
     desktop_file_tree::*,
     desktop_log_view::*,
-    desktop_model_picker::*,
     desktop_profiler_view::*,
     desktop_run_list::*,
     desktop_run_view::*,
@@ -60,7 +59,6 @@ pub fn register_script_modules(vm: &mut ScriptVm) {
     crate::desktop_run_list::script_mod(vm);
     crate::desktop_run_view::script_mod(vm);
     crate::desktop_terminal_view::script_mod(vm);
-    crate::desktop_model_picker::script_mod(vm);
     crate::app_ui::script_mod(vm);
 }
 
@@ -205,49 +203,17 @@ impl MatchEvent for App {
                 {
                     self.select_ai_manager_agent(&active_mount, index);
                 }
+                if let Some(index) = workspace
+                    .drop_down(cx, ids!(ai_model_picker))
+                    .selected(actions)
+                {
+                    self.select_ai_manager_backend(&active_mount, index);
+                }
                 if workspace
-                    .button(cx, ids!(ai_model_picker_button))
-                    .clicked(actions)
-                {
-                    self.data.model_search_filter = "".to_string();
-                    self.ui.text_input(cx, ids!(model_search_input)).set_text(cx, "");
-                    self.ui.modal(cx, ids!(model_picker_modal)).open(cx);
-                    self.ui.text_input(cx, ids!(model_search_input)).set_key_focus(cx);
-                    self.ui.widget(cx, ids!(model_picker_modal)).redraw(cx);
-                }
-                if let Some(filter) = self
-                    .ui
-                    .text_input(cx, ids!(model_search_input))
-                    .changed(actions)
-                {
-                    self.data.model_search_filter = filter;
-                    self.ui.widget(cx, ids!(desktop_model_picker)).redraw(cx);
-                }
-                if let Some(backend_id) = self
-                    .ui
-                    .desktop_model_picker(cx, ids!(desktop_model_picker))
-                    .select_requested(actions)
-                {
-                    if let Some(index) = self
-                        .data
-                        .mounts
-                        .get(&active_mount)
-                        .and_then(|state| state.ai_state.as_ref())
-                        .and_then(|state| {
-                            state.backends.iter().position(|b| b.id == backend_id)
-                        })
-                    {
-                        self.select_ai_manager_backend(&active_mount, index);
-                    }
-                    self.ui.modal(cx, ids!(model_picker_modal)).close(cx);
-                }
-                if self
-                    .ui
-                    .button(cx, ids!(configure_button))
+                    .button(cx, ids!(ai_configure_button))
                     .clicked(actions)
                 {
                     self.configure_ai_manager_backend(cx, &active_mount);
-                    self.ui.modal(cx, ids!(model_picker_modal)).close(cx);
                 }
                 if workspace.button(cx, ids!(ai_new_button)).clicked(actions) {
                     self.create_ai_manager_agent(&active_mount);
@@ -462,19 +428,12 @@ impl AppMain for App {
                     self.cancel_ai_manager_prompt(&active_mount);
                 }
             }
-            if key_event.key_code == KeyCode::KeyC && key_event.modifiers.alt && key_event.modifiers.logo {
+            if key_event.key_code == KeyCode::KeyC
+                && key_event.modifiers.alt
+                && key_event.modifiers.logo
+            {
                 if let Some(active_mount) = self.data.active_mount.clone() {
-                    let modal = self.ui.modal(cx, ids!(model_picker_modal));
-                    if modal.is_open() {
-                        self.configure_ai_manager_backend(cx, &active_mount);
-                        modal.close(cx);
-                    } else {
-                        self.data.model_search_filter = "".to_string();
-                        self.ui.text_input(cx, ids!(model_search_input)).set_text(cx, "");
-                        modal.open(cx);
-                        self.ui.text_input(cx, ids!(model_search_input)).set_key_focus(cx);
-                        self.ui.widget(cx, ids!(model_picker_modal)).redraw(cx);
-                    }
+                    self.configure_ai_manager_backend(cx, &active_mount);
                 }
             }
         }

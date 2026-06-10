@@ -224,8 +224,11 @@ impl App {
                 .drop_down(cx, ids!(ai_agent_dropdown))
                 .set_selected_item(cx, 0);
             workspace
-                .button(cx, ids!(ai_model_picker_button))
-                .set_text(cx, "Loading... ⌃");
+                .drop_down(cx, ids!(ai_model_picker))
+                .set_labels(cx, vec!["Loading...".to_string()]);
+            workspace
+                .drop_down(cx, ids!(ai_model_picker))
+                .set_selected_item(cx, 0);
             workspace
                 .widget(cx, ids!(ai_chat_markdown))
                 .set_text(cx, "_No AI state yet._");
@@ -282,9 +285,28 @@ impl App {
             .map(|backend| backend.configured)
             .unwrap_or(true);
 
+        let backend_labels = state
+            .backends
+            .iter()
+            .map(|backend| backend.label.clone())
+            .collect::<Vec<_>>();
+        let backend_selected = state
+            .active_backend_id
+            .as_ref()
+            .and_then(|active_id| {
+                state
+                    .backends
+                    .iter()
+                    .position(|backend| &backend.id == active_id)
+            })
+            .unwrap_or(0);
+
         workspace
-            .button(cx, ids!(ai_model_picker_button))
-            .set_text(cx, &format!("{} ⌃", active_backend_label));
+            .drop_down(cx, ids!(ai_model_picker))
+            .set_labels(cx, non_empty_labels(backend_labels, "local"));
+        workspace
+            .drop_down(cx, ids!(ai_model_picker))
+            .set_selected_item(cx, backend_selected);
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace

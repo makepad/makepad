@@ -355,6 +355,7 @@ pub enum PopupMenuPosition {
     #[pick]
     OnSelected,
     BelowInput,
+    AboveInput,
 }
 
 #[derive(Script, Widget, Animator)]
@@ -537,6 +538,20 @@ impl DropDown {
                     let shift = Vec2d {
                         x: 0.0,
                         y: area.size.y,
+                    };
+
+                    popup_menu.end(cx, self.draw_bg.area(), shift);
+                }
+                PopupMenuPosition::AboveInput => {
+                    for (i, item) in self.labels.iter().enumerate() {
+                        let node_id = LiveId(i as u64).into();
+                        popup_menu.draw_item(cx, node_id, &item);
+                    }
+
+                    let popup_height = cx.turtle().used_height();
+                    let shift = Vec2d {
+                        x: 0.0,
+                        y: -popup_height,
                     };
 
                     popup_menu.end(cx, self.draw_bg.area(), shift);
