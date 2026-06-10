@@ -18,6 +18,7 @@ use makepad_studio_protocol::hub_protocol::{
 use providers::AiProviderKind;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -153,6 +154,7 @@ struct AiTrackedTask {
     last_terminal_summary: String,
     last_terminal_excerpt: String,
     last_codex_status: Option<String>,
+    handled_followup_signatures: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -889,28 +891,19 @@ impl AiManager {
                 if previous_mode != "awaiting-input" && snapshot.mode == "awaiting-input" {
                     queue.push((
                         task.id,
-                        format!(
-                            "terminal:{}:awaiting-input:{}",
-                            snapshot.path, task.last_terminal_summary
-                        ),
+                        terminal_followup_signature("awaiting-input", &snapshot.path, task),
                         "Tracked terminal is awaiting input".to_string(),
                     ));
                 } else if previous_mode != "needs-attention" && snapshot.mode == "needs-attention" {
                     queue.push((
                         task.id,
-                        format!(
-                            "terminal:{}:attention:{}",
-                            snapshot.path, task.last_terminal_summary
-                        ),
+                        terminal_followup_signature("attention", &snapshot.path, task),
                         "Tracked terminal needs attention".to_string(),
                     ));
                 } else if previous_mode != "done" && snapshot.mode == "done" {
                     queue.push((
                         task.id,
-                        format!(
-                            "terminal:{}:done:{}",
-                            snapshot.path, task.last_terminal_summary
-                        ),
+                        terminal_followup_signature("done", &snapshot.path, task),
                         "Tracked terminal appears done".to_string(),
                     ));
                 }
@@ -1040,7 +1033,7 @@ impl AiManager {
                 task.last_codex_status = None;
                 queue.push((
                     task.id,
-                    format!("terminal:{}:exit:{}", path, exit_code),
+                    terminal_followup_signature("exit", path, task),
                     format!("Tracked terminal exited with code {}", exit_code),
                 ));
             }
@@ -2331,6 +2324,7 @@ impl AiManager {
             last_terminal_summary: "Waiting for the AI to hand work to a terminal".to_string(),
             last_terminal_excerpt: String::new(),
             last_codex_status: None,
+            handled_followup_signatures: Vec::new(),
         });
     }
 
@@ -2437,6 +2431,7 @@ impl AiManager {
                 AI_TERMINAL_EXCERPT_MAX_LINES,
             ),
             last_codex_status: snapshot.codex_status.clone(),
+            handled_followup_signatures: Vec::new(),
         });
         true
     }
@@ -2454,6 +2449,18 @@ impl AiManager {
         let Some(mount_state) = self.mounts.get_mut(mount) else {
             return;
         };
+        if mount_state
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .is_some_and(|task| {
+                task.handled_followup_signatures
+                    .iter()
+                    .any(|handled| handled == &signature)
+            })
+        {
+            return;
+        }
         if mount_state
             .queued_followups
             .iter()
@@ -2546,6 +2553,20 @@ impl AiManager {
         };
         if let Some(mount_state) = self.mounts.get_mut(mount) {
             let _ = mount_state.queued_followups.remove(queue_index);
+            if let Some(task) = mount_state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == queued.task_id)
+            {
+                if !task
+                    .handled_followup_signatures
+                    .iter()
+                    .any(|signature| signature == &queued.signature)
+                {
+                    task.handled_followup_signatures
+                        .push(queued.signature.clone());
+                }
+            }
         }
         self.send_prompt(mount, queued.agent_id, &queued.text);
         true
@@ -3815,6 +3836,24 @@ fn should_show_live_terminal(terminal: &AiTerminalSnapshot) -> bool {
         terminal.mode,
         "working" | "awaiting-input" | "needs-attention" | "input"
     )
+}
+
+fn terminal_followup_signature(kind: &str, path: &str, task: &AiTrackedTask) -> String {
+    format!(
+        "terminal:{}:{}:{}:{}:{}:{}",
+        path,
+        kind,
+        task.last_terminal_mode,
+        task.last_terminal_summary,
+        task.last_codex_status.as_deref().unwrap_or(""),
+        stable_text_fingerprint(&task.last_terminal_excerpt)
+    )
+}
+
+fn stable_text_fingerprint(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn live_task_title(task: &AiTrackedTask) -> String {
@@ -5749,6 +5788,99 @@ mod tests {
                 && message.text.contains("send_terminal_text")
                 && message.text.contains("submit=true")
         }));
+    }
+
+    #[test]
+    fn unchanged_awaiting_input_prompt_does_not_loop_after_input() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        let path = "repo/.makepad/codex-plan.term";
+        let awaiting_text = "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n";
+
+        manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: path.to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "Working (2s) esc to interrupt\n".to_string(),
+                },
+            )
+            .expect("initial working observation should change state");
+
+        manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: path.to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: awaiting_text.to_string(),
+                },
+            )
+            .expect("first awaiting input observation should dispatch");
+
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            let task = mount_state.tasks.first().unwrap();
+            assert_eq!(task.handled_followup_signatures.len(), 1);
+            let agent = mount_state
+                .agents
+                .get_mut(&mount_state.active_agent_id.unwrap())
+                .unwrap();
+            agent.pending_request_id = None;
+            agent.pending_tool_batch = false;
+            agent.status = "ready".to_string();
+        }
+
+        manager
+            .process_terminal_input("repo", path)
+            .expect("terminal input should update task state");
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: path.to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: awaiting_text.to_string(),
+                },
+            )
+            .expect("same awaiting prompt should update state without dispatching");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert_eq!(mount_state.tasks[0].handled_followup_signatures.len(), 1);
+        assert!(mount_state.queued_followups.is_empty());
+        assert!(state
+            .active_agent
+            .as_ref()
+            .is_some_and(|agent| !agent.pending));
+        let followup_prompts = state
+            .active_agent
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message.role, AiMessageRole::User)
+                    && message.text.starts_with(AI_TASK_EVENT_PREFIX)
+                    && message.text.contains("Tracked terminal is awaiting input")
+            })
+            .count();
+        assert_eq!(followup_prompts, 1);
     }
 
     #[test]
