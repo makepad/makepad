@@ -3989,42 +3989,43 @@ fn execute_tool_call(
     event_tx: &Sender<HubEvent>,
     tool_call: &ToolCallRecord,
 ) -> AiToolExecutionResult {
+    let arguments_json = normalized_tool_arguments(&tool_call.arguments_json);
     let result = match tool_call.name.as_str() {
-        "read_file" => ReadFileArgs::deserialize_json(&tool_call.arguments_json)
+        "read_file" => ReadFileArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid read_file arguments: {:?}", err))
             .and_then(|args| tool_read_file(root_path, args)),
-        "list_files" => ListFilesArgs::deserialize_json(&tool_call.arguments_json)
+        "list_files" => ListFilesArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid list_files arguments: {:?}", err))
             .and_then(|args| tool_list_files(root_path, args)),
-        "search_text" => SearchTextArgs::deserialize_json(&tool_call.arguments_json)
+        "search_text" => SearchTextArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid search_text arguments: {:?}", err))
             .and_then(|args| tool_search_text(root_path, args)),
-        "write_file" => WriteFileArgs::deserialize_json(&tool_call.arguments_json)
+        "write_file" => WriteFileArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid write_file arguments: {:?}", err))
             .and_then(|args| tool_write_file(root_path, args)),
-        "replace_in_file" => ReplaceInFileArgs::deserialize_json(&tool_call.arguments_json)
+        "replace_in_file" => ReplaceInFileArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid replace_in_file arguments: {:?}", err))
             .and_then(|args| tool_replace_in_file(root_path, args)),
-        "open_editor" => OpenEditorArgs::deserialize_json(&tool_call.arguments_json)
+        "open_editor" => OpenEditorArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid open_editor arguments: {:?}", err))
             .and_then(|args| tool_open_editor(root_path, mount, event_tx, args)),
-        "observe_filesystem" => ObserveFilesystemArgs::deserialize_json(&tool_call.arguments_json)
+        "observe_filesystem" => ObserveFilesystemArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid observe_filesystem arguments: {:?}", err))
             .and_then(|args| tool_observe_filesystem(root_path, mount, event_tx, args)),
-        "open_terminal" => OpenTerminalArgs::deserialize_json(&tool_call.arguments_json)
+        "open_terminal" => OpenTerminalArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid open_terminal arguments: {:?}", err))
             .and_then(|args| tool_open_terminal(mount, event_tx, args)),
         "list_terminals" => tool_list_terminals(mount, event_tx),
-        "read_terminal" => ReadTerminalArgs::deserialize_json(&tool_call.arguments_json)
+        "read_terminal" => ReadTerminalArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid read_terminal arguments: {:?}", err))
             .and_then(|args| tool_read_terminal(mount, event_tx, args)),
-        "send_terminal_text" => SendTerminalTextArgs::deserialize_json(&tool_call.arguments_json)
+        "send_terminal_text" => SendTerminalTextArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid send_terminal_text arguments: {:?}", err))
             .and_then(|args| tool_send_terminal_text(mount, event_tx, args)),
-        "send_terminal_key" => SendTerminalKeyArgs::deserialize_json(&tool_call.arguments_json)
+        "send_terminal_key" => SendTerminalKeyArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid send_terminal_key arguments: {:?}", err))
             .and_then(|args| tool_send_terminal_key(mount, event_tx, args)),
-        "bash" => BashArgs::deserialize_json(&tool_call.arguments_json)
+        "bash" => BashArgs::deserialize_json(arguments_json)
             .map_err(|err| format!("invalid bash arguments: {:?}", err))
             .and_then(|args| tool_bash(root_path, args)),
         other => Err(format!("unknown tool '{}'", other)),
@@ -4043,6 +4044,14 @@ fn execute_tool_call(
             content: error,
             is_error: true,
         },
+    }
+}
+
+fn normalized_tool_arguments(arguments_json: &str) -> &str {
+    if arguments_json.trim().is_empty() {
+        "{}"
+    } else {
+        arguments_json
     }
 }
 
@@ -5227,6 +5236,35 @@ mod tests {
         .unwrap_err();
         assert!(hidden_read.contains("Studio/internal state"));
 
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn list_files_accepts_empty_tool_arguments() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "makepad_ai_empty_list_files_args_test_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let (event_tx, _event_rx) = mpsc::channel();
+        let result = execute_tool_call(
+            &root,
+            "makepad",
+            &event_tx,
+            &ToolCallRecord {
+                id: "call_1".to_string(),
+                name: "list_files".to_string(),
+                arguments_json: String::new(),
+            },
+        );
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("Cargo.toml"));
         fs::remove_dir_all(&root).unwrap();
     }
 

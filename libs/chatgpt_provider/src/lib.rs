@@ -464,15 +464,11 @@ impl ChatGptProvider {
                 .or_else(|| json_string_field(&value, "type").map(str::to_string))
                 .unwrap_or_default();
 
-            let mut emitted_text_delta = false;
             if let Some(text) = extract_delta_text(&value, &event_name) {
                 events.push(ChatGptStreamEvent::TextDelta { text });
-                emitted_text_delta = true;
             }
-            if !emitted_text_delta {
-                if let Some(text) = extract_completed_text(&value, &event_name) {
-                    events.push(ChatGptStreamEvent::TextDelta { text });
-                }
+            if let Some(text) = extract_completed_text(&value, &event_name) {
+                events.push(ChatGptStreamEvent::TextSnapshot { text });
             }
 
             if let Some(tool_call) = extract_tool_call(&value, &event_name) {
@@ -534,6 +530,9 @@ pub enum ChatGptStreamEvent {
     TextDelta {
         text: String,
     },
+    TextSnapshot {
+        text: String,
+    },
     ToolCallStart {
         id: String,
         name: String,
@@ -563,6 +562,11 @@ impl ChatGptStreamState {
     pub fn apply(&mut self, event: ChatGptStreamEvent) {
         match event {
             ChatGptStreamEvent::TextDelta { text } => self.text.push_str(&text),
+            ChatGptStreamEvent::TextSnapshot { text } => {
+                if self.text.is_empty() {
+                    self.text = text;
+                }
+            }
             ChatGptStreamEvent::ToolCallStart { id, name } => {
                 self.tool_calls.push(ToolCallAccumulator {
                     id,
@@ -810,12 +814,7 @@ fn append_input_items_json(
                 name,
                 arguments_json,
             } => {
-                append_pending_text_message(
-                    out,
-                    first_item,
-                    message.role.as_str(),
-                    &mut text_blocks,
-                );
+                append_pending_text_message(out, first_item, &message.role, &mut text_blocks);
                 append_comma_if_needed(out, first_item);
                 out.push_str("{\"type\":\"function_call\",\"call_id\":");
                 out.push_str(&json_string(id));
@@ -830,12 +829,7 @@ fn append_input_items_json(
                 content,
                 is_error: _,
             } => {
-                append_pending_text_message(
-                    out,
-                    first_item,
-                    message.role.as_str(),
-                    &mut text_blocks,
-                );
+                append_pending_text_message(out, first_item, &message.role, &mut text_blocks);
                 append_comma_if_needed(out, first_item);
                 out.push_str("{\"type\":\"function_call_output\",\"call_id\":");
                 out.push_str(&json_string(tool_call_id));
@@ -846,14 +840,14 @@ fn append_input_items_json(
         }
     }
 
-    append_pending_text_message(out, first_item, message.role.as_str(), &mut text_blocks);
+    append_pending_text_message(out, first_item, &message.role, &mut text_blocks);
     Ok(())
 }
 
 fn append_pending_text_message(
     out: &mut String,
     first_item: &mut bool,
-    role: &str,
+    role: &ChatGptMessageRole,
     text_blocks: &mut Vec<&str>,
 ) {
     if !text_blocks.is_empty() {
@@ -863,10 +857,14 @@ fn append_pending_text_message(
     }
 }
 
-fn append_text_message_json(out: &mut String, role: &str, text_blocks: &[&str]) {
+fn append_text_message_json(out: &mut String, role: &ChatGptMessageRole, text_blocks: &[&str]) {
+    let text_type = match role {
+        ChatGptMessageRole::Assistant => "output_text",
+        _ => "input_text",
+    };
     out.push('{');
     out.push_str("\"role\":");
-    out.push_str(&json_string(role));
+    out.push_str(&json_string(role.as_str()));
     out.push_str(",\"content\":[");
     let mut first_block = true;
     for text in text_blocks {
@@ -874,7 +872,9 @@ fn append_text_message_json(out: &mut String, role: &str, text_blocks: &[&str]) 
             out.push(',');
         }
         first_block = false;
-        out.push_str("{\"type\":\"input_text\",\"text\":");
+        out.push_str("{\"type\":\"");
+        out.push_str(text_type);
+        out.push_str("\",\"text\":");
         out.push_str(&json_string(text));
         out.push('}');
     }
@@ -943,11 +943,7 @@ fn extract_error_message(value: &JsonValue) -> Option<String> {
 
 fn extract_delta_text(value: &JsonValue, event_name: &str) -> Option<String> {
     let event_name = event_name.to_ascii_lowercase();
-    if event_name.contains("text.delta")
-        || event_name.contains("output_text.delta")
-        || event_name.contains("output_text.done")
-        || event_name.contains("text.done")
-    {
+    if event_name.contains("text.delta") || event_name.contains("output_text.delta") {
         if let Some(text) = json_string_field(value, "delta") {
             return Some(text.to_string());
         }
@@ -1014,23 +1010,23 @@ fn collect_completed_text(value: &JsonValue, out: &mut String) {
         return;
     }
     let item_type = json_string_field(value, "type").unwrap_or_default();
-    if matches!(
+    let is_text_item = matches!(
         item_type,
         "output_text" | "text" | "message" | "assistant_message"
-    ) {
+    ) || item_type.contains("output_text")
+        || item_type.contains("text.done");
+    if is_text_item {
         if let Some(text) = json_string_field(value, "text")
             .or_else(|| json_string_field(value, "output_text"))
             .or_else(|| json_string_field(value, "value"))
         {
             out.push_str(text);
+            return;
         }
     }
     if let Some(text_value) = value.key("text") {
         if let Some(text) = text_value.string() {
-            if matches!(
-                item_type,
-                "output_text" | "text" | "message" | "assistant_message"
-            ) {
+            if is_text_item {
                 out.push_str(text);
             }
         } else {
@@ -1301,6 +1297,13 @@ mod tests {
         assert!(body.contains("\"tool_choice\":\"auto\""));
         assert!(!body.contains("\"max_output_tokens\""));
         assert!(body.contains("\"temperature\":0.2"));
+        assert!(body.contains(
+            "\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]"
+        ));
+        assert!(body.contains(
+            "\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"working\"}]"
+        ));
+        assert!(!body.contains("\"role\":\"assistant\",\"content\":[{\"type\":\"input_text\""));
         assert!(body.contains("\"type\":\"function_call\",\"call_id\":\"call_1\""));
         assert!(body.contains("\"name\":\"read_file\""));
         assert!(body.contains("\"arguments\":\"{\\\"path\\\":\\\"src/lib.rs\\\"}\""));
@@ -1368,6 +1371,9 @@ mod tests {
         state.apply(ChatGptStreamEvent::TextDelta {
             text: "hello".to_string(),
         });
+        state.apply(ChatGptStreamEvent::TextSnapshot {
+            text: "hello".to_string(),
+        });
         state.apply(ChatGptStreamEvent::ToolCallStart {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
@@ -1391,5 +1397,28 @@ mod tests {
             Some(ChatGptFinishReason::ToolUse)
         ));
         assert_eq!(turn.usage.unwrap().total_tokens, 3);
+    }
+
+    #[test]
+    fn final_text_snapshot_does_not_duplicate_streamed_delta() {
+        let events = ChatGptProvider::parse_stream_chunk(
+            "event: response.output_text.delta\ndata: {\"delta\":\"hello\"}\n\n\
+             event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n\n\
+             event: response.completed\ndata: {\"type\":\"response.completed\",\"status\":\"completed\",\"finish_reason\":\"stop\"}\n\n",
+        )
+        .unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event, ChatGptStreamEvent::TextDelta { text } if text == "hello")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, ChatGptStreamEvent::TextSnapshot { text } if text == "hello")
+        ));
+
+        let mut state = ChatGptStreamState::default();
+        for event in events {
+            state.apply(event);
+        }
+        let turn = state.finalize().unwrap();
+        assert_eq!(turn.text, "hello");
     }
 }

@@ -69,6 +69,14 @@ impl AiProviderBackend for ChatGptBackend {
                             stream.saw_text_delta = true;
                         }
                     }
+                    ChatGptStreamEvent::TextSnapshot { text } => {
+                        if !stream.saw_text_delta
+                            && stream.assistant_text.trim().is_empty()
+                            && deltas.assistant_delta.trim().is_empty()
+                        {
+                            deltas.assistant_delta.push_str(&text);
+                        }
+                    }
                     ChatGptStreamEvent::ToolCallStart { id, name } => {
                         deltas.tool_call_deltas.push(OpenAiStreamToolCallDelta {
                             index: Some(deltas.tool_call_deltas.len() as u32),
