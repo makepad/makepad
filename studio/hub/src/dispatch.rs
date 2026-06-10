@@ -142,6 +142,11 @@ pub enum HubEvent {
     AiHttpResponse {
         response: NetworkResponse,
     },
+    AiChatGptOAuthCode {
+        mount: String,
+        backend_id: String,
+        code: String,
+    },
     AiToolExecutionDone {
         mount: String,
         agent_id: AiAgentId,
@@ -724,6 +729,16 @@ impl HubCore {
                 if let Some((mount, state)) = self.ai_manager.handle_http_response(response) {
                     self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
                 }
+            }
+            HubEvent::AiChatGptOAuthCode {
+                mount,
+                backend_id,
+                code,
+            } => {
+                let state = self
+                    .ai_manager
+                    .handle_chatgpt_oauth_code(&mount, &backend_id, &code);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
             }
             HubEvent::AiToolExecutionDone {
                 mount,
@@ -1783,6 +1798,10 @@ impl HubCore {
             }
             ClientToHub::AiSetBackend { mount, backend_id } => {
                 let state = self.ai_manager.set_backend(&mount, &backend_id);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
+            ClientToHub::AiConfigureBackend { mount, backend_id } => {
+                let state = self.ai_manager.configure_backend(&mount, &backend_id);
                 self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
             }
             ClientToHub::AiSendPrompt {

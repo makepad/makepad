@@ -36,6 +36,7 @@ workspace.members = [
     "libs/latex_math",
     "libs/mbtile_reader",
     "libs/makepad_ai",
+    "libs/chatgpt_provider",
     "libs/pdf_parse",
     "libs/regex",
     "libs/svg",

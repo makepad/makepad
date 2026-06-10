@@ -98,6 +98,34 @@ impl App {
         });
     }
 
+    pub(super) fn configure_ai_manager_backend(&mut self, cx: &mut Cx, mount: &str) {
+        let Some((backend_id, configuration_url)) = self
+            .mount_state(mount)
+            .and_then(|state| state.ai_state.as_ref())
+            .and_then(|state| {
+                let backend_id = state
+                    .active_backend_id
+                    .clone()
+                    .or_else(|| state.backends.first().map(|backend| backend.id.clone()))?;
+                let configuration_url = state
+                    .backends
+                    .iter()
+                    .find(|backend| backend.id == backend_id)
+                    .and_then(|backend| backend.configuration_url.clone());
+                Some((backend_id, configuration_url))
+            })
+        else {
+            return;
+        };
+        let _ = self.send_studio(ClientToHub::AiConfigureBackend {
+            mount: mount.to_string(),
+            backend_id,
+        });
+        if let Some(url) = configuration_url {
+            cx.open_url(&url, OpenUrlInPlace::No);
+        }
+    }
+
     pub(super) fn send_ai_manager_prompt(&mut self, cx: &mut Cx, mount: &str) {
         let Some(workspace) = self.mount_workspace_widget(cx, mount) else {
             return;
@@ -261,12 +289,27 @@ impl App {
                     .position(|backend| &backend.id == active_id)
             })
             .unwrap_or(0);
+        let active_backend_configured = state
+            .backends
+            .get(backend_selected)
+            .map(|backend| backend.configured)
+            .unwrap_or(true);
         workspace
             .drop_down(cx, ids!(ai_backend_dropdown))
             .set_labels(cx, non_empty_labels(backend_labels, "local"));
         workspace
             .drop_down(cx, ids!(ai_backend_dropdown))
             .set_selected_item(cx, backend_selected);
+        workspace
+            .button(cx, ids!(ai_backend_configure_button))
+            .set_enabled(cx, !active_backend_configured);
+        workspace
+            .widget(cx, ids!(ai_backend_configure_button))
+            .set_text(cx, if active_backend_configured {
+                "Configured"
+            } else {
+                "Configure"
+            });
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace
@@ -274,10 +317,14 @@ impl App {
                 .set_text(cx, &ai_chat_markdown(agent));
             workspace
                 .label(cx, ids!(ai_status_label))
-                .set_text(cx, &agent.status);
+                .set_text(cx, if active_backend_configured {
+                    &agent.status
+                } else {
+                    "Configure backend"
+                });
             workspace
                 .button(cx, ids!(ai_run_button))
-                .set_enabled(cx, true);
+                .set_enabled(cx, active_backend_configured);
             workspace
                 .widget(cx, ids!(ai_run_button))
                 .set_text(cx, if agent.pending { "■" } else { "▶" });
@@ -381,6 +428,7 @@ impl App {
         true
     }
 }
+
 
 fn ai_chat_markdown(agent: &AiAgentState) -> String {
     if agent.messages.is_empty() {
@@ -939,6 +987,8 @@ mod tests {
                 label: "Local".to_string(),
                 detail: String::new(),
                 configured: true,
+                configuration_url: None,
+                configuration_hint: None,
             }],
             active_backend_id: Some("local".to_string()),
             active_agent_id: Some(agent_id),

@@ -1,4 +1,9 @@
 use crate::dispatch::HubEvent;
+use makepad_chatgpt_provider::{
+    ChatGptContentBlock, ChatGptCredentials, ChatGptMessage, ChatGptMessageRole, ChatGptModel,
+    ChatGptOAuthConfig, ChatGptProvider, ChatGptRequest, ChatGptStreamEvent, ChatGptTokenResponse,
+    ChatGptTool,
+};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::{HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime};
@@ -7,7 +12,8 @@ use makepad_studio_protocol::hub_protocol::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,9 +24,11 @@ use std::time::{Duration, Instant};
 
 const LOCAL_BACKEND_ID: &str = "openai_localhost";
 const CLOUD_BACKEND_ID: &str = "openai";
+const CHATGPT_BACKEND_ID: &str = "chatgpt";
 const DEFAULT_LOCAL_BASE_URL: &str = "http://10.0.0.217:8080/v1/chat/completions";
 const DEFAULT_LOCAL_MODEL: &str = "";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
+const DEFAULT_CHATGPT_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_MAX_TOKENS: u32 = 2048;
 const DEFAULT_READ_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
@@ -60,6 +68,10 @@ struct AiBackendConfig {
     url: String,
     model: String,
     api_key: Option<String>,
+    chatgpt: Option<ChatGptProvider>,
+    configured: bool,
+    configuration_url: Option<String>,
+    configuration_hint: Option<String>,
     disable_thinking_via_chat_template: bool,
 }
 
@@ -162,7 +174,13 @@ struct InFlightRequest {
     mount: String,
     agent_id: AiAgentId,
     run_token: u64,
+    chatgpt: bool,
     stream: StreamingTurnState,
+}
+
+struct PendingChatGptOAuth {
+    mount: String,
+    backend_id: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -181,6 +199,8 @@ struct StreamVisibleState {
 #[derive(Default)]
 struct StreamingTurnState {
     buffer: String,
+    raw_event_sample: String,
+    saw_text_delta: bool,
     thinking_text: String,
     assistant_text: String,
     tool_calls: Vec<ToolCallAccumulator>,
@@ -211,6 +231,14 @@ struct PersistedAiChat {
     role: Option<String>,
     task: Option<String>,
     subagents: Option<Vec<AiAgentId>>,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+struct PersistedChatGptCredentials {
+    access_token: String,
+    refresh_token: Option<String>,
+    account_id: Option<String>,
+    expires_at_unix: Option<u64>,
 }
 
 #[derive(DeJson)]
@@ -391,6 +419,7 @@ struct AssistantTurn {
     text: String,
     thinking_text: String,
     tool_calls: Vec<ToolCallRecord>,
+    raw_event_sample: String,
 }
 
 pub struct AiManager {
@@ -399,6 +428,7 @@ pub struct AiManager {
     backends: Vec<AiBackendConfig>,
     mounts: HashMap<String, MountAgents>,
     inflight: HashMap<LiveId, InFlightRequest>,
+    pending_chatgpt_oauth: HashMap<LiveId, PendingChatGptOAuth>,
     next_agent_id: u64,
     next_run_token: u64,
 }
@@ -424,6 +454,7 @@ impl AiManager {
             backends: Self::detect_backends(),
             mounts: HashMap::new(),
             inflight: HashMap::new(),
+            pending_chatgpt_oauth: HashMap::new(),
             next_agent_id: 1,
             next_run_token: 1,
         }
@@ -578,6 +609,97 @@ impl AiManager {
             }
         }
         self.persist_mount_state_best_effort(mount);
+        self.snapshot(mount)
+    }
+
+    pub fn configure_backend(&mut self, mount: &str, backend_id: &str) -> AiMountState {
+        self.ensure_mount_entry(mount);
+        let Some(backend) = self.backend_by_id(backend_id).cloned() else {
+            return self.snapshot(mount);
+        };
+        if backend.id == CHATGPT_BACKEND_ID && !backend.configured {
+            self.start_chatgpt_oauth_listener(mount, backend_id);
+        }
+        if let Some(mount_state) = self.mounts.get_mut(mount) {
+            mount_state.active_backend_id = backend_id.to_string();
+            if let Some(agent_id) = mount_state.active_agent_id {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    agent.backend_id = backend_id.to_string();
+                    agent.messages.push(AiMessage {
+                        role: AiMessageRole::System,
+                        text: backend_configuration_message(&backend),
+                    });
+                    agent.status = if backend.configured {
+                        "backend configured".to_string()
+                    } else {
+                        "backend needs configuration".to_string()
+                    };
+                    agent.updated_at = now_seconds();
+                }
+            }
+        }
+        self.persist_mount_state_best_effort(mount);
+        self.snapshot(mount)
+    }
+
+    pub fn handle_chatgpt_oauth_code(
+        &mut self,
+        mount: &str,
+        backend_id: &str,
+        code: &str,
+    ) -> AiMountState {
+        self.ensure_mount_entry(mount);
+        let Some(backend_index) = self.backends.iter().position(|backend| backend.id == backend_id)
+        else {
+            return self.snapshot(mount);
+        };
+        let Some(provider) = self.backends[backend_index].chatgpt.clone() else {
+            return self.snapshot(mount);
+        };
+        let Some(verifier) = chatgpt_pkce_verifier_from_hint(
+            self.backends[backend_index].configuration_hint.as_deref(),
+        ) else {
+            self.append_backend_system_message(
+                mount,
+                backend_id,
+                "ChatGPT authorization failed: missing PKCE verifier. Start configuration again.",
+            );
+            return self.snapshot(mount);
+        };
+        let body = match provider.authorization_request_body(code, &verifier) {
+            Ok(body) => body,
+            Err(error) => {
+                self.append_backend_system_message(
+                    mount,
+                    backend_id,
+                    &format!("ChatGPT authorization failed: {}", error),
+                );
+                return self.snapshot(mount);
+            }
+        };
+        let request = provider.build_token_request(body);
+        let request_id = LiveId::unique();
+        self.pending_chatgpt_oauth.insert(
+            request_id,
+            PendingChatGptOAuth {
+                mount: mount.to_string(),
+                backend_id: backend_id.to_string(),
+            },
+        );
+        if let Err(error) = self.runtime.http_start(request_id, request) {
+            self.pending_chatgpt_oauth.remove(&request_id);
+            self.append_backend_system_message(
+                mount,
+                backend_id,
+                &format!("ChatGPT token exchange failed to start: {:?}", error),
+            );
+        } else {
+            self.append_backend_system_message(
+                mount,
+                backend_id,
+                "ChatGPT authorization received; exchanging token...",
+            );
+        }
         self.snapshot(mount)
     }
 
@@ -979,6 +1101,39 @@ impl AiManager {
                 request_id,
                 response,
             } => {
+                if let Some(pending) = self.pending_chatgpt_oauth.remove(&request_id) {
+                    let body = response
+                        .body
+                        .as_ref()
+                        .map(|body| String::from_utf8_lossy(body).to_string())
+                        .unwrap_or_default();
+                    let mount = pending.mount.clone();
+                    if response.status_code >= 400 {
+                        self.append_backend_system_message(
+                            &mount,
+                            &pending.backend_id,
+                            &format!(
+                                "ChatGPT token exchange failed: HTTP {}: {}",
+                                response.status_code,
+                                extract_error_text(&body)
+                            ),
+                        );
+                        return Some((mount.clone(), self.snapshot(&mount)));
+                    }
+                    match ChatGptTokenResponse::deserialize_json_lenient(&body) {
+                        Ok(token_response) => {
+                            self.complete_chatgpt_oauth(&pending, token_response);
+                        }
+                        Err(error) => {
+                            self.append_backend_system_message(
+                                &mount,
+                                &pending.backend_id,
+                                &format!("ChatGPT token exchange returned invalid JSON: {:?}", error),
+                            );
+                        }
+                    }
+                    return Some((mount.clone(), self.snapshot(&mount)));
+                }
                 let in_flight = self.inflight.remove(&request_id)?;
                 let mount = in_flight.mount.clone();
                 let agent_id = in_flight.agent_id;
@@ -1006,6 +1161,22 @@ impl AiManager {
                     return Some((mount.clone(), self.snapshot(&mount)));
                 }
 
+                if in_flight.chatgpt {
+                    match self.process_stream_data(request_id, &body, true) {
+                        Ok(stream_update) => {
+                            if stream_update.done {
+                                return self.finish_stream_request(request_id);
+                            }
+                            if stream_update.changed {
+                                return Some((mount.clone(), self.snapshot(&mount)));
+                            }
+                            return Some((mount.clone(), self.snapshot(&mount)));
+                        }
+                        Err(error) => self.set_agent_error(&mount, agent_id, error),
+                    }
+                    return Some((mount.clone(), self.snapshot(&mount)));
+                }
+
                 match extract_assistant_turn(&body) {
                     Ok(turn) => {
                         let state =
@@ -1025,6 +1196,15 @@ impl AiManager {
                 response,
             } => self.handle_stream_complete_response(request_id, response),
             NetworkResponse::HttpError { request_id, error } => {
+                if let Some(pending) = self.pending_chatgpt_oauth.remove(&request_id) {
+                    let mount = pending.mount.clone();
+                    self.append_backend_system_message(
+                        &mount,
+                        &pending.backend_id,
+                        &format!("ChatGPT token exchange network error: {}", error.message),
+                    );
+                    return Some((mount.clone(), self.snapshot(&mount)));
+                }
                 let in_flight = self.inflight.remove(&request_id)?;
                 if !self.agent_run_matches(
                     &in_flight.mount,
@@ -1123,12 +1303,16 @@ impl AiManager {
         request_id: LiveId,
         response: makepad_network::HttpResponse,
     ) -> Option<(String, AiMountState)> {
-        let in_flight = self.inflight.get(&request_id)?;
-        if !self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token) {
-            return None;
-        }
-        let mount = in_flight.mount.clone();
-        let agent_id = in_flight.agent_id;
+        let (mount, agent_id) = {
+            let in_flight = self.inflight.get(&request_id)?;
+            if !self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token) {
+                return None;
+            }
+            (
+                in_flight.mount.clone(),
+                in_flight.agent_id,
+            )
+        };
         let body = response.get_string_body().unwrap_or_default();
         if response.status_code >= 400 {
             self.inflight.remove(&request_id);
@@ -1166,13 +1350,19 @@ impl AiManager {
         request_id: LiveId,
         response: makepad_network::HttpResponse,
     ) -> Option<(String, AiMountState)> {
-        let in_flight = self.inflight.get(&request_id)?;
-        if !self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token) {
+        let (mount, agent_id, chatgpt, matches_run) = {
+            let in_flight = self.inflight.get(&request_id)?;
+            (
+                in_flight.mount.clone(),
+                in_flight.agent_id,
+                in_flight.chatgpt,
+                self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token),
+            )
+        };
+        if !matches_run {
             self.inflight.remove(&request_id);
             return None;
         }
-        let mount = in_flight.mount.clone();
-        let agent_id = in_flight.agent_id;
         let body = response.get_string_body().unwrap_or_default();
         if response.status_code >= 400 {
             self.inflight.remove(&request_id);
@@ -1186,6 +1376,14 @@ impl AiManager {
                 ),
             );
             return Some((mount.clone(), self.snapshot(&mount)));
+        }
+        if chatgpt {
+            if let Err(error) = self.process_stream_data(request_id, &body, true) {
+                self.inflight.remove(&request_id);
+                self.set_agent_error(&mount, agent_id, error);
+                return Some((mount.clone(), self.snapshot(&mount)));
+            }
+            return self.finish_stream_request(request_id);
         }
         if let Ok(turn) = extract_assistant_turn(&body) {
             let in_flight = self.inflight.remove(&request_id)?;
@@ -1213,11 +1411,12 @@ impl AiManager {
         data: &str,
         flush: bool,
     ) -> Result<StreamUpdate, String> {
-        let Some((mount, agent_id, run_token)) = self.inflight.get(&request_id).map(|in_flight| {
+        let Some((mount, agent_id, run_token, chatgpt)) = self.inflight.get(&request_id).map(|in_flight| {
             (
                 in_flight.mount.clone(),
                 in_flight.agent_id,
                 in_flight.run_token,
+                in_flight.chatgpt,
             )
         }) else {
             return Ok(StreamUpdate::default());
@@ -1248,6 +1447,70 @@ impl AiManager {
         let mut saw_done = false;
 
         for event in events {
+            if chatgpt {
+                if let Some(in_flight) = self.inflight.get_mut(&request_id) {
+                    append_raw_event_sample(&mut in_flight.stream.raw_event_sample, &event);
+                }
+                for delta in ChatGptProvider::parse_stream_chunk(&event)
+                    .map_err(|err| err.to_string())?
+                {
+                    match delta {
+                        ChatGptStreamEvent::TextDelta { text } => {
+                            if saw_done {
+                                let already_streamed = self
+                                    .inflight
+                                    .get(&request_id)
+                                    .map(|in_flight| in_flight.stream.saw_text_delta)
+                                    .unwrap_or(false);
+                                if !already_streamed {
+                                    assistant_delta.push_str(&text);
+                                }
+                            } else {
+                                assistant_delta.push_str(&text);
+                                if let Some(in_flight) = self.inflight.get_mut(&request_id) {
+                                    in_flight.stream.saw_text_delta = true;
+                                }
+                            }
+                        }
+                        ChatGptStreamEvent::ToolCallStart { id, name } => {
+                            tool_call_deltas.push(OpenAiStreamToolCallDelta {
+                                index: Some(tool_call_deltas.len() as u32),
+                                id: Some(id),
+                                kind: Some("function".to_string()),
+                                function: Some(OpenAiStreamFunctionDelta {
+                                    name: Some(name),
+                                    arguments: None,
+                                }),
+                            });
+                        }
+                        ChatGptStreamEvent::ToolCallArgumentsDelta { partial_json } => {
+                            if let Some(last) = tool_call_deltas.last_mut() {
+                                let mut args = last
+                                    .function
+                                    .as_ref()
+                                    .and_then(|function| function.arguments.clone())
+                                    .unwrap_or_default();
+                                args.push_str(&partial_json);
+                                if let Some(function) = last.function.as_mut() {
+                                    function.arguments = Some(args);
+                                }
+                            }
+                        }
+                        ChatGptStreamEvent::Completed {
+                            finish_reason: stream_finish_reason,
+                            ..
+                        } => {
+                            if let Some(reason) = stream_finish_reason {
+                                finish_reason = Some(reason);
+                            }
+                            saw_done = true;
+                        }
+                        ChatGptStreamEvent::Error { message } => return Err(message),
+                    }
+                }
+                continue;
+            }
+
             let Some(json_data) = extract_sse_event_data(&event) else {
                 continue;
             };
@@ -1758,10 +2021,18 @@ impl AiManager {
             }
         }
         if empty_assistant_response {
+            let message = if turn.raw_event_sample.trim().is_empty() {
+                "AI backend returned an empty assistant response".to_string()
+            } else {
+                format!(
+                    "AI backend returned an empty assistant response.\n\nRaw ChatGPT stream sample:\n```text\n{}\n```",
+                    truncate_text(&turn.raw_event_sample, 4000)
+                )
+            };
             self.set_agent_error(
                 mount,
                 agent_id,
-                "AI backend returned an empty assistant response".to_string(),
+                message,
             );
         }
         if retry_empty_terminal_response {
@@ -1815,6 +2086,10 @@ impl AiManager {
             url: local_url,
             model: local_model,
             api_key: None,
+            chatgpt: None,
+            configured: true,
+            configuration_url: None,
+            configuration_hint: None,
             disable_thinking_via_chat_template: false,
         });
 
@@ -1831,9 +2106,15 @@ impl AiManager {
                 url: "https://api.openai.com/v1/chat/completions".to_string(),
                 model,
                 api_key: Some(api_key),
+                chatgpt: None,
+                configured: true,
+                configuration_url: None,
+                configuration_hint: None,
                 disable_thinking_via_chat_template: false,
             });
         }
+
+        backends.push(detect_chatgpt_backend());
 
         backends
     }
@@ -1841,7 +2122,8 @@ impl AiManager {
     fn default_backend_id(&self) -> String {
         self.backends
             .iter()
-            .find(|backend| backend.id == LOCAL_BACKEND_ID)
+            .find(|backend| backend.id == CHATGPT_BACKEND_ID && backend.configured)
+            .or_else(|| self.backends.iter().find(|backend| backend.id == LOCAL_BACKEND_ID))
             .or_else(|| self.backends.first())
             .map(|backend| backend.id.clone())
             .unwrap_or_else(|| LOCAL_BACKEND_ID.to_string())
@@ -1971,16 +2253,44 @@ impl AiManager {
         };
 
         let request_id = LiveId::unique();
-        let body = build_request_body(&backend, mount, &root_path, &history, role.as_deref(), task.as_deref(), &active_terminals);
+        let request = if let Some(provider) = &backend.chatgpt {
+            let body = build_chatgpt_request(
+                &backend,
+                mount,
+                &root_path,
+                &history,
+                role.as_deref(),
+                task.as_deref(),
+                &active_terminals,
+            );
+            match body.and_then(|request| provider.build_responses_request(&request).map_err(|err| err.to_string())) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.set_agent_error(mount, agent_id, error);
+                    return;
+                }
+            }
+        } else {
+            let body = build_request_body(
+                &backend,
+                mount,
+                &root_path,
+                &history,
+                role.as_deref(),
+                task.as_deref(),
+                &active_terminals,
+            );
 
-        let mut request = HttpRequest::new(backend.url.clone(), HttpMethod::POST);
-        request.set_is_streaming();
-        request.set_header("Content-Type".to_string(), "application/json".to_string());
-        request.set_header("Accept".to_string(), "text/event-stream".to_string());
-        if let Some(api_key) = &backend.api_key {
-            request.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
-        }
-        request.set_string_body(body);
+            let mut request = HttpRequest::new(backend.url.clone(), HttpMethod::POST);
+            request.set_is_streaming();
+            request.set_header("Content-Type".to_string(), "application/json".to_string());
+            request.set_header("Accept".to_string(), "text/event-stream".to_string());
+            if let Some(api_key) = &backend.api_key {
+                request.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
+            }
+            request.set_string_body(body);
+            request
+        };
 
         let Some(thinking_message_index) = self
             .mounts
@@ -2010,6 +2320,7 @@ impl AiManager {
                 mount: mount.to_string(),
                 agent_id,
                 run_token,
+                chatgpt: backend.chatgpt.is_some(),
                 stream: StreamingTurnState {
                     visible: StreamVisibleState {
                         thinking_message_index,
@@ -2529,7 +2840,9 @@ impl AiManager {
                 id: backend.id.clone(),
                 label: backend.label.clone(),
                 detail: backend.detail.clone(),
-                configured: true,
+                configured: backend.configured,
+                configuration_url: backend.configuration_url.clone(),
+                configuration_hint: backend.configuration_hint.clone(),
             })
             .collect::<Vec<_>>();
         let agents = mount_state
@@ -2795,6 +3108,109 @@ impl AiManager {
             .iter()
             .find(|backend| backend.id == backend_id)
     }
+
+    fn start_chatgpt_oauth_listener(&self, mount: &str, backend_id: &str) {
+        let event_tx = self.event_tx.clone();
+        let mount = mount.to_string();
+        let backend_id = backend_id.to_string();
+        thread::spawn(move || {
+            let Ok(listener) = TcpListener::bind("localhost:1455") else {
+                return;
+            };
+            let Ok((mut stream, _addr)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 8192];
+            let read_len = stream.read(&mut request).unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..read_len]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let code = query_param(path, "code").unwrap_or_default();
+            let error = query_param(path, "error").unwrap_or_default();
+            let body = if !code.is_empty() {
+                let _ = event_tx.send(HubEvent::AiChatGptOAuthCode {
+                    mount,
+                    backend_id,
+                    code,
+                });
+                "<!doctype html><meta charset=\"utf-8\"><title>Makepad Studio ChatGPT</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1f1f1f;color:#ddd;padding:48px;line-height:1.45}</style><h1>ChatGPT authorization received</h1><p>You can return to Makepad Studio. Studio is exchanging the token now.</p>".to_string()
+            } else if !error.is_empty() {
+                format!(
+                    "<!doctype html><meta charset=\"utf-8\"><title>Makepad Studio ChatGPT</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1f1f1f;color:#ddd;padding:48px;line-height:1.45}}code{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#ffb0b0}}</style><h1>ChatGPT authorization failed</h1><p><code>{}</code></p>",
+                    html_escape(&error)
+                )
+            } else {
+                "<!doctype html><meta charset=\"utf-8\"><title>Makepad Studio ChatGPT</title><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#1f1f1f;color:#ddd;padding:48px;line-height:1.45}</style><h1>ChatGPT authorization callback received</h1><p>No authorization code was present in the callback URL.</p>".to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.as_bytes().len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+    }
+
+    fn complete_chatgpt_oauth(
+        &mut self,
+        pending: &PendingChatGptOAuth,
+        token_response: ChatGptTokenResponse,
+    ) {
+        let Some(backend_index) = self
+            .backends
+            .iter()
+            .position(|backend| backend.id == pending.backend_id)
+        else {
+            return;
+        };
+        let mut credentials = token_response.into_credentials(None, now_unix_seconds());
+        if credentials.account_id.is_none() {
+            credentials.account_id =
+                ChatGptProvider::extract_account_id_from_jwt(&credentials.access_token);
+        }
+        if credentials.access_token.trim().is_empty() {
+            self.append_backend_system_message(
+                &pending.mount,
+                &pending.backend_id,
+                "ChatGPT token exchange did not return an access token.",
+            );
+            return;
+        }
+        if let Some(provider) = self.backends[backend_index].chatgpt.as_mut() {
+            provider.credentials = credentials.clone();
+        }
+        self.backends[backend_index].configured = true;
+        self.backends[backend_index].detail = self.backends[backend_index].model.clone();
+        self.backends[backend_index].configuration_hint =
+            Some("ChatGPT is configured for this Studio session.".to_string());
+        let _ = persist_chatgpt_credentials(&credentials);
+        self.append_backend_system_message(
+            &pending.mount,
+            &pending.backend_id,
+            "ChatGPT login complete. Credentials were saved for future Studio sessions.",
+        );
+    }
+
+    fn append_backend_system_message(&mut self, mount: &str, backend_id: &str, text: &str) {
+        self.ensure_mount_entry(mount);
+        if let Some(mount_state) = self.mounts.get_mut(mount) {
+            if let Some(agent_id) = mount_state.active_agent_id {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    agent.backend_id = backend_id.to_string();
+                    agent.messages.push(AiMessage {
+                        role: AiMessageRole::System,
+                        text: text.to_string(),
+                    });
+                    agent.status = text.to_string();
+                    agent.updated_at = now_seconds();
+                }
+            }
+        }
+        self.persist_mount_state_best_effort(mount);
+    }
 }
 
 impl RunningAgent {
@@ -2944,6 +3360,316 @@ fn build_request_body(
     }
     out.push('}');
     out
+}
+
+fn detect_chatgpt_backend() -> AiBackendConfig {
+    let default_oauth = ChatGptOAuthConfig::default();
+    let client_id = std::env::var("MAKEPAD_STUDIO_CHATGPT_CLIENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_oauth.client_id);
+    let persisted_credentials = read_persisted_chatgpt_credentials();
+    let access_token = std::env::var("MAKEPAD_STUDIO_CHATGPT_ACCESS_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            persisted_credentials
+                .as_ref()
+                .map(|credentials| credentials.access_token.clone())
+        })
+        .unwrap_or_default();
+    let configured = !access_token.is_empty();
+
+    let refresh_token = std::env::var("MAKEPAD_STUDIO_CHATGPT_REFRESH_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            persisted_credentials
+                .as_ref()
+                .and_then(|credentials| credentials.refresh_token.clone())
+        });
+    let account_id = std::env::var("MAKEPAD_STUDIO_CHATGPT_ACCOUNT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            persisted_credentials
+                .as_ref()
+                .and_then(|credentials| credentials.account_id.clone())
+        })
+        .or_else(|| ChatGptProvider::extract_account_id_from_jwt(&access_token));
+    let expires_at_unix = persisted_credentials
+        .as_ref()
+        .and_then(|credentials| credentials.expires_at_unix);
+    let model = std::env::var("MAKEPAD_STUDIO_CHATGPT_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_CHATGPT_MODEL.to_string());
+    let model_kind = chatgpt_model_from_str(&model);
+    let pkce = Some(ChatGptProvider::pkce_pair());
+    let provider = ChatGptProvider::new(
+        ChatGptOAuthConfig::new(client_id),
+        ChatGptCredentials {
+            access_token,
+            refresh_token,
+            account_id,
+            expires_at_unix,
+        },
+        model_kind,
+    );
+    let configuration_url = pkce.as_ref().map(|pkce| {
+        let mut url = provider.authorize_url("makepad-studio", pkce);
+        url.push_str("&id_token_add_organizations=true");
+        url.push_str("&codex_cli_simplified_flow=true");
+        url.push_str("&originator=makepad-studio");
+        url
+    });
+    let configuration_hint = Some(chatgpt_configuration_hint(
+        configured,
+        provider.oauth.client_id.trim().is_empty(),
+        pkce.as_ref().map(|pkce| pkce.verifier.as_str()),
+    ));
+
+    AiBackendConfig {
+        id: CHATGPT_BACKEND_ID.to_string(),
+        label: "ChatGPT".to_string(),
+        detail: if configured {
+            model.clone()
+        } else {
+            format!("{}  not configured", model)
+        },
+        url: provider.responses_url.clone(),
+        model,
+        api_key: None,
+        chatgpt: Some(provider),
+        configured,
+        configuration_url,
+        configuration_hint,
+        disable_thinking_via_chat_template: false,
+    }
+}
+
+fn chatgpt_configuration_hint(
+    configured: bool,
+    missing_client_id: bool,
+    pkce_verifier: Option<&str>,
+) -> String {
+    if configured {
+        return "ChatGPT is configured for this Studio session.".to_string();
+    }
+    if missing_client_id {
+        return "Set MAKEPAD_STUDIO_CHATGPT_CLIENT_ID in the Studio hub environment, then restart Studio.".to_string();
+    }
+    let verifier = pkce_verifier.unwrap_or("");
+    format!(
+        "Studio opened the ChatGPT login URL and is listening for the localhost callback. After authorization, Studio exchanges and saves the returned token automatically.\n\nPKCE verifier:\n{}",
+        verifier
+    )
+}
+
+fn backend_configuration_message(backend: &AiBackendConfig) -> String {
+    let mut message = format!("Configure {}\n", backend.label);
+    if let Some(hint) = &backend.configuration_hint {
+        message.push_str(hint);
+    } else if backend.configured {
+        message.push_str("This backend is already configured.");
+    } else {
+        message.push_str("This backend needs configuration before it can run prompts.");
+    }
+    if let Some(url) = &backend.configuration_url {
+        message.push_str("\n\nLogin URL:\n");
+        message.push_str(url);
+    }
+    message
+}
+
+fn chatgpt_model_from_str(model: &str) -> ChatGptModel {
+    match model.trim() {
+        "gpt-5.4-mini" => ChatGptModel::Gpt54Mini,
+        "codex-mini-latest" => ChatGptModel::CodexMiniLatest,
+        "o4-mini" => ChatGptModel::O4Mini,
+        "o3" => ChatGptModel::O3,
+        other => ChatGptModel::Custom(other.to_string()),
+    }
+}
+
+fn build_chatgpt_request(
+    backend: &AiBackendConfig,
+    mount: &str,
+    root_path: &str,
+    history: &[ConversationItem],
+    role: Option<&str>,
+    task: Option<&str>,
+    active_terminals: &[String],
+) -> Result<ChatGptRequest, String> {
+    let system_prompt = render_system_prompt(mount, root_path, role, task, active_terminals);
+    let mut messages = vec![ChatGptMessage::system(system_prompt)];
+    for item in prune_history(history) {
+        match item {
+            ConversationItem::User { text } => {
+                messages.push(ChatGptMessage::user(text));
+            }
+            ConversationItem::Assistant { text, tool_calls } => {
+                if is_empty_assistant_turn(&text, &tool_calls) {
+                    continue;
+                }
+                if tool_calls.is_empty() {
+                    messages.push(ChatGptMessage::assistant(text));
+                } else {
+                    let mut content = Vec::new();
+                    if !text.trim().is_empty() {
+                        content.push(ChatGptContentBlock::Text { text });
+                    }
+                    for call in tool_calls {
+                        content.push(ChatGptContentBlock::ToolCall {
+                            id: call.id,
+                            name: call.name,
+                            arguments_json: call.arguments_json,
+                        });
+                    }
+                    messages.push(ChatGptMessage {
+                        role: ChatGptMessageRole::Assistant,
+                        content,
+                    });
+                }
+            }
+            ConversationItem::ToolResult {
+                tool_call_id,
+                content,
+            } => {
+                messages.push(ChatGptMessage {
+                    role: ChatGptMessageRole::Tool,
+                    content: vec![ChatGptContentBlock::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error: false,
+                    }],
+                });
+            }
+        }
+    }
+
+    let model_name = if backend.model.trim().is_empty() {
+        DEFAULT_CHATGPT_MODEL
+    } else {
+        backend.model.as_str()
+    };
+    let model = chatgpt_model_from_str(model_name);
+    Ok(ChatGptRequest {
+        messages,
+        model: model.clone(),
+        max_output_tokens: model.max_output_tokens(),
+        temperature: None,
+        tools: chatgpt_tools(),
+        stream: true,
+    })
+}
+
+fn chatgpt_tools() -> Vec<ChatGptTool> {
+    vec![
+        ChatGptTool {
+            name: "read_file".to_string(),
+            description: "Read a UTF-8 text file from the workspace. Use this before editing."
+                .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to the file"},"offset":{"type":"integer","description":"Starting line number (1-indexed)"},"limit":{"type":"integer","description":"Maximum number of lines to read"}},"required":["path"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "list_files".to_string(),
+            description: "List files and directories in the workspace.".to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Optional workspace-relative directory"},"limit":{"type":"integer","description":"Maximum number of entries to return"}}}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "search_text".to_string(),
+            description:
+                "Search text in workspace files and return matching path and line snippets."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"pattern":{"type":"string","description":"Text to search for"},"path":{"type":"string","description":"Optional workspace-relative directory"},"limit":{"type":"integer","description":"Maximum number of matches to return"}},"required":["pattern"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "write_file".to_string(),
+            description:
+                "Write a UTF-8 text file in the workspace, creating parent directories if needed."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to write"},"content":{"type":"string","description":"Full file contents"}},"required":["path","content"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "replace_in_file".to_string(),
+            description: "Replace text in an existing UTF-8 file.".to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to edit"},"old_text":{"type":"string","description":"Existing text to replace"},"new_text":{"type":"string","description":"Replacement text"},"replace_all":{"type":"boolean","description":"Replace all matches instead of the first one"}},"required":["path","old_text","new_text"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "open_editor".to_string(),
+            description:
+                "Open a UTF-8 text file in a Studio code editor tab for this workspace, optionally jumping to a line and column."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Workspace-relative path to open in Studio"},"line":{"type":"integer","description":"Optional 1-indexed line to focus after opening"},"column":{"type":"integer","description":"Optional 1-indexed column to focus after opening"}},"required":["path"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "observe_filesystem".to_string(),
+            description:
+                "Return recent filesystem changes observed by the Studio hub watcher for this workspace. Use this after other agents edit files."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Optional workspace-relative path prefix to filter changes"},"limit":{"type":"integer","description":"Maximum number of recent changes to return"},"since_secs":{"type":"integer","description":"Only include changes observed within this many seconds"}}}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "open_terminal".to_string(),
+            description:
+                "Open a Studio terminal for this workspace and optionally run an initial command such as codex."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"Optional terminal tab name stem"},"command":{"type":"string","description":"Optional command to send after the terminal opens"},"cols":{"type":"integer","description":"Optional terminal column count"},"rows":{"type":"integer","description":"Optional terminal row count"}}}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "list_terminals".to_string(),
+            description:
+                "List currently open Studio terminals for this workspace. Use the returned path value with other terminal tools."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "read_terminal".to_string(),
+            description: "Read visible text and state from an open Studio terminal.".to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"rows":{"type":"integer","description":"Optional number of visible rows to include"},"top_row":{"type":"integer","description":"Optional absolute top row to read; omit to read from the bottom"}},"required":["path"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "send_terminal_text".to_string(),
+            description:
+                "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately, especially for codex prompts."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands and codex prompts that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "send_terminal_key".to_string(),
+            description:
+                "Send a keypress to an open Studio terminal. Use this for Enter, Ctrl+C, arrows, Tab, Escape, or function keys."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"key":{"type":"string","description":"Key name such as enter, tab, up, f5, or a single printable character. Modifier prefixes like ctrl+c are also accepted"},"shift":{"type":"boolean","description":"Optional Shift modifier"},"control":{"type":"boolean","description":"Optional Control modifier"},"alt":{"type":"boolean","description":"Optional Alt modifier"}},"required":["path","key"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "bash".to_string(),
+            description:
+                "Run a shell command inside the workspace root. Prefer quick inspection and verification commands."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_secs":{"type":"integer","description":"Optional timeout in seconds"}},"required":["command"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "spawn_subagent".to_string(),
+            description:
+                "Spawn a specialized subagent to perform a scoped task (e.g. planner, coder, critic, explorer). The parent will wait until the subagent completes."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"},"model_override":{"type":"string","description":"Optional model name override, e.g. gpt-4o-mini"}},"required":["role","task"]}"#.to_string(),
+        },
+        ChatGptTool {
+            name: "complete_task".to_string(),
+            description:
+                "Called by a subagent to declare its task completed and return the structured findings/results to the parent agent."
+                    .to_string(),
+            parameters_json: r#"{"type":"object","properties":{"summary":{"type":"string","description":"A detailed summary of the findings or results of the task"},"success":{"type":"boolean","description":"Whether the task was completed successfully"}},"required":["summary","success"]}"#.to_string(),
+        },
+    ]
 }
 
 fn render_system_prompt(
@@ -3170,6 +3896,7 @@ fn extract_assistant_turn(body: &str) -> Result<AssistantTurn, String> {
         text,
         thinking_text,
         tool_calls,
+        raw_event_sample: String::new(),
     })
 }
 
@@ -3323,9 +4050,26 @@ fn finalize_stream_turn(
             text: stream.assistant_text,
             thinking_text: stream.thinking_text,
             tool_calls,
+            raw_event_sample: stream.raw_event_sample,
         },
         stream.visible,
     ))
+}
+
+fn append_raw_event_sample(sample: &mut String, event: &str) {
+    const MAX_RAW_EVENT_SAMPLE: usize = 6000;
+    if sample.len() >= MAX_RAW_EVENT_SAMPLE {
+        return;
+    }
+    if !sample.is_empty() {
+        sample.push_str("\n\n");
+    }
+    let remaining = MAX_RAW_EVENT_SAMPLE.saturating_sub(sample.len());
+    if event.len() <= remaining {
+        sample.push_str(event);
+    } else {
+        sample.push_str(&event[..remaining]);
+    }
 }
 
 fn execute_tool_call(
@@ -4369,6 +5113,102 @@ fn ai_chat_file_path(root_path: &Path, agent_id: AiAgentId) -> PathBuf {
     ai_chats_dir(root_path).join(format!("chat-{:020}.json", agent_id.0))
 }
 
+fn chatgpt_credentials_path() -> PathBuf {
+    PathBuf::from(".makepad").join("studio_chatgpt_credentials.json")
+}
+
+fn read_persisted_chatgpt_credentials() -> Option<PersistedChatGptCredentials> {
+    let contents = fs::read_to_string(chatgpt_credentials_path()).ok()?;
+    PersistedChatGptCredentials::deserialize_json(&contents).ok()
+}
+
+fn persist_chatgpt_credentials(credentials: &ChatGptCredentials) -> std::io::Result<()> {
+    let path = chatgpt_credentials_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let persisted = PersistedChatGptCredentials {
+        access_token: credentials.access_token.clone(),
+        refresh_token: credentials.refresh_token.clone(),
+        account_id: credentials.account_id.clone(),
+        expires_at_unix: credentials.expires_at_unix,
+    };
+    fs::write(path, persisted.serialize_json())
+}
+
+fn chatgpt_pkce_verifier_from_hint(hint: Option<&str>) -> Option<String> {
+    hint?.lines()
+        .last()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn query_param(path: &str, key: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name == key {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let high = hex_value(bytes[index + 1]);
+                let low = hex_value(bytes[index + 2]);
+                if let (Some(high), Some(low)) = (high, low) {
+                    out.push((high << 4) | low);
+                    index += 3;
+                } else {
+                    out.push(bytes[index]);
+                    index += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 fn read_secret_or_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -4883,6 +5723,7 @@ mod tests {
                 text: String::new(),
                 thinking_text: String::new(),
                 tool_calls: Vec::new(),
+                raw_event_sample: String::new(),
             },
             None,
         );
@@ -4910,6 +5751,10 @@ mod tests {
             url: DEFAULT_LOCAL_BASE_URL.to_string(),
             model: String::new(),
             api_key: None,
+            chatgpt: None,
+            configured: true,
+            configuration_url: None,
+            configuration_hint: None,
             disable_thinking_via_chat_template: false,
         };
         let history = vec![
@@ -4941,6 +5786,10 @@ mod tests {
             url: DEFAULT_LOCAL_BASE_URL.to_string(),
             model: String::new(),
             api_key: None,
+            chatgpt: None,
+            configured: true,
+            configuration_url: None,
+            configuration_hint: None,
             disable_thinking_via_chat_template: false,
         };
         let body = build_request_body(&backend, "repo", "/tmp/repo", &[], None, None, &[]);

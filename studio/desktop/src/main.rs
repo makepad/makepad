@@ -208,6 +208,12 @@ impl MatchEvent for App {
                 {
                     self.select_ai_manager_backend(&active_mount, index);
                 }
+                if workspace
+                    .button(cx, ids!(ai_backend_configure_button))
+                    .clicked(actions)
+                {
+                    self.configure_ai_manager_backend(cx, &active_mount);
+                }
                 if workspace.button(cx, ids!(ai_new_button)).clicked(actions) {
                     self.create_ai_manager_agent(&active_mount);
                 }

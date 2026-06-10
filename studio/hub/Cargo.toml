@@ -16,3 +16,4 @@ makepad-terminal-core = { path = "../../libs/terminal_core", version = "1.0.0" }
 makepad-filesystem-watcher = { path = "../../libs/filesystem_watcher", version = "0.1.0" }
 makepad-rabin-karp = { path = "../../libs/rabin-karp", version = "1.0.0" }
 makepad-regex = { path = "../../libs/regex", version = "0.1.0" }
+makepad-chatgpt-provider = { path = "../../libs/chatgpt_provider", version = "0.1.0" }

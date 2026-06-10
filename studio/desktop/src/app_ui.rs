@@ -320,13 +320,18 @@ script_mod! {
                 align: Align {x: 0.0 y: 0.5}
 
                 Label {
-                    text: "Backend:"
+                    text: "AI backend:"
                     draw_text.color: theme.color_label_outer
                 }
 
                 ai_backend_dropdown := DropDown {
                     width: Fill
                     labels: ["local"]
+                }
+
+                ai_backend_configure_button := ButtonFlat {
+                    width: Fit
+                    text: "Configure"
                 }
             }
         }

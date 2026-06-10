@@ -208,6 +208,10 @@ pub enum ClientToHub {
         mount: String,
         backend_id: String,
     },
+    AiConfigureBackend {
+        mount: String,
+        backend_id: String,
+    },
     AiSendPrompt {
         mount: String,
         agent_id: AiAgentId,
@@ -652,6 +656,8 @@ pub struct AiBackendInfo {
     pub label: String,
     pub detail: String,
     pub configured: bool,
+    pub configuration_url: Option<String>,
+    pub configuration_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
