@@ -473,7 +473,6 @@ script_mod! {
                             padding: Inset {left: 8.0 right: 18.0 top: 0.0 bottom: 0.0}
                             align: Align {x: 0.0 y: 0.5}
                             labels: ["local"]
-                            popup_menu_position: AboveInput
                             draw_bg +: {
                                 color: theme.color_bg_highlight * 0.88
                                 color_hover: theme.color_bg_highlight * 0.98
