@@ -155,6 +155,9 @@ pub struct IosApp {
     /// to be processed atomically before SyncImeState can interfere
     pub queued_text_events: Vec<IosTextInputEvent>,
     pub text_event_drain_timer_scheduled: bool,
+    /// Last text the UITextView reported to makepad (via send_text_selection_changed),
+    /// so set_ime_text can detect a newer in-flight user edit and not clobber it.
+    pub last_forwarded_text: Option<String>,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
@@ -202,6 +205,7 @@ impl IosApp {
                 virtual_keyboard_event: None,
                 queued_text_events: Vec::new(),
                 text_event_drain_timer_scheduled: false,
+                last_forwarded_text: None,
                 touches: Vec::new(),
                 last_window_geom: WindowGeom::default(),
                 metal_device,
@@ -298,6 +302,7 @@ impl IosApp {
             (*makepad_text_view).set_ivar::<f64>("ime_pos_x", 0.0);
             (*makepad_text_view).set_ivar::<f64>("ime_pos_y", 0.0);
             (*makepad_text_view).set_ivar::<bool>("_is_multiline", false);
+            (*makepad_text_view).set_ivar::<bool>("_submit_on_enter", false);
             (*makepad_text_view).set_ivar::<BOOL>("programmatic_update", NO);
             let () = msg_send![makepad_text_view, setBackgroundColor: clear_color];
             let () = msg_send![makepad_text_view, setTextColor: clear_color];
@@ -738,6 +743,7 @@ impl IosApp {
                                 let () = msg_send![view, setReturnKeyType: return_type];
                                 let () = msg_send![view, setSecureTextEntry: secure];
                                 (*view).set_ivar::<bool>("_is_multiline", config.is_multiline);
+                                (*view).set_ivar::<bool>("_submit_on_enter", config.submit_on_enter);
                             }
                             Some(view)
                         } else {
@@ -856,28 +862,60 @@ impl IosApp {
             .map(|c| c.len_utf16())
             .sum();
 
-        let view = IOS_APP
+        // Snapshot the view + freshness state under one borrow, then message UIKit
+        // outside it (the writes' delegate callbacks can re-enter IOS_APP).
+        let snapshot = IOS_APP
             .try_with(|app| {
-                app.try_borrow()
-                    .ok()
-                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
+                app.try_borrow().ok().and_then(|app_ref| {
+                    let app = app_ref.as_ref()?;
+                    let view = app.makepad_text_view?;
+                    Some((
+                        view,
+                        !app.queued_text_events.is_empty(),
+                        app.last_forwarded_text.clone(),
+                    ))
+                })
             })
             .ok()
             .flatten();
 
-        let Some(view) = view else {
+        let Some((view, queue_nonempty, last_forwarded)) = snapshot else {
             return;
         };
 
         unsafe {
-            (*view).set_ivar::<BOOL>("programmatic_update", YES);
-            let ns_text = str_to_nsstring(&text);
-            let () = msg_send![view, setText: ns_text];
+            // Read the live view state first (pure getters, no delegate callbacks).
+            let ns_text: ObjcId = msg_send![view, text];
+            let live_text = if ns_text == nil {
+                String::new()
+            } else {
+                nsstring_to_string(ns_text)
+            };
+            let live_sel: NSRange = msg_send![view, selectedRange];
+
+            // The view is the typing authority: don't clobber it back to a stale
+            // snapshot. If inbound edits are still queued, or the view's live text
+            // differs from what makepad last received from it, a newer user edit is
+            // in flight, so drop this push (the queued drain reconciles makepad).
+            let view_moved = last_forwarded.map_or(false, |t| t != live_text);
+            if queue_nonempty || view_moved {
+                return;
+            }
+
             let range = NSRange {
                 location: selection_start_utf16 as u64,
                 length: selection_end_utf16.saturating_sub(selection_start_utf16) as u64,
             };
-            let () = msg_send![view, setSelectedRange: range];
+            (*view).set_ivar::<BOOL>("programmatic_update", YES);
+            if live_text != text {
+                let ns_text = str_to_nsstring(&text);
+                let () = msg_send![view, setText: ns_text];
+                let () = msg_send![view, setSelectedRange: range];
+            } else if live_sel.location != range.location || live_sel.length != range.length {
+                // Same text already: only move the selection if it actually differs
+                // (skips a gratuitous setSelectedRange that can fire a deferred echo).
+                let () = msg_send![view, setSelectedRange: range];
+            }
             (*view).set_ivar::<BOOL>("programmatic_update", NO);
         }
     }
@@ -1023,6 +1061,7 @@ impl IosApp {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
+                    app.last_forwarded_text = Some(text.clone());
                     app.queued_text_events
                         .push(IosTextInputEvent::SelectionChanged(text, start, end));
                     app.schedule_text_event_drain();
@@ -1056,6 +1095,45 @@ impl IosApp {
                 }
             }
         });
+    }
+
+    /// (is_multiline, submit_on_enter) read off the text view's ivars, for the
+    /// hardware-Enter newline-vs-submit decision. None if the view is gone.
+    pub fn text_view_enter_config() -> Option<(bool, bool)> {
+        let view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
+            })
+            .ok()
+            .flatten()?;
+        unsafe {
+            Some((
+                *(*view).get_ivar::<bool>("_is_multiline"),
+                *(*view).get_ivar::<bool>("_submit_on_enter"),
+            ))
+        }
+    }
+
+    /// Insert a newline into the text view at the caret. A hardware Enter never
+    /// reaches the view's text path, so for newline mode we add it here; it then
+    /// syncs to makepad in-order like typed text instead of going out-of-band.
+    pub fn insert_newline_into_text_view() {
+        let view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
+            })
+            .ok()
+            .flatten();
+        if let Some(view) = view {
+            unsafe {
+                let ns_newline = str_to_nsstring("\n");
+                let () = msg_send![view, insertText: ns_newline];
+            }
+        }
     }
 
     pub fn send_timer_received(nstimer: ObjcId) {

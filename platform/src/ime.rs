@@ -115,4 +115,5 @@ pub struct TextInputConfig {
     pub soft_keyboard: SoftKeyboardConfig,
     pub is_multiline: bool,
     pub is_secure: bool,
+    pub submit_on_enter: bool,
 }

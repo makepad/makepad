@@ -221,6 +221,7 @@ pub fn define_makepad_text_view() -> *const Class {
     decl.add_ivar::<f64>("ime_pos_y");
     // Whether the focused makepad field is multiline (set by configure_keyboard).
     decl.add_ivar::<bool>("_is_multiline");
+    decl.add_ivar::<bool>("_submit_on_enter");
     // Set true while makepad is pushing text in (set_ime_text); the delegate
     // callbacks that push triggers must not echo straight back to makepad.
     decl.add_ivar::<BOOL>("programmatic_update");
@@ -316,7 +317,7 @@ pub fn define_makepad_text_view() -> *const Class {
     // than letting the text view insert a raw newline; if makepad decides newline,
     // it comes back via set_ime_text.
     extern "C" fn should_change_text(
-        _this: &Object,
+        this: &Object,
         _: Sel,
         _tv: ObjcId,
         _range: NSRange,
@@ -326,6 +327,12 @@ pub fn define_makepad_text_view() -> *const Class {
             if text != nil {
                 let s = nsstring_to_string(text);
                 if s == "\n" {
+                    // Multiline newlines insert into the view (soft keyboard here,
+                    // hardware via insertText) so they sync in-order; single-line submits.
+                    let is_multiline: bool = *this.get_ivar::<bool>("_is_multiline");
+                    if is_multiline {
+                        return YES;
+                    }
                     IosApp::send_return_key();
                     return NO;
                 }

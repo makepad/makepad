@@ -285,6 +285,22 @@ pub unsafe fn dispatch_hardware_key_presses(
         if !dispatch_navigation && is_hardware_navigation_key(key_code) {
             continue;
         }
+        if key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter {
+            // Hardware Enter only reaches this path (never the view's text delegate).
+            // Newline mode: insert into the view so it syncs in-order; submit dispatches.
+            if let Some((is_multiline, submit_on_enter)) = IosApp::text_view_enter_config() {
+                let is_newline = is_multiline
+                    && !modifiers.is_primary()
+                    && !(submit_on_enter && !modifiers.any());
+                if is_newline {
+                    if is_down {
+                        IosApp::insert_newline_into_text_view();
+                    }
+                    handled_press = true;
+                    continue;
+                }
+            }
+        }
         dispatch_makepad_key_code(key_code, modifiers, is_down);
         handled_press = true;
     }

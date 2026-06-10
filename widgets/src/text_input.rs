@@ -1565,6 +1565,7 @@ impl TextInput {
             },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
+            submit_on_enter: self.submit_on_enter,
         }
     }
 
