@@ -1592,6 +1592,7 @@ impl AiManager {
         }
 
         if spawn_subagent_call.is_some() || complete_task_call.is_some() {
+            let event_tx = self.event_tx.clone();
             if let Some(mount_state) = self.mounts.get_mut(mount) {
                 let (parent_id, backend_id) = {
                     if let Some(agent) = mount_state.agents.get(&agent_id) {
@@ -1831,6 +1832,15 @@ impl AiManager {
                                 role: AiMessageRole::Thinking,
                                 text: String::new(),
                             });
+                            parent.subagents.retain(|id| *id != agent_id);
+                            mount_state.order.retain(|id| *id != agent_id);
+                            mount_state.agents.remove(&agent_id);
+                            remove_agent_file_for_root_best_effort(
+                                &event_tx,
+                                mount,
+                                &mount_state.root_path,
+                                agent_id,
+                            );
 
                             self.persist_mount_state_best_effort(mount);
                             self.start_model_request(mount, parent_id, parent_run_token);
@@ -2998,19 +3008,7 @@ impl AiManager {
         if root_path.is_empty() {
             return;
         }
-        self.suppress_chat_persist_fs_events(mount);
-        let path = ai_chat_file_path(Path::new(&root_path), agent_id);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => {
-                eprintln!(
-                    "makepad-studio-hub: failed to remove AI chat {}: {}",
-                    path.display(),
-                    err
-                );
-            }
-        }
+        remove_agent_file_for_root_best_effort(&self.event_tx, mount, &root_path, agent_id);
     }
 
     fn set_agent_error(&mut self, mount: &str, agent_id: AiAgentId, error: String) {
@@ -3142,6 +3140,33 @@ impl AiManager {
             }
         }
         self.persist_mount_state_best_effort(mount);
+    }
+}
+
+fn remove_agent_file_for_root_best_effort(
+    event_tx: &Sender<HubEvent>,
+    mount: &str,
+    root_path: &str,
+    agent_id: AiAgentId,
+) {
+    if root_path.is_empty() {
+        return;
+    }
+    let _ = event_tx.send(HubEvent::SuppressMountRootFsEvents {
+        mount: mount.to_string(),
+        duration: AI_CHAT_PERSIST_FS_SUPPRESS,
+    });
+    let path = ai_chat_file_path(Path::new(root_path), agent_id);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            eprintln!(
+                "makepad-studio-hub: failed to remove AI chat {}: {}",
+                path.display(),
+                err
+            );
+        }
     }
 }
 
@@ -5829,6 +5854,86 @@ mod tests {
         assert!(sub_agent.messages.iter().any(|message| {
             matches!(message.role, AiMessageRole::User)
                 && message.text.contains("You are the `planner` subagent.")
+        }));
+    }
+
+    #[test]
+    fn completed_subagent_closes_after_returning_result_to_parent() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let parent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let parent_run_token = 42;
+        {
+            let parent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&parent_id))
+                .unwrap();
+            parent.run_token = parent_run_token;
+        }
+
+        manager.complete_assistant_turn(
+            "repo",
+            parent_id,
+            parent_run_token,
+            AssistantTurn {
+                text: "I will ask a coder to update the plan.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_spawn".to_string(),
+                    name: "spawn_subagent".to_string(),
+                    arguments_json: r#"{"role":"coder","task":"Update the plan."}"#.to_string(),
+                }],
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let (sub_id, sub_run_token) = {
+            let mount_state = manager.mounts.get("repo").unwrap();
+            let parent = mount_state.agents.get(&parent_id).unwrap();
+            let sub_id = parent.subagents[0];
+            let sub_run_token = mount_state.agents.get(&sub_id).unwrap().run_token;
+            (sub_id, sub_run_token)
+        };
+
+        manager.complete_assistant_turn(
+            "repo",
+            sub_id,
+            sub_run_token,
+            AssistantTurn {
+                text: "Done.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_complete".to_string(),
+                    name: "complete_task".to_string(),
+                    arguments_json: r#"{"summary":"Updated the plan.","success":true}"#.to_string(),
+                }],
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let parent = mount_state.agents.get(&parent_id).unwrap();
+        assert!(parent.subagents.is_empty());
+        assert!(!mount_state.order.contains(&sub_id));
+        assert!(!mount_state.agents.contains_key(&sub_id));
+        assert_eq!(mount_state.active_agent_id, Some(parent_id));
+        assert!(parent.history.iter().any(|item| {
+            matches!(
+                item,
+                ConversationItem::ToolResult {
+                    tool_call_id,
+                    content
+                } if tool_call_id == "call_spawn" && content.contains("Updated the plan.")
+            )
         }));
     }
 
