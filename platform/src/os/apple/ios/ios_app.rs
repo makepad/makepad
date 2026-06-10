@@ -108,10 +108,6 @@ pub struct IosClasses {
     pub timer_delegate: *const Class,
     pub edit_menu_delegate: *const Class,
     // UITextInput protocol classes for IME support
-    pub text_position: *const Class,
-    pub text_range: *const Class,
-    pub text_selection_rect: *const Class,
-    pub text_input_view: *const Class,
     pub makepad_text_view: *const Class,
 }
 impl IosClasses {
@@ -127,10 +123,6 @@ impl IosClasses {
             timer_delegate: define_ios_timer_delegate(),
             edit_menu_delegate: define_edit_menu_interaction_delegate(),
             // All UITextInput classes enabled
-            text_position: define_makepad_text_position(),
-            text_range: define_makepad_text_range(),
-            text_selection_rect: define_makepad_selection_rect(),
-            text_input_view: define_text_input_view(),
             makepad_text_view: define_makepad_text_view(),
         }
     }
@@ -170,8 +162,6 @@ pub struct IosApp {
     metal_device: ObjcId,
     first_draw: bool,
     pub mtk_view: Option<ObjcId>,
-    /// UITextInput view for IME support
-    pub text_input_view: Option<ObjcId>,
     /// SPIKE: real UITextView client, to test whether iOS grants the native
     /// language HUD + full input-mode cycle. Focused by show_keyboard.
     pub makepad_text_view: Option<ObjcId>,
@@ -196,9 +186,6 @@ pub struct IosApp {
     selection_handle_end_view: Option<ObjcId>,
     selection_handle_start_handler: Option<ObjcId>,
     selection_handle_end_handler: Option<ObjcId>,
-    /// iOS 16+ runtime-selected native selection display interaction.
-    native_selection_display_interaction: Option<ObjcId>,
-    has_native_selection_display_api: bool,
 }
 
 impl IosApp {
@@ -220,7 +207,6 @@ impl IosApp {
                 metal_device,
                 first_draw: true,
                 mtk_view: None,
-                text_input_view: None,
                 makepad_text_view: None,
                 ime_position: None,
                 time_start: Instant::now(),
@@ -240,8 +226,6 @@ impl IosApp {
                 selection_handle_end_view: None,
                 selection_handle_start_handler: None,
                 selection_handle_end_handler: None,
-                native_selection_display_interaction: None,
-                has_native_selection_display_api: false,
             }
         }
     }
@@ -300,71 +284,7 @@ impl IosApp {
             // required for safeAreaInsets to update correctly.
             let () = msg_send![mtk_view_obj, setAutoresizingMask: 18u64];
 
-            let text_input_view: ObjcId = msg_send![get_ios_class_global().text_input_view, alloc];
-            let text_input_view: ObjcId = msg_send![text_input_view, initWithFrame: NSRect {
-                origin: NSPoint { x: 0.0, y: 0.0 },
-                size: NSSize {
-                    width: 1.0,
-                    height: IOS_TEXT_INPUT_TARGET_HEIGHT,
-                }
-            }];
-
-            let marked_text: ObjcId = msg_send![class!(NSMutableAttributedString), alloc];
-            let marked_text: ObjcId = msg_send![marked_text, init];
-            (*text_input_view).set_ivar::<ObjcId>("markedText", marked_text);
-            (*text_input_view).set_ivar::<i64>("cursorPosition", 0);
-            (*text_input_view).set_ivar::<i64>("selectionStart", 0);
-            (*text_input_view).set_ivar::<i64>("selectionEnd", 0);
-            (*text_input_view).set_ivar::<ObjcId>("_inputDelegate", nil);
-            (*text_input_view).set_ivar::<ObjcId>("_tokenizer", nil);
-            (*text_input_view).set_ivar::<f64>("ime_pos_x", 0.0);
-            (*text_input_view).set_ivar::<f64>("ime_pos_y", 0.0);
-            // Initialize keyboard config ivars with defaults
-            (*text_input_view).set_ivar::<i64>("_keyboard_type", UI_KEYBOARD_TYPE_DEFAULT);
-            (*text_input_view).set_ivar::<i64>(
-                "_autocapitalization_type",
-                UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
-            );
-            (*text_input_view).set_ivar::<i64>("_autocorrection_type", -1); // Use CJK detection logic
-            (*text_input_view).set_ivar::<i64>("_return_key_type", UI_RETURN_KEY_DEFAULT);
-            (*text_input_view).set_ivar::<bool>("_secure_text_entry", false);
-            (*text_input_view).set_ivar::<bool>("_is_multiline", false);
-            // Floating cursor (keyboard trackpad) state
-            (*text_input_view).set_ivar::<BOOL>("floating_cursor_active", NO);
-            (*text_input_view).set_ivar::<f64>("floating_cursor_last_x", 0.0);
-            (*text_input_view).set_ivar::<f64>("floating_cursor_last_y", 0.0);
-            (*text_input_view).set_ivar::<f64>("selection_handle_start_x", 0.0);
-            (*text_input_view).set_ivar::<f64>("selection_handle_start_y", 0.0);
-            (*text_input_view).set_ivar::<f64>("selection_handle_end_x", 0.0);
-            (*text_input_view).set_ivar::<f64>("selection_handle_end_y", 0.0);
-            (*text_input_view).set_ivar::<BOOL>("selection_handles_visible", NO);
-            (*text_input_view).set_ivar::<BOOL>("accept_system_selection_changes", NO);
-            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", NO);
-
             let clear_color: ObjcId = msg_send![class!(UIColor), clearColor];
-            let () = msg_send![text_input_view, setBackgroundColor: clear_color];
-            let () = msg_send![text_input_view, setTintColor: clear_color];
-            let () = msg_send![text_input_view, setOpaque: NO];
-            let () = msg_send![text_input_view, setAutoresizingMask: 0u64];
-            let () = msg_send![text_input_view, setIsAccessibilityElement: NO];
-            let () = msg_send![text_input_view, setAccessibilityElementsHidden: YES];
-            let responds_to_accessibility_interaction: BOOL = msg_send![
-                text_input_view,
-                respondsToSelector: sel!(setAccessibilityRespondsToUserInteraction:)
-            ];
-            if responds_to_accessibility_interaction == YES {
-                let () =
-                    msg_send![text_input_view, setAccessibilityRespondsToUserInteraction: NO];
-            }
-            let () = msg_send![text_input_view, setUserInteractionEnabled: YES];
-            // Opt out of the system focus halo (the FKA ring). Setting it
-            // explicitly is what takes; overriding the getter alone does not. iOS 15+.
-            let responds_to_focus_effect: BOOL =
-                msg_send![text_input_view, respondsToSelector: sel!(setFocusEffect:)];
-            if responds_to_focus_effect == YES {
-                let () = msg_send![text_input_view, setFocusEffect: nil];
-            }
-            let () = msg_send![mtk_view_obj, addSubview: text_input_view];
 
             // SPIKE: a real UITextView client, to test whether iOS grants the
             // native language HUD + full input-mode cycle. Invisible (clear
@@ -490,7 +410,6 @@ impl IosApp {
                 self.edit_menu_interaction = Some(edit_menu_interaction);
             }
 
-            self.text_input_view = Some(text_input_view);
             self.makepad_text_view = Some(makepad_text_view);
             self.mtk_view = Some(mtk_view_obj);
         }
@@ -895,8 +814,7 @@ impl IosApp {
         let local_y = IOS_TEXT_INPUT_TARGET_HEIGHT;
 
         // Extract the view pointer inside the borrow, then message UIKit after the
-        // borrow is dropped, so a re-entrant IOS_APP borrow can never silently skip
-        // the update (mirrors update_native_selection_display).
+        // borrow is dropped, so a re-entrant IOS_APP borrow can never silently skip it.
         let text_input_view = IOS_APP
             .try_with(|app| {
                 app.try_borrow_mut().ok().and_then(|mut app_ref| {
@@ -1325,57 +1243,6 @@ impl IosApp {
         }
     }
 
-    fn update_native_selection_display(start: DVec2, end: DVec2, visible: bool) {
-        // Extract views and set ivars inside the borrow. Then call inputDelegate
-        // notifications and interaction updates OUTSIDE the borrow, because
-        // selectionWillChange/selectionDidChange can trigger UITextInput callbacks
-        // that re-enter IOS_APP.
-        let state = IOS_APP
-            .try_with(|app| {
-                if let Ok(app_ref) = app.try_borrow() {
-                    if let Some(ref app) = *app_ref {
-                        if !app.has_native_selection_display_api {
-                            return None;
-                        }
-                        let text_input_view = app.text_input_view?;
-                        return Some((text_input_view, app.native_selection_display_interaction));
-                    }
-                }
-                None
-            })
-            .ok()
-            .flatten();
-
-        let Some((text_input_view, interaction)) = state else {
-            return;
-        };
-
-        unsafe {
-            // Set ivars directly on the view (no borrow needed for ObjC ivar access)
-            (*text_input_view).set_ivar::<f64>("selection_handle_start_x", start.x);
-            (*text_input_view).set_ivar::<f64>("selection_handle_start_y", start.y);
-            (*text_input_view).set_ivar::<f64>("selection_handle_end_x", end.x);
-            (*text_input_view).set_ivar::<f64>("selection_handle_end_y", end.y);
-            (*text_input_view)
-                .set_ivar::<BOOL>("selection_handles_visible", if visible { YES } else { NO });
-
-            // UITextSelectionDisplayInteraction listens via the input delegate.
-            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
-            if input_delegate != nil {
-                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
-                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
-            }
-
-            if let Some(interaction) = interaction {
-                let has_refresh: BOOL =
-                    msg_send![interaction, respondsToSelector: sel!(setNeedsSelectionUpdate)];
-                if has_refresh == YES {
-                    let () = msg_send![interaction, setNeedsSelectionUpdate];
-                }
-            }
-        }
-    }
-
     fn set_selection_handle_center(handle: ObjcId, center: DVec2) {
         unsafe {
             let () = msg_send![
@@ -1389,7 +1256,6 @@ impl IosApp {
     }
 
     pub fn show_selection_handles(start: DVec2, end: DVec2) {
-        Self::update_native_selection_display(start, end, true);
         // Extract view pointers inside the borrow, then do UIKit calls outside.
         // bringSubviewToFront can trigger layout callbacks that re-enter IOS_APP.
         let views = IOS_APP
@@ -1432,7 +1298,6 @@ impl IosApp {
     }
 
     pub fn update_selection_handles(start: DVec2, end: DVec2) {
-        Self::update_native_selection_display(start, end, true);
         let views = IOS_APP
             .try_with(|app| {
                 app.try_borrow().ok().and_then(|app_ref| {
@@ -1457,7 +1322,6 @@ impl IosApp {
     }
 
     pub fn hide_selection_handles() {
-        Self::update_native_selection_display(dvec2(0.0, 0.0), dvec2(0.0, 0.0), false);
         let views = IOS_APP
             .try_with(|app| {
                 app.try_borrow().ok().and_then(|app_ref| {

@@ -1015,7 +1015,7 @@ pub fn define_textfield_delegate() -> *const Class {
         // autocorrectionType (which dynamically checks CJK vs non-CJK).
         // Extract the view pointer first; reloadInputViews can trigger
         // synchronous UIKit callbacks that re-enter IOS_APP.
-        let view = try_with_ios_app(|app| app.text_input_view).flatten();
+        let view = try_with_ios_app(|app| app.makepad_text_view).flatten();
         if let Some(text_input_view) = view {
             unsafe {
                 let () = msg_send![text_input_view, reloadInputViews];
