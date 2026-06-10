@@ -1,15 +1,17 @@
 use crate::dispatch::HubEvent;
+mod providers;
+
 use makepad_chatgpt_provider::{
     ChatGptContentBlock, ChatGptCredentials, ChatGptMessage, ChatGptMessageRole, ChatGptModel,
-    ChatGptOAuthConfig, ChatGptProvider, ChatGptRequest, ChatGptStreamEvent, ChatGptTokenResponse,
-    ChatGptTool,
+    ChatGptOAuthConfig, ChatGptProvider, ChatGptRequest, ChatGptTokenResponse, ChatGptTool,
 };
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
-use makepad_network::{HttpMethod, HttpRequest, NetworkConfig, NetworkResponse, NetworkRuntime};
+use makepad_network::{NetworkConfig, NetworkResponse, NetworkRuntime};
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
 };
+use providers::AiProviderKind;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
@@ -174,7 +176,7 @@ struct InFlightRequest {
     mount: String,
     agent_id: AiAgentId,
     run_token: u64,
-    chatgpt: bool,
+    provider_kind: AiProviderKind,
     stream: StreamingTurnState,
 }
 
@@ -649,7 +651,10 @@ impl AiManager {
         code: &str,
     ) -> AiMountState {
         self.ensure_mount_entry(mount);
-        let Some(backend_index) = self.backends.iter().position(|backend| backend.id == backend_id)
+        let Some(backend_index) = self
+            .backends
+            .iter()
+            .position(|backend| backend.id == backend_id)
         else {
             return self.snapshot(mount);
         };
@@ -1128,7 +1133,10 @@ impl AiManager {
                             self.append_backend_system_message(
                                 &mount,
                                 &pending.backend_id,
-                                &format!("ChatGPT token exchange returned invalid JSON: {:?}", error),
+                                &format!(
+                                    "ChatGPT token exchange returned invalid JSON: {:?}",
+                                    error
+                                ),
                             );
                         }
                     }
@@ -1161,7 +1169,7 @@ impl AiManager {
                     return Some((mount.clone(), self.snapshot(&mount)));
                 }
 
-                if in_flight.chatgpt {
+                if in_flight.provider_kind.backend().response_is_stream() {
                     match self.process_stream_data(request_id, &body, true) {
                         Ok(stream_update) => {
                             if stream_update.done {
@@ -1177,7 +1185,11 @@ impl AiManager {
                     return Some((mount.clone(), self.snapshot(&mount)));
                 }
 
-                match extract_assistant_turn(&body) {
+                match in_flight
+                    .provider_kind
+                    .backend()
+                    .extract_assistant_turn(&body)
+                {
                     Ok(turn) => {
                         let state =
                             self.complete_assistant_turn(&mount, agent_id, run_token, turn, None);
@@ -1308,10 +1320,7 @@ impl AiManager {
             if !self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token) {
                 return None;
             }
-            (
-                in_flight.mount.clone(),
-                in_flight.agent_id,
-            )
+            (in_flight.mount.clone(), in_flight.agent_id)
         };
         let body = response.get_string_body().unwrap_or_default();
         if response.status_code >= 400 {
@@ -1350,12 +1359,12 @@ impl AiManager {
         request_id: LiveId,
         response: makepad_network::HttpResponse,
     ) -> Option<(String, AiMountState)> {
-        let (mount, agent_id, chatgpt, matches_run) = {
+        let (mount, agent_id, provider_kind, matches_run) = {
             let in_flight = self.inflight.get(&request_id)?;
             (
                 in_flight.mount.clone(),
                 in_flight.agent_id,
-                in_flight.chatgpt,
+                in_flight.provider_kind,
                 self.agent_run_matches(&in_flight.mount, in_flight.agent_id, in_flight.run_token),
             )
         };
@@ -1377,7 +1386,7 @@ impl AiManager {
             );
             return Some((mount.clone(), self.snapshot(&mount)));
         }
-        if chatgpt {
+        if provider_kind.backend().response_is_stream() {
             if let Err(error) = self.process_stream_data(request_id, &body, true) {
                 self.inflight.remove(&request_id);
                 self.set_agent_error(&mount, agent_id, error);
@@ -1385,7 +1394,7 @@ impl AiManager {
             }
             return self.finish_stream_request(request_id);
         }
-        if let Ok(turn) = extract_assistant_turn(&body) {
+        if let Ok(turn) = provider_kind.backend().extract_assistant_turn(&body) {
             let in_flight = self.inflight.remove(&request_id)?;
             return self
                 .complete_assistant_turn(
@@ -1411,14 +1420,16 @@ impl AiManager {
         data: &str,
         flush: bool,
     ) -> Result<StreamUpdate, String> {
-        let Some((mount, agent_id, run_token, chatgpt)) = self.inflight.get(&request_id).map(|in_flight| {
-            (
-                in_flight.mount.clone(),
-                in_flight.agent_id,
-                in_flight.run_token,
-                in_flight.chatgpt,
-            )
-        }) else {
+        let Some((mount, agent_id, run_token, provider_kind)) =
+            self.inflight.get(&request_id).map(|in_flight| {
+                (
+                    in_flight.mount.clone(),
+                    in_flight.agent_id,
+                    in_flight.run_token,
+                    in_flight.provider_kind,
+                )
+            })
+        else {
             return Ok(StreamUpdate::default());
         };
         if !self.agent_run_matches(&mount, agent_id, run_token) {
@@ -1440,124 +1451,34 @@ impl AiManager {
             return Ok(StreamUpdate::default());
         }
 
-        let mut thinking_delta = String::new();
-        let mut assistant_delta = String::new();
-        let mut finish_reason = None;
-        let mut tool_call_deltas = Vec::new();
-        let mut saw_done = false;
-
-        for event in events {
-            if chatgpt {
-                if let Some(in_flight) = self.inflight.get_mut(&request_id) {
-                    append_raw_event_sample(&mut in_flight.stream.raw_event_sample, &event);
-                }
-                for delta in ChatGptProvider::parse_stream_chunk(&event)
-                    .map_err(|err| err.to_string())?
-                {
-                    match delta {
-                        ChatGptStreamEvent::TextDelta { text } => {
-                            if saw_done {
-                                let already_streamed = self
-                                    .inflight
-                                    .get(&request_id)
-                                    .map(|in_flight| in_flight.stream.saw_text_delta)
-                                    .unwrap_or(false);
-                                if !already_streamed {
-                                    assistant_delta.push_str(&text);
-                                }
-                            } else {
-                                assistant_delta.push_str(&text);
-                                if let Some(in_flight) = self.inflight.get_mut(&request_id) {
-                                    in_flight.stream.saw_text_delta = true;
-                                }
-                            }
-                        }
-                        ChatGptStreamEvent::ToolCallStart { id, name } => {
-                            tool_call_deltas.push(OpenAiStreamToolCallDelta {
-                                index: Some(tool_call_deltas.len() as u32),
-                                id: Some(id),
-                                kind: Some("function".to_string()),
-                                function: Some(OpenAiStreamFunctionDelta {
-                                    name: Some(name),
-                                    arguments: None,
-                                }),
-                            });
-                        }
-                        ChatGptStreamEvent::ToolCallArgumentsDelta { partial_json } => {
-                            if let Some(last) = tool_call_deltas.last_mut() {
-                                let mut args = last
-                                    .function
-                                    .as_ref()
-                                    .and_then(|function| function.arguments.clone())
-                                    .unwrap_or_default();
-                                args.push_str(&partial_json);
-                                if let Some(function) = last.function.as_mut() {
-                                    function.arguments = Some(args);
-                                }
-                            }
-                        }
-                        ChatGptStreamEvent::Completed {
-                            finish_reason: stream_finish_reason,
-                            ..
-                        } => {
-                            if let Some(reason) = stream_finish_reason {
-                                finish_reason = Some(reason);
-                            }
-                            saw_done = true;
-                        }
-                        ChatGptStreamEvent::Error { message } => return Err(message),
-                    }
-                }
-                continue;
-            }
-
-            let Some(json_data) = extract_sse_event_data(&event) else {
-                continue;
-            };
-            if json_data == "[DONE]" {
-                saw_done = true;
-                continue;
-            }
-            let chunk = OpenAiStreamChunk::deserialize_json_lenient(&json_data)
-                .map_err(|err| format!("invalid AI stream chunk: {:?}", err))?;
-            if let Some(error) = chunk.error {
-                return Err(error
-                    .message
-                    .unwrap_or_else(|| "AI backend returned a stream error".to_string()));
-            }
-            for choice in chunk.choices {
-                if let Some(reason) = choice.finish_reason {
-                    finish_reason = Some(reason);
-                }
-                if let Some(delta) = choice.delta {
-                    if let Some(reasoning) = first_non_empty_stream_reasoning(&delta) {
-                        thinking_delta.push_str(&reasoning);
-                    }
-                    if let Some(text) = delta.content {
-                        assistant_delta.push_str(&text);
-                    }
-                    if let Some(tool_calls) = delta.tool_calls {
-                        tool_call_deltas.extend(tool_calls);
-                    }
-                }
-            }
-        }
+        let deltas = {
+            let in_flight = self.inflight.get_mut(&request_id).expect("checked above");
+            provider_kind
+                .backend()
+                .process_stream_events(events, &mut in_flight.stream)?
+        };
 
         {
             let in_flight = self.inflight.get_mut(&request_id).expect("checked above");
-            if !thinking_delta.is_empty() {
-                in_flight.stream.thinking_text.push_str(&thinking_delta);
+            if !deltas.thinking_delta.is_empty() {
+                in_flight
+                    .stream
+                    .thinking_text
+                    .push_str(&deltas.thinking_delta);
             }
-            if !assistant_delta.is_empty() {
-                in_flight.stream.assistant_text.push_str(&assistant_delta);
+            if !deltas.assistant_delta.is_empty() {
+                in_flight
+                    .stream
+                    .assistant_text
+                    .push_str(&deltas.assistant_delta);
             }
-            if let Some(reason) = finish_reason {
+            if let Some(reason) = deltas.finish_reason {
                 in_flight.stream.finish_reason = Some(reason);
             }
-            if saw_done {
+            if deltas.saw_done {
                 in_flight.stream.done_received = true;
             }
-            for delta in tool_call_deltas {
+            for delta in deltas.tool_call_deltas {
                 apply_tool_call_delta(&mut in_flight.stream.tool_calls, delta)?;
             }
         }
@@ -1651,7 +1572,7 @@ impl AiManager {
         let mut pre_sub_id = None;
         let mut pre_sub_run_token = None;
         let mut pre_parent_run_token = None;
-        
+
         if spawn_subagent_call.is_some() {
             pre_sub_id = Some(self.alloc_agent_id());
             pre_sub_run_token = Some(self.alloc_run_token());
@@ -1688,7 +1609,8 @@ impl AiManager {
                                     agent.messages.remove(index);
                                     if let Some(assistant_index) = visible.assistant_message_index {
                                         if assistant_index > index {
-                                            visible.assistant_message_index = Some(assistant_index - 1);
+                                            visible.assistant_message_index =
+                                                Some(assistant_index - 1);
                                         }
                                     }
                                 }
@@ -1799,7 +1721,8 @@ impl AiManager {
                         });
                         agent.history.push(ConversationItem::ToolResult {
                             tool_call_id: call.id.clone(),
-                            content: "Task completed successfully. Returning control to parent.".to_string(),
+                            content: "Task completed successfully. Returning control to parent."
+                                .to_string(),
                         });
                         agent.messages.push(AiMessage {
                             role: AiMessageRole::ToolResult,
@@ -1824,12 +1747,10 @@ impl AiManager {
                         pending_tool_message_start: None,
                         cancel_requested: false,
                         run_token: sub_run_token,
-                        messages: vec![
-                            AiMessage {
-                                role: AiMessageRole::Thinking,
-                                text: String::new(),
-                            }
-                        ],
+                        messages: vec![AiMessage {
+                            role: AiMessageRole::Thinking,
+                            text: String::new(),
+                        }],
                         history: Vec::new(),
                         updated_at: now_seconds(),
                         parent_agent_id: Some(agent_id),
@@ -1854,8 +1775,12 @@ impl AiManager {
                     if let Some(parent_id) = parent_id {
                         if let Some(parent) = mount_state.agents.get_mut(&parent_id) {
                             let mut parent_tool_call_id = String::new();
-                            if let Some(ConversationItem::Assistant { tool_calls, .. }) = parent.history.last() {
-                                if let Some(tc) = tool_calls.iter().find(|tc| tc.name == "spawn_subagent") {
+                            if let Some(ConversationItem::Assistant { tool_calls, .. }) =
+                                parent.history.last()
+                            {
+                                if let Some(tc) =
+                                    tool_calls.iter().find(|tc| tc.name == "spawn_subagent")
+                                {
                                     parent_tool_call_id = tc.id.clone();
                                 }
                             }
@@ -1879,7 +1804,7 @@ impl AiManager {
                                     args.success, args.summary
                                 ),
                             });
-                            
+
                             mount_state.active_agent_id = Some(parent_id);
                             parent.run_token = parent_run_token;
                             parent.status = "thinking...".to_string();
@@ -2029,11 +1954,7 @@ impl AiManager {
                     truncate_text(&turn.raw_event_sample, 4000)
                 )
             };
-            self.set_agent_error(
-                mount,
-                agent_id,
-                message,
-            );
+            self.set_agent_error(mount, agent_id, message);
         }
         if retry_empty_terminal_response {
             self.start_model_request(mount, agent_id, run_token);
@@ -2123,7 +2044,11 @@ impl AiManager {
         self.backends
             .iter()
             .find(|backend| backend.id == CHATGPT_BACKEND_ID && backend.configured)
-            .or_else(|| self.backends.iter().find(|backend| backend.id == LOCAL_BACKEND_ID))
+            .or_else(|| {
+                self.backends
+                    .iter()
+                    .find(|backend| backend.id == LOCAL_BACKEND_ID)
+            })
             .or_else(|| self.backends.first())
             .map(|backend| backend.id.clone())
             .unwrap_or_else(|| LOCAL_BACKEND_ID.to_string())
@@ -2233,63 +2158,46 @@ impl AiManager {
     }
 
     fn start_model_request(&mut self, mount: &str, agent_id: AiAgentId, run_token: u64) {
-        let Some((backend, root_path, history, role, task, active_terminals)) = self.mounts.get(mount).and_then(|mount_state| {
-            let agent = mount_state.agents.get(&agent_id)?;
-            let mut terms = Vec::new();
-            for (path, snap) in &mount_state.terminal_snapshots {
-                terms.push(format!("- `{}`: mode={}, summary='{}'", path, snap.mode, snap.summary));
-            }
-            Some((
-                self.backend_by_id(&agent.backend_id)?.clone(),
-                mount_state.root_path.clone(),
-                agent.history.clone(),
-                agent.role.clone(),
-                agent.task.clone(),
-                terms,
-            ))
-        }) else {
+        let Some((backend, root_path, history, role, task, active_terminals)) =
+            self.mounts.get(mount).and_then(|mount_state| {
+                let agent = mount_state.agents.get(&agent_id)?;
+                let mut terms = Vec::new();
+                for (path, snap) in &mount_state.terminal_snapshots {
+                    terms.push(format!(
+                        "- `{}`: mode={}, summary='{}'",
+                        path, snap.mode, snap.summary
+                    ));
+                }
+                Some((
+                    self.backend_by_id(&agent.backend_id)?.clone(),
+                    mount_state.root_path.clone(),
+                    agent.history.clone(),
+                    agent.role.clone(),
+                    agent.task.clone(),
+                    terms,
+                ))
+            })
+        else {
             self.set_agent_error(mount, agent_id, "backend not available".to_string());
             return;
         };
 
         let request_id = LiveId::unique();
-        let request = if let Some(provider) = &backend.chatgpt {
-            let body = build_chatgpt_request(
-                &backend,
-                mount,
-                &root_path,
-                &history,
-                role.as_deref(),
-                task.as_deref(),
-                &active_terminals,
-            );
-            match body.and_then(|request| provider.build_responses_request(&request).map_err(|err| err.to_string())) {
-                Ok(request) => request,
-                Err(error) => {
-                    self.set_agent_error(mount, agent_id, error);
-                    return;
-                }
+        let provider_kind = backend.provider_kind();
+        let request = match backend.provider_backend().build_http_request(
+            &backend,
+            mount,
+            &root_path,
+            &history,
+            role.as_deref(),
+            task.as_deref(),
+            &active_terminals,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.set_agent_error(mount, agent_id, error);
+                return;
             }
-        } else {
-            let body = build_request_body(
-                &backend,
-                mount,
-                &root_path,
-                &history,
-                role.as_deref(),
-                task.as_deref(),
-                &active_terminals,
-            );
-
-            let mut request = HttpRequest::new(backend.url.clone(), HttpMethod::POST);
-            request.set_is_streaming();
-            request.set_header("Content-Type".to_string(), "application/json".to_string());
-            request.set_header("Accept".to_string(), "text/event-stream".to_string());
-            if let Some(api_key) = &backend.api_key {
-                request.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
-            }
-            request.set_string_body(body);
-            request
         };
 
         let Some(thinking_message_index) = self
@@ -2320,7 +2228,7 @@ impl AiManager {
                 mount: mount.to_string(),
                 agent_id,
                 run_token,
-                chatgpt: backend.chatgpt.is_some(),
+                provider_kind,
                 stream: StreamingTurnState {
                     visible: StreamVisibleState {
                         thinking_message_index,
@@ -2368,7 +2276,6 @@ impl AiManager {
             });
         });
     }
-
     fn note_ai_prompt_task(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) {
         if prompt.starts_with(AI_TASK_EVENT_PREFIX) || !should_track_ai_terminal_task(prompt) {
             return;
@@ -3248,7 +3155,8 @@ fn prune_history(history: &[ConversationItem]) -> Vec<ConversationItem> {
                 total_chars += content.len();
                 if total_chars > 16000 {
                     if content.len() > 300 {
-                        *content = format!("{}... [truncated for context efficiency]", &content[..300]);
+                        *content =
+                            format!("{}... [truncated for context efficiency]", &content[..300]);
                     }
                 }
             }
@@ -3690,7 +3598,9 @@ fn render_system_prompt(
         for term in active_terminals {
             base.push_str(&format!("{}\n", term));
         }
-        base.push_str("You can interact with them via `read_terminal` or `send_terminal_text` tools.");
+        base.push_str(
+            "You can interact with them via `read_terminal` or `send_terminal_text` tools.",
+        );
     }
 
     if let (Some(role), Some(task)) = (role, task) {
@@ -3861,7 +3771,7 @@ fn append_tool_definition(
     out.push_str("}}");
 }
 
-fn extract_assistant_turn(body: &str) -> Result<AssistantTurn, String> {
+fn extract_openai_assistant_turn(body: &str) -> Result<AssistantTurn, String> {
     let response = OpenAiResponse::deserialize_json_lenient(body)
         .map_err(|err| format!("invalid AI response: {:?}", err))?;
     if let Some(error) = response.error {
@@ -5137,7 +5047,8 @@ fn persist_chatgpt_credentials(credentials: &ChatGptCredentials) -> std::io::Res
 }
 
 fn chatgpt_pkce_verifier_from_hint(hint: Option<&str>) -> Option<String> {
-    hint?.lines()
+    hint?
+        .lines()
         .last()
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -5233,7 +5144,7 @@ fn now_seconds() -> f64 {
 mod tests {
     use super::*;
     use makepad_network::backend::{EventSink, NetworkBackend};
-    use makepad_network::{HttpResponse, NetworkError, WsSend};
+    use makepad_network::{HttpMethod, HttpRequest, HttpResponse, NetworkError, WsSend};
     use std::collections::BTreeMap;
     use std::sync::mpsc::channel;
     use std::thread;
@@ -5665,7 +5576,7 @@ mod tests {
 
     #[test]
     fn assistant_turn_extracts_tool_calls() {
-        let turn = extract_assistant_turn(
+        let turn = extract_openai_assistant_turn(
             r#"{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}}]}}],"error":null}"#,
         )
         .unwrap();
@@ -5675,7 +5586,7 @@ mod tests {
 
     #[test]
     fn assistant_turn_accepts_standard_openai_choice_fields() {
-        let turn = extract_assistant_turn(
+        let turn = extract_openai_assistant_turn(
             r#"{"id":"chatcmpl-1","object":"chat.completion","created":123,"model":"local","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}]}"#,
         )
         .unwrap();
@@ -5686,7 +5597,7 @@ mod tests {
 
     #[test]
     fn assistant_turn_extracts_reasoning_content() {
-        let turn = extract_assistant_turn(
+        let turn = extract_openai_assistant_turn(
             r#"{"choices":[{"message":{"content":"hello","reasoning_content":"step 1\nstep 2"}}]}"#,
         )
         .unwrap();
@@ -5808,7 +5719,7 @@ mod tests {
 
     #[test]
     fn render_system_prompt_replaces_mount_and_root_placeholders() {
-        let prompt = render_system_prompt("repo", "/tmp/repo");
+        let prompt = render_system_prompt("repo", "/tmp/repo", None, None, &[]);
         assert!(prompt.contains("mount 'repo'"));
         assert!(prompt.contains("rooted at '/tmp/repo'"));
         assert!(prompt.contains("observe_filesystem"));

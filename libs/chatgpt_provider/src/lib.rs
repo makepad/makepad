@@ -2,7 +2,6 @@ use makepad_micro_serde::*;
 use makepad_network::{HttpMethod, HttpRequest};
 use rand::{rngs::OsRng, RngCore};
 use std::convert::TryFrom;
-use std::collections::HashMap;
 use std::fmt;
 
 const DEFAULT_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -313,7 +312,10 @@ impl ChatGptProvider {
             format_authorization_url(&self.oauth, state, pkce),
             HttpMethod::GET,
         );
-        request.set_header("Accept".to_string(), "text/html,application/xhtml+xml".to_string());
+        request.set_header(
+            "Accept".to_string(),
+            "text/html,application/xhtml+xml".to_string(),
+        );
         request
     }
 
@@ -328,7 +330,10 @@ impl ChatGptProvider {
         request
     }
 
-    pub fn build_responses_request(&self, request: &ChatGptRequest) -> Result<HttpRequest, ChatGptError> {
+    pub fn build_responses_request(
+        &self,
+        request: &ChatGptRequest,
+    ) -> Result<HttpRequest, ChatGptError> {
         let body = self.build_responses_body(request)?;
         let mut http = HttpRequest::new(self.responses_url.clone(), HttpMethod::POST);
         http.set_is_streaming();
@@ -386,11 +391,7 @@ impl ChatGptProvider {
         out.push_str("\"input\":[");
         let mut first_message = true;
         for message in input_messages {
-            if !first_message {
-                out.push(',');
-            }
-            first_message = false;
-            append_message_json(&mut out, message)?;
+            append_input_items_json(&mut out, &mut first_message, message)?;
         }
         out.push(']');
         out.push(',');
@@ -470,7 +471,7 @@ impl ChatGptProvider {
             }
             if !emitted_text_delta {
                 if let Some(text) = extract_completed_text(&value, &event_name) {
-                events.push(ChatGptStreamEvent::TextDelta { text });
+                    events.push(ChatGptStreamEvent::TextDelta { text });
                 }
             }
 
@@ -530,14 +531,23 @@ pub struct ChatGptAssistantTurn {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatGptStreamEvent {
-    TextDelta { text: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallArgumentsDelta { partial_json: String },
+    TextDelta {
+        text: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallArgumentsDelta {
+        partial_json: String,
+    },
     Completed {
         finish_reason: Option<String>,
         usage: Option<ChatGptUsage>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Default)]
@@ -670,11 +680,7 @@ struct ToolCallAccumulator {
     arguments_json: String,
 }
 
-fn format_authorization_url(
-    oauth: &ChatGptOAuthConfig,
-    state: &str,
-    pkce: &PkcePair,
-) -> String {
+fn format_authorization_url(oauth: &ChatGptOAuthConfig, state: &str, pkce: &PkcePair) -> String {
     let mut url = String::new();
     url.push_str(&oauth.authorize_url);
     url.push('?');
@@ -702,13 +708,9 @@ fn percent_encode(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{:02X}", byte)),
         }
     }
@@ -729,8 +731,7 @@ fn form_encode(pairs: &[(&str, &str)]) -> String {
 }
 
 fn base64_url_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
     let mut index = 0;
     while index < bytes.len() {
@@ -791,54 +792,110 @@ fn json_string(value: &str) -> String {
     value.to_string().serialize_json()
 }
 
-fn append_message_json(out: &mut String, message: &ChatGptMessage) -> Result<(), ChatGptError> {
-    out.push('{');
-    out.push_str("\"role\":");
-    out.push_str(&json_string(message.role.as_str()));
-    out.push_str(",\"content\":[");
-    let mut first_block = true;
+fn append_input_items_json(
+    out: &mut String,
+    first_item: &mut bool,
+    message: &ChatGptMessage,
+) -> Result<(), ChatGptError> {
+    let mut text_blocks = Vec::new();
     for block in &message.content {
-        if !first_block {
-            out.push(',');
-        }
-        first_block = false;
         match block {
             ChatGptContentBlock::Text { text } => {
-                out.push_str("{\"type\":\"input_text\",\"text\":");
-                out.push_str(&json_string(text));
-                out.push('}');
+                if !text.trim().is_empty() {
+                    text_blocks.push(text.as_str());
+                }
             }
             ChatGptContentBlock::ToolCall {
                 id,
                 name,
                 arguments_json,
             } => {
-                out.push_str("{\"type\":\"tool_call\",\"id\":");
+                append_pending_text_message(
+                    out,
+                    first_item,
+                    message.role.as_str(),
+                    &mut text_blocks,
+                );
+                append_comma_if_needed(out, first_item);
+                out.push_str("{\"type\":\"function_call\",\"call_id\":");
                 out.push_str(&json_string(id));
                 out.push_str(",\"name\":");
                 out.push_str(&json_string(name));
                 out.push_str(",\"arguments\":");
-                out.push_str(arguments_json);
+                out.push_str(&json_string(&normalized_tool_arguments(arguments_json)));
                 out.push('}');
             }
             ChatGptContentBlock::ToolResult {
                 tool_call_id,
                 content,
-                is_error,
+                is_error: _,
             } => {
+                append_pending_text_message(
+                    out,
+                    first_item,
+                    message.role.as_str(),
+                    &mut text_blocks,
+                );
+                append_comma_if_needed(out, first_item);
                 out.push_str("{\"type\":\"function_call_output\",\"call_id\":");
                 out.push_str(&json_string(tool_call_id));
                 out.push_str(",\"output\":");
                 out.push_str(&json_string(content));
-                out.push_str(",\"is_error\":");
-                out.push_str(if *is_error { "true" } else { "false" });
                 out.push('}');
             }
         }
     }
+
+    append_pending_text_message(out, first_item, message.role.as_str(), &mut text_blocks);
+    Ok(())
+}
+
+fn append_pending_text_message(
+    out: &mut String,
+    first_item: &mut bool,
+    role: &str,
+    text_blocks: &mut Vec<&str>,
+) {
+    if !text_blocks.is_empty() {
+        append_comma_if_needed(out, first_item);
+        append_text_message_json(out, role, text_blocks);
+        text_blocks.clear();
+    }
+}
+
+fn append_text_message_json(out: &mut String, role: &str, text_blocks: &[&str]) {
+    out.push('{');
+    out.push_str("\"role\":");
+    out.push_str(&json_string(role));
+    out.push_str(",\"content\":[");
+    let mut first_block = true;
+    for text in text_blocks {
+        if !first_block {
+            out.push(',');
+        }
+        first_block = false;
+        out.push_str("{\"type\":\"input_text\",\"text\":");
+        out.push_str(&json_string(text));
+        out.push('}');
+    }
     out.push(']');
     out.push('}');
-    Ok(())
+}
+
+fn append_comma_if_needed(out: &mut String, first_item: &mut bool) {
+    if !*first_item {
+        out.push(',');
+    }
+    *first_item = false;
+}
+
+fn normalized_tool_arguments(arguments_json: &str) -> String {
+    let trimmed = arguments_json.trim();
+    if trimmed.is_empty() {
+        "{}".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn parse_sse_event(event: &str) -> (Option<String>, Option<String>) {
@@ -860,7 +917,10 @@ fn parse_sse_event(event: &str) -> (Option<String>, Option<String>) {
 }
 
 fn json_string_field<'a>(value: &'a JsonValue, key: &str) -> Option<&'a str> {
-    value.key(key).and_then(JsonValue::string).map(String::as_str)
+    value
+        .key(key)
+        .and_then(JsonValue::string)
+        .map(String::as_str)
 }
 
 fn extract_error_message(value: &JsonValue) -> Option<String> {
@@ -895,8 +955,8 @@ fn extract_delta_text(value: &JsonValue, event_name: &str) -> Option<String> {
             return Some(text.to_string());
         }
         if let Some(delta) = value.key("delta") {
-            if let Some(text) = json_string_field(delta, "text")
-                .or_else(|| json_string_field(delta, "content"))
+            if let Some(text) =
+                json_string_field(delta, "text").or_else(|| json_string_field(delta, "content"))
             {
                 return Some(text.to_string());
             }
@@ -1012,7 +1072,9 @@ fn extract_tool_call(value: &JsonValue, event_name: &str) -> Option<ChatGptToolC
             .or_else(|| json_string_field(value, "id"))
             .unwrap_or_default()
             .to_string();
-        let name = json_string_field(value, "name").unwrap_or_default().to_string();
+        let name = json_string_field(value, "name")
+            .unwrap_or_default()
+            .to_string();
         let arguments_json = json_string_field(value, "delta")
             .or_else(|| json_string_field(value, "partial_json"))
             .unwrap_or_default()
@@ -1039,13 +1101,15 @@ fn extract_usage(value: &JsonValue) -> Option<ChatGptUsage> {
     let input_tokens = number_field(usage, &["input_tokens", "prompt_tokens", "inputTokens"])?;
     let output_tokens = number_field(
         usage,
-        &["output_tokens", "completion_tokens", "outputTokens", "candidates_token_count"],
+        &[
+            "output_tokens",
+            "completion_tokens",
+            "outputTokens",
+            "candidates_token_count",
+        ],
     )?;
-    let total_tokens = number_field(
-        usage,
-        &["total_tokens", "totalTokens", "total_token_count"],
-    )
-    .unwrap_or(input_tokens.saturating_add(output_tokens));
+    let total_tokens = number_field(usage, &["total_tokens", "totalTokens", "total_token_count"])
+        .unwrap_or(input_tokens.saturating_add(output_tokens));
     Some(ChatGptUsage {
         input_tokens,
         output_tokens,
@@ -1176,6 +1240,22 @@ mod tests {
                         },
                     ],
                 },
+                ChatGptMessage {
+                    role: ChatGptMessageRole::Assistant,
+                    content: vec![ChatGptContentBlock::ToolCall {
+                        id: "call_2".to_string(),
+                        name: "list_files".to_string(),
+                        arguments_json: String::new(),
+                    }],
+                },
+                ChatGptMessage {
+                    role: ChatGptMessageRole::Tool,
+                    content: vec![ChatGptContentBlock::ToolResult {
+                        tool_call_id: "call_2".to_string(),
+                        content: "[]".to_string(),
+                        is_error: false,
+                    }],
+                },
             ],
             model: ChatGptModel::O4Mini,
             max_output_tokens: 1234,
@@ -1194,7 +1274,7 @@ mod tests {
                 .get("originator")
                 .and_then(|values| values.first())
                 .map(String::as_str),
-            Some("zed")
+            Some("makepad-studio")
         );
         assert_eq!(
             http.headers
@@ -1210,13 +1290,25 @@ mod tests {
                 .map(String::as_str),
             Some("acct_123")
         );
-        let body = http.get_string_body().unwrap();
+        let body = http
+            .body
+            .as_ref()
+            .map(|body| String::from_utf8_lossy(body).to_string())
+            .unwrap();
         assert!(body.contains("\"store\":false"));
         assert!(body.contains("\"model\":\"o4-mini\""));
         assert!(body.contains("\"instructions\":\"system one\""));
         assert!(body.contains("\"tool_choice\":\"auto\""));
         assert!(!body.contains("\"max_output_tokens\""));
         assert!(body.contains("\"temperature\":0.2"));
+        assert!(body.contains("\"type\":\"function_call\",\"call_id\":\"call_1\""));
+        assert!(body.contains("\"name\":\"read_file\""));
+        assert!(body.contains("\"arguments\":\"{\\\"path\\\":\\\"src/lib.rs\\\"}\""));
+        assert!(body.contains("\"type\":\"function_call\",\"call_id\":\"call_2\""));
+        assert!(body.contains("\"arguments\":\"{}\""));
+        assert!(body.contains("\"type\":\"function_call_output\",\"call_id\":\"call_2\""));
+        assert!(!body.contains("\"is_error\""));
+        assert!(!body.contains("\"type\":\"tool_call\""));
     }
 
     #[test]
@@ -1294,7 +1386,10 @@ mod tests {
         let turn = state.finalize().unwrap();
         assert_eq!(turn.text, "hello");
         assert_eq!(turn.tool_calls.len(), 1);
-        assert!(matches!(turn.finish_reason, Some(ChatGptFinishReason::ToolUse)));
+        assert!(matches!(
+            turn.finish_reason,
+            Some(ChatGptFinishReason::ToolUse)
+        ));
         assert_eq!(turn.usage.unwrap().total_tokens, 3);
     }
 }
