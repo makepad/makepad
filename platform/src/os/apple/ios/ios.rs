@@ -1016,11 +1016,9 @@ impl Cx {
                 }
                 CxOsOp::ShowTextIME(area, pos, config) => {
                     let window_id = CxWindowPool::id_zero();
-                    let region = area.clipped_rect(self);
-                    let caret = region.pos + pos;
-                    let region = self.windows[window_id].layout_rect_to_native_points(region);
+                    let caret = area.clipped_rect(self).pos + pos;
                     let caret = self.windows[window_id].layout_vec2d_to_native_points(caret);
-                    IosApp::set_ime_position(region, caret);
+                    IosApp::set_ime_position(caret);
                     IosApp::configure_keyboard(&config);
                     IosApp::show_keyboard();
                 }

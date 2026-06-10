@@ -171,7 +171,7 @@ fn is_keycommand_nav_key(key_code: KeyCode) -> bool {
 
 fn text_input_is_first_responder() -> bool {
     try_with_ios_app(|app| {
-        app.text_input_view
+        app.makepad_text_view
             .map(|view| unsafe {
                 let is_fr: BOOL = msg_send![view, isFirstResponder];
                 is_fr == YES

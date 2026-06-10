@@ -112,6 +112,7 @@ pub struct IosClasses {
     pub text_range: *const Class,
     pub text_selection_rect: *const Class,
     pub text_input_view: *const Class,
+    pub makepad_text_view: *const Class,
 }
 impl IosClasses {
     pub fn new() -> Self {
@@ -130,6 +131,7 @@ impl IosClasses {
             text_range: define_makepad_text_range(),
             text_selection_rect: define_makepad_selection_rect(),
             text_input_view: define_text_input_view(),
+            makepad_text_view: define_makepad_text_view(),
         }
     }
 }
@@ -170,6 +172,9 @@ pub struct IosApp {
     pub mtk_view: Option<ObjcId>,
     /// UITextInput view for IME support
     pub text_input_view: Option<ObjcId>,
+    /// SPIKE: real UITextView client, to test whether iOS grants the native
+    /// language HUD + full input-mode cycle. Focused by show_keyboard.
+    pub makepad_text_view: Option<ObjcId>,
     /// IME candidate window position
     pub ime_position: Option<DVec2>,
     event_callback: Option<Box<dyn FnMut(IosEvent) -> EventFlow>>,
@@ -216,6 +221,7 @@ impl IosApp {
                 first_draw: true,
                 mtk_view: None,
                 text_input_view: None,
+                makepad_text_view: None,
                 ime_position: None,
                 time_start: Instant::now(),
                 timer_delegate_instance: msg_send![get_ios_class_global().timer_delegate, new],
@@ -360,6 +366,40 @@ impl IosApp {
             }
             let () = msg_send![mtk_view_obj, addSubview: text_input_view];
 
+            // SPIKE: a real UITextView client, to test whether iOS grants the
+            // native language HUD + full input-mode cycle. Invisible (clear
+            // text/caret/bg), real on-screen frame, pointInside=NO so touches pass
+            // through to makepad. show_keyboard focuses this instead of the proxy.
+            let mtk_bounds: NSRect = msg_send![mtk_view_obj, bounds];
+            let makepad_text_view: ObjcId =
+                msg_send![get_ios_class_global().makepad_text_view, alloc];
+            let makepad_text_view: ObjcId =
+                msg_send![makepad_text_view, initWithFrame: mtk_bounds];
+            (*makepad_text_view).set_ivar::<f64>("ime_pos_x", 0.0);
+            (*makepad_text_view).set_ivar::<f64>("ime_pos_y", 0.0);
+            (*makepad_text_view).set_ivar::<bool>("_is_multiline", false);
+            (*makepad_text_view).set_ivar::<BOOL>("programmatic_update", NO);
+            let () = msg_send![makepad_text_view, setBackgroundColor: clear_color];
+            let () = msg_send![makepad_text_view, setTextColor: clear_color];
+            // tintColor also colors the CJK candidate bar's highlighted candidate, so a
+            // clear tint made it white-on-white. Real tint here; the caret tintColor would
+            // also show is hidden via a zero-width caretRectForPosition.
+            let tint: ObjcId = msg_send![class!(UIColor), systemBlueColor];
+            let () = msg_send![makepad_text_view, setTintColor: tint];
+            let () = msg_send![makepad_text_view, setOpaque: NO];
+            let () = msg_send![makepad_text_view, setScrollEnabled: NO];
+            let () = msg_send![makepad_text_view, setClipsToBounds: YES];
+            // Drop the red misspelling underline; makepad renders the text, so the
+            // text view's own spellcheck decoration would just be a floating artifact.
+            let () = msg_send![makepad_text_view, setSpellCheckingType: 1i64];
+            let () = msg_send![makepad_text_view, setDelegate: makepad_text_view];
+            let responds_to_focus_effect_tv: BOOL =
+                msg_send![makepad_text_view, respondsToSelector: sel!(setFocusEffect:)];
+            if responds_to_focus_effect_tv == YES {
+                let () = msg_send![makepad_text_view, setFocusEffect: nil];
+            }
+            let () = msg_send![mtk_view_obj, addSubview: makepad_text_view];
+
             // No UITextInteraction needed: arrow nav and auto-repeat come from
             // UIKeyCommand (see key_commands in ios_text_input.rs).
 
@@ -451,6 +491,7 @@ impl IosApp {
             }
 
             self.text_input_view = Some(text_input_view);
+            self.makepad_text_view = Some(makepad_text_view);
             self.mtk_view = Some(mtk_view_obj);
         }
     }
@@ -723,7 +764,7 @@ impl IosApp {
                             return None;
                         }
 
-                        let view = if let Some(text_input_view) = app.text_input_view {
+                        let view = if let Some(view) = app.makepad_text_view {
                             unsafe {
                                 let kb_type: i64 = match config.soft_keyboard.input_mode {
                                     InputMode::None => UI_KEYBOARD_TYPE_DEFAULT,
@@ -746,8 +787,10 @@ impl IosApp {
                                     AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
                                 };
 
+                                // A real UITextView adapts autocorrect to the active
+                                // input mode (incl. CJK) itself, so Default is Default.
                                 let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
-                                    AutoCorrect::Default => -1,
+                                    AutoCorrect::Default => UI_TEXT_AUTOCORRECTION_DEFAULT,
                                     AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
                                     AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
                                 };
@@ -769,18 +812,15 @@ impl IosApp {
                                     ReturnKeyType::Previous => UI_RETURN_KEY_DEFAULT,
                                 };
 
-                                (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
-                                (*text_input_view)
-                                    .set_ivar::<i64>("_autocapitalization_type", autocap_type);
-                                (*text_input_view)
-                                    .set_ivar::<i64>("_autocorrection_type", autocorrect_type);
-                                (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
-                                (*text_input_view)
-                                    .set_ivar::<bool>("_secure_text_entry", config.is_secure);
-                                (*text_input_view)
-                                    .set_ivar::<bool>("_is_multiline", config.is_multiline);
+                                let secure: BOOL = if config.is_secure { YES } else { NO };
+                                let () = msg_send![view, setKeyboardType: kb_type];
+                                let () = msg_send![view, setAutocapitalizationType: autocap_type];
+                                let () = msg_send![view, setAutocorrectionType: autocorrect_type];
+                                let () = msg_send![view, setReturnKeyType: return_type];
+                                let () = msg_send![view, setSecureTextEntry: secure];
+                                (*view).set_ivar::<bool>("_is_multiline", config.is_multiline);
                             }
-                            Some(text_input_view)
+                            Some(view)
                         } else {
                             None
                         };
@@ -810,7 +850,7 @@ impl IosApp {
             .try_with(|app| {
                 app.try_borrow()
                     .ok()
-                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
             })
             .ok()
             .flatten();
@@ -828,7 +868,7 @@ impl IosApp {
             .try_with(|app| {
                 app.try_borrow()
                     .ok()
-                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
             })
             .ok()
             .flatten();
@@ -838,25 +878,21 @@ impl IosApp {
         }
     }
 
-    pub fn set_ime_position(region: Rect, caret: DVec2) {
-        // Frame the proxy to the whole editable region (MTKView-local native
-        // points) so iOS treats it as a real text field: this drives the input
-        // mode list, the language HUD, and Scribble/handwriting targeting, and
-        // stops the FKA focus indicator from rendering as a thin caret over the
-        // glyph. caret is the caret-glyph bottom; store it region-local so the
-        // accent/candidate popup still anchors at the real caret.
+    pub fn set_ime_position(caret: DVec2) {
+        // Short sliver at the caret line, not the full box: a tall frame drops the
+        // first candidate in multiline. 1pt wide + opaque so the HUD pill still shows.
         let frame = NSRect {
             origin: NSPoint {
-                x: region.pos.x,
-                y: region.pos.y,
+                x: caret.x,
+                y: caret.y - IOS_TEXT_INPUT_TARGET_HEIGHT,
             },
             size: NSSize {
-                width: region.size.x.max(1.0),
-                height: region.size.y.max(1.0),
+                width: 1.0,
+                height: IOS_TEXT_INPUT_TARGET_HEIGHT,
             },
         };
-        let local_x = caret.x - region.pos.x;
-        let local_y = caret.y - region.pos.y;
+        let local_x = 0.0;
+        let local_y = IOS_TEXT_INPUT_TARGET_HEIGHT;
 
         // Extract the view pointer inside the borrow, then message UIKit after the
         // borrow is dropped, so a re-entrant IOS_APP borrow can never silently skip
@@ -870,7 +906,7 @@ impl IosApp {
                     if app.ime_position == Some(caret) {
                         return None;
                     }
-                    let view = app.text_input_view?;
+                    let view = app.makepad_text_view?;
                     app.ime_position = Some(caret);
                     Some(view)
                 })
@@ -888,7 +924,9 @@ impl IosApp {
     }
 
     pub fn set_ime_text(text: String, selection_start: usize, selection_end: usize) {
-        // Convert character selection indices to UTF-16 code units for NSString indexing.
+        // Push makepad's text + selection into the UITextView. char offsets → UTF-16
+        // for NSRange. The programmatic_update guard makes the delegate callbacks
+        // this triggers skip forwarding the change back to makepad (no echo loop).
         let selection_start_utf16: usize = text
             .chars()
             .take(selection_start)
@@ -900,80 +938,29 @@ impl IosApp {
             .map(|c| c.len_utf16())
             .sum();
 
-        // Extract the view pointer inside the borrow, then do ALL UIKit/ObjC
-        // messaging outside the borrow. The inputDelegate notifications
-        // (textWillChange, textDidChange, etc.) can synchronously trigger
-        // UITextInput callbacks that re-enter IOS_APP.
         let view = IOS_APP
             .try_with(|app| {
                 app.try_borrow()
                     .ok()
-                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+                    .and_then(|app_ref| app_ref.as_ref()?.makepad_text_view)
             })
             .ok()
             .flatten();
 
-        let Some(text_input_view) = view else {
+        let Some(view) = view else {
             return;
         };
 
         unsafe {
-            // Get inputDelegate for notifications - this is critical for iOS
-            // to know the text/cursor has changed (needed for autocorrect positioning)
-            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
-
-            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", YES);
-
-            // Notify BEFORE changes
-            if input_delegate != nil {
-                let () = msg_send![input_delegate, textWillChange: text_input_view];
-                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
-            }
-
-            // Get or create text buffer
-            let buffer: ObjcId = *(*text_input_view).get_ivar("textBuffer");
-            let buffer = if buffer != nil {
-                buffer
-            } else {
-                let new_buffer: ObjcId = msg_send![class!(NSMutableString), alloc];
-                let new_buffer: ObjcId = msg_send![new_buffer, init];
-                (*text_input_view).set_ivar("textBuffer", new_buffer);
-                new_buffer
-            };
-
-            // Clear existing content
-            let len: u64 = msg_send![buffer, length];
-            if len > 0 {
-                let range = NSRange {
-                    location: 0,
-                    length: len,
-                };
-                let () = msg_send![buffer, deleteCharactersInRange: range];
-            }
-
-            // Set new content
+            (*view).set_ivar::<BOOL>("programmatic_update", YES);
             let ns_text = str_to_nsstring(&text);
-            let () = msg_send![buffer, appendString: ns_text];
-
-            // Set cursor position and selection (UTF-16 indices)
-            (*text_input_view).set_ivar("cursorPosition", selection_end_utf16 as i64);
-            (*text_input_view).set_ivar("selectionStart", selection_start_utf16 as i64);
-            (*text_input_view).set_ivar("selectionEnd", selection_end_utf16 as i64);
-            (*text_input_view).set_ivar("markedTextStart", 0i64);
-            let marked_text: ObjcId = *(*text_input_view).get_ivar("markedText");
-            if marked_text != nil {
-                let mutable_string: ObjcId = msg_send![marked_text, mutableString];
-                let empty = str_to_nsstring("");
-                let () = msg_send![mutable_string, setString: empty];
-            }
-
-            // Notify AFTER changes (CRITICAL for autocorrect positioning)
-            if input_delegate != nil {
-                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
-                let () = msg_send![input_delegate, textDidChange: text_input_view];
-            }
-
-            (*text_input_view).set_ivar::<BOOL>("suppress_system_selection_changes", NO);
+            let () = msg_send![view, setText: ns_text];
+            let range = NSRange {
+                location: selection_start_utf16 as u64,
+                length: selection_end_utf16.saturating_sub(selection_start_utf16) as u64,
+            };
+            let () = msg_send![view, setSelectedRange: range];
+            (*view).set_ivar::<BOOL>("programmatic_update", NO);
         }
     }
 
