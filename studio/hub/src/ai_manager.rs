@@ -16,7 +16,7 @@ use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
 };
 use providers::AiProviderKind;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -3171,6 +3171,7 @@ fn forward_runtime_events(
 }
 
 fn prune_history(history: &[ConversationItem]) -> Vec<ConversationItem> {
+    let history = sanitize_conversation_history(history.to_vec());
     let mut pruned = Vec::new();
     let mut total_chars = 0;
     for item in history.iter().rev() {
@@ -3646,15 +3647,47 @@ fn render_system_prompt(
 }
 
 fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
-    history
-        .into_iter()
-        .filter(|item| match item {
-            ConversationItem::Assistant { text, tool_calls } => {
-                !is_empty_assistant_turn(text, tool_calls)
-            }
-            _ => true,
+    let completed_tool_call_ids = history
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
         })
-        .collect()
+        .collect::<HashSet<_>>();
+    let mut retained_tool_call_ids = HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for item in history {
+        match item {
+            ConversationItem::Assistant { text, tool_calls } => {
+                let tool_calls = tool_calls
+                    .into_iter()
+                    .filter(|tool_call| completed_tool_call_ids.contains(&tool_call.id))
+                    .collect::<Vec<_>>();
+                if is_empty_assistant_turn(&text, &tool_calls) {
+                    continue;
+                }
+                for tool_call in &tool_calls {
+                    retained_tool_call_ids.insert(tool_call.id.clone());
+                }
+                sanitized.push(ConversationItem::Assistant { text, tool_calls });
+            }
+            ConversationItem::ToolResult {
+                tool_call_id,
+                content,
+            } => {
+                if retained_tool_call_ids.contains(&tool_call_id) {
+                    sanitized.push(ConversationItem::ToolResult {
+                        tool_call_id,
+                        content,
+                    });
+                }
+            }
+            item => sanitized.push(item),
+        }
+    }
+
+    sanitized
 }
 
 fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
@@ -5832,6 +5865,98 @@ mod tests {
         assert!(!body.contains("\"role\":\"assistant\",\"content\":\"\""));
         assert!(body.contains("\"content\":\"hello\""));
         assert!(body.contains("\"content\":\"again\""));
+    }
+
+    #[test]
+    fn request_body_drops_unresolved_tool_calls() {
+        let backend = AiBackendConfig {
+            id: LOCAL_BACKEND_ID.to_string(),
+            label: String::new(),
+            detail: String::new(),
+            url: DEFAULT_LOCAL_BASE_URL.to_string(),
+            model: String::new(),
+            api_key: None,
+            chatgpt: None,
+            configured: true,
+            configuration_url: None,
+            configuration_hint: None,
+            disable_thinking_via_chat_template: false,
+        };
+        let history = vec![
+            ConversationItem::User {
+                text: "spawn a planner".to_string(),
+            },
+            ConversationItem::Assistant {
+                text: "I will ask a planner.".to_string(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_missing".to_string(),
+                    name: "spawn_subagent".to_string(),
+                    arguments_json: r#"{"role":"planner","task":"make a plan"}"#.to_string(),
+                }],
+            },
+            ConversationItem::User {
+                text: "try again".to_string(),
+            },
+        ];
+
+        let body = build_request_body(&backend, "repo", "/tmp/repo", &history, None, None, &[]);
+
+        assert!(body.contains("\"content\":\"I will ask a planner.\""));
+        assert!(!body.contains("call_missing"));
+        assert!(!body.contains("\"tool_calls\""));
+        assert!(body.contains("\"content\":\"try again\""));
+    }
+
+    #[test]
+    fn chatgpt_request_drops_unresolved_tool_calls() {
+        let backend = AiBackendConfig {
+            id: CHATGPT_BACKEND_ID.to_string(),
+            label: String::new(),
+            detail: String::new(),
+            url: String::new(),
+            model: DEFAULT_CHATGPT_MODEL.to_string(),
+            api_key: None,
+            chatgpt: None,
+            configured: true,
+            configuration_url: None,
+            configuration_hint: None,
+            disable_thinking_via_chat_template: false,
+        };
+        let history = vec![
+            ConversationItem::User {
+                text: "spawn a planner".to_string(),
+            },
+            ConversationItem::Assistant {
+                text: "I will ask a planner.".to_string(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_missing".to_string(),
+                    name: "spawn_subagent".to_string(),
+                    arguments_json: r#"{"role":"planner","task":"make a plan"}"#.to_string(),
+                }],
+            },
+            ConversationItem::User {
+                text: "try again".to_string(),
+            },
+        ];
+
+        let request =
+            build_chatgpt_request(&backend, "repo", "/tmp/repo", &history, None, None, &[])
+                .unwrap();
+
+        assert!(request.messages.iter().any(|message| {
+            matches!(message.role, ChatGptMessageRole::Assistant)
+                && message.text() == "I will ask a planner."
+                && message
+                    .content
+                    .iter()
+                    .all(|block| matches!(block, ChatGptContentBlock::Text { .. }))
+        }));
+        assert!(!request.messages.iter().any(|message| {
+            message.content.iter().any(|block| match block {
+                ChatGptContentBlock::ToolCall { id, .. } => id == "call_missing",
+                _ => false,
+            })
+        }));
     }
 
     #[test]
