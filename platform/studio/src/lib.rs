@@ -7,6 +7,7 @@ pub use mouse::{KeyModifiers, MouseButton};
 pub use shared_framebuf::*;
 pub use studio::*;
 
+pub mod ai_format;
 pub mod cursor;
 pub mod hub_protocol;
 pub mod keyboard;

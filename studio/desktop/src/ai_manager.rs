@@ -1,12 +1,13 @@
 use crate::{makepad_widgets::*, App};
+use makepad_studio_protocol::ai_format::{
+    parse_json_bool_field, parse_json_string_field, AI_TASK_EVENT_PREFIX,
+    AI_TERMINAL_OBSERVATION_PREFIX, AI_WAITING_MESSAGE_PREFIX,
+};
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiMessage, AiMessageRole, AiMountState, ClientToHub,
 };
 
 const AI_CHAT_SCROLL_SETTLE_FRAMES: u8 = 4;
-const AI_TASK_EVENT_PREFIX: &str = "TASK EVENT:";
-const AI_WAITING_MESSAGE_PREFIX: &str = "WAITING:";
-const AI_TERMINAL_OBSERVATION_PREFIX: &str = "TERMINAL OBSERVATION:";
 const AI_CHAT_COMPACT_MAX_CHARS: usize = 220;
 const AI_CHAT_ACTIVITY_MAX_CHARS: usize = 140;
 
@@ -305,23 +306,27 @@ impl App {
             .set_enabled(cx, !active_backend_configured);
         workspace
             .widget(cx, ids!(ai_backend_configure_button))
-            .set_text(cx, if active_backend_configured {
-                "Configured"
-            } else {
-                "Configure"
-            });
+            .set_text(
+                cx,
+                if active_backend_configured {
+                    "Configured"
+                } else {
+                    "Configure"
+                },
+            );
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace
                 .widget(cx, ids!(ai_chat_markdown))
                 .set_text(cx, &ai_chat_markdown(agent));
-            workspace
-                .label(cx, ids!(ai_status_label))
-                .set_text(cx, if active_backend_configured {
+            workspace.label(cx, ids!(ai_status_label)).set_text(
+                cx,
+                if active_backend_configured {
                     &agent.status
                 } else {
                     "Configure backend"
-                });
+                },
+            );
             workspace
                 .button(cx, ids!(ai_run_button))
                 .set_enabled(cx, active_backend_configured);
@@ -428,7 +433,6 @@ impl App {
         true
     }
 }
-
 
 fn ai_chat_markdown(agent: &AiAgentState) -> String {
     if agent.messages.is_empty() {
@@ -838,45 +842,6 @@ fn extract_code_block_body(text: &str) -> Option<&str> {
     Some(&body[..end])
 }
 
-fn parse_json_string_field<'a>(json: &'a str, field: &str) -> Option<String> {
-    let needle = format!("\"{}\":\"", field);
-    let start = json.find(&needle)? + needle.len();
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in json[start..].chars() {
-        if escaped {
-            out.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '"' => '"',
-                '\\' => '\\',
-                other => other,
-            });
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' => escaped = true,
-            '"' => return Some(out),
-            other => out.push(other),
-        }
-    }
-    None
-}
-
-fn parse_json_bool_field(json: &str, field: &str) -> Option<bool> {
-    let true_needle = format!("\"{}\":true", field);
-    if json.contains(&true_needle) {
-        return Some(true);
-    }
-    let false_needle = format!("\"{}\":false", field);
-    if json.contains(&false_needle) {
-        return Some(false);
-    }
-    None
-}
-
 fn truncate_inline(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
@@ -978,6 +943,43 @@ mod tests {
     use super::*;
     use makepad_studio_protocol::hub_protocol::{AiAgentSummary, AiBackendInfo};
 
+    fn test_agent_summary(
+        agent_id: AiAgentId,
+        title: &str,
+        message_count: usize,
+    ) -> AiAgentSummary {
+        AiAgentSummary {
+            agent_id,
+            title: title.to_string(),
+            backend_id: "local".to_string(),
+            status: "idle".to_string(),
+            pending: false,
+            updated_at: 0.0,
+            message_count,
+            parent_agent_id: None,
+            role: None,
+        }
+    }
+
+    fn test_agent_state(
+        agent_id: AiAgentId,
+        status: &str,
+        pending: bool,
+        messages: Vec<AiMessage>,
+    ) -> AiAgentState {
+        AiAgentState {
+            agent_id,
+            title: "Chat 1".to_string(),
+            backend_id: "local".to_string(),
+            status: status.to_string(),
+            pending,
+            messages,
+            parent_agent_id: None,
+            role: None,
+            subagents: Vec::new(),
+        }
+    }
+
     #[test]
     fn apply_local_prompt_echo_updates_visible_agent_immediately() {
         let agent_id = AiAgentId(7);
@@ -992,23 +994,8 @@ mod tests {
             }],
             active_backend_id: Some("local".to_string()),
             active_agent_id: Some(agent_id),
-            agents: vec![AiAgentSummary {
-                agent_id,
-                title: "Chat 1".to_string(),
-                backend_id: "local".to_string(),
-                status: "idle".to_string(),
-                pending: false,
-                updated_at: 0.0,
-                message_count: 0,
-            }],
-            active_agent: Some(AiAgentState {
-                agent_id,
-                title: "Chat 1".to_string(),
-                backend_id: "local".to_string(),
-                status: "idle".to_string(),
-                pending: false,
-                messages: Vec::new(),
-            }),
+            agents: vec![test_agent_summary(agent_id, "Chat 1", 0)],
+            active_agent: Some(test_agent_state(agent_id, "idle", false, Vec::new())),
             live_markdown: String::new(),
         };
 
@@ -1033,20 +1020,18 @@ mod tests {
 
     #[test]
     fn ai_chat_markdown_renders_waiting_messages_as_waiting() {
-        let agent = AiAgentState {
-            agent_id: AiAgentId(1),
-            title: "Chat 1".to_string(),
-            backend_id: "local".to_string(),
-            status: "thinking...".to_string(),
-            pending: true,
-            messages: vec![AiMessage {
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "thinking...",
+            true,
+            vec![AiMessage {
                 role: AiMessageRole::Thinking,
                 text: format!(
                     "{}waiting on `makepad/.makepad/hello-world-makepad.term`",
                     AI_WAITING_MESSAGE_PREFIX
                 ),
             }],
-        };
+        );
 
         let markdown = ai_chat_markdown(&agent);
         assert!(markdown.contains("> **Waiting**"));
@@ -1057,20 +1042,18 @@ mod tests {
 
     #[test]
     fn ai_chat_markdown_renders_terminal_observation_messages() {
-        let agent = AiAgentState {
-            agent_id: AiAgentId(1),
-            title: "Chat 1".to_string(),
-            backend_id: "local".to_string(),
-            status: "ready".to_string(),
-            pending: false,
-            messages: vec![AiMessage {
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "ready",
+            false,
+            vec![AiMessage {
                 role: AiMessageRole::System,
                 text: format!(
                     "{} makepad/.makepad/manual-codex.term\nMode: working\nCodex status: Working (3s)",
                     AI_TERMINAL_OBSERVATION_PREFIX
                 ),
             }],
-        };
+        );
 
         let markdown = ai_chat_markdown(&agent);
         assert!(markdown.contains("> **Observation**"));
@@ -1096,13 +1079,11 @@ mod tests {
 
     #[test]
     fn ai_chat_markdown_groups_activity_before_assistant() {
-        let agent = AiAgentState {
-            agent_id: AiAgentId(1),
-            title: "Chat 1".to_string(),
-            backend_id: "local".to_string(),
-            status: "ready".to_string(),
-            pending: false,
-            messages: vec![
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "ready",
+            false,
+            vec![
                 AiMessage {
                     role: AiMessageRole::User,
                     text: "add a button".to_string(),
@@ -1124,7 +1105,7 @@ mod tests {
                     text: "Done.".to_string(),
                 },
             ],
-        };
+        );
 
         let markdown = ai_chat_markdown(&agent);
         assert!(markdown.contains("### User"));
@@ -1145,14 +1126,7 @@ mod tests {
                 text: format!("thought line {}", index),
             });
         }
-        let agent = AiAgentState {
-            agent_id: AiAgentId(1),
-            title: "Chat 1".to_string(),
-            backend_id: "local".to_string(),
-            status: "thinking...".to_string(),
-            pending: true,
-            messages,
-        };
+        let agent = test_agent_state(AiAgentId(1), "thinking...", true, messages);
 
         let markdown = ai_chat_markdown(&agent);
         assert!(!markdown.contains("more"));
@@ -1165,36 +1139,41 @@ fn ai_swarm_tree_markdown(state: &AiMountState) -> String {
     if state.agents.is_empty() {
         return "_No active swarm._".to_string();
     }
-    
+
     let mut markdown = String::new();
-    
+
     let roots: Vec<_> = state
         .agents
         .iter()
         .filter(|agent| agent.parent_agent_id.is_none())
         .collect();
-        
+
     for root in roots {
         render_agent_node(&mut markdown, root, state, 0);
     }
-    
+
     markdown
 }
 
-fn render_agent_node(markdown: &mut String, agent: &AiAgentSummary, state: &AiMountState, depth: usize) {
+fn render_agent_node(
+    markdown: &mut String,
+    agent: &AiAgentSummary,
+    state: &AiMountState,
+    depth: usize,
+) {
     let indent = if depth == 0 {
         "".to_string()
     } else {
         format!("{}└─ ", "  ".repeat(depth - 1))
     };
-    
+
     let is_active = state.active_agent_id == Some(agent.agent_id);
     let title_fmt = if is_active {
         format!("**{}** (active)", agent.title)
     } else {
         agent.title.clone()
     };
-    
+
     let status_fmt = if agent.pending {
         " [thinking]"
     } else if agent.status == "completed" {
@@ -1202,15 +1181,15 @@ fn render_agent_node(markdown: &mut String, agent: &AiAgentSummary, state: &AiMo
     } else {
         ""
     };
-    
+
     markdown.push_str(&format!("{}- {}{}\n", indent, title_fmt, status_fmt));
-    
+
     let children: Vec<_> = state
         .agents
         .iter()
         .filter(|a| a.parent_agent_id == Some(agent.agent_id))
         .collect();
-        
+
     for child in children {
         render_agent_node(markdown, child, state, depth + 1);
     }

@@ -8,6 +8,10 @@ use makepad_chatgpt_provider::{
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::{NetworkConfig, NetworkResponse, NetworkRuntime};
+use makepad_studio_protocol::ai_format::{
+    parse_json_string_field, AI_TASK_EVENT_PREFIX, AI_TERMINAL_OBSERVATION_PREFIX,
+    AI_WAITING_MESSAGE_PREFIX,
+};
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
 };
@@ -45,9 +49,6 @@ const DEFAULT_BASH_TIMEOUT_SECS: u64 = 20;
 const MAX_BASH_TIMEOUT_SECS: u64 = 120;
 const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../ai_mgr.md");
 const AI_CHAT_PERSIST_FS_SUPPRESS: Duration = Duration::from_millis(1_500);
-const AI_TASK_EVENT_PREFIX: &str = "TASK EVENT:";
-const AI_WAITING_MESSAGE_PREFIX: &str = "WAITING:";
-const AI_TERMINAL_OBSERVATION_PREFIX: &str = "TERMINAL OBSERVATION:";
 const AI_TERMINAL_EXCERPT_MAX_CHARS: usize = 480;
 const AI_TERMINAL_EXCERPT_MAX_LINES: usize = 10;
 
@@ -4962,33 +4963,6 @@ fn matches_expected_path(path: &str, expected_paths: &[String]) -> bool {
     expected_paths.iter().any(|expected| {
         path == expected || path.ends_with(&format!("/{}", expected)) || expected.ends_with(path)
     })
-}
-
-fn parse_json_string_field(json: &str, field: &str) -> Option<String> {
-    let needle = format!("\"{}\":\"", field);
-    let start = json.find(&needle)? + needle.len();
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in json[start..].chars() {
-        if escaped {
-            out.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '"' => '"',
-                '\\' => '\\',
-                other => other,
-            });
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' => escaped = true,
-            '"' => return Some(out),
-            other => out.push(other),
-        }
-    }
-    None
 }
 
 fn terminal_display_name(path: &str) -> String {
