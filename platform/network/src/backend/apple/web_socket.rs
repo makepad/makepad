@@ -156,7 +156,15 @@ impl AppleWebSocket {
                             let data: ObjcId = msg_send![message, data];
                             let bytes: *const u8 = msg_send![data, bytes];
                             let length: usize = msg_send![data, length];
-                            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                            // `-[NSData bytes]` returns NULL for an empty frame;
+                            // `from_raw_parts` with a null pointer trips Rust's
+                            // pointer precondition check and aborts. Treat an
+                            // empty binary frame as an empty slice.
+                            let data_bytes: &[u8] = if bytes.is_null() {
+                                &[]
+                            } else {
+                                std::slice::from_raw_parts(bytes, length)
+                            };
                             let _ = rx_sender.send(WebSocketMessage::Binary(data_bytes.to_vec()));
                         } else {
                             let text: ObjcId = msg_send![message, string];
