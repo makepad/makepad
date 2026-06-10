@@ -1,6 +1,6 @@
 use crate::{makepad_widgets::*, App};
 use makepad_studio_protocol::hub_protocol::{
-    AiAgentId, AiAgentState, AiMessage, AiMessageRole, AiMountState, ClientToHub,
+    AiAgentId, AiAgentState, AiAgentSummary, AiMessage, AiMessageRole, AiMountState, ClientToHub,
 };
 
 const AI_CHAT_SCROLL_SETTLE_FRAMES: u8 = 4;
@@ -83,6 +83,21 @@ impl App {
         });
     }
 
+    pub(super) fn select_ai_manager_backend(&mut self, mount: &str, index: usize) {
+        let Some(backend_id) = self
+            .mount_state(mount)
+            .and_then(|state| state.ai_state.as_ref())
+            .and_then(|state| state.backends.get(index))
+            .map(|backend| backend.id.clone())
+        else {
+            return;
+        };
+        let _ = self.send_studio(ClientToHub::AiSetBackend {
+            mount: mount.to_string(),
+            backend_id,
+        });
+    }
+
     pub(super) fn send_ai_manager_prompt(&mut self, cx: &mut Cx, mount: &str) {
         let Some(workspace) = self.mount_workspace_widget(cx, mount) else {
             return;
@@ -160,6 +175,15 @@ impl App {
                 .unwrap_or("_No live AI state yet._"),
         );
 
+        workspace.widget(cx, ids!(ai_swarm_markdown)).set_text(
+            cx,
+            &self
+                .mount_state(&active_mount)
+                .and_then(|mount| mount.ai_state.as_ref())
+                .map(|state| ai_swarm_tree_markdown(state))
+                .unwrap_or_else(|| "_No active swarm._".to_string()),
+        );
+
         let Some(state) = self
             .mount_state(&active_mount)
             .and_then(|mount| mount.ai_state.as_ref())
@@ -169,6 +193,12 @@ impl App {
                 .set_labels(cx, vec!["Loading AI...".to_string()]);
             workspace
                 .drop_down(cx, ids!(ai_agent_dropdown))
+                .set_selected_item(cx, 0);
+            workspace
+                .drop_down(cx, ids!(ai_backend_dropdown))
+                .set_labels(cx, vec!["Loading backends...".to_string()]);
+            workspace
+                .drop_down(cx, ids!(ai_backend_dropdown))
                 .set_selected_item(cx, 0);
             workspace
                 .widget(cx, ids!(ai_chat_markdown))
@@ -209,6 +239,34 @@ impl App {
         workspace
             .drop_down(cx, ids!(ai_agent_dropdown))
             .set_selected_item(cx, agent_selected);
+
+        let backend_labels = state
+            .backends
+            .iter()
+            .map(|backend| {
+                if !backend.detail.is_empty() {
+                    format!("{} ({})", backend.label, backend.detail)
+                } else {
+                    backend.label.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let backend_selected = state
+            .active_backend_id
+            .as_ref()
+            .and_then(|active_id| {
+                state
+                    .backends
+                    .iter()
+                    .position(|backend| &backend.id == active_id)
+            })
+            .unwrap_or(0);
+        workspace
+            .drop_down(cx, ids!(ai_backend_dropdown))
+            .set_labels(cx, non_empty_labels(backend_labels, "local"));
+        workspace
+            .drop_down(cx, ids!(ai_backend_dropdown))
+            .set_selected_item(cx, backend_selected);
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace
@@ -1050,5 +1108,60 @@ mod tests {
         assert!(!markdown.contains("more"));
         assert_eq!(markdown.matches("```runsplash").count(), 8);
         assert!(markdown.contains("thought line 7"));
+    }
+}
+
+fn ai_swarm_tree_markdown(state: &AiMountState) -> String {
+    if state.agents.is_empty() {
+        return "_No active swarm._".to_string();
+    }
+    
+    let mut markdown = String::new();
+    
+    let roots: Vec<_> = state
+        .agents
+        .iter()
+        .filter(|agent| agent.parent_agent_id.is_none())
+        .collect();
+        
+    for root in roots {
+        render_agent_node(&mut markdown, root, state, 0);
+    }
+    
+    markdown
+}
+
+fn render_agent_node(markdown: &mut String, agent: &AiAgentSummary, state: &AiMountState, depth: usize) {
+    let indent = if depth == 0 {
+        "".to_string()
+    } else {
+        format!("{}└─ ", "  ".repeat(depth - 1))
+    };
+    
+    let is_active = state.active_agent_id == Some(agent.agent_id);
+    let title_fmt = if is_active {
+        format!("**{}** (active)", agent.title)
+    } else {
+        agent.title.clone()
+    };
+    
+    let status_fmt = if agent.pending {
+        " [thinking]"
+    } else if agent.status == "completed" {
+        " [completed]"
+    } else {
+        ""
+    };
+    
+    markdown.push_str(&format!("{}- {}{}\n", indent, title_fmt, status_fmt));
+    
+    let children: Vec<_> = state
+        .agents
+        .iter()
+        .filter(|a| a.parent_agent_id == Some(agent.agent_id))
+        .collect();
+        
+    for child in children {
+        render_agent_node(markdown, child, state, depth + 1);
     }
 }

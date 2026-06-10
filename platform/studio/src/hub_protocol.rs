@@ -663,6 +663,8 @@ pub struct AiAgentSummary {
     pub pending: bool,
     pub updated_at: f64,
     pub message_count: usize,
+    pub parent_agent_id: Option<AiAgentId>,
+    pub role: Option<String>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
@@ -673,6 +675,9 @@ pub struct AiAgentState {
     pub status: String,
     pub pending: bool,
     pub messages: Vec<AiMessage>,
+    pub parent_agent_id: Option<AiAgentId>,
+    pub role: Option<String>,
+    pub subagents: Vec<AiAgentId>,
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson)]

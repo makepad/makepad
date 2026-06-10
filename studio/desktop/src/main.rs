@@ -202,6 +202,12 @@ impl MatchEvent for App {
                 {
                     self.select_ai_manager_agent(&active_mount, index);
                 }
+                if let Some(index) = workspace
+                    .drop_down(cx, ids!(ai_backend_dropdown))
+                    .selected(actions)
+                {
+                    self.select_ai_manager_backend(&active_mount, index);
+                }
                 if workspace.button(cx, ids!(ai_new_button)).clicked(actions) {
                     self.create_ai_manager_agent(&active_mount);
                 }

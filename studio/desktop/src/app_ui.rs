@@ -283,26 +283,78 @@ script_mod! {
         RectView {
             width: Fill
             height: Fit
-            flow: Right
+            flow: Down
             spacing: theme.space_2
             padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 8.0}
             draw_bg +: {
                 color: theme.color_bg_highlight
             }
 
-            ai_agent_dropdown := DropDown {
+            View {
                 width: Fill
-                labels: ["Chat 1"]
+                height: Fit
+                flow: Right
+                spacing: theme.space_2
+
+                ai_agent_dropdown := DropDown {
+                    width: Fill
+                    labels: ["Chat 1"]
+                }
+
+                ai_new_button := ButtonFlat {
+                    width: 34.0
+                    text: "+"
+                }
+
+                ai_delete_button := ButtonFlat {
+                    width: 34.0
+                    text: "x"
+                }
             }
 
-            ai_new_button := ButtonFlat {
-                width: 34.0
-                text: "+"
+            View {
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: theme.space_2
+                align: Align {x: 0.0 y: 0.5}
+
+                Label {
+                    text: "Backend:"
+                    draw_text.color: theme.color_label_outer
+                }
+
+                ai_backend_dropdown := DropDown {
+                    width: Fill
+                    labels: ["local"]
+                }
+            }
+        }
+
+        RectView {
+            width: Fill
+            height: Fit
+            flow: Down
+            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 4.0}
+            draw_bg +: {
+                color: theme.color_bg_highlight
             }
 
-            ai_delete_button := ButtonFlat {
-                width: 34.0
-                text: "x"
+            Label {
+                text: "Swarm Tree"
+                draw_text.color: theme.color_label_outer
+            }
+
+            ai_swarm_scroll := ScrollYView {
+                width: Fill
+                height: 80.0
+                flow: Down
+                show_bg: true
+                padding: Inset {left: 8.0 right: 8.0 top: 6.0 bottom: 6.0}
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.76
+                }
+                ai_swarm_markdown := AiChatMarkdown {}
             }
         }
 

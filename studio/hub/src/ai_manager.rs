@@ -105,6 +105,10 @@ struct RunningAgent {
     messages: Vec<AiMessage>,
     history: Vec<ConversationItem>,
     updated_at: f64,
+    parent_agent_id: Option<AiAgentId>,
+    role: Option<String>,
+    task: Option<String>,
+    subagents: Vec<AiAgentId>,
 }
 
 struct MountAgents {
@@ -203,6 +207,10 @@ struct PersistedAiChat {
     updated_at: f64,
     messages: Vec<AiMessage>,
     history: Vec<ConversationItem>,
+    parent_agent_id: Option<AiAgentId>,
+    role: Option<String>,
+    task: Option<String>,
+    subagents: Option<Vec<AiAgentId>>,
 }
 
 #[derive(DeJson)]
@@ -366,6 +374,19 @@ struct SendTerminalKeyArgs {
     alt: Option<bool>,
 }
 
+#[derive(DeJson)]
+struct SpawnSubagentArgs {
+    role: String,
+    task: String,
+    model_override: Option<String>,
+}
+
+#[derive(DeJson)]
+struct CompleteTaskArgs {
+    summary: String,
+    success: bool,
+}
+
 struct AssistantTurn {
     text: String,
     thinking_text: String,
@@ -491,6 +512,10 @@ impl AiManager {
                 messages: Vec::new(),
                 history: Vec::new(),
                 updated_at: now_seconds(),
+                parent_agent_id: None,
+                role: None,
+                task: None,
+                subagents: Vec::new(),
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -503,6 +528,11 @@ impl AiManager {
         if let Some(mount_state) = self.mounts.get_mut(mount) {
             if let Some(agent) = mount_state.agents.remove(&agent_id) {
                 removed_pending = agent.pending_request_id;
+                if let Some(parent_id) = agent.parent_agent_id {
+                    if let Some(parent) = mount_state.agents.get_mut(&parent_id) {
+                        parent.subagents.retain(|id| *id != agent_id);
+                    }
+                }
             }
             mount_state.order.retain(|existing| *existing != agent_id);
             if mount_state.active_agent_id == Some(agent_id) {
@@ -1345,6 +1375,271 @@ impl AiManager {
         turn: AssistantTurn,
         visible: Option<StreamVisibleState>,
     ) -> Option<AiMountState> {
+        let mut spawn_subagent_call = None;
+        let mut complete_task_call = None;
+        for tool_call in &turn.tool_calls {
+            if tool_call.name == "spawn_subagent" {
+                spawn_subagent_call = Some(tool_call.clone());
+            } else if tool_call.name == "complete_task" {
+                complete_task_call = Some(tool_call.clone());
+            }
+        }
+
+        let mut pre_sub_id = None;
+        let mut pre_sub_run_token = None;
+        let mut pre_parent_run_token = None;
+        
+        if spawn_subagent_call.is_some() {
+            pre_sub_id = Some(self.alloc_agent_id());
+            pre_sub_run_token = Some(self.alloc_run_token());
+        }
+        if complete_task_call.is_some() {
+            pre_parent_run_token = Some(self.alloc_run_token());
+        }
+
+        if spawn_subagent_call.is_some() || complete_task_call.is_some() {
+            if let Some(mount_state) = self.mounts.get_mut(mount) {
+                let (parent_id, backend_id) = {
+                    if let Some(agent) = mount_state.agents.get(&agent_id) {
+                        if agent.run_token != run_token {
+                            return None;
+                        }
+                        (agent.parent_agent_id, agent.backend_id.clone())
+                    } else {
+                        return None;
+                    }
+                };
+
+                // Update the current agent first, scoped so the borrow finishes
+                {
+                    let agent = mount_state.agents.get_mut(&agent_id).unwrap();
+                    agent.pending_request_id = None;
+                    agent.updated_at = now_seconds();
+
+                    if let Some(mut visible) = visible {
+                        if turn.thinking_text.trim().is_empty() {
+                            if let Some(index) = visible.thinking_message_index {
+                                if index < agent.messages.len()
+                                    && matches!(agent.messages[index].role, AiMessageRole::Thinking)
+                                {
+                                    agent.messages.remove(index);
+                                    if let Some(assistant_index) = visible.assistant_message_index {
+                                        if assistant_index > index {
+                                            visible.assistant_message_index = Some(assistant_index - 1);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            upsert_stream_message(
+                                &mut agent.messages,
+                                visible.thinking_message_index,
+                                AiMessageRole::Thinking,
+                                &truncate_text(&turn.thinking_text, MAX_RESULT_CHARS),
+                            );
+                        }
+                        upsert_stream_message(
+                            &mut agent.messages,
+                            visible.assistant_message_index,
+                            AiMessageRole::Assistant,
+                            &truncate_text(&turn.text, MAX_RESULT_CHARS),
+                        );
+                    } else {
+                        if !turn.thinking_text.trim().is_empty() {
+                            agent.messages.push(AiMessage {
+                                role: AiMessageRole::Thinking,
+                                text: truncate_text(turn.thinking_text.trim(), MAX_RESULT_CHARS),
+                            });
+                        }
+                        if !turn.text.trim().is_empty() {
+                            agent.messages.push(AiMessage {
+                                role: AiMessageRole::Assistant,
+                                text: turn.text.clone(),
+                            });
+                        }
+                    }
+
+                    if let Some(call) = &spawn_subagent_call {
+                        let args = match SpawnSubagentArgs::deserialize_json(&call.arguments_json) {
+                            Ok(args) => args,
+                            Err(err) => {
+                                agent.history.push(ConversationItem::Assistant {
+                                    text: turn.text.clone(),
+                                    tool_calls: vec![call.clone()],
+                                });
+                                agent.messages.push(AiMessage {
+                                    role: AiMessageRole::ToolCall,
+                                    text: format_tool_call_message(call),
+                                });
+                                agent.history.push(ConversationItem::ToolResult {
+                                    tool_call_id: call.id.clone(),
+                                    content: format!("Deserialization error: {:?}", err),
+                                });
+                                agent.messages.push(AiMessage {
+                                    role: AiMessageRole::ToolResult,
+                                    text: format!("`spawn_subagent` failed: {:?}", err),
+                                });
+                                agent.status = "thinking...".to_string();
+                                self.persist_mount_state_best_effort(mount);
+                                self.start_model_request(mount, agent_id, run_token);
+                                return Some(self.snapshot(mount));
+                            }
+                        };
+
+                        let sub_id = pre_sub_id.unwrap();
+                        agent.history.push(ConversationItem::Assistant {
+                            text: turn.text.clone(),
+                            tool_calls: vec![call.clone()],
+                        });
+                        agent.messages.push(AiMessage {
+                            role: AiMessageRole::ToolCall,
+                            text: format_tool_call_message(call),
+                        });
+                        agent.subagents.push(sub_id);
+                        agent.status = format!("waiting for subagent: {}...", args.role);
+                    }
+
+                    if let Some(call) = &complete_task_call {
+                        let _args = match CompleteTaskArgs::deserialize_json(&call.arguments_json) {
+                            Ok(args) => args,
+                            Err(err) => {
+                                agent.history.push(ConversationItem::Assistant {
+                                    text: turn.text.clone(),
+                                    tool_calls: vec![call.clone()],
+                                });
+                                agent.messages.push(AiMessage {
+                                    role: AiMessageRole::ToolCall,
+                                    text: format_tool_call_message(call),
+                                });
+                                agent.history.push(ConversationItem::ToolResult {
+                                    tool_call_id: call.id.clone(),
+                                    content: format!("Deserialization error: {:?}", err),
+                                });
+                                agent.messages.push(AiMessage {
+                                    role: AiMessageRole::ToolResult,
+                                    text: format!("`complete_task` failed: {:?}", err),
+                                });
+                                agent.status = "thinking...".to_string();
+                                self.persist_mount_state_best_effort(mount);
+                                self.start_model_request(mount, agent_id, run_token);
+                                return Some(self.snapshot(mount));
+                            }
+                        };
+
+                        agent.history.push(ConversationItem::Assistant {
+                            text: turn.text.clone(),
+                            tool_calls: vec![call.clone()],
+                        });
+                        agent.messages.push(AiMessage {
+                            role: AiMessageRole::ToolCall,
+                            text: format_tool_call_message(call),
+                        });
+                        agent.history.push(ConversationItem::ToolResult {
+                            tool_call_id: call.id.clone(),
+                            content: "Task completed successfully. Returning control to parent.".to_string(),
+                        });
+                        agent.messages.push(AiMessage {
+                            role: AiMessageRole::ToolResult,
+                            text: "Task completed".to_string(),
+                        });
+                        agent.status = "completed".to_string();
+                    }
+                }
+
+                if let Some(call) = &spawn_subagent_call {
+                    let args = SpawnSubagentArgs::deserialize_json(&call.arguments_json).unwrap();
+                    let sub_id = pre_sub_id.unwrap();
+                    let sub_run_token = pre_sub_run_token.unwrap();
+                    let title = format!("{} Subagent", args.role);
+
+                    let sub_agent = RunningAgent {
+                        title: title.clone(),
+                        backend_id,
+                        status: "thinking...".to_string(),
+                        pending_request_id: None,
+                        pending_tool_batch: false,
+                        pending_tool_message_start: None,
+                        cancel_requested: false,
+                        run_token: sub_run_token,
+                        messages: vec![
+                            AiMessage {
+                                role: AiMessageRole::Thinking,
+                                text: String::new(),
+                            }
+                        ],
+                        history: Vec::new(),
+                        updated_at: now_seconds(),
+                        parent_agent_id: Some(agent_id),
+                        role: Some(args.role),
+                        task: Some(args.task),
+                        subagents: Vec::new(),
+                    };
+
+                    mount_state.order.push(sub_id);
+                    mount_state.agents.insert(sub_id, sub_agent);
+                    mount_state.active_agent_id = Some(sub_id);
+
+                    self.persist_mount_state_best_effort(mount);
+                    self.start_model_request(mount, sub_id, sub_run_token);
+                    return Some(self.snapshot(mount));
+                }
+
+                if let Some(call) = &complete_task_call {
+                    let args = CompleteTaskArgs::deserialize_json(&call.arguments_json).unwrap();
+                    let parent_run_token = pre_parent_run_token.unwrap();
+
+                    if let Some(parent_id) = parent_id {
+                        if let Some(parent) = mount_state.agents.get_mut(&parent_id) {
+                            let mut parent_tool_call_id = String::new();
+                            if let Some(ConversationItem::Assistant { tool_calls, .. }) = parent.history.last() {
+                                if let Some(tc) = tool_calls.iter().find(|tc| tc.name == "spawn_subagent") {
+                                    parent_tool_call_id = tc.id.clone();
+                                }
+                            }
+                            if parent_tool_call_id.is_empty() {
+                                parent_tool_call_id = "parent_call_id_placeholder".to_string();
+                            }
+
+                            let result_content = format!(
+                                "Subagent completed task. Success: {}. Summary: {}",
+                                args.success, args.summary
+                            );
+
+                            parent.history.push(ConversationItem::ToolResult {
+                                tool_call_id: parent_tool_call_id.clone(),
+                                content: result_content,
+                            });
+                            parent.messages.push(AiMessage {
+                                role: AiMessageRole::ToolResult,
+                                text: format!(
+                                    "`spawn_subagent` completed.\nSuccess: {}\nSummary: {}",
+                                    args.success, args.summary
+                                ),
+                            });
+                            
+                            mount_state.active_agent_id = Some(parent_id);
+                            parent.run_token = parent_run_token;
+                            parent.status = "thinking...".to_string();
+                            parent.messages.push(AiMessage {
+                                role: AiMessageRole::Thinking,
+                                text: String::new(),
+                            });
+
+                            self.persist_mount_state_best_effort(mount);
+                            self.start_model_request(mount, parent_id, parent_run_token);
+                            return Some(self.snapshot(mount));
+                        }
+                    }
+
+                    if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                        agent.status = "ready".to_string();
+                    }
+                    self.persist_mount_state_best_effort(mount);
+                    return Some(self.snapshot(mount));
+                }
+            }
+        }
+
         let mut tool_batch: Option<(PathBuf, Vec<ToolCallRecord>)> = None;
         let mut empty_assistant_response = false;
         let mut retry_empty_terminal_response = false;
@@ -1355,6 +1650,7 @@ impl AiManager {
                 }
                 agent.pending_request_id = None;
                 agent.updated_at = now_seconds();
+
                 let visible_message_start = visible
                     .as_ref()
                     .and_then(|visible| {
@@ -1619,6 +1915,10 @@ impl AiManager {
                 messages: Vec::new(),
                 history: Vec::new(),
                 updated_at: now_seconds(),
+                parent_agent_id: None,
+                role: None,
+                task: None,
+                subagents: Vec::new(),
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -1651,12 +1951,19 @@ impl AiManager {
     }
 
     fn start_model_request(&mut self, mount: &str, agent_id: AiAgentId, run_token: u64) {
-        let Some((backend, root_path, history)) = self.mounts.get(mount).and_then(|mount_state| {
+        let Some((backend, root_path, history, role, task, active_terminals)) = self.mounts.get(mount).and_then(|mount_state| {
             let agent = mount_state.agents.get(&agent_id)?;
+            let mut terms = Vec::new();
+            for (path, snap) in &mount_state.terminal_snapshots {
+                terms.push(format!("- `{}`: mode={}, summary='{}'", path, snap.mode, snap.summary));
+            }
             Some((
                 self.backend_by_id(&agent.backend_id)?.clone(),
                 mount_state.root_path.clone(),
                 agent.history.clone(),
+                agent.role.clone(),
+                agent.task.clone(),
+                terms,
             ))
         }) else {
             self.set_agent_error(mount, agent_id, "backend not available".to_string());
@@ -1664,7 +1971,7 @@ impl AiManager {
         };
 
         let request_id = LiveId::unique();
-        let body = build_request_body(&backend, mount, &root_path, &history);
+        let body = build_request_body(&backend, mount, &root_path, &history, role.as_deref(), task.as_deref(), &active_terminals);
 
         let mut request = HttpRequest::new(backend.url.clone(), HttpMethod::POST);
         request.set_is_streaming();
@@ -2238,6 +2545,8 @@ impl AiManager {
                     pending: agent.is_pending(),
                     updated_at: agent.updated_at,
                     message_count: agent.messages.len(),
+                    parent_agent_id: agent.parent_agent_id,
+                    role: agent.role.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2250,6 +2559,9 @@ impl AiManager {
                 status: agent.status.clone(),
                 pending: agent.is_pending(),
                 messages: agent.messages.clone(),
+                parent_agent_id: agent.parent_agent_id,
+                role: agent.role.clone(),
+                subagents: agent.subagents.clone(),
             })
         });
         AiMountState {
@@ -2359,6 +2671,10 @@ impl AiManager {
                     messages,
                     history: sanitize_conversation_history(chat.history),
                     updated_at: chat.updated_at,
+                    parent_agent_id: chat.parent_agent_id,
+                    role: chat.role,
+                    task: chat.task,
+                    subagents: chat.subagents.unwrap_or_default(),
                 },
             );
         }
@@ -2413,6 +2729,10 @@ impl AiManager {
                 updated_at: agent.updated_at,
                 messages: agent.messages.clone(),
                 history: sanitize_conversation_history(agent.history.clone()),
+                parent_agent_id: agent.parent_agent_id,
+                role: agent.role.clone(),
+                task: agent.task.clone(),
+                subagents: Some(agent.subagents.clone()),
             };
             let path = ai_chat_file_path(Path::new(&mount_state.root_path), *agent_id);
             fs::write(&path, persisted.serialize_json())
@@ -2502,13 +2822,44 @@ fn forward_runtime_events(
     }
 }
 
+fn prune_history(history: &[ConversationItem]) -> Vec<ConversationItem> {
+    let mut pruned = Vec::new();
+    let mut total_chars = 0;
+    for item in history.iter().rev() {
+        let mut new_item = item.clone();
+        match &mut new_item {
+            ConversationItem::ToolResult { content, .. } => {
+                total_chars += content.len();
+                if total_chars > 16000 {
+                    if content.len() > 300 {
+                        *content = format!("{}... [truncated for context efficiency]", &content[..300]);
+                    }
+                }
+            }
+            ConversationItem::User { text } => {
+                total_chars += text.len();
+            }
+            ConversationItem::Assistant { text, .. } => {
+                total_chars += text.len();
+            }
+        }
+        pruned.push(new_item);
+    }
+    pruned.reverse();
+    pruned
+}
+
 fn build_request_body(
     backend: &AiBackendConfig,
     mount: &str,
     root_path: &str,
     history: &[ConversationItem],
+    role: Option<&str>,
+    task: Option<&str>,
+    active_terminals: &[String],
 ) -> String {
-    let system_prompt = render_system_prompt(mount, root_path);
+    let system_prompt = render_system_prompt(mount, root_path, role, task, active_terminals);
+    let pruned_history = prune_history(history);
     let mut out = String::new();
     out.push('{');
     let mut needs_comma = false;
@@ -2527,7 +2878,7 @@ fn build_request_body(
 
     append_plain_message(&mut out, &mut first_message, "system", &system_prompt);
 
-    for item in history {
+    for item in &pruned_history {
         match item {
             ConversationItem::User { text } => {
                 append_plain_message(&mut out, &mut first_message, "user", text);
@@ -2595,12 +2946,34 @@ fn build_request_body(
     out
 }
 
-fn render_system_prompt(mount: &str, root_path: &str) -> String {
-    SYSTEM_PROMPT_TEMPLATE
+fn render_system_prompt(
+    mount: &str,
+    root_path: &str,
+    role: Option<&str>,
+    task: Option<&str>,
+    active_terminals: &[String],
+) -> String {
+    let mut base = SYSTEM_PROMPT_TEMPLATE
         .replace("{{mount}}", mount)
         .replace("{{root_path}}", root_path)
         .trim()
-        .to_string()
+        .to_string();
+
+    if !active_terminals.is_empty() {
+        base.push_str("\n\n--- ACTIVE WORKSPACE TERMINALS ---\nYou currently have the following active terminals running in your environment:\n");
+        for term in active_terminals {
+            base.push_str(&format!("{}\n", term));
+        }
+        base.push_str("You can interact with them via `read_terminal` or `send_terminal_text` tools.");
+    }
+
+    if let (Some(role), Some(task)) = (role, task) {
+        base.push_str(&format!(
+            "\n\n--- SUBAGENT Swarm Orchestration Mode ---\nYou are a specialized subagent executing the role: '{}'.\nYour task/goal is: '{}'.\nFocus strictly on your assigned task. When you are done, summarize your findings and call the `complete_task` tool to yield control back to the parent agent.",
+            role, task
+        ));
+    }
+    base
 }
 
 fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
@@ -2724,6 +3097,20 @@ fn append_tool_definitions(out: &mut String) {
         "bash",
         "Run a shell command inside the workspace root. Prefer quick inspection and verification commands.",
         r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_secs":{"type":"integer","description":"Optional timeout in seconds"}},"required":["command"]}"#,
+    );
+    append_tool_definition(
+        out,
+        &mut first,
+        "spawn_subagent",
+        "Spawn a specialized subagent to perform a scoped task (e.g. planner, coder, critic, explorer). The parent will wait until the subagent completes.",
+        r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"},"model_override":{"type":"string","description":"Optional model name override, e.g. gpt-4o-mini"}},"required":["role","task"]}"#,
+    );
+    append_tool_definition(
+        out,
+        &mut first,
+        "complete_task",
+        "Called by a subagent to declare its task completed and return the structured findings/results to the parent agent.",
+        r#"{"type":"object","properties":{"summary":{"type":"string","description":"A detailed summary of the findings or results of the task"},"success":{"type":"boolean","description":"Whether the task was completed successfully"}},"required":["summary","success"]}"#,
     );
 }
 
@@ -4538,7 +4925,7 @@ mod tests {
             },
         ];
 
-        let body = build_request_body(&backend, "repo", "/tmp/repo", &history);
+        let body = build_request_body(&backend, "repo", "/tmp/repo", &history, None, None, &[]);
 
         assert!(!body.contains("\"role\":\"assistant\",\"content\":\"\""));
         assert!(body.contains("\"content\":\"hello\""));
@@ -4556,7 +4943,7 @@ mod tests {
             api_key: None,
             disable_thinking_via_chat_template: false,
         };
-        let body = build_request_body(&backend, "repo", "/tmp/repo", &[]);
+        let body = build_request_body(&backend, "repo", "/tmp/repo", &[], None, None, &[]);
         assert!(body.contains("\"tools\""));
         assert!(body.contains("\"read_file\""));
         assert!(body.contains("\"open_editor\""));

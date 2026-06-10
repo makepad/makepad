@@ -1132,3 +1132,120 @@ fn ai_manager_accepts_second_prompt_after_done_before_socket_close() {
 
     server.join().expect("join ai server");
 }
+
+#[test]
+fn ai_manager_spawns_subagent_and_completes_task_natively() {
+    let _env_lock = ai_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local ai server");
+    let addr = listener.local_addr().expect("local addr");
+    let _base_url = EnvGuard::set(
+        "MAKEPAD_STUDIO_AI_BASE_URL",
+        format!("http://{}/v1/chat/completions", addr),
+    );
+
+    let server = thread::spawn(move || {
+        // 1. First request: Parent asks to write code. Server returns spawn_subagent tool call.
+        let (mut stream1, _) = listener.accept().expect("accept first ai request");
+        let request1 = read_http_request(&mut stream1);
+        assert!(request1.contains("run a coder subagent"));
+        write_chunked_sse(
+            &mut stream1,
+            &[
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+                    "\"id\":\"call_spawn\",\"type\":\"function\",\"function\":{",
+                    "\"name\":\"spawn_subagent\",",
+                    "\"arguments\":\"{\\\"role\\\":\\\"coder\\\",\\\"task\\\":\\\"write button code\\\"}\"",
+                    "}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "data: [DONE]\n\n",
+            ],
+        );
+
+        // 2. Second request: Subagent starts request. Server returns complete_task tool call.
+        let (mut stream2, _) = listener.accept().expect("accept second ai request (subagent)");
+        let request2 = read_http_request(&mut stream2);
+        assert!(request2.contains("write button code"));
+        assert!(request2.contains("Swarm Orchestration Mode"));
+        assert!(request2.contains("coder"));
+        write_chunked_sse(
+            &mut stream2,
+            &[
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+                    "\"id\":\"call_complete\",\"type\":\"function\",\"function\":{",
+                    "\"name\":\"complete_task\",",
+                    "\"arguments\":\"{\\\"summary\\\":\\\"done writing button\\\",\\\"success\\\":true}\"",
+                    "}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "data: [DONE]\n\n",
+            ],
+        );
+
+        // 3. Third request: Parent resumes with tool results from subagent. Server returns final response.
+        let (mut stream3, _) = listener.accept().expect("accept third ai request (parent resume)");
+        let request3 = read_http_request(&mut stream3);
+        assert!(request3.contains("done writing button"));
+        assert!(request3.contains("spawn_subagent"));
+        write_chunked_sse(
+            &mut stream3,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"finished swarm task\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+    });
+
+    let root = std::env::current_dir().expect("current_dir");
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: root,
+        }],
+        enable_in_process_gateway: false,
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start backend");
+
+    let _ = connection.send(ClientToHub::AiGetState {
+        mount: "repo".to_string(),
+    });
+    let initial = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
+        state.active_agent.is_some()
+    });
+    let agent_id = initial.active_agent_id.expect("default ai agent");
+
+    let _ = connection.send(ClientToHub::AiSendPrompt {
+        mount: "repo".to_string(),
+        agent_id,
+        text: "run a coder subagent".to_string(),
+    });
+
+    let done = wait_for_ai_state(&connection, "repo", Duration::from_secs(5), |state| {
+        state
+            .active_agent
+            .as_ref()
+            .map(|agent| {
+                !agent.pending
+                    && agent
+                        .messages
+                        .iter()
+                        .any(|message| message.text.contains("finished swarm task"))
+            })
+            .unwrap_or(false)
+    });
+
+    let messages = &done.active_agent.expect("active agent").messages;
+    assert!(messages
+        .iter()
+        .any(|message| message.text.contains("spawn_subagent")));
+    assert!(messages
+        .iter()
+        .any(|message| message.text.contains("finished swarm task")));
+
+    server.join().expect("join ai server");
+}
+
