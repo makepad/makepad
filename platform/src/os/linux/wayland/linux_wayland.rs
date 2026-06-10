@@ -62,6 +62,7 @@ impl WaylandCx {
             custom_window_chrome: true,
         });
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
+        cx.borrow_mut().set_physical_keyboard_state(true);
 
         let wayland_cx = Rc::new(RefCell::new(WaylandCx {
             cx: cx.clone(),
@@ -204,15 +205,19 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
-                    if let Some(dpi_override) = cx.windows[re.window_id].dpi_override {
-                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                        re.new_geom.dpi_factor = dpi_override;
+                    {
+                        let cx_window = &mut cx.windows[re.window_id];
+                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
 
                     window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    // redraw just this windows root draw list
-                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                    // Redraw this window root draw list when logical size or
+                    // backing scale changes.
+                    if re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                    {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -222,9 +227,16 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    {
+                        let cx_window = &mut cx.windows[re.window_id];
+                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
+                    }
                     window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    if re.old_geom.inner_size != re.new_geom.inner_size {
+                    if re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                    {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -279,32 +291,50 @@ impl WaylandCx {
                 // ok here we send out to all our childprocesses
 
                 self.handle_repaint(state);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend. Without this the script object heap grows without
+                // bound: every `eval` / `script_apply_eval!` allocates script objects
+                // that are only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
+                {
+                    let mut cx = self.cx.borrow_mut();
+                    cx.with_vm(|vm| {
+                        if vm.heap().needs_gc() {
+                            vm.gc();
+                        }
+                    });
+                }
             }
-            XlibEvent::MouseMove(e) => {
+            XlibEvent::MouseMove(mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.call_event_handler(&Event::MouseMove(e.into()));
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
                 cx.fingers.switch_captures();
             }
-            XlibEvent::MouseDown(e) => {
+            XlibEvent::MouseDown(mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.fingers.process_tap_count(e.abs, e.time);
                 cx.fingers.mouse_down(e.button, e.window_id);
                 cx.call_event_handler(&Event::MouseDown(e.into()))
             }
-            XlibEvent::MouseUp(e) => {
+            XlibEvent::MouseUp(mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
                 cx.call_event_handler(&Event::MouseUp(e.into()));
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
             }
-            XlibEvent::Scroll(e) => {
+            XlibEvent::Scroll(mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.call_event_handler(&Event::Scroll(e.into()))
             }
-            XlibEvent::WindowDragQuery(e) => {
+            XlibEvent::WindowDragQuery(mut e) => {
                 let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.call_event_handler(&Event::WindowDragQuery(e))
             }
             XlibEvent::WindowCloseRequested(e) => {
@@ -363,6 +393,7 @@ impl WaylandCx {
                 let mut cx = self.cx.borrow_mut();
                 if e.timer_id == 0 {
                     if SignalToUI::check_and_clear_ui_signal() {
+                        cx.handle_termination_signal();
                         cx.handle_media_signals();
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
@@ -1031,6 +1062,12 @@ impl WaylandCx {
 
     pub(crate) fn handle_repaint(&self, state: &mut WaylandState) {
         let mut cx = self.cx.borrow_mut();
+        // Skip the eglMakeCurrent + full pass-list scan when there is nothing to draw.
+        // demo_time_repaint forces a redraw of time-animated passes (see
+        // compute_pass_repaint_order), so it must keep us rendering.
+        if !cx.any_passes_dirty() && !cx.demo_time_repaint {
+            return;
+        }
         cx.os.opengl_cx.as_ref().unwrap().make_current();
         let mut passes_todo = Vec::new();
         cx.compute_pass_repaint_order(&mut passes_todo);

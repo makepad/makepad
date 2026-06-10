@@ -580,10 +580,74 @@ impl Cx {
     }
 
     pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
-        if self.handle_live_edit() {
-            self.draw_shaders.reset_for_live_reload();
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
+        // Three independent triggers, fanning out to two events. The
+        // critical distinction between FileChange and Manual is whether
+        // we follow LiveEdit up with an immediate ScriptReapply pass in
+        // the SAME tick — manual triggers (rotation) defer it to the next
+        // tick to keep each tick's work bounded, since rotation can fire
+        // multiple WindowGeomChange events back-to-back during the
+        // animation and each Apply walk over the full widget tree is
+        // non-trivial on mobile hardware.
+        //
+        // 1. `LiveEditTrigger::FileChange` — file watcher delivered a
+        //    hot-reloaded `script_mod!` block (or studio websocket sent
+        //    a `LiveChange`). The DSL itself changed; shader caches may
+        //    be stale, so `reset_for_live_reload` runs. Any preference
+        //    re-broadcast in the LiveEdit handler propagates immediately
+        //    via the same-tick `ScriptReapply` follow-up — file changes
+        //    are a live-coding scenario where the user wants to see the
+        //    update right away.
+        //
+        // 2. `LiveEditTrigger::Manual` — `cx.request_live_edit()` was
+        //    called (canonical case: safe-area insets changed on iOS
+        //    rotation, where `mod.widgets.SAFE_INSET_PAD_*` heap
+        //    primitives need to be re-baked into `script_mod!` block
+        //    expressions). The DSL did NOT change; we skip
+        //    `reset_for_live_reload` (no shader code changed), and we
+        //    skip the immediate ScriptReapply follow-up — if the
+        //    LiveEdit handler set `pending_script_reapply` (e.g. robrix
+        //    re-broadcasting preferences), it lands on the next event-
+        //    loop tick. Without this split, rotation incurred a visible
+        //    1-2s lag from doing two full Apply walks per geom change.
+        //
+        // 3. `LiveEditTrigger::None` + `pending_script_reapply` — set by
+        //    `cx.request_script_reapply()` after runtime mutations to a
+        //    *shared* heap *object* (`script_eval!` overriding
+        //    `mod.widgets.IMG_MSG_FIT.max`, etc.). Re-running script_mod
+        //    would clobber those overrides; we fire `Event::ScriptReapply`
+        //    which re-applies the captured `app_value` with
+        //    `Apply::ScriptReapply` — no script_mod re-run, runtime
+        //    overrides preserved, imperative-setter fields early-return.
+        use crate::live_reload::LiveEditTrigger;
+        match self.handle_live_edit() {
+            LiveEditTrigger::FileChange => {
+                self.draw_shaders.reset_for_live_reload();
+                self.pending_script_reapply = false;
+                self.call_event_handler(&Event::LiveEdit);
+                self.redraw_all();
+                if self.pending_script_reapply {
+                    self.pending_script_reapply = false;
+                    self.call_event_handler(&Event::ScriptReapply);
+                    self.redraw_all();
+                }
+            }
+            LiveEditTrigger::Manual => {
+                // Clear `pending_script_reapply` defensively — LiveEdit's
+                // script_mod re-run clobbers heap overrides anyway, and an
+                // app-level handler that re-broadcasts (e.g. robrix's
+                // `broadcast_all`) sets a fresh flag that lands on the
+                // next tick.
+                self.pending_script_reapply = false;
+                self.call_event_handler(&Event::LiveEdit);
+                self.redraw_all();
+            }
+            LiveEditTrigger::None => {
+                if self.pending_script_reapply {
+                    self.pending_script_reapply = false;
+                    self.call_event_handler(&Event::ScriptReapply);
+                    self.redraw_all();
+                }
+            }
         }
     }
 
@@ -694,11 +758,38 @@ impl Cx {
         }
     }
 
+    /// Dispatch any `WindowGeomChange` events queued by code that ran during
+    /// the current event dispatch (typically `Cx::set_window_dpi_override`
+    /// called from a widget handler). Drained the same way as `handle_actions`
+    /// — swap, dispatch each, repeat until quiescent. Each dispatch is a
+    /// fresh `inner_call_event_handler` call after the previous one's handler
+    /// has been put back, so the `event_handler.take()` is safe.
+    pub fn handle_pending_window_geom_changes(&mut self) {
+        let mut counter = 0;
+        while !self.pending_window_geom_changes.is_empty() {
+            counter += 1;
+            let mut events = Vec::new();
+            std::mem::swap(&mut self.pending_window_geom_changes, &mut events);
+            for event in events {
+                self.inner_call_event_handler(&Event::WindowGeomChange(event));
+                self.inner_key_focus_change();
+            }
+            if counter > 100 {
+                crate::error!("WindowGeomChange feedback loop detected");
+                break;
+            }
+        }
+    }
+
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
         self.inner_call_event_handler(event);
+        // Dispatch any synthetic geom changes queued during the original
+        // handler (e.g. runtime dpi_override updates) before triggers and
+        // actions, so layout-dependent reactions see the new geometry.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
@@ -706,9 +797,22 @@ impl Cx {
         // widget->script calls run immediately instead of waiting for tick/timer paths.
         self.handle_script_tasks();
         // Script callbacks can enqueue actions/triggers; flush them in the same cycle.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_physical_keyboard_state(&mut self, connected: bool) {
+        self.keyboard.set_physical_keyboard_state(connected);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update_physical_keyboard_state(&mut self, connected: bool) {
+        if let Some(event) = self.keyboard.update_physical_keyboard_state(connected) {
+            self.call_event_handler(&Event::PhysicalKeyboard(event));
+        }
     }
 
     // helpers

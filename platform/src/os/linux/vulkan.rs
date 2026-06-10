@@ -5300,9 +5300,7 @@ impl CxVulkan {
             return Ok(());
         }
 
-        let force_full_upload = needs_recreate && !matches!(updated, TextureUpdated::Partial(_));
-        let clear_before_partial_upload =
-            needs_recreate && matches!(updated, TextureUpdated::Partial(_));
+        let force_full_upload = needs_recreate;
         let upload = {
             let cxtexture = &cx.textures[texture_id];
             Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
@@ -5387,24 +5385,6 @@ impl CxVulkan {
                 &[],
                 &[to_transfer],
             );
-            if clear_before_partial_upload {
-                let clear_value = vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 0.0],
-                };
-                let clear_range = vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(layer_count);
-                self.device.cmd_clear_color_image(
-                    self.command_buffer,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &clear_value,
-                    &[clear_range],
-                );
-            }
             self.device.cmd_copy_buffer_to_image(
                 self.command_buffer,
                 staging.buffer,

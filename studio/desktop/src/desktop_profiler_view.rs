@@ -1106,7 +1106,7 @@ impl Widget for DesktopProfilerView {
 
         self.view
             .check_box(cx, ids!(running_button))
-            .set_active(cx, running);
+            .set_active(cx, running, Animate::Yes);
         if let Some(mut chart) = self
             .view
             .widget(cx, ids!(chart))

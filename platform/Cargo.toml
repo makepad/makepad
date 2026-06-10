@@ -28,7 +28,7 @@ makepad-network = { path = "./network", version = "1.0.0", features = [
 ] }
 makepad-script = { path = "./script", version = "1.0.0" }
 makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0" }
-makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
+makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.2" }
 makepad-tsdf = { path = "../libs/tsdf", version = "0.1.0" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
@@ -102,6 +102,9 @@ hilog-sys = "0.1.1"
 napi-derive-ohos = "0.0.9"
 napi-ohos = "0.1.3"
 ohos-sys = { version = "0.2.1", features = ["xcomponent"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+ctrlc = { version = "3.4", features = ["termination"] }
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"

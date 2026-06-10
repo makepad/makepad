@@ -334,10 +334,21 @@ script_primitive!(
     fn script_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
+        // Same rationale as `ArcStringMut::script_apply`: text-bearing fields
+        // (`TextInput.text`, `TextInput.empty_text`, etc.) are canonically
+        // mutated through imperative setters at runtime. A ScriptReapply
+        // walk fired by `cx.request_script_reapply()` (preference broadcast,
+        // safe-area inset change) would otherwise clobber that runtime value
+        // with the stale DSL literal. Strings are not part of the shared-
+        // heap-object propagation pipeline (which uses `Size`/numerics), so
+        // bailing here is safe.
+        if apply.is_script_reapply() {
+            return;
+        }
         self.clear();
         vm.bx.heap.cast_to_string(value, self);
     },

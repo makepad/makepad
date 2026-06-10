@@ -105,17 +105,26 @@ impl Gemma4Tensors {
                     &layer_name(index, "post_ffw_norm", "weight"),
                 )?,
                 per_layer_inp_gate: if cfg.embedding_length_per_layer_input != 0 {
-                    Some(required_tensor(model, &layer_name(index, "inp_gate", "weight"))?)
+                    Some(required_tensor(
+                        model,
+                        &layer_name(index, "inp_gate", "weight"),
+                    )?)
                 } else {
                     None
                 },
                 per_layer_proj: if cfg.embedding_length_per_layer_input != 0 {
-                    Some(required_tensor(model, &layer_name(index, "proj", "weight"))?)
+                    Some(required_tensor(
+                        model,
+                        &layer_name(index, "proj", "weight"),
+                    )?)
                 } else {
                     None
                 },
                 per_layer_post_norm: if cfg.embedding_length_per_layer_input != 0 {
-                    Some(required_tensor(model, &layer_name(index, "post_norm", "weight"))?)
+                    Some(required_tensor(
+                        model,
+                        &layer_name(index, "post_norm", "weight"),
+                    )?)
                 } else {
                     None
                 },

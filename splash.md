@@ -17,33 +17,247 @@ If you write `label:` (colon) instead of `label :=` (colon-equals), the child is
 
 **Use `:=` for any child you want to reference or override later:** `check :=`, `label :=`, `tag :=`, `title :=`, `body :=`, `icon :=`, `content :=`, etc.
 
-## COPY-PASTE REFERENCE: Todo list
+Each child widget can have only one `:=` name. Do not chain aliases such as `value := detail_wind := Label{...}`. If callback code needs `ui.detail_wind`, write the actual child as `detail_wind := Label{...}`.
+
+## INTERACTION DEFAULT: Apps must work
+
+When the user asks for an **app**, **tool**, **todo app**, **form**, **editor**, **dashboard**, **calculator**, **wizard**, or anything with buttons/inputs/lists, create working Splash business logic. Do not output a static mockup with inert controls unless the user explicitly asks for a mockup.
+
+Splash scripts DO support local state, functions, callbacks, and re-rendering:
+
+- State: `let todos = [...]`
+- Functions: `fn add_todo(text){...}`
+- Button callbacks: `on_click: || add_todo(ui.todo_input.text())`
+- Text input callbacks: `on_return: |text| add_todo(text)`
+- Checkbox callbacks: `on_click: |checked| {todos[index] += {done: checked}}`
+- Re-rendering: `ui.todo_list.render()`
+- Widget methods: `ui.todo_input.text()`, `ui.todo_input.set_text("")`, `ui.todo_status.set_text("...")`
+
+Do not claim that Splash lacks event handlers, mutable state, or render hooks. Do not answer with Rust code, `MatchEvent`, `PortalList`, or host-app instructions when the user asks for logic in Splash. The correct answer is a `runsplash` block containing Splash state and callbacks.
+
+Required interaction rules:
+
+- Every `TextInput` + submit button pair must be wired with `on_return` and `on_click`.
+- Every visible command button must do something real. If you cannot wire it, omit it.
+- Dynamic list apps need a state array, helper functions, and a refresh path.
+- Use `:=` ids for widgets that callbacks need to read or update through `ui.<id>`.
+- Widgets updated from callbacks must have a unique `:=` id. Nested named children are fine; use `ui.<id>` for the widget you actually named.
+- Use `on_render` for dynamic repeated rows, then call `ui.<list_id>.render()` after changing state.
+- For inline `runsplash`, seed the initial rows visibly as normal children if the list also uses `on_render`; the first `render()` happens after an interaction.
+- Do not put prose after the `runsplash` block explaining that it is only a mockup. If you include a control, wire it.
+
+### Runtime string methods
+
+Use the actual Splash string API:
+
+- Convert a numeric string with `text.to_f64()`, not `parse_float()`.
+- Check substring presence with `text.search(".") >= 0`, not `contains(".")`.
+- Strip a suffix with `text.strip_suffix(".0")`, not `ends_with()` plus `substring()`.
+- Available basics include `len()`, `trim()`, `split()`, `search()`, `match_str()`, `replace()`, `strip_prefix()`, `strip_suffix()`, and `to_f64()`.
+
+For calculators, avoid unsupported JS/Rust-style string helpers:
 
 ```
-let TodoItem = View{
+fn current_value(){
+    display_text.to_f64()
+}
+
+fn has_decimal(){
+    display_text.search(".") >= 0
+}
+
+fn format_number(n){
+    (n + "").strip_suffix(".0")
+}
+```
+
+For calculators specifically, give the display label a unique `:=` id before the key rows:
+
+```
+RoundedView{
+    width: Fill height: Fit
+    flow: Down spacing: 10
+    display := Label{text: "0"}
+    View{flow: Right DigitKey{text: "1" on_click: || ui.display.set_text("1")}}
+}
+```
+
+## MOBILE APP DESIGN DEFAULT
+
+For generated apps, prefer a polished mobile-first app surface instead of bare controls: a compact header, one primary action area, clear grouped sections, status chips, generous touch targets, and a restrained high-contrast palette. Keep the UI usable in a narrow chat column; avoid huge desktop dashboards unless asked.
+
+Use `RoundedView` or `GlassPanel` for cards and tool surfaces. Use `ButtonFlat` / `ButtonFlatter` for secondary actions. Use icon-like short labels only when the meaning is clear; otherwise use concise text.
+
+Glass style is available and should be used sparingly for important overlays, detail panels, or premium controls. Do not invent glass widget names. Valid options include:
+
+```
+GlassPanel{
+    height: Fit
+    padding: 14
+    flow: Down
+    spacing: 8
+    draw_bg +: {
+        tint_color: #fff
+        tint_alpha: 0.16
+        border_alpha: 0.32
+        corner_radius: 16.0
+        specular_strength: 0.28
+        noise_strength: 0.025
+    }
+    Label{text: "Glass card" draw_text.color: #fff}
+}
+```
+
+For an overlay, use `PopupNotification` with `content +:` and an `AppleGlassRoundedView` background:
+
+```
+details_popup := PopupNotification{
+    align: Align{x: 0.5 y: 0.5}
+    content +: {
+        width: 360
+        height: 260
+        flow: Overlay
+        clip_x: false
+        clip_y: false
+        glass_bg := AppleGlassRoundedView{
+            width: Fill
+            height: Fill
+            draw_bg +: {
+                blur_level: 5.2
+                lensing_effect: 0.75
+                corner_radius: 18.0
+                tint_color: #b8b8b8
+                tint_alpha: 0.08
+                surface_alpha: 0.76
+                border_alpha: 0.56
+                specular_strength: 0.14
+                fallback_color: #8c8c8c
+                shadow_color: #000c
+                shadow_radius: 46.0
+                shadow_offset: vec2(0.0, 20.0)
+                diffraction_strength: 2.4
+            }
+        }
+        content := View{
+            width: Fill
+            height: Fill
+            padding: 22
+            flow: Down
+            spacing: 12
+            Label{text: "Details" draw_text.color: #fff draw_text.text_style.font_size: 18}
+            close_details := ButtonFlat{text: "Close"}
+        }
+    }
+}
+```
+
+## COPY-PASTE REFERENCE: Interactive Todo app
+
+```
+let todos = [
+    {text: "Buy groceries" tag: "errands" done: false}
+    {text: "Write unit tests" tag: "dev" done: false}
+]
+
+fn remaining_count(){
+    let count = 0
+    for todo in todos {
+        if !todo.done count += 1
+    }
+    count
+}
+
+fn sync_status(){
+    ui.todo_status.set_text(remaining_count() + " remaining / " + todos.len() + " total")
+}
+
+fn refresh_todos(){
+    ui.todo_list.render()
+    sync_status()
+}
+
+fn add_todo(text){
+    let clean = ("" + text).trim()
+    if clean == "" { return }
+    todos.push({text: clean tag: "" done: false})
+    ui.todo_input.set_text("")
+    refresh_todos()
+}
+
+fn clear_done(){
+    todos.retain(|todo| !todo.done)
+    refresh_todos()
+}
+
+let TodoRow = RoundedView{
     width: Fill height: Fit
     padding: Inset{top: 8 bottom: 8 left: 12 right: 12}
     flow: Right spacing: 10
     align: Align{y: 0.5}
+    new_batch: true
+    draw_bg.color: #x2a2a3a
+    draw_bg.border_radius: 8.0
     check := CheckBox{text: ""}
     label := Label{text: "task" draw_text.color: #ddd draw_text.text_style.font_size: 11}
     Filler{}
     tag := Label{text: "" draw_text.color: #888 draw_text.text_style.font_size: 9}
+    delete := ButtonFlatter{text: "x" width: 28 height: 28 draw_text.color: #888}
 }
 
 RoundedView{
-    width: 380 height: Fit
-    flow: Down spacing: 4
+    width: Fill height: Fit
+    flow: Down spacing: 10
     padding: 16
     new_batch: true
-    draw_bg.color: #1e1e2e
+    draw_bg.color: #x1e1e2e
     draw_bg.border_radius: 10.0
     Label{text: "My Tasks" draw_text.color: #fff draw_text.text_style.font_size: 14}
-    Hr{}
-    TodoItem{label.text: "Buy groceries" tag.text: "errands"}
-    TodoItem{label.text: "Fix login bug" tag.text: "urgent"}
-    TodoItem{label.text: "Write unit tests" tag.text: "dev"}
-    TodoItem{label.text: "Call the dentist" tag.text: "personal"}
+    View{
+        width: Fill height: Fit
+        flow: Right spacing: 8
+        todo_input := TextInput{
+            width: Fill height: Fit
+            empty_text: "Add a new task"
+            on_return: |text| add_todo(text)
+        }
+        Button{text: "Add" on_click: || add_todo(ui.todo_input.text())}
+    }
+    todo_list := View{
+        width: Fill height: Fit
+        flow: Down spacing: 4
+        TodoRow{
+            label.text: "Buy groceries"
+            tag.text: "errands"
+            check.on_click: |checked| {todos[0] += {done: checked} refresh_todos()}
+            delete.on_click: || {todos.remove(0) refresh_todos()}
+        }
+        TodoRow{
+            label.text: "Write unit tests"
+            tag.text: "dev"
+            check.on_click: |checked| {todos[1] += {done: checked} refresh_todos()}
+            delete.on_click: || {todos.remove(1) refresh_todos()}
+        }
+        on_render: ||{
+            if todos.len() == 0 {
+                Label{text: "No tasks yet" draw_text.color: #888}
+            }
+            else for index, todo in todos {
+                TodoRow{
+                    label.text: todo.text
+                    tag.text: todo.tag
+                    check.active: todo.done
+                    check.on_click: |checked| {todos[index] += {done: checked} refresh_todos()}
+                    delete.on_click: || {todos.remove(index) refresh_todos()}
+                }
+            }
+        }
+    }
+    View{
+        width: Fill height: Fit
+        flow: Right
+        todo_status := Label{text: "2 remaining / 2 total" width: Fill draw_text.color: #aaa}
+        ButtonFlatter{text: "Clear completed" on_click: || clear_done()}
+    }
 }
 ```
 
@@ -77,6 +291,8 @@ View{
 - Make up new widgets that aren't listed here
 - Suggest hypothetical features or syntax that "might work"
 - Use CSS-like property names (no `border-radius`, use `draw_bg.border_radius`)
+- Use ambiguous bare guard returns like `if cond return`; write `if cond { return }` and `if cond { return value }`
+- Put a raw object into `draw_text +: { text_style: {...} }`; use `draw_text.text_style.font_size: 18` or `draw_text +: { text_style +: {font_size: 18} }`
 
 If you're unsure whether a property exists, **don't use it**. Stick to the exact syntax shown in the examples.
 
@@ -91,7 +307,19 @@ If you're unsure whether a property exists, **don't use it**. Stick to the exact
 - Suggestions for improvements or alternatives
 - Commentary about what the code does
 
-Just output the raw Splash script starting with `use mod.prelude.widgets.*` — nothing else.
+In AI chat `runsplash` blocks, output the raw Splash body only. `use mod.prelude.widgets.*` is automatically prepended by the host — do NOT include it yourself.
+
+For standalone `.rs` `script_mod!` examples, start with `use mod.prelude.widgets.*`.
+
+## CHAT APP OUTPUT: SPLASH ONLY
+
+When the user asks for an app inside AI chat, return exactly one fenced `runsplash` block and no prose before or after it. The code inside that block must be Splash only.
+
+Do not output Rust, `app_main!`, `script_mod!`, `Root`, `Window`, `MatchEvent`, `PortalList`, Cargo.toml edits, shell commands, files to create, or project-edit instructions. The chat renderer already owns the host app and places your Splash body inside a container.
+
+Splash chat apps are sandboxed. There is no HTTP/fetch/network API, filesystem API, process API, geolocation API, timer API, real weather API, or host Rust bridge. For weather, stock tickers, travel, dashboards, or similar data apps, use local sample data and make controls update that local Splash state. Do not ask for API keys and do not call external services.
+
+If the request says "todo app", "weather app", "calculator", "tool", "form", or "editor", include working local state and callbacks. A static mockup with inert controls is a failed answer.
 
 ---
 
@@ -225,7 +453,7 @@ RoundedShadowView{ width: Fill height: Fit draw_bg.color: #556 draw_bg.shadow_ra
 
 ## Script Structure
 
-Every splash script must start with a `use` statement to bring widgets into scope:
+Standalone Splash scripts start with a `use` statement to bring widgets into scope. In AI chat `runsplash` blocks, the host prepends this line automatically, so omit it there.
 
 ```
 use mod.prelude.widgets.*
@@ -239,7 +467,7 @@ View{
 }
 ```
 
-Without `use mod.prelude.widgets.*` at the top, widget names like `View`, `Label`, `Button` etc. will not be found.
+In standalone scripts, without `use mod.prelude.widgets.*` at the top, widget names like `View`, `Label`, `Button` etc. will not be found.
 
 ### Let bindings for reusable definitions
 
@@ -279,7 +507,9 @@ View{
 
 Children inside a `let` template that you want to override per-instance MUST be declared with `:=`. This is part of the syntax — `label :=` creates a named/dynamic child, `label:` does not.
 
-**Reusable todo/list item with multiple named children:**
+**Reusable todo/list item with multiple named children (layout only):**
+
+This demonstrates `:=` override paths only. If the user asks for a todo app, use the interactive todo pattern above and add callbacks/state.
 
 ```
 let TodoItem = View{
@@ -316,6 +546,42 @@ let Item = View{
 }
 Item{texts.label.text: "new text"}           // full path through named containers
 ```
+
+## Dynamics / Scripting
+
+Splash can include business logic directly in the script. Use this when the UI must react to user input, keep state, add/remove items, call HTTP, or rebuild part of the widget tree.
+
+Core rules:
+
+- Put mutable state and helper functions before the UI: `let todos = []`, `fn add_todo(text){...}`.
+- Give interactive widgets names with `:=` so callbacks can reach them through `ui.name`.
+- Use widget callbacks for simple actions:
+  - `Button{on_click: || do_something()}`
+  - `Button{on_press: || do_something()}`
+  - `TextInput{on_return: |text| do_something(text)}`
+  - `TextInput{on_change: |text| do_something(text)}`
+  - `CheckBox{on_click: |checked| do_something(checked)}`
+- Use `TextInput.text()` to read input and `TextInput.set_text("")` to clear it.
+- Arrays support `push(value)`, `remove(index)`, `retain(|item| condition)`, `clear()`, and `len()`.
+- Strings support `.trim()`.
+- To show numbers in labels, concatenate with the number on the left: `ui.total.set_text(total + "")` or `total + " items"`. Do not use `"" + total`; that can produce `[Error:NotFound]`.
+- If you make reusable clickable templates, the template itself must be a button type if instances receive `on_click`: `let Key = ButtonFlat{...}` then `Key{text: "1" on_click: || press("1")}`. Do not put `on_click` on a `View`/card wrapper unless that wrapper type defines `on_click`.
+- For repeated dynamic UI, put the rows inside a named `View` or `ScrollYView` with `on_render: ||{...}`. After changing state, call `ui.list.render()` and update any labels.
+- In inline `runsplash`, `on_render` is not called automatically on first display. Include visible seed rows as normal children, or only use `on_render` for content that appears after the first interaction.
+- `on_render` rebuilds that view from current state. This is the Splash equivalent of the Rust todo example's `TodoList::draw_walk`.
+
+### Todo Logic Checklist
+
+When asked for todo item functionality, include all of these:
+
+- `let todos = [...]` state at the top.
+- `fn add_todo(text)` that trims, pushes a new `{text tag done}` object, clears the input, and refreshes.
+- `fn clear_done()` using `todos.retain(|todo| !todo.done)`.
+- A named input: `todo_input := TextInput{on_return: |text| add_todo(text)}`.
+- An Add button: `Button{on_click: || add_todo(ui.todo_input.text())}`.
+- A named list: `todo_list := View{... on_render: ||{...}}`.
+- Row callbacks: `check.on_click: |checked| {todos[index] += {done: checked} refresh_todos()}` and `delete.on_click: || {todos.remove(index) refresh_todos()}`.
+- A status label updated with `ui.todo_status.set_text(...)`.
 
 ## Syntax Fundamentals
 

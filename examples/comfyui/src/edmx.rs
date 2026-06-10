@@ -344,19 +344,27 @@ script_mod! {
     use mod.std
     use mod.net
 
-    mod.edmx = {
-        http_body: "
-        <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:20;background:#fff;color:#000;display:flex;height:100vh;overflow:hidden'>
-        <b id='d' style='font:5vw sans-serif'></b>
-        <script>
-        u = location.origin + location.pathname + '?' + location.pathname.slice(1);
-        f = () => {
-            fetch(u)
-            .then(r => r.ok ? r.text() : null)
-            .then(t => { if (t !== null) d.innerText = t })
-            .catch(e => 0)
-            .finally(() => setTimeout(f, 1000));
-        };
+	    mod.edmx = {
+	        http_body: "
+	        <body onclick='document.documentElement.requestFullscreen()' ondblclick='location.reload()' style='margin:0;padding:0;background:#fff;color:#000;width:100vw;height:100vh;overflow:hidden'>
+	        <img id='i' style='width:100vw;height:100vh;object-fit:contain;display:block'>
+	        <b id='d' style='position:absolute;left:20px;right:20px;bottom:20px;font:3vw sans-serif;background:rgba(255,255,255,.8)'></b>
+	        <script>
+	        last = '';
+	        f = () => {
+	            fetch(location.origin + '/current.txt?' + Date.now(), {cache:'no-store'})
+	            .then(r => r.ok ? r.text() : '')
+	            .then(t => {
+	                t = (t || '').trim();
+	                if (t && t !== last) {
+	                    last = t;
+	                    i.src = location.origin + '/image?' + encodeURIComponent(t);
+	                    d.innerText = '';
+	                }
+	            })
+	            .catch(e => 0)
+	            .finally(() => setTimeout(f, 1000));
+	        };
         f();
         </script>
         </body>
@@ -381,7 +389,7 @@ script_mod! {
                     stop_date: "2999-12-31"
                     start_time: "00:00:00"
                     contents: [{
-                        image_url: "http://" + local_ip + ":" + local_port + "/image"
+                        image_url: "http://" + local_ip + ":" + local_port + "/image?" + file_id
                         file_id: file_id
                         file_path: "/home/owner/content/Downloads/vxtplayer/epaper/mobile/contents/" + file_id + "/" + (file_id + ".png")
                         duration: 91326
@@ -396,7 +404,7 @@ script_mod! {
                 program_id: "com.samsung.ios.ePaper"
                 content_type: "ImageContent"
                 deploy_type: "MOBILE"
-            }.to_json()
+            }.to_json().replace(regex("/", "g"), "\\/")
         }
 
         mdc_wait_for_command: |socket, command_id| {
@@ -421,11 +429,14 @@ script_mod! {
                 read_timeout_ms: 250
                 write_timeout_ms: 5000
             })
+            let finish_upload = |result| {
+                socket.close()
+                result
+            }
 
             let greeting = mod.edmx.wait_for_socket_text(socket, "MDCSTART<<TLS>>", "", "")
             if greeting == ""{
-                socket.close()
-                return {is_ok:false error:"EDMX error: missing TLS greeting"}
+                return finish_upload({is_ok:false error:"EDMX error: missing TLS greeting"})
             }
 
             socket.start_tls(display.ip true)
@@ -438,30 +449,26 @@ script_mod! {
                 "MDCAUTH<<FAIL:0x02>>"
             )
             if auth_result == "MDCAUTH<<FAIL:0x01>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: incorrect pin"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: incorrect pin"})
             }
             if auth_result == "MDCAUTH<<FAIL:0x02>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: blocked"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: blocked"})
             }
             if auth_result != "MDCAUTH<<PASS>>"{
-                socket.close()
-                return {is_ok:false error:"EDMX auth failed: missing pass marker"}
+                return finish_upload({is_ok:false error:"EDMX auth failed: missing pass marker"})
             }
 
             socket.send_mdc_set_content_download(content_url 0)
 
             let response = mod.edmx.mdc_wait_for_command(socket, 199)
-            socket.close()
 
             if response == nil{
-                return {is_ok:false error:"EDMX error: missing MDC response"}
+                return finish_upload({is_ok:false error:"EDMX error: missing MDC response"})
             }
             if !response.ack{
-                return {is_ok:false error:"EDMX NAK payload: " + response.payload.to_string()}
+                return finish_upload({is_ok:false error:"EDMX NAK payload: " + response.payload.to_string()})
             }
-            {is_ok:true}
+            finish_upload({is_ok:true})
         }
     }
 }

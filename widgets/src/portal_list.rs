@@ -2,6 +2,7 @@ use {
     crate::{
         animator::AnimatorImpl,
         event::{TouchState, TAP_COUNT_DISTANCE},
+        flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -109,12 +110,6 @@ impl ListDrawState {
     fn is_down_again(&self) -> bool {
         matches!(self, Self::DownAgain { .. })
     }
-}
-
-#[derive(Default)]
-struct WidgetItem {
-    widget: WidgetRef,
-    template: LiveId,
 }
 
 struct AlignItem {
@@ -547,7 +542,18 @@ impl ScriptHook for PortalList {
 
 impl PortalList {
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
-        cx.begin_turtle(walk, self.layout);
+        // The outer turtle wraps the inner item turtle (Fill cross-axis, Fit
+        // main-axis). If we let `self.layout.align` apply here, a non-zero
+        // main-axis align would shift the inner turtle as a whole when items
+        // don't fill the viewport — showing up as leading empty space at the
+        // start of the list. Drop align on the outer turtle: the user's
+        // `align` config is reserved for the inner item turtle (cross-axis
+        // only — see `next_visible_item`).
+        let outer_layout = Layout {
+            align: Align::default(),
+            ..self.layout
+        };
+        cx.begin_turtle(walk, outer_layout);
         self.draw_align_list.clear();
     }
 
@@ -825,10 +831,18 @@ impl PortalList {
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
         let vi = self.vec_index;
+        // Propagate only the cross-axis component of the PortalList's own
+        // `align` to the inner item turtle, so items shorter than the bar's
+        // cross-axis size get centered. Main-axis align is intentionally
+        // dropped: items are stacked along the flow direction and may
+        // overflow (PortalList scrolls), so main-axis centering would either
+        // create leading empty space when items don't fill the viewport or
+        // misalign with the scroll origin. The default Align{x:0,y:0}
+        // preserves prior top-left item behavior.
         let layout = if vi == Vec2Index::Y {
-            Layout::flow_down()
+            Layout::flow_down().with_align_x(self.layout.align.x)
         } else {
-            Layout::flow_right()
+            Layout::flow_right().with_align_y(self.layout.align.y)
         };
 
         if let Some(draw_state) = self.draw_state.get() {
@@ -1020,7 +1034,7 @@ impl PortalList {
                                         height: Size::fit(),
                                         metrics: Metrics::default(),
                                     },
-                                    Layout::flow_down(),
+                                    layout,
                                 );
                                 return Some(last_index + 1);
                             }
@@ -1168,6 +1182,13 @@ impl PortalList {
         self.items
             .get(&entry_id)
             .map(|item| (item.template, item.widget.clone()))
+    }
+
+    /// Returns the current in-use items in this PortalList, keyed by entry id.
+    ///
+    /// This excludes widgets in the reusable pool.
+    pub fn items(&self) -> &ComponentMap<usize, WidgetItem> {
+        &self.items
     }
 
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -1806,12 +1827,25 @@ impl Widget for PortalList {
         );
         if self.suppress_child_events || is_scroll_animating {
             match event {
-                Event::TouchUpdate(_)
-                | Event::MouseDown(_)
-                | Event::MouseMove(_)
-                | Event::MouseUp(_) => {
+                // Suppress in-progress interactions so children don't react to
+                // a gesture that the list is handling as part of a "scroll" action.
+                Event::MouseDown(_) | Event::MouseMove(_) => {
                     pass_through_to_children = false;
                 }
+                // Don't suppress touch events if a touch-stop occurred (finger was released).
+                // Without this, a child widget in this list that captured `FingerDown`
+                // (e.g. a button that has been pressed/hovered) will never see the FingerUp,
+                // meaning it'll get stuck in that old pressed/hovered state.
+                Event::TouchUpdate(e) => {
+                    let has_release = e
+                        .touches
+                        .iter()
+                        .any(|t| matches!(t.state, TouchState::Stop));
+                    if !has_release {
+                        pass_through_to_children = false;
+                    }
+                }
+                // Note: MouseUp should pass through just like "touch stop" (finger releases) above.
                 _ => {}
             }
         }

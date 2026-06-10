@@ -468,6 +468,78 @@ mod hotreload_tests {
     }
 }
 
+/// Internal helper for [`app_main!`]. Emits the boxed event-handler
+/// closure that every platform entry point hands to `Cx::new`.
+///
+/// Not part of the public API. Use [`app_main!`] instead.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! _app_main_event_closure {
+    ($app:ident) => {{
+        let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        $crate::register_hotreload_handler(&hotreload_flag);
+        Box::new(move |cx: &mut Cx, event: &Event| {
+            if let Event::Startup = event {
+                *app.borrow_mut() = Some(cx.with_vm(|vm| {
+                    let value = $crate::script_mod_value::<$app>(vm);
+                    if let Some(obj) = value.as_object() {
+                        *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                    }
+                    let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
+                    <$app as AppMain>::after_new_from_script(vm, &mut app);
+                    app
+                }));
+                cx.start_hot_reload_file_observer_if_requested();
+            }
+            if let Event::LiveEdit = event {
+                let mut app_ref = app.borrow_mut();
+                if let Some(app) = app_ref.as_mut() {
+                    cx.with_vm(|vm| {
+                        let value = vm.with_reload($crate::script_mod_value::<$app>);
+                        if let Some(obj) = value.as_object() {
+                            *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                        }
+                        <$app as $crate::ScriptApply>::script_apply(
+                            app,
+                            vm,
+                            &$crate::Apply::Reload,
+                            &mut $crate::Scope::empty(),
+                            value,
+                        );
+                    });
+                }
+            }
+            if let Event::ScriptReapply = event {
+                let mut app_ref = app.borrow_mut();
+                if let Some(app) = app_ref.as_mut() {
+                    let value = app_value
+                        .borrow()
+                        .as_ref()
+                        .map(|r| $crate::ScriptValue::from(r.as_object()));
+                    if let Some(value) = value {
+                        cx.with_vm(|vm| {
+                            <$app as $crate::ScriptApply>::script_apply(
+                                app,
+                                vm,
+                                &$crate::Apply::ScriptReapply,
+                                &mut $crate::Scope::empty(),
+                                value,
+                            );
+                        });
+                    }
+                }
+            }
+            $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
+            if let Some(app) = &mut *app.borrow_mut() {
+                $crate::dispatch_app_event(app, cx, event);
+            }
+        }) as Box<dyn FnMut(&mut Cx, &Event)>
+    }};
+}
+
 #[macro_export]
 macro_rules! app_main {
     ( $ app: ident) => {
@@ -483,27 +555,12 @@ macro_rules! app_main {
                 return;
             }
 
-            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            $crate::register_hotreload_handler(&hotreload_flag);
-            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
-                move |cx, event| {
-                    if let Event::Startup = event {
-                        *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
-                        cx.start_hot_reload_file_observer_if_requested();
-                    }
-                    if let Event::LiveEdit = event {
-                        let mut app_ref = app.borrow_mut();
-                        if let Some(app) = app_ref.as_mut() {
-                            $crate::apply_live_edit(app, cx);
-                        }
-                    }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
-                    if let Some(app) = &mut *app.borrow_mut() {
-                        $crate::dispatch_app_event(app, cx, event);
-                    }
-                },
-            ))));
+            // The event-handler closure (which captures `app` and
+            // `app_value` Rcs internally) is shared across all four
+            // platform entry points via `_app_main_event_closure!`.
+            let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(
+                $crate::_app_main_event_closure!($app),
+            )));
             let studio_http = $crate::resolve_studio_http();
             cx.borrow_mut().init_websockets(&studio_http);
             if $crate::should_run_stdin_loop_from_env() {
@@ -546,25 +603,7 @@ macro_rules! app_main {
             $crate::os::linux::android::android_jni::apply_studio_env_from_activity(activity);
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
-                let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                $crate::register_hotreload_handler(&hotreload_flag);
-                let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
-                    if let Event::Startup = event {
-                        *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
-                        cx.start_hot_reload_file_observer_if_requested();
-                    }
-                    if let Event::LiveEdit = event {
-                        let mut app_ref = app.borrow_mut();
-                        if let Some(app) = app_ref.as_mut() {
-                            $crate::apply_live_edit(app, cx);
-                        }
-                    }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
-                    if let Some(app) = &mut *app.borrow_mut() {
-                        $crate::dispatch_app_event(app, cx, event);
-                    }
-                })));
+                let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
                 cx
@@ -578,25 +617,7 @@ macro_rules! app_main {
             env: $crate::napi_ohos::Env,
         ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
-                let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                $crate::register_hotreload_handler(&hotreload_flag);
-                let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
-                    if let Event::Startup = event {
-                        *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
-                        cx.start_hot_reload_file_observer_if_requested();
-                    }
-                    if let Event::LiveEdit = event {
-                        let mut app_ref = app.borrow_mut();
-                        if let Some(app) = app_ref.as_mut() {
-                            $crate::apply_live_edit(app, cx);
-                        }
-                    }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
-                    if let Some(app) = &mut *app.borrow_mut() {
-                        $crate::dispatch_app_event(app, cx, event);
-                    }
-                })));
+                let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
                 let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
@@ -612,21 +633,7 @@ macro_rules! app_main {
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
             Cx::init_log();
-            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
-                if let Event::Startup = event {
-                    *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
-                }
-                if let Event::LiveEdit = event {
-                    let mut app_ref = app.borrow_mut();
-                    if let Some(app) = app_ref.as_mut() {
-                        $crate::apply_live_edit(app, cx);
-                    }
-                }
-                if let Some(app) = &mut *app.borrow_mut() {
-                    $crate::dispatch_app_event(app, cx, event);
-                }
-            })));
+            let mut cx = Box::new(Cx::new($crate::_app_main_event_closure!($app)));
             let studio_http = $crate::resolve_studio_http();
             cx.init_websockets(&studio_http);
             cx.init_cx_os();

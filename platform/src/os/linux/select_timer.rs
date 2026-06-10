@@ -30,7 +30,11 @@ impl SelectTimers {
         let mut fds = mem::MaybeUninit::uninit();
         unsafe {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
-            libc_sys::FD_SET(0, fds.as_mut_ptr());
+            // NOTE: do NOT add stdin (fd 0) to the read set here.
+            //       Only X11 & Wayland event loops call this, and neither read stdin.
+            //       Only makepad-studio does that, but it doesn't use this function.
+            //       If we leave this here, it locks one CPU core to 100% when stdin is `/dev/null`,
+            //       which occurs any time an app is run from a DE/WM and not a terminal
             libc_sys::FD_SET(fd, fds.as_mut_ptr());
         }
         //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());

@@ -1,8 +1,17 @@
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
 use crate::{
-    desktop_button::DesktopButtonWidgetExt, label::*, makepad_derive_widget::*, makepad_draw::*,
-    nav_control::NavControl, view::*, widget::*,
+    desktop_button::DesktopButtonWidgetExt,
+    gauss_view::{
+        begin_window_gauss_frame, finish_window_gauss_frame, window_wants_gauss_capture,
+        GaussBlurSnapshot, GAUSS_VIEW_LEVELS,
+    },
+    label::*,
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    nav_control::NavControl,
+    view::*,
+    widget::*,
 };
 
 script_mod! {
@@ -18,6 +27,94 @@ script_mod! {
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
+
+    set_type_default() do #(DrawGaussDownsample::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        source_texture: texture_2d(float)
+
+        sample_source: fn(uv: vec2) -> vec4 {
+            return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+
+        pixel: fn() {
+            let size = self.source_texture.size()
+            let texel = vec2(
+                1.0 / max(size.x, 1.0),
+                1.0 / max(size.y, 1.0)
+            )
+            let uv = self.pos
+            let color = self.sample_source(uv) * 0.125
+                + (
+                    self.sample_source(uv + texel * vec2(-2.0, 2.0))
+                    + self.sample_source(uv + texel * vec2(2.0, 2.0))
+                    + self.sample_source(uv + texel * vec2(-2.0, -2.0))
+                    + self.sample_source(uv + texel * vec2(2.0, -2.0))
+                ) * 0.03125
+                + (
+                    self.sample_source(uv + texel * vec2(0.0, 2.0))
+                    + self.sample_source(uv + texel * vec2(-2.0, 0.0))
+                    + self.sample_source(uv + texel * vec2(2.0, 0.0))
+                    + self.sample_source(uv + texel * vec2(0.0, -2.0))
+                ) * 0.0625
+                + (
+                    self.sample_source(uv + texel * vec2(-1.0, 1.0))
+                    + self.sample_source(uv + texel * vec2(1.0, 1.0))
+                    + self.sample_source(uv + texel * vec2(-1.0, -1.0))
+                    + self.sample_source(uv + texel * vec2(1.0, -1.0))
+                ) * 0.125
+            return color
+        }
+    }
+
+    set_type_default() do #(DrawGaussUpsample::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        source_texture: texture_2d(float)
+        detail_texture: texture_2d(float)
+        detail_mix: uniform(0.82)
+
+        sample_source: fn(uv: vec2) -> vec4 {
+            return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+
+        sample_detail: fn(uv: vec2) -> vec4 {
+            return self.detail_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+
+        pixel: fn() {
+            let size = self.source_texture.size()
+            let texel = vec2(
+                1.0 / max(size.x, 1.0),
+                1.0 / max(size.y, 1.0)
+            )
+            let uv = self.pos
+            let smooth =
+                self.sample_source(uv) * 0.25
+                + (
+                    self.sample_source(uv + texel * vec2(1.0, 0.0))
+                    + self.sample_source(uv + texel * vec2(-1.0, 0.0))
+                    + self.sample_source(uv + texel * vec2(0.0, 1.0))
+                    + self.sample_source(uv + texel * vec2(0.0, -1.0))
+                ) * 0.125
+                + (
+                    self.sample_source(uv + texel * vec2(1.0, 1.0))
+                    + self.sample_source(uv + texel * vec2(-1.0, 1.0))
+                    + self.sample_source(uv + texel * vec2(1.0, -1.0))
+                    + self.sample_source(uv + texel * vec2(-1.0, -1.0))
+                ) * 0.0625
+            return smooth.mix(self.sample_detail(uv), clamp(self.detail_mix, 0.0, 1.0))
+        }
+    }
+
+    set_type_default() do #(DrawGaussScene::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        scene_texture: texture_2d(float)
+        source_y_flip: uniform(0.0)
+
+        pixel: fn() {
+            let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
+            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+    }
 
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
@@ -204,8 +301,18 @@ pub struct Window {
     window: ScriptWindowHandle,
     #[live]
     stdin_size: DrawColor,
+    #[live]
+    draw_gauss_downsample: DrawGaussDownsample,
+    #[live]
+    draw_gauss_upsample: DrawGaussUpsample,
+    #[live]
+    draw_gauss_scene: DrawGaussScene,
+    #[rust]
+    use_gauss_capture: bool,
     #[rust]
     last_known_area: Area,
+    #[rust(GaussStack::new(vm.cx_mut()))]
+    gauss_stack: GaussStack,
     #[new]
     overlay: Overlay,
     #[new]
@@ -225,6 +332,11 @@ pub struct Window {
     /// `None` means no geometry has been reported by the platform yet.
     #[rust]
     system_caption_bar_height: Option<f64>,
+    /// The last system-bar (status/navigation bar) icon tint pushed to the
+    /// platform: `Some(true)` for dark icons, `Some(false)` for light icons.
+    /// Used to only emit a platform op when the resolved value actually changes.
+    #[rust]
+    system_bar_dark_icons: Option<bool>,
     #[deref]
     view: View,
 
@@ -247,6 +359,263 @@ pub enum WindowAction {
     WindowGeomChange(WindowGeomChangeEvent),
     #[default]
     None,
+}
+
+const GAUSS_STACK_LEVELS: usize = GAUSS_VIEW_LEVELS;
+const GAUSS_SMOOTH_LEVEL_START: usize = 3;
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGaussDownsample {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGaussUpsample {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGaussScene {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+struct GaussStackLevel {
+    pass: DrawPass,
+    draw_list: DrawList2d,
+    texture: Texture,
+    smooth_pass: DrawPass,
+    smooth_draw_list: DrawList2d,
+    smooth_texture: Texture,
+}
+
+struct GaussStack {
+    scene_pass: DrawPass,
+    scene_draw_list: DrawList2d,
+    scene_texture: Texture,
+    _scene_depth_texture: Texture,
+    levels: Vec<GaussStackLevel>,
+}
+
+fn gauss_render_texture_y_flip_for_os(os_type: &OsType) -> f32 {
+    match os_type {
+        OsType::Android(_) => 1.0,
+        _ => 0.0,
+    }
+}
+
+impl GaussStack {
+    fn new(cx: &mut Cx) -> Self {
+        let scene_pass = DrawPass::new_with_name(cx, "gauss_scene");
+        let scene_draw_list = DrawList2d::new(cx);
+        let scene_texture = Self::new_render_texture(cx);
+        let scene_depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        scene_pass.set_color_texture(
+            cx,
+            &scene_texture,
+            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+        );
+        scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+
+        let mut levels = Vec::with_capacity(GAUSS_STACK_LEVELS);
+        for index in 0..GAUSS_STACK_LEVELS {
+            let pass = DrawPass::new_with_name(cx, &format!("gauss_mip_{index}"));
+            let draw_list = DrawList2d::new(cx);
+            let texture = Self::new_render_texture(cx);
+            pass.set_color_texture(
+                cx,
+                &texture,
+                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+            );
+            let smooth_pass = DrawPass::new_with_name(cx, &format!("gauss_smooth_mip_{index}"));
+            let smooth_draw_list = DrawList2d::new(cx);
+            let smooth_texture = Self::new_render_texture(cx);
+            smooth_pass.set_color_texture(
+                cx,
+                &smooth_texture,
+                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+            );
+            levels.push(GaussStackLevel {
+                pass,
+                draw_list,
+                texture,
+                smooth_pass,
+                smooth_draw_list,
+                smooth_texture,
+            });
+        }
+
+        Self {
+            scene_pass,
+            scene_draw_list,
+            scene_texture,
+            _scene_depth_texture: scene_depth_texture,
+            levels,
+        }
+    }
+
+    fn new_render_texture(cx: &mut Cx) -> Texture {
+        Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        )
+    }
+
+    fn begin_scene(&mut self, cx: &mut Cx2d) {
+        cx.make_child_pass(&self.scene_pass);
+        cx.begin_pass(&self.scene_pass, None);
+        self.scene_draw_list.begin_always(cx);
+        let size = cx.current_pass_size();
+        cx.begin_root_turtle(size, Layout::flow_down());
+    }
+
+    fn end_scene(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.scene_draw_list.end(cx);
+        cx.end_pass(&self.scene_pass);
+    }
+
+    fn snapshot(&self, root_size: Vec2d, source_y_flip: f32, dpi_factor: f64) -> GaussBlurSnapshot {
+        GaussBlurSnapshot {
+            scene_texture: self.scene_texture.clone(),
+            mip_textures: self
+                .levels
+                .iter()
+                .enumerate()
+                .map(|(index, level)| {
+                    if index >= GAUSS_SMOOTH_LEVEL_START {
+                        level.smooth_texture.clone()
+                    } else {
+                        level.texture.clone()
+                    }
+                })
+                .collect(),
+            source_size: root_size,
+            source_y_flip,
+            dpi_factor,
+        }
+    }
+
+    fn level_size(root_size: Vec2d, dpi: f64, index: usize) -> Vec2d {
+        let min_logical_size = 1.0 / dpi.max(1.0);
+        let scale = (1usize << (index + 1)) as f64;
+        dvec2(
+            (root_size.x / scale).max(min_logical_size),
+            (root_size.y / scale).max(min_logical_size),
+        )
+    }
+
+    fn draw_mip_chain(
+        &mut self,
+        cx: &mut Cx2d,
+        downsample: &mut DrawGaussDownsample,
+        root_size: Vec2d,
+    ) {
+        let dpi = cx.current_dpi_factor();
+        let mut source_texture = self.scene_texture.clone();
+
+        for (index, level) in self.levels.iter_mut().enumerate() {
+            let level_size = Self::level_size(root_size, dpi, index);
+
+            level.pass.set_size(cx, level_size);
+            cx.make_child_pass(&level.pass);
+            cx.begin_pass(&level.pass, Some(dpi));
+            level.draw_list.begin_always(cx);
+
+            let pass_size = cx.current_pass_size();
+            cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+            downsample.draw_vars.set_texture(0, &source_texture);
+            downsample.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(0.0, 0.0),
+                    size: pass_size,
+                },
+            );
+            cx.end_pass_sized_turtle();
+
+            level.draw_list.end(cx);
+            cx.end_pass(&level.pass);
+            source_texture = level.texture.clone();
+        }
+    }
+
+    fn draw_high_blur_chain(
+        &mut self,
+        cx: &mut Cx2d,
+        upsample: &mut DrawGaussUpsample,
+        root_size: Vec2d,
+    ) {
+        if self.levels.is_empty() || GAUSS_SMOOTH_LEVEL_START >= self.levels.len() {
+            return;
+        }
+
+        let dpi = cx.current_dpi_factor();
+        let mut source_texture = self.levels[self.levels.len() - 1].texture.clone();
+
+        for index in (GAUSS_SMOOTH_LEVEL_START..self.levels.len()).rev() {
+            let level_size = Self::level_size(root_size, dpi, index);
+            let level = &mut self.levels[index];
+            level.smooth_pass.set_size(cx, level_size);
+            cx.make_child_pass(&level.smooth_pass);
+            cx.begin_pass(&level.smooth_pass, Some(dpi));
+            level.smooth_draw_list.begin_always(cx);
+
+            let pass_size = cx.current_pass_size();
+            cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+            upsample.draw_vars.set_texture(0, &source_texture);
+            upsample.draw_vars.set_texture(1, &level.texture);
+            let detail_mix = if index == GAUSS_SMOOTH_LEVEL_START {
+                0.90
+            } else {
+                0.78
+            };
+            upsample
+                .draw_vars
+                .set_uniform(cx, live_id!(detail_mix), &[detail_mix]);
+            upsample.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(0.0, 0.0),
+                    size: pass_size,
+                },
+            );
+            cx.end_pass_sized_turtle();
+
+            level.smooth_draw_list.end(cx);
+            cx.end_pass(&level.smooth_pass);
+            source_texture = level.smooth_texture.clone();
+        }
+    }
+
+    fn draw_scene(&mut self, cx: &mut Cx2d, scene: &mut DrawGaussScene, root_size: Vec2d) {
+        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        scene
+            .draw_vars
+            .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
+        scene.draw_vars.set_texture(0, &self.scene_texture);
+        scene.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: root_size,
+            },
+        );
+    }
 }
 
 impl Window {
@@ -340,11 +709,39 @@ impl Window {
         }
     }
 
+    /// Resolves the desired system-bar (status/navigation bar) icon tint and,
+    /// when it changes, asks the platform to apply it.
+    ///
+    /// In `Auto` mode the tint follows the window background luminance: a light
+    /// background needs dark icons for contrast, and vice versa. `DarkIcons` /
+    /// `LightIcons` force the choice. Honored on Android and iOS (iOS has no
+    /// separate navigation bar, so only the status bar is affected).
+    fn sync_system_bar_appearance(&mut self, cx: &mut Cx) {
+        if !matches!(cx.os_type(), OsType::Android(_) | OsType::Ios(_)) {
+            return;
+        }
+        let dark_icons = match cx.display_context.system_bar_appearance {
+            SystemBarAppearance::DarkIcons => true,
+            SystemBarAppearance::LightIcons => false,
+            SystemBarAppearance::Auto => {
+                let c = self.pass.clear_color;
+                // Rec.709 luma as a perceptual brightness estimate.
+                let luma = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+                luma > 0.5
+            }
+        };
+        if self.system_bar_dark_icons != Some(dark_icons) {
+            self.system_bar_dark_icons = Some(dark_icons);
+            cx.push_unique_platform_op(CxOsOp::SetSystemBarDarkIcons(dark_icons));
+        }
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
         self.sync_caption_centering(cx);
+        self.sync_system_bar_appearance(cx);
 
         if self.initialized {
             return;
@@ -384,9 +781,27 @@ impl Window {
         self.main_draw_list.begin_always(cx);
 
         let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, Layout::flow_down());
+        cx.begin_root_turtle(size, Layout::flow_overlay());
+        let window_id = self.window.handle.window_id();
+        self.use_gauss_capture = window_wants_gauss_capture(cx, window_id);
+        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let gauss_snapshot = if self.use_gauss_capture {
+            Some(
+                self.gauss_stack
+                    .snapshot(size, source_y_flip, cx.current_dpi_factor()),
+            )
+        } else {
+            None
+        };
+        begin_window_gauss_frame(cx, window_id, self.use_gauss_capture, gauss_snapshot);
 
-        self.overlay.begin(cx);
+        if self.use_gauss_capture {
+            self.gauss_stack.begin_scene(cx);
+            self.overlay
+                .begin_for_pass(cx, self.pass.handle.draw_pass_id());
+        } else {
+            self.overlay.begin(cx);
+        }
 
         Redrawing::yes()
     }
@@ -408,7 +823,24 @@ impl Window {
             self.cursor_draw_list.end(cx);
         }
 
+        if self.use_gauss_capture {
+            self.gauss_stack.end_scene(cx);
+            let root_size = cx.current_pass_size();
+            if root_size.x >= 0.5 && root_size.y >= 0.5 {
+                self.gauss_stack
+                    .draw_mip_chain(cx, &mut self.draw_gauss_downsample, root_size);
+                self.gauss_stack
+                    .draw_high_blur_chain(cx, &mut self.draw_gauss_upsample, root_size);
+                self.gauss_stack
+                    .draw_scene(cx, &mut self.draw_gauss_scene, root_size);
+            }
+        }
         self.overlay.end(cx);
+        let window_id = self.window.handle.window_id();
+        if finish_window_gauss_frame(cx, window_id) {
+            cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
+        }
+
         // lets get te pass size
         fn encode_size(x: f64) -> Vec4f {
             let x = x as usize;
@@ -480,6 +912,20 @@ impl Window {
 
     pub fn position(&self, cx: &Cx) -> Vec2d {
         self.window.handle.get_position(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gauss_render_texture_y_flip_is_platform_specific() {
+        assert_eq!(gauss_render_texture_y_flip_for_os(&OsType::Macos), 0.0);
+        assert_eq!(
+            gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
+            1.0
+        );
     }
 }
 
@@ -634,10 +1080,15 @@ impl Widget for Window {
                         }
                     }
 
-                    // If safe area insets changed, trigger a script re-apply
-                    // so widgets pick up new values.
+                    // If safe area insets changed, request a `script_mod`
+                    // re-run so widget definitions that reference these
+                    // primitives via `mod.widgets.SAFE_INSET_PAD_*` get the
+                    // new values re-baked. `request_script_reapply` would
+                    // not work here: those expressions are evaluated when
+                    // `script_mod` runs, and `Apply::ScriptReapply` does
+                    // not re-evaluate them.
                     if old_insets != ev.new_geom.safe_area_insets {
-                        cx.request_script_reapply();
+                        cx.request_live_edit();
                     }
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));

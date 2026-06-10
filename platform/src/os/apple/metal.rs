@@ -594,8 +594,13 @@ impl Cx {
 
         let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
 
-        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = mode {
-            unsafe { msg_send![view, currentRenderPassDescriptor] }
+        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = &mode {
+            let descriptor: ObjcId = unsafe { msg_send![*view, currentRenderPassDescriptor] };
+            if descriptor == nil {
+                let () = unsafe { msg_send![pool, release] };
+                return;
+            }
+            descriptor
         } else {
             unsafe {
                 msg_send![
@@ -622,15 +627,19 @@ impl Cx {
             self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         }
 
-        self.passes[draw_pass_id].paint_dirty = false;
-
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
+            if !matches!(&mode, DrawPassMode::MTKView(_)) {
+                self.passes[draw_pass_id].paint_dirty = false;
+            }
+            let () = unsafe { msg_send![pool, release] };
             return;
         }
 
+        self.passes[draw_pass_id].paint_dirty = false;
+
         self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
 
-        if let DrawPassMode::MTKView(_) = mode {
+        if matches!(&mode, DrawPassMode::MTKView(_)) {
             let color_attachments: ObjcId =
                 unsafe { msg_send![render_pass_descriptor, colorAttachments] };
             let color_attachment: ObjcId =

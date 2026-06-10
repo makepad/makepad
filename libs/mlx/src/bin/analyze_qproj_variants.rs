@@ -1,6 +1,4 @@
-use makepad_mlx::{
-    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader,
-};
+use makepad_mlx::{fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader};
 use std::error::Error;
 use std::path::PathBuf;
 

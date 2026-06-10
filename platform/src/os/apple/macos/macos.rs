@@ -4,13 +4,14 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, QuitReason, VideoSource,
+            WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -348,6 +349,7 @@ impl Cx {
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
 
         //let cx = Rc::new(RefCell::new(self));
+        cx.borrow_mut().set_physical_keyboard_state(true);
         if crate::app_main::should_run_stdin_loop_from_env() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
@@ -515,6 +517,7 @@ impl Cx {
 
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
+                        self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
@@ -553,7 +556,21 @@ impl Cx {
                     self.run_live_edit_if_needed("macos");
                     self.handle_networking_events();
                     self.handle_gamepad_events();
-                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
+                    // Propagate Exit from the inner Paint dispatch. The
+                    // signal handling above (Ctrl+C / SIGTERM) calls
+                    // `request_quit`, which queues a `CxOsOp::Quit`; that op
+                    // is drained by `handle_platform_ops` at the top of this
+                    // recursive call and surfaces as `EventFlow::Exit`
+                    // (after `Event::Shutdown` is dispatched). If we ignore
+                    // the return value here and fall through to
+                    // `EventFlow::Wait`, `do_callback` overwrites the just-
+                    // set Exit and the main loop blocks indefinitely on the
+                    // next NSEvent — the symptom being a Ctrl+C that runs
+                    // the user's `QuitRequested` / `Shutdown` handlers but
+                    // never actually exits.
+                    if let EventFlow::Exit = self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows) {
+                        return EventFlow::Exit;
+                    }
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
                     self.with_vm(|vm| {
@@ -570,6 +587,13 @@ impl Cx {
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
+            MacosEvent::AppQuitRequested => {
+                self.request_quit(QuitReason::App);
+                if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
+            }
             MacosEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
@@ -601,10 +625,10 @@ impl Cx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
-                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
-                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
-                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                        re.new_geom.dpi_factor = dpi_override;
+                    {
+                        let cx_window = &mut self.windows[re.window_id];
+                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
@@ -860,10 +884,6 @@ impl Cx {
         }
     }
 
-    fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
-        *pos = self.windows[window_id].remap_dpi_override(*pos)
-    }
-
     fn handle_platform_ops(
         &mut self,
         metal_windows: &mut Vec<MetalWindow>,
@@ -1036,6 +1056,8 @@ impl Cx {
                 }
                 CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
+                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     metal_windows.iter_mut().for_each(|w| {
                         w.cocoa_window.set_ime_active(true);
                         w.cocoa_window.set_ime_spot(pos);

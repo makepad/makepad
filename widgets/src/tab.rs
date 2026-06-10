@@ -304,11 +304,20 @@ pub enum TabAction {
     ShouldTabStartDrag,
     ShouldTabStopDrag,
     /// A touch finger went down on this tab (for scroll tracking).
-    TouchDown { abs: Vec2d, time: f64 },
+    TouchDown {
+        abs: Vec2d,
+        time: f64,
+    },
     /// A touch finger moved on this tab without a long press (scroll the tab bar).
-    TouchScroll { abs: Vec2d, time: f64 },
+    TouchScroll {
+        abs: Vec2d,
+        time: f64,
+    },
     /// A touch finger lifted off this tab without a long press (end scroll / flick).
-    TouchUp { abs: Vec2d, time: f64 },
+    TouchUp {
+        abs: Vec2d,
+        time: f64,
+    },
 }
 
 impl Tab {
@@ -375,24 +384,24 @@ impl Tab {
                 if e.device.is_touch() {
                     if e.has_long_press_occurred {
                         // Touch: drag the tab only after a long press.
-                        if !self.is_dragging
-                            && (e.abs - e.abs_start).length() > self.min_drag_dist
+                        if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist
                         {
                             self.is_dragging = true;
                             dispatch_action(cx, TabAction::ShouldTabStartDrag);
                         }
                     } else {
                         // Touch without long press: scroll the tab bar.
-                        dispatch_action(cx, TabAction::TouchScroll {
-                            abs: e.abs,
-                            time: e.time,
-                        });
+                        dispatch_action(
+                            cx,
+                            TabAction::TouchScroll {
+                                abs: e.abs,
+                                time: e.time,
+                            },
+                        );
                     }
                 } else {
                     // Mouse: drag the tab after exceeding the minimum drag distance.
-                    if !self.is_dragging
-                        && (e.abs - e.abs_start).length() > self.min_drag_dist
-                    {
+                    if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
                         self.is_dragging = true;
                         dispatch_action(cx, TabAction::ShouldTabStartDrag);
                     }
@@ -405,10 +414,13 @@ impl Tab {
                 }
                 if fue.device.is_touch() {
                     if !fue.has_long_press_occurred {
-                        dispatch_action(cx, TabAction::TouchUp {
-                            abs: fue.abs,
-                            time: fue.time,
-                        });
+                        dispatch_action(
+                            cx,
+                            TabAction::TouchUp {
+                                abs: fue.abs,
+                                time: fue.time,
+                            },
+                        );
                     }
                     // For touch: only select the tab if it was a simple tap,
                     // not a scroll gesture or long-press drag.
@@ -422,10 +434,13 @@ impl Tab {
                     // For touch: don't select on finger down; selection happens
                     // on finger up if no gesture was recognized (see FingerUp above).
                     if fde.is_primary_hit() {
-                        dispatch_action(cx, TabAction::TouchDown {
-                            abs: fde.abs,
-                            time: fde.time,
-                        });
+                        dispatch_action(
+                            cx,
+                            TabAction::TouchDown {
+                                abs: fde.abs,
+                                time: fde.time,
+                            },
+                        );
                     }
                 } else {
                     // Mouse: select immediately on click, middle-click to close.
