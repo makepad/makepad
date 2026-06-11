@@ -277,11 +277,17 @@ pub fn define_makepad_text_view() -> *const Class {
             NSRect {
                 origin: NSPoint {
                     x,
-                    y: y - IOS_TEXT_INPUT_TARGET_HEIGHT,
+                    // Anchor above the caret line so the candidate bubble sits above the
+                    // text instead of covering it (the hairline height makes iOS plant the
+                    // bubble right at this anchor).
+                    y: y - 1.5 * IOS_TEXT_INPUT_TARGET_HEIGHT,
                 },
+                // Near-degenerate rect: a hairline height still anchors the autocorrect
+                // candidate bubble but is too small to draw a visible caret during marked
+                // text. The caret's height is this rect's height (makepad draws the real one).
                 size: NSSize {
                     width: 1.0,
-                    height: IOS_TEXT_INPUT_TARGET_HEIGHT,
+                    height: 0.01,
                 },
             }
         }
