@@ -583,7 +583,33 @@ script_mod! {
         height: Fill
         flow: Down
         PaneToolbar {
-            run_stop_all := ButtonFlat {text: "Stop All"}
+            padding: Inset {left: 10.0 right: 4.0 top: 0.0 bottom: 0.0}
+            align: Align {x: 0.0 y: 0.5}
+            Label {
+                text: "Run Targets"
+                draw_text +: {
+                    font_size: theme.font_size_p - 1.0
+                    color: theme.color_label_inner
+                    text_style: theme.font_bold
+                }
+            }
+            Filler {}
+            run_stop_all := ButtonFlatter {
+                width: 24.0
+                height: 24.0
+                text: ""
+                padding: 0.0
+                margin: 0.0
+                draw_bg +: {
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.box(8.0, 8.0, 8.0, 8.0, 1.0)
+                        let color = #xef596f
+                        sdf.fill(color.mix(#xFFFFFF, self.hover * 0.2))
+                        return sdf.result
+                    }
+                }
+            }
         }
         run_list := DesktopRunList {}
     }
