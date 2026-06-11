@@ -1583,6 +1583,11 @@ impl AiManager {
                     );
                     return Some((mount.clone(), self.snapshot(&mount)));
                 }
+                if let Some(pending) = self.pending_classifiers.remove(&request_id) {
+                    let mount = pending.mount.clone();
+                    self.send_prompt_accepted(&mount, pending.agent_id, &pending.original_prompt);
+                    return Some((mount.clone(), self.snapshot(&mount)));
+                }
                 let in_flight = self.inflight.remove(&request_id)?;
                 if !self.agent_run_matches(
                     &in_flight.mount,
@@ -6419,7 +6424,7 @@ fn now_seconds() -> f64 {
 mod tests {
     use super::*;
     use makepad_network::backend::{EventSink, NetworkBackend};
-    use makepad_network::{HttpMethod, HttpRequest, HttpResponse, NetworkError, WsSend};
+    use makepad_network::{HttpError, HttpMethod, HttpRequest, HttpResponse, NetworkError, WsSend};
     use std::collections::BTreeMap;
     use std::sync::mpsc::channel;
     use std::thread;
@@ -8733,5 +8738,51 @@ Some intro text...
             }
         });
         assert!(has_original_500);
+    }
+
+    #[test]
+    fn test_classifier_network_error_fallback() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        let request_id = LiveId::unique();
+        manager.pending_classifiers.insert(
+            request_id,
+            PendingClassifier {
+                mount: "repo".to_string(),
+                agent_id,
+                original_prompt: "review this change".to_string(),
+            },
+        );
+
+        let result = manager.handle_http_response(NetworkResponse::HttpError {
+            request_id,
+            error: HttpError {
+                message: "connection reset".to_string(),
+                metadata_id: LiveId(0),
+            },
+        });
+
+        assert!(result.is_some());
+        assert!(!manager.pending_classifiers.contains_key(&request_id));
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        let has_original = agent.history.iter().any(|item| {
+            if let ConversationItem::User { text } = item {
+                text == "review this change"
+            } else {
+                false
+            }
+        });
+        assert!(has_original);
     }
 }
