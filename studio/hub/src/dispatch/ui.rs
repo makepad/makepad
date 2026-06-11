@@ -1,12 +1,14 @@
 use super::*;
+use makepad_network::ToUISender;
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId, SaveResult, BuildInfo, BuildBoxStatus,
+    BuildBoxStatus, BuildInfo, ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
+    SaveResult,
 };
 use makepad_studio_protocol::{
-    KeyEvent, KeyModifiers, KeyCode, TextInputEvent, RemoteMouseDown, RemoteMouseUp, RemoteKeyModifiers, MouseButton,
-    ScreenshotRequest, WidgetTreeDumpRequest, WidgetQueryRequest, WidgetSnapshotRequest, LogLevel,
+    KeyCode, KeyEvent, KeyModifiers, LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
+    RemoteMouseUp, ScreenshotRequest, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
+    WidgetTreeDumpRequest,
 };
-use makepad_network::ToUISender;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1170,7 +1172,12 @@ impl HubCore {
         self.send_ui_reply(client_id, HubToClient::Error { message });
     }
 
-    pub(super) fn send_ui_message(&self, client_id: ClientId, msg: HubToClient, format: WireFormat) {
+    pub(super) fn send_ui_message(
+        &self,
+        client_id: ClientId,
+        msg: HubToClient,
+        format: WireFormat,
+    ) {
         let Some(client) = self.ui_clients.get(&client_id) else {
             return;
         };

@@ -169,7 +169,6 @@ impl ActionDefaultRef for RunListRowData {
     }
 }
 
-
 #[derive(Script, ScriptHook, Widget)]
 pub struct DesktopRunList {
     #[deref]

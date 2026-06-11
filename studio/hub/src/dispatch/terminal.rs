@@ -255,7 +255,11 @@ impl HubCore {
         });
     }
 
-    pub(super) fn push_terminal_frame_updates(&mut self, path: &str, force_bottom_for_sticky: bool) {
+    pub(super) fn push_terminal_frame_updates(
+        &mut self,
+        path: &str,
+        force_bottom_for_sticky: bool,
+    ) {
         let updates = {
             let Some(session) = self.terminal_sessions.get_mut(path) else {
                 return;

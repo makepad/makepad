@@ -344,8 +344,14 @@ fn ai_manager_persists_chats_per_mount_and_loads_them_on_restart() {
     });
     let restored = wait_for_ai_state(&connection, "repo", Duration::from_secs(2), |state| {
         state.agents.len() == 2
-            && state.agents.iter().any(|agent| agent.title == "persist this chat")
-            && state.agents.iter().any(|agent| agent.title == "Second chat")
+            && state
+                .agents
+                .iter()
+                .any(|agent| agent.title == "persist this chat")
+            && state
+                .agents
+                .iter()
+                .any(|agent| agent.title == "Second chat")
             && state
                 .active_agent
                 .as_ref()
@@ -1166,7 +1172,9 @@ fn ai_manager_spawns_subagent_and_completes_task_natively() {
         );
 
         // 2. Second request: Subagent starts request. Server returns complete_task tool call.
-        let (mut stream2, _) = listener.accept().expect("accept second ai request (subagent)");
+        let (mut stream2, _) = listener
+            .accept()
+            .expect("accept second ai request (subagent)");
         let request2 = read_http_request(&mut stream2);
         assert!(request2.contains("write button code"));
         assert!(request2.contains("Swarm Orchestration Mode"));
@@ -1186,7 +1194,9 @@ fn ai_manager_spawns_subagent_and_completes_task_natively() {
         );
 
         // 3. Third request: Parent resumes with tool results from subagent. Server returns final response.
-        let (mut stream3, _) = listener.accept().expect("accept third ai request (parent resume)");
+        let (mut stream3, _) = listener
+            .accept()
+            .expect("accept third ai request (parent resume)");
         let request3 = read_http_request(&mut stream3);
         assert!(request3.contains("done writing button"));
         assert!(request3.contains("spawn_subagent"));
@@ -1248,4 +1258,3 @@ fn ai_manager_spawns_subagent_and_completes_task_natively() {
 
     server.join().expect("join ai server");
 }
-

@@ -2152,6 +2152,19 @@ impl AiManager {
                     mount_state.order.push(sub_id);
                     mount_state.agents.insert(sub_id, sub_agent);
                     mount_state.active_agent_id = Some(sub_id);
+                    Self::push_visibility_event(
+                        mount_state,
+                        Self::visibility_event(
+                            "subagent_spawned",
+                            Some(sub_id),
+                            &title,
+                            &format!(
+                                "{} delegated work to {}",
+                                agent_title_for_event(mount_state, agent_id),
+                                title
+                            ),
+                        ),
+                    );
 
                     self.persist_mount_state_best_effort(mount);
                     self.start_model_request(mount, sub_id, sub_run_token);
@@ -2163,6 +2176,11 @@ impl AiManager {
                     let parent_run_token = pre_parent_run_token.unwrap();
 
                     if let Some(parent_id) = parent_id {
+                        let completed_title = mount_state
+                            .agents
+                            .get(&agent_id)
+                            .map(|agent| agent.title.clone())
+                            .unwrap_or_else(|| "Subagent".to_string());
                         if let Some(parent) = mount_state.agents.get_mut(&parent_id) {
                             let mut parent_tool_call_id = String::new();
                             if let Some(ConversationItem::Assistant { tool_calls, .. }) =
@@ -2203,6 +2221,19 @@ impl AiManager {
                                 text: String::new(),
                             });
                             parent.subagents.retain(|id| *id != agent_id);
+                            Self::push_visibility_event(
+                                mount_state,
+                                Self::visibility_event(
+                                    "subagent_completed",
+                                    Some(parent_id),
+                                    &completed_title,
+                                    &format!(
+                                        "Success: {}. {}",
+                                        args.success,
+                                        truncate_inline(&args.summary, 120)
+                                    ),
+                                ),
+                            );
                             mount_state.order.retain(|id| *id != agent_id);
                             mount_state.agents.remove(&agent_id);
                             remove_agent_file_for_root_best_effort(
@@ -4858,6 +4889,14 @@ fn is_closed_subagent(agent: &RunningAgent) -> bool {
     agent.parent_agent_id.is_some() && matches!(agent.status.as_str(), "completed" | "done")
 }
 
+fn agent_title_for_event(mount_state: &MountAgents, agent_id: AiAgentId) -> String {
+    mount_state
+        .agents
+        .get(&agent_id)
+        .map(|agent| agent.title.clone())
+        .unwrap_or_else(|| format!("Agent {}", agent_id.0))
+}
+
 fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
     text.trim().is_empty() && tool_calls.is_empty()
 }
@@ -7340,6 +7379,12 @@ Some intro text...
             matches!(message.role, AiMessageRole::User)
                 && message.text.contains("You are the `planner` subagent.")
         }));
+        assert!(mount_state.visibility_events.iter().any(|event| {
+            event.kind == "subagent_spawned"
+                && event.agent_id == Some(sub_id)
+                && event.title == "planner Subagent"
+                && event.detail.contains("delegated work")
+        }));
     }
 
     #[test]
@@ -7419,6 +7464,12 @@ Some intro text...
                     content
                 } if tool_call_id == "call_spawn" && content.contains("Updated the plan.")
             )
+        }));
+        assert!(mount_state.visibility_events.iter().any(|event| {
+            event.kind == "subagent_completed"
+                && event.agent_id == Some(parent_id)
+                && event.title == "coder Subagent"
+                && event.detail.contains("Updated the plan.")
         }));
     }
 

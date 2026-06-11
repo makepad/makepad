@@ -248,13 +248,7 @@ impl App {
         let agent_labels = state
             .agents
             .iter()
-            .map(|agent| {
-                if agent.pending {
-                    format!("{} *", agent.title)
-                } else {
-                    agent.title.clone()
-                }
-            })
+            .map(|agent| ai_agent_picker_label(agent, state))
             .collect::<Vec<_>>();
         let agent_selected = state
             .active_agent_id
@@ -467,6 +461,47 @@ fn ai_chat_markdown(agent: &AiAgentState) -> String {
     }
     append_activity_markdown(&mut markdown, &activity, true, agent.pending);
     markdown
+}
+
+fn ai_agent_picker_label(agent: &AiAgentSummary, state: &AiMountState) -> String {
+    let mut label = String::new();
+    let depth = agent_depth(agent, state);
+    for _ in 0..depth {
+        label.push_str("  ");
+    }
+    if depth > 0 {
+        label.push_str("↳ ");
+    }
+    label.push_str(&truncate_inline(&agent.title, 42));
+    if let Some(role) = agent.role.as_deref().filter(|role| !role.trim().is_empty()) {
+        label.push_str(" · ");
+        label.push_str(&truncate_inline(role, 18));
+    }
+    if agent.pending {
+        label.push_str(" · running");
+    } else if agent.status == "completed" {
+        label.push_str(" · done");
+    } else if agent.status.contains("error") {
+        label.push_str(" · error");
+    }
+    label
+}
+
+fn agent_depth(agent: &AiAgentSummary, state: &AiMountState) -> usize {
+    let mut depth = 0;
+    let mut parent_id = agent.parent_agent_id;
+    while let Some(id) = parent_id {
+        depth += 1;
+        if depth >= 4 {
+            break;
+        }
+        parent_id = state
+            .agents
+            .iter()
+            .find(|candidate| candidate.agent_id == id)
+            .and_then(|candidate| candidate.parent_agent_id);
+    }
+    depth
 }
 
 fn ai_main_message_label(message: &AiMessage) -> &'static str {
@@ -1686,6 +1721,8 @@ fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
         let kind_label = match event.kind.as_str() {
             "step_activated" => "Step Active",
             "step_completed" => "Step Completed",
+            "subagent_spawned" => "Subagent Started",
+            "subagent_completed" => "Subagent Done",
             "terminal_attached" => "Terminal Open",
             "terminal_needs_input" => "Awaiting Input",
             "terminal_done" => "Terminal Done",
@@ -1695,10 +1732,22 @@ fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
             "workflow_failed" => "Workflow Failed",
             other => other,
         };
+        let agent_label = event
+            .agent_id
+            .and_then(|agent_id| {
+                state
+                    .agents
+                    .iter()
+                    .find(|agent| agent.agent_id == agent_id)
+                    .map(|agent| truncate_inline(&agent.title, 32))
+            })
+            .map(|title| format!(" - {}", title))
+            .unwrap_or_default();
         markdown.push_str(&format!(
-            "- `[{}]` **{}** - {}\n",
+            "- `[{}]` **{}**{} - {}\n",
             kind_label,
             truncate_inline(&event.title, 44),
+            agent_label,
             truncate_inline(&event.detail, 96)
         ));
     }
@@ -2033,8 +2082,38 @@ mod ai_task_board_tests {
     }
 
     #[test]
+    fn agent_picker_labels_show_subagent_hierarchy_and_status() {
+        let root = summary(
+            1,
+            "Implement agent observability",
+            "thinking...",
+            true,
+            None,
+        );
+        let mut child = summary(
+            2,
+            "Review instrumentation",
+            "ready",
+            false,
+            Some(AiAgentId(1)),
+        );
+        child.role = Some("reviewer".to_string());
+        let state = mount_state(vec![root.clone(), child.clone()], "");
+
+        assert_eq!(
+            ai_agent_picker_label(&root, &state),
+            "Implement agent observability · running"
+        );
+        assert_eq!(
+            ai_agent_picker_label(&child, &state),
+            "  ↳ Review instrumentation · reviewer"
+        );
+    }
+
+    #[test]
     fn live_activity_renders_recent_activity_events() {
-        let mut state = mount_state(Vec::new(), "");
+        let state_agent = summary(1, "Workflow Owner", "running", true, None);
+        let mut state = mount_state(vec![state_agent], "");
         state.visibility_events = vec![
             AiVisibilityEvent {
                 kind: "step_activated".to_string(),
@@ -2044,10 +2123,10 @@ mod ai_task_board_tests {
                 timestamp: 100.0,
             },
             AiVisibilityEvent {
-                kind: "terminal_attached".to_string(),
+                kind: "subagent_spawned".to_string(),
                 agent_id: Some(AiAgentId(1)),
-                title: "a.term".to_string(),
-                detail: "Terminal open".to_string(),
+                title: "Reviewer Subagent".to_string(),
+                detail: "Workflow Owner delegated work to Reviewer Subagent".to_string(),
                 timestamp: 101.0,
             },
         ];
@@ -2055,8 +2134,11 @@ mod ai_task_board_tests {
         let markdown = ai_live_activity_markdown(&state);
         assert!(markdown.contains("**Recent Activity**"));
         // Newest-first check: order is reverse
-        assert!(markdown.contains("- `[Terminal Open]` **a.term** - Terminal open"));
-        assert!(markdown.contains("- `[Step Active]` **Resolve PR Set** - Step active"));
+        assert!(markdown.contains(
+            "- `[Subagent Started]` **Reviewer Subagent** - Workflow Owner - Workflow Owner delegated work to Reviewer Subagent"
+        ));
+        assert!(markdown
+            .contains("- `[Step Active]` **Resolve PR Set** - Workflow Owner - Step active"));
     }
 
     #[test]

@@ -1,15 +1,23 @@
 use super::*;
 use makepad_studio_protocol::hub_protocol::{
-    AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildInfo, ClientId, HubToBuildBox, HubToBuildBoxVec,
-    HubToClient, QueryId, RunItem, LogSource,
+    AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildInfo, ClientId, HubToBuildBox,
+    HubToBuildBoxVec, HubToClient, LogSource, QueryId, RunItem,
 };
-use makepad_studio_protocol::{AppToStudio, StudioToApp, StudioToAppVec, LogLevel, TextInputEvent, KeyEvent, KeyModifiers, KeyCode, RemoteMouseDown, RemoteMouseUp, RemoteKeyModifiers, MouseButton, ScreenshotRequest, WidgetTreeDumpRequest, WidgetQueryRequest, WidgetSnapshotRequest};
-use std::collections::{HashSet, HashMap};
-use std::sync::mpsc::Sender;
+use makepad_studio_protocol::{
+    AppToStudio, KeyCode, KeyEvent, KeyModifiers, LogLevel, MouseButton, RemoteKeyModifiers,
+    RemoteMouseDown, RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
+    WidgetQueryRequest, WidgetSnapshotRequest, WidgetTreeDumpRequest,
+};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
 impl HubCore {
-    pub(super) fn send_to_app_with_socket(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<u64, String> {
+    pub(super) fn send_to_app_with_socket(
+        &self,
+        build_id: QueryId,
+        msg_bin: Vec<u8>,
+    ) -> Result<u64, String> {
         let mut candidates: Vec<(u64, Sender<Vec<u8>>)> = self
             .app_sockets
             .iter()
@@ -35,7 +43,11 @@ impl HubCore {
         Ok(socket_id)
     }
 
-    pub(super) fn send_to_process_stdin(&self, build_id: QueryId, msg_bin: Vec<u8>) -> Result<(), String> {
+    pub(super) fn send_to_process_stdin(
+        &self,
+        build_id: QueryId,
+        msg_bin: Vec<u8>,
+    ) -> Result<(), String> {
         let msgs = StudioToAppVec::deserialize_bin(&msg_bin)
             .map_err(|err| format!("failed to decode app payload: {}", err.msg))?;
         for msg in msgs.0 {
@@ -72,7 +84,10 @@ impl HubCore {
         queue.push(msg_bin);
     }
 
-    pub(super) fn merge_pending_bootstrap_msgs(existing: &[u8], incoming: &[u8]) -> Option<Vec<u8>> {
+    pub(super) fn merge_pending_bootstrap_msgs(
+        existing: &[u8],
+        incoming: &[u8],
+    ) -> Option<Vec<u8>> {
         let existing = StudioToAppVec::deserialize_bin(existing).ok()?.0;
         let incoming = StudioToAppVec::deserialize_bin(incoming).ok()?.0;
 
@@ -204,11 +219,19 @@ impl HubCore {
         self.send_to_app(build_id, StudioToAppVec(vec![msg]).serialize_bin())
     }
 
-    pub(super) fn send_app_msgs(&self, build_id: QueryId, msgs: Vec<StudioToApp>) -> Result<(), String> {
+    pub(super) fn send_app_msgs(
+        &self,
+        build_id: QueryId,
+        msgs: Vec<StudioToApp>,
+    ) -> Result<(), String> {
         self.send_to_app(build_id, StudioToAppVec(msgs).serialize_bin())
     }
 
-    pub(super) fn send_to_buildbox_name(&self, name: &str, msg: HubToBuildBox) -> Result<(), String> {
+    pub(super) fn send_to_buildbox_name(
+        &self,
+        name: &str,
+        msg: HubToBuildBox,
+    ) -> Result<(), String> {
         let Some(web_socket_id) = self.buildbox_by_name.get(name).copied() else {
             return Err(format!("buildbox '{}' is not connected", name));
         };
@@ -698,7 +721,12 @@ impl HubCore {
         self.broadcast_live_log_entry(index, entry);
     }
 
-    pub(super) fn on_script_exited(&mut self, script_id: ScriptId, mount: String, exit_code: Option<i32>) {
+    pub(super) fn on_script_exited(
+        &mut self,
+        script_id: ScriptId,
+        mount: String,
+        exit_code: Option<i32>,
+    ) {
         if self
             .script_manager
             .mark_exited(script_id, exit_code)

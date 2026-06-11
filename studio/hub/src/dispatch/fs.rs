@@ -1,7 +1,7 @@
 use super::*;
 use makepad_filesystem_watcher::WatchRoot;
 use makepad_studio_protocol::hub_protocol::{
-    ClientId, HubToClient, QueryId, SearchResult, LogEntry,
+    ClientId, HubToClient, LogEntry, QueryId, SearchResult,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -72,7 +72,11 @@ impl HubCore {
         }
     }
 
-    pub(super) fn flush_pending_mount_fs_events_for_mount(&mut self, mount: String, paths: Vec<PathBuf>) {
+    pub(super) fn flush_pending_mount_fs_events_for_mount(
+        &mut self,
+        mount: String,
+        paths: Vec<PathBuf>,
+    ) {
         let mut paths_to_process = Vec::with_capacity(paths.len());
         let mut saw_git_status_change = false;
         for path in paths {
@@ -335,7 +339,11 @@ impl HubCore {
         self.enqueue_file_tree_delta_for_known_path(virtual_path, disk_path);
     }
 
-    pub(super) fn enqueue_file_tree_delta_for_known_path(&mut self, virtual_path: &str, disk_path: PathBuf) {
+    pub(super) fn enqueue_file_tree_delta_for_known_path(
+        &mut self,
+        virtual_path: &str,
+        disk_path: PathBuf,
+    ) {
         let Some((mount, _)) = virtual_path.split_once('/') else {
             return;
         };
@@ -395,7 +403,11 @@ impl HubCore {
         rest == ".git" || rest.starts_with(".git/")
     }
 
-    pub(super) fn should_ignore_fs_watch_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
+    pub(super) fn should_ignore_fs_watch_virtual_path(
+        &self,
+        mount: &str,
+        virtual_path: &str,
+    ) -> bool {
         let prefix = format!("{}/", mount);
         let Some(rest) = virtual_path.strip_prefix(&prefix) else {
             return false;
@@ -505,7 +517,11 @@ impl HubCore {
         self.fs_recent_change_at_by_path.insert(path, now);
     }
 
-    pub(super) fn should_suppress_self_save_event(&mut self, virtual_path: &str, now: Instant) -> bool {
+    pub(super) fn should_suppress_self_save_event(
+        &mut self,
+        virtual_path: &str,
+        now: Instant,
+    ) -> bool {
         self.self_save_suppress_until_by_path
             .retain(|_, until| *until > now);
         self.self_save_suppress_until_by_path
@@ -513,7 +529,11 @@ impl HubCore {
             .is_some_and(|until| now < *until)
     }
 
-    pub(super) fn should_suppress_self_save_mount_root_event(&mut self, mount: &str, now: Instant) -> bool {
+    pub(super) fn should_suppress_self_save_mount_root_event(
+        &mut self,
+        mount: &str,
+        now: Instant,
+    ) -> bool {
         self.self_save_suppress_until_by_path
             .retain(|_, until| *until > now);
         let mount_prefix = format!("{}/", mount);

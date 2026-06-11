@@ -1,8 +1,6 @@
 use super::*;
 use crate::ai_manager::{AiTerminalObservation, AiToolExecutionResult};
-use makepad_studio_protocol::hub_protocol::{
-    ClientId, HubToClient, QueryId,
-};
+use makepad_studio_protocol::hub_protocol::{ClientId, HubToClient, QueryId};
 use makepad_terminal_core::TermKeyCode;
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -569,7 +567,11 @@ impl HubCore {
         Err("failed to allocate terminal path".to_string())
     }
 
-    pub(super) fn unique_ai_terminal_path(&self, mount: &str, stem: &str) -> Result<String, String> {
+    pub(super) fn unique_ai_terminal_path(
+        &self,
+        mount: &str,
+        stem: &str,
+    ) -> Result<String, String> {
         for index in 0usize.. {
             let file_name = if index == 0 {
                 format!("{}.term", stem)

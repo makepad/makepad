@@ -488,18 +488,18 @@ pub struct HubCore {
     stdio_ready_builds: HashSet<QueryId>,
 }
 
-#[path = "dispatch/ui.rs"]
-mod ui;
-#[path = "dispatch/fs.rs"]
-mod fs_dispatch;
+#[path = "dispatch/ai.rs"]
+mod ai;
 #[path = "dispatch/app.rs"]
 mod app;
 #[path = "dispatch/buildbox.rs"]
 mod buildbox;
+#[path = "dispatch/fs.rs"]
+mod fs_dispatch;
 #[path = "dispatch/terminal.rs"]
 mod terminal;
-#[path = "dispatch/ai.rs"]
-mod ai;
+#[path = "dispatch/ui.rs"]
+mod ui;
 
 impl HubCore {
     pub fn new(
