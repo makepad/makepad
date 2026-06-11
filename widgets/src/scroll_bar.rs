@@ -530,6 +530,12 @@ impl ScrollBar {
             return;
         }
 
+        // Don't start or continue a touch-based drag scroll if scrolling is blocked.
+        if !cx.is_scrolling_allowed_within(&scroll_area) {
+            self.scroll_state = ScrollState::Stopped;
+            return;
+        }
+
         // Check if scroll bar handle is not captured
         if self.is_area_captured(cx) {
             self.scroll_state = ScrollState::Stopped;
