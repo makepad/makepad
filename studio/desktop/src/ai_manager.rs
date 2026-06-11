@@ -1143,11 +1143,38 @@ mod tests {
 }
 
 fn ai_task_board_markdown(state: &AiMountState) -> String {
-    if state.agents.is_empty() {
+    let has_workflow = state.active_workflow.is_some();
+    if state.agents.is_empty() && !has_workflow {
         return "_No active tasks._".to_string();
     }
 
     let mut markdown = String::new();
+    if let Some(workflow) = state.active_workflow.as_ref() {
+        let total_steps = workflow.steps.len();
+        let current_step = if total_steps == 0 {
+            0
+        } else {
+            workflow.current_step.saturating_add(1).min(total_steps)
+        };
+        markdown.push_str(&format!(
+            "**Workflow:** {}\n\nStep {}/{}\n",
+            workflow.name, current_step, total_steps
+        ));
+        for step in &workflow.steps {
+            markdown.push_str(&format!(
+                "- {} {}\n",
+                workflow_step_marker(&step.status),
+                step.name
+            ));
+        }
+        markdown.push('\n');
+    }
+
+    if state.agents.is_empty() {
+        markdown.push_str("_No active tasks._");
+        return markdown;
+    }
+
     let active_count = state.agents.iter().filter(|agent| agent.pending).count();
     let idle_count = state.agents.len().saturating_sub(active_count);
     let message_count: usize = state.agents.iter().map(|agent| agent.message_count).sum();
@@ -1170,6 +1197,22 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
     }
 
     markdown
+}
+
+fn workflow_step_marker(status: &str) -> &'static str {
+    let status = status.trim();
+    if status.eq_ignore_ascii_case("done") || status.eq_ignore_ascii_case("completed") {
+        "✓"
+    } else if status.eq_ignore_ascii_case("active")
+        || status.eq_ignore_ascii_case("running")
+        || status.eq_ignore_ascii_case("current")
+    {
+        "▶"
+    } else if status.eq_ignore_ascii_case("failed") || status.eq_ignore_ascii_case("error") {
+        "✗"
+    } else {
+        "○"
+    }
 }
 
 fn render_task_board_agent(
@@ -1230,13 +1273,99 @@ fn render_task_board_agent(
 
 fn ai_live_activity_markdown(state: &AiMountState) -> String {
     let live = state.live_markdown.trim();
-    if live.is_empty() {
-        return "_No live AI activity yet._".to_string();
+    let mut markdown = if live.is_empty() {
+        String::new()
+    } else {
+        live.lines()
+            .map(polish_live_activity_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    append_live_agent_details(&mut markdown, state);
+    if markdown.is_empty() {
+        "_No live AI activity yet._".to_string()
+    } else {
+        markdown
     }
-    live.lines()
-        .map(polish_live_activity_line)
-        .collect::<Vec<_>>()
-        .join("\n")
+}
+
+fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
+    let mut wrote_header = false;
+    for agent in state
+        .agents
+        .iter()
+        .filter(|agent| agent.pending || state.active_agent_id == Some(agent.agent_id))
+    {
+        let has_action = agent
+            .current_action
+            .as_deref()
+            .map(|action| !action.trim().is_empty())
+            .unwrap_or(false);
+        let has_terminal = agent
+            .last_terminal_excerpt
+            .as_deref()
+            .map(|excerpt| !excerpt.trim().is_empty())
+            .unwrap_or(false);
+        let has_files = !agent.files_touched.is_empty();
+        if !has_action && !has_terminal && !has_files {
+            continue;
+        }
+        if !wrote_header {
+            if !markdown.is_empty() {
+                markdown.push_str("\n\n");
+            }
+            markdown.push_str("**Agents**\n\n");
+            wrote_header = true;
+        }
+        markdown.push_str(&format!(
+            "- **{}** - `{}`\n",
+            truncate_inline(&agent.title, 44),
+            live_agent_state_label(agent)
+        ));
+        if let Some(action) = agent.current_action.as_deref() {
+            let action = action.trim();
+            if !action.is_empty() {
+                markdown.push_str(&format!("  action: {}\n", truncate_inline(action, 96)));
+            }
+        }
+        if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
+            if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
+                markdown.push_str(&format!("  terminal: {}\n", truncate_inline(line, 120)));
+            }
+        }
+        if !agent.files_touched.is_empty() {
+            markdown.push_str("  files touched: ");
+            for (index, path) in agent.files_touched.iter().take(5).enumerate() {
+                if index > 0 {
+                    markdown.push_str(", ");
+                }
+                markdown.push_str(&format!("`{}`", truncate_inline(path, 80)));
+            }
+            let remaining = agent.files_touched.len().saturating_sub(5);
+            if remaining > 0 {
+                markdown.push_str(&format!(", +{} more", remaining));
+            }
+            markdown.push('\n');
+        }
+    }
+    if wrote_header && markdown.ends_with('\n') {
+        markdown.pop();
+    }
+}
+
+fn live_agent_state_label(agent: &AiAgentSummary) -> &'static str {
+    if agent.pending {
+        "running"
+    } else if agent.status == "completed" {
+        "done"
+    } else if agent.status == "cancelled" {
+        "cancelled"
+    } else if agent.status.contains("error") {
+        "error"
+    } else {
+        "idle"
+    }
 }
 
 fn polish_live_activity_line(line: &str) -> String {
@@ -1288,7 +1417,9 @@ fn polish_live_activity_line(line: &str) -> String {
 #[cfg(test)]
 mod ai_task_board_tests {
     use super::*;
-    use makepad_studio_protocol::hub_protocol::AiBackendInfo;
+    use makepad_studio_protocol::hub_protocol::{
+        ActiveWorkflowState, AiBackendInfo, WorkflowStepState,
+    };
 
     fn summary(
         id: u64,
@@ -1332,6 +1463,64 @@ mod ai_task_board_tests {
         }
     }
 
+    fn workflow_state() -> ActiveWorkflowState {
+        ActiveWorkflowState {
+            name: "review-prs".to_string(),
+            current_step: 1,
+            steps: vec![
+                WorkflowStepState {
+                    name: "Collect context".to_string(),
+                    status: "done".to_string(),
+                },
+                WorkflowStepState {
+                    name: "Review implementation".to_string(),
+                    status: "active".to_string(),
+                },
+                WorkflowStepState {
+                    name: "Summarize findings".to_string(),
+                    status: "pending".to_string(),
+                },
+                WorkflowStepState {
+                    name: "Post review".to_string(),
+                    status: "failed".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn mount_state_with_workflow(
+        agents: Vec<AiAgentSummary>,
+        live_markdown: &str,
+        active_workflow: Option<ActiveWorkflowState>,
+    ) -> AiMountState {
+        AiMountState {
+            active_workflow,
+            ..mount_state(agents, live_markdown)
+        }
+    }
+
+    #[test]
+    fn task_board_renders_active_workflow_and_preserves_agents() {
+        let state = mount_state_with_workflow(
+            vec![
+                summary(1, "Review pull request", "thinking...", true, None),
+                summary(2, "Check tests", "ready", false, Some(AiAgentId(1))),
+            ],
+            "",
+            Some(workflow_state()),
+        );
+
+        let markdown = ai_task_board_markdown(&state);
+        assert!(markdown.contains("**Workflow:** review-prs"));
+        assert!(markdown.contains("Step 2/4"));
+        assert!(markdown.contains("✓ Collect context"));
+        assert!(markdown.contains("▶ Review implementation"));
+        assert!(markdown.contains("○ Summarize findings"));
+        assert!(markdown.contains("✗ Post review"));
+        assert!(markdown.contains("**2 chats**"));
+        assert!(markdown.contains("Review pull request"));
+        assert!(markdown.contains("└─ - **Check tests**"));
+    }
     #[test]
     fn task_board_marks_active_running_and_children() {
         let state = mount_state(
@@ -1351,6 +1540,28 @@ mod ai_task_board_tests {
         assert!(markdown.contains("6 msgs"));
     }
 
+    #[test]
+    fn live_activity_renders_agent_action_terminal_excerpt_and_files() {
+        let mut agent = summary(1, "Task 4", "running", true, None);
+        agent.current_action = Some("Editing ai_manager.rs".to_string());
+        agent.last_terminal_excerpt =
+            Some("cargo test -p makepad-studio ai_task_board_tests\nok".to_string());
+        agent.files_touched = vec![
+            "studio/desktop/src/ai_manager.rs".to_string(),
+            "studio/desktop/src/app.rs".to_string(),
+        ];
+        let state = mount_state(vec![agent], "**Tasks**\n\n- `T1` [working] Upgrade UI");
+
+        let markdown = ai_live_activity_markdown(&state);
+        assert!(markdown.contains("**Todo**"));
+        assert!(markdown.contains("**Agents**"));
+        assert!(markdown.contains("**Task 4**"));
+        assert!(markdown.contains("action: Editing ai_manager.rs"));
+        assert!(markdown.contains("terminal: cargo test -p makepad-studio ai_task_board_tests"));
+        assert!(markdown.contains(
+            "files touched: `studio/desktop/src/ai_manager.rs`, `studio/desktop/src/app.rs`"
+        ));
+    }
     #[test]
     fn live_activity_polishes_task_and_terminal_labels() {
         let state = mount_state(
