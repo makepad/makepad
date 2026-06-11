@@ -957,7 +957,7 @@ impl AiManager {
                     task.touched_paths.clone(),
                     blocked_reason.map(str::to_string),
                 ));
-                if previous_mode != snapshot.mode {
+                if created_observed_task || previous_mode != snapshot.mode {
                     if snapshot.mode == "awaiting-input" || snapshot.mode == "needs-attention" {
                         visibility_events.push(Self::visibility_event(
                             "terminal_needs_input",
@@ -7745,6 +7745,38 @@ Some intro text...
             .last_terminal_excerpt
             .as_deref()
             .is_some_and(|excerpt| excerpt.contains("Need more details")));
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "terminal_needs_input" && event.agent_id == Some(agent_id)
+        }));
+    }
+
+    #[test]
+    fn workflow_first_observed_codex_terminal_emits_visibility_event() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n".to_string(),
+                },
+            )
+            .expect("first observed codex terminal should update visibility");
+
         assert!(state.visibility_events.iter().any(|event| {
             event.kind == "terminal_needs_input" && event.agent_id == Some(agent_id)
         }));
