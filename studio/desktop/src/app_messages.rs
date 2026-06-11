@@ -301,6 +301,7 @@ impl App {
                         dock.redraw_tab(cx, log_tab_id);
                     }
                 }
+                self.refresh_active_mount_run_list(cx);
                 self.set_status(cx, &format!("build started: {}", package));
             }
             HubToClient::BuildStopped {
@@ -340,6 +341,7 @@ impl App {
                         }
                     }
                 }
+                self.refresh_active_mount_run_list(cx);
             }
             HubToClient::BuildCleared { build_id } => {
                 self.clear_build_tabs(cx, build_id);
