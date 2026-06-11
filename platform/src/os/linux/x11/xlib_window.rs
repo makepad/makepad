@@ -437,10 +437,15 @@ impl XlibWindow {
     }
 
     pub fn close_window(&mut self) {
-        unsafe {
-            x11_sys::XDestroyWindow(get_xlib_app_global().display, self.window.unwrap());
-            self.window = None;
-            // lets remove us from the mapping
+        if let Some(window) = self.window.take() {
+            unsafe {
+                let xlib_app = get_xlib_app_global();
+                if xlib_app.active_popup == Some(window) {
+                    xlib_app.release_popup_grab(window);
+                }
+                xlib_app.window_map.remove(&window);
+                x11_sys::XDestroyWindow(xlib_app.display, window);
+            }
         }
     }
 

@@ -633,6 +633,7 @@ impl Win32Window {
             }
             WM_DESTROY => {
                 // window actively destroyed
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 window.do_callback(Win32Event::WindowClosed(WindowClosedEvent {
                     window_id: window.window_id,
                 }));

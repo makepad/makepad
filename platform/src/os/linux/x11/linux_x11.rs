@@ -425,6 +425,15 @@ impl X11Cx {
                 }
 
                 cx.run_live_edit_if_needed("linux-x11");
+                let has_platform_ops = !cx.platform_ops.is_empty();
+                drop(cx);
+                if has_platform_ops {
+                    if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
+                        let mut cx = self.cx.borrow_mut();
+                        cx.call_event_handler(&Event::Shutdown);
+                        return EventFlow::Exit;
+                    }
+                }
                 return EventFlow::Wait;
             }
         }
