@@ -217,8 +217,17 @@ impl App {
             &self
                 .mount_state(&active_mount)
                 .and_then(|mount| mount.ai_state.as_ref())
-                .map(ai_live_activity_markdown)
+                .map(|state| ai_live_activity_markdown(&active_mount, state))
                 .unwrap_or_else(|| "_No live AI state yet._".to_string()),
+        );
+
+        workspace.widget(cx, ids!(ai_files_markdown)).set_text(
+            cx,
+            &self
+                .mount_state(&active_mount)
+                .and_then(|mount| mount.ai_state.as_ref())
+                .map(|state| ai_changed_files_markdown(&active_mount, state))
+                .unwrap_or_else(|| "_No files changed yet._".to_string()),
         );
 
         workspace.widget(cx, ids!(ai_swarm_markdown)).set_text(
@@ -226,7 +235,7 @@ impl App {
             &self
                 .mount_state(&active_mount)
                 .and_then(|mount| mount.ai_state.as_ref())
-                .map(ai_task_board_markdown)
+                .map(|state| ai_task_board_markdown(&active_mount, state))
                 .unwrap_or_else(|| "_No active tasks._".to_string()),
         );
 
@@ -261,7 +270,7 @@ impl App {
                     cx,
                     AI_SUBAGENT_ROLES
                         .iter()
-                        .map(|role| role.to_string())
+                        .map(|role| ai_subagent_role_label(role))
                         .collect(),
                 );
             workspace
@@ -330,22 +339,25 @@ impl App {
                 cx,
                 AI_SUBAGENT_ROLES
                     .iter()
-                    .map(|role| role.to_string())
+                    .map(|role| ai_subagent_role_label(role))
                     .collect(),
             );
 
         if let Some(agent) = state.active_agent.as_ref() {
+            let selected_role_index = workspace
+                .drop_down(cx, ids!(ai_subagent_role_picker))
+                .selected_item();
             workspace
                 .widget(cx, ids!(ai_chat_markdown))
                 .set_text(cx, &ai_chat_markdown(agent));
-            workspace.label(cx, ids!(ai_status_label)).set_text(
-                cx,
-                if active_backend_configured {
-                    &agent.status
-                } else {
-                    "Configure backend"
-                },
-            );
+            let status_text = if active_backend_configured {
+                ai_status_label(agent, selected_role_index)
+            } else {
+                "Configure backend".to_string()
+            };
+            workspace
+                .label(cx, ids!(ai_status_label))
+                .set_text(cx, &status_text);
             workspace
                 .button(cx, ids!(ai_run_button))
                 .set_enabled(cx, active_backend_configured);
@@ -503,6 +515,9 @@ impl App {
                 .set_is_open(cx, true, Animate::Yes);
             workspace
                 .fold_header(cx, ids!(ai_live_fold))
+                .set_is_open(cx, true, Animate::Yes);
+            workspace
+                .fold_header(cx, ids!(ai_files_fold))
                 .set_is_open(cx, true, Animate::Yes);
         }
         self.schedule_ai_chat_scroll_to_bottom(cx);
@@ -1046,6 +1061,32 @@ fn native_delegation_echo(role: &str, prompt: &str) -> String {
     format!("Native {} subagent\n\n{}", role, prompt.trim())
 }
 
+pub(super) fn ai_file_link_path_from_href(href: &str) -> Option<String> {
+    href.strip_prefix("makepad-studio-file:")
+        .map(|path| {
+            path.replace("%20", " ")
+                .replace("%29", ")")
+                .replace("%28", "(")
+        })
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty() && !path.contains(".."))
+}
+
+fn ai_subagent_role_label(role: &str) -> String {
+    format!("{} agent", role)
+}
+
+fn ai_status_label(agent: &AiAgentState, role_index: usize) -> String {
+    if agent.pending {
+        return agent.status.clone();
+    }
+    let role = AI_SUBAGENT_ROLES
+        .get(role_index)
+        .copied()
+        .unwrap_or("coder");
+    format!("{} · send starts {} agent", agent.status, role)
+}
+
 fn summarized_chat_title(
     state: &AiMountState,
     agent_id: AiAgentId,
@@ -1196,6 +1237,44 @@ mod tests {
             "Native coder subagent\n\nimplement the native activity board"
         );
         assert!(!echo.contains("/subagent"));
+    }
+
+    #[test]
+    fn subagent_role_labels_make_native_agent_mode_visible() {
+        assert_eq!(ai_subagent_role_label("coder"), "coder agent");
+        assert_eq!(ai_subagent_role_label("reviewer"), "reviewer agent");
+    }
+
+    #[test]
+    fn idle_status_explains_native_send_target() {
+        let mut agent = test_agent_state(AiAgentId(1), "ready", false, Vec::new());
+        assert_eq!(
+            ai_status_label(&agent, 1),
+            "ready · send starts planner agent"
+        );
+        agent.pending = true;
+        agent.status = "thinking...".to_string();
+        assert_eq!(ai_status_label(&agent, 1), "thinking...");
+    }
+
+    #[test]
+    fn ai_file_links_round_trip_to_editor_paths() {
+        let markdown = ai_file_markdown_link("makepad", "studio/src/file with space.rs", 80);
+        assert_eq!(
+            markdown,
+            "[studio/src/file with space.rs](makepad-studio-file:makepad/studio/src/file%20with%20space.rs)"
+        );
+        assert_eq!(
+            ai_file_link_path_from_href(
+                "makepad-studio-file:makepad/studio/src/file%20with%20space.rs"
+            ),
+            Some("makepad/studio/src/file with space.rs".to_string())
+        );
+        assert_eq!(ai_file_link_path_from_href("https://example.com"), None);
+        assert_eq!(
+            ai_file_link_path_from_href("makepad-studio-file:../secret"),
+            None
+        );
     }
 
     #[test]
@@ -1435,7 +1514,7 @@ mod tests {
     }
 }
 
-fn ai_task_board_markdown(state: &AiMountState) -> String {
+fn ai_task_board_markdown(mount: &str, state: &AiMountState) -> String {
     let has_workflow = state.active_workflow.is_some();
     if state.agents.is_empty() && !has_workflow {
         return "_No active tasks._".to_string();
@@ -1479,7 +1558,7 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
             {
                 for agent in &state.agents {
                     if agent.workflow_step_name.as_deref() == Some(&step.name) {
-                        render_workflow_owner_agent(&mut markdown, agent, state, 1);
+                        render_workflow_owner_agent(&mut markdown, mount, agent, state, 1);
                     }
                 }
             }
@@ -1514,7 +1593,7 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
         .collect();
 
     for root in roots {
-        render_task_board_agent(&mut markdown, root, state, 0);
+        render_task_board_agent(&mut markdown, mount, root, state, 0);
     }
 
     markdown
@@ -1538,6 +1617,7 @@ fn workflow_step_marker(status: &str) -> &'static str {
 
 fn render_task_board_agent(
     markdown: &mut String,
+    mount: &str,
     agent: &AiAgentSummary,
     state: &AiMountState,
     depth: usize,
@@ -1570,7 +1650,7 @@ fn render_task_board_agent(
         truncate_inline(&agent.status, 48),
         role
     ));
-    append_task_board_agent_timeline(markdown, agent, depth);
+    append_task_board_agent_timeline(markdown, mount, agent, depth);
 
     let children: Vec<_> = state
         .agents
@@ -1579,12 +1659,13 @@ fn render_task_board_agent(
         .collect();
 
     for child in children {
-        render_task_board_agent(markdown, child, state, depth + 1);
+        render_task_board_agent(markdown, mount, child, state, depth + 1);
     }
 }
 
 fn render_workflow_owner_agent(
     markdown: &mut String,
+    mount: &str,
     agent: &AiAgentSummary,
     state: &AiMountState,
     depth: usize,
@@ -1624,7 +1705,7 @@ fn render_workflow_owner_agent(
         action_str,
         step_info
     ));
-    append_task_board_agent_timeline(markdown, agent, depth);
+    append_task_board_agent_timeline(markdown, mount, agent, depth);
 
     let children: Vec<_> = state
         .agents
@@ -1633,11 +1714,16 @@ fn render_workflow_owner_agent(
         .collect();
 
     for child in children {
-        render_task_board_agent(markdown, child, state, depth + 1);
+        render_task_board_agent(markdown, mount, child, state, depth + 1);
     }
 }
 
-fn append_task_board_agent_timeline(markdown: &mut String, agent: &AiAgentSummary, depth: usize) {
+fn append_task_board_agent_timeline(
+    markdown: &mut String,
+    mount: &str,
+    agent: &AiAgentSummary,
+    depth: usize,
+) {
     let detail_indent = format!("{}  ", "  ".repeat(depth + 1));
     let mut wrote_timeline = false;
     let mut append_line = |markdown: &mut String, label: &str, value: String| {
@@ -1696,7 +1782,7 @@ fn append_task_board_agent_timeline(markdown: &mut String, agent: &AiAgentSummar
             if index > 0 {
                 files.push_str(", ");
             }
-            files.push_str(&format!("`{}`", truncate_inline(path, 72)));
+            files.push_str(&ai_file_markdown_link(mount, path, 72));
         }
         let remaining = agent.files_touched.len().saturating_sub(4);
         if remaining > 0 {
@@ -1706,7 +1792,7 @@ fn append_task_board_agent_timeline(markdown: &mut String, agent: &AiAgentSummar
     }
 }
 
-fn ai_live_activity_markdown(state: &AiMountState) -> String {
+fn ai_live_activity_markdown(mount: &str, state: &AiMountState) -> String {
     let live = state.live_markdown.trim();
     let mut markdown = if live.is_empty() {
         String::new()
@@ -1717,8 +1803,8 @@ fn ai_live_activity_markdown(state: &AiMountState) -> String {
             .join("\n")
     };
 
-    append_live_agent_details(&mut markdown, state);
-    append_recent_activity(&mut markdown, state);
+    append_live_agent_details(&mut markdown, mount, state);
+    append_recent_activity(&mut markdown, mount, state);
     if markdown.is_empty() {
         "_No live AI activity yet._".to_string()
     } else {
@@ -1726,7 +1812,7 @@ fn ai_live_activity_markdown(state: &AiMountState) -> String {
     }
 }
 
-fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
+fn append_live_agent_details(markdown: &mut String, mount: &str, state: &AiMountState) {
     let mut wrote_header = false;
     for agent in state
         .agents
@@ -1790,7 +1876,7 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
                 if index > 0 {
                     markdown.push_str(", ");
                 }
-                markdown.push_str(&format!("`{}`", truncate_inline(path, 80)));
+                markdown.push_str(&ai_file_markdown_link(mount, path, 80));
             }
             let remaining = agent.files_touched.len().saturating_sub(5);
             if remaining > 0 {
@@ -1804,7 +1890,7 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
     }
 }
 
-fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
+fn append_recent_activity(markdown: &mut String, mount: &str, state: &AiMountState) {
     if state.visibility_events.is_empty() {
         return;
     }
@@ -1840,17 +1926,97 @@ fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
             })
             .map(|title| format!(" - {}", title))
             .unwrap_or_default();
+        let detail = if event.kind == "file_touched" {
+            ai_file_markdown_link(mount, event.detail.trim(), 96)
+        } else {
+            truncate_inline(&event.detail, 96)
+        };
         markdown.push_str(&format!(
             "- `[{}]` **{}**{} - {}\n",
             kind_label,
             truncate_inline(&event.title, 44),
             agent_label,
-            truncate_inline(&event.detail, 96)
+            detail
         ));
     }
     if markdown.ends_with('\n') {
         markdown.pop();
     }
+}
+
+fn ai_changed_files_markdown(mount: &str, state: &AiMountState) -> String {
+    let mut files = Vec::<String>::new();
+    for agent in &state.agents {
+        for path in &agent.files_touched {
+            push_unique_changed_file(&mut files, path);
+        }
+    }
+    if let Some(agent) = state.active_agent.as_ref() {
+        for path in &agent.files_touched {
+            push_unique_changed_file(&mut files, path);
+        }
+    }
+    for event in state.visibility_events.iter().rev() {
+        if event.kind == "file_touched" {
+            push_unique_changed_file(&mut files, &event.detail);
+        }
+    }
+
+    if files.is_empty() {
+        return "_No files changed yet._".to_string();
+    }
+
+    let mut markdown = String::new();
+    markdown.push_str(&format!("**{} changed**\n\n", files.len()));
+    for path in files.iter().take(8) {
+        markdown.push_str("- ");
+        markdown.push_str(&ai_file_markdown_link(mount, path, 88));
+        markdown.push('\n');
+    }
+    let remaining = files.len().saturating_sub(8);
+    if remaining > 0 {
+        markdown.push_str(&format!("- +{} more", remaining));
+    } else if markdown.ends_with('\n') {
+        markdown.pop();
+    }
+    markdown
+}
+
+fn push_unique_changed_file(files: &mut Vec<String>, path: &str) {
+    let path = path.trim();
+    if path.is_empty() {
+        return;
+    }
+    if !files.iter().any(|existing| existing == path) {
+        files.push(path.to_string());
+    }
+}
+
+fn ai_file_markdown_link(mount: &str, path: &str, max_chars: usize) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return String::new();
+    }
+    let virtual_path = if path.starts_with(&format!("{}/", mount)) {
+        path.to_string()
+    } else {
+        format!("{}/{}", mount, path.trim_start_matches('/'))
+    };
+    let label = escape_markdown_link_label(&truncate_inline(path, max_chars));
+    let href = escape_markdown_link_destination(&format!("makepad-studio-file:{}", virtual_path));
+    format!("[{}]({})", label, href)
+}
+
+fn escape_markdown_link_label(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn escape_markdown_link_destination(text: &str) -> String {
+    text.replace(' ', "%20")
+        .replace(')', "%29")
+        .replace('(', "%28")
 }
 
 fn live_agent_state_label(agent: &AiAgentSummary) -> &'static str {
@@ -2016,7 +2182,7 @@ mod ai_task_board_tests {
             Some(workflow_state()),
         );
 
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
         assert!(markdown.contains("**Workflow:** review-prs"));
         assert!(markdown.contains("Step 2/4"));
         assert!(markdown.contains("✓ Collect context"));
@@ -2055,7 +2221,7 @@ mod ai_task_board_tests {
             }),
         );
 
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
         assert!(markdown.contains(&format!(
             "**Workflow:** {}",
             truncate_inline(&long_workflow_name, 64)
@@ -2079,7 +2245,7 @@ mod ai_task_board_tests {
             "",
         );
 
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
         assert!(markdown.contains("**2 chats**"));
         assert!(markdown.contains("**1 active**"));
         assert!(markdown.contains("`selected` `running`"));
@@ -2097,12 +2263,14 @@ mod ai_task_board_tests {
         child.files_touched = vec!["studio/hub/src/ai_manager.rs".to_string()];
 
         let state = mount_state(vec![root, child], "");
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
 
         assert!(markdown.contains("└─ - **Coder Subagent**"));
         assert!(markdown.contains("`done`"));
         assert!(markdown.contains("Completed: Updated the native activity board."));
-        assert!(markdown.contains("files: `studio/hub/src/ai_manager.rs`"));
+        assert!(markdown.contains(
+            "files: [studio/hub/src/ai_manager.rs](makepad-studio-file:makepad/studio/hub/src/ai_manager.rs)"
+        ));
     }
 
     #[test]
@@ -2114,7 +2282,7 @@ mod ai_task_board_tests {
         child.blocked_reason = Some("Subagent reported task failure".to_string());
 
         let state = mount_state(vec![root, child], "");
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
 
         assert!(markdown.contains("└─ - **Verifier Subagent**"));
         assert!(markdown.contains("`error`"));
@@ -2140,13 +2308,13 @@ mod ai_task_board_tests {
 
         let state = mount_state(vec![root, child], "");
 
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
         assert!(markdown.contains("timeline:"));
         assert!(markdown.contains("- blocked: Waiting for CI logs"));
         assert!(markdown.contains("- now: Editing Agent panel timeline"));
         assert!(markdown.contains("- terminal: `makepad/.makepad/codex.term` (Codex Terminal)"));
         assert!(markdown.contains(
-            "- files: `studio/desktop/src/ai_manager.rs`, `platform/studio/src/hub_protocol.rs`"
+            "- files: [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs), [platform/studio/src/hub_protocol.rs](makepad-studio-file:makepad/platform/studio/src/hub_protocol.rs)"
         ));
         assert!(markdown.contains("cargo test -p makepad-studio ai_task_board_tests"));
     }
@@ -2163,14 +2331,14 @@ mod ai_task_board_tests {
         ];
         let state = mount_state(vec![agent], "**Tasks**\n\n- `T1` [working] Upgrade UI");
 
-        let markdown = ai_live_activity_markdown(&state);
+        let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Todo**"));
         assert!(markdown.contains("**Agents**"));
         assert!(markdown.contains("**Task 4**"));
         assert!(markdown.contains("action: Editing ai_manager.rs"));
         assert!(markdown.contains("terminal: cargo test -p makepad-studio ai_task_board_tests"));
         assert!(markdown.contains(
-            "files touched: `studio/desktop/src/ai_manager.rs`, `studio/desktop/src/app.rs`"
+            "files touched: [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs), [studio/desktop/src/app.rs](makepad-studio-file:makepad/studio/desktop/src/app.rs)"
         ));
     }
     #[test]
@@ -2180,7 +2348,7 @@ mod ai_task_board_tests {
             "**Tasks**\n\n- `T1` [working] Build task UI\n  `makepad/.makepad/task.term` [Working]\n  expecting: studio/desktop/src/ai_manager.rs\n\n**Terminals**\n\n- `makepad/.makepad/task.term` [working / codex]\n  Working (3s)",
         );
 
-        let markdown = ai_live_activity_markdown(&state);
+        let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Todo**"));
         assert!(markdown.contains("- Task `T1` - **working** - Build task UI"));
         assert!(markdown.contains("terminal: `makepad/.makepad/task.term` - Working"));
@@ -2199,7 +2367,7 @@ mod ai_task_board_tests {
 
         let state = mount_state_with_workflow(vec![owner, child], "", Some(workflow_state()));
 
-        let markdown = ai_task_board_markdown(&state);
+        let markdown = ai_task_board_markdown("makepad", &state);
         assert!(markdown.contains("**Workflow:** review-prs"));
         assert!(markdown.contains("▶ Review implementation"));
         assert!(markdown.contains("└─ - **Workflow Owner**"));
@@ -2274,11 +2442,21 @@ mod ai_task_board_tests {
                 detail: "`read_file` completed".to_string(),
                 timestamp: 103.0,
             },
+            AiVisibilityEvent {
+                kind: "file_touched".to_string(),
+                agent_id: Some(AiAgentId(1)),
+                title: "File updated".to_string(),
+                detail: "studio/desktop/src/ai_manager.rs".to_string(),
+                timestamp: 104.0,
+            },
         ];
 
-        let markdown = ai_live_activity_markdown(&state);
+        let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Recent Activity**"));
         // Newest-first check: order is reverse
+        assert!(markdown.contains(
+            "- `[File Touched]` **File updated** - Workflow Owner - [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs)"
+        ));
         assert!(markdown.contains(
             "- `[Native Tools Finished]` **Reviewer Subagent** - Workflow Owner - `read_file` completed"
         ));
@@ -2300,9 +2478,53 @@ mod ai_task_board_tests {
         agent.active_terminal_title = Some("Codex Terminal".to_string());
         let state = mount_state(vec![agent], "");
 
-        let markdown = ai_live_activity_markdown(&state);
+        let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Agents**"));
         assert!(markdown.contains("blocked: Waiting for user to clarify PR bounds"));
         assert!(markdown.contains("terminal: `repo/.makepad/codex.term` (Codex Terminal)"));
+    }
+
+    #[test]
+    fn changed_files_markdown_collects_native_agent_files_and_events() {
+        let mut root = summary(1, "Root", "ready", false, None);
+        root.files_touched = vec![
+            "studio/desktop/src/ai_manager.rs".to_string(),
+            "studio/hub/src/ai_manager.rs".to_string(),
+        ];
+        let mut child = summary(2, "Child", "completed", false, Some(AiAgentId(1)));
+        child.files_touched = vec![
+            "studio/hub/src/ai_manager.rs".to_string(),
+            "platform/studio/src/hub_protocol.rs".to_string(),
+        ];
+        let mut state = mount_state(vec![root, child], "");
+        state.visibility_events = vec![AiVisibilityEvent {
+            kind: "file_touched".to_string(),
+            agent_id: Some(AiAgentId(2)),
+            title: "File updated".to_string(),
+            detail: "studio/desktop/src/main.rs".to_string(),
+            timestamp: 42.0,
+        }];
+
+        let markdown = ai_changed_files_markdown("makepad", &state);
+        assert!(markdown.contains("**4 changed**"));
+        assert!(markdown.contains(
+            "- [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs)"
+        ));
+        assert_eq!(markdown.matches("studio/hub/src/ai_manager.rs").count(), 2);
+        assert!(markdown.contains(
+            "- [platform/studio/src/hub_protocol.rs](makepad-studio-file:makepad/platform/studio/src/hub_protocol.rs)"
+        ));
+        assert!(markdown.contains(
+            "- [studio/desktop/src/main.rs](makepad-studio-file:makepad/studio/desktop/src/main.rs)"
+        ));
+    }
+
+    #[test]
+    fn changed_files_markdown_shows_empty_state() {
+        let state = mount_state(Vec::new(), "");
+        assert_eq!(
+            ai_changed_files_markdown("makepad", &state),
+            "_No files changed yet._"
+        );
     }
 }

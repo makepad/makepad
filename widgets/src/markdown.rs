@@ -225,6 +225,10 @@ pub struct Markdown {
     in_splash_block: bool,
     #[rust]
     splash_block_string: String,
+    #[rust]
+    link_href: Option<String>,
+    #[rust]
+    link_text: String,
     #[live(false)]
     use_math_widget: bool,
     #[rust]
@@ -374,13 +378,24 @@ impl Markdown {
                     tf.underline.pop();
                 }
                 MdEvent::Start(Tag::Link { dest_url, .. }) => {
-                    self.auto_id += 1;
-                    let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
-                    item.as_markdown_link().set_href(&dest_url);
-                    item.draw_all_unscoped(cx);
+                    self.link_href = Some(dest_url.to_string());
+                    self.link_text.clear();
                 }
                 MdEvent::End(TagEnd::Link) => {
-                    // Link handling is done in Start event
+                    if let Some(href) = self.link_href.take() {
+                        self.auto_id += 1;
+                        let label = if self.link_text.trim().is_empty() {
+                            href.as_str()
+                        } else {
+                            self.link_text.trim()
+                        };
+                        let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
+                        let link = item.as_markdown_link();
+                        link.set_href(&href);
+                        link.set_label(cx, label);
+                        item.draw_all_unscoped(cx);
+                        self.link_text.clear();
+                    }
                 }
                 MdEvent::Start(Tag::Image {
                     dest_url, title, ..
@@ -452,6 +467,10 @@ impl Markdown {
                 }
                 // Inline code
                 MdEvent::Code(text) => {
+                    if self.link_href.is_some() {
+                        self.link_text.push_str(&text);
+                        continue;
+                    }
                     const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
                     tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
                     tf.fixed.push();
@@ -508,6 +527,8 @@ impl Markdown {
                         self.splash_block_string.push_str(&text);
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
+                    } else if self.link_href.is_some() {
+                        self.link_text.push_str(text.trim_end_matches("\n"));
                     } else {
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
@@ -517,6 +538,8 @@ impl Markdown {
                         self.splash_block_string.push('\n');
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
+                    } else if self.link_href.is_some() {
+                        self.link_text.push(' ');
                     } else {
                         tf.draw_text(cx, " ");
                     }
@@ -719,6 +742,13 @@ impl MarkdownLinkRef {
             return;
         };
         inner.href = v.to_string();
+    }
+
+    pub fn set_label(&self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.link.set_text(cx, v);
     }
 }
 

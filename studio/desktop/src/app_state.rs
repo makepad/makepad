@@ -210,6 +210,30 @@ impl App {
                 *selected = 0;
             }
         }
+        if let Some(DockItem::Tabs {
+            tabs,
+            selected,
+            closable,
+            ..
+        }) = dock_items.get_mut(&id!(agent_tabs))
+        {
+            *closable = false;
+            if let Some(ai_index) = tabs.iter().position(|tab_id| *tab_id == id!(ai_tab)) {
+                *selected = ai_index;
+            } else if *selected >= tabs.len() {
+                *selected = 0;
+            }
+        }
+        if let Some(DockItem::Splitter { align, .. }) = dock_items.get_mut(&id!(agent_split)) {
+            let should_restore = match align {
+                SplitterAlign::FromB(width) => *width < 260.0,
+                SplitterAlign::FromA(_) => false,
+                SplitterAlign::Weighted(weight) => *weight >= 0.98,
+            };
+            if should_restore {
+                *align = SplitterAlign::FromB(360.0);
+            }
+        }
     }
 
     fn workspace_dock_has_required_sidebar_tabs(dock_items: &HashMap<LiveId, DockItem>) -> bool {
@@ -610,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_dock_with_right_agent_tab_is_kept() {
+    fn workspace_dock_with_collapsed_right_agent_tab_is_restored() {
         let dock_items = HashMap::from([
             (
                 id!(root),
@@ -625,7 +649,7 @@ mod tests {
                 id!(agent_split),
                 DockItem::Splitter {
                     axis: SplitterAxis::Horizontal,
-                    align: SplitterAlign::FromB(310.0),
+                    align: SplitterAlign::FromB(8.0),
                     a: id!(main_split),
                     b: id!(agent_tabs),
                 },
@@ -772,5 +796,19 @@ mod tests {
 
         assert!(*hide_tab_bar);
         assert!(!*closable);
+        let Some(DockItem::Tabs {
+            selected, closable, ..
+        }) = sanitized.get(&id!(agent_tabs))
+        else {
+            panic!("missing agent_tabs");
+        };
+        assert_eq!(*selected, 0);
+        assert!(!*closable);
+        let Some(DockItem::Splitter { align, .. }) = sanitized.get(&id!(agent_split)) else {
+            panic!("missing agent_split");
+        };
+        assert!(
+            matches!(align, SplitterAlign::FromB(width) if (*width - 360.0).abs() < f64::EPSILON)
+        );
     }
 }

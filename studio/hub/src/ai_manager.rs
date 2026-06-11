@@ -1842,6 +1842,11 @@ impl AiManager {
                     ),
                 );
             }
+            let virtual_path = format!("{}/{}", mount, path);
+            let _ = self.event_tx.send(HubEvent::AiRevealTouchedFile {
+                mount: mount.to_string(),
+                path: virtual_path,
+            });
         }
         for result in &results {
             self.process_ai_tool_result_for_task(mount, agent_id, result);
@@ -3326,11 +3331,16 @@ impl AiManager {
 
     fn ai_live_markdown(&self, mount_state: &MountAgents) -> String {
         let mut markdown = String::new();
+        self.append_native_agent_live_markdown(&mut markdown, mount_state);
+
         let visible_tasks = mount_state
             .tasks
             .iter()
             .filter(|task| should_show_live_task(task))
             .collect::<Vec<_>>();
+        if !markdown.is_empty() {
+            markdown.push_str("\n\n");
+        }
         if visible_tasks.is_empty() {
             markdown.push_str("**Todo**\n\n_No open AI todos._");
         } else {
@@ -3386,6 +3396,98 @@ impl AiManager {
             }
         }
         markdown
+    }
+
+    fn append_native_agent_live_markdown(&self, markdown: &mut String, mount_state: &MountAgents) {
+        let visible_agents = mount_state
+            .order
+            .iter()
+            .filter_map(|agent_id| {
+                let agent = mount_state.agents.get(agent_id)?;
+                if is_closed_subagent(agent) {
+                    return None;
+                }
+                let active = mount_state.active_agent_id == Some(*agent_id);
+                let has_native_activity = active
+                    || agent.is_pending()
+                    || agent.parent_agent_id.is_some()
+                    || !agent.subagents.is_empty()
+                    || agent
+                        .current_action
+                        .as_deref()
+                        .map(|action| !action.trim().is_empty())
+                        .unwrap_or(false)
+                    || agent.blocked_reason.is_some()
+                    || !agent.files_touched.is_empty();
+                has_native_activity.then_some((*agent_id, agent))
+            })
+            .collect::<Vec<_>>();
+
+        markdown.push_str("**Native Agents**\n\n");
+        if visible_agents.is_empty() {
+            markdown.push_str("_No native agent activity yet._");
+            return;
+        }
+
+        for (agent_id, agent) in visible_agents {
+            let selected = if mount_state.active_agent_id == Some(agent_id) {
+                " `selected`"
+            } else {
+                ""
+            };
+            let role = agent
+                .role
+                .as_deref()
+                .map(|role| format!(" · {}", role))
+                .unwrap_or_default();
+            markdown.push_str(&format!(
+                "- **{}**{} - `{}`{} - {}\n",
+                truncate_inline(&agent.title, 44),
+                selected,
+                native_agent_state_label(agent),
+                role,
+                truncate_inline(&agent.status, 72)
+            ));
+            if let Some(parent_id) = agent.parent_agent_id {
+                markdown.push_str(&format!(
+                    "  parent: {}\n",
+                    truncate_inline(&agent_title_for_event(mount_state, parent_id), 72)
+                ));
+            }
+            if let Some(task) = agent.task.as_deref() {
+                markdown.push_str(&format!("  task: {}\n", truncate_inline(task, 112)));
+            }
+            if let Some(action) = agent.current_action.as_deref() {
+                let action = action.trim();
+                if !action.is_empty() {
+                    markdown.push_str(&format!("  now: {}\n", truncate_inline(action, 112)));
+                }
+            }
+            if let Some(reason) = agent.blocked_reason.as_deref() {
+                let reason = reason.trim();
+                if !reason.is_empty() {
+                    markdown.push_str(&format!("  blocked: {}\n", truncate_inline(reason, 112)));
+                }
+            }
+            if !agent.files_touched.is_empty() {
+                markdown.push_str("  files: ");
+                for (index, path) in agent.files_touched.iter().take(5).enumerate() {
+                    if index > 0 {
+                        markdown.push_str(", ");
+                    }
+                    markdown.push_str(&format!("`{}`", truncate_inline(path, 80)));
+                }
+                let remaining = agent.files_touched.len().saturating_sub(5);
+                if remaining > 0 {
+                    markdown.push_str(&format!(", +{} more", remaining));
+                }
+                markdown.push('\n');
+            }
+        }
+
+        if markdown.ends_with('\n') {
+            markdown.pop();
+        }
     }
 
     pub(crate) fn terminal_mode_and_summary(
@@ -4766,7 +4868,7 @@ fn chatgpt_tools() -> Vec<ChatGptTool> {
         ChatGptTool {
             name: "bash".to_string(),
             description:
-                "Run a shell command inside the workspace root. Prefer quick inspection and verification commands."
+                "Run a shell command inside the workspace root. Prefer quick inspection and verification commands. Do not use this to start hosted coding agents; use spawn_subagent for delegated programming work."
                     .to_string(),
             parameters_json: r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_secs":{"type":"integer","description":"Optional timeout in seconds"}},"required":["command"]}"#.to_string(),
         },
@@ -5059,6 +5161,20 @@ fn is_closed_subagent(agent: &RunningAgent) -> bool {
         && agent.history.is_empty()
 }
 
+fn native_agent_state_label(agent: &RunningAgent) -> &'static str {
+    if agent.is_pending() {
+        "running"
+    } else if agent.status == "completed" || agent.status == "done" {
+        "done"
+    } else if agent.status == "cancelled" {
+        "cancelled"
+    } else if agent.status.contains("error") {
+        "error"
+    } else {
+        "idle"
+    }
+}
+
 fn agent_title_for_event(mount_state: &MountAgents, agent_id: AiAgentId) -> String {
     mount_state
         .agents
@@ -5226,7 +5342,7 @@ fn append_tool_definitions(out: &mut String) {
         out,
         &mut first,
         "bash",
-        "Run a shell command inside the workspace root. Prefer quick inspection and verification commands.",
+        "Run a shell command inside the workspace root. Prefer quick inspection and verification commands. Do not use this to start hosted coding agents; use spawn_subagent for delegated programming work.",
         r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout_secs":{"type":"integer","description":"Optional timeout in seconds"}},"required":["command"]}"#,
     );
     append_tool_definition(
@@ -5569,7 +5685,7 @@ fn tool_open_terminal(
     args: OpenTerminalArgs,
 ) -> Result<String, String> {
     if let Some(command) = args.command.as_deref() {
-        reject_terminal_coding_agent_launch(command)?;
+        reject_hosted_coding_agent_launch(command)?;
     }
     request_hub_tool(
         event_tx,
@@ -5703,7 +5819,7 @@ fn tool_send_terminal_text(
     event_tx: &Sender<HubEvent>,
     args: SendTerminalTextArgs,
 ) -> Result<String, String> {
-    reject_terminal_coding_agent_launch(&args.text)?;
+    reject_hosted_coding_agent_launch(&args.text)?;
     request_hub_tool(
         event_tx,
         |reply_tx| HubEvent::AiSendTerminalTextRequest {
@@ -5740,10 +5856,10 @@ fn tool_send_terminal_key(
     )
 }
 
-fn reject_terminal_coding_agent_launch(text: &str) -> Result<(), String> {
-    if terminal_text_starts_coding_agent(text) {
+fn reject_hosted_coding_agent_launch(text: &str) -> Result<(), String> {
+    if text_starts_hosted_coding_agent(text) {
         Err(
-            "refusing to start a terminal-hosted coding agent; use spawn_subagent for delegated programming work"
+            "refusing to start a hosted coding agent; use spawn_subagent for delegated programming work"
                 .to_string(),
         )
     } else {
@@ -5751,21 +5867,85 @@ fn reject_terminal_coding_agent_launch(text: &str) -> Result<(), String> {
     }
 }
 
-fn terminal_text_starts_coding_agent(text: &str) -> bool {
+fn text_starts_hosted_coding_agent(text: &str) -> bool {
     let lowered = text.trim_start().to_ascii_lowercase();
-    let first_command = lowered.split(['\n', ';']).next().unwrap_or("").trim_start();
-    let first_command = first_command
-        .strip_prefix("exec ")
-        .unwrap_or(first_command)
-        .trim_start();
-    let first_command = first_command.strip_prefix("env ").unwrap_or(first_command);
-    let command = first_command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_matches('"')
-        .trim_matches('\'');
-    let command = command.rsplit('/').next().unwrap_or(command);
+    let first_command = lowered.split(['\n', ';']).next().unwrap_or("").trim();
+    let tokens = first_command.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0;
+
+    if tokens
+        .get(index)
+        .map(|token| normalized_shell_command(token) == "exec")
+        .unwrap_or(false)
+    {
+        index += 1;
+    }
+
+    if tokens
+        .get(index)
+        .map(|token| normalized_shell_command(token) == "env")
+        .unwrap_or(false)
+    {
+        index += 1;
+    }
+
+    while tokens
+        .get(index)
+        .map(|token| looks_like_env_assignment(token))
+        .unwrap_or(false)
+    {
+        index += 1;
+    }
+
+    let Some(command) = tokens
+        .get(index)
+        .map(|token| normalized_shell_command(token))
+    else {
+        return false;
+    };
+
+    if is_hosted_coding_agent_command(&command) {
+        return true;
+    }
+
+    match command.as_str() {
+        "npx" | "bunx" | "uvx" => tokens
+            .get(index + 1)
+            .map(|token| is_hosted_coding_agent_command(&normalized_shell_command(token)))
+            .unwrap_or(false),
+        "pnpm" | "yarn" => {
+            tokens
+                .get(index + 1)
+                .map(|token| normalized_shell_command(token) == "dlx")
+                .unwrap_or(false)
+                && tokens
+                    .get(index + 2)
+                    .map(|token| is_hosted_coding_agent_command(&normalized_shell_command(token)))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn normalized_shell_command(token: &str) -> String {
+    let token = token.trim_matches('"').trim_matches('\'');
+    token.rsplit('/').next().unwrap_or(token).to_string()
+}
+
+fn looks_like_env_assignment(token: &str) -> bool {
+    let token = token.trim_matches('"').trim_matches('\'');
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_hosted_coding_agent_command(command: &str) -> bool {
     matches!(
         command,
         "codex" | "claude" | "aider" | "opencode" | "cursor-agent" | "goose" | "gemini" | "qwen"
@@ -5931,6 +6111,7 @@ fn tool_replace_in_file(root_path: &Path, args: ReplaceInFileArgs) -> Result<Str
 }
 
 fn tool_bash(root_path: &Path, args: BashArgs) -> Result<String, String> {
+    reject_hosted_coding_agent_launch(&args.command)?;
     let timeout_secs = args
         .timeout_secs
         .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS)
@@ -7802,6 +7983,16 @@ Some intro text...
                 && event.title == "planner Subagent"
                 && event.detail.contains("delegated work")
         }));
+        let state = manager.snapshot("repo");
+        assert!(state.live_markdown.contains("**Native Agents**"));
+        assert!(state.live_markdown.contains("**planner Subagent**"));
+        assert!(state.live_markdown.contains("parent: Chat 1"));
+        assert!(state
+            .live_markdown
+            .contains("task: Update the Makepad Studio refactor plan"));
+        assert!(state
+            .live_markdown
+            .contains("now: Starting native subagent"));
     }
 
     #[test]
@@ -7873,6 +8064,14 @@ Some intro text...
             .visibility_events
             .iter()
             .any(|event| event.kind == "subagent_spawned" && event.agent_id == Some(sub_id)));
+        assert!(state.live_markdown.contains("**Native Agents**"));
+        assert!(state.live_markdown.contains("**coder Subagent**"));
+        assert!(state
+            .live_markdown
+            .contains("task: Update the agent panel visibility"));
+        assert!(state
+            .live_markdown
+            .contains("now: Starting native subagent"));
     }
 
     #[test]
@@ -7918,6 +8117,11 @@ Some intro text...
         assert!(text.contains("Native coder subagent"));
         assert!(text.contains("Update the native activity board"));
         assert!(!text.contains("/subagent"));
+        assert!(state.live_markdown.contains("**Native Agents**"));
+        assert!(state.live_markdown.contains("**coder Subagent**"));
+        assert!(state
+            .live_markdown
+            .contains("task: Update the native activity board"));
     }
 
     #[test]
@@ -8038,7 +8242,7 @@ Some intro text...
 
     #[test]
     fn native_file_tool_result_updates_agent_touched_files() {
-        let (event_tx, _event_rx) = channel();
+        let (event_tx, event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
         manager.ensure_mount_entry("repo");
         manager.ensure_default_agent("repo");
@@ -8092,6 +8296,11 @@ Some intro text...
                 && event.title == "studio/hub/src/ai_manager.rs"
                 && event.detail.contains("Native `write_file` completed")
         }));
+        assert!(event_rx.try_iter().any(|event| matches!(
+            event,
+            HubEvent::AiRevealTouchedFile { mount, path }
+                if mount == "repo" && path == "repo/studio/hub/src/ai_manager.rs"
+        )));
     }
 
     #[test]
@@ -8708,6 +8917,7 @@ Some intro text...
         assert!(body.contains("\"send_terminal_key\""));
         assert!(body.contains("spawn_subagent"));
         assert!(body.contains("Do not use this to spawn coding agents"));
+        assert!(body.contains("Do not use this to start hosted coding agents"));
         assert!(!body.contains("model_override"));
         assert!(!body.contains("codex prompts"));
         assert!(!body.contains("\"model\""));
@@ -8727,12 +8937,20 @@ Some intro text...
             "goose session",
             "gemini",
             "qwen code",
+            "npx codex",
+            "bunx opencode",
+            "uvx aider",
+            "pnpm dlx aider",
+            "yarn dlx claude",
+            "env FOO=bar codex",
+            "FOO=bar /usr/local/bin/codex run",
+            "exec codex",
         ] {
             assert!(
-                terminal_text_starts_coding_agent(text),
+                text_starts_hosted_coding_agent(text),
                 "{text:?} should be blocked"
             );
-            assert!(reject_terminal_coding_agent_launch(text)
+            assert!(reject_hosted_coding_agent_launch(text)
                 .unwrap_err()
                 .contains("spawn_subagent"));
         }
@@ -8746,13 +8964,30 @@ Some intro text...
             "npm run dev",
             "echo codex should be native",
             "rg codex studio/hub",
+            "npm run codex-check",
+            "cargo test",
+            "FOO=bar cargo test",
         ] {
             assert!(
-                !terminal_text_starts_coding_agent(text),
+                !text_starts_hosted_coding_agent(text),
                 "{text:?} should be allowed"
             );
-            assert!(reject_terminal_coding_agent_launch(text).is_ok());
+            assert!(reject_hosted_coding_agent_launch(text).is_ok());
         }
+    }
+
+    #[test]
+    fn bash_rejects_hosted_coding_agent_launches() {
+        let err = tool_bash(
+            Path::new("."),
+            BashArgs {
+                command: "codex --model gpt-5".to_string(),
+                timeout_secs: Some(1),
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.contains("spawn_subagent"));
     }
 
     #[test]

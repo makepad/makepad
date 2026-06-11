@@ -1,4 +1,4 @@
-use crate::ai_manager::{AiManager, AiTerminalObservation, AiToolExecutionResult};
+use crate::ai_manager::{AiManager, AiToolExecutionResult};
 use crate::build_manager::BuildManager;
 use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
@@ -167,6 +167,10 @@ pub enum HubEvent {
         line: Option<usize>,
         column: Option<usize>,
         reply_tx: Sender<Result<String, String>>,
+    },
+    AiRevealTouchedFile {
+        mount: String,
+        path: String,
     },
     AiObserveFilesystemRequest {
         mount: String,
@@ -778,6 +782,9 @@ impl HubCore {
                 column,
                 reply_tx,
             } => self.on_ai_open_editor_request(mount, path, line, column, reply_tx),
+            HubEvent::AiRevealTouchedFile { mount, path } => {
+                self.reveal_ai_touched_file(&mount, &path);
+            }
             HubEvent::AiObserveFilesystemRequest {
                 mount,
                 path,
@@ -2107,6 +2114,66 @@ mod tests {
         }
 
         assert!(ui_rx_bin.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn ai_reveal_touched_file_opens_file_in_primary_studio_ui() {
+        let dir = crate::test_support::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+        let (event_tx, event_rx) = mpsc::channel::<HubEvent>();
+        let mut vfs = VirtualFs::new();
+        vfs.mount("repo", dir.path().to_path_buf())
+            .expect("mount repo");
+        let mut core = HubCore::new(event_rx, event_tx, vfs, None, None);
+
+        let ui_rx = ToUIReceiver::<Vec<u8>>::default();
+        core.handle_event(HubEvent::ClientConnected {
+            web_socket_id: 1,
+            sender: ui_rx.sender(),
+            typed_sender: None,
+        });
+        let client_id = match HubToClient::deserialize_bin(
+            &ui_rx
+                .receiver
+                .recv_timeout(Duration::from_millis(250))
+                .expect("hello"),
+        )
+        .expect("decode hello")
+        {
+            HubToClient::Hello { client_id } => client_id,
+            other => panic!("expected Hello, got {:?}", other),
+        };
+
+        core.handle_event(HubEvent::ClientEnvelope {
+            web_socket_id: 1,
+            envelope: ClientToHubEnvelope {
+                query_id: QueryId::new(client_id, 0),
+                msg: ClientToHub::ObserveMount {
+                    mount: "repo".to_string(),
+                    primary: Some(true),
+                },
+            },
+        });
+        let _ = recv_ui_messages(&ui_rx, Duration::from_millis(100));
+
+        core.handle_event(HubEvent::AiRevealTouchedFile {
+            mount: "repo".to_string(),
+            path: "repo/src/lib.rs".to_string(),
+        });
+
+        let messages = recv_ui_messages(&ui_rx, Duration::from_millis(300));
+        assert!(
+            messages.iter().any(|msg| {
+                matches!(
+                    msg,
+                    HubToClient::TextFileOpened { path, content, .. }
+                        if path == "repo/src/lib.rs" && content.contains("pub fn hi")
+                )
+            }),
+            "expected touched file to open in Studio"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::*;
-use crate::ai_manager::{AiTerminalObservation, AiToolExecutionResult};
-use makepad_studio_protocol::hub_protocol::{ClientId, HubToClient, QueryId};
+use crate::ai_manager::AiTerminalObservation;
+use makepad_studio_protocol::hub_protocol::HubToClient;
 use makepad_terminal_core::TermKeyCode;
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -30,6 +30,10 @@ impl HubCore {
     ) {
         let result = self.open_ai_editor(&mount, &path, line, column);
         let _ = reply_tx.send(result);
+    }
+
+    pub(super) fn reveal_ai_touched_file(&mut self, mount: &str, path: &str) {
+        let _ = self.open_ai_editor(mount, path, None, None);
     }
 
     pub(super) fn on_ai_observe_filesystem_request(

@@ -355,6 +355,12 @@ impl MatchEvent for App {
 
         for action in actions {
             if let Some(action) = action.as_widget_action() {
+                if let MarkdownAction::LinkNavigated(href) = action.cast::<MarkdownAction>() {
+                    if let Some(path) = ai_manager::ai_file_link_path_from_href(&href) {
+                        self.open_path_in_editor(cx, &path);
+                        continue;
+                    }
+                }
                 match action.cast() {
                     DockAction::TabWasPressed(tab_id) => {
                         if let Some(mount) = self.data.tab_to_mount.get(&tab_id).cloned() {

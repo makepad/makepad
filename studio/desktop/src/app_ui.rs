@@ -404,6 +404,48 @@ script_mod! {
             }
         }
 
+        ai_files_fold := FoldHeader {
+            animator +: {
+                active +: {
+                    default: @on
+                }
+            }
+            header: RectView {
+                width: Fill
+                height: 28.0
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+                spacing: theme.space_1
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.94
+                }
+                fold_button := FoldButton {
+                    animator +: {
+                        active +: {
+                            default: @on
+                        }
+                    }
+                }
+                Label {
+                    text: "Changed Files"
+                    draw_text.color: theme.color_label_outer
+                }
+            }
+            body_walk: Walk {width: Fill, height: Fit}
+            body: ScrollYView {
+                width: Fill
+                height: 78.0
+                flow: Down
+                show_bg: true
+                padding: Inset {left: 8.0 right: 8.0 top: 8.0 bottom: 8.0}
+                draw_bg +: {
+                    color: theme.color_bg_highlight * 0.76
+                }
+                ai_files_markdown := AiChatMarkdown {}
+            }
+        }
+
         AiPaneDivider {}
 
         chat_scroll := ScrollYView {
@@ -528,12 +570,12 @@ script_mod! {
                         View { width: Fill }
 
                         ai_subagent_role_picker := DropDown {
-                            width: 76.0
+                            width: 112.0
                             height: 24.0
                             margin: Inset {right: 6.0}
                             padding: Inset {left: 6.0 right: 14.0 top: 0.0 bottom: 0.0}
                             align: Align {x: 0.0 y: 0.5}
-                            labels: ["coder", "planner", "explorer", "reviewer", "verifier"]
+                            labels: ["coder agent", "planner agent", "explorer agent", "reviewer agent", "verifier agent"]
                             draw_bg +: {
                                 color: theme.color_bg_highlight * 0.88
                                 color_hover: theme.color_bg_highlight * 0.98
