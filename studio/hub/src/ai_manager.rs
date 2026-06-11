@@ -1444,6 +1444,70 @@ impl AiManager {
                     }
                     return Some((mount.clone(), self.snapshot(&mount)));
                 }
+                if let Some(pending) = self.pending_classifiers.remove(&request_id) {
+                    let mount = pending.mount.clone();
+                    let agent_id = pending.agent_id;
+                    let original_prompt = pending.original_prompt.clone();
+
+                    let body = response
+                        .body
+                        .as_ref()
+                        .map(|body| String::from_utf8_lossy(body).to_string())
+                        .unwrap_or_default();
+
+                    let mut fallback = true;
+
+                    if response.status_code == 200 {
+                        if let Some(response_json) = self.parse_classifier_json(&body) {
+                            if let Some(ref matched_name) = response_json.matched_workflow {
+                                let mut found_workflow = None;
+                                if let Some(mount_state) = self.mounts.get(&mount) {
+                                    if let Some(wf) = mount_state.workflows.iter().find(|w| w.name == *matched_name) {
+                                        found_workflow = Some(wf.clone());
+                                    }
+                                }
+
+                                if let Some(wf) = found_workflow {
+                                    let first_step_name = wf.steps.first().map(|s| s.name.clone()).unwrap_or_default();
+                                    let mut steps = Vec::with_capacity(wf.steps.len());
+                                    for (index, step) in wf.steps.iter().enumerate() {
+                                        steps.push(WorkflowStepState {
+                                            name: step.name.clone(),
+                                            status: if index == 0 { "active" } else { "pending" }.to_string(),
+                                        });
+                                    }
+
+                                    let active_workflow = ActiveWorkflowState {
+                                        name: wf.name.clone(),
+                                        current_step: 0,
+                                        steps,
+                                    };
+
+                                    if let Some(mount_state) = self.mounts.get_mut(&mount) {
+                                        mount_state.active_workflow = Some(active_workflow);
+                                        mount_state.active_workflow_agent_id = Some(agent_id);
+                                        Self::activate_current_workflow_step(mount_state, agent_id);
+                                    }
+
+                                    let args = response_json.arguments.as_deref().unwrap_or("");
+                                    let rewritten_prompt = format!(
+                                        "Execute workflow {}. Arguments: {}. Focus on Step 1: {}.",
+                                        wf.name, args, first_step_name
+                                    );
+
+                                    self.send_prompt_accepted(&mount, agent_id, &rewritten_prompt);
+                                    fallback = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if fallback {
+                        self.send_prompt_accepted(&mount, agent_id, &original_prompt);
+                    }
+
+                    return Some((mount.clone(), self.snapshot(&mount)));
+                }
                 let in_flight = self.inflight.remove(&request_id)?;
                 let mount = in_flight.mount.clone();
                 let agent_id = in_flight.agent_id;
@@ -3946,6 +4010,40 @@ impl AiManager {
             catalog, prompt
         )
     }
+
+    fn parse_classifier_json(&self, body: &str) -> Option<ClassifierResponseJson> {
+        let mut json_text = body.trim().to_string();
+        if let Ok(openai_resp) = OpenAiResponse::deserialize_json_lenient(&json_text) {
+            if let Some(choice) = openai_resp.choices.first() {
+                if let Some(content) = &choice.message.content {
+                    json_text = content.trim().to_string();
+                }
+            }
+        }
+
+        let mut cleaned = json_text.as_str();
+        if cleaned.starts_with("```json") {
+            cleaned = cleaned.strip_prefix("```json").unwrap_or(cleaned);
+        } else if cleaned.starts_with("```") {
+            cleaned = cleaned.strip_prefix("```").unwrap_or(cleaned);
+        }
+        if cleaned.ends_with("```") {
+            cleaned = cleaned.strip_suffix("```").unwrap_or(cleaned);
+        }
+        let cleaned = cleaned.trim();
+
+        if cleaned == "null" {
+            return None;
+        }
+
+        ClassifierResponseJson::deserialize_json_lenient(cleaned).ok()
+    }
+}
+
+#[derive(DeJson)]
+struct ClassifierResponseJson {
+    matched_workflow: Option<String>,
+    arguments: Option<String>,
 }
 
 fn remove_agent_file_for_root_best_effort(
@@ -8444,5 +8542,188 @@ Some intro text...
 
         shutdown.store(true, Ordering::Relaxed);
         join.join().unwrap();
+    }
+
+    #[test]
+    fn test_classifier_response_trigger_workflow() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        // 1. Add a dummy workflow to the mount state.
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![
+                    WorkflowStep {
+                        name: "Resolve PR Set".to_string(),
+                        description: "Find and select PRs".to_string(),
+                    },
+                ],
+            }];
+        }
+
+        // 2. Insert a pending classifier request.
+        let request_id = LiveId::unique();
+        manager.pending_classifiers.insert(
+            request_id,
+            PendingClassifier {
+                mount: "repo".to_string(),
+                agent_id,
+                original_prompt: "review PR 12".to_string(),
+            },
+        );
+
+        // 3. Construct a successful classification response containing valid JSON.
+        let response_body = r#"{"matched_workflow": "review-prs", "arguments": "12"}"#;
+        let response = HttpResponse::new(
+            LiveId(1),
+            200,
+            BTreeMap::new(),
+            Some(response_body.as_bytes().to_vec()),
+        );
+
+        // 4. Handle the HTTP response.
+        let result = manager.handle_http_response(NetworkResponse::HttpResponse {
+            request_id,
+            response,
+        });
+
+        assert!(result.is_some());
+
+        // 5. Verify workflow state is initialized and set.
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let active_wf = mount_state.active_workflow.as_ref().unwrap();
+        assert_eq!(active_wf.name, "review-prs");
+        assert_eq!(active_wf.current_step, 0);
+        assert_eq!(active_wf.steps[0].name, "Resolve PR Set");
+        assert_eq!(active_wf.steps[0].status, "active");
+        assert_eq!(mount_state.active_workflow_agent_id, Some(agent_id));
+
+        // 6. Verify agent state is updated and prompt is rewritten.
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        assert_eq!(agent.workflow_step_name, Some("Resolve PR Set".to_string()));
+        assert_eq!(agent.workflow_step_status, Some("active".to_string()));
+        
+        let has_rewritten = agent.history.iter().any(|item| {
+            if let ConversationItem::User { text } = item {
+                text.contains("Execute workflow review-prs") && text.contains("Arguments: 12")
+            } else {
+                false
+            }
+        });
+        assert!(has_rewritten);
+    }
+
+    #[test]
+    fn test_classifier_response_fallback() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        // 1. Add a dummy workflow to the mount state.
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![
+                    WorkflowStep {
+                        name: "Resolve PR Set".to_string(),
+                        description: "Find and select PRs".to_string(),
+                    },
+                ],
+            }];
+        }
+
+        // 2. Insert a pending classifier request.
+        let request_id = LiveId::unique();
+        manager.pending_classifiers.insert(
+            request_id,
+            PendingClassifier {
+                mount: "repo".to_string(),
+                agent_id,
+                original_prompt: "hello there".to_string(),
+            },
+        );
+
+        // 3. Construct a fallback classification response containing null/invalid JSON.
+        let response_body = "null";
+        let response = HttpResponse::new(
+            LiveId(1),
+            200,
+            BTreeMap::new(),
+            Some(response_body.as_bytes().to_vec()),
+        );
+
+        // 4. Handle the HTTP response.
+        let result = manager.handle_http_response(NetworkResponse::HttpResponse {
+            request_id,
+            response,
+        });
+
+        assert!(result.is_some());
+
+        // 5. Verify workflow state is NOT initialized.
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+
+        // 6. Verify agent state is updated with the original prompt.
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        let has_original = agent.history.iter().any(|item| {
+            if let ConversationItem::User { text } = item {
+                text == "hello there"
+            } else {
+                false
+            }
+        });
+        assert!(has_original);
+
+        // 7. Test status code 500 fallback.
+        let request_id_500 = LiveId::unique();
+        manager.pending_classifiers.insert(
+            request_id_500,
+            PendingClassifier {
+                mount: "repo".to_string(),
+                agent_id,
+                original_prompt: "help me".to_string(),
+            },
+        );
+
+        let response_500 = HttpResponse::new(
+            LiveId(1),
+            500,
+            BTreeMap::new(),
+            None,
+        );
+
+        manager.handle_http_response(NetworkResponse::HttpResponse {
+            request_id: request_id_500,
+            response: response_500,
+        });
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        let has_original_500 = agent.history.iter().any(|item| {
+            if let ConversationItem::User { text } = item {
+                text == "help me"
+            } else {
+                false
+            }
+        });
+        assert!(has_original_500);
     }
 }
