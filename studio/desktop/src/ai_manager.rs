@@ -964,6 +964,12 @@ mod tests {
             current_action: None,
             last_terminal_excerpt: None,
             files_touched: Vec::new(),
+            active_terminal_path: None,
+            active_terminal_title: None,
+            state_changed_at: 0.0,
+            workflow_step_name: None,
+            workflow_step_status: None,
+            blocked_reason: None,
         }
     }
 
@@ -986,6 +992,12 @@ mod tests {
             current_action: None,
             last_terminal_excerpt: None,
             files_touched: Vec::new(),
+            active_terminal_path: None,
+            active_terminal_title: None,
+            state_changed_at: 0.0,
+            workflow_step_name: None,
+            workflow_step_status: None,
+            blocked_reason: None,
         }
     }
 
@@ -1005,8 +1017,9 @@ mod tests {
             active_agent_id: Some(agent_id),
             agents: vec![test_agent_summary(agent_id, "Chat 1", 0)],
             active_agent: Some(test_agent_state(agent_id, "idle", false, Vec::new())),
-            active_workflow: None,
             live_markdown: String::new(),
+            active_workflow: None,
+            visibility_events: Vec::new(),
         };
 
         apply_local_prompt_echo(&mut state, agent_id, "say hi");
@@ -1462,6 +1475,12 @@ mod ai_task_board_tests {
             current_action: None,
             last_terminal_excerpt: None,
             files_touched: Vec::new(),
+            active_terminal_path: None,
+            active_terminal_title: None,
+            state_changed_at: 0.0,
+            workflow_step_name: None,
+            workflow_step_status: None,
+            blocked_reason: None,
         }
     }
 
@@ -1481,6 +1500,7 @@ mod ai_task_board_tests {
             active_agent: None,
             live_markdown: live_markdown.to_string(),
             active_workflow: None,
+            visibility_events: Vec::new(),
         }
     }
 
