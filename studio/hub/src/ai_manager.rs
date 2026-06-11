@@ -899,6 +899,7 @@ impl AiManager {
                 changed = true;
             }
 
+            let mut agent_activity_updates = Vec::new();
             for task in mount_state
                 .tasks
                 .iter_mut()
@@ -924,6 +925,12 @@ impl AiManager {
                     AI_TERMINAL_EXCERPT_MAX_LINES,
                 );
                 task.last_codex_status = snapshot.codex_status.clone();
+                agent_activity_updates.push((
+                    task.agent_id,
+                    task.last_terminal_summary.clone(),
+                    task.last_terminal_excerpt.clone(),
+                    task.touched_paths.clone(),
+                ));
 
                 if created_observed_task
                     || previous_mode != task.last_terminal_mode
@@ -969,6 +976,19 @@ impl AiManager {
                         terminal_followup_signature("done", &snapshot.path, task),
                         "Tracked terminal appears done".to_string(),
                     ));
+                }
+            }
+
+            for (agent_id, action, excerpt, files_touched) in agent_activity_updates {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    agent.current_action = Some(action);
+                    agent.last_terminal_excerpt = if excerpt.is_empty() {
+                        None
+                    } else {
+                        Some(excerpt)
+                    };
+                    agent.files_touched = files_touched;
+                    agent.updated_at = now_seconds();
                 }
             }
 
@@ -1078,6 +1098,7 @@ impl AiManager {
         let mut queue = Vec::new();
         {
             let mount_state = self.mounts.get_mut(mount)?;
+            let mut agent_activity_updates = Vec::new();
             mount_state
                 .terminal_snapshots
                 .insert(path.to_string(), snapshot);
@@ -1094,12 +1115,31 @@ impl AiManager {
                 task.last_terminal_mode = "exited".to_string();
                 task.last_terminal_summary = summary.clone();
                 task.last_codex_status = None;
+                agent_activity_updates.push((
+                    task.agent_id,
+                    task.last_terminal_summary.clone(),
+                    task.last_terminal_excerpt.clone(),
+                    task.touched_paths.clone(),
+                ));
                 queue.push((
                     task.id,
                     terminal_followup_signature("exit", path, task),
                     format!("Tracked terminal exited with code {}", exit_code),
                 ));
             }
+            for (agent_id, action, excerpt, files_touched) in agent_activity_updates {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    agent.current_action = Some(action);
+                    agent.last_terminal_excerpt = if excerpt.is_empty() {
+                        None
+                    } else {
+                        Some(excerpt)
+                    };
+                    agent.files_touched = files_touched;
+                    agent.updated_at = now_seconds();
+                }
+            }
+
         }
 
         for (task_id, signature, reason) in queue {
@@ -1124,6 +1164,7 @@ impl AiManager {
         let mut changed = false;
         {
             let mount_state = self.mounts.get_mut(mount)?;
+            let mut agent_file_updates = Vec::new();
             for task in &mut mount_state.tasks {
                 if !matches_expected_path(relative_path, &task.expected_paths) {
                     continue;
@@ -1136,6 +1177,7 @@ impl AiManager {
                     task.touched_paths.push(relative_path.to_string());
                     changed = true;
                 }
+                agent_file_updates.push((task.agent_id, task.touched_paths.clone()));
                 if matches!(
                     task.last_terminal_mode.as_str(),
                     "done" | "awaiting-input" | "needs-attention"
@@ -1150,6 +1192,13 @@ impl AiManager {
                     ));
                 }
             }
+            for (agent_id, files_touched) in agent_file_updates {
+                if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    agent.files_touched = files_touched;
+                    agent.updated_at = now_seconds();
+                }
+            }
+
         }
 
         for (task_id, signature, reason) in queue {
