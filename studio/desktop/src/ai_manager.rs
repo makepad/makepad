@@ -445,7 +445,10 @@ fn ai_chat_markdown(agent: &AiAgentState) -> String {
     let mut activity = Vec::new();
     for message in &agent.messages {
         if let Some(item) = ai_activity_item(message) {
-            if matches!(item.kind, AiActivityKind::Observation | AiActivityKind::Event) {
+            if matches!(
+                item.kind,
+                AiActivityKind::Observation | AiActivityKind::Event
+            ) {
                 continue;
             }
             if !item.text.is_empty() {
@@ -836,7 +839,8 @@ fn summarize_tool_result_message(text: &str) -> String {
         "open_editor" => "opened editor".to_string(),
         "list_terminals" => "listed terminals".to_string(),
         "bash" => {
-            if payload.contains("failed") || payload.contains("error") || payload.contains("Error") {
+            if payload.contains("failed") || payload.contains("error") || payload.contains("Error")
+            {
                 "ran bash command (failed)".to_string()
             } else {
                 "ran bash command".to_string()
@@ -1236,7 +1240,10 @@ mod tests {
             summarize_tool_result_message(list_terminals),
             "listed terminals"
         );
-        assert_eq!(summarize_tool_result_message(bash_failed), "ran bash command (failed)");
+        assert_eq!(
+            summarize_tool_result_message(bash_failed),
+            "ran bash command (failed)"
+        );
         assert_eq!(summarize_tool_result_message(search), "searched codebase");
     }
 
@@ -1412,17 +1419,7 @@ fn render_task_board_agent(
     };
 
     let is_active = state.active_agent_id == Some(agent.agent_id);
-    let state_label = if agent.pending {
-        "running"
-    } else if agent.status == "completed" {
-        "done"
-    } else if agent.status == "cancelled" {
-        "cancelled"
-    } else if agent.status.contains("error") {
-        "error"
-    } else {
-        "idle"
-    };
+    let state_label = live_agent_state_label(agent);
     let role = agent
         .role
         .as_deref()
@@ -1443,6 +1440,7 @@ fn render_task_board_agent(
         truncate_inline(&agent.status, 48),
         role
     ));
+    append_task_board_agent_timeline(markdown, agent, depth);
 
     let children: Vec<_> = state
         .agents
@@ -1463,17 +1461,7 @@ fn render_workflow_owner_agent(
 ) {
     let indent = format!("{}└─ ", "  ".repeat(depth - 1));
     let is_active = state.active_agent_id == Some(agent.agent_id);
-    let state_label = if agent.pending {
-        "running"
-    } else if agent.status == "completed" {
-        "done"
-    } else if agent.status == "cancelled" {
-        "cancelled"
-    } else if agent.status.contains("error") {
-        "error"
-    } else {
-        "idle"
-    };
+    let state_label = live_agent_state_label(agent);
 
     let status_chips = if is_active {
         format!("`selected` `{}`", state_label)
@@ -1489,7 +1477,11 @@ fn render_workflow_owner_agent(
 
     let step_info = if let Some(step_name) = agent.workflow_step_name.as_ref() {
         let step_status = agent.workflow_step_status.as_deref().unwrap_or("active");
-        format!(" (Step: {} [{}])", truncate_inline(step_name, 20), step_status)
+        format!(
+            " (Step: {} [{}])",
+            truncate_inline(step_name, 20),
+            step_status
+        )
     } else {
         "".to_string()
     };
@@ -1502,6 +1494,7 @@ fn render_workflow_owner_agent(
         action_str,
         step_info
     ));
+    append_task_board_agent_timeline(markdown, agent, depth);
 
     let children: Vec<_> = state
         .agents
@@ -1511,6 +1504,75 @@ fn render_workflow_owner_agent(
 
     for child in children {
         render_task_board_agent(markdown, child, state, depth + 1);
+    }
+}
+
+fn append_task_board_agent_timeline(markdown: &mut String, agent: &AiAgentSummary, depth: usize) {
+    let detail_indent = format!("{}  ", "  ".repeat(depth + 1));
+    let mut wrote_timeline = false;
+    let mut append_line = |markdown: &mut String, label: &str, value: String| {
+        let value = value.trim();
+        if value.is_empty() {
+            return;
+        }
+        if !wrote_timeline {
+            markdown.push_str(&format!("{}timeline:\n", detail_indent));
+            wrote_timeline = true;
+        }
+        markdown.push_str(&format!("{}- {}: {}\n", detail_indent, label, value));
+    };
+
+    if let Some(step_name) = agent.workflow_step_name.as_deref() {
+        let step_status = agent.workflow_step_status.as_deref().unwrap_or("active");
+        append_line(
+            markdown,
+            "step",
+            format!(
+                "{} [{}]",
+                truncate_inline(step_name, 64),
+                truncate_inline(step_status, 24)
+            ),
+        );
+    }
+
+    if let Some(reason) = agent.blocked_reason.as_deref() {
+        append_line(markdown, "blocked", truncate_inline(reason, 96));
+    }
+
+    if let Some(action) = agent.current_action.as_deref() {
+        append_line(markdown, "now", truncate_inline(action, 96));
+    }
+
+    if let Some(path) = agent.active_terminal_path.as_deref() {
+        let title = agent.active_terminal_title.as_deref().unwrap_or("terminal");
+        append_line(
+            markdown,
+            "terminal",
+            format!(
+                "`{}` ({})",
+                truncate_inline(path, 80),
+                truncate_inline(title, 40)
+            ),
+        );
+    } else if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
+        if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
+            append_line(markdown, "terminal", truncate_inline(line, 120));
+        }
+    }
+
+    if !agent.files_touched.is_empty() {
+        let mut files = String::new();
+        for (index, path) in agent.files_touched.iter().take(4).enumerate() {
+            if index > 0 {
+                files.push_str(", ");
+            }
+            files.push_str(&format!("`{}`", truncate_inline(path, 72)));
+        }
+        let remaining = agent.files_touched.len().saturating_sub(4);
+        if remaining > 0 {
+            files.push_str(&format!(", +{} more", remaining));
+        }
+        append_line(markdown, "files", files);
     }
 }
 
@@ -1546,7 +1608,8 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
             .as_deref()
             .map(|action| !action.trim().is_empty())
             .unwrap_or(false);
-        let has_terminal = agent.active_terminal_path.is_some() || agent.last_terminal_excerpt.is_some();
+        let has_terminal =
+            agent.active_terminal_path.is_some() || agent.last_terminal_excerpt.is_some();
         let has_files = !agent.files_touched.is_empty();
         let has_blocked = agent.blocked_reason.is_some();
         if !has_action && !has_terminal && !has_files && !has_blocked {
@@ -1580,7 +1643,11 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
             let path = path.trim();
             if !path.is_empty() {
                 let title = agent.active_terminal_title.as_deref().unwrap_or("Codex");
-                markdown.push_str(&format!("  terminal: `{}` ({})\n", truncate_inline(path, 80), truncate_inline(title, 40)));
+                markdown.push_str(&format!(
+                    "  terminal: `{}` ({})\n",
+                    truncate_inline(path, 80),
+                    truncate_inline(title, 40)
+                ));
             }
         } else if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
             if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -1704,7 +1771,7 @@ fn polish_live_activity_line(line: &str) -> String {
 mod ai_task_board_tests {
     use super::*;
     use makepad_studio_protocol::hub_protocol::{
-        ActiveWorkflowState, AiBackendInfo, WorkflowStepState, AiVisibilityEvent,
+        ActiveWorkflowState, AiBackendInfo, AiVisibilityEvent, WorkflowStepState,
     };
 
     fn summary(
@@ -1876,6 +1943,35 @@ mod ai_task_board_tests {
     }
 
     #[test]
+    fn task_board_renders_agent_timeline_state_details() {
+        let mut root = summary(1, "Plan Studio tasks", "thinking...", true, None);
+        root.current_action = Some("Editing Agent panel timeline".to_string());
+        root.blocked_reason = Some("Waiting for CI logs".to_string());
+        root.active_terminal_path = Some("makepad/.makepad/codex.term".to_string());
+        root.active_terminal_title = Some("Codex Terminal".to_string());
+        root.files_touched = vec![
+            "studio/desktop/src/ai_manager.rs".to_string(),
+            "platform/studio/src/hub_protocol.rs".to_string(),
+        ];
+
+        let mut child = summary(2, "Review task UI", "ready", false, Some(AiAgentId(1)));
+        child.last_terminal_excerpt =
+            Some("cargo test -p makepad-studio ai_task_board_tests\nok".to_string());
+
+        let state = mount_state(vec![root, child], "");
+
+        let markdown = ai_task_board_markdown(&state);
+        assert!(markdown.contains("timeline:"));
+        assert!(markdown.contains("- blocked: Waiting for CI logs"));
+        assert!(markdown.contains("- now: Editing Agent panel timeline"));
+        assert!(markdown.contains("- terminal: `makepad/.makepad/codex.term` (Codex Terminal)"));
+        assert!(markdown.contains(
+            "- files: `studio/desktop/src/ai_manager.rs`, `platform/studio/src/hub_protocol.rs`"
+        ));
+        assert!(markdown.contains("cargo test -p makepad-studio ai_task_board_tests"));
+    }
+
+    #[test]
     fn live_activity_renders_agent_action_terminal_excerpt_and_files() {
         let mut agent = summary(1, "Task 4", "running", true, None);
         agent.current_action = Some("Editing ai_manager.rs".to_string());
@@ -1921,11 +2017,7 @@ mod ai_task_board_tests {
 
         let child = summary(2, "Subagent Reviewer", "ready", false, Some(AiAgentId(1)));
 
-        let state = mount_state_with_workflow(
-            vec![owner, child],
-            "",
-            Some(workflow_state()),
-        );
+        let state = mount_state_with_workflow(vec![owner, child], "", Some(workflow_state()));
 
         let markdown = ai_task_board_markdown(&state);
         assert!(markdown.contains("**Workflow:** review-prs"));
@@ -1934,7 +2026,7 @@ mod ai_task_board_tests {
         assert!(markdown.contains("`running`"));
         assert!(markdown.contains("Resolving PR comments"));
         assert!(markdown.contains("  └─ - **Subagent Reviewer**"));
-        
+
         // Verify total chat count is shown, but owner is not listed at the bottom
         assert!(markdown.contains("**2 chats**"));
         assert!(!markdown.contains("\n- **Workflow Owner**")); // Only indented as └─
