@@ -59,7 +59,7 @@ pub const UI_RETURN_KEY_EMERGENCY_CALL: i64 = 10;
 pub const UI_RETURN_KEY_CONTINUE: i64 = 11;
 
 pub(crate) const IOS_TEXT_INPUT_CARET_HEIGHT: f64 = 20.0;
-const IOS_TEXT_INPUT_TARGET_HEIGHT: f64 = 32.0;
+pub(crate) const IOS_TEXT_INPUT_TARGET_HEIGHT: f64 = 32.0;
 pub const IOS_TEXT_EVENT_DRAIN_TIMER_ID: u64 = u64::MAX - 1;
 
 // this value will be fetched from multiple threads (post signal uses it)
@@ -193,6 +193,7 @@ unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
     (*view).set_ivar::<f64>("ime_pos_y", 0.0);
     (*view).set_ivar::<bool>("_is_multiline", false);
     (*view).set_ivar::<bool>("_submit_on_enter", false);
+    (*view).set_ivar::<bool>("_is_read_only", false);
     (*view).set_ivar::<BOOL>("programmatic_update", NO);
     let clear_color: ObjcId = msg_send![class!(UIColor), clearColor];
     let () = msg_send![view, setBackgroundColor: clear_color];
@@ -676,126 +677,152 @@ impl IosApp {
     pub fn configure_keyboard(config: &crate::ime::TextInputConfig) {
         use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputContentType};
 
-        // Set ivars and update cached config inside the borrow, but call
-        // reloadInputViews OUTSIDE the borrow because it can synchronously
-        // trigger UIKit callbacks that re-enter IOS_APP.
-        let needs_reload = IOS_APP
+        // Phase 1 (under the borrow, NO UIKit): early-out on an unchanged config,
+        // decide whether to recreate the view (leaving a secure field), and stash the
+        // pointers we need. All UIKit work happens outside the borrow (Phases 2/3),
+        // because removeFromSuperview/reloadInputViews can re-enter IOS_APP.
+        let plan = IOS_APP
             .try_with(|app| {
-                if let Ok(mut app_ref) = app.try_borrow_mut() {
-                    if let Some(ref mut app) = *app_ref {
-                        if app.last_keyboard_config.as_ref() == Some(config) {
-                            return None;
-                        }
-
-                        // Leaving a secure field: iOS keeps the password/AutoFill tag on
-                        // the old view object, so swap in a fresh one for the next field.
-                        let was_tainting = app.last_keyboard_config.map_or(false, |c| c.taints_autofill());
-                        if was_tainting && !config.taints_autofill() {
-                            if let (Some(old_view), Some(mtk)) = (app.makepad_text_view, app.mtk_view) {
-                                unsafe {
-                                    // The old view was resigned in a prior drain and is now
-                                    // detached with no strong refs; release balances its alloc+1.
-                                    let () = msg_send![old_view, removeFromSuperview];
-                                    let () = msg_send![old_view, release];
-                                    app.makepad_text_view = Some(create_makepad_text_view(mtk));
-                                }
-                                // The fresh view starts empty at the origin: clear the cached
-                                // position (re-park next frame) and the freshness baseline so
-                                // makepad's re-push into the new view isn't dropped as stale.
-                                app.ime_position = None;
-                                app.last_forwarded_text = None;
-                            }
-                        }
-
-                        let view = if let Some(view) = app.makepad_text_view {
-                            unsafe {
-                                let kb_type: i64 = match config.soft_keyboard.input_mode {
-                                    InputMode::None => UI_KEYBOARD_TYPE_DEFAULT,
-                                    InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
-                                    InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
-                                    InputMode::Url => UI_KEYBOARD_TYPE_URL,
-                                    InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
-                                    InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
-                                    InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
-                                    InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
-                                    InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
-                                };
-
-                                let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
-                                    AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
-                                    AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
-                                    AutoCapitalize::Sentences => {
-                                        UI_TEXT_AUTOCAPITALIZATION_SENTENCES
-                                    }
-                                    AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
-                                };
-
-                                // A real UITextView adapts autocorrect to the active
-                                // input mode (incl. CJK) itself, so Default is Default.
-                                let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
-                                    AutoCorrect::Default => UI_TEXT_AUTOCORRECTION_DEFAULT,
-                                    AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
-                                    AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
-                                };
-
-                                let return_type: i64 = match config.soft_keyboard.return_key_type {
-                                    ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
-                                    ReturnKeyType::None => UI_RETURN_KEY_DEFAULT,
-                                    ReturnKeyType::Go => UI_RETURN_KEY_GO,
-                                    ReturnKeyType::Google => UI_RETURN_KEY_GOOGLE,
-                                    ReturnKeyType::Join => UI_RETURN_KEY_JOIN,
-                                    ReturnKeyType::Next => UI_RETURN_KEY_NEXT,
-                                    ReturnKeyType::Route => UI_RETURN_KEY_ROUTE,
-                                    ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
-                                    ReturnKeyType::Send => UI_RETURN_KEY_SEND,
-                                    ReturnKeyType::Yahoo => UI_RETURN_KEY_YAHOO,
-                                    ReturnKeyType::Done => UI_RETURN_KEY_DONE,
-                                    ReturnKeyType::EmergencyCall => UI_RETURN_KEY_EMERGENCY_CALL,
-                                    ReturnKeyType::Continue => UI_RETURN_KEY_CONTINUE,
-                                    ReturnKeyType::Previous => UI_RETURN_KEY_DEFAULT,
-                                };
-
-                                let secure: BOOL = if config.is_secure { YES } else { NO };
-                                let () = msg_send![view, setKeyboardType: kb_type];
-                                let () = msg_send![view, setAutocapitalizationType: autocap_type];
-                                let () = msg_send![view, setAutocorrectionType: autocorrect_type];
-                                let () = msg_send![view, setReturnKeyType: return_type];
-                                let () = msg_send![view, setSecureTextEntry: secure];
-                                // AutoFill identity from the field's content type, independent
-                                // of the secure display toggle (a revealed password stays a password).
-                                let content_type_const: ObjcId = match config.content_type {
-                                    TextInputContentType::None => UITextContentTypeNone,
-                                    TextInputContentType::Username => UITextContentTypeUsername,
-                                    TextInputContentType::Password => UITextContentTypePassword,
-                                    TextInputContentType::NewPassword => UITextContentTypeNewPassword,
-                                    TextInputContentType::EmailAddress => UITextContentTypeEmailAddress,
-                                    TextInputContentType::Url => UITextContentTypeURL,
-                                    TextInputContentType::FullStreetAddress => UITextContentTypeFullStreetAddress,
-                                    TextInputContentType::TelephoneNumber => UITextContentTypeTelephoneNumber,
-                                    TextInputContentType::OneTimeCode => UITextContentTypeOneTimeCode,
-                                };
-                                let () = msg_send![view, setTextContentType: content_type_const];
-                                (*view).set_ivar::<bool>("_is_multiline", config.is_multiline);
-                                (*view).set_ivar::<bool>("_submit_on_enter", config.submit_on_enter);
-                            }
-                            Some(view)
-                        } else {
-                            None
-                        };
-
-                        app.last_keyboard_config = Some(*config);
-                        return view;
-                    }
+                let mut app_ref = app.try_borrow_mut().ok()?;
+                let app = app_ref.as_mut()?;
+                if app.last_keyboard_config.as_ref() == Some(config) {
+                    return None;
                 }
-                None
+                // Leaving a secure field: iOS keeps the password/AutoFill tag on the
+                // old view object, so swap in a fresh one for the next field.
+                let was_tainting = app.last_keyboard_config.map_or(false, |c| c.taints_autofill());
+                let recreate = was_tainting && !config.taints_autofill();
+                let old_view = app.makepad_text_view;
+                let mtk = app.mtk_view;
+                app.last_keyboard_config = Some(*config);
+                if recreate {
+                    // The fresh view starts empty at the origin: clear the cached
+                    // position (re-park next frame) and the freshness baseline so
+                    // makepad's re-push into the new view isn't dropped as stale.
+                    app.makepad_text_view = None;
+                    app.ime_position = None;
+                    app.last_forwarded_text = None;
+                }
+                Some((recreate, old_view, mtk))
             })
             .ok()
             .flatten();
 
-        // Call reloadInputViews after the borrow is dropped
-        if let Some(text_input_view) = needs_reload {
+        let Some((recreate, old_view, mtk)) = plan else {
+            return;
+        };
+
+        // Phase 2 (OUTSIDE the borrow): recreate the view if leaving a secure field.
+        let view = if recreate {
+            if let (Some(old_view), Some(mtk)) = (old_view, mtk) {
+                let new_view = unsafe {
+                    // The old view was resigned in a prior drain and is now detached
+                    // with no strong refs; release balances its alloc+1.
+                    let () = msg_send![old_view, removeFromSuperview];
+                    let () = msg_send![old_view, release];
+                    create_makepad_text_view(mtk)
+                };
+                let _ = IOS_APP.try_with(|app| {
+                    if let Ok(mut app_ref) = app.try_borrow_mut() {
+                        if let Some(app) = app_ref.as_mut() {
+                            app.makepad_text_view = Some(new_view);
+                        }
+                    }
+                });
+                Some(new_view)
+            } else {
+                // Recreate was requested but we couldn't build a new view; Phase 1 already
+                // nulled makepad_text_view, so restore the old one rather than strand it.
+                if let Some(old_view) = old_view {
+                    let _ = IOS_APP.try_with(|app| {
+                        if let Ok(mut app_ref) = app.try_borrow_mut() {
+                            if let Some(app) = app_ref.as_mut() {
+                                app.makepad_text_view = Some(old_view);
+                            }
+                        }
+                    });
+                }
+                old_view
+            }
+        } else {
+            old_view
+        };
+
+        // Phase 3 (OUTSIDE the borrow): apply the UITextInputTraits + ivars, then
+        // reloadInputViews so the change takes effect.
+        if let Some(view) = view {
             unsafe {
-                let () = msg_send![text_input_view, reloadInputViews];
+                let kb_type: i64 = match config.soft_keyboard.input_mode {
+                    InputMode::None => UI_KEYBOARD_TYPE_DEFAULT,
+                    InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
+                    InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
+                    InputMode::Url => UI_KEYBOARD_TYPE_URL,
+                    InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
+                    InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
+                    InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
+                    InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
+                    InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
+                };
+
+                let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
+                    AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
+                    AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
+                    AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
+                    AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
+                };
+
+                // A real UITextView adapts autocorrect to the active
+                // input mode (incl. CJK) itself, so Default is Default.
+                let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
+                    AutoCorrect::Default => UI_TEXT_AUTOCORRECTION_DEFAULT,
+                    AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
+                    AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
+                };
+
+                let return_type: i64 = match config.soft_keyboard.return_key_type {
+                    ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
+                    ReturnKeyType::None => UI_RETURN_KEY_DEFAULT,
+                    ReturnKeyType::Go => UI_RETURN_KEY_GO,
+                    ReturnKeyType::Google => UI_RETURN_KEY_GOOGLE,
+                    ReturnKeyType::Join => UI_RETURN_KEY_JOIN,
+                    ReturnKeyType::Next => UI_RETURN_KEY_NEXT,
+                    ReturnKeyType::Route => UI_RETURN_KEY_ROUTE,
+                    ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
+                    ReturnKeyType::Send => UI_RETURN_KEY_SEND,
+                    ReturnKeyType::Yahoo => UI_RETURN_KEY_YAHOO,
+                    ReturnKeyType::Done => UI_RETURN_KEY_DONE,
+                    ReturnKeyType::EmergencyCall => UI_RETURN_KEY_EMERGENCY_CALL,
+                    ReturnKeyType::Continue => UI_RETURN_KEY_CONTINUE,
+                    ReturnKeyType::Previous => UI_RETURN_KEY_DEFAULT,
+                };
+
+                let secure: BOOL = if config.is_secure { YES } else { NO };
+                let () = msg_send![view, setKeyboardType: kb_type];
+                let () = msg_send![view, setAutocapitalizationType: autocap_type];
+                let () = msg_send![view, setAutocorrectionType: autocorrect_type];
+                let () = msg_send![view, setReturnKeyType: return_type];
+                let () = msg_send![view, setSecureTextEntry: secure];
+                // A read-only field's shared view must reject all inserts (e.g. a
+                // hardware Enter), so makepad and the view stay in sync.
+                let () = msg_send![view, setEditable: if config.is_read_only { NO } else { YES }];
+                // AutoFill identity from the field's content type, independent
+                // of the secure display toggle (a revealed password stays a password).
+                let content_type_const: ObjcId = match config.content_type {
+                    TextInputContentType::None => UITextContentTypeNone,
+                    TextInputContentType::Username => UITextContentTypeUsername,
+                    TextInputContentType::Password => UITextContentTypePassword,
+                    TextInputContentType::NewPassword => UITextContentTypeNewPassword,
+                    TextInputContentType::EmailAddress => UITextContentTypeEmailAddress,
+                    TextInputContentType::Url => UITextContentTypeURL,
+                    TextInputContentType::FullStreetAddress => UITextContentTypeFullStreetAddress,
+                    TextInputContentType::TelephoneNumber => UITextContentTypeTelephoneNumber,
+                    TextInputContentType::OneTimeCode => UITextContentTypeOneTimeCode,
+                };
+                let () = msg_send![view, setTextContentType: content_type_const];
+                (*view).set_ivar::<bool>("_is_multiline", config.is_multiline);
+                (*view).set_ivar::<bool>("_submit_on_enter", config.submit_on_enter);
+                (*view).set_ivar::<bool>("_is_read_only", config.is_read_only);
+                let () = msg_send![view, reloadInputViews];
             }
         }
     }
@@ -814,7 +841,14 @@ impl IosApp {
             .flatten();
 
         if let Some(text_input_view) = view {
-            let () = unsafe { msg_send![text_input_view, becomeFirstResponder] };
+            // show_keyboard is re-issued every draw frame; skip the redundant
+            // msg_send when the view already holds first responder.
+            unsafe {
+                let is_fr: BOOL = msg_send![text_input_view, isFirstResponder];
+                if is_fr != YES {
+                    let () = msg_send![text_input_view, becomeFirstResponder];
+                }
+            }
         }
     }
 
@@ -1112,7 +1146,7 @@ impl IosApp {
 
     /// (is_multiline, submit_on_enter) read off the text view's ivars, for the
     /// hardware-Enter newline-vs-submit decision. None if the view is gone.
-    pub fn text_view_enter_config() -> Option<(bool, bool)> {
+    pub fn text_view_enter_config() -> Option<(bool, bool, bool)> {
         let view = IOS_APP
             .try_with(|app| {
                 app.try_borrow()
@@ -1125,6 +1159,7 @@ impl IosApp {
             Some((
                 *(*view).get_ivar::<bool>("_is_multiline"),
                 *(*view).get_ivar::<bool>("_submit_on_enter"),
+                *(*view).get_ivar::<bool>("_is_read_only"),
             ))
         }
     }

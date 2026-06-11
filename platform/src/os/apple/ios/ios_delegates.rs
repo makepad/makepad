@@ -289,12 +289,16 @@ pub unsafe fn dispatch_hardware_key_presses(
         if key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter {
             // Hardware Enter only reaches this path (never the view's text delegate).
             // Newline mode: insert into the view so it syncs in-order; submit dispatches.
-            if let Some((is_multiline, submit_on_enter)) = IosApp::text_view_enter_config() {
+            if let Some((is_multiline, submit_on_enter, is_read_only)) =
+                IosApp::text_view_enter_config()
+            {
                 let is_newline = is_multiline
                     && !modifiers.is_primary()
                     && !(submit_on_enter && !modifiers.any());
                 if is_newline {
-                    if is_down {
+                    // A read-only field's view rejects edits; swallow the newline so the
+                    // view never desyncs from makepad (which rejects the read-only edit).
+                    if is_down && !is_read_only {
                         IosApp::insert_newline_into_text_view();
                     }
                     handled_press = true;

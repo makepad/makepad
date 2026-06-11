@@ -141,6 +141,7 @@ pub struct TextInputConfig {
     pub is_secure: bool,
     pub submit_on_enter: bool,
     pub content_type: TextInputContentType,
+    pub is_read_only: bool,
 }
 
 impl TextInputConfig {

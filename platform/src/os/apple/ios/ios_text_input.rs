@@ -14,7 +14,7 @@ use crate::{
         apple::apple_sys::*,
         apple::apple_util::nsstring_to_string,
         apple::ios_app::IosApp,
-        apple::ios_app::IOS_TEXT_INPUT_CARET_HEIGHT,
+        apple::ios_app::{IOS_TEXT_INPUT_CARET_HEIGHT, IOS_TEXT_INPUT_TARGET_HEIGHT},
     },
 };
 
@@ -222,6 +222,7 @@ pub fn define_makepad_text_view() -> *const Class {
     // Whether the focused makepad field is multiline (set by configure_keyboard).
     decl.add_ivar::<bool>("_is_multiline");
     decl.add_ivar::<bool>("_submit_on_enter");
+    decl.add_ivar::<bool>("_is_read_only");
     // Set true while makepad is pushing text in (set_ime_text); the delegate
     // callbacks that push triggers must not echo straight back to makepad.
     decl.add_ivar::<BOOL>("programmatic_update");
@@ -270,18 +271,17 @@ pub fn define_makepad_text_view() -> *const Class {
         }
     }
     extern "C" fn first_rect_for_range(this: &Object, _: Sel, _range: ObjcId) -> NSRect {
-        const CANDIDATE_RECT_HEIGHT: f64 = 32.0;
         unsafe {
             let x = *this.get_ivar::<f64>("ime_pos_x");
             let y = *this.get_ivar::<f64>("ime_pos_y");
             NSRect {
                 origin: NSPoint {
                     x,
-                    y: y - CANDIDATE_RECT_HEIGHT,
+                    y: y - IOS_TEXT_INPUT_TARGET_HEIGHT,
                 },
                 size: NSSize {
                     width: 1.0,
-                    height: CANDIDATE_RECT_HEIGHT,
+                    height: IOS_TEXT_INPUT_TARGET_HEIGHT,
                 },
             }
         }

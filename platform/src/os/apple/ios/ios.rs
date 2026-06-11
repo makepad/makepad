@@ -995,8 +995,10 @@ impl Cx {
                     let window_id = CxWindowPool::id_zero();
                     let caret = area.clipped_rect(self).pos + pos;
                     let caret = self.windows[window_id].layout_vec2d_to_native_points(caret);
-                    IosApp::set_ime_position(caret);
+                    // configure_keyboard may recreate the view; set_ime_position must
+                    // run after so it frames the final view (same-frame parking).
                     IosApp::configure_keyboard(&config);
+                    IosApp::set_ime_position(caret);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {

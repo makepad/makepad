@@ -1578,6 +1578,7 @@ impl TextInput {
             is_secure: self.is_password,
             submit_on_enter: self.submit_on_enter,
             content_type: self.content_type,
+            is_read_only: self.is_read_only,
         }
     }
 
@@ -2544,22 +2545,77 @@ impl Widget for TextInput {
                         let rejected = filtered != full_state.text;
                         let changed = self.text != filtered;
                         if changed {
-                            self.history
-                                .create_or_extend_edit_group(EditKind::Other, self.selection);
-                            self.text = filtered;
-                            self.laidout_text = None;
+                            // Apply only the changed middle span so undo records a small
+                            // delta; a whole-text replace would clone the entire old text
+                            // onto the undo stack on every keystroke.
+                            let common_prefix = self
+                                .text
+                                .chars()
+                                .zip(filtered.chars())
+                                .take_while(|(a, b)| a == b)
+                                .count();
+                            let old_count = self.text.chars().count();
+                            let new_count = filtered.chars().count();
+                            let max_suffix = old_count.min(new_count) - common_prefix;
+                            let common_suffix = self
+                                .text
+                                .chars()
+                                .rev()
+                                .zip(filtered.chars().rev())
+                                .take_while(|(a, b)| a == b)
+                                .count()
+                                .min(max_suffix);
+                            let start = CharOffset(common_prefix).to_byte_index(&self.text);
+                            let old_end =
+                                CharOffset(old_count - common_suffix).to_byte_index(&self.text);
+                            let new_end =
+                                CharOffset(new_count - common_suffix).to_byte_index(&filtered);
+                            self.create_or_extend_edit_group(EditKind::Other);
+                            self.apply_edit_preserving_selection(
+                                cx,
+                                Edit {
+                                    start,
+                                    end: old_end,
+                                    replace_with: filtered[start..new_end].to_string(),
+                                },
+                            );
                         }
                         (changed, rejected)
                     };
 
-                    let sel_start_byte = floor_grapheme_boundary(
-                        &self.text,
-                        full_state.selection.start.to_byte_index(&self.text),
-                    );
-                    let sel_end_byte = floor_grapheme_boundary(
-                        &self.text,
-                        full_state.selection.end.to_byte_index(&self.text),
-                    );
+                    // The view's selection offsets index the UNFILTERED full_state.text.
+                    // When chars were rejected, self.text is now shorter, so map each
+                    // endpoint through the filter (count filtered chars in the prefix)
+                    // before resolving to a byte index; otherwise self.text == the source
+                    // text and the offsets map directly.
+                    let remap_char_offset = |this: &Self, offset: CharOffset| -> usize {
+                        let char_idx = if rejected {
+                            // self.text is the filtered subsequence of full_state.text; count
+                            // the kept chars falling at or before this source offset (greedy
+                            // match), which avoids re-filtering a prefix.
+                            let mut kept = this.text.chars();
+                            let mut next_kept = kept.next();
+                            let mut count = 0;
+                            for (i, c) in full_state.text.chars().enumerate() {
+                                if i >= offset.0 {
+                                    break;
+                                }
+                                if Some(c) == next_kept {
+                                    count += 1;
+                                    next_kept = kept.next();
+                                }
+                            }
+                            count
+                        } else {
+                            offset.0
+                        };
+                        floor_grapheme_boundary(
+                            &this.text,
+                            CharOffset(char_idx).to_byte_index(&this.text),
+                        )
+                    };
+                    let sel_start_byte = remap_char_offset(self, full_state.selection.start);
+                    let sel_end_byte = remap_char_offset(self, full_state.selection.end);
                     self.needs_scroll_to_cursor = true;
                     self.selection = Selection {
                         anchor: Cursor {
@@ -2573,8 +2629,14 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start = composition_range.start.to_byte_index(&self.text);
-                        self.composition_end = composition_range.end.to_byte_index(&self.text);
+                        self.composition_start = floor_grapheme_boundary(
+                            &self.text,
+                            composition_range.start.to_byte_index(&self.text),
+                        );
+                        self.composition_end = floor_grapheme_boundary(
+                            &self.text,
+                            composition_range.end.to_byte_index(&self.text),
+                        );
                     } else {
                         self.composition_start = 0;
                         self.composition_end = 0;
