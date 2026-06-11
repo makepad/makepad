@@ -218,6 +218,142 @@ impl App {
         )
     }
 
+    fn workspace_selected_sidebar_tab(&mut self, cx: &mut Cx, mount: &str) -> Option<LiveId> {
+        let dock = self.mount_workspace_dock(cx, mount)?;
+        let dock_items = dock.clone_state()?;
+        let Some(DockItem::Tabs { tabs, selected, .. }) = dock_items.get(&id!(tree_tabs)) else {
+            return None;
+        };
+        tabs.get(*selected).copied()
+    }
+
+    fn workspace_sidebar_is_open(&mut self, cx: &mut Cx, mount: &str) -> bool {
+        self.sidebar_animation
+            .as_ref()
+            .filter(|animation| animation.mount == mount)
+            .map(|animation| animation.to_width > 1.0)
+            .or_else(|| {
+                self.workspace_root_splitter_position(cx, mount)
+                    .map(|width| width > 1.0)
+            })
+            .unwrap_or(false)
+    }
+
+    fn apply_bottom_bar_button_style(
+        &mut self,
+        cx: &mut Cx,
+        button_id: LiveId,
+        active: bool,
+        active_bg: Vec4f,
+        active_bg_hover: Vec4f,
+        active_icon: Vec4f,
+    ) {
+        let mut button = self.ui.widget(cx, &[button_id]);
+        let bg = if active {
+            active_bg
+        } else {
+            Vec4f::from_u32(0x00000000)
+        };
+        let bg_hover = if active {
+            active_bg_hover
+        } else {
+            Vec4f::from_u32(0x4c4c4cff)
+        };
+        let bg_down = if active {
+            active_bg_hover
+        } else {
+            Vec4f::from_u32(0x424242ff)
+        };
+        let icon = if active {
+            active_icon
+        } else {
+            Vec4f::from_u32(0xbdbdbdff)
+        };
+        let icon_hover = if active {
+            active_icon
+        } else {
+            Vec4f::from_u32(0xe0e0e0ff)
+        };
+        script_apply_eval!(cx, button, {
+            draw_bg +: {
+                color: #(bg)
+                color_hover: #(bg_hover)
+                color_down: #(bg_down)
+                color_focus: #(bg)
+            }
+            draw_icon +: {
+                color: #(icon)
+                color_hover: #(icon_hover)
+                color_down: #(active_icon)
+                color_focus: #(icon)
+            }
+        });
+    }
+
+    pub(super) fn sync_bottom_bar_state(&mut self, cx: &mut Cx) {
+        let Some(active_mount) = self.data.active_mount.clone() else {
+            return;
+        };
+
+        let selected_sidebar_tab = self.workspace_selected_sidebar_tab(cx, &active_mount);
+        let sidebar_open = self.workspace_sidebar_is_open(cx, &active_mount);
+        let file_active = sidebar_open && selected_sidebar_tab == Some(id!(tree_tab));
+        let run_active = sidebar_open && selected_sidebar_tab == Some(id!(run_list_tab));
+        let terminal_active = self
+            .bottom_panel_animation
+            .as_ref()
+            .filter(|animation| animation.mount == active_mount)
+            .map(|animation| animation.to_height > 1.0)
+            .or_else(|| {
+                self.workspace_main_splitter_height(cx, &active_mount)
+                    .map(|height| height > 1.0)
+            })
+            .unwrap_or(false);
+        let agent_active = self
+            .agent_panel_animation
+            .as_ref()
+            .filter(|animation| animation.mount == active_mount)
+            .map(|animation| animation.to_width > 1.0)
+            .or_else(|| {
+                self.workspace_agent_splitter_width(cx, &active_mount)
+                    .map(|width| width > 1.0)
+            })
+            .unwrap_or(false);
+
+        self.apply_bottom_bar_button_style(
+            cx,
+            id!(bottom_file_tree_toggle),
+            file_active,
+            Vec4f::from_u32(0x1d3a31ff),
+            Vec4f::from_u32(0x285243ff),
+            Vec4f::from_u32(0x80ffbfff),
+        );
+        self.apply_bottom_bar_button_style(
+            cx,
+            id!(bottom_run_list_toggle),
+            run_active,
+            Vec4f::from_u32(0x493326ff),
+            Vec4f::from_u32(0x604432ff),
+            Vec4f::from_u32(0xffb368ff),
+        );
+        self.apply_bottom_bar_button_style(
+            cx,
+            id!(bottom_panel_toggle),
+            terminal_active,
+            Vec4f::from_u32(0x1b3540ff),
+            Vec4f::from_u32(0x264a59ff),
+            Vec4f::from_u32(0x80bfffff),
+        );
+        self.apply_bottom_bar_button_style(
+            cx,
+            id!(bottom_agent_toggle),
+            agent_active,
+            Vec4f::from_u32(0x48331fff),
+            Vec4f::from_u32(0x63472bff),
+            Vec4f::from_u32(0xffb368ff),
+        );
+    }
+
     fn start_bottom_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_height: f64) {
         let from_height = self
             .workspace_main_splitter_height(cx, mount)
@@ -343,6 +479,21 @@ impl App {
                 .unwrap_or(310.0);
             self.start_sidebar_animation(cx, mount, restore_width);
         }
+    }
+
+    pub(super) fn toggle_sidebar_tab(&mut self, cx: &mut Cx, mount: &str, tab_id: LiveId) {
+        let is_selected = self.workspace_selected_sidebar_tab(cx, mount) == Some(tab_id);
+        let is_open = self.workspace_sidebar_is_open(cx, mount);
+
+        if is_selected && is_open {
+            if let Some(current_width) = self.workspace_root_splitter_position(cx, mount) {
+                self.mount_state_mut(mount).sidebar_restore_width = Some(current_width);
+                self.start_sidebar_animation(cx, mount, 0.0);
+            }
+            return;
+        }
+
+        self.select_sidebar_tab(cx, mount, tab_id);
     }
 
     pub(super) fn toggle_mount_sidebar(&mut self, cx: &mut Cx, mount: &str) {

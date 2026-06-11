@@ -169,6 +169,7 @@ impl MatchEvent for App {
             self.sync_run_preview_splitter(cx, &mount);
         }
         self.init_ai_manager(cx);
+        self.sync_bottom_bar_state(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -184,7 +185,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             if let Some(active_mount) = self.data.active_mount.clone() {
-                self.select_sidebar_tab(cx, &active_mount, id!(tree_tab));
+                self.toggle_sidebar_tab(cx, &active_mount, id!(tree_tab));
             }
         }
 
@@ -194,7 +195,7 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             if let Some(active_mount) = self.data.active_mount.clone() {
-                self.select_sidebar_tab(cx, &active_mount, id!(run_list_tab));
+                self.toggle_sidebar_tab(cx, &active_mount, id!(run_list_tab));
             }
         }
 
@@ -442,6 +443,7 @@ impl MatchEvent for App {
                 }
             }
         }
+        self.sync_bottom_bar_state(cx);
     }
 }
 

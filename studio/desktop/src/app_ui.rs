@@ -731,10 +731,10 @@ script_mod! {
     }
 
     let BottomBarIconButton = ButtonFlatterIcon {
-        width: 30.0
+        width: 32.0
         height: 24.0
         margin: Inset {}
-        icon_walk: Walk {width: 14.0 height: 14.0}
+        icon_walk: Walk {width: 15.0 height: 15.0}
         draw_bg +: {
             color: theme.color_u_hidden
             color_hover: theme.color_bg_highlight
@@ -752,11 +752,11 @@ script_mod! {
 
     let StudioBottomBar = SolidView {
         width: Fill
-        height: 28.0
+        height: 30.0
         flow: Right
         align: Align {x: 0.0 y: 0.5}
-        padding: Inset {left: 4.0 right: 5.0 top: 0.0 bottom: 0.0}
-        spacing: 2.0
+        padding: Inset {left: 5.0 right: 5.0 top: 0.0 bottom: 0.0}
+        spacing: 4.0
         draw_bg +: {
             color: theme.color_bg_container
         }
