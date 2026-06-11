@@ -757,10 +757,10 @@ script_mod! {
     }
 
     let BottomBarIconButton = ButtonFlatterIcon {
-        width: 32.0
-        height: 24.0
+        width: 38.0
+        height: 26.0
         margin: Inset {}
-        icon_walk: Walk {width: 15.0 height: 15.0}
+        icon_walk: Walk {width: 16.0 height: 16.0}
         draw_bg +: {
             color: theme.color_u_hidden
             color_hover: theme.color_bg_highlight
