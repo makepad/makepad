@@ -796,6 +796,77 @@ impl AiManager {
             return self.snapshot(mount);
         }
 
+        if let Some(snapshot) = self.run_classifier_or_fallback(mount, agent_id, prompt) {
+            return snapshot;
+        }
+
+        self.send_prompt_accepted(mount, agent_id, prompt)
+    }
+
+    pub fn run_classifier_or_fallback(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) -> Option<AiMountState> {
+        let (parent_agent_id, workflows, root_path, active_backend_id) = {
+            let mount_state = self.mounts.get(mount)?;
+            let agent = mount_state.agents.get(&agent_id)?;
+            (
+                agent.parent_agent_id,
+                mount_state.workflows.clone(),
+                mount_state.root_path.clone(),
+                mount_state.active_backend_id.clone(),
+            )
+        };
+
+        if prompt.starts_with('/') || parent_agent_id.is_some() || workflows.is_empty() {
+            return None;
+        }
+
+        let backend = self.backend_by_id(&active_backend_id)?.clone();
+        let provider = backend.provider_backend();
+        let classifier_prompt = self.build_classifier_prompt(prompt, &workflows);
+        let request_id = LiveId::unique();
+
+        let mut request = match provider.build_http_request(
+            &backend,
+            mount,
+            &root_path,
+            &[ConversationItem::User {
+                text: classifier_prompt.clone(),
+            }],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        ) {
+            Ok(req) => req,
+            Err(_) => return None,
+        };
+
+        request.is_streaming = false;
+        request.headers.insert("Accept".to_string(), vec!["application/json".to_string()]);
+        if let Some(ref mut body_bytes) = request.body {
+            if let Ok(mut body_str) = String::from_utf8(body_bytes.clone()) {
+                body_str = body_str.replace("\"stream\":true", "\"stream\":false");
+                *body_bytes = body_str.into_bytes();
+            }
+        }
+
+        if self.runtime.http_start(request_id, request).is_ok() {
+            self.pending_classifiers.insert(
+                request_id,
+                PendingClassifier {
+                    mount: mount.to_string(),
+                    agent_id,
+                    original_prompt: prompt.to_string(),
+                },
+            );
+            Some(self.snapshot(mount))
+        } else {
+            None
+        }
+    }
+
+    pub fn send_prompt_accepted(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) -> AiMountState {
         let workflow_start = self.mounts.get(mount).and_then(|mount_state| {
             let agent = mount_state.agents.get(&agent_id)?;
             if agent.parent_agent_id.is_some() {
