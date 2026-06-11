@@ -711,6 +711,13 @@ impl TextInput {
 
     pub fn set_is_read_only(&mut self, cx: &mut Cx, is_read_only: bool) {
         self.is_read_only = is_read_only;
+        // Flipped to read-only while focused: drop the keyboard now, since the draw
+        // path no longer re-shows it (gated on !is_read_only). Guard against Area::Empty
+        // (a never-drawn/reapplied field) so we don't false-match an Empty key focus.
+        let area = self.draw_bg.area();
+        if is_read_only && !area.is_empty() && cx.has_key_focus(area) {
+            cx.hide_text_ime();
+        }
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
@@ -2045,7 +2052,8 @@ impl Widget for TextInput {
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
-        if cx.has_key_focus(self.draw_bg.area()) {
+        // A read-only field does no IME work at all (no state push, no keyboard).
+        if cx.has_key_focus(self.draw_bg.area()) && !self.is_read_only {
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
@@ -2571,14 +2579,18 @@ impl Widget for TextInput {
                             let new_end =
                                 CharOffset(new_count - common_suffix).to_byte_index(&filtered);
                             self.create_or_extend_edit_group(EditKind::Other);
-                            self.apply_edit_preserving_selection(
-                                cx,
+                            // history.apply_edit records the inverse + rewrites self.text; the
+                            // selection is set authoritatively below, so skip the wasted
+                            // selection transform apply_edit_preserving_selection would do.
+                            self.history.apply_edit(
                                 Edit {
                                     start,
                                     end: old_end,
                                     replace_with: filtered[start..new_end].to_string(),
                                 },
+                                &mut self.text,
                             );
+                            self.laidout_text = None;
                         }
                         (changed, rejected)
                     };
@@ -2629,20 +2641,30 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start = floor_grapheme_boundary(
-                            &self.text,
-                            composition_range.start.to_byte_index(&self.text),
-                        );
-                        self.composition_end = floor_grapheme_boundary(
-                            &self.text,
-                            composition_range.end.to_byte_index(&self.text),
-                        );
+                        // Same filter remap as the selection: when chars were rejected the
+                        // composition offsets index the unfiltered source, so map them onto
+                        // the filtered self.text (remap_char_offset also grapheme-floors).
+                        self.composition_start = remap_char_offset(self, composition_range.start);
+                        self.composition_end = remap_char_offset(self, composition_range.end);
                     } else {
                         self.composition_start = 0;
                         self.composition_end = 0;
                     }
 
-                    if rejected {
+                    if rejected && self.has_composition() {
+                        // update_ime_context skips the re-push while composing, so push the
+                        // cleaned text (with the remapped composition) directly so the view
+                        // drops the rejected chars before the composition commits.
+                        let sel = CharOffset(self.text[..sel_start_byte].chars().count())
+                            ..CharOffset(self.text[..sel_end_byte].chars().count());
+                        let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                            ..CharOffset(self.text[..self.composition_end].chars().count());
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                        cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+                    } else if rejected {
                         // The view still holds the rejected chars; force update_ime_context
                         // to re-push the cleaned text back to it (sentinel selection).
                         self.last_sent_ime_sel_start = usize::MAX;

@@ -1144,8 +1144,8 @@ impl IosApp {
         });
     }
 
-    /// (is_multiline, submit_on_enter) read off the text view's ivars, for the
-    /// hardware-Enter newline-vs-submit decision. None if the view is gone.
+    /// (is_multiline, submit_on_enter, is_read_only) read off the text view's ivars,
+    /// for the hardware-Enter newline-vs-submit decision. None if the view is gone.
     pub fn text_view_enter_config() -> Option<(bool, bool, bool)> {
         let view = IOS_APP
             .try_with(|app| {
