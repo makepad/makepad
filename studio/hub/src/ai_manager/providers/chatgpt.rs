@@ -1,11 +1,12 @@
 use super::super::{
     append_raw_event_sample, build_chatgpt_request, extract_openai_assistant_turn, AiBackendConfig,
     AssistantTurn, ConversationItem, OpenAiStreamFunctionDelta, OpenAiStreamToolCallDelta,
-    StreamingTurnState,
+    ParsedSkill, ParsedWorkflow, StreamingTurnState,
 };
 use super::{AiProviderBackend, ProviderStreamDeltas};
 use makepad_chatgpt_provider::{ChatGptProvider, ChatGptStreamEvent};
 use makepad_network::HttpRequest;
+use makepad_studio_protocol::hub_protocol::ActiveWorkflowState;
 
 pub(super) struct ChatGptBackend;
 
@@ -21,6 +22,9 @@ impl AiProviderBackend for ChatGptBackend {
         role: Option<&str>,
         task: Option<&str>,
         active_terminals: &[String],
+        skills: &[ParsedSkill],
+        workflows: &[ParsedWorkflow],
+        active_workflow: Option<&ActiveWorkflowState>,
     ) -> Result<HttpRequest, String> {
         let Some(provider) = &backend.chatgpt else {
             return Err("ChatGPT backend is missing provider state".to_string());
@@ -33,6 +37,9 @@ impl AiProviderBackend for ChatGptBackend {
             role,
             task,
             active_terminals,
+            skills,
+            workflows,
+            active_workflow,
         )?;
         provider
             .build_responses_request(&request)

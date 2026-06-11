@@ -4,9 +4,11 @@ mod openai_compatible;
 use self::chatgpt::CHATGPT_BACKEND;
 use self::openai_compatible::OPENAI_COMPATIBLE_BACKEND;
 use super::{
-    AiBackendConfig, AssistantTurn, ConversationItem, OpenAiStreamToolCallDelta, StreamingTurnState,
+    AiBackendConfig, AssistantTurn, ConversationItem, OpenAiStreamToolCallDelta, ParsedSkill,
+    ParsedWorkflow, StreamingTurnState,
 };
 use makepad_network::HttpRequest;
+use makepad_studio_protocol::hub_protocol::ActiveWorkflowState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AiProviderKind {
@@ -67,6 +69,9 @@ pub(super) trait AiProviderBackend {
         role: Option<&str>,
         task: Option<&str>,
         active_terminals: &[String],
+        skills: &[ParsedSkill],
+        workflows: &[ParsedWorkflow],
+        active_workflow: Option<&ActiveWorkflowState>,
     ) -> Result<HttpRequest, String>;
 
     fn response_is_stream(&self) -> bool {

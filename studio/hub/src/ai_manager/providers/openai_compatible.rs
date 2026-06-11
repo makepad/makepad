@@ -1,11 +1,12 @@
 use super::super::{
     build_request_body, extract_openai_assistant_turn, extract_sse_event_data,
     first_non_empty_stream_reasoning, AiBackendConfig, AssistantTurn, ConversationItem,
-    OpenAiStreamChunk, StreamingTurnState,
+    OpenAiStreamChunk, ParsedSkill, ParsedWorkflow, StreamingTurnState,
 };
 use super::{AiProviderBackend, ProviderStreamDeltas};
 use makepad_micro_serde::*;
 use makepad_network::{HttpMethod, HttpRequest};
+use makepad_studio_protocol::hub_protocol::ActiveWorkflowState;
 
 pub(super) struct OpenAiCompatibleBackend;
 
@@ -21,6 +22,9 @@ impl AiProviderBackend for OpenAiCompatibleBackend {
         role: Option<&str>,
         task: Option<&str>,
         active_terminals: &[String],
+        skills: &[ParsedSkill],
+        workflows: &[ParsedWorkflow],
+        active_workflow: Option<&ActiveWorkflowState>,
     ) -> Result<HttpRequest, String> {
         let body = build_request_body(
             backend,
@@ -30,6 +34,9 @@ impl AiProviderBackend for OpenAiCompatibleBackend {
             role,
             task,
             active_terminals,
+            skills,
+            workflows,
+            active_workflow,
         );
 
         let mut request = HttpRequest::new(backend.url.clone(), HttpMethod::POST);

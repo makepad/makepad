@@ -13,8 +13,8 @@ use makepad_studio_protocol::ai_format::{
     AI_WAITING_MESSAGE_PREFIX,
 };
 use makepad_studio_protocol::hub_protocol::{
-    AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
-    ActiveWorkflowState,
+    ActiveWorkflowState, AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage,
+    AiMessageRole, AiMountState, WorkflowStepState,
 };
 use providers::AiProviderKind;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -755,6 +755,19 @@ impl AiManager {
             return self.snapshot(mount);
         }
 
+        let workflow_start = self
+            .mounts
+            .get(mount)
+            .and_then(|mount_state| workflow_prompt_from_command(prompt, &mount_state.workflows));
+        let prompt_text = if let Some((active_workflow, workflow_prompt)) = workflow_start {
+            if let Some(mount_state) = self.mounts.get_mut(mount) {
+                mount_state.active_workflow = Some(active_workflow);
+            }
+            workflow_prompt
+        } else {
+            prompt.to_string()
+        };
+
         let run_token = self.alloc_run_token();
         {
             let Some(agent) = self
@@ -768,17 +781,17 @@ impl AiManager {
                 return self.snapshot(mount);
             }
             if agent.messages.is_empty() && agent.title.starts_with("Chat ") {
-                let summary = summarize_title(prompt);
+                let summary = summarize_title(&prompt_text);
                 if !summary.is_empty() {
                     agent.title = summary;
                 }
             }
             agent.messages.push(AiMessage {
                 role: AiMessageRole::User,
-                text: prompt.to_string(),
+                text: prompt_text.clone(),
             });
             agent.history.push(ConversationItem::User {
-                text: prompt.to_string(),
+                text: prompt_text.clone(),
             });
             agent.pending_request_id = None;
             agent.pending_tool_batch = false;
@@ -793,8 +806,7 @@ impl AiManager {
             agent.updated_at = now_seconds();
         }
 
-        self.note_ai_prompt_task(mount, agent_id, prompt);
-        self.persist_mount_state_best_effort(mount);
+        self.note_ai_prompt_task(mount, agent_id, &prompt_text);
         self.start_model_request(mount, agent_id, run_token);
         self.snapshot(mount)
     }
@@ -1982,6 +1994,9 @@ impl AiManager {
                             collapse_repeated_tail_messages(&mut agent.messages);
                         }
                         agent.status = "ready".to_string();
+                        if agent.parent_agent_id.is_none() {
+                            Self::advance_active_workflow_step(mount_state);
+                        }
                     }
                 } else {
                     push_assistant_history_dedup(
@@ -2234,25 +2249,37 @@ impl AiManager {
     }
 
     fn start_model_request(&mut self, mount: &str, agent_id: AiAgentId, run_token: u64) {
-        let Some((backend, root_path, history, role, task, active_terminals)) =
-            self.mounts.get(mount).and_then(|mount_state| {
-                let agent = mount_state.agents.get(&agent_id)?;
-                let mut terms = Vec::new();
-                for (path, snap) in &mount_state.terminal_snapshots {
-                    terms.push(format!(
-                        "- `{}`: mode={}, summary='{}'",
-                        path, snap.mode, snap.summary
-                    ));
-                }
-                Some((
-                    self.backend_by_id(&agent.backend_id)?.clone(),
-                    mount_state.root_path.clone(),
-                    agent.history.clone(),
-                    agent.role.clone(),
-                    agent.task.clone(),
-                    terms,
-                ))
-            })
+        let Some((
+            backend,
+            root_path,
+            history,
+            role,
+            task,
+            active_terminals,
+            skills,
+            workflows,
+            active_workflow,
+        )) = self.mounts.get(mount).and_then(|mount_state| {
+            let agent = mount_state.agents.get(&agent_id)?;
+            let mut terms = Vec::new();
+            for (path, snap) in &mount_state.terminal_snapshots {
+                terms.push(format!(
+                    "- `{}`: mode={}, summary='{}'",
+                    path, snap.mode, snap.summary
+                ));
+            }
+            Some((
+                self.backend_by_id(&agent.backend_id)?.clone(),
+                mount_state.root_path.clone(),
+                agent.history.clone(),
+                agent.role.clone(),
+                agent.task.clone(),
+                terms,
+                mount_state.skills.clone(),
+                mount_state.workflows.clone(),
+                mount_state.active_workflow.clone(),
+            ))
+        })
         else {
             self.set_agent_error(mount, agent_id, "backend not available".to_string());
             return;
@@ -2268,6 +2295,9 @@ impl AiManager {
             role.as_deref(),
             task.as_deref(),
             &active_terminals,
+            &skills,
+            &workflows,
+            active_workflow.as_ref(),
         ) {
             Ok(request) => request,
             Err(error) => {
@@ -2619,6 +2649,27 @@ impl AiManager {
         }
         self.send_prompt(mount, queued.agent_id, &queued.text);
         true
+    }
+    fn advance_active_workflow_step(mount_state: &mut MountAgents) {
+        let Some(workflow) = mount_state.active_workflow.as_mut() else {
+            return;
+        };
+        let Some(current) = workflow.steps.get_mut(workflow.current_step) else {
+            return;
+        };
+        if current.status != "done" {
+            current.status = "done".to_string();
+        }
+        if let Some(next_index) = workflow
+            .steps
+            .iter()
+            .position(|step| step.status == "pending")
+        {
+            workflow.current_step = next_index;
+            if let Some(next) = workflow.steps.get_mut(next_index) {
+                next.status = "active".to_string();
+            }
+        }
     }
 
     fn ai_live_markdown(&self, mount_state: &MountAgents) -> String {
@@ -3265,12 +3316,8 @@ impl AiManager {
         }
 
         let (frontmatter_lines, body_lines) = match (first_dash, second_dash) {
-            (Some(start), Some(end)) if start < end => {
-                (&lines[start + 1..end], &lines[end + 1..])
-            }
-            _ => {
-                (&[][..], &lines[..])
-            }
+            (Some(start), Some(end)) if start < end => (&lines[start + 1..end], &lines[end + 1..]),
+            _ => (&[][..], &lines[..]),
         };
 
         let mut name = String::new();
@@ -3317,10 +3364,20 @@ impl AiManager {
             let trimmed = line.trim();
             if trimmed.starts_with("# ") {
                 if name.is_empty() {
-                    name = trimmed.strip_prefix("# ").unwrap_or(trimmed).trim().to_string();
+                    name = trimmed
+                        .strip_prefix("# ")
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string();
                 }
             } else if trimmed.starts_with("## ") {
-                if trimmed.to_lowercase().strip_prefix("##").unwrap_or("").trim() == "steps" {
+                if trimmed
+                    .to_lowercase()
+                    .strip_prefix("##")
+                    .unwrap_or("")
+                    .trim()
+                    == "steps"
+                {
                     in_steps = true;
                 } else {
                     in_steps = false;
@@ -3372,10 +3429,7 @@ impl AiManager {
             return None;
         }
 
-        Some(ParsedWorkflow {
-            name,
-            steps,
-        })
+        Some(ParsedWorkflow { name, steps })
     }
 
     pub fn load_skills_for_mount(&self, root_path: &str) -> Vec<ParsedSkill> {
@@ -3522,8 +3576,20 @@ fn build_request_body(
     role: Option<&str>,
     task: Option<&str>,
     active_terminals: &[String],
+    skills: &[ParsedSkill],
+    workflows: &[ParsedWorkflow],
+    active_workflow: Option<&ActiveWorkflowState>,
 ) -> String {
-    let system_prompt = render_system_prompt(mount, root_path, role, task, active_terminals);
+    let system_prompt = render_system_prompt(
+        mount,
+        root_path,
+        role,
+        task,
+        active_terminals,
+        skills,
+        workflows,
+        active_workflow,
+    );
     let pruned_history = prune_history(history);
     let mut out = String::new();
     out.push('{');
@@ -3762,8 +3828,20 @@ fn build_chatgpt_request(
     role: Option<&str>,
     task: Option<&str>,
     active_terminals: &[String],
+    skills: &[ParsedSkill],
+    workflows: &[ParsedWorkflow],
+    active_workflow: Option<&ActiveWorkflowState>,
 ) -> Result<ChatGptRequest, String> {
-    let system_prompt = render_system_prompt(mount, root_path, role, task, active_terminals);
+    let system_prompt = render_system_prompt(
+        mount,
+        root_path,
+        role,
+        task,
+        active_terminals,
+        skills,
+        workflows,
+        active_workflow,
+    );
     let mut messages = vec![ChatGptMessage::system(system_prompt)];
     for item in prune_history(history) {
         match item {
@@ -3935,6 +4013,9 @@ fn render_system_prompt(
     role: Option<&str>,
     task: Option<&str>,
     active_terminals: &[String],
+    skills: &[ParsedSkill],
+    workflows: &[ParsedWorkflow],
+    active_workflow: Option<&ActiveWorkflowState>,
 ) -> String {
     let mut base = SYSTEM_PROMPT_TEMPLATE
         .replace("{{mount}}", mount)
@@ -3945,11 +4026,31 @@ fn render_system_prompt(
     if !active_terminals.is_empty() {
         base.push_str("\n\n--- ACTIVE WORKSPACE TERMINALS ---\nYou currently have the following active terminals running in your environment:\n");
         for term in active_terminals {
-            base.push_str(&format!("{}\n", term));
+            base.push_str(term);
+            base.push('\n');
         }
         base.push_str(
             "You can interact with them via `read_terminal` or `send_terminal_text` tools.",
         );
+    }
+
+    if !skills.is_empty() {
+        base.push_str("\n\n# Workspace Skills\nThe active workspace has these loaded skills. Follow them when relevant.\n");
+        for skill in skills {
+            base.push_str("\n## ");
+            base.push_str(skill.name.trim());
+            if !skill.description.trim().is_empty() {
+                base.push_str("\nDescription: ");
+                base.push_str(skill.description.trim());
+            }
+            base.push_str("\n\n");
+            base.push_str(skill.content.trim());
+            base.push('\n');
+        }
+    }
+
+    if let Some(active_workflow) = active_workflow {
+        append_workflow_focus(&mut base, active_workflow, workflows);
     }
 
     if let (Some(role), Some(task)) = (role, task) {
@@ -3959,6 +4060,125 @@ fn render_system_prompt(
         ));
     }
     base
+}
+
+fn append_workflow_focus(
+    out: &mut String,
+    active_workflow: &ActiveWorkflowState,
+    workflows: &[ParsedWorkflow],
+) {
+    out.push_str("\n\n# Current Workflow\n");
+    out.push_str("Workflow: ");
+    out.push_str(active_workflow.name.trim());
+    out.push('\n');
+
+    if let Some(step) = active_workflow.steps.get(active_workflow.current_step) {
+        out.push_str("Current step: ");
+        out.push_str(&(active_workflow.current_step + 1).to_string());
+        out.push_str(". ");
+        out.push_str(step.name.trim());
+        out.push('\n');
+        out.push_str("Status: ");
+        out.push_str(step.status.trim());
+        out.push('\n');
+
+        if let Some(description) =
+            workflow_step_description(workflows, &active_workflow.name, &step.name)
+        {
+            out.push_str("Description:\n");
+            out.push_str(description.trim());
+            out.push('\n');
+        }
+    }
+}
+fn workflow_step_description<'a>(
+    workflows: &'a [ParsedWorkflow],
+    workflow_name: &str,
+    step_name: &str,
+) -> Option<&'a str> {
+    workflows
+        .iter()
+        .find(|workflow| workflow.name == workflow_name)
+        .and_then(|workflow| {
+            workflow
+                .steps
+                .iter()
+                .find(|step| step.name == step_name)
+                .map(|step| step.description.as_str())
+        })
+        .filter(|description| !description.trim().is_empty())
+}
+
+fn workflow_prompt_from_command(
+    prompt: &str,
+    workflows: &[ParsedWorkflow],
+) -> Option<(ActiveWorkflowState, String)> {
+    let command_line = prompt.strip_prefix('/')?;
+    let (command, arguments) = command_line
+        .split_once(char::is_whitespace)
+        .map(|(command, arguments)| (command.trim(), arguments.trim()))
+        .unwrap_or((command_line.trim(), ""));
+    if command.is_empty() {
+        return None;
+    }
+    let workflow = workflows
+        .iter()
+        .find(|workflow| workflow_command_matches(&workflow.name, command))?;
+    let first_step = workflow.steps.first()?;
+    let mut steps = Vec::with_capacity(workflow.steps.len());
+    for (index, step) in workflow.steps.iter().enumerate() {
+        steps.push(WorkflowStepState {
+            name: step.name.clone(),
+            status: if index == 0 { "active" } else { "pending" }.to_string(),
+        });
+    }
+
+    let mut instruction = String::new();
+    instruction.push_str("Execute workflow `");
+    instruction.push_str(&workflow.name);
+    instruction.push_str("`.");
+    if !arguments.is_empty() {
+        instruction.push_str("\nArguments: ");
+        instruction.push_str(arguments);
+    }
+    instruction.push_str("\nFocus on step 1: ");
+    instruction.push_str(&first_step.name);
+    instruction.push_str("\nStatus: active");
+    if !first_step.description.trim().is_empty() {
+        instruction.push_str("\nStep description:\n");
+        instruction.push_str(first_step.description.trim());
+    }
+    instruction.push_str("\n\nComplete this step before moving to later workflow steps.");
+
+    Some((
+        ActiveWorkflowState {
+            name: workflow.name.clone(),
+            current_step: 0,
+            steps,
+        },
+        instruction,
+    ))
+}
+
+fn workflow_command_matches(workflow_name: &str, command: &str) -> bool {
+    workflow_name == command || workflow_command_slug(workflow_name) == command
+}
+
+fn workflow_command_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(ch.to_ascii_lowercase());
+            pending_dash = false;
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug
 }
 
 fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
@@ -4048,8 +4268,7 @@ fn collapse_repeated_tail_messages(messages: &mut Vec<AiMessage>) {
 }
 
 fn same_visible_text(left: &str, right: &str) -> bool {
-    left.split_whitespace().collect::<Vec<_>>()
-        == right.split_whitespace().collect::<Vec<_>>()
+    left.split_whitespace().collect::<Vec<_>>() == right.split_whitespace().collect::<Vec<_>>()
 }
 
 fn is_closed_subagent(agent: &RunningAgent) -> bool {
@@ -5640,7 +5859,10 @@ It has multiple lines.
 "#;
         let parsed = AiManager::parse_skill_markdown(content).unwrap();
         assert_eq!(parsed.name, "Semantic Compression");
-        assert_eq!(parsed.description, "Guidelines for compressing and summarizing files");
+        assert_eq!(
+            parsed.description,
+            "Guidelines for compressing and summarizing files"
+        );
         assert!(parsed.content.contains("# Semantic Compression"));
         assert!(parsed.content.contains("It has multiple lines."));
     }
@@ -5666,7 +5888,10 @@ Not steps.
         assert_eq!(parsed.name, "Review PRs Command");
         assert_eq!(parsed.steps.len(), 2);
         assert_eq!(parsed.steps[0].name, "Resolve PR Set");
-        assert_eq!(parsed.steps[0].description, "Description of step 1...\nDetailed instructions...");
+        assert_eq!(
+            parsed.steps[0].description,
+            "Description of step 1...\nDetailed instructions..."
+        );
         assert_eq!(parsed.steps[1].name, "Verify Changes");
         assert_eq!(parsed.steps[1].description, "Description of step 2...");
     }
@@ -5709,7 +5934,6 @@ Some intro text...
 "#;
         assert!(AiManager::parse_workflow_markdown(content_no_steps).is_none());
     }
-
 
     #[test]
     fn extracts_expected_paths_from_prompt() {
@@ -6650,7 +6874,18 @@ Some intro text...
             },
         ];
 
-        let body = build_request_body(&backend, "repo", "/tmp/repo", &history, None, None, &[]);
+        let body = build_request_body(
+            &backend,
+            "repo",
+            "/tmp/repo",
+            &history,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        );
 
         assert!(!body.contains("\"role\":\"assistant\",\"content\":\"\""));
         assert!(body.contains("\"content\":\"hello\""));
@@ -6689,7 +6924,18 @@ Some intro text...
             },
         ];
 
-        let body = build_request_body(&backend, "repo", "/tmp/repo", &history, None, None, &[]);
+        let body = build_request_body(
+            &backend,
+            "repo",
+            "/tmp/repo",
+            &history,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        );
 
         assert!(body.contains("\"content\":\"I will ask a planner.\""));
         assert!(!body.contains("call_missing"));
@@ -6729,9 +6975,19 @@ Some intro text...
             },
         ];
 
-        let request =
-            build_chatgpt_request(&backend, "repo", "/tmp/repo", &history, None, None, &[])
-                .unwrap();
+        let request = build_chatgpt_request(
+            &backend,
+            "repo",
+            "/tmp/repo",
+            &history,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
 
         assert!(request.messages.iter().any(|message| {
             matches!(message.role, ChatGptMessageRole::Assistant)
@@ -6764,7 +7020,18 @@ Some intro text...
             configuration_hint: None,
             disable_thinking_via_chat_template: false,
         };
-        let body = build_request_body(&backend, "repo", "/tmp/repo", &[], None, None, &[]);
+        let body = build_request_body(
+            &backend,
+            "repo",
+            "/tmp/repo",
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+        );
         assert!(body.contains("\"tools\""));
         assert!(body.contains("\"read_file\""));
         assert!(body.contains("\"open_editor\""));
@@ -6780,7 +7047,7 @@ Some intro text...
 
     #[test]
     fn render_system_prompt_replaces_mount_and_root_placeholders() {
-        let prompt = render_system_prompt("repo", "/tmp/repo", None, None, &[]);
+        let prompt = render_system_prompt("repo", "/tmp/repo", None, None, &[], &[], &[], None);
         assert!(prompt.contains("mount 'repo'"));
         assert!(prompt.contains("rooted at '/tmp/repo'"));
         assert!(prompt.contains("observe_filesystem"));
@@ -6788,6 +7055,163 @@ Some intro text...
         assert!(prompt.contains("send_terminal_text.submit"));
         assert!(prompt.contains("interpret that as a Makepad app/example"));
         assert!(prompt.contains("not as a Python script, web app"));
+    }
+
+    #[test]
+    fn render_system_prompt_includes_loaded_skills_and_workflow_focus() {
+        let skills = vec![ParsedSkill {
+            name: "Semantic Compression".to_string(),
+            description: "Guidelines for compressing context".to_string(),
+            content: "Use concise summaries for large files.".to_string(),
+        }];
+        let workflows = vec![ParsedWorkflow {
+            name: "review-prs".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find the pull requests to review.".to_string(),
+                },
+                WorkflowStep {
+                    name: "Verify Changes".to_string(),
+                    description: "Run targeted verification.".to_string(),
+                },
+            ],
+        }];
+        let active_workflow = ActiveWorkflowState {
+            name: "review-prs".to_string(),
+            current_step: 0,
+            steps: vec![
+                WorkflowStepState {
+                    name: "Resolve PR Set".to_string(),
+                    status: "active".to_string(),
+                },
+                WorkflowStepState {
+                    name: "Verify Changes".to_string(),
+                    status: "pending".to_string(),
+                },
+            ],
+        };
+
+        let prompt = render_system_prompt(
+            "repo",
+            "/tmp/repo",
+            None,
+            None,
+            &[],
+            &skills,
+            &workflows,
+            Some(&active_workflow),
+        );
+
+        assert!(prompt.contains("# Workspace Skills"));
+        assert!(prompt.contains("## Semantic Compression"));
+        assert!(prompt.contains("Guidelines for compressing context"));
+        assert!(prompt.contains("Use concise summaries for large files."));
+        assert!(prompt.contains("# Current Workflow"));
+        assert!(prompt.contains("Workflow: review-prs"));
+        assert!(prompt.contains("Current step: 1. Resolve PR Set"));
+        assert!(prompt.contains("Status: active"));
+        assert!(prompt.contains("Find the pull requests to review."));
+    }
+
+    #[test]
+    fn slash_workflow_prompt_initializes_active_workflow_and_rewrites_user_message() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![
+                    WorkflowStep {
+                        name: "Resolve PR Set".to_string(),
+                        description: "Find PRs.".to_string(),
+                    },
+                    WorkflowStep {
+                        name: "Verify Changes".to_string(),
+                        description: "Run checks.".to_string(),
+                    },
+                ],
+            }];
+        }
+
+        manager.send_prompt("repo", agent_id, "/review-prs owner/repo#7");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let workflow = mount_state.active_workflow.as_ref().unwrap();
+        assert_eq!(workflow.name, "review-prs");
+        assert_eq!(workflow.current_step, 0);
+        assert_eq!(workflow.steps[0].status, "active");
+        assert_eq!(workflow.steps[1].status, "pending");
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        let ConversationItem::User { text } = &agent.history[0] else {
+            panic!("workflow should rewrite the user prompt");
+        };
+        assert!(text.contains("Execute workflow `review-prs`"));
+        assert!(text.contains("Arguments: owner/repo#7"));
+        assert!(text.contains("Focus on step 1: Resolve PR Set"));
+        assert!(text.contains("Find PRs."));
+        assert!(!text.starts_with("/review-prs"));
+    }
+
+    #[test]
+    fn assistant_completion_advances_active_workflow_step() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.active_workflow = Some(ActiveWorkflowState {
+                name: "review-prs".to_string(),
+                current_step: 0,
+                steps: vec![
+                    WorkflowStepState {
+                        name: "Resolve PR Set".to_string(),
+                        status: "active".to_string(),
+                    },
+                    WorkflowStepState {
+                        name: "Verify Changes".to_string(),
+                        status: "pending".to_string(),
+                    },
+                ],
+            });
+            let agent = mount_state.agents.get_mut(&agent_id).unwrap();
+            agent.run_token = run_token;
+        }
+
+        manager.complete_assistant_turn(
+            "repo",
+            agent_id,
+            run_token,
+            AssistantTurn {
+                text: "Resolved the PR set.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: Vec::new(),
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let workflow = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_workflow.as_ref())
+            .unwrap();
+        assert_eq!(workflow.current_step, 1);
+        assert_eq!(workflow.steps[0].status, "done");
+        assert_eq!(workflow.steps[1].status, "active");
     }
 
     struct TestBackend;
