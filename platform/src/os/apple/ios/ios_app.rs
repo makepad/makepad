@@ -131,19 +131,9 @@ impl IosClasses {
 /// Text input events from iOS UITextInput, queued to avoid re-entrancy
 #[derive(Debug, Clone)]
 pub enum IosTextInputEvent {
-    /// Regular text input (input, replace_last)
-    TextInput(String, bool),
-    /// Range replacement for autocorrect (start, end, text)
-    RangeReplace {
-        start: usize,
-        end: usize,
-        text: String,
-        replaced_text: Option<String>,
-        fallback_to_insert: bool,
-    },
-    /// Native UITextInput selection update (text, start, end)
+    /// Full text+selection state forwarded from the UITextView (text, start, end)
     SelectionChanged(String, usize, usize),
-    /// Key event (e.g., Backspace, Return)
+    /// Key event routed through the queue (Return)
     KeyEvent(KeyCode),
 }
 
@@ -709,9 +699,11 @@ impl IosApp {
                                     let () = msg_send![old_view, release];
                                     app.makepad_text_view = Some(create_makepad_text_view(mtk));
                                 }
-                                // The fresh view starts at the origin; clear the cached
-                                // position so the next frame re-parks it at the caret.
+                                // The fresh view starts empty at the origin: clear the cached
+                                // position (re-park next frame) and the freshness baseline so
+                                // makepad's re-push into the new view isn't dropped as stale.
                                 app.ime_position = None;
+                                app.last_forwarded_text = None;
                             }
                         }
 
@@ -940,9 +932,16 @@ impl IosApp {
             return;
         };
 
+        // Inbound edits are still queued: a newer user edit is in flight, so pushing now
+        // would be a stale clobber. Drop it before the (allocating) live-text read; the
+        // queued drain reconciles makepad.
+        if queue_nonempty {
+            return;
+        }
+
         let mut wrote_text = false;
         unsafe {
-            // Read the live view state first (pure getters, no delegate callbacks).
+            // Read the live view state (pure getters, no delegate callbacks).
             let ns_text: ObjcId = msg_send![view, text];
             let live_text = if ns_text == nil {
                 String::new()
@@ -951,12 +950,10 @@ impl IosApp {
             };
             let live_sel: NSRange = msg_send![view, selectedRange];
 
-            // The view is the typing authority: don't clobber it back to a stale
-            // snapshot. If inbound edits are still queued, or the view's live text
-            // differs from what makepad last received from it, a newer user edit is
-            // in flight, so drop this push (the queued drain reconciles makepad).
+            // Don't clobber the view (the typing authority) back to a stale snapshot if its
+            // live text differs from what makepad last received from it.
             let view_moved = last_forwarded.map_or(false, |t| t != live_text);
-            if queue_nonempty || view_moved {
+            if view_moved {
                 return;
             }
 
@@ -1086,47 +1083,6 @@ impl IosApp {
         self.start_timer(IOS_TEXT_EVENT_DRAIN_TIMER_ID, 0.0, false);
     }
 
-    pub fn send_text_input(input: String, replace_last: bool) {
-        // Queue text input - will be processed on next timer tick
-        // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events
-                        .push(IosTextInputEvent::TextInput(input, replace_last));
-                    app.schedule_text_event_drain();
-                }
-            }
-        });
-    }
-
-    pub fn send_text_range_replace(
-        start: usize,
-        end: usize,
-        text: String,
-        replaced_text: Option<String>,
-        fallback_to_insert: bool,
-    ) {
-        // Queue range replacement for iOS autocorrect
-        // Using a Vec queue allows batching with subsequent insertText calls
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events.push(IosTextInputEvent::RangeReplace {
-                        start,
-                        end,
-                        text,
-                        replaced_text,
-                        fallback_to_insert,
-                    });
-                    app.schedule_text_event_drain();
-                }
-            }
-        });
-    }
-
     pub fn send_text_selection_changed(text: String, start: usize, end: usize) {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
@@ -1140,19 +1096,6 @@ impl IosApp {
         });
     }
 
-    pub fn send_backspace() {
-        // Queue backspace key event
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    app.queued_text_events
-                        .push(IosTextInputEvent::KeyEvent(KeyCode::Backspace));
-                    app.schedule_text_event_drain();
-                }
-            }
-        });
-    }
 
     pub fn send_return_key() {
         // Queue Return key event

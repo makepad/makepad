@@ -11,7 +11,7 @@ use {
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
+            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent,
             VirtualKeyboardEvent,
         },
         makepad_live_id::*,
@@ -493,29 +493,6 @@ impl Cx {
         let time = with_ios_app(|app| app.time_now());
         for queued_event in queued_events {
             match queued_event {
-                ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                    self.call_event_handler(&Event::TextInput(TextInputEvent {
-                        input,
-                        replace_last,
-                        was_paste: false,
-                        ..Default::default()
-                    }));
-                }
-                ios_app::IosTextInputEvent::RangeReplace {
-                    start,
-                    end,
-                    text,
-                    replaced_text,
-                    fallback_to_insert,
-                } => {
-                    self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
-                        start,
-                        end,
-                        text,
-                        replaced_text,
-                        fallback_to_insert,
-                    }));
-                }
                 ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
                     self.call_event_handler(&Event::TextInput(TextInputEvent {
                         full_state_sync: Some(FullTextState {

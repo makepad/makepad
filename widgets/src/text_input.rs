@@ -2442,21 +2442,29 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
-                modifiers: KeyModifiers { shift: true, .. },
+                modifiers: mods @ KeyModifiers { shift: true, .. },
                 ..
             }) if !self.is_read_only => {
-                self.reset_blink_timer(cx);
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: "\n".to_string(),
-                    },
-                );
-                self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid);
+                if !self.is_multiline {
+                    // Single-line fields submit on Enter regardless of Shift; never embed
+                    // a raw newline.
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -2527,15 +2535,22 @@ impl Widget for TextInput {
                 if let Some(full_state) = &event.full_state_sync {
                     // The view can deliver characters a restricted field disallows (paste,
                     // hardware keyboard); filter so iOS/Android match every other platform.
-                    let filtered = self.filter_input(&full_state.text, true);
-                    let rejected = filtered != full_state.text;
-                    let text_changed = self.text != filtered;
-                    if text_changed {
-                        self.history
-                            .create_or_extend_edit_group(EditKind::Other, self.selection);
-                        self.text = filtered;
-                        self.laidout_text = None;
-                    }
+                    // A selection-only sync (text unchanged) skips the filter pass + its
+                    // per-keystroke allocation.
+                    let (text_changed, rejected) = if self.text == full_state.text {
+                        (false, false)
+                    } else {
+                        let filtered = self.filter_input(&full_state.text, true);
+                        let rejected = filtered != full_state.text;
+                        let changed = self.text != filtered;
+                        if changed {
+                            self.history
+                                .create_or_extend_edit_group(EditKind::Other, self.selection);
+                            self.text = filtered;
+                            self.laidout_text = None;
+                        }
+                        (changed, rejected)
+                    };
 
                     let sel_start_byte = floor_grapheme_boundary(
                         &self.text,
