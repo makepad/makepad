@@ -1114,8 +1114,8 @@ impl AiManager {
                 changed = true;
             }
 
-            for task in mount_state
-                .tasks
+            let (tasks, agents) = (&mut mount_state.tasks, &mut mount_state.agents);
+            for task in tasks
                 .iter_mut()
                 .filter(|task| task.terminal_path.as_deref() == Some(path))
             {
@@ -1126,6 +1126,19 @@ impl AiManager {
                 task.last_terminal_mode = "input".to_string();
                 task.last_terminal_summary = summary.clone();
                 task.last_codex_status = None;
+
+                if let Some(agent) = agents.get_mut(&task.agent_id) {
+                    if agent.current_action.as_deref() != Some(&summary)
+                        || agent.blocked_reason.is_some()
+                    {
+                        let now = now_seconds();
+                        agent.current_action = Some(summary.clone());
+                        agent.blocked_reason = None;
+                        agent.state_changed_at = now;
+                        agent.updated_at = now;
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -3490,6 +3503,7 @@ impl AiManager {
     fn set_agent_error(&mut self, mount: &str, agent_id: AiAgentId, error: String) {
         if let Some(mount_state) = self.mounts.get_mut(mount) {
             let mut failed_event = None;
+            let mut workflow_failed_event = None;
             if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
                 if let Some(request_id) = agent.pending_request_id.take() {
                     self.inflight.remove(&request_id);
@@ -3518,7 +3532,22 @@ impl AiManager {
                     &error,
                 ));
             }
+            if mount_state.active_workflow_agent_id == Some(agent_id) {
+                if let Some(workflow) = mount_state.active_workflow.as_ref() {
+                    workflow_failed_event = Some(Self::visibility_event(
+                        "workflow_failed",
+                        Some(agent_id),
+                        &workflow.name,
+                        &error,
+                    ));
+                }
+                mount_state.active_workflow = None;
+                mount_state.active_workflow_agent_id = None;
+            }
             if let Some(event) = failed_event {
+                Self::push_visibility_event(mount_state, event);
+            }
+            if let Some(event) = workflow_failed_event {
                 Self::push_visibility_event(mount_state, event);
             }
         }
@@ -6488,6 +6517,48 @@ Some intro text...
         assert!(state.live_markdown.contains("[input / codex]"));
         assert!(state.live_markdown.contains("Input sent to Codex"));
     }
+    #[test]
+    fn terminal_input_clears_blocked_visibility_for_owning_agent() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.tasks.push(AiTrackedTask {
+                id: 1,
+                agent_id,
+                goal: "Answer terminal prompt".to_string(),
+                terminal_path: Some("repo/.makepad/codex.term".to_string()),
+                expected_paths: Vec::new(),
+                touched_paths: Vec::new(),
+                status: "watching".to_string(),
+                last_terminal_mode: "awaiting-input".to_string(),
+                last_terminal_summary: "Awaiting input".to_string(),
+                last_terminal_excerpt: String::new(),
+                last_codex_status: Some("Need more details?".to_string()),
+                handled_followup_signatures: Vec::new(),
+            });
+            let agent = mount_state.agents.get_mut(&agent_id).unwrap();
+            agent.active_terminal_path = Some("repo/.makepad/codex.term".to_string());
+            agent.active_terminal_title = Some("codex".to_string());
+            agent.current_action = Some("Awaiting input".to_string());
+            agent.blocked_reason = Some("Tracked terminal is awaiting input".to_string());
+        }
+
+        let state = manager
+            .process_terminal_input("repo", "repo/.makepad/codex.term")
+            .expect("terminal input should update agent visibility");
+        let active = state.active_agent.as_ref().unwrap();
+
+        assert_eq!(active.current_action.as_deref(), Some("Input sent to Codex"));
+        assert!(active.blocked_reason.is_none());
+    }
+
 
     #[test]
     fn terminal_observation_updates_hub_live_markdown() {
@@ -7774,6 +7845,78 @@ Some intro text...
             .iter()
             .any(|event| event.kind == "step_completed"));
     }
+    #[test]
+    fn workflow_owner_error_clears_active_workflow() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let owner_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.active_workflow_agent_id = Some(owner_id);
+            mount_state.active_workflow = Some(ActiveWorkflowState {
+                name: "review-prs".to_string(),
+                current_step: 0,
+                steps: vec![
+                    WorkflowStepState {
+                        name: "Resolve PR Set".to_string(),
+                        status: "active".to_string(),
+                    },
+                    WorkflowStepState {
+                        name: "Verify Changes".to_string(),
+                        status: "pending".to_string(),
+                    },
+                ],
+            });
+            let agent = mount_state.agents.get_mut(&owner_id).unwrap();
+            agent.workflow_step_name = Some("Resolve PR Set".to_string());
+            agent.workflow_step_status = Some("active".to_string());
+        }
+
+        manager.set_agent_error("repo", owner_id, "request failed".to_string());
+
+        {
+            let mount_state = manager.mounts.get("repo").unwrap();
+            assert!(mount_state.active_workflow.is_none());
+            assert!(mount_state.active_workflow_agent_id.is_none());
+            assert!(mount_state
+                .visibility_events
+                .iter()
+                .any(|event| event.kind == "agent_failed" && event.agent_id == Some(owner_id)));
+        }
+        let owner_run_token = manager.alloc_run_token();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            let owner = mount_state.agents.get_mut(&owner_id).unwrap();
+            owner.run_token = owner_run_token;
+            owner.status = "running".to_string();
+        }
+        manager.complete_assistant_turn(
+            "repo",
+            owner_id,
+            owner_run_token,
+            AssistantTurn {
+                text: "Late successful turn.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: Vec::new(),
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        assert!(mount_state.active_workflow_agent_id.is_none());
+        assert!(!mount_state
+            .visibility_events
+            .iter()
+            .any(|event| event.kind == "step_completed"));
+    }
+
 
     #[test]
     fn active_workflow_focus_is_only_for_owning_agent() {
