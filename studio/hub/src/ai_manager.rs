@@ -755,31 +755,38 @@ impl AiManager {
             return self.snapshot(mount);
         }
 
+        let prompt_accepted = self
+            .mounts
+            .get(mount)
+            .and_then(|mount_state| mount_state.agents.get(&agent_id))
+            .map(|agent| !agent.is_pending())
+            .unwrap_or(false);
+        if !prompt_accepted {
+            return self.snapshot(mount);
+        }
+
         let workflow_start = self
             .mounts
             .get(mount)
             .and_then(|mount_state| workflow_prompt_from_command(prompt, &mount_state.workflows));
-        let prompt_text = if let Some((active_workflow, workflow_prompt)) = workflow_start {
-            if let Some(mount_state) = self.mounts.get_mut(mount) {
-                mount_state.active_workflow = Some(active_workflow);
-            }
-            workflow_prompt
-        } else {
-            prompt.to_string()
-        };
+        let (workflow_to_activate, prompt_text) =
+            if let Some((active_workflow, workflow_prompt)) = workflow_start {
+                (Some(active_workflow), workflow_prompt)
+            } else {
+                (None, prompt.to_string())
+            };
 
         let run_token = self.alloc_run_token();
         {
-            let Some(agent) = self
-                .mounts
-                .get_mut(mount)
-                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
-            else {
+            let Some(mount_state) = self.mounts.get_mut(mount) else {
                 return self.snapshot(mount);
             };
-            if agent.is_pending() {
-                return self.snapshot(mount);
+            if let Some(active_workflow) = workflow_to_activate {
+                mount_state.active_workflow = Some(active_workflow);
             }
+            let Some(agent) = mount_state.agents.get_mut(&agent_id) else {
+                return self.snapshot(mount);
+            };
             if agent.messages.is_empty() && agent.title.starts_with("Chat ") {
                 let summary = summarize_title(&prompt_text);
                 if !summary.is_empty() {
@@ -807,6 +814,7 @@ impl AiManager {
         }
 
         self.note_ai_prompt_task(mount, agent_id, &prompt_text);
+        self.persist_mount_state_best_effort(mount);
         self.start_model_request(mount, agent_id, run_token);
         self.snapshot(mount)
     }
@@ -7158,6 +7166,66 @@ Some intro text...
         assert!(text.contains("Focus on step 1: Resolve PR Set"));
         assert!(text.contains("Find PRs."));
         assert!(!text.starts_with("/review-prs"));
+    }
+    #[test]
+    fn slash_workflow_prompt_does_not_activate_when_agent_is_pending() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find PRs.".to_string(),
+                }],
+            }];
+            let agent = mount_state.agents.get_mut(&agent_id).unwrap();
+            agent.status = "thinking...".to_string();
+            agent.pending_request_id = Some(LiveId(99));
+        }
+
+        manager.send_prompt("repo", agent_id, "/review-prs owner/repo#7");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        assert!(agent.history.is_empty());
+    }
+
+    #[test]
+    fn send_prompt_persists_accepted_prompt_before_request() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "makepad_ai_send_prompt_persist_test_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.register_mount("repo", &root);
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        manager.send_prompt("repo", agent_id, "remember this immediately");
+
+        let path = ai_chat_file_path(&root, agent_id);
+        let saved = fs::read_to_string(&path).expect("accepted prompt should persist immediately");
+        assert!(saved.contains("remember this immediately"));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
