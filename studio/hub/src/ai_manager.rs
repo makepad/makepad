@@ -1462,7 +1462,7 @@ impl AiManager {
                             if let Some(ref matched_name) = response_json.matched_workflow {
                                 let mut found_workflow = None;
                                 if let Some(mount_state) = self.mounts.get(&mount) {
-                                    if let Some(wf) = mount_state.workflows.iter().find(|w| w.name == *matched_name) {
+                                    if let Some(wf) = mount_state.workflows.iter().find(|w| workflow_command_matches(&w.name, matched_name)) {
                                         found_workflow = Some(wf.clone());
                                     }
                                 }
@@ -3996,16 +3996,24 @@ impl AiManager {
     fn build_classifier_prompt(&self, prompt: &str, workflows: &[ParsedWorkflow]) -> String {
         let mut catalog = String::new();
         for wf in workflows {
-            catalog.push_str(&format!("- {}: {}\n", wf.name, wf.steps.first().map(|s| s.name.as_str()).unwrap_or("")));
+            let slug = workflow_command_slug(&wf.name);
+            let mut steps_list = Vec::new();
+            for step in &wf.steps {
+                steps_list.push(step.name.as_str());
+            }
+            catalog.push_str(&format!(
+                "- ID: \"{}\" (Title: \"{}\", Steps: {})\n",
+                slug, wf.name, steps_list.join(" ➔ ")
+            ));
         }
         format!(
             "You are an AI assistant routing user prompts to available workflows. \
             Available workflows:\n\
             {}\n\
             Given the user's prompt: \"{}\"\n\
-            Determine if they want to trigger one of the workflows. \
+            Determine if they want to trigger one of the workflows (even if arguments are missing or implicit). \
             Return a JSON object in this format (no other text, no markdown fences):\n\
-            {{\n  \"matched_workflow\": \"workflow-name\",\n  \"arguments\": \"extracted-args\"\n}}\n\
+            {{\n  \"matched_workflow\": \"workflow-id\",\n  \"arguments\": \"extracted-args-or-empty\"\n}}\n\
             If no workflow matches, return null.",
             catalog, prompt
         )
