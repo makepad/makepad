@@ -14,6 +14,7 @@ struct PersistedMountStateRon {
     editor_tab_to_path: HashMap<LiveId, String>,
     terminal_tab_to_path: HashMap<LiveId, String>,
     sidebar_restore_width: Option<f64>,
+    agent_panel_restore_width: Option<f64>,
     bottom_panel_restore_height: Option<f64>,
     file_filter: String,
     log_filter: String,
@@ -184,6 +185,7 @@ impl App {
             allowed_tab_ids.contains(&tab_id)
         })?;
         if Self::workspace_dock_has_required_sidebar_tabs(&dock_items)
+            && Self::workspace_dock_has_required_agent_tabs(&dock_items)
             && dock_items.contains_key(&id!(log_first))
             && dock_items.contains_key(&id!(terminal_first))
         {
@@ -197,9 +199,14 @@ impl App {
         let Some(DockItem::Tabs { tabs, .. }) = dock_items.get(&id!(tree_tabs)) else {
             return false;
         };
-        tabs.contains(&id!(tree_tab))
-            && tabs.contains(&id!(run_list_tab))
-            && tabs.contains(&id!(ai_tab))
+        tabs.contains(&id!(tree_tab)) && tabs.contains(&id!(run_list_tab))
+    }
+
+    fn workspace_dock_has_required_agent_tabs(dock_items: &HashMap<LiveId, DockItem>) -> bool {
+        let Some(DockItem::Tabs { tabs, .. }) = dock_items.get(&id!(agent_tabs)) else {
+            return false;
+        };
+        tabs.contains(&id!(ai_tab))
     }
 
     fn rebuild_mount_tab_bindings(&mut self, cx: &Cx) {
@@ -331,6 +338,7 @@ impl App {
                 mount_state.log_filter = saved.log_filter.clone();
                 mount_state.log_tail = saved.log_tail;
                 mount_state.sidebar_restore_width = saved.sidebar_restore_width;
+                mount_state.agent_panel_restore_width = saved.agent_panel_restore_width;
                 mount_state.bottom_panel_restore_height = saved.bottom_panel_restore_height;
                 mount_state.terminals_initialized = true;
                 mount_state.terminal_files = terminal_tab_to_path.values().cloned().collect();
@@ -412,6 +420,7 @@ impl App {
             editor_tab_to_path,
             terminal_tab_to_path,
             sidebar_restore_width: mount_state.sidebar_restore_width,
+            agent_panel_restore_width: mount_state.agent_panel_restore_width,
             bottom_panel_restore_height: mount_state.bottom_panel_restore_height,
             file_filter: mount_state.file_filter.clone(),
             log_filter: mount_state.log_filter.clone(),
@@ -478,6 +487,7 @@ mod tests {
             editor_tab_to_path: HashMap::new(),
             terminal_tab_to_path: HashMap::new(),
             sidebar_restore_width: Some(420.0),
+            agent_panel_restore_width: Some(360.0),
             bottom_panel_restore_height: Some(260.0),
             file_filter: String::new(),
             log_filter: String::new(),
@@ -487,6 +497,7 @@ mod tests {
         let restored = PersistedMountStateRon::deserialize_ron(&state.serialize_ron()).unwrap();
 
         assert_eq!(restored.sidebar_restore_width, Some(420.0));
+        assert_eq!(restored.agent_panel_restore_width, Some(360.0));
         assert_eq!(restored.bottom_panel_restore_height, Some(260.0));
     }
 
@@ -507,6 +518,7 @@ mod tests {
         let restored = PersistedMountStateRon::deserialize_ron(legacy).unwrap();
 
         assert_eq!(restored.sidebar_restore_width, None);
+        assert_eq!(restored.agent_panel_restore_width, None);
         assert_eq!(restored.bottom_panel_restore_height, None);
     }
 
@@ -528,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_workspace_dock_without_ai_tab_is_rejected() {
+    fn legacy_workspace_dock_without_agent_tabs_is_rejected() {
         let dock_items = HashMap::from([
             (
                 id!(root),
@@ -565,7 +577,15 @@ mod tests {
                 },
             ),
         ]);
-        let allowed = HashSet::from([id!(tree_tab), id!(run_list_tab), id!(ai_tab)]);
+        let allowed = HashSet::from([
+            id!(tree_tab),
+            id!(run_list_tab),
+            id!(ai_tab),
+            id!(editor_first),
+            id!(run_first),
+            id!(log_first),
+            id!(terminal_first),
+        ]);
 
         let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed);
 
@@ -573,21 +593,84 @@ mod tests {
     }
 
     #[test]
-    fn workspace_dock_with_ai_tab_is_kept() {
+    fn workspace_dock_with_right_agent_tab_is_kept() {
         let dock_items = HashMap::from([
             (
                 id!(root),
+                DockItem::Splitter {
+                    axis: SplitterAxis::Horizontal,
+                    align: SplitterAlign::FromA(310.0),
+                    a: id!(tree_tabs),
+                    b: id!(agent_split),
+                },
+            ),
+            (
+                id!(agent_split),
+                DockItem::Splitter {
+                    axis: SplitterAxis::Horizontal,
+                    align: SplitterAlign::FromB(310.0),
+                    a: id!(main_split),
+                    b: id!(agent_tabs),
+                },
+            ),
+            (
+                id!(tree_tabs),
                 DockItem::Tabs {
-                    tabs: vec![id!(tree_tabs)],
+                    tabs: vec![id!(tree_tab), id!(run_list_tab)],
                     selected: 0,
                     closable: false,
                     hide_tab_bar: false,
                 },
             ),
             (
-                id!(tree_tabs),
+                id!(agent_tabs),
                 DockItem::Tabs {
-                    tabs: vec![id!(tree_tab), id!(run_list_tab), id!(ai_tab)],
+                    tabs: vec![id!(ai_tab)],
+                    selected: 0,
+                    closable: false,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(main_split),
+                DockItem::Splitter {
+                    axis: SplitterAxis::Vertical,
+                    align: SplitterAlign::FromB(220.0),
+                    a: id!(editor_split),
+                    b: id!(bottom_panel_tabs),
+                },
+            ),
+            (
+                id!(editor_split),
+                DockItem::Splitter {
+                    axis: SplitterAxis::Horizontal,
+                    align: SplitterAlign::Weighted(0.62),
+                    a: id!(editor_tabs),
+                    b: id!(run_tabs),
+                },
+            ),
+            (
+                id!(editor_tabs),
+                DockItem::Tabs {
+                    tabs: vec![id!(editor_first)],
+                    selected: 0,
+                    closable: true,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(run_tabs),
+                DockItem::Tabs {
+                    tabs: vec![id!(run_first)],
+                    selected: 0,
+                    closable: true,
+                    hide_tab_bar: false,
+                },
+            ),
+            (
+                id!(bottom_panel_tabs),
+                DockItem::Tabs {
+                    tabs: vec![id!(log_first), id!(terminal_first)],
                     selected: 0,
                     closable: false,
                     hide_tab_bar: false,
@@ -610,6 +693,38 @@ mod tests {
                 },
             ),
             (
+                id!(editor_first),
+                DockItem::Tab {
+                    name: String::new(),
+                    template: id!(EditorFirstTab),
+                    kind: id!(EditorFirstPane),
+                },
+            ),
+            (
+                id!(run_first),
+                DockItem::Tab {
+                    name: String::new(),
+                    template: id!(RunFirstTab),
+                    kind: id!(RunFirstPane),
+                },
+            ),
+            (
+                id!(log_first),
+                DockItem::Tab {
+                    name: "Logs".to_string(),
+                    template: id!(LogFirstTab),
+                    kind: id!(LogFirstPane),
+                },
+            ),
+            (
+                id!(terminal_first),
+                DockItem::Tab {
+                    name: "Terminal".to_string(),
+                    template: id!(TerminalTab),
+                    kind: id!(TerminalFirstPane),
+                },
+            ),
+            (
                 id!(ai_tab),
                 DockItem::Tab {
                     name: "AI".to_string(),
@@ -618,7 +733,15 @@ mod tests {
                 },
             ),
         ]);
-        let allowed = HashSet::from([id!(tree_tab), id!(run_list_tab), id!(ai_tab)]);
+        let allowed = HashSet::from([
+            id!(tree_tab),
+            id!(run_list_tab),
+            id!(ai_tab),
+            id!(editor_first),
+            id!(run_first),
+            id!(log_first),
+            id!(terminal_first),
+        ]);
 
         let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed);
 

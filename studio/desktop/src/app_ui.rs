@@ -736,6 +736,45 @@ script_mod! {
         }
     }
 
+    let BottomBarIconButton = ButtonFlatterIcon {
+        width: 30.0
+        height: 24.0
+        margin: Inset {}
+        icon_walk: Walk {width: 14.0 height: 14.0}
+        draw_bg +: {
+            color: theme.color_u_hidden
+            color_hover: theme.color_bg_highlight
+            color_down: theme.color_bg_highlight * 0.78
+            color_focus: theme.color_u_hidden
+            border_radius: 4.0
+        }
+        draw_icon +: {
+            color: theme.color_label_outer
+            color_hover: theme.color_label_outer_hover
+            color_down: theme.color_label_inner_active
+            color_focus: theme.color_label_outer
+        }
+    }
+
+    let StudioBottomBar = SolidView {
+        width: Fill
+        height: 28.0
+        flow: Right
+        align: Align {x: 0.0 y: 0.5}
+        padding: Inset {left: 4.0 right: 5.0 top: 0.0 bottom: 0.0}
+        spacing: 2.0
+        draw_bg +: {
+            color: theme.color_bg_container
+        }
+
+        bottom_file_tree_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_file.svg")
+        }
+        bottom_agent_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_ai.svg")
+        }
+    }
+
     let STUDIO_PALETTE_1 = #B2FF64
     let STUDIO_PALETTE_2 = #80FFBF
     let STUDIO_PALETTE_3 = #80BFFF
@@ -897,6 +936,7 @@ script_mod! {
             draw_bg.color: theme.color_bg_app
 
             left_controls := View {
+                visible: false
                 width: Fit
                 height: Fit
                 flow: Right
@@ -965,13 +1005,14 @@ script_mod! {
         body +: {
             width: Fill
             height: Fill
-            flow: Overlay
+            flow: Down
             spacing: 0.0
-            padding: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 10.0}
+            padding: Inset {}
 
             main_work_area := View {
                 width: Fill
                 height: Fill
+                margin: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 0.0}
                 flow: Down
                 spacing: 0.0
 
@@ -1044,7 +1085,14 @@ script_mod! {
                                 axis: SplitterAxis.Horizontal
                                 align: SplitterAlign.FromA(310.0)
                                 a: @tree_tabs
-                                b: @main_split
+                                b: @agent_split
+                            }
+
+                            agent_split := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.FromB(310.0)
+                                a: @main_split
+                                b: @agent_tabs
                             }
 
                             main_split := DockSplitter {
@@ -1068,7 +1116,13 @@ script_mod! {
                             }
 
                             tree_tabs := DockTabs {
-                                tabs: [@tree_tab @run_list_tab @ai_tab]
+                                tabs: [@tree_tab @run_list_tab]
+                                selected: 0
+                                closable: false
+                            }
+
+                            agent_tabs := DockTabs {
+                                tabs: [@ai_tab]
                                 selected: 0
                                 closable: false
                             }
@@ -1144,6 +1198,7 @@ script_mod! {
                 }
             }
 
+            StudioBottomBar {}
         }
     }
 }

@@ -269,15 +269,12 @@ impl App {
             .drop_down(cx, ids!(ai_agent_dropdown))
             .set_selected_item(cx, agent_selected);
 
-        let active_backend = state
-            .active_backend_id
-            .as_ref()
-            .and_then(|active_id| {
-                state
-                    .backends
-                    .iter()
-                    .find(|backend| &backend.id == active_id)
-            });
+        let active_backend = state.active_backend_id.as_ref().and_then(|active_id| {
+            state
+                .backends
+                .iter()
+                .find(|backend| &backend.id == active_id)
+        });
         let active_backend_label = active_backend
             .map(|backend| backend.label.clone())
             .unwrap_or_else(|| "local".to_string());
@@ -413,12 +410,16 @@ impl App {
                     workspace
                         .text_input(cx, ids!(ai_prompt_input))
                         .set_key_focus(cx);
-                    workspace
-                        .fold_header(cx, ids!(ai_swarm_fold))
-                        .set_is_open(cx, true, Animate::Yes);
-                    workspace
-                        .fold_header(cx, ids!(ai_live_fold))
-                        .set_is_open(cx, true, Animate::Yes);
+                    workspace.fold_header(cx, ids!(ai_swarm_fold)).set_is_open(
+                        cx,
+                        true,
+                        Animate::Yes,
+                    );
+                    workspace.fold_header(cx, ids!(ai_live_fold)).set_is_open(
+                        cx,
+                        true,
+                        Animate::Yes,
+                    );
                 }
                 self.schedule_ai_chat_scroll_to_bottom(cx);
             }
@@ -1248,16 +1249,14 @@ fn polish_live_activity_line(line: &str) -> String {
     if let Some(rest) = trimmed.strip_prefix("- `T") {
         if let Some((id_and_status, goal)) = rest.split_once(']') {
             if let Some((id, status)) = id_and_status.split_once("` [") {
-                return format!(
-                    "- Task `T{}` - **{}** - {}",
-                    id,
-                    status,
-                    goal.trim()
-                );
+                return format!("- Task `T{}` - **{}** - {}", id, status, goal.trim());
             }
         }
     }
-    if trimmed.trim_start().starts_with("waiting for terminal assignment") {
+    if trimmed
+        .trim_start()
+        .starts_with("waiting for terminal assignment")
+    {
         return "  terminal: waiting for assignment".to_string();
     }
     if let Some(path_line) = trimmed.trim_start().strip_prefix('`') {

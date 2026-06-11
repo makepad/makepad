@@ -192,6 +192,32 @@ impl App {
         )
     }
 
+    fn workspace_agent_splitter_width(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
+        let dock = self.mount_workspace_dock(cx, mount)?;
+        let dock_width = dock.area().rect(cx).size.x.max(0.0);
+        if let Some(DockItem::Splitter { align, .. }) = dock.clone_state()?.get(&id!(agent_split)) {
+            return match align {
+                SplitterAlign::FromB(width) => Some(width.max(0.0)),
+                SplitterAlign::FromA(width) => Some((dock_width - width).max(0.0)),
+                SplitterAlign::Weighted(weight) => Some((dock_width * (1.0 - weight)).max(0.0)),
+            };
+        }
+        let splitter_position = dock.splitter_position(id!(agent_split))?;
+        Some((dock_width - splitter_position).max(0.0))
+    }
+
+    fn set_workspace_agent_splitter_width(&mut self, cx: &mut Cx, mount: &str, width: f64) -> bool {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return false;
+        };
+        dock.set_splitter_align(
+            cx,
+            id!(agent_split),
+            SplitterAlign::FromB(width.max(0.0)),
+            false,
+        )
+    }
+
     fn start_bottom_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_height: f64) {
         let from_height = self
             .workspace_main_splitter_height(cx, mount)
@@ -278,6 +304,32 @@ impl App {
         } else {
             self.mount_state_mut(mount).sidebar_restore_width = Some(current_width);
             self.start_sidebar_animation(cx, mount, 0.0);
+        }
+    }
+
+    pub(super) fn toggle_agent_panel(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(current_width) = self.workspace_agent_splitter_width(cx, mount) else {
+            return;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return;
+        };
+        dock.select_tab(cx, id!(ai_tab));
+
+        let restore_width = self
+            .mount_state(mount)
+            .and_then(|state| state.agent_panel_restore_width)
+            .unwrap_or(310.0);
+
+        if current_width <= 1.0 {
+            if self.set_workspace_agent_splitter_width(cx, mount, restore_width) {
+                self.save_state(cx, 0);
+            }
+        } else {
+            self.mount_state_mut(mount).agent_panel_restore_width = Some(current_width);
+            if self.set_workspace_agent_splitter_width(cx, mount, 0.0) {
+                self.save_state(cx, 0);
+            }
         }
     }
 

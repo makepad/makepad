@@ -169,6 +169,26 @@ impl MatchEvent for App {
 
         if self
             .ui
+            .button(cx, ids!(bottom_file_tree_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_mount_sidebar(cx, &active_mount);
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(bottom_agent_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_agent_panel(cx, &active_mount);
+            }
+        }
+
+        if self
+            .ui
             .button(cx, ids!(bottom_panel_toggle))
             .clicked(actions)
         {
@@ -468,7 +488,21 @@ impl AppMain for App {
                     .button(cx, ids!(bottom_panel_toggle))
                     .area()
                     .rect(cx);
-                if sidebar_rect.contains(dq.abs) || panel_rect.contains(dq.abs) {
+                let bottom_file_tree_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_file_tree_toggle))
+                    .area()
+                    .rect(cx);
+                let bottom_agent_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_agent_toggle))
+                    .area()
+                    .rect(cx);
+                if sidebar_rect.contains(dq.abs)
+                    || panel_rect.contains(dq.abs)
+                    || bottom_file_tree_rect.contains(dq.abs)
+                    || bottom_agent_rect.contains(dq.abs)
+                {
                     dq.response.set(WindowDragQueryResponse::Client);
                     cx.set_cursor(MouseCursor::Default);
                 }
