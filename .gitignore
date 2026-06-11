@@ -43,3 +43,6 @@ CLAUDE.md
 /tools/__pycache__/
 **/*.obsidian
 /xr/util/dumps/
+
+# Brainstorming visual companion temp directory
+.superpowers/
