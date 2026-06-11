@@ -767,10 +767,13 @@ impl AiManager {
             return self.snapshot(mount);
         }
 
-        let workflow_start = self
-            .mounts
-            .get(mount)
-            .and_then(|mount_state| workflow_prompt_from_command(prompt, &mount_state.workflows));
+        let workflow_start = self.mounts.get(mount).and_then(|mount_state| {
+            let agent = mount_state.agents.get(&agent_id)?;
+            if agent.parent_agent_id.is_some() {
+                return None;
+            }
+            workflow_prompt_from_command(prompt, &mount_state.workflows)
+        });
         let (workflow_to_activate, prompt_text) =
             if let Some((active_workflow, workflow_prompt)) = workflow_start {
                 (Some(active_workflow), workflow_prompt)
@@ -7288,6 +7291,41 @@ Some intro text...
         assert_eq!(workflow.current_step, 0);
         assert_eq!(workflow.steps[0].status, "active");
         assert_eq!(workflow.steps[1].status, "pending");
+    }
+
+    #[test]
+    fn slash_workflow_prompt_from_subagent_does_not_activate_workflow() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find PRs.".to_string(),
+                }],
+            }];
+            let agent = mount_state.agents.get_mut(&agent_id).unwrap();
+            agent.parent_agent_id = Some(AiAgentId(99));
+        }
+
+        manager.send_prompt("repo", agent_id, "/review-prs owner/repo#7");
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        assert!(mount_state.active_workflow_agent_id.is_none());
+        let agent = mount_state.agents.get(&agent_id).unwrap();
+        let ConversationItem::User { text } = &agent.history[0] else {
+            panic!("subagent prompt should use normal prompt path");
+        };
+        assert_eq!(text, "/review-prs owner/repo#7");
     }
     #[test]
     fn slash_workflow_prompt_does_not_activate_when_agent_is_pending() {
