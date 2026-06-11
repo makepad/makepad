@@ -524,12 +524,10 @@ fn ai_activity_item(message: &AiMessage) -> Option<AiActivityItem> {
                     text,
                 });
             }
-            let thinking = normalize_activity_block_text(message.text.trim());
-            let text = if thinking.is_empty() {
-                "thinking".to_string()
-            } else {
-                thinking
-            };
+            let text = normalize_activity_block_text(message.text.trim());
+            if text.is_empty() {
+                return None;
+            }
             Some(AiActivityItem {
                 kind: AiActivityKind::Thinking,
                 text,
@@ -1079,6 +1077,40 @@ mod tests {
         assert!(markdown.contains("```runsplash"));
         assert!(!markdown.contains("### Thinking"));
         assert!(markdown.contains("waiting on `makepad/.makepad/hello-world-makepad.term`"));
+    }
+
+    #[test]
+    fn ai_chat_markdown_hides_placeholder_thinking_messages() {
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "ready",
+            false,
+            vec![
+                AiMessage {
+                    role: AiMessageRole::Assistant,
+                    text: "First answer.".to_string(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Thinking,
+                    text: String::new(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Thinking,
+                    text: String::new(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Assistant,
+                    text: "Second answer.".to_string(),
+                },
+            ],
+        );
+
+        let markdown = ai_chat_markdown(&agent);
+        assert!(!markdown.contains("> **Thinking**"));
+        assert!(!markdown.contains("thinking x2"));
+        assert!(!markdown.contains("```runsplash"));
+        assert!(markdown.contains("First answer."));
+        assert!(markdown.contains("Second answer."));
     }
 
     #[test]
