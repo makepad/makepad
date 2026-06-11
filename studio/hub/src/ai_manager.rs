@@ -14,6 +14,7 @@ use makepad_studio_protocol::ai_format::{
 };
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage, AiMessageRole, AiMountState,
+    ActiveWorkflowState,
 };
 use providers::AiProviderKind;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -125,6 +126,9 @@ struct RunningAgent {
     role: Option<String>,
     task: Option<String>,
     subagents: Vec<AiAgentId>,
+    current_action: Option<String>,
+    last_terminal_excerpt: Option<String>,
+    files_touched: Vec<String>,
 }
 
 struct MountAgents {
@@ -139,6 +143,7 @@ struct MountAgents {
     tasks: Vec<AiTrackedTask>,
     queued_followups: VecDeque<AiQueuedFollowup>,
     terminal_snapshots: HashMap<String, AiTerminalSnapshot>,
+    active_workflow: Option<ActiveWorkflowState>,
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +489,7 @@ impl AiManager {
                     tasks: Vec::new(),
                     queued_followups: VecDeque::new(),
                     terminal_snapshots: HashMap::new(),
+                    active_workflow: None,
                 });
             entry.root_path = root.to_string_lossy().to_string();
             if entry.active_backend_id.is_empty() {
@@ -552,6 +558,9 @@ impl AiManager {
                 role: None,
                 task: None,
                 subagents: Vec::new(),
+                current_action: None,
+                last_terminal_excerpt: None,
+                files_touched: Vec::new(),
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -1771,6 +1780,9 @@ impl AiManager {
                         role: Some(args.role),
                         task: Some(args.task),
                         subagents: Vec::new(),
+                        current_action: None,
+                        last_terminal_excerpt: None,
+                        files_touched: Vec::new(),
                     };
 
                     mount_state.order.push(sub_id);
@@ -2098,6 +2110,7 @@ impl AiManager {
                     tasks: Vec::new(),
                     queued_followups: VecDeque::new(),
                     terminal_snapshots: HashMap::new(),
+                    active_workflow: None,
                 },
             );
         }
@@ -2130,6 +2143,7 @@ impl AiManager {
                 tasks: Vec::new(),
                 queued_followups: VecDeque::new(),
                 terminal_snapshots: HashMap::new(),
+                active_workflow: None,
             });
         let title = format!("Chat {}", mount_state.next_chat_ordinal);
         mount_state.next_chat_ordinal += 1;
@@ -2153,6 +2167,9 @@ impl AiManager {
                 role: None,
                 task: None,
                 subagents: Vec::new(),
+                current_action: None,
+                last_terminal_excerpt: None,
+                files_touched: Vec::new(),
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -2840,6 +2857,9 @@ impl AiManager {
                     message_count: agent.messages.len(),
                     parent_agent_id: agent.parent_agent_id,
                     role: agent.role.clone(),
+                    current_action: agent.current_action.clone(),
+                    last_terminal_excerpt: agent.last_terminal_excerpt.clone(),
+                    files_touched: agent.files_touched.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2865,6 +2885,9 @@ impl AiManager {
                 parent_agent_id: agent.parent_agent_id,
                 role: agent.role.clone(),
                 subagents: agent.subagents.clone(),
+                current_action: agent.current_action.clone(),
+                last_terminal_excerpt: agent.last_terminal_excerpt.clone(),
+                files_touched: agent.files_touched.clone(),
             })
         });
         AiMountState {
@@ -2874,6 +2897,7 @@ impl AiManager {
             agents,
             active_agent,
             live_markdown: self.ai_live_markdown(mount_state),
+            active_workflow: mount_state.active_workflow.clone(),
         }
     }
 
@@ -2978,6 +3002,9 @@ impl AiManager {
                     role: chat.role,
                     task: chat.task,
                     subagents: chat.subagents.unwrap_or_default(),
+                    current_action: None,
+                    last_terminal_excerpt: None,
+                    files_touched: Vec::new(),
                 },
             );
         }
@@ -6280,6 +6307,9 @@ mod tests {
                     role: Some("coder".to_string()),
                     task: Some("Update plan".to_string()),
                     subagents: Vec::new(),
+                    current_action: None,
+                    last_terminal_excerpt: None,
+                    files_touched: Vec::new(),
                 },
             );
         }
