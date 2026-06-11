@@ -217,6 +217,12 @@ pub enum ClientToHub {
         agent_id: AiAgentId,
         text: String,
     },
+    AiSpawnSubagent {
+        mount: String,
+        parent_agent_id: AiAgentId,
+        role: String,
+        task: String,
+    },
     AiCancelPrompt {
         mount: String,
         agent_id: AiAgentId,

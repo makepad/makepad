@@ -465,10 +465,10 @@ script_mod! {
                         padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 8.0}
 
                         ai_model_picker := DropDown {
-                            width: Fit
+                            width: 76.0
                             height: 24.0
                             margin: Inset {}
-                            padding: Inset {left: 8.0 right: 18.0 top: 0.0 bottom: 0.0}
+                            padding: Inset {left: 6.0 right: 14.0 top: 0.0 bottom: 0.0}
                             align: Align {x: 0.0 y: 0.5}
                             labels: ["local"]
                             draw_bg +: {
@@ -497,10 +497,10 @@ script_mod! {
                         }
 
                         ai_configure_button := ButtonFlat {
-                            width: Fit
+                            width: 24.0
                             height: 24.0
                             margin: Inset {}
-                            padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+                            padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
                             text: "⚙"
                             draw_bg +: {
                                 color: theme.color_bg_highlight * 0.88
@@ -526,6 +526,39 @@ script_mod! {
                         }
 
                         View { width: Fill }
+
+                        ai_subagent_role_picker := DropDown {
+                            width: 76.0
+                            height: 24.0
+                            margin: Inset {right: 6.0}
+                            padding: Inset {left: 6.0 right: 14.0 top: 0.0 bottom: 0.0}
+                            align: Align {x: 0.0 y: 0.5}
+                            labels: ["coder", "planner", "explorer", "reviewer", "verifier"]
+                            draw_bg +: {
+                                color: theme.color_bg_highlight * 0.88
+                                color_hover: theme.color_bg_highlight * 0.98
+                                color_focus: theme.color_bg_highlight * 1.02
+                                color_down: theme.color_bg_highlight * 0.88
+                                border_color: theme.color_u_hidden
+                                border_color_hover: theme.color_u_hidden
+                                border_color_focus: theme.color_u_hidden
+                                border_color_down: theme.color_u_hidden
+                                border_color_disabled: theme.color_u_hidden
+                                border_color_2: theme.color_u_hidden
+                                border_color_2_hover: theme.color_u_hidden
+                                border_color_2_focus: theme.color_u_hidden
+                                border_color_2_down: theme.color_u_hidden
+                                border_color_2_disabled: theme.color_u_hidden
+                                border_radius: 4.0
+                            }
+                            draw_text +: {
+                                color: theme.color_label_inner
+                                color_disabled: theme.color_label_inner_inactive
+                                text_style: theme.font_regular {
+                                    font_size: 9.0
+                                }
+                            }
+                        }
 
                         ai_run_button := AiRunButton {
                             width: 28.0

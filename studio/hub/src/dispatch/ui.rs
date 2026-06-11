@@ -981,6 +981,17 @@ impl HubCore {
                 let state = self.ai_manager.send_prompt(&mount, agent_id, &text);
                 self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
             }
+            ClientToHub::AiSpawnSubagent {
+                mount,
+                parent_agent_id,
+                role,
+                task,
+            } => {
+                let state = self
+                    .ai_manager
+                    .spawn_subagent(&mount, parent_agent_id, &role, &task);
+                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
+            }
             ClientToHub::AiCancelPrompt { mount, agent_id } => {
                 let state = self.ai_manager.cancel_prompt(&mount, agent_id);
                 self.broadcast_ui_message(HubToClient::AiMountState { mount, state });

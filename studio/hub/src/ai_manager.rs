@@ -55,7 +55,6 @@ const AI_TERMINAL_EXCERPT_MAX_CHARS: usize = 480;
 const AI_TERMINAL_EXCERPT_MAX_LINES: usize = 10;
 const MAX_VISIBILITY_EVENTS: usize = 64;
 
-
 pub struct AiTerminalObservation {
     pub path: String,
     pub terminal_title: String,
@@ -435,7 +434,6 @@ struct SendTerminalKeyArgs {
 struct SpawnSubagentArgs {
     role: String,
     task: String,
-    model_override: Option<String>,
 }
 
 #[derive(DeJson)]
@@ -634,10 +632,10 @@ impl AiManager {
                     }
                 }
             }
-                if mount_state.active_workflow_agent_id == Some(agent_id) {
-                    mount_state.active_workflow = None;
-                    mount_state.active_workflow_agent_id = None;
-                }
+            if mount_state.active_workflow_agent_id == Some(agent_id) {
+                mount_state.active_workflow = None;
+                mount_state.active_workflow_agent_id = None;
+            }
             mount_state.order.retain(|existing| *existing != agent_id);
             if mount_state.active_agent_id == Some(agent_id) {
                 mount_state.active_agent_id = mount_state.order.last().copied();
@@ -796,6 +794,10 @@ impl AiManager {
             return self.snapshot(mount);
         }
 
+        if let Some((role, task)) = parse_direct_subagent_command(prompt) {
+            return self.spawn_subagent(mount, agent_id, &role, &task);
+        }
+
         if let Some(snapshot) = self.run_classifier_or_fallback(mount, agent_id, prompt) {
             return snapshot;
         }
@@ -803,7 +805,12 @@ impl AiManager {
         self.send_prompt_accepted(mount, agent_id, prompt)
     }
 
-    pub fn run_classifier_or_fallback(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) -> Option<AiMountState> {
+    pub fn run_classifier_or_fallback(
+        &mut self,
+        mount: &str,
+        agent_id: AiAgentId,
+        prompt: &str,
+    ) -> Option<AiMountState> {
         let (parent_agent_id, workflows, root_path, active_backend_id) = {
             let mount_state = self.mounts.get(mount)?;
             let agent = mount_state.agents.get(&agent_id)?;
@@ -843,7 +850,9 @@ impl AiManager {
         };
 
         request.is_streaming = false;
-        request.headers.insert("Accept".to_string(), vec!["application/json".to_string()]);
+        request
+            .headers
+            .insert("Accept".to_string(), vec!["application/json".to_string()]);
         if let Some(ref mut body_bytes) = request.body {
             if let Ok(mut body_str) = String::from_utf8(body_bytes.clone()) {
                 body_str = body_str.replace("\"stream\":true", "\"stream\":false");
@@ -866,7 +875,12 @@ impl AiManager {
         }
     }
 
-    pub fn send_prompt_accepted(&mut self, mount: &str, agent_id: AiAgentId, prompt: &str) -> AiMountState {
+    pub fn send_prompt_accepted(
+        &mut self,
+        mount: &str,
+        agent_id: AiAgentId,
+        prompt: &str,
+    ) -> AiMountState {
         let workflow_start = self.mounts.get(mount).and_then(|mount_state| {
             let agent = mount_state.agents.get(&agent_id)?;
             if agent.parent_agent_id.is_some() {
@@ -956,6 +970,123 @@ impl AiManager {
         self.snapshot(mount)
     }
 
+    pub fn spawn_subagent(
+        &mut self,
+        mount: &str,
+        parent_id: AiAgentId,
+        role: &str,
+        task: &str,
+    ) -> AiMountState {
+        let role = role.trim();
+        let task = task.trim();
+        if role.is_empty() || task.is_empty() {
+            return self.snapshot(mount);
+        }
+        let sub_id = self.alloc_agent_id();
+        let sub_run_token = self.alloc_run_token();
+        let now = now_seconds();
+        let title = format!("{} Subagent", role);
+        let prompt = native_delegation_prompt(role, task);
+        let kickoff_prompt = subagent_kickoff_prompt(role, task);
+        let call = ToolCallRecord {
+            id: format!("direct_subagent_{}_{}", parent_id.0, sub_id.0),
+            name: "spawn_subagent".to_string(),
+            arguments_json: format!(
+                "{{\"role\":{},\"task\":{}}}",
+                json_string(role),
+                json_string(task)
+            ),
+        };
+
+        let Some(mount_state) = self.mounts.get_mut(mount) else {
+            return AiMountState::default();
+        };
+        let Some(parent) = mount_state.agents.get_mut(&parent_id) else {
+            return self.snapshot(mount);
+        };
+
+        let backend_id = parent.backend_id.clone();
+        parent.messages.push(AiMessage {
+            role: AiMessageRole::User,
+            text: prompt.to_string(),
+        });
+        parent.history.push(ConversationItem::User {
+            text: prompt.to_string(),
+        });
+        parent.history.push(ConversationItem::Assistant {
+            text: format!("Starting native {} subagent.", role),
+            tool_calls: vec![call.clone()],
+        });
+        parent.messages.push(AiMessage {
+            role: AiMessageRole::ToolCall,
+            text: format_tool_call_message(&call),
+        });
+        parent.subagents.push(sub_id);
+        parent.status = format!("waiting for subagent: {}...", role);
+        parent.updated_at = now;
+        parent.current_action = Some(format!("Delegated to {} subagent", role));
+        parent.state_changed_at = now;
+
+        let sub_agent = RunningAgent {
+            title: title.clone(),
+            backend_id,
+            status: "thinking...".to_string(),
+            pending_request_id: None,
+            pending_tool_batch: false,
+            pending_tool_message_start: None,
+            cancel_requested: false,
+            run_token: sub_run_token,
+            messages: vec![
+                AiMessage {
+                    role: AiMessageRole::User,
+                    text: kickoff_prompt.clone(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Thinking,
+                    text: String::new(),
+                },
+            ],
+            history: vec![ConversationItem::User {
+                text: kickoff_prompt,
+            }],
+            updated_at: now,
+            parent_agent_id: Some(parent_id),
+            role: Some(role.to_string()),
+            task: Some(task.to_string()),
+            subagents: Vec::new(),
+            current_action: Some("Starting native subagent".to_string()),
+            last_terminal_excerpt: None,
+            files_touched: Vec::new(),
+            active_terminal_path: None,
+            active_terminal_title: None,
+            state_changed_at: now,
+            workflow_step_name: None,
+            workflow_step_status: None,
+            blocked_reason: None,
+        };
+
+        mount_state.order.push(sub_id);
+        mount_state.agents.insert(sub_id, sub_agent);
+        mount_state.active_agent_id = Some(sub_id);
+        Self::push_visibility_event(
+            mount_state,
+            Self::visibility_event(
+                "subagent_spawned",
+                Some(sub_id),
+                &title,
+                &format!(
+                    "{} delegated work to {}",
+                    agent_title_for_event(mount_state, parent_id),
+                    title
+                ),
+            ),
+        );
+
+        self.persist_mount_state_best_effort(mount);
+        self.start_model_request(mount, sub_id, sub_run_token);
+        self.snapshot(mount)
+    }
+
     pub fn process_terminal_observation(
         &mut self,
         mount: &str,
@@ -991,12 +1122,6 @@ impl AiManager {
                 })
                 .unwrap_or(true)
             {
-                changed = true;
-            }
-
-            let created_observed_task =
-                Self::ensure_observed_codex_terminal_task(mount_state, &snapshot);
-            if created_observed_task {
                 changed = true;
             }
 
@@ -1037,7 +1162,7 @@ impl AiManager {
                     task.touched_paths.clone(),
                     blocked_reason.map(str::to_string),
                 ));
-                if created_observed_task || previous_mode != snapshot.mode {
+                if previous_mode != snapshot.mode {
                     if snapshot.mode == "awaiting-input" || snapshot.mode == "needs-attention" {
                         visibility_events.push(Self::visibility_event(
                             "terminal_needs_input",
@@ -1055,16 +1180,14 @@ impl AiManager {
                     }
                 }
 
-                if created_observed_task
-                    || previous_mode != task.last_terminal_mode
+                if previous_mode != task.last_terminal_mode
                     || previous_summary != task.last_terminal_summary
                     || previous_excerpt != task.last_terminal_excerpt
                     || previous_codex_status != task.last_codex_status
                 {
                     changed = true;
                 }
-                if created_observed_task
-                    || previous_mode != task.last_terminal_mode
+                if previous_mode != task.last_terminal_mode
                     || previous_summary != task.last_terminal_summary
                     || previous_excerpt != task.last_terminal_excerpt
                     || previous_codex_status != task.last_codex_status
@@ -1158,7 +1281,7 @@ impl AiManager {
         {
             let mount_state = self.mounts.get_mut(mount)?;
             let path_lowered = path.to_lowercase();
-            let (is_codex, summary, snapshot) = {
+            let summary = {
                 let snapshot = mount_state
                     .terminal_snapshots
                     .entry(path.to_string())
@@ -1171,11 +1294,7 @@ impl AiManager {
                         codex_status: None,
                     });
                 let is_codex = snapshot.is_codex || path_lowered.contains("codex");
-                let summary = if is_codex {
-                    "Input sent to Codex"
-                } else {
-                    "Input sent to terminal"
-                };
+                let summary = "Input sent to terminal";
                 if snapshot.mode != "input"
                     || snapshot.summary != summary
                     || snapshot.is_codex != is_codex
@@ -1187,12 +1306,8 @@ impl AiManager {
                     snapshot.codex_status = None;
                     changed = true;
                 }
-                (is_codex, summary.to_string(), snapshot.clone())
+                summary.to_string()
             };
-
-            if is_codex && Self::ensure_observed_codex_terminal_task(mount_state, &snapshot) {
-                changed = true;
-            }
 
             let (tasks, agents) = (&mut mount_state.tasks, &mut mount_state.agents);
             for task in tasks
@@ -1297,7 +1412,8 @@ impl AiManager {
             for event in visibility_events {
                 Self::push_visibility_event(mount_state, event);
             }
-            for (agent_id, action, excerpt, files_touched, blocked_reason) in agent_activity_updates {
+            for (agent_id, action, excerpt, files_touched, blocked_reason) in agent_activity_updates
+            {
                 if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
                     let now = now_seconds();
                     agent.current_action = Some(action);
@@ -1384,7 +1500,6 @@ impl AiManager {
                     agent.updated_at = now_seconds();
                 }
             }
-
         }
 
         for (task_id, signature, reason) in queue {
@@ -1462,18 +1577,27 @@ impl AiManager {
                             if let Some(ref matched_name) = response_json.matched_workflow {
                                 let mut found_workflow = None;
                                 if let Some(mount_state) = self.mounts.get(&mount) {
-                                    if let Some(wf) = mount_state.workflows.iter().find(|w| workflow_command_matches(&w.name, matched_name)) {
+                                    if let Some(wf) = mount_state
+                                        .workflows
+                                        .iter()
+                                        .find(|w| workflow_command_matches(&w.name, matched_name))
+                                    {
                                         found_workflow = Some(wf.clone());
                                     }
                                 }
 
                                 if let Some(wf) = found_workflow {
-                                    let first_step_name = wf.steps.first().map(|s| s.name.clone()).unwrap_or_default();
+                                    let first_step_name = wf
+                                        .steps
+                                        .first()
+                                        .map(|s| s.name.clone())
+                                        .unwrap_or_default();
                                     let mut steps = Vec::with_capacity(wf.steps.len());
                                     for (index, step) in wf.steps.iter().enumerate() {
                                         steps.push(WorkflowStepState {
                                             name: step.name.clone(),
-                                            status: if index == 0 { "active" } else { "pending" }.to_string(),
+                                            status: if index == 0 { "active" } else { "pending" }
+                                                .to_string(),
                                         });
                                     }
 
@@ -1629,14 +1753,32 @@ impl AiManager {
         } else {
             None
         };
+        let mut completion_event = None;
+        let mut file_touch_events = Vec::new();
         if let Some(agent) = self
             .mounts
             .get_mut(mount)
             .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
         {
+            let now = now_seconds();
             agent.pending_tool_batch = false;
             let pending_tool_message_start = agent.pending_tool_message_start.take();
             for result in &results {
+                if let Some(file_touch) = native_file_touch_from_tool_result(&agent.history, result)
+                {
+                    if !agent
+                        .files_touched
+                        .iter()
+                        .any(|path| path == &file_touch.path)
+                    {
+                        agent.files_touched.push(file_touch.path.clone());
+                    }
+                    file_touch_events.push((
+                        agent.title.clone(),
+                        file_touch.path,
+                        file_touch.tool_name,
+                    ));
+                }
                 agent.history.push(ConversationItem::ToolResult {
                     tool_call_id: result.tool_call_id.clone(),
                     content: result.content.clone(),
@@ -1660,13 +1802,45 @@ impl AiManager {
                 }
                 upsert_terminal_waiting_message(&mut agent.messages, waiting_message);
             }
-            agent.updated_at = now_seconds();
+            agent.updated_at = now;
             if agent.cancel_requested {
                 agent.cancel_requested = false;
                 agent.status = "cancelled".to_string();
+                agent.current_action = Some("Tool execution cancelled".to_string());
+                agent.state_changed_at = now;
             } else {
                 agent.status = "thinking...".to_string();
+                let action = tool_results_action_summary(&results);
+                agent.current_action = Some(action.clone());
+                agent.state_changed_at = now;
+                completion_event = Some((agent.title.clone(), action));
                 continue_loop = true;
+            }
+        }
+        if let Some((title, action)) = completion_event {
+            if let Some(mount_state) = self.mounts.get_mut(mount) {
+                Self::push_visibility_event(
+                    mount_state,
+                    Self::visibility_event(
+                        "native_tools_finished",
+                        Some(agent_id),
+                        &title,
+                        &action,
+                    ),
+                );
+            }
+        }
+        for (title, path, tool_name) in file_touch_events {
+            if let Some(mount_state) = self.mounts.get_mut(mount) {
+                Self::push_visibility_event(
+                    mount_state,
+                    Self::visibility_event(
+                        "file_touched",
+                        Some(agent_id),
+                        &path,
+                        &format!("Native `{}` completed for {}", tool_name, title),
+                    ),
+                );
             }
         }
         for result in &results {
@@ -1888,7 +2062,10 @@ impl AiManager {
             } else {
                 "responding...".to_string()
             };
-            agent.updated_at = now_seconds();
+            agent.current_action = Some(stream_current_action(&thinking_text, &assistant_text));
+            let now = now_seconds();
+            agent.state_changed_at = now;
+            agent.updated_at = now;
         }
 
         let done = self
@@ -1953,7 +2130,6 @@ impl AiManager {
         }
 
         if spawn_subagent_call.is_some() || complete_task_call.is_some() {
-            let event_tx = self.event_tx.clone();
             if let Some(mount_state) = self.mounts.get_mut(mount) {
                 let (parent_id, backend_id) = {
                     if let Some(agent) = mount_state.agents.get(&agent_id) {
@@ -2054,6 +2230,9 @@ impl AiManager {
                         });
                         agent.subagents.push(sub_id);
                         agent.status = format!("waiting for subagent: {}...", args.role);
+                        agent.current_action = Some(format!("Delegated to {} subagent", args.role));
+                        agent.state_changed_at = now_seconds();
+                        agent.updated_at = now_seconds();
                     }
 
                     if let Some(call) = &complete_task_call {
@@ -2138,7 +2317,7 @@ impl AiManager {
                         role: Some(args.role),
                         task: Some(args.task),
                         subagents: Vec::new(),
-                        current_action: None,
+                        current_action: Some("Starting native subagent".to_string()),
                         last_terminal_excerpt: None,
                         files_touched: Vec::new(),
                         active_terminal_path: None,
@@ -2181,6 +2360,30 @@ impl AiManager {
                             .get(&agent_id)
                             .map(|agent| agent.title.clone())
                             .unwrap_or_else(|| "Subagent".to_string());
+                        if let Some(completed_agent) = mount_state.agents.get_mut(&agent_id) {
+                            let now = now_seconds();
+                            completed_agent.pending_request_id = None;
+                            completed_agent.pending_tool_batch = false;
+                            completed_agent.pending_tool_message_start = None;
+                            completed_agent.cancel_requested = false;
+                            completed_agent.status = if args.success {
+                                "completed".to_string()
+                            } else {
+                                "error".to_string()
+                            };
+                            completed_agent.current_action = Some(format!(
+                                "{}: {}",
+                                if args.success { "Completed" } else { "Failed" },
+                                truncate_inline(&args.summary, 120)
+                            ));
+                            completed_agent.blocked_reason = if args.success {
+                                None
+                            } else {
+                                Some("Subagent reported task failure".to_string())
+                            };
+                            completed_agent.state_changed_at = now;
+                            completed_agent.updated_at = now;
+                        }
                         if let Some(parent) = mount_state.agents.get_mut(&parent_id) {
                             let mut parent_tool_call_id = String::new();
                             if let Some(ConversationItem::Assistant { tool_calls, .. }) =
@@ -2220,7 +2423,6 @@ impl AiManager {
                                 role: AiMessageRole::Thinking,
                                 text: String::new(),
                             });
-                            parent.subagents.retain(|id| *id != agent_id);
                             Self::push_visibility_event(
                                 mount_state,
                                 Self::visibility_event(
@@ -2233,14 +2435,6 @@ impl AiManager {
                                         truncate_inline(&args.summary, 120)
                                     ),
                                 ),
-                            );
-                            mount_state.order.retain(|id| *id != agent_id);
-                            mount_state.agents.remove(&agent_id);
-                            remove_agent_file_for_root_best_effort(
-                                &event_tx,
-                                mount,
-                                &mount_state.root_path,
-                                agent_id,
                             );
 
                             self.persist_mount_state_best_effort(mount);
@@ -2378,6 +2572,19 @@ impl AiManager {
                     } else {
                         format!("running {} tool calls...", turn.tool_calls.len())
                     };
+                    let action = tool_calls_action_summary(&turn.tool_calls);
+                    agent.current_action = Some(action.clone());
+                    agent.state_changed_at = now_seconds();
+                    let title = agent.title.clone();
+                    Self::push_visibility_event(
+                        mount_state,
+                        Self::visibility_event(
+                            "native_tools_started",
+                            Some(agent_id),
+                            &title,
+                            &action,
+                        ),
+                    );
                     tool_batch = Some((
                         PathBuf::from(mount_state.root_path.clone()),
                         turn.tool_calls,
@@ -2861,58 +3068,6 @@ impl AiManager {
         true
     }
 
-    fn ensure_observed_codex_terminal_task(
-        mount_state: &mut MountAgents,
-        snapshot: &AiTerminalSnapshot,
-    ) -> bool {
-        if !snapshot.is_codex {
-            return false;
-        }
-        if !should_track_observed_terminal_mode(snapshot.mode) {
-            return false;
-        }
-        if mount_state
-            .tasks
-            .iter()
-            .any(|task| task.terminal_path.as_deref() == Some(snapshot.path.as_str()))
-        {
-            return false;
-        }
-        let Some(agent_id) = mount_state.active_agent_id else {
-            return false;
-        };
-        let task_id = mount_state.next_task_id.max(1);
-        mount_state.next_task_id = task_id.saturating_add(1);
-        mount_state.tasks.push(AiTrackedTask {
-            id: task_id,
-            agent_id,
-            goal: format!(
-                "Observe Codex terminal `{}`",
-                terminal_display_name(&snapshot.path)
-            ),
-            terminal_path: Some(snapshot.path.clone()),
-            expected_paths: Vec::new(),
-            touched_paths: Vec::new(),
-            status: if snapshot.mode == "needs-attention" {
-                "needs-attention".to_string()
-            } else if snapshot.mode == "done" || snapshot.mode == "exited" {
-                "done".to_string()
-            } else {
-                "observing".to_string()
-            },
-            last_terminal_mode: snapshot.mode.to_string(),
-            last_terminal_summary: snapshot.summary.clone(),
-            last_terminal_excerpt: Self::truncate_terminal_excerpt(
-                &snapshot.visible_text,
-                AI_TERMINAL_EXCERPT_MAX_CHARS,
-                AI_TERMINAL_EXCERPT_MAX_LINES,
-            ),
-            last_codex_status: snapshot.codex_status.clone(),
-            handled_followup_signatures: Vec::new(),
-        });
-        true
-    }
-
     fn queue_ai_task_followup(
         &mut self,
         mount: &str,
@@ -3096,7 +3251,12 @@ impl AiManager {
         }
         Self::push_visibility_event(
             mount_state,
-            Self::visibility_event("step_activated", Some(agent_id), &step_name, "Workflow step active"),
+            Self::visibility_event(
+                "step_activated",
+                Some(agent_id),
+                &step_name,
+                "Workflow step active",
+            ),
         );
     }
 
@@ -4039,7 +4199,9 @@ impl AiManager {
             }
             catalog.push_str(&format!(
                 "- ID: \"{}\" (Title: \"{}\", Steps: {})\n",
-                slug, wf.name, steps_list.join(" ➔ ")
+                slug,
+                wf.name,
+                steps_list.join(" ➔ ")
             ));
         }
         format!(
@@ -4424,6 +4586,10 @@ fn subagent_kickoff_prompt(role: &str, task: &str) -> String {
     )
 }
 
+fn native_delegation_prompt(role: &str, task: &str) -> String {
+    format!("Native {} subagent\n\n{}", role.trim(), task.trim())
+}
+
 fn chatgpt_model_from_str(model: &str) -> ChatGptModel {
     match model.trim() {
         "gpt-5.4-mini" => ChatGptModel::Gpt54Mini,
@@ -4567,7 +4733,7 @@ fn chatgpt_tools() -> Vec<ChatGptTool> {
         ChatGptTool {
             name: "open_terminal".to_string(),
             description:
-                "Open a Studio terminal for this workspace and optionally run an initial command such as codex."
+                "Open a Studio terminal for this workspace and optionally run an initial non-agent command. Do not use this to spawn coding agents; use spawn_subagent for delegated programming work."
                     .to_string(),
             parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"Optional terminal tab name stem"},"command":{"type":"string","description":"Optional command to send after the terminal opens"},"cols":{"type":"integer","description":"Optional terminal column count"},"rows":{"type":"integer","description":"Optional terminal row count"}}}"#.to_string(),
         },
@@ -4586,9 +4752,9 @@ fn chatgpt_tools() -> Vec<ChatGptTool> {
         ChatGptTool {
             name: "send_terminal_text".to_string(),
             description:
-                "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately, especially for codex prompts."
+                "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately. Do not use terminal text to drive coding agents; use spawn_subagent for delegated programming work."
                     .to_string(),
-            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands and codex prompts that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#.to_string(),
+            parameters_json: r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#.to_string(),
         },
         ChatGptTool {
             name: "send_terminal_key".to_string(),
@@ -4609,7 +4775,7 @@ fn chatgpt_tools() -> Vec<ChatGptTool> {
             description:
                 "Spawn a specialized subagent to perform a scoped task (e.g. planner, coder, critic, explorer). The parent will wait until the subagent completes."
                     .to_string(),
-            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"},"model_override":{"type":"string","description":"Optional model name override, e.g. gpt-4o-mini"}},"required":["role","task"]}"#.to_string(),
+            parameters_json: r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"}},"required":["role","task"]}"#.to_string(),
         },
         ChatGptTool {
             name: "complete_task".to_string(),
@@ -4886,7 +5052,11 @@ fn same_visible_text(left: &str, right: &str) -> bool {
 }
 
 fn is_closed_subagent(agent: &RunningAgent) -> bool {
-    agent.parent_agent_id.is_some() && matches!(agent.status.as_str(), "completed" | "done")
+    agent.parent_agent_id.is_some()
+        && matches!(agent.status.as_str(), "completed" | "done")
+        && agent.current_action.is_none()
+        && agent.messages.is_empty()
+        && agent.history.is_empty()
 }
 
 fn agent_title_for_event(mount_state: &MountAgents, agent_id: AiAgentId) -> String {
@@ -4899,10 +5069,6 @@ fn agent_title_for_event(mount_state: &MountAgents, agent_id: AiAgentId) -> Stri
 
 fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
     text.trim().is_empty() && tool_calls.is_empty()
-}
-
-fn should_track_observed_terminal_mode(mode: &str) -> bool {
-    matches!(mode, "working" | "awaiting-input" | "needs-attention" | "done")
 }
 
 fn should_show_live_task(task: &AiTrackedTask) -> bool {
@@ -5025,7 +5191,7 @@ fn append_tool_definitions(out: &mut String) {
         out,
         &mut first,
         "open_terminal",
-        "Open a Studio terminal for this workspace and optionally run an initial command such as codex.",
+        "Open a Studio terminal for this workspace and optionally run an initial non-agent command. Do not use this to spawn coding agents; use spawn_subagent for delegated programming work.",
         r#"{"type":"object","properties":{"name":{"type":"string","description":"Optional terminal tab name stem"},"command":{"type":"string","description":"Optional command to send after the terminal opens"},"cols":{"type":"integer","description":"Optional terminal column count"},"rows":{"type":"integer","description":"Optional terminal row count"}}}"#,
     );
     append_tool_definition(
@@ -5046,8 +5212,8 @@ fn append_tool_definitions(out: &mut String) {
         out,
         &mut first,
         "send_terminal_text",
-        "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately, especially for codex prompts.",
-        r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands and codex prompts that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#,
+        "Send text to an open Studio terminal, optionally submitting it with Enter. Use submit=true when the text should run immediately. Do not use terminal text to drive coding agents; use spawn_subagent for delegated programming work.",
+        r#"{"type":"object","properties":{"path":{"type":"string","description":"Exact terminal path returned by open_terminal or list_terminals"},"text":{"type":"string","description":"Text to send to the terminal"},"submit":{"type":"boolean","description":"When true, press Enter after the text. Use this for commands that should execute immediately"},"bracketed_paste":{"type":"boolean","description":"Override bracketed paste wrapping for multiline text"}},"required":["path","text"]}"#,
     );
     append_tool_definition(
         out,
@@ -5068,7 +5234,7 @@ fn append_tool_definitions(out: &mut String) {
         &mut first,
         "spawn_subagent",
         "Spawn a specialized subagent to perform a scoped task (e.g. planner, coder, critic, explorer). The parent will wait until the subagent completes.",
-        r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"},"model_override":{"type":"string","description":"Optional model name override, e.g. gpt-4o-mini"}},"required":["role","task"]}"#,
+        r#"{"type":"object","properties":{"role":{"type":"string","description":"The subagent role name, e.g. planner, coder, critic, explorer"},"task":{"type":"string","description":"Concretely describe the subtask/goal for the subagent"}},"required":["role","task"]}"#,
     );
     append_tool_definition(
         out,
@@ -5259,6 +5425,20 @@ fn upsert_stream_message(
     Some(messages.len() - 1)
 }
 
+fn stream_current_action(thinking_text: &str, assistant_text: &str) -> String {
+    if let Some(line) = first_non_empty_line(assistant_text) {
+        format!("Responding: {}", truncate_inline(line, 96))
+    } else if let Some(line) = first_non_empty_line(thinking_text) {
+        format!("Thinking: {}", truncate_inline(line, 96))
+    } else {
+        "Thinking".to_string()
+    }
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
 fn finalize_stream_turn(
     stream: StreamingTurnState,
 ) -> Result<(AssistantTurn, StreamVisibleState), String> {
@@ -5388,6 +5568,9 @@ fn tool_open_terminal(
     event_tx: &Sender<HubEvent>,
     args: OpenTerminalArgs,
 ) -> Result<String, String> {
+    if let Some(command) = args.command.as_deref() {
+        reject_terminal_coding_agent_launch(command)?;
+    }
     request_hub_tool(
         event_tx,
         |reply_tx| HubEvent::AiOpenTerminalRequest {
@@ -5520,6 +5703,7 @@ fn tool_send_terminal_text(
     event_tx: &Sender<HubEvent>,
     args: SendTerminalTextArgs,
 ) -> Result<String, String> {
+    reject_terminal_coding_agent_launch(&args.text)?;
     request_hub_tool(
         event_tx,
         |reply_tx| HubEvent::AiSendTerminalTextRequest {
@@ -5553,6 +5737,38 @@ fn tool_send_terminal_key(
         },
         "failed to request terminal key input from hub",
         "timed out waiting for hub to send terminal key",
+    )
+}
+
+fn reject_terminal_coding_agent_launch(text: &str) -> Result<(), String> {
+    if terminal_text_starts_coding_agent(text) {
+        Err(
+            "refusing to start a terminal-hosted coding agent; use spawn_subagent for delegated programming work"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn terminal_text_starts_coding_agent(text: &str) -> bool {
+    let lowered = text.trim_start().to_ascii_lowercase();
+    let first_command = lowered.split(['\n', ';']).next().unwrap_or("").trim_start();
+    let first_command = first_command
+        .strip_prefix("exec ")
+        .unwrap_or(first_command)
+        .trim_start();
+    let first_command = first_command.strip_prefix("env ").unwrap_or(first_command);
+    let command = first_command
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches('"')
+        .trim_matches('\'');
+    let command = command.rsplit('/').next().unwrap_or(command);
+    matches!(
+        command,
+        "codex" | "claude" | "aider" | "opencode" | "cursor-agent" | "goose" | "gemini" | "qwen"
     )
 }
 
@@ -6042,6 +6258,135 @@ fn format_tool_result_message(result: &AiToolExecutionResult) -> String {
     )
 }
 
+fn tool_calls_action_summary(tool_calls: &[ToolCallRecord]) -> String {
+    if tool_calls.len() == 1 {
+        return format!("Running {}", tool_call_activity_label(&tool_calls[0]));
+    }
+    let names = tool_calls
+        .iter()
+        .take(4)
+        .map(tool_call_activity_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = tool_calls.len().saturating_sub(4);
+    if remaining == 0 {
+        format!("Running {} tools: {}", tool_calls.len(), names)
+    } else {
+        format!(
+            "Running {} tools: {}, +{} more",
+            tool_calls.len(),
+            names,
+            remaining
+        )
+    }
+}
+
+fn tool_call_activity_label(tool_call: &ToolCallRecord) -> String {
+    let args = tool_call.arguments_json.as_str();
+    match tool_call.name.as_str() {
+        "read_file" | "write_file" | "replace_in_file" | "open_editor" => {
+            if let Some(path) = parse_json_string_field(args, "path") {
+                return format!("`{}` on `{}`", tool_call.name, truncate_inline(&path, 80));
+            }
+        }
+        "list_files" | "observe_filesystem" => {
+            let path = parse_json_string_field(args, "path").unwrap_or_else(|| ".".to_string());
+            return format!("`{}` in `{}`", tool_call.name, truncate_inline(&path, 80));
+        }
+        "search_text" => {
+            if let Some(pattern) = parse_json_string_field(args, "pattern") {
+                let path = parse_json_string_field(args, "path").unwrap_or_else(|| ".".to_string());
+                return format!(
+                    "`search_text` for `{}` in `{}`",
+                    truncate_inline(&pattern, 48),
+                    truncate_inline(&path, 80)
+                );
+            }
+        }
+        "bash" => {
+            if let Some(command) = parse_json_string_field(args, "command") {
+                return format!("`bash` `{}`", truncate_inline(&command, 96));
+            }
+        }
+        "read_terminal" | "send_terminal_text" | "send_terminal_key" => {
+            if let Some(path) = parse_json_string_field(args, "path") {
+                return format!("`{}` for `{}`", tool_call.name, truncate_inline(&path, 80));
+            }
+        }
+        "open_terminal" => {
+            if let Some(command) = parse_json_string_field(args, "command") {
+                return format!("`open_terminal` `{}`", truncate_inline(&command, 96));
+            }
+            if let Some(name) = parse_json_string_field(args, "name") {
+                return format!("`open_terminal` `{}`", truncate_inline(&name, 80));
+            }
+        }
+        "spawn_subagent" => {
+            let role =
+                parse_json_string_field(args, "role").unwrap_or_else(|| "subagent".to_string());
+            if let Some(task) = parse_json_string_field(args, "task") {
+                return format!(
+                    "`spawn_subagent` {}: {}",
+                    truncate_inline(&role, 32),
+                    truncate_inline(&task, 96)
+                );
+            }
+            return format!("`spawn_subagent` {}", truncate_inline(&role, 32));
+        }
+        _ => {}
+    }
+    format!("`{}`", tool_call.name)
+}
+
+fn tool_results_action_summary(results: &[AiToolExecutionResult]) -> String {
+    if results.len() == 1 {
+        let result = &results[0];
+        return if result.is_error {
+            format!("`{}` failed", result.tool_name)
+        } else {
+            format!("`{}` completed", result.tool_name)
+        };
+    }
+    let failed = results.iter().filter(|result| result.is_error).count();
+    if failed == 0 {
+        format!("Completed {} tools", results.len())
+    } else {
+        format!("Completed {} tools, {} failed", results.len(), failed)
+    }
+}
+
+struct NativeFileTouch {
+    path: String,
+    tool_name: String,
+}
+
+fn native_file_touch_from_tool_result(
+    history: &[ConversationItem],
+    result: &AiToolExecutionResult,
+) -> Option<NativeFileTouch> {
+    if result.is_error {
+        return None;
+    }
+    if result.tool_name != "write_file" && result.tool_name != "replace_in_file" {
+        return None;
+    }
+    let tool_call = history.iter().rev().find_map(|item| {
+        let ConversationItem::Assistant { tool_calls, .. } = item else {
+            return None;
+        };
+        tool_calls
+            .iter()
+            .find(|tool_call| tool_call.id == result.tool_call_id)
+    })?;
+    if tool_call.name != result.tool_name {
+        return None;
+    }
+    parse_json_string_field(&tool_call.arguments_json, "path").map(|path| NativeFileTouch {
+        path,
+        tool_name: tool_call.name.clone(),
+    })
+}
+
 fn format_terminal_waiting_message(result: &AiToolExecutionResult) -> Option<String> {
     if result.is_error || result.tool_name != "read_terminal" {
         return None;
@@ -6232,6 +6577,30 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 fn json_string(value: &str) -> String {
     value.to_string().serialize_json()
+}
+
+fn parse_direct_subagent_command(prompt: &str) -> Option<(String, String)> {
+    let trimmed = prompt.trim();
+    let rest = trimmed
+        .strip_prefix("/subagent")
+        .or_else(|| trimmed.strip_prefix("/agent"))?
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (role, task) = if let Some((role, task)) = rest.split_once(':') {
+        (role.trim(), task.trim())
+    } else {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        (parts.next()?.trim(), parts.next().unwrap_or("").trim())
+    };
+
+    if role.is_empty() || task.is_empty() {
+        return None;
+    }
+
+    Some((role.to_string(), task.to_string()))
 }
 
 fn summarize_title(prompt: &str) -> String {
@@ -6763,7 +7132,7 @@ Some intro text...
             .expect("terminal input should change state");
 
         assert!(state.live_markdown.contains("[input / codex]"));
-        assert!(state.live_markdown.contains("Input sent to Codex"));
+        assert!(state.live_markdown.contains("Input sent to terminal"));
     }
     #[test]
     fn terminal_input_clears_blocked_visibility_for_owning_agent() {
@@ -6803,10 +7172,12 @@ Some intro text...
             .expect("terminal input should update agent visibility");
         let active = state.active_agent.as_ref().unwrap();
 
-        assert_eq!(active.current_action.as_deref(), Some("Input sent to Codex"));
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("Input sent to terminal")
+        );
         assert!(active.blocked_reason.is_none());
     }
-
 
     #[test]
     fn terminal_observation_updates_hub_live_markdown() {
@@ -6837,7 +7208,7 @@ Some intro text...
     }
 
     #[test]
-    fn terminal_observation_autotracks_direct_codex_activity() {
+    fn terminal_observation_does_not_autotrack_direct_codex_activity() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
         let state = manager
@@ -6854,36 +7225,28 @@ Some intro text...
                     text: "• Working (2s • esc to interrupt)\n\n  gpt-5.5 xhigh fast · ~/makepad/makepad".to_string(),
                 },
             )
-            .expect("codex terminal observation should change state");
+            .expect("codex terminal observation should update snapshot");
 
         let mount_state = manager.mounts.get("repo").unwrap();
-        assert_eq!(mount_state.tasks.len(), 1);
-        assert_eq!(
-            mount_state.tasks[0].terminal_path.as_deref(),
-            Some("repo/.makepad/manual-codex.term")
-        );
-        assert!(mount_state.tasks[0]
-            .goal
-            .contains("Observe Codex terminal `manual-codex.term`"));
-        assert!(state.live_markdown.contains("Monitor `manual-codex.term`"));
+        assert!(mount_state.tasks.is_empty());
+        assert!(mount_state
+            .terminal_snapshots
+            .contains_key("repo/.makepad/manual-codex.term"));
+        assert!(state.live_markdown.contains("_No open AI todos._"));
         assert!(state.live_markdown.contains("[working / codex]"));
         let agent = mount_state
             .agents
             .get(&mount_state.active_agent_id.unwrap())
             .unwrap();
-        assert!(agent.messages.iter().any(|message| {
+        assert!(!agent.messages.iter().any(|message| {
             matches!(message.role, AiMessageRole::System)
                 && message.text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
-                && message.text.contains("repo/.makepad/manual-codex.term")
-                && message.text.contains("Working (2s")
         }));
-        assert!(agent.history.iter().any(|item| {
+        assert!(!agent.history.iter().any(|item| {
             matches!(
                 item,
                 ConversationItem::User { text }
                     if text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
-                        && text.contains("repo/.makepad/manual-codex.term")
-                        && text.contains("Working (2s")
             )
         }));
 
@@ -6903,6 +7266,7 @@ Some intro text...
             )
             .expect("updated codex terminal observation should change state");
         let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.tasks.is_empty());
         let agent = mount_state
             .agents
             .get(&mount_state.active_agent_id.unwrap())
@@ -6915,8 +7279,7 @@ Some intro text...
                     && message.text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX)
             })
             .collect::<Vec<_>>();
-        assert_eq!(visible_observations.len(), 1);
-        assert!(visible_observations[0].text.contains("Working (3s"));
+        assert!(visible_observations.is_empty());
         let history_observations = agent
             .history
             .iter()
@@ -6928,7 +7291,7 @@ Some intro text...
                 )
             })
             .count();
-        assert_eq!(history_observations, 1);
+        assert_eq!(history_observations, 0);
     }
 
     #[test]
@@ -6967,6 +7330,29 @@ Some intro text...
     fn awaiting_input_terminal_queues_orchestrator_reply() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.tasks.push(AiTrackedTask {
+                id: 1,
+                agent_id,
+                goal: "Track explicit terminal task".to_string(),
+                terminal_path: Some("repo/.makepad/codex-plan.term".to_string()),
+                expected_paths: Vec::new(),
+                touched_paths: Vec::new(),
+                status: "watching".to_string(),
+                last_terminal_mode: "starting".to_string(),
+                last_terminal_summary: "starting".to_string(),
+                last_terminal_excerpt: String::new(),
+                last_codex_status: None,
+                handled_followup_signatures: Vec::new(),
+            });
+        }
         manager
             .process_terminal_observation(
                 "repo",
@@ -7017,6 +7403,29 @@ Some intro text...
         let mut manager = AiManager::new(event_tx);
         let path = "repo/.makepad/codex-plan.term";
         let awaiting_text = "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n";
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.tasks.push(AiTrackedTask {
+                id: 1,
+                agent_id,
+                goal: "Track explicit terminal task".to_string(),
+                terminal_path: Some(path.to_string()),
+                expected_paths: Vec::new(),
+                touched_paths: Vec::new(),
+                status: "watching".to_string(),
+                last_terminal_mode: "starting".to_string(),
+                last_terminal_summary: "starting".to_string(),
+                last_terminal_excerpt: String::new(),
+                last_codex_status: None,
+                handled_followup_signatures: Vec::new(),
+            });
+        }
 
         manager
             .process_terminal_observation(
@@ -7369,6 +7778,14 @@ Some intro text...
         let parent = mount_state.agents.get(&agent_id).unwrap();
         let sub_id = parent.subagents[0];
         let sub_agent = mount_state.agents.get(&sub_id).unwrap();
+        assert_eq!(
+            parent.current_action.as_deref(),
+            Some("Delegated to planner subagent")
+        );
+        assert_eq!(
+            sub_agent.current_action.as_deref(),
+            Some("Starting native subagent")
+        );
         let ConversationItem::User { text } = &sub_agent.history[0] else {
             panic!("subagent should start with a user kickoff message");
         };
@@ -7388,7 +7805,441 @@ Some intro text...
     }
 
     #[test]
-    fn completed_subagent_closes_after_returning_result_to_parent() {
+    fn parse_direct_subagent_command_accepts_agent_and_colon_forms() {
+        assert_eq!(
+            parse_direct_subagent_command("/subagent coder implement native runs"),
+            Some(("coder".to_string(), "implement native runs".to_string()))
+        );
+        assert_eq!(
+            parse_direct_subagent_command("/agent reviewer: inspect the hub diff"),
+            Some(("reviewer".to_string(), "inspect the hub diff".to_string()))
+        );
+        assert_eq!(parse_direct_subagent_command("/subagent coder"), None);
+        assert_eq!(
+            parse_direct_subagent_command("subagent coder do work"),
+            None
+        );
+    }
+
+    #[test]
+    fn direct_subagent_command_spawns_native_child_agent_for_compatibility() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let parent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        let state = manager.send_prompt(
+            "repo",
+            parent_id,
+            "/subagent coder Update the agent panel visibility",
+        );
+
+        let parent = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.agents.get(&parent_id))
+            .unwrap();
+        let sub_id = parent.subagents[0];
+        let sub_agent = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.agents.get(&sub_id))
+            .unwrap();
+
+        assert_eq!(state.active_agent_id, Some(sub_id));
+        assert_eq!(sub_agent.parent_agent_id, Some(parent_id));
+        assert_eq!(sub_agent.role.as_deref(), Some("coder"));
+        assert_eq!(
+            sub_agent.task.as_deref(),
+            Some("Update the agent panel visibility")
+        );
+        assert!(sub_agent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::User)
+                && message.text.contains("You are the `coder` subagent.")
+        }));
+        assert!(parent.messages.iter().any(|message| {
+            matches!(message.role, AiMessageRole::ToolCall)
+                && message.text.contains("`spawn_subagent`")
+        }));
+        assert!(manager
+            .mounts
+            .get("repo")
+            .unwrap()
+            .visibility_events
+            .iter()
+            .any(|event| event.kind == "subagent_spawned" && event.agent_id == Some(sub_id)));
+    }
+
+    #[test]
+    fn spawn_subagent_api_uses_native_parent_prompt() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let parent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        let state = manager.spawn_subagent(
+            "repo",
+            parent_id,
+            "coder",
+            "Update the native activity board",
+        );
+
+        let parent = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.agents.get(&parent_id))
+            .unwrap();
+        let sub_id = parent.subagents[0];
+        let sub_agent = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.agents.get(&sub_id))
+            .unwrap();
+
+        assert_eq!(state.active_agent_id, Some(sub_id));
+        assert_eq!(sub_agent.role.as_deref(), Some("coder"));
+        assert_eq!(
+            sub_agent.task.as_deref(),
+            Some("Update the native activity board")
+        );
+        let ConversationItem::User { text } = &parent.history[0] else {
+            panic!("parent should record a native delegation user prompt");
+        };
+        assert!(text.contains("Native coder subagent"));
+        assert!(text.contains("Update the native activity board"));
+        assert!(!text.contains("/subagent"));
+    }
+
+    #[test]
+    fn native_tool_results_update_agent_current_action() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+            agent.pending_tool_batch = true;
+        }
+
+        let state = manager
+            .handle_tool_execution_done(
+                "repo",
+                agent_id,
+                run_token,
+                vec![AiToolExecutionResult {
+                    tool_call_id: "call_read".to_string(),
+                    tool_name: "read_file".to_string(),
+                    content: "file contents".to_string(),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        let active = state.active_agent.as_ref().unwrap();
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("`read_file` completed")
+        );
+        assert!(active
+            .messages
+            .iter()
+            .any(|message| message.text.contains("`read_file` result")));
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "native_tools_finished"
+                && event.agent_id == Some(agent_id)
+                && event.detail == "`read_file` completed"
+        }));
+    }
+
+    #[test]
+    fn streaming_response_updates_agent_current_action() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        let request_id = LiveId(77);
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+            agent.pending_request_id = Some(request_id);
+        }
+        manager.inflight.insert(
+            request_id,
+            InFlightRequest {
+                mount: "repo".to_string(),
+                agent_id,
+                run_token,
+                provider_kind: AiProviderKind::OpenAiCompatible,
+                stream: StreamingTurnState::default(),
+            },
+        );
+
+        manager
+            .process_stream_data(
+                request_id,
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspecting the native task board.\"}}]}\n\n",
+                false,
+            )
+            .unwrap();
+        let state = manager.snapshot("repo");
+        let active = state.active_agent.as_ref().unwrap();
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("Thinking: Inspecting the native task board.")
+        );
+        assert_eq!(active.status, "thinking...");
+
+        manager
+            .process_stream_data(
+                request_id,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"I updated the agent timeline.\"}}]}\n\n",
+                false,
+            )
+            .unwrap();
+        let state = manager.snapshot("repo");
+        let active = state.active_agent.as_ref().unwrap();
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("Responding: I updated the agent timeline.")
+        );
+        assert_eq!(active.status, "responding...");
+    }
+
+    #[test]
+    fn native_file_tool_result_updates_agent_touched_files() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+            agent.pending_tool_batch = true;
+            agent.history.push(ConversationItem::Assistant {
+                text: "I will update the file.".to_string(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_write".to_string(),
+                    name: "write_file".to_string(),
+                    arguments_json: r#"{"path":"studio/hub/src/ai_manager.rs","content":"updated"}"#
+                        .to_string(),
+                }],
+            });
+        }
+
+        let state = manager
+            .handle_tool_execution_done(
+                "repo",
+                agent_id,
+                run_token,
+                vec![AiToolExecutionResult {
+                    tool_call_id: "call_write".to_string(),
+                    tool_name: "write_file".to_string(),
+                    content: "Wrote 7 bytes to studio/hub/src/ai_manager.rs.".to_string(),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        let active = state.active_agent.as_ref().unwrap();
+        assert_eq!(
+            active.files_touched,
+            vec!["studio/hub/src/ai_manager.rs".to_string()]
+        );
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "file_touched"
+                && event.agent_id == Some(agent_id)
+                && event.title == "studio/hub/src/ai_manager.rs"
+                && event.detail.contains("Native `write_file` completed")
+        }));
+    }
+
+    #[test]
+    fn failed_native_file_tool_result_does_not_mark_file_touched() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+            agent.pending_tool_batch = true;
+            agent.history.push(ConversationItem::Assistant {
+                text: "I will update the file.".to_string(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_replace".to_string(),
+                    name: "replace_in_file".to_string(),
+                    arguments_json: r#"{"path":"studio/hub/src/ai_manager.rs","old":"a","new":"b"}"#
+                        .to_string(),
+                }],
+            });
+        }
+
+        let state = manager
+            .handle_tool_execution_done(
+                "repo",
+                agent_id,
+                run_token,
+                vec![AiToolExecutionResult {
+                    tool_call_id: "call_replace".to_string(),
+                    tool_name: "replace_in_file".to_string(),
+                    content: "old text not found".to_string(),
+                    is_error: true,
+                }],
+            )
+            .unwrap();
+
+        let active = state.active_agent.as_ref().unwrap();
+        assert!(active.files_touched.is_empty());
+        assert!(!state
+            .visibility_events
+            .iter()
+            .any(|event| event.kind == "file_touched"));
+    }
+
+    #[test]
+    fn native_tool_calls_emit_visibility_event() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let run_token = 42;
+        {
+            let agent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
+                .unwrap();
+            agent.run_token = run_token;
+        }
+
+        let state = manager
+            .complete_assistant_turn(
+                "repo",
+                agent_id,
+                run_token,
+                AssistantTurn {
+                    text: "I will inspect the file.".to_string(),
+                    thinking_text: String::new(),
+                    tool_calls: vec![ToolCallRecord {
+                        id: "call_read".to_string(),
+                        name: "read_file".to_string(),
+                        arguments_json: r#"{"path":"studio/hub/src/ai_manager.rs"}"#.to_string(),
+                    }],
+                    raw_event_sample: String::new(),
+                },
+                None,
+            )
+            .unwrap();
+
+        let active = state.active_agent.as_ref().unwrap();
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("Running `read_file` on `studio/hub/src/ai_manager.rs`")
+        );
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "native_tools_started"
+                && event.agent_id == Some(agent_id)
+                && event.detail == "Running `read_file` on `studio/hub/src/ai_manager.rs`"
+        }));
+    }
+
+    #[test]
+    fn native_tool_action_summaries_are_compact() {
+        let tool_calls = vec![
+            ToolCallRecord {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments_json: r#"{"path":"Cargo.toml"}"#.to_string(),
+            },
+            ToolCallRecord {
+                id: "call_2".to_string(),
+                name: "search_text".to_string(),
+                arguments_json: r#"{"pattern":"spawn_subagent","path":"studio"}"#.to_string(),
+            },
+        ];
+        assert_eq!(
+            tool_calls_action_summary(&tool_calls),
+            "Running 2 tools: `read_file` on `Cargo.toml`, `search_text` for `spawn_subagent` in `studio`"
+        );
+
+        let results = vec![
+            AiToolExecutionResult {
+                tool_call_id: "call_1".to_string(),
+                tool_name: "read_file".to_string(),
+                content: String::new(),
+                is_error: false,
+            },
+            AiToolExecutionResult {
+                tool_call_id: "call_2".to_string(),
+                tool_name: "search_text".to_string(),
+                content: "missing".to_string(),
+                is_error: true,
+            },
+        ];
+        assert_eq!(
+            tool_results_action_summary(&results),
+            "Completed 2 tools, 1 failed"
+        );
+    }
+
+    #[test]
+    fn completed_subagent_remains_visible_after_returning_result_to_parent() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
         manager.ensure_mount_entry("repo");
@@ -7452,10 +8303,15 @@ Some intro text...
 
         let mount_state = manager.mounts.get("repo").unwrap();
         let parent = mount_state.agents.get(&parent_id).unwrap();
-        assert!(parent.subagents.is_empty());
-        assert!(!mount_state.order.contains(&sub_id));
-        assert!(!mount_state.agents.contains_key(&sub_id));
+        let sub_agent = mount_state.agents.get(&sub_id).unwrap();
+        assert_eq!(parent.subagents, vec![sub_id]);
+        assert!(mount_state.order.contains(&sub_id));
         assert_eq!(mount_state.active_agent_id, Some(parent_id));
+        assert_eq!(sub_agent.status, "completed");
+        assert_eq!(
+            sub_agent.current_action.as_deref(),
+            Some("Completed: Updated the plan.")
+        );
         assert!(parent.history.iter().any(|item| {
             matches!(
                 item,
@@ -7470,6 +8326,100 @@ Some intro text...
                 && event.agent_id == Some(parent_id)
                 && event.title == "coder Subagent"
                 && event.detail.contains("Updated the plan.")
+        }));
+        let snapshot = manager.snapshot("repo");
+        assert!(snapshot.agents.iter().any(|agent| {
+            agent.agent_id == sub_id
+                && agent.parent_agent_id == Some(parent_id)
+                && agent.status == "completed"
+                && agent.current_action.as_deref() == Some("Completed: Updated the plan.")
+        }));
+    }
+
+    #[test]
+    fn failed_subagent_completion_remains_visible_as_error() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        manager.ensure_default_agent("repo");
+        let parent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        let parent_run_token = 42;
+        {
+            let parent = manager
+                .mounts
+                .get_mut("repo")
+                .and_then(|mount_state| mount_state.agents.get_mut(&parent_id))
+                .unwrap();
+            parent.run_token = parent_run_token;
+        }
+
+        manager.complete_assistant_turn(
+            "repo",
+            parent_id,
+            parent_run_token,
+            AssistantTurn {
+                text: "I will ask a verifier to check the work.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_spawn".to_string(),
+                    name: "spawn_subagent".to_string(),
+                    arguments_json: r#"{"role":"verifier","task":"Verify the native workflow."}"#
+                        .to_string(),
+                }],
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let (sub_id, sub_run_token) = {
+            let mount_state = manager.mounts.get("repo").unwrap();
+            let parent = mount_state.agents.get(&parent_id).unwrap();
+            let sub_id = parent.subagents[0];
+            let sub_run_token = mount_state.agents.get(&sub_id).unwrap().run_token;
+            (sub_id, sub_run_token)
+        };
+
+        manager.complete_assistant_turn(
+            "repo",
+            sub_id,
+            sub_run_token,
+            AssistantTurn {
+                text: "Verification failed.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: vec![ToolCallRecord {
+                    id: "call_complete".to_string(),
+                    name: "complete_task".to_string(),
+                    arguments_json: r#"{"summary":"Regression test is failing.","success":false}"#
+                        .to_string(),
+                }],
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let snapshot = manager.snapshot("repo");
+        let sub_summary = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == sub_id)
+            .expect("failed subagent should remain visible");
+        assert_eq!(sub_summary.status, "error");
+        assert_eq!(
+            sub_summary.current_action.as_deref(),
+            Some("Failed: Regression test is failing.")
+        );
+        assert_eq!(
+            sub_summary.blocked_reason.as_deref(),
+            Some("Subagent reported task failure")
+        );
+        assert!(snapshot.visibility_events.iter().any(|event| {
+            event.kind == "subagent_completed"
+                && event.title == "verifier Subagent"
+                && event.detail.contains("Success: false")
         }));
     }
 
@@ -7756,8 +8706,53 @@ Some intro text...
         assert!(body.contains("\"read_terminal\""));
         assert!(body.contains("\"send_terminal_text\""));
         assert!(body.contains("\"send_terminal_key\""));
+        assert!(body.contains("spawn_subagent"));
+        assert!(body.contains("Do not use this to spawn coding agents"));
+        assert!(!body.contains("model_override"));
+        assert!(!body.contains("codex prompts"));
         assert!(!body.contains("\"model\""));
         assert!(!body.contains("\"chat_template_kwargs\":{\"enable_thinking\":false}"));
+    }
+
+    #[test]
+    fn terminal_coding_agent_launches_are_rejected() {
+        for text in [
+            "codex",
+            "codex --model gpt-5",
+            "  /usr/local/bin/codex run",
+            "claude",
+            "aider src/lib.rs",
+            "opencode .",
+            "cursor-agent",
+            "goose session",
+            "gemini",
+            "qwen code",
+        ] {
+            assert!(
+                terminal_text_starts_coding_agent(text),
+                "{text:?} should be blocked"
+            );
+            assert!(reject_terminal_coding_agent_launch(text)
+                .unwrap_err()
+                .contains("spawn_subagent"));
+        }
+    }
+
+    #[test]
+    fn terminal_guard_allows_normal_shell_commands() {
+        for text in [
+            "cargo test -p makepad-studio-hub",
+            "git status --short",
+            "npm run dev",
+            "echo codex should be native",
+            "rg codex studio/hub",
+        ] {
+            assert!(
+                !terminal_text_starts_coding_agent(text),
+                "{text:?} should be allowed"
+            );
+            assert!(reject_terminal_coding_agent_launch(text).is_ok());
+        }
     }
 
     #[test]
@@ -7765,11 +8760,16 @@ Some intro text...
         let prompt = render_system_prompt("repo", "/tmp/repo", None, None, &[], &[], &[], None);
         assert!(prompt.contains("mount 'repo'"));
         assert!(prompt.contains("rooted at '/tmp/repo'"));
+        assert!(prompt.contains("native Makepad Studio manager agent"));
+        assert!(prompt.contains("Use `spawn_subagent`"));
+        assert!(prompt.contains("Do not start Codex"));
         assert!(prompt.contains("observe_filesystem"));
         assert!(prompt.contains("open_editor"));
         assert!(prompt.contains("send_terminal_text.submit"));
         assert!(prompt.contains("interpret that as a Makepad app/example"));
         assert!(prompt.contains("not as a Python script, web app"));
+        assert!(!prompt.contains("Programming tasks must go through codex"));
+        assert!(!prompt.contains("terminal-based codex work"));
     }
 
     #[test]
@@ -8011,7 +9011,7 @@ Some intro text...
     }
 
     #[test]
-    fn workflow_first_observed_codex_terminal_emits_visibility_event() {
+    fn workflow_first_observed_codex_terminal_does_not_emit_task_event() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
         manager.ensure_mount_entry("repo");
@@ -8035,14 +9035,16 @@ Some intro text...
                     text: "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n".to_string(),
                 },
             )
-            .expect("first observed codex terminal should update visibility");
+            .expect("first observed codex terminal should update snapshot");
 
-        assert!(state.visibility_events.iter().any(|event| {
+        assert!(!state.visibility_events.iter().any(|event| {
             event.kind == "terminal_needs_input" && event.agent_id == Some(agent_id)
         }));
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.tasks.is_empty());
     }
     #[test]
-    fn workflow_first_observed_completed_codex_terminal_emits_done_visibility_event() {
+    fn workflow_first_observed_completed_codex_terminal_does_not_emit_task_event() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
         manager.ensure_mount_entry("repo");
@@ -8066,13 +9068,15 @@ Some intro text...
                     text: "\nAll checks passed.\n\n› \n\n  gpt-5.5 medium · ~/repo\n".to_string(),
                 },
             )
-            .expect("first observed completed codex terminal should update visibility");
+            .expect("first observed completed codex terminal should update snapshot");
 
-        assert!(state.visibility_events.iter().any(|event| {
-            event.kind == "terminal_done" && event.agent_id == Some(agent_id)
-        }));
+        assert!(!state
+            .visibility_events
+            .iter()
+            .any(|event| { event.kind == "terminal_done" && event.agent_id == Some(agent_id) }));
+        let mount_state = manager.mounts.get("repo").unwrap();
+        assert!(mount_state.tasks.is_empty());
     }
-
 
     #[test]
     fn workflow_file_touch_updates_agent_files_and_event() {
@@ -8240,7 +9244,6 @@ Some intro text...
             .iter()
             .any(|event| event.kind == "step_completed"));
     }
-
 
     #[test]
     fn active_workflow_focus_is_only_for_owning_agent() {
@@ -8625,12 +9628,10 @@ Some intro text...
             let mount_state = manager.mounts.get_mut("repo").unwrap();
             mount_state.workflows = vec![ParsedWorkflow {
                 name: "review-prs".to_string(),
-                steps: vec![
-                    WorkflowStep {
-                        name: "Resolve PR Set".to_string(),
-                        description: "Find and select PRs".to_string(),
-                    },
-                ],
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find and select PRs".to_string(),
+                }],
             }];
         }
 
@@ -8675,7 +9676,7 @@ Some intro text...
         let agent = mount_state.agents.get(&agent_id).unwrap();
         assert_eq!(agent.workflow_step_name, Some("Resolve PR Set".to_string()));
         assert_eq!(agent.workflow_step_status, Some("active".to_string()));
-        
+
         let has_rewritten = agent.history.iter().any(|item| {
             if let ConversationItem::User { text } = item {
                 text.contains("Execute workflow review-prs") && text.contains("Arguments: 12")
@@ -8703,12 +9704,10 @@ Some intro text...
             let mount_state = manager.mounts.get_mut("repo").unwrap();
             mount_state.workflows = vec![ParsedWorkflow {
                 name: "review-prs".to_string(),
-                steps: vec![
-                    WorkflowStep {
-                        name: "Resolve PR Set".to_string(),
-                        description: "Find and select PRs".to_string(),
-                    },
-                ],
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find and select PRs".to_string(),
+                }],
             }];
         }
 
@@ -8766,12 +9765,7 @@ Some intro text...
             },
         );
 
-        let response_500 = HttpResponse::new(
-            LiveId(1),
-            500,
-            BTreeMap::new(),
-            None,
-        );
+        let response_500 = HttpResponse::new(LiveId(1), 500, BTreeMap::new(), None);
 
         manager.handle_http_response(NetworkResponse::HttpResponse {
             request_id: request_id_500,

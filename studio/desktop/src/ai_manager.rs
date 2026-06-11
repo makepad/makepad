@@ -13,6 +13,7 @@ const AI_CHAT_ACTIVITY_MAX_CHARS: usize = 140;
 const AI_TASK_BOARD_WORKFLOW_NAME_MAX_CHARS: usize = 64;
 const AI_TASK_BOARD_WORKFLOW_STEP_MAX_CHARS: usize = 96;
 const AI_TASK_BOARD_WORKFLOW_MAX_STEPS: usize = 10;
+const AI_SUBAGENT_ROLES: &[&str] = &["coder", "planner", "explorer", "reviewer", "verifier"];
 
 impl App {
     pub(super) fn init_ai_manager(&mut self, cx: &mut Cx) {
@@ -156,8 +157,21 @@ impl App {
             return;
         }
         let agent_id = agent_id.0;
-        if self.send_ai_prompt_to_agent(cx, mount, agent_id, &prompt, true) {
-            input.set_text(cx, "");
+        if prompt.starts_with('/') {
+            if self.send_ai_prompt_to_agent(cx, mount, agent_id, &prompt, Some(&prompt)) {
+                input.set_text(cx, "");
+            }
+        } else {
+            let role_index = workspace
+                .drop_down(cx, ids!(ai_subagent_role_picker))
+                .selected_item();
+            let role = AI_SUBAGENT_ROLES
+                .get(role_index)
+                .copied()
+                .unwrap_or("coder");
+            if self.spawn_ai_subagent(cx, mount, agent_id, role, &prompt) {
+                input.set_text(cx, "");
+            }
         }
     }
 
@@ -241,6 +255,18 @@ impl App {
             workspace
                 .button(cx, ids!(ai_run_button))
                 .set_enabled(cx, false);
+            workspace
+                .drop_down(cx, ids!(ai_subagent_role_picker))
+                .set_labels(
+                    cx,
+                    AI_SUBAGENT_ROLES
+                        .iter()
+                        .map(|role| role.to_string())
+                        .collect(),
+                );
+            workspace
+                .drop_down(cx, ids!(ai_subagent_role_picker))
+                .set_selected_item(cx, 0);
             workspace.widget(cx, ids!(ai_run_button)).set_text(cx, "▶");
             return;
         };
@@ -272,9 +298,6 @@ impl App {
                 .iter()
                 .find(|backend| &backend.id == active_id)
         });
-        let active_backend_label = active_backend
-            .map(|backend| backend.label.clone())
-            .unwrap_or_else(|| "local".to_string());
         let active_backend_configured = active_backend
             .map(|backend| backend.configured)
             .unwrap_or(true);
@@ -301,6 +324,15 @@ impl App {
         workspace
             .drop_down(cx, ids!(ai_model_picker))
             .set_selected_item(cx, backend_selected);
+        workspace
+            .drop_down(cx, ids!(ai_subagent_role_picker))
+            .set_labels(
+                cx,
+                AI_SUBAGENT_ROLES
+                    .iter()
+                    .map(|role| role.to_string())
+                    .collect(),
+            );
 
         if let Some(agent) = state.active_agent.as_ref() {
             workspace
@@ -330,6 +362,9 @@ impl App {
             workspace
                 .button(cx, ids!(ai_run_button))
                 .set_enabled(cx, false);
+            workspace
+                .drop_down(cx, ids!(ai_subagent_role_picker))
+                .set_selected_item(cx, 0);
             workspace.widget(cx, ids!(ai_run_button)).set_text(cx, "▶");
         }
     }
@@ -375,7 +410,7 @@ impl App {
         mount: &str,
         agent_id: AiAgentId,
         prompt: &str,
-        echo_local: bool,
+        local_echo: Option<&str>,
     ) -> bool {
         let prompt = prompt.trim();
         if prompt.is_empty() {
@@ -397,29 +432,11 @@ impl App {
             return false;
         }
 
-        if echo_local {
+        if let Some(local_echo) = local_echo {
             if let Some(state) = self.mount_state_mut(mount).ai_state.as_mut() {
-                apply_local_prompt_echo(state, agent_id, prompt);
+                apply_local_prompt_echo(state, agent_id, local_echo);
             }
-            if self.data.active_mount.as_deref() == Some(mount) {
-                self.sync_ai_manager_widgets(cx);
-                if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
-                    workspace
-                        .text_input(cx, ids!(ai_prompt_input))
-                        .set_key_focus(cx);
-                    workspace.fold_header(cx, ids!(ai_swarm_fold)).set_is_open(
-                        cx,
-                        true,
-                        Animate::Yes,
-                    );
-                    workspace.fold_header(cx, ids!(ai_live_fold)).set_is_open(
-                        cx,
-                        true,
-                        Animate::Yes,
-                    );
-                }
-                self.schedule_ai_chat_scroll_to_bottom(cx);
-            }
+            self.focus_ai_prompt_after_local_send(cx, mount);
         }
 
         let _ = self.send_studio(ClientToHub::AiSendPrompt {
@@ -428,6 +445,67 @@ impl App {
             text: prompt.to_string(),
         });
         true
+    }
+
+    fn spawn_ai_subagent(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+        parent_agent_id: AiAgentId,
+        role: &str,
+        task: &str,
+    ) -> bool {
+        let task = task.trim();
+        if task.is_empty() {
+            return false;
+        }
+
+        let is_pending = self
+            .mount_state(mount)
+            .and_then(|state| state.ai_state.as_ref())
+            .and_then(|state| {
+                state
+                    .agents
+                    .iter()
+                    .find(|agent| agent.agent_id == parent_agent_id)
+                    .map(|agent| agent.pending)
+            })
+            .unwrap_or(false);
+        if is_pending {
+            return false;
+        }
+
+        let echo = native_delegation_echo(role, task);
+        if let Some(state) = self.mount_state_mut(mount).ai_state.as_mut() {
+            apply_local_prompt_echo(state, parent_agent_id, &echo);
+        }
+        self.focus_ai_prompt_after_local_send(cx, mount);
+        let _ = self.send_studio(ClientToHub::AiSpawnSubagent {
+            mount: mount.to_string(),
+            parent_agent_id,
+            role: role.to_string(),
+            task: task.to_string(),
+        });
+        true
+    }
+
+    fn focus_ai_prompt_after_local_send(&mut self, cx: &mut Cx, mount: &str) {
+        if self.data.active_mount.as_deref() != Some(mount) {
+            return;
+        }
+        self.sync_ai_manager_widgets(cx);
+        if let Some(workspace) = self.mount_workspace_widget(cx, mount) {
+            workspace
+                .text_input(cx, ids!(ai_prompt_input))
+                .set_key_focus(cx);
+            workspace
+                .fold_header(cx, ids!(ai_swarm_fold))
+                .set_is_open(cx, true, Animate::Yes);
+            workspace
+                .fold_header(cx, ids!(ai_live_fold))
+                .set_is_open(cx, true, Animate::Yes);
+        }
+        self.schedule_ai_chat_scroll_to_bottom(cx);
     }
 }
 
@@ -962,6 +1040,12 @@ fn apply_local_prompt_echo(state: &mut AiMountState, agent_id: AiAgentId, prompt
     }
 }
 
+fn native_delegation_echo(role: &str, prompt: &str) -> String {
+    let role = role.trim();
+    let role = if role.is_empty() { "agent" } else { role };
+    format!("Native {} subagent\n\n{}", role, prompt.trim())
+}
+
 fn summarized_chat_title(
     state: &AiMountState,
     agent_id: AiAgentId,
@@ -1101,6 +1185,17 @@ mod tests {
         assert_eq!(summary.status, "thinking...");
         assert!(summary.pending);
         assert_eq!(summary.message_count, 2);
+    }
+
+    #[test]
+    fn native_delegation_echo_hides_subagent_slash_command() {
+        let echo = native_delegation_echo("coder", "implement the native activity board");
+
+        assert_eq!(
+            echo,
+            "Native coder subagent\n\nimplement the native activity board"
+        );
+        assert!(!echo.contains("/subagent"));
     }
 
     #[test]
@@ -1723,6 +1818,8 @@ fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
             "step_completed" => "Step Completed",
             "subagent_spawned" => "Subagent Started",
             "subagent_completed" => "Subagent Done",
+            "native_tools_started" => "Native Tools Started",
+            "native_tools_finished" => "Native Tools Finished",
             "terminal_attached" => "Terminal Open",
             "terminal_needs_input" => "Awaiting Input",
             "terminal_done" => "Terminal Done",
@@ -1992,6 +2089,40 @@ mod ai_task_board_tests {
     }
 
     #[test]
+    fn task_board_keeps_completed_subagent_result_visible() {
+        let root = summary(1, "Plan Studio tasks", "thinking...", true, None);
+        let mut child = summary(2, "Coder Subagent", "completed", false, Some(AiAgentId(1)));
+        child.role = Some("coder".to_string());
+        child.current_action = Some("Completed: Updated the native activity board.".to_string());
+        child.files_touched = vec!["studio/hub/src/ai_manager.rs".to_string()];
+
+        let state = mount_state(vec![root, child], "");
+        let markdown = ai_task_board_markdown(&state);
+
+        assert!(markdown.contains("└─ - **Coder Subagent**"));
+        assert!(markdown.contains("`done`"));
+        assert!(markdown.contains("Completed: Updated the native activity board."));
+        assert!(markdown.contains("files: `studio/hub/src/ai_manager.rs`"));
+    }
+
+    #[test]
+    fn task_board_renders_failed_subagent_result_as_error() {
+        let root = summary(1, "Plan Studio tasks", "thinking...", true, None);
+        let mut child = summary(2, "Verifier Subagent", "error", false, Some(AiAgentId(1)));
+        child.role = Some("verifier".to_string());
+        child.current_action = Some("Failed: Regression test is failing.".to_string());
+        child.blocked_reason = Some("Subagent reported task failure".to_string());
+
+        let state = mount_state(vec![root, child], "");
+        let markdown = ai_task_board_markdown(&state);
+
+        assert!(markdown.contains("└─ - **Verifier Subagent**"));
+        assert!(markdown.contains("`error`"));
+        assert!(markdown.contains("blocked: Subagent reported task failure"));
+        assert!(markdown.contains("Failed: Regression test is failing."));
+    }
+
+    #[test]
     fn task_board_renders_agent_timeline_state_details() {
         let mut root = summary(1, "Plan Studio tasks", "thinking...", true, None);
         root.current_action = Some("Editing Agent panel timeline".to_string());
@@ -2129,11 +2260,31 @@ mod ai_task_board_tests {
                 detail: "Workflow Owner delegated work to Reviewer Subagent".to_string(),
                 timestamp: 101.0,
             },
+            AiVisibilityEvent {
+                kind: "native_tools_started".to_string(),
+                agent_id: Some(AiAgentId(1)),
+                title: "Reviewer Subagent".to_string(),
+                detail: "Running `read_file`".to_string(),
+                timestamp: 102.0,
+            },
+            AiVisibilityEvent {
+                kind: "native_tools_finished".to_string(),
+                agent_id: Some(AiAgentId(1)),
+                title: "Reviewer Subagent".to_string(),
+                detail: "`read_file` completed".to_string(),
+                timestamp: 103.0,
+            },
         ];
 
         let markdown = ai_live_activity_markdown(&state);
         assert!(markdown.contains("**Recent Activity**"));
         // Newest-first check: order is reverse
+        assert!(markdown.contains(
+            "- `[Native Tools Finished]` **Reviewer Subagent** - Workflow Owner - `read_file` completed"
+        ));
+        assert!(markdown.contains(
+            "- `[Native Tools Started]` **Reviewer Subagent** - Workflow Owner - Running `read_file`"
+        ));
         assert!(markdown.contains(
             "- `[Subagent Started]` **Reviewer Subagent** - Workflow Owner - Workflow Owner delegated work to Reviewer Subagent"
         ));
