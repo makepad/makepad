@@ -205,6 +205,13 @@ struct PendingChatGptOAuth {
     backend_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingClassifier {
+    pub mount: String,
+    pub agent_id: AiAgentId,
+    pub original_prompt: String,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ToolCallAccumulator {
     id: String,
@@ -470,6 +477,7 @@ pub struct AiManager {
     mounts: HashMap<String, MountAgents>,
     inflight: HashMap<LiveId, InFlightRequest>,
     pending_chatgpt_oauth: HashMap<LiveId, PendingChatGptOAuth>,
+    pending_classifiers: HashMap<LiveId, PendingClassifier>,
     next_agent_id: u64,
     next_run_token: u64,
 }
@@ -496,6 +504,7 @@ impl AiManager {
             mounts: HashMap::new(),
             inflight: HashMap::new(),
             pending_chatgpt_oauth: HashMap::new(),
+            pending_classifiers: HashMap::new(),
             next_agent_id: 1,
             next_run_token: 1,
         }
