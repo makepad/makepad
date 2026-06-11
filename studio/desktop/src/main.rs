@@ -96,6 +96,13 @@ pub struct BottomPanelAnimation {
     start_time: Option<f64>,
 }
 
+pub struct AgentPanelAnimation {
+    mount: String,
+    from_width: f64,
+    to_width: f64,
+    start_time: Option<f64>,
+}
+
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
     let cleaned = token.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';'));
     let (path_and_line, column_str) = cleaned.rsplit_once(':')?;
@@ -141,6 +148,10 @@ pub struct App {
     pub bottom_panel_animation: Option<BottomPanelAnimation>,
     #[rust]
     pub bottom_panel_animation_next_frame: NextFrame,
+    #[rust]
+    pub agent_panel_animation: Option<AgentPanelAnimation>,
+    #[rust]
+    pub agent_panel_animation_next_frame: NextFrame,
     #[rust]
     pub ai_chat_scroll_pending: bool,
     #[rust]
@@ -471,6 +482,13 @@ impl AppMain for App {
                 .is_some()
             {
                 self.step_bottom_panel_animation(cx, ne.time);
+            }
+            if self
+                .agent_panel_animation_next_frame
+                .is_event(event)
+                .is_some()
+            {
+                self.step_agent_panel_animation(cx, ne.time);
             }
             if self.ai_chat_scroll_pending
                 && self.ai_chat_scroll_next_frame.is_event(event).is_some()

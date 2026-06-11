@@ -770,6 +770,10 @@ script_mod! {
         bottom_file_tree_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_file.svg")
         }
+        bottom_bar_spacer := View {
+            width: Fill
+            height: Fill
+        }
         bottom_agent_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_ai.svg")
         }

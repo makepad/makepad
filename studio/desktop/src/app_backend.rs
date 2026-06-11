@@ -255,6 +255,43 @@ impl App {
         }
     }
 
+    fn start_agent_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_width: f64) {
+        let from_width = self
+            .workspace_agent_splitter_width(cx, mount)
+            .unwrap_or(to_width);
+        self.agent_panel_animation = Some(AgentPanelAnimation {
+            mount: mount.to_string(),
+            from_width,
+            to_width: to_width.max(0.0),
+            start_time: None,
+        });
+        self.agent_panel_animation_next_frame = cx.new_next_frame();
+    }
+
+    pub(super) fn step_agent_panel_animation(&mut self, cx: &mut Cx, time: f64) {
+        let Some(animation) = self.agent_panel_animation.as_mut() else {
+            return;
+        };
+        let eased = Self::panel_animation_progress(time, &mut animation.start_time);
+        let progress = eased;
+        let mount = animation.mount.clone();
+        let target = animation.to_width;
+        let width = animation.from_width + (target - animation.from_width) * eased;
+
+        if !self.set_workspace_agent_splitter_width(cx, &mount, width) {
+            self.agent_panel_animation = None;
+            return;
+        }
+
+        if progress >= 1.0 {
+            self.agent_panel_animation = None;
+            self.set_workspace_agent_splitter_width(cx, &mount, target);
+            self.save_state(cx, 0);
+        } else {
+            self.agent_panel_animation_next_frame = cx.new_next_frame();
+        }
+    }
+
     pub(super) fn sync_mount_tab_bar_visibility(&mut self, cx: &mut Cx) {
         let dock = self.ui.dock(cx, ids!(mount_dock));
         let Some(mut dock_items) = dock.clone_state() else {
@@ -322,14 +359,10 @@ impl App {
             .unwrap_or(310.0);
 
         if current_width <= 1.0 {
-            if self.set_workspace_agent_splitter_width(cx, mount, restore_width) {
-                self.save_state(cx, 0);
-            }
+            self.start_agent_panel_animation(cx, mount, restore_width);
         } else {
             self.mount_state_mut(mount).agent_panel_restore_width = Some(current_width);
-            if self.set_workspace_agent_splitter_width(cx, mount, 0.0) {
-                self.save_state(cx, 0);
-            }
+            self.start_agent_panel_animation(cx, mount, 0.0);
         }
     }
 
