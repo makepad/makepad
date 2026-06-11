@@ -456,30 +456,37 @@ fn ai_chat_markdown(agent: &AiAgentState) -> String {
         append_activity_markdown(&mut markdown, &activity, false, agent.pending);
         activity.clear();
 
-        let heading = ai_main_message_heading(message);
         let body = ai_main_message_markdown_body(message);
         if body.is_empty() {
             continue;
         }
-        if !markdown.is_empty() {
-            markdown.push_str("\n\n");
-        }
-        markdown.push_str(heading);
-        markdown.push_str("\n\n");
-        markdown.push_str(&body);
+        append_main_message_markdown(&mut markdown, message, &body);
     }
     append_activity_markdown(&mut markdown, &activity, true, agent.pending);
     markdown
 }
 
-fn ai_main_message_heading(message: &AiMessage) -> &'static str {
+fn ai_main_message_label(message: &AiMessage) -> &'static str {
     match message.role {
-        AiMessageRole::User => "### User",
-        AiMessageRole::Assistant => "### Assistant",
-        AiMessageRole::System => "### System",
-        AiMessageRole::Thinking => "### Thinking",
-        AiMessageRole::ToolCall | AiMessageRole::ToolResult => "### Tool",
-        AiMessageRole::Error => "### Error",
+        AiMessageRole::User => "User",
+        AiMessageRole::Assistant => "Assistant",
+        AiMessageRole::System => "System",
+        AiMessageRole::Thinking => "Thinking",
+        AiMessageRole::ToolCall | AiMessageRole::ToolResult => "Tool",
+        AiMessageRole::Error => "Error",
+    }
+}
+
+fn append_main_message_markdown(markdown: &mut String, message: &AiMessage, body: &str) {
+    if !markdown.is_empty() {
+        markdown.push_str("\n\n");
+    }
+    markdown.push_str("> **");
+    markdown.push_str(ai_main_message_label(message));
+    markdown.push_str("**");
+    for line in body.lines() {
+        markdown.push_str("\n> ");
+        markdown.push_str(line);
     }
 }
 
@@ -1080,6 +1087,33 @@ mod tests {
     }
 
     #[test]
+    fn ai_chat_markdown_renders_user_and_assistant_as_cards() {
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "ready",
+            false,
+            vec![
+                AiMessage {
+                    role: AiMessageRole::User,
+                    text: "What enhancement should we make?".to_string(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Assistant,
+                    text: "Use transcript cards for clearer separation.".to_string(),
+                },
+            ],
+        );
+
+        let markdown = ai_chat_markdown(&agent);
+        assert!(markdown.contains("> **User**"));
+        assert!(markdown.contains("> What enhancement should we make?"));
+        assert!(markdown.contains("> **Assistant**"));
+        assert!(markdown.contains("> Use transcript cards for clearer separation."));
+        assert!(!markdown.contains("### User"));
+        assert!(!markdown.contains("### Assistant"));
+    }
+
+    #[test]
     fn ai_chat_markdown_hides_placeholder_thinking_messages() {
         let agent = test_agent_state(
             AiAgentId(1),
@@ -1143,8 +1177,39 @@ mod tests {
         assert!(!markdown.contains("```runsplash"));
         assert!(!markdown.contains("makepad/.makepad/manual-codex.term"));
         assert!(!markdown.contains("mode working"));
-        assert!(markdown.contains("### User"));
-        assert!(markdown.contains("### Assistant"));
+        assert!(markdown.contains("> **User**"));
+        assert!(markdown.contains("> **Assistant**"));
+    }
+
+    #[test]
+    fn ai_chat_markdown_keeps_tool_activity_between_cards() {
+        let agent = test_agent_state(
+            AiAgentId(1),
+            "ready",
+            false,
+            vec![
+                AiMessage {
+                    role: AiMessageRole::User,
+                    text: "Inspect the terminal.".to_string(),
+                },
+                AiMessage {
+                    role: AiMessageRole::ToolResult,
+                    text: "`read_terminal` result\n```text\n{}\n```".to_string(),
+                },
+                AiMessage {
+                    role: AiMessageRole::Assistant,
+                    text: "Terminal is idle.".to_string(),
+                },
+            ],
+        );
+
+        let markdown = ai_chat_markdown(&agent);
+        let user = markdown.find("> **User**").unwrap();
+        let tools = markdown.find("> **Tools**").unwrap();
+        let assistant = markdown.find("> **Assistant**").unwrap();
+        assert!(user < tools);
+        assert!(tools < assistant);
+        assert!(markdown.contains("Read terminal"));
     }
 
     #[test]
@@ -1206,12 +1271,12 @@ mod tests {
         );
 
         let markdown = ai_chat_markdown(&agent);
-        assert!(markdown.contains("### User"));
+        assert!(markdown.contains("> **User**"));
         assert!(markdown.contains("> **Thinking**"));
         assert!(markdown.contains("```runsplash"));
         assert!(markdown.contains("> **Tools**"));
         assert!(markdown.contains("Read terminal x2"));
-        assert!(markdown.contains("### Assistant"));
+        assert!(markdown.contains("> **Assistant**"));
         assert_eq!(markdown.matches("### Tool").count(), 0);
     }
 
