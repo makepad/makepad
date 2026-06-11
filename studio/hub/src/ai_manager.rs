@@ -53,6 +53,8 @@ const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../ai_mgr.md");
 const AI_CHAT_PERSIST_FS_SUPPRESS: Duration = Duration::from_millis(1_500);
 const AI_TERMINAL_EXCERPT_MAX_CHARS: usize = 480;
 const AI_TERMINAL_EXCERPT_MAX_LINES: usize = 10;
+const MAX_VISIBILITY_EVENTS: usize = 64;
+
 
 pub struct AiTerminalObservation {
     pub path: String,
@@ -807,6 +809,7 @@ impl AiManager {
             if let Some(active_workflow) = workflow_to_activate {
                 mount_state.active_workflow = Some(active_workflow);
                 mount_state.active_workflow_agent_id = Some(agent_id);
+                Self::activate_current_workflow_step(mount_state, agent_id);
             }
             let Some(agent) = mount_state.agents.get_mut(&agent_id) else {
                 return self.snapshot(mount);
@@ -918,6 +921,7 @@ impl AiManager {
             }
 
             let mut agent_activity_updates = Vec::new();
+            let mut visibility_events = Vec::new();
             for task in mount_state
                 .tasks
                 .iter_mut()
@@ -943,12 +947,33 @@ impl AiManager {
                     AI_TERMINAL_EXCERPT_MAX_LINES,
                 );
                 task.last_codex_status = snapshot.codex_status.clone();
+                let blocked_reason = terminal_blocked_reason(snapshot.mode);
                 agent_activity_updates.push((
                     task.agent_id,
+                    snapshot.path.clone(),
+                    observation.terminal_title.clone(),
                     task.last_terminal_summary.clone(),
                     task.last_terminal_excerpt.clone(),
                     task.touched_paths.clone(),
+                    blocked_reason.map(str::to_string),
                 ));
+                if previous_mode != snapshot.mode {
+                    if snapshot.mode == "awaiting-input" || snapshot.mode == "needs-attention" {
+                        visibility_events.push(Self::visibility_event(
+                            "terminal_needs_input",
+                            Some(task.agent_id),
+                            &terminal_display_name(&snapshot.path),
+                            blocked_reason.unwrap_or("Tracked terminal needs attention"),
+                        ));
+                    } else if snapshot.mode == "done" {
+                        visibility_events.push(Self::visibility_event(
+                            "terminal_done",
+                            Some(task.agent_id),
+                            &terminal_display_name(&snapshot.path),
+                            &task.last_terminal_summary,
+                        ));
+                    }
+                }
 
                 if created_observed_task
                     || previous_mode != task.last_terminal_mode
@@ -997,16 +1022,31 @@ impl AiManager {
                 }
             }
 
-            for (agent_id, action, excerpt, files_touched) in agent_activity_updates {
+            for event in visibility_events {
+                Self::push_visibility_event(mount_state, event);
+            }
+
+            for (agent_id, path, title, action, excerpt, files_touched, blocked_reason) in
+                agent_activity_updates
+            {
                 if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    let now = now_seconds();
+                    agent.active_terminal_path = Some(path);
+                    agent.active_terminal_title = if title.trim().is_empty() {
+                        None
+                    } else {
+                        Some(title)
+                    };
                     agent.current_action = Some(action);
+                    agent.blocked_reason = blocked_reason;
                     agent.last_terminal_excerpt = if excerpt.is_empty() {
                         None
                     } else {
                         Some(excerpt)
                     };
                     agent.files_touched = files_touched;
-                    agent.updated_at = now_seconds();
+                    agent.state_changed_at = now;
+                    agent.updated_at = now;
                 }
             }
 
@@ -1116,6 +1156,7 @@ impl AiManager {
         let mut queue = Vec::new();
         {
             let mount_state = self.mounts.get_mut(mount)?;
+            let mut visibility_events = Vec::new();
             let mut agent_activity_updates = Vec::new();
             mount_state
                 .terminal_snapshots
@@ -1138,6 +1179,21 @@ impl AiManager {
                     task.last_terminal_summary.clone(),
                     task.last_terminal_excerpt.clone(),
                     task.touched_paths.clone(),
+                    if exit_code == 0 {
+                        None
+                    } else {
+                        Some(format!("Tracked terminal exited with code {}", exit_code))
+                    },
+                ));
+                visibility_events.push(Self::visibility_event(
+                    if exit_code == 0 {
+                        "terminal_done"
+                    } else {
+                        "terminal_needs_input"
+                    },
+                    Some(task.agent_id),
+                    &terminal_display_name(path),
+                    &task.last_terminal_summary,
                 ));
                 queue.push((
                     task.id,
@@ -1145,19 +1201,24 @@ impl AiManager {
                     format!("Tracked terminal exited with code {}", exit_code),
                 ));
             }
-            for (agent_id, action, excerpt, files_touched) in agent_activity_updates {
+            for event in visibility_events {
+                Self::push_visibility_event(mount_state, event);
+            }
+            for (agent_id, action, excerpt, files_touched, blocked_reason) in agent_activity_updates {
                 if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                    let now = now_seconds();
                     agent.current_action = Some(action);
+                    agent.blocked_reason = blocked_reason;
                     agent.last_terminal_excerpt = if excerpt.is_empty() {
                         None
                     } else {
                         Some(excerpt)
                     };
                     agent.files_touched = files_touched;
-                    agent.updated_at = now_seconds();
+                    agent.state_changed_at = now;
+                    agent.updated_at = now;
                 }
             }
-
         }
 
         for (task_id, signature, reason) in queue {
@@ -1183,19 +1244,30 @@ impl AiManager {
         {
             let mount_state = self.mounts.get_mut(mount)?;
             let mut agent_file_updates = Vec::new();
+            let mut touched_events = Vec::new();
             for task in &mut mount_state.tasks {
                 if !matches_expected_path(relative_path, &task.expected_paths) {
                     continue;
                 }
+                let mut newly_touched = false;
                 if !task
                     .touched_paths
                     .iter()
                     .any(|existing| existing == relative_path)
                 {
                     task.touched_paths.push(relative_path.to_string());
+                    newly_touched = true;
                     changed = true;
                 }
                 agent_file_updates.push((task.agent_id, task.touched_paths.clone()));
+                if newly_touched {
+                    touched_events.push(Self::visibility_event(
+                        "file_touched",
+                        Some(task.agent_id),
+                        relative_path,
+                        "Observed filesystem change",
+                    ));
+                }
                 if matches!(
                     task.last_terminal_mode.as_str(),
                     "done" | "awaiting-input" | "needs-attention"
@@ -1209,6 +1281,9 @@ impl AiManager {
                         format!("Observed filesystem change for `{}`", relative_path),
                     ));
                 }
+            }
+            for event in touched_events {
+                Self::push_visibility_event(mount_state, event);
             }
             for (agent_id, files_touched) in agent_file_updates {
                 if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
@@ -2081,6 +2156,9 @@ impl AiManager {
                             collapse_repeated_tail_messages(&mut agent.messages);
                         }
                         agent.status = "ready".to_string();
+                        agent.blocked_reason = None;
+                        agent.current_action = Some("Response completed".to_string());
+                        agent.state_changed_at = now_seconds();
                         if agent.parent_agent_id.is_none() {
                             Self::advance_active_workflow_step(mount_state, agent_id);
                         }
@@ -2529,10 +2607,10 @@ impl AiManager {
         let Some(mount_state) = self.mounts.get_mut(mount) else {
             return false;
         };
-        let Some(task) = mount_state
+        let Some(task_index) = mount_state
             .tasks
-            .iter_mut()
-            .find(|task| task.agent_id == agent_id && task.terminal_path.is_none())
+            .iter()
+            .position(|task| task.agent_id == agent_id && task.terminal_path.is_none())
         else {
             return false;
         };
@@ -2548,16 +2626,45 @@ impl AiManager {
                 is_codex: false,
                 codex_status: None,
             });
-        task.terminal_path = Some(path.to_string());
-        task.status = "watching".to_string();
-        task.last_terminal_mode = snapshot.mode.to_string();
-        task.last_terminal_summary = snapshot.summary;
-        task.last_terminal_excerpt = Self::truncate_terminal_excerpt(
+        let summary = snapshot.summary.clone();
+        let excerpt = Self::truncate_terminal_excerpt(
             &snapshot.visible_text,
             AI_TERMINAL_EXCERPT_MAX_CHARS,
             AI_TERMINAL_EXCERPT_MAX_LINES,
         );
-        task.last_codex_status = snapshot.codex_status;
+        let blocked_reason = terminal_blocked_reason(snapshot.mode).map(str::to_string);
+        {
+            let task = &mut mount_state.tasks[task_index];
+            task.terminal_path = Some(path.to_string());
+            task.status = "watching".to_string();
+            task.last_terminal_mode = snapshot.mode.to_string();
+            task.last_terminal_summary = summary.clone();
+            task.last_terminal_excerpt = excerpt.clone();
+            task.last_codex_status = snapshot.codex_status;
+        }
+        if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+            let now = now_seconds();
+            agent.active_terminal_path = Some(path.to_string());
+            agent.active_terminal_title = Some(terminal_display_name(path));
+            agent.current_action = Some(summary.clone());
+            agent.blocked_reason = blocked_reason;
+            agent.last_terminal_excerpt = if excerpt.is_empty() {
+                None
+            } else {
+                Some(excerpt)
+            };
+            agent.state_changed_at = now;
+            agent.updated_at = now;
+        }
+        Self::push_visibility_event(
+            mount_state,
+            Self::visibility_event(
+                "terminal_attached",
+                Some(agent_id),
+                &terminal_display_name(path),
+                &summary,
+            ),
+        );
         true
     }
 
@@ -2748,10 +2855,63 @@ impl AiManager {
         self.send_prompt(mount, queued.agent_id, &queued.text);
         true
     }
+
+    fn visibility_event(
+        kind: &str,
+        agent_id: Option<AiAgentId>,
+        title: &str,
+        detail: &str,
+    ) -> AiVisibilityEvent {
+        AiVisibilityEvent {
+            kind: kind.to_string(),
+            agent_id,
+            title: title.to_string(),
+            detail: detail.to_string(),
+            timestamp: now_seconds(),
+        }
+    }
+
+    fn push_visibility_event(mount_state: &mut MountAgents, event: AiVisibilityEvent) {
+        mount_state.visibility_events.push(event);
+        if mount_state.visibility_events.len() > MAX_VISIBILITY_EVENTS {
+            let overflow = mount_state.visibility_events.len() - MAX_VISIBILITY_EVENTS;
+            mount_state.visibility_events.drain(0..overflow);
+        }
+    }
+
+    fn activate_current_workflow_step(mount_state: &mut MountAgents, agent_id: AiAgentId) {
+        if mount_state.active_workflow_agent_id != Some(agent_id) {
+            return;
+        }
+        let Some(workflow) = mount_state.active_workflow.as_ref() else {
+            return;
+        };
+        let Some(step) = workflow.steps.get(workflow.current_step) else {
+            return;
+        };
+        let step_name = step.name.clone();
+        let step_status = step.status.clone();
+        let action = format!("Executing workflow step {}", workflow.current_step + 1);
+        if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+            let now = now_seconds();
+            agent.workflow_step_name = Some(step_name.clone());
+            agent.workflow_step_status = Some(step_status);
+            agent.current_action = Some(action);
+            agent.blocked_reason = None;
+            agent.state_changed_at = now;
+            agent.updated_at = now;
+        }
+        Self::push_visibility_event(
+            mount_state,
+            Self::visibility_event("step_activated", Some(agent_id), &step_name, "Workflow step active"),
+        );
+    }
+
     fn advance_active_workflow_step(mount_state: &mut MountAgents, agent_id: AiAgentId) {
         if mount_state.active_workflow_agent_id != Some(agent_id) {
             return;
         }
+        let mut next_step = None;
         let Some(workflow) = mount_state.active_workflow.as_mut() else {
             mount_state.active_workflow_agent_id = None;
             return;
@@ -2764,6 +2924,16 @@ impl AiManager {
         if current.status != "done" {
             current.status = "done".to_string();
         }
+        let completed_step = Some(current.name.clone());
+        if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+            let now = now_seconds();
+            agent.workflow_step_name = completed_step.clone();
+            agent.workflow_step_status = Some("done".to_string());
+            agent.current_action = Some("Completed workflow step".to_string());
+            agent.blocked_reason = None;
+            agent.state_changed_at = now;
+            agent.updated_at = now;
+        }
         if let Some(next_index) = workflow
             .steps
             .iter()
@@ -2772,10 +2942,32 @@ impl AiManager {
             workflow.current_step = next_index;
             if let Some(next) = workflow.steps.get_mut(next_index) {
                 next.status = "active".to_string();
+                next_step = Some(next.name.clone());
             }
         } else {
             mount_state.active_workflow = None;
             mount_state.active_workflow_agent_id = None;
+        }
+        if let Some(step_name) = completed_step {
+            Self::push_visibility_event(
+                mount_state,
+                Self::visibility_event(
+                    "step_completed",
+                    Some(agent_id),
+                    &step_name,
+                    "Workflow step completed",
+                ),
+            );
+        }
+        if next_step.is_some() {
+            Self::activate_current_workflow_step(mount_state, agent_id);
+        } else if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+            let now = now_seconds();
+            agent.workflow_step_status = Some("done".to_string());
+            agent.current_action = Some("Workflow completed".to_string());
+            agent.blocked_reason = None;
+            agent.state_changed_at = now;
+            agent.updated_at = now;
         }
     }
 
@@ -3296,23 +3488,39 @@ impl AiManager {
     }
 
     fn set_agent_error(&mut self, mount: &str, agent_id: AiAgentId, error: String) {
-        if let Some(agent) = self
-            .mounts
-            .get_mut(mount)
-            .and_then(|mount_state| mount_state.agents.get_mut(&agent_id))
-        {
-            if let Some(request_id) = agent.pending_request_id.take() {
-                self.inflight.remove(&request_id);
+        if let Some(mount_state) = self.mounts.get_mut(mount) {
+            let mut failed_event = None;
+            if let Some(agent) = mount_state.agents.get_mut(&agent_id) {
+                if let Some(request_id) = agent.pending_request_id.take() {
+                    self.inflight.remove(&request_id);
+                }
+                let now = now_seconds();
+                agent.pending_tool_batch = false;
+                agent.pending_tool_message_start = None;
+                agent.cancel_requested = false;
+                agent.status = error.clone();
+                agent.workflow_step_status = agent
+                    .workflow_step_status
+                    .as_ref()
+                    .map(|_| "failed".to_string());
+                agent.blocked_reason = Some(error.clone());
+                agent.current_action = Some("Agent failed".to_string());
+                agent.state_changed_at = now;
+                agent.updated_at = now;
+                agent.messages.push(AiMessage {
+                    role: AiMessageRole::Error,
+                    text: error.clone(),
+                });
+                failed_event = Some(Self::visibility_event(
+                    "agent_failed",
+                    Some(agent_id),
+                    &agent.title,
+                    &error,
+                ));
             }
-            agent.pending_tool_batch = false;
-            agent.pending_tool_message_start = None;
-            agent.cancel_requested = false;
-            agent.status = error.clone();
-            agent.updated_at = now_seconds();
-            agent.messages.push(AiMessage {
-                role: AiMessageRole::Error,
-                text: error,
-            });
+            if let Some(event) = failed_event {
+                Self::push_visibility_event(mount_state, event);
+            }
         }
         self.persist_mount_state_best_effort(mount);
     }
@@ -5821,6 +6029,14 @@ fn terminal_display_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
+fn terminal_blocked_reason(mode: &str) -> Option<&'static str> {
+    match mode {
+        "awaiting-input" => Some("Tracked terminal is awaiting input"),
+        "needs-attention" => Some("Tracked terminal needs attention"),
+        _ => None,
+    }
+}
+
 fn truncate_inline(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
@@ -7328,6 +7544,235 @@ Some intro text...
         assert!(text.contains("Focus on step 1: Resolve PR Set"));
         assert!(text.contains("Find PRs."));
         assert!(!text.starts_with("/review-prs"));
+    }
+
+    #[test]
+    fn workflow_visibility_event_ring_is_bounded() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            for index in 0..70 {
+                AiManager::push_visibility_event(
+                    mount_state,
+                    AiVisibilityEvent {
+                        kind: "test".to_string(),
+                        agent_id: None,
+                        title: format!("event {}", index),
+                        detail: String::new(),
+                        timestamp: index as f64,
+                    },
+                );
+            }
+        }
+
+        let state = manager.snapshot("repo");
+
+        assert_eq!(state.visibility_events.len(), 64);
+        assert_eq!(state.visibility_events.first().unwrap().title, "event 6");
+        assert_eq!(state.visibility_events.last().unwrap().title, "event 69");
+    }
+
+    #[test]
+    fn workflow_activation_populates_owner_visibility_fields() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find PRs.".to_string(),
+                }],
+            }];
+        }
+
+        let state = manager.send_prompt("repo", agent_id, "/review-prs owner/repo#7");
+        let active = state.active_agent.as_ref().unwrap();
+
+        assert_eq!(active.workflow_step_name.as_deref(), Some("Resolve PR Set"));
+        assert_eq!(active.workflow_step_status.as_deref(), Some("active"));
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("Executing workflow step 1")
+        );
+        assert!(active.state_changed_at >= active.messages[0].text.len() as f64 * 0.0);
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "step_activated"
+                && event.agent_id == Some(agent_id)
+                && event.title == "Resolve PR Set"
+        }));
+    }
+
+    #[test]
+    fn workflow_terminal_observation_populates_activity_fields() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.tasks.push(AiTrackedTask {
+                id: 1,
+                agent_id,
+                goal: "Run checks".to_string(),
+                terminal_path: Some("repo/.makepad/codex.term".to_string()),
+                expected_paths: Vec::new(),
+                touched_paths: Vec::new(),
+                status: "watching".to_string(),
+                last_terminal_mode: "starting".to_string(),
+                last_terminal_summary: "starting".to_string(),
+                last_terminal_excerpt: String::new(),
+                last_codex_status: None,
+                handled_followup_signatures: Vec::new(),
+            });
+        }
+
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "\n› Need more details?\n\n  gpt-5.5 medium · ~/repo\n".to_string(),
+                },
+            )
+            .expect("terminal observation should update visibility");
+        let active = state.active_agent.as_ref().unwrap();
+
+        assert_eq!(
+            active.active_terminal_path.as_deref(),
+            Some("repo/.makepad/codex.term")
+        );
+        assert_eq!(active.active_terminal_title.as_deref(), Some("codex"));
+        assert_eq!(
+            active.current_action.as_deref(),
+            Some("gpt-5.5 medium · ~/repo")
+        );
+        assert_eq!(
+            active.blocked_reason.as_deref(),
+            Some("Tracked terminal is awaiting input")
+        );
+        assert!(active
+            .last_terminal_excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("Need more details")));
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "terminal_needs_input" && event.agent_id == Some(agent_id)
+        }));
+    }
+
+    #[test]
+    fn workflow_file_touch_updates_agent_files_and_event() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.tasks.push(AiTrackedTask {
+                id: 1,
+                agent_id,
+                goal: "Edit source".to_string(),
+                terminal_path: Some("repo/.makepad/codex.term".to_string()),
+                expected_paths: vec!["src/lib.rs".to_string()],
+                touched_paths: Vec::new(),
+                status: "watching".to_string(),
+                last_terminal_mode: "working".to_string(),
+                last_terminal_summary: "Working".to_string(),
+                last_terminal_excerpt: String::new(),
+                last_codex_status: None,
+                handled_followup_signatures: Vec::new(),
+            });
+        }
+
+        let state = manager
+            .process_path_change("repo", "repo/src/lib.rs")
+            .expect("matching path should update visibility");
+        let active = state.active_agent.as_ref().unwrap();
+
+        assert_eq!(active.files_touched, vec!["src/lib.rs".to_string()]);
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "file_touched"
+                && event.agent_id == Some(agent_id)
+                && event.title == "src/lib.rs"
+        }));
+    }
+
+    #[test]
+    fn workflow_owner_deletion_clears_visibility_and_stops_injection() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let owner_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find PRs.".to_string(),
+                }],
+            }];
+        }
+        manager.send_prompt("repo", owner_id, "/review-prs owner/repo#7");
+
+        let state = manager.delete_agent("repo", owner_id);
+        let replacement_id = state.active_agent_id.unwrap();
+        let replacement_run_token = manager.alloc_run_token();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            let replacement = mount_state.agents.get_mut(&replacement_id).unwrap();
+            replacement.run_token = replacement_run_token;
+        }
+        manager.complete_assistant_turn(
+            "repo",
+            replacement_id,
+            replacement_run_token,
+            AssistantTurn {
+                text: "Unrelated answer.".to_string(),
+                thinking_text: String::new(),
+                tool_calls: Vec::new(),
+                raw_event_sample: String::new(),
+            },
+            None,
+        );
+
+        let mount_state = manager.mounts.get("repo").unwrap();
+        let replacement = mount_state.agents.get(&replacement_id).unwrap();
+        assert!(mount_state.active_workflow.is_none());
+        assert!(mount_state.active_workflow_agent_id.is_none());
+        assert!(replacement.workflow_step_name.is_none());
+        assert!(replacement.workflow_step_status.is_none());
+        assert!(!mount_state
+            .visibility_events
+            .iter()
+            .any(|event| event.kind == "step_completed"));
     }
 
     #[test]
