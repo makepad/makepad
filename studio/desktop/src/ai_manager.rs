@@ -10,6 +10,9 @@ use makepad_studio_protocol::hub_protocol::{
 const AI_CHAT_SCROLL_SETTLE_FRAMES: u8 = 4;
 const AI_CHAT_COMPACT_MAX_CHARS: usize = 220;
 const AI_CHAT_ACTIVITY_MAX_CHARS: usize = 140;
+const AI_TASK_BOARD_WORKFLOW_NAME_MAX_CHARS: usize = 64;
+const AI_TASK_BOARD_WORKFLOW_STEP_MAX_CHARS: usize = 96;
+const AI_TASK_BOARD_WORKFLOW_MAX_STEPS: usize = 10;
 
 impl App {
     pub(super) fn init_ai_manager(&mut self, cx: &mut Cx) {
@@ -1158,14 +1161,32 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
         };
         markdown.push_str(&format!(
             "**Workflow:** {}\n\nStep {}/{}\n",
-            workflow.name, current_step, total_steps
+            truncate_inline(&workflow.name, AI_TASK_BOARD_WORKFLOW_NAME_MAX_CHARS),
+            current_step,
+            total_steps
         ));
-        for step in &workflow.steps {
+        let current_step_index = workflow.current_step.min(total_steps.saturating_sub(1));
+        let visible_start = if total_steps > AI_TASK_BOARD_WORKFLOW_MAX_STEPS {
+            current_step_index
+                .saturating_add(1)
+                .saturating_sub(AI_TASK_BOARD_WORKFLOW_MAX_STEPS)
+        } else {
+            0
+        };
+        let visible_end = total_steps.min(visible_start + AI_TASK_BOARD_WORKFLOW_MAX_STEPS);
+        if visible_start > 0 {
+            markdown.push_str(&format!("... {} more steps\n", visible_start));
+        }
+        for step in &workflow.steps[visible_start..visible_end] {
             markdown.push_str(&format!(
                 "- {} {}\n",
                 workflow_step_marker(&step.status),
-                step.name
+                truncate_inline(&step.name, AI_TASK_BOARD_WORKFLOW_STEP_MAX_CHARS)
             ));
+        }
+        let omitted_after = total_steps.saturating_sub(visible_end);
+        if omitted_after > 0 {
+            markdown.push_str(&format!("... {} more steps\n", omitted_after));
         }
         markdown.push('\n');
     }
@@ -1521,6 +1542,48 @@ mod ai_task_board_tests {
         assert!(markdown.contains("Review pull request"));
         assert!(markdown.contains("└─ - **Check tests**"));
     }
+
+    #[test]
+    fn task_board_bounds_and_truncates_active_workflow_steps() {
+        let long_workflow_name = format!("{}{}", "workflow-", "w".repeat(120));
+        let long_step_name = format!("{}{}", "step-", "s".repeat(120));
+        let active_step_name = format!("{}{}", "active-step-", "a".repeat(120));
+        let mut steps = (0..12)
+            .map(|index| WorkflowStepState {
+                name: if index == 11 {
+                    active_step_name.clone()
+                } else {
+                    format!("{long_step_name}-{index}")
+                },
+                status: if index == 11 { "active" } else { "pending" }.to_string(),
+            })
+            .collect::<Vec<_>>();
+        steps[10].name = "penultimate bounded step".to_string();
+
+        let state = mount_state_with_workflow(
+            Vec::new(),
+            "",
+            Some(ActiveWorkflowState {
+                name: long_workflow_name.clone(),
+                current_step: 11,
+                steps,
+            }),
+        );
+
+        let markdown = ai_task_board_markdown(&state);
+        assert!(markdown.contains(&format!(
+            "**Workflow:** {}",
+            truncate_inline(&long_workflow_name, 64)
+        )));
+        assert!(!markdown.contains(&long_workflow_name));
+        assert!(markdown.contains("Step 12/12"));
+        assert!(markdown.contains("... 2 more steps"));
+        assert_eq!(markdown.matches("\n- ").count(), 10);
+        assert!(markdown.contains(&truncate_inline(&active_step_name, 96)));
+        assert!(!markdown.contains(&active_step_name));
+        assert!(markdown.contains("▶ active-step-"));
+    }
+
     #[test]
     fn task_board_marks_active_running_and_children() {
         let state = mount_state(
