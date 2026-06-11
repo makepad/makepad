@@ -445,6 +445,9 @@ fn ai_chat_markdown(agent: &AiAgentState) -> String {
     let mut activity = Vec::new();
     for message in &agent.messages {
         if let Some(item) = ai_activity_item(message) {
+            if matches!(item.kind, AiActivityKind::Observation | AiActivityKind::Event) {
+                continue;
+            }
             if !item.text.is_empty() {
                 activity.push(item);
             }
@@ -825,8 +828,23 @@ fn summarize_tool_result_message(text: &str) -> String {
                 format!("checked recent filesystem changes ({})", count)
             }
         }
-        "open_editor" => truncate_inline(payload.trim(), 120),
-        _ => truncate_inline(payload.trim(), 120),
+        "open_editor" => "opened editor".to_string(),
+        "list_terminals" => "listed terminals".to_string(),
+        "bash" => {
+            if payload.contains("failed") || payload.contains("error") || payload.contains("Error") {
+                "ran bash command (failed)".to_string()
+            } else {
+                "ran bash command".to_string()
+            }
+        }
+        "read_file" | "read" => "read file".to_string(),
+        "write_file" | "write" => "wrote file".to_string(),
+        "search_text" | "search" => "searched codebase".to_string(),
+        "ast_grep" => "searched syntax tree".to_string(),
+        "lsp" => "queried code intelligence".to_string(),
+        "edit" => "edited file".to_string(),
+        "ast_edit" => "edited syntax tree".to_string(),
+        _ => truncate_inline(payload.trim(), 80),
     }
 }
 
@@ -1064,26 +1082,37 @@ mod tests {
     }
 
     #[test]
-    fn ai_chat_markdown_renders_terminal_observation_messages() {
+    fn ai_chat_markdown_hides_background_terminal_observations() {
         let agent = test_agent_state(
             AiAgentId(1),
             "ready",
             false,
-            vec![AiMessage {
-                role: AiMessageRole::System,
-                text: format!(
-                    "{} makepad/.makepad/manual-codex.term\nMode: working\nCodex status: Working (3s)",
-                    AI_TERMINAL_OBSERVATION_PREFIX
-                ),
-            }],
+            vec![
+                AiMessage {
+                    role: AiMessageRole::User,
+                    text: "review the PR".to_string(),
+                },
+                AiMessage {
+                    role: AiMessageRole::System,
+                    text: format!(
+                        "{} makepad/.makepad/manual-codex.term\nMode: working\nCodex status: Working (3s)",
+                        AI_TERMINAL_OBSERVATION_PREFIX
+                    ),
+                },
+                AiMessage {
+                    role: AiMessageRole::Assistant,
+                    text: "Still working.".to_string(),
+                },
+            ],
         );
 
         let markdown = ai_chat_markdown(&agent);
-        assert!(markdown.contains("> **Observation**"));
-        assert!(markdown.contains("```runsplash"));
-        assert!(markdown.contains("`makepad/.makepad/manual-codex.term`"));
-        assert!(markdown.contains("mode working"));
-        assert!(markdown.contains("Working (3s)"));
+        assert!(!markdown.contains("> **Observation**"));
+        assert!(!markdown.contains("```runsplash"));
+        assert!(!markdown.contains("makepad/.makepad/manual-codex.term"));
+        assert!(!markdown.contains("mode working"));
+        assert!(markdown.contains("### User"));
+        assert!(markdown.contains("### Assistant"));
     }
 
     #[test]
@@ -1098,6 +1127,20 @@ mod tests {
             summarize_tool_result_message(failed),
             "Read terminal failed"
         );
+    }
+
+    #[test]
+    fn noisy_tool_results_are_summarized_without_payloads() {
+        let list_terminals = "`list_terminals` result\n```text\n[{\"path\":\"makepad/.makepad/a.term\",\"name\":\"a.term\",\"mode\":\"idle\",\"summary\":\"wheregmis@Sahins-MacBook...\"}]\n```";
+        let bash_failed = "`bash` result\n```text\ninvalid bash arguments: JSON Deserialize error: Key not found command, line:1 col:3\n```";
+        let search = "`search` result\n```text\nhuge matched file output\n```";
+
+        assert_eq!(
+            summarize_tool_result_message(list_terminals),
+            "listed terminals"
+        );
+        assert_eq!(summarize_tool_result_message(bash_failed), "ran bash command (failed)");
+        assert_eq!(summarize_tool_result_message(search), "searched codebase");
     }
 
     #[test]
