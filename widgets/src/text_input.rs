@@ -7,7 +7,7 @@ use {
             event::keyboard::CharOffset,
             ime::{
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
-                TextInputConfig,
+                TextInputConfig, TextInputContentType,
             },
             text::{
                 geom::Point,
@@ -522,6 +522,8 @@ pub struct TextInput {
     is_numeric_only: bool,
     #[live]
     input_mode: InputMode,
+    #[live]
+    content_type: TextInputContentType,
     #[live]
     autocapitalize: AutoCapitalize,
     #[live]
@@ -1559,13 +1561,23 @@ impl TextInput {
         TextInputConfig {
             soft_keyboard: SoftKeyboardConfig {
                 input_mode: self.effective_input_mode(),
-                autocapitalize: self.autocapitalize,
-                autocorrect: self.autocorrect,
+                // A password must never auto-capitalize or autocorrect.
+                autocapitalize: if self.is_password {
+                    AutoCapitalize::None
+                } else {
+                    self.autocapitalize
+                },
+                autocorrect: if self.is_password {
+                    AutoCorrect::Disabled
+                } else {
+                    self.autocorrect
+                },
                 return_key_type: self.return_key_type,
             },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
             submit_on_enter: self.submit_on_enter,
+            content_type: self.content_type,
         }
     }
 
@@ -2511,13 +2523,17 @@ impl Widget for TextInput {
                 self.preserved_selection_cursor = None;
                 self.pending_outside_focus_loss_touch = None;
 
-                // Handle Android full state sync (authoritative from Java InputConnection)
+                // Full state sync (authoritative: Android InputConnection / iOS UITextView)
                 if let Some(full_state) = &event.full_state_sync {
-                    let text_changed = self.text != full_state.text;
+                    // The view can deliver characters a restricted field disallows (paste,
+                    // hardware keyboard); filter so iOS/Android match every other platform.
+                    let filtered = self.filter_input(&full_state.text, true);
+                    let rejected = filtered != full_state.text;
+                    let text_changed = self.text != filtered;
                     if text_changed {
                         self.history
                             .create_or_extend_edit_group(EditKind::Other, self.selection);
-                        self.text = full_state.text.clone();
+                        self.text = filtered;
                         self.laidout_text = None;
                     }
 
@@ -2549,10 +2565,17 @@ impl Widget for TextInput {
                         self.composition_end = 0;
                     }
 
-                    self.last_sent_ime_text = self.text.clone();
-                    self.last_sent_ime_sel_start = sel_start_byte;
-                    self.last_sent_ime_sel_end = sel_end_byte;
-                    self.ime_update_frame = cx.redraw_id();
+                    if rejected {
+                        // The view still holds the rejected chars; force update_ime_context
+                        // to re-push the cleaned text back to it (sentinel selection).
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.last_sent_ime_sel_end = usize::MAX;
+                    } else {
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                    }
 
                     // This path bypasses apply_edit(), so keep placeholder/color state in sync.
                     self.check_text_is_empty(cx);

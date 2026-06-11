@@ -336,6 +336,11 @@ pub fn define_makepad_text_view() -> *const Class {
                     IosApp::send_return_key();
                     return NO;
                 }
+                if s == "\t" {
+                    // Hardware Tab moves focus (handled by makepad's nav_control via pressesBegan),
+                    // so never insert a tab character into the field.
+                    return NO;
+                }
             }
             YES
         }

@@ -191,6 +191,40 @@ pub struct IosApp {
     selection_handle_end_handler: Option<ObjcId>,
 }
 
+/// Creates a fresh MakepadTextView, configured invisible (makepad renders the
+/// text + caret), and attaches it to the MTKView. Used at startup and to
+/// re-create the view when leaving a secure field (iOS caches a sticky
+/// password/AutoFill tag on the text-input object).
+unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
+    let mtk_bounds: NSRect = msg_send![mtk_view_obj, bounds];
+    let view: ObjcId = msg_send![get_ios_class_global().makepad_text_view, alloc];
+    let view: ObjcId = msg_send![view, initWithFrame: mtk_bounds];
+    (*view).set_ivar::<f64>("ime_pos_x", 0.0);
+    (*view).set_ivar::<f64>("ime_pos_y", 0.0);
+    (*view).set_ivar::<bool>("_is_multiline", false);
+    (*view).set_ivar::<bool>("_submit_on_enter", false);
+    (*view).set_ivar::<BOOL>("programmatic_update", NO);
+    let clear_color: ObjcId = msg_send![class!(UIColor), clearColor];
+    let () = msg_send![view, setBackgroundColor: clear_color];
+    let () = msg_send![view, setTextColor: clear_color];
+    // tintColor also colors the CJK candidate-bar highlight; a clear tint
+    // white-on-whites it. Real tint; the caret is hidden via a zero-width caretRect.
+    let tint: ObjcId = msg_send![class!(UIColor), systemBlueColor];
+    let () = msg_send![view, setTintColor: tint];
+    let () = msg_send![view, setOpaque: NO];
+    let () = msg_send![view, setScrollEnabled: NO];
+    let () = msg_send![view, setClipsToBounds: YES];
+    // Drop the red misspelling underline; makepad renders the text itself.
+    let () = msg_send![view, setSpellCheckingType: 1i64];
+    let () = msg_send![view, setDelegate: view];
+    let responds: BOOL = msg_send![view, respondsToSelector: sel!(setFocusEffect:)];
+    if responds == YES {
+        let () = msg_send![view, setFocusEffect: nil];
+    }
+    let () = msg_send![mtk_view_obj, addSubview: view];
+    view
+}
+
 impl IosApp {
     pub fn new(
         metal_device: ObjcId,
@@ -288,42 +322,9 @@ impl IosApp {
             // required for safeAreaInsets to update correctly.
             let () = msg_send![mtk_view_obj, setAutoresizingMask: 18u64];
 
-            let clear_color: ObjcId = msg_send![class!(UIColor), clearColor];
-
-            // SPIKE: a real UITextView client, to test whether iOS grants the
-            // native language HUD + full input-mode cycle. Invisible (clear
-            // text/caret/bg), real on-screen frame, pointInside=NO so touches pass
-            // through to makepad. show_keyboard focuses this instead of the proxy.
-            let mtk_bounds: NSRect = msg_send![mtk_view_obj, bounds];
-            let makepad_text_view: ObjcId =
-                msg_send![get_ios_class_global().makepad_text_view, alloc];
-            let makepad_text_view: ObjcId =
-                msg_send![makepad_text_view, initWithFrame: mtk_bounds];
-            (*makepad_text_view).set_ivar::<f64>("ime_pos_x", 0.0);
-            (*makepad_text_view).set_ivar::<f64>("ime_pos_y", 0.0);
-            (*makepad_text_view).set_ivar::<bool>("_is_multiline", false);
-            (*makepad_text_view).set_ivar::<bool>("_submit_on_enter", false);
-            (*makepad_text_view).set_ivar::<BOOL>("programmatic_update", NO);
-            let () = msg_send![makepad_text_view, setBackgroundColor: clear_color];
-            let () = msg_send![makepad_text_view, setTextColor: clear_color];
-            // tintColor also colors the CJK candidate bar's highlighted candidate, so a
-            // clear tint made it white-on-white. Real tint here; the caret tintColor would
-            // also show is hidden via a zero-width caretRectForPosition.
-            let tint: ObjcId = msg_send![class!(UIColor), systemBlueColor];
-            let () = msg_send![makepad_text_view, setTintColor: tint];
-            let () = msg_send![makepad_text_view, setOpaque: NO];
-            let () = msg_send![makepad_text_view, setScrollEnabled: NO];
-            let () = msg_send![makepad_text_view, setClipsToBounds: YES];
-            // Drop the red misspelling underline; makepad renders the text, so the
-            // text view's own spellcheck decoration would just be a floating artifact.
-            let () = msg_send![makepad_text_view, setSpellCheckingType: 1i64];
-            let () = msg_send![makepad_text_view, setDelegate: makepad_text_view];
-            let responds_to_focus_effect_tv: BOOL =
-                msg_send![makepad_text_view, respondsToSelector: sel!(setFocusEffect:)];
-            if responds_to_focus_effect_tv == YES {
-                let () = msg_send![makepad_text_view, setFocusEffect: nil];
-            }
-            let () = msg_send![mtk_view_obj, addSubview: makepad_text_view];
+            // Invisible real UITextView client: makepad renders text/caret, this owns
+            // the system keyboard session. show_keyboard focuses it.
+            let makepad_text_view = create_makepad_text_view(mtk_view_obj);
 
             // No UITextInteraction needed: arrow nav and auto-repeat come from
             // UIKeyCommand (see key_commands in ios_text_input.rs).
@@ -675,7 +676,7 @@ impl IosApp {
     /// Configure keyboard settings (UITextInputTraits)
     /// Uses caching to avoid calling reloadInputViews every frame
     pub fn configure_keyboard(config: &crate::ime::TextInputConfig) {
-        use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType};
+        use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputContentType};
 
         // Set ivars and update cached config inside the borrow, but call
         // reloadInputViews OUTSIDE the borrow because it can synchronously
@@ -686,6 +687,24 @@ impl IosApp {
                     if let Some(ref mut app) = *app_ref {
                         if app.last_keyboard_config.as_ref() == Some(config) {
                             return None;
+                        }
+
+                        // Leaving a secure field: iOS keeps the password/AutoFill tag on
+                        // the old view object, so swap in a fresh one for the next field.
+                        let was_tainting = app.last_keyboard_config.map_or(false, |c| c.taints_autofill());
+                        if was_tainting && !config.taints_autofill() {
+                            if let (Some(old_view), Some(mtk)) = (app.makepad_text_view, app.mtk_view) {
+                                unsafe {
+                                    // The old view was resigned in a prior drain and is now
+                                    // detached with no strong refs; release balances its alloc+1.
+                                    let () = msg_send![old_view, removeFromSuperview];
+                                    let () = msg_send![old_view, release];
+                                    app.makepad_text_view = Some(create_makepad_text_view(mtk));
+                                }
+                                // The fresh view starts at the origin; clear the cached
+                                // position so the next frame re-parks it at the caret.
+                                app.ime_position = None;
+                            }
                         }
 
                         let view = if let Some(view) = app.makepad_text_view {
@@ -742,6 +761,20 @@ impl IosApp {
                                 let () = msg_send![view, setAutocorrectionType: autocorrect_type];
                                 let () = msg_send![view, setReturnKeyType: return_type];
                                 let () = msg_send![view, setSecureTextEntry: secure];
+                                // AutoFill identity from the field's content type, independent
+                                // of the secure display toggle (a revealed password stays a password).
+                                let content_type_const: ObjcId = match config.content_type {
+                                    TextInputContentType::None => UITextContentTypeNone,
+                                    TextInputContentType::Username => UITextContentTypeUsername,
+                                    TextInputContentType::Password => UITextContentTypePassword,
+                                    TextInputContentType::NewPassword => UITextContentTypeNewPassword,
+                                    TextInputContentType::EmailAddress => UITextContentTypeEmailAddress,
+                                    TextInputContentType::Url => UITextContentTypeURL,
+                                    TextInputContentType::FullStreetAddress => UITextContentTypeFullStreetAddress,
+                                    TextInputContentType::TelephoneNumber => UITextContentTypeTelephoneNumber,
+                                    TextInputContentType::OneTimeCode => UITextContentTypeOneTimeCode,
+                                };
+                                let () = msg_send![view, setTextContentType: content_type_const];
                                 (*view).set_ivar::<bool>("_is_multiline", config.is_multiline);
                                 (*view).set_ivar::<bool>("_submit_on_enter", config.submit_on_enter);
                             }
@@ -799,6 +832,22 @@ impl IosApp {
             .flatten();
 
         if let Some(text_input_view) = view {
+            unsafe {
+                // Wipe any lingering text (a typed password) from the shared view's
+                // buffer; programmatic_update keeps it from echoing to makepad's model.
+                (*text_input_view).set_ivar::<BOOL>("programmatic_update", YES);
+                let empty = str_to_nsstring("");
+                let () = msg_send![text_input_view, setText: empty];
+                (*text_input_view).set_ivar::<BOOL>("programmatic_update", NO);
+            }
+            // Reset the freshness baseline so the next field's push isn't dropped.
+            let _ = IOS_APP.try_with(|app| {
+                if let Ok(mut app_ref) = app.try_borrow_mut() {
+                    if let Some(app) = app_ref.as_mut() {
+                        app.last_forwarded_text = None;
+                    }
+                }
+            });
             let () = unsafe { msg_send![text_input_view, resignFirstResponder] };
         }
     }
@@ -883,6 +932,7 @@ impl IosApp {
             return;
         };
 
+        let mut wrote_text = false;
         unsafe {
             // Read the live view state first (pure getters, no delegate callbacks).
             let ns_text: ObjcId = msg_send![view, text];
@@ -911,12 +961,24 @@ impl IosApp {
                 let ns_text = str_to_nsstring(&text);
                 let () = msg_send![view, setText: ns_text];
                 let () = msg_send![view, setSelectedRange: range];
+                wrote_text = true;
             } else if live_sel.location != range.location || live_sel.length != range.length {
                 // Same text already: only move the selection if it actually differs
                 // (skips a gratuitous setSelectedRange that can fire a deferred echo).
                 let () = msg_send![view, setSelectedRange: range];
             }
             (*view).set_ivar::<BOOL>("programmatic_update", NO);
+        }
+        // Keep the freshness baseline in step with the text just written, so an
+        // immediate follow-up push isn't dropped as a stale clobber.
+        if wrote_text {
+            let _ = IOS_APP.try_with(|app| {
+                if let Ok(mut app_ref) = app.try_borrow_mut() {
+                    if let Some(app) = app_ref.as_mut() {
+                        app.last_forwarded_text = Some(text);
+                    }
+                }
+            });
         }
     }
 

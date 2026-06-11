@@ -191,7 +191,8 @@ unsafe fn makepad_key_press(press: ObjcId) -> Option<(KeyCode, crate::event::Key
     let usage: u64 = msg_send![key, keyCode];
     let key_code = hid_usage_to_key_code(usage);
     let is_enter = key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter;
-    if (!is_enter && !modifiers.logo && !is_hardware_navigation_key(key_code)) || key_code.is_unknown() {
+    let is_tab = key_code == KeyCode::Tab;
+    if (!is_enter && !is_tab && !modifiers.logo && !is_hardware_navigation_key(key_code)) || key_code.is_unknown() {
         None
     } else {
         Some((key_code, modifiers))
