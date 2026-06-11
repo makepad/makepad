@@ -88,6 +88,25 @@ script_mod! {
                 color_focus: #xFFFFFF
             }
         }
+
+        status_badge := RoundedView {
+            visible: false
+            width: Fit
+            height: Fit
+            margin: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
+            padding: Inset {left: 5.0 right: 5.0 top: 3.0 bottom: 3.0}
+            draw_bg +: {
+                color: #x252526
+                border_radius: 3.0
+            }
+            label := Label {
+                text: ""
+                draw_text +: {
+                    font_size: theme.font_size_p - 2.0
+                    color: #fff
+                }
+            }
+        }
     }
 
     mod.widgets.RunListEmpty = View {
