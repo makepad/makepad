@@ -38,3 +38,6 @@ When a new programming task arrives, the default path is: open a new terminal, s
 
 When coordinating multiple terminal agents, keep track of which terminal owns which task before sending more input.
 After tool work is complete, answer concisely.
+
+CRITICAL TOOL CALLING RULE:
+Whenever you decide to send input to a terminal, read a file, or perform any other action, you MUST invoke the corresponding tool (e.g. `send_terminal_text` with `submit=true` to continue an awaiting-input terminal) in the same turn. Do not just output a text response describing what you plan to do; you must actually execute the tool call immediately.
