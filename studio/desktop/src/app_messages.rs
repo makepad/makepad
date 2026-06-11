@@ -285,7 +285,7 @@ impl App {
                     if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
                         state.mount = mount.clone();
                         state.package = package.clone();
-                        state.status = "running".to_string();
+                        state.status = "building".to_string();
                         window_id = state.window_id;
                     }
                     if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
@@ -676,6 +676,20 @@ impl App {
             HubToClient::Error { message } => {
                 self.data.pending_reload_paths.clear();
                 self.set_status(cx, &format!("error: {}", message));
+            }
+            HubToClient::AppStarted { build_id } => {
+                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                    if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                        state.status = "running".to_string();
+                    }
+                    let mount = self.data.build_to_mount.get(&build_id).cloned();
+                    if let Some(mount) = mount {
+                        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                        self.refresh_active_mount_run_list(cx);
+                    }
+                }
             }
             _ => {}
         }
