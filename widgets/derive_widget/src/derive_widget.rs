@@ -148,6 +148,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn redraw(&mut self, cx:&mut Cx) { self.")
                 .ident(wrap_field)
                 .add(".redraw(cx)}");
+            tb.add("    fn set_scroll_pos(&mut self, cx:&mut Cx, v:Vec2d) { self.")
+                .ident(wrap_field)
+                .add(".set_scroll_pos(cx, v)}");
             tb.add("    fn visible(&self)->bool{ self.")
                 .ident(wrap_field)
                 .add(".visible()}");
@@ -249,6 +252,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                     "Need either a field marked redraw or deref or wrap to find redraw method",
                 );
             }
+            if let Some(deref_field) = &deref_field {
+                tb.add("    fn set_scroll_pos(&mut self, cx:&mut Cx, v:Vec2d) { self.")
+                    .ident(deref_field)
+                    .add(".set_scroll_pos(cx, v)}");
+            }
             if !find_fields.is_empty() {
                 tb.add("    fn children(&self, visit:&mut dyn FnMut(LiveId, WidgetRef)){");
                 for find_field in &find_fields {
@@ -312,6 +320,13 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                         .add(".selection_get_full_text(); if !v.is_empty() { return v; } }");
                 }
                 tb.add("        String::new() }");
+                if deref_field.is_none() {
+                    tb.add("    fn set_scroll_pos(&mut self, cx:&mut Cx, v:Vec2d) {");
+                    for find_field in &find_fields {
+                        tb.add("        self.").ident(find_field).add(".set_scroll_pos(cx, v);");
+                    }
+                    tb.add("    }");
+                }
             } else if let Some(deref_field) = &deref_field {
                 tb.add("   fn children(&self, visit:&mut dyn FnMut(LiveId, WidgetRef)){");
                 tb.add("       self.")

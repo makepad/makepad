@@ -159,6 +159,7 @@ pub trait WidgetNode: ScriptApply {
     fn walk(&mut self, _cx: &mut Cx) -> Walk;
     fn area(&self) -> Area; //{return Area::Empty;}
     fn redraw(&mut self, _cx: &mut Cx);
+    fn set_scroll_pos(&mut self, _cx: &mut Cx, _v: Vec2d) {}
     fn set_action_data(&mut self, _data: Arc<dyn ActionTrait>) {}
     fn action_data(&self) -> Option<Arc<dyn ActionTrait>> {
         None
@@ -1074,6 +1075,12 @@ impl WidgetRef {
     pub fn redraw(&self, cx: &mut Cx) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.redraw(cx);
+        }
+    }
+
+    pub fn set_scroll_pos(&self, cx: &mut Cx, v: Vec2d) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            return inner.widget.set_scroll_pos(cx, v);
         }
     }
 
