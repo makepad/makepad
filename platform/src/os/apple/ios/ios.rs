@@ -11,7 +11,7 @@ use {
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
+            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent,
             VirtualKeyboardEvent,
         },
         makepad_live_id::*,
@@ -493,29 +493,6 @@ impl Cx {
         let time = with_ios_app(|app| app.time_now());
         for queued_event in queued_events {
             match queued_event {
-                ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                    self.call_event_handler(&Event::TextInput(TextInputEvent {
-                        input,
-                        replace_last,
-                        was_paste: false,
-                        ..Default::default()
-                    }));
-                }
-                ios_app::IosTextInputEvent::RangeReplace {
-                    start,
-                    end,
-                    text,
-                    replaced_text,
-                    fallback_to_insert,
-                } => {
-                    self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
-                        start,
-                        end,
-                        text,
-                        replaced_text,
-                        fallback_to_insert,
-                    }));
-                }
                 ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
                     self.call_event_handler(&Event::TextInput(TextInputEvent {
                         full_state_sync: Some(FullTextState {
@@ -818,6 +795,16 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_cx);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend, so the script object heap doesn't grow without bound:
+                // every `eval` / `script_apply_eval!` allocates script objects that are
+                // only reclaimed by `gc()`. `needs_gc()` gates the actual sweep.
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                    }
+                });
             }
             IosEvent::TouchUpdate(mut e) => {
                 let window = &self.windows[e.window_id];
@@ -1005,11 +992,13 @@ impl Cx {
                     window.is_created = true;
                 }
                 CxOsOp::ShowTextIME(area, pos, config) => {
-                    let pos = area.clipped_rect(self).pos + pos;
                     let window_id = CxWindowPool::id_zero();
-                    let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
-                    IosApp::set_ime_position(pos);
+                    let caret = area.clipped_rect(self).pos + pos;
+                    let caret = self.windows[window_id].layout_vec2d_to_native_points(caret);
+                    // configure_keyboard may recreate the view; set_ime_position must
+                    // run after so it frames the final view (same-frame parking).
                     IosApp::configure_keyboard(&config);
+                    IosApp::set_ime_position(caret);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {

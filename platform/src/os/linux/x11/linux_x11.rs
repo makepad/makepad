@@ -195,6 +195,20 @@ impl X11Cx {
                 // ok here we send out to all our childprocesses
 
                 self.handle_repaint(opengl_windows);
+
+                // Run script-VM garbage collection at a safe point after paint, matching
+                // the macOS backend. Without this the script object heap grows without
+                // bound on Linux: every `eval` / `script_apply_eval!` allocates script
+                // objects that are only reclaimed by `gc()`. `needs_gc()` gates this so
+                // it only runs once the heap has grown past its threshold (~2x).
+                {
+                    let mut cx = self.cx.borrow_mut();
+                    cx.with_vm(|vm| {
+                        if vm.heap().needs_gc() {
+                            vm.gc();
+                        }
+                    });
+                }
             }
             XlibEvent::MouseDown(mut e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -411,6 +425,15 @@ impl X11Cx {
                 }
 
                 cx.run_live_edit_if_needed("linux-x11");
+                let has_platform_ops = !cx.platform_ops.is_empty();
+                drop(cx);
+                if has_platform_ops {
+                    if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
+                        let mut cx = self.cx.borrow_mut();
+                        cx.call_event_handler(&Event::Shutdown);
+                        return EventFlow::Exit;
+                    }
+                }
                 return EventFlow::Wait;
             }
         }
