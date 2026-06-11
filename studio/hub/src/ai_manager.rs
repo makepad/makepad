@@ -3857,6 +3857,24 @@ impl AiManager {
         }
         workflows
     }
+
+    fn build_classifier_prompt(&self, prompt: &str, workflows: &[ParsedWorkflow]) -> String {
+        let mut catalog = String::new();
+        for wf in workflows {
+            catalog.push_str(&format!("- {}: {}\n", wf.name, wf.steps.first().map(|s| s.name.as_str()).unwrap_or("")));
+        }
+        format!(
+            "You are an AI assistant routing user prompts to available workflows. \
+            Available workflows:\n\
+            {}\n\
+            Given the user's prompt: \"{}\"\n\
+            Determine if they want to trigger one of the workflows. \
+            Return a JSON object in this format (no other text, no markdown fences):\n\
+            {{\n  \"matched_workflow\": \"workflow-name\",\n  \"arguments\": \"extracted-args\"\n}}\n\
+            If no workflow matches, return null.",
+            catalog, prompt
+        )
+    }
 }
 
 fn remove_agent_file_for_root_best_effort(
