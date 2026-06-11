@@ -1196,6 +1196,16 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
                 workflow_step_marker(&step.status),
                 truncate_inline(&step.name, AI_TASK_BOARD_WORKFLOW_STEP_MAX_CHARS)
             ));
+            if step.status.eq_ignore_ascii_case("active")
+                || step.status.eq_ignore_ascii_case("running")
+                || step.status.eq_ignore_ascii_case("current")
+            {
+                for agent in &state.agents {
+                    if agent.workflow_step_name.as_deref() == Some(&step.name) {
+                        render_workflow_owner_agent(&mut markdown, agent, state, 1);
+                    }
+                }
+            }
         }
         let omitted_after = total_steps.saturating_sub(visible_end);
         if omitted_after > 0 {
@@ -1223,7 +1233,7 @@ fn ai_task_board_markdown(state: &AiMountState) -> String {
     let roots: Vec<_> = state
         .agents
         .iter()
-        .filter(|agent| agent.parent_agent_id.is_none())
+        .filter(|agent| agent.parent_agent_id.is_none() && agent.workflow_step_name.is_none())
         .collect();
 
     for root in roots {
@@ -1305,6 +1315,65 @@ fn render_task_board_agent(
     }
 }
 
+fn render_workflow_owner_agent(
+    markdown: &mut String,
+    agent: &AiAgentSummary,
+    state: &AiMountState,
+    depth: usize,
+) {
+    let indent = format!("{}└─ ", "  ".repeat(depth - 1));
+    let is_active = state.active_agent_id == Some(agent.agent_id);
+    let state_label = if agent.pending {
+        "running"
+    } else if agent.status == "completed" {
+        "done"
+    } else if agent.status == "cancelled" {
+        "cancelled"
+    } else if agent.status.contains("error") {
+        "error"
+    } else {
+        "idle"
+    };
+
+    let status_chips = if is_active {
+        format!("`selected` `{}`", state_label)
+    } else {
+        format!("`{}`", state_label)
+    };
+
+    let action_str = if let Some(action) = agent.current_action.as_ref() {
+        truncate_inline(action, 48)
+    } else {
+        truncate_inline(&agent.status, 48)
+    };
+
+    let step_info = if let Some(step_name) = agent.workflow_step_name.as_ref() {
+        let step_status = agent.workflow_step_status.as_deref().unwrap_or("active");
+        format!(" (Step: {} [{}])", truncate_inline(step_name, 20), step_status)
+    } else {
+        "".to_string()
+    };
+
+    markdown.push_str(&format!(
+        "{}- **{}** - {} - {}{}\n",
+        indent,
+        truncate_inline(&agent.title, 44),
+        status_chips,
+        action_str,
+        step_info
+    ));
+
+    let children: Vec<_> = state
+        .agents
+        .iter()
+        .filter(|a| a.parent_agent_id == Some(agent.agent_id))
+        .collect();
+
+    for child in children {
+        render_task_board_agent(markdown, child, state, depth + 1);
+    }
+}
+
 fn ai_live_activity_markdown(state: &AiMountState) -> String {
     let live = state.live_markdown.trim();
     let mut markdown = if live.is_empty() {
@@ -1317,6 +1386,7 @@ fn ai_live_activity_markdown(state: &AiMountState) -> String {
     };
 
     append_live_agent_details(&mut markdown, state);
+    append_recent_activity(&mut markdown, state);
     if markdown.is_empty() {
         "_No live AI activity yet._".to_string()
     } else {
@@ -1336,13 +1406,10 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
             .as_deref()
             .map(|action| !action.trim().is_empty())
             .unwrap_or(false);
-        let has_terminal = agent
-            .last_terminal_excerpt
-            .as_deref()
-            .map(|excerpt| !excerpt.trim().is_empty())
-            .unwrap_or(false);
+        let has_terminal = agent.active_terminal_path.is_some() || agent.last_terminal_excerpt.is_some();
         let has_files = !agent.files_touched.is_empty();
-        if !has_action && !has_terminal && !has_files {
+        let has_blocked = agent.blocked_reason.is_some();
+        if !has_action && !has_terminal && !has_files && !has_blocked {
             continue;
         }
         if !wrote_header {
@@ -1357,13 +1424,25 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
             truncate_inline(&agent.title, 44),
             live_agent_state_label(agent)
         ));
+        if let Some(reason) = agent.blocked_reason.as_deref() {
+            let reason = reason.trim();
+            if !reason.is_empty() {
+                markdown.push_str(&format!("  blocked: {}\n", truncate_inline(reason, 96)));
+            }
+        }
         if let Some(action) = agent.current_action.as_deref() {
             let action = action.trim();
             if !action.is_empty() {
                 markdown.push_str(&format!("  action: {}\n", truncate_inline(action, 96)));
             }
         }
-        if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
+        if let Some(path) = agent.active_terminal_path.as_deref() {
+            let path = path.trim();
+            if !path.is_empty() {
+                let title = agent.active_terminal_title.as_deref().unwrap_or("Codex");
+                markdown.push_str(&format!("  terminal: `{}` ({})\n", truncate_inline(path, 80), truncate_inline(title, 40)));
+            }
+        } else if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
             if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
                 markdown.push_str(&format!("  terminal: {}\n", truncate_inline(line, 120)));
             }
@@ -1384,6 +1463,39 @@ fn append_live_agent_details(markdown: &mut String, state: &AiMountState) {
         }
     }
     if wrote_header && markdown.ends_with('\n') {
+        markdown.pop();
+    }
+}
+
+fn append_recent_activity(markdown: &mut String, state: &AiMountState) {
+    if state.visibility_events.is_empty() {
+        return;
+    }
+    if !markdown.is_empty() {
+        markdown.push_str("\n\n");
+    }
+    markdown.push_str("**Recent Activity**\n\n");
+    for event in state.visibility_events.iter().rev().take(10) {
+        let kind_label = match event.kind.as_str() {
+            "step_activated" => "Step Active",
+            "step_completed" => "Step Completed",
+            "terminal_attached" => "Terminal Open",
+            "terminal_needs_input" => "Awaiting Input",
+            "terminal_done" => "Terminal Done",
+            "file_touched" => "File Touched",
+            "agent_done" => "Agent Done",
+            "agent_failed" => "Agent Failed",
+            "workflow_failed" => "Workflow Failed",
+            other => other,
+        };
+        markdown.push_str(&format!(
+            "- `[{}]` **{}** - {}\n",
+            kind_label,
+            truncate_inline(&event.title, 44),
+            truncate_inline(&event.detail, 96)
+        ));
+    }
+    if markdown.ends_with('\n') {
         markdown.pop();
     }
 }
@@ -1452,7 +1564,7 @@ fn polish_live_activity_line(line: &str) -> String {
 mod ai_task_board_tests {
     use super::*;
     use makepad_studio_protocol::hub_protocol::{
-        ActiveWorkflowState, AiBackendInfo, WorkflowStepState,
+        ActiveWorkflowState, AiBackendInfo, WorkflowStepState, AiVisibilityEvent,
     };
 
     fn summary(
@@ -1658,5 +1770,74 @@ mod ai_task_board_tests {
         assert!(markdown.contains("terminal: `makepad/.makepad/task.term` - Working"));
         assert!(markdown.contains("expected files: studio/desktop/src/ai_manager.rs"));
         assert!(markdown.contains("- Terminal `makepad/.makepad/task.term` - working / codex"));
+    }
+
+    #[test]
+    fn task_board_renders_active_workflow_owner_and_nested_subagents() {
+        let mut owner = summary(1, "Workflow Owner", "running", true, None);
+        owner.workflow_step_name = Some("Review implementation".to_string());
+        owner.workflow_step_status = Some("active".to_string());
+        owner.current_action = Some("Resolving PR comments".to_string());
+
+        let child = summary(2, "Subagent Reviewer", "ready", false, Some(AiAgentId(1)));
+
+        let state = mount_state_with_workflow(
+            vec![owner, child],
+            "",
+            Some(workflow_state()),
+        );
+
+        let markdown = ai_task_board_markdown(&state);
+        assert!(markdown.contains("**Workflow:** review-prs"));
+        assert!(markdown.contains("▶ Review implementation"));
+        assert!(markdown.contains("└─ - **Workflow Owner**"));
+        assert!(markdown.contains("`running`"));
+        assert!(markdown.contains("Resolving PR comments"));
+        assert!(markdown.contains("  └─ - **Subagent Reviewer**"));
+        
+        // Verify total chat count is shown, but owner is not listed at the bottom
+        assert!(markdown.contains("**2 chats**"));
+        assert!(!markdown.contains("\n- **Workflow Owner**")); // Only indented as └─
+    }
+
+    #[test]
+    fn live_activity_renders_recent_activity_events() {
+        let mut state = mount_state(Vec::new(), "");
+        state.visibility_events = vec![
+            AiVisibilityEvent {
+                kind: "step_activated".to_string(),
+                agent_id: Some(AiAgentId(1)),
+                title: "Resolve PR Set".to_string(),
+                detail: "Step active".to_string(),
+                timestamp: 100.0,
+            },
+            AiVisibilityEvent {
+                kind: "terminal_attached".to_string(),
+                agent_id: Some(AiAgentId(1)),
+                title: "a.term".to_string(),
+                detail: "Terminal open".to_string(),
+                timestamp: 101.0,
+            },
+        ];
+
+        let markdown = ai_live_activity_markdown(&state);
+        assert!(markdown.contains("**Recent Activity**"));
+        // Newest-first check: order is reverse
+        assert!(markdown.contains("- `[Terminal Open]` **a.term** - Terminal open"));
+        assert!(markdown.contains("- `[Step Active]` **Resolve PR Set** - Step active"));
+    }
+
+    #[test]
+    fn live_activity_renders_agent_blocked_reason_and_active_terminal() {
+        let mut agent = summary(1, "Task 4", "running", true, None);
+        agent.blocked_reason = Some("Waiting for user to clarify PR bounds".to_string());
+        agent.active_terminal_path = Some("repo/.makepad/codex.term".to_string());
+        agent.active_terminal_title = Some("Codex Terminal".to_string());
+        let state = mount_state(vec![agent], "");
+
+        let markdown = ai_live_activity_markdown(&state);
+        assert!(markdown.contains("**Agents**"));
+        assert!(markdown.contains("blocked: Waiting for user to clarify PR bounds"));
+        assert!(markdown.contains("terminal: `repo/.makepad/codex.term` (Codex Terminal)"));
     }
 }
