@@ -958,6 +958,9 @@ mod tests {
             message_count,
             parent_agent_id: None,
             role: None,
+            current_action: None,
+            last_terminal_excerpt: None,
+            files_touched: Vec::new(),
         }
     }
 
@@ -977,6 +980,9 @@ mod tests {
             parent_agent_id: None,
             role: None,
             subagents: Vec::new(),
+            current_action: None,
+            last_terminal_excerpt: None,
+            files_touched: Vec::new(),
         }
     }
 
@@ -996,6 +1002,7 @@ mod tests {
             active_agent_id: Some(agent_id),
             agents: vec![test_agent_summary(agent_id, "Chat 1", 0)],
             active_agent: Some(test_agent_state(agent_id, "idle", false, Vec::new())),
+            active_workflow: None,
             live_markdown: String::new(),
         };
 
@@ -1300,6 +1307,9 @@ mod ai_task_board_tests {
             message_count: 3,
             parent_agent_id: parent,
             role: None,
+            current_action: None,
+            last_terminal_excerpt: None,
+            files_touched: Vec::new(),
         }
     }
 
@@ -1318,6 +1328,7 @@ mod ai_task_board_tests {
             agents,
             active_agent: None,
             live_markdown: live_markdown.to_string(),
+            active_workflow: None,
         }
     }
 
