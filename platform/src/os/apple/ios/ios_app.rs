@@ -221,6 +221,14 @@ unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
     if responds == YES {
         let () = msg_send![view, setFocusEffect: nil];
     }
+    // Tell Full Keyboard Access to skip this element so it doesn't force a visible
+    // focus caret (makepad draws its own); keys still arrive via keyCommands. iOS 13+.
+    let () = msg_send![view, setIsAccessibilityElement: YES];
+    let responds_arui: BOOL =
+        msg_send![view, respondsToSelector: sel!(setAccessibilityRespondsToUserInteraction:)];
+    if responds_arui == YES {
+        let () = msg_send![view, setAccessibilityRespondsToUserInteraction: NO];
+    }
     let () = msg_send![mtk_view_obj, addSubview: view];
     view
 }

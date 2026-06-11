@@ -232,6 +232,16 @@ pub fn define_makepad_text_view() -> *const Class {
     extern "C" fn focus_effect(_: &Object, _: Sel) -> ObjcId {
         nil
     }
+    // Empty focus geometry so Full Keyboard Access has nothing to draw its cursor over.
+    extern "C" fn accessibility_path(_: &Object, _: Sel) -> ObjcId {
+        unsafe {
+            let zero = NSRect {
+                origin: NSPoint { x: 0.0, y: 0.0 },
+                size: NSSize { width: 0.0, height: 0.0 },
+            };
+            msg_send![class!(UIBezierPath), bezierPathWithRect: zero]
+        }
+    }
     // Never intercept touches: makepad renders the text and owns hit-testing and
     // caret placement; the text view only drives the keyboard + IME.
     extern "C" fn point_inside(_: &Object, _: Sel, _: NSPoint, _: ObjcId) -> BOOL {
@@ -364,6 +374,10 @@ pub fn define_makepad_text_view() -> *const Class {
         decl.add_method(
             sel!(focusEffect),
             focus_effect as extern "C" fn(&Object, Sel) -> ObjcId,
+        );
+        decl.add_method(
+            sel!(accessibilityPath),
+            accessibility_path as extern "C" fn(&Object, Sel) -> ObjcId,
         );
         decl.add_method(
             sel!(pointInside:withEvent:),
