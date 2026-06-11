@@ -227,21 +227,26 @@ impl XlibApp {
                 x11_sys::DestroyNotify => {
                     // our window got destroyed
                     let destroy_window = event.xdestroywindow;
-                    if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
-                        let window = &mut (**window_ptr);
+                    if let Some(window_ptr) = self.window_map.remove(&destroy_window.window) {
+                        let window = &mut (*window_ptr);
                         if self.active_popup == Some(destroy_window.window) {
                             self.release_popup_grab(destroy_window.window);
                         }
+                        window.window = None;
+                        let window_id = window.window_id;
                         window.do_callback(XlibEvent::WindowClosed(WindowClosedEvent {
-                            window_id: window.window_id,
+                            window_id,
                         }));
+                        if !self.event_loop_running {
+                            return;
+                        }
                     }
                 }
                 x11_sys::ConfigureNotify => {
                     let cfg = event.xconfigure;
                     if let Some(window_ptr) = self.window_map.get(&cfg.window) {
                         let window = &mut (**window_ptr);
-                        if cfg.window == window.window.unwrap() {
+                        if window.window == Some(cfg.window) {
                             window.send_change_event();
                         }
                     }
@@ -637,10 +642,21 @@ impl XlibApp {
                 }
                 x11_sys::ClientMessage => {
                     let event = event.xclient;
-                    if event.message_type == self.atoms.wm_protocols {
-                        if let Some(window_ptr) = self.window_map.get(&event.window) {
-                            let window = &mut (**window_ptr);
-                            window.close_window();
+                    if event.message_type == self.atoms.wm_protocols
+                        && event.data.l[0] as c_ulong == self.atoms.wm_delete_window
+                    {
+                        if let Some(window_ptr) = self.window_map.get(&event.window).copied() {
+                            let window = &mut (*window_ptr);
+                            let window_id = window.window_id;
+                            if window.send_close_requested_event() {
+                                window.close_window();
+                                window.do_callback(XlibEvent::WindowClosed(WindowClosedEvent {
+                                    window_id,
+                                }));
+                                if !self.event_loop_running {
+                                    return;
+                                }
+                            }
                         }
                     }
                     if event.message_type == self.dnd.atoms.enter {
@@ -705,7 +721,9 @@ impl XlibApp {
                 _ => {}
             }
         }
-        self.do_callback(XlibEvent::Paint);
+        if self.event_loop_running && !self.display.is_null() {
+            self.do_callback(XlibEvent::Paint);
+        }
     }
 
     pub fn event_loop(&mut self) {
