@@ -4654,7 +4654,7 @@ fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
 }
 
 fn should_track_observed_terminal_mode(mode: &str) -> bool {
-    matches!(mode, "working" | "awaiting-input" | "needs-attention")
+    matches!(mode, "working" | "awaiting-input" | "needs-attention" | "done")
 }
 
 fn should_show_live_task(task: &AiTrackedTask) -> bool {
@@ -7781,6 +7781,38 @@ Some intro text...
             event.kind == "terminal_needs_input" && event.agent_id == Some(agent_id)
         }));
     }
+    #[test]
+    fn workflow_first_observed_completed_codex_terminal_emits_done_visibility_event() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+
+        let state = manager
+            .process_terminal_observation(
+                "repo",
+                AiTerminalObservation {
+                    path: "repo/.makepad/codex-done.term".to_string(),
+                    terminal_title: "codex".to_string(),
+                    cols: 80,
+                    rows: 8,
+                    top_row: 0,
+                    total_lines: 8,
+                    is_tui: true,
+                    text: "\nAll checks passed.\n\n› \n\n  gpt-5.5 medium · ~/repo\n".to_string(),
+                },
+            )
+            .expect("first observed completed codex terminal should update visibility");
+
+        assert!(state.visibility_events.iter().any(|event| {
+            event.kind == "terminal_done" && event.agent_id == Some(agent_id)
+        }));
+    }
+
 
     #[test]
     fn workflow_file_touch_updates_agent_files_and_event() {
