@@ -14,7 +14,7 @@ use makepad_studio_protocol::ai_format::{
 };
 use makepad_studio_protocol::hub_protocol::{
     ActiveWorkflowState, AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage,
-    AiMessageRole, AiMountState, WorkflowStepState,
+    AiMessageRole, AiMountState, AiVisibilityEvent, WorkflowStepState,
 };
 use providers::AiProviderKind;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -129,6 +129,12 @@ struct RunningAgent {
     current_action: Option<String>,
     last_terminal_excerpt: Option<String>,
     files_touched: Vec<String>,
+    active_terminal_path: Option<String>,
+    active_terminal_title: Option<String>,
+    state_changed_at: f64,
+    workflow_step_name: Option<String>,
+    workflow_step_status: Option<String>,
+    blocked_reason: Option<String>,
 }
 
 struct MountAgents {
@@ -145,6 +151,7 @@ struct MountAgents {
     terminal_snapshots: HashMap<String, AiTerminalSnapshot>,
     active_workflow: Option<ActiveWorkflowState>,
     active_workflow_agent_id: Option<AiAgentId>,
+    visibility_events: Vec<AiVisibilityEvent>,
     skills: Vec<ParsedSkill>,
     workflows: Vec<ParsedWorkflow>,
 }
@@ -516,6 +523,7 @@ impl AiManager {
                     terminal_snapshots: HashMap::new(),
                     active_workflow: None,
                     active_workflow_agent_id: None,
+                    visibility_events: Vec::new(),
                     skills: Vec::new(),
                     workflows: Vec::new(),
                 });
@@ -591,6 +599,12 @@ impl AiManager {
                 current_action: None,
                 last_terminal_excerpt: None,
                 files_touched: Vec::new(),
+                active_terminal_path: None,
+                active_terminal_title: None,
+                state_changed_at: now_seconds(),
+                workflow_step_name: None,
+                workflow_step_status: None,
+                blocked_reason: None,
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -1890,6 +1904,12 @@ impl AiManager {
                         current_action: None,
                         last_terminal_excerpt: None,
                         files_touched: Vec::new(),
+                        active_terminal_path: None,
+                        active_terminal_title: None,
+                        state_changed_at: now_seconds(),
+                        workflow_step_name: None,
+                        workflow_step_status: None,
+                        blocked_reason: None,
                     };
 
                     mount_state.order.push(sub_id);
@@ -2222,6 +2242,7 @@ impl AiManager {
                     terminal_snapshots: HashMap::new(),
                     active_workflow: None,
                     active_workflow_agent_id: None,
+                    visibility_events: Vec::new(),
                     skills: Vec::new(),
                     workflows: Vec::new(),
                 },
@@ -2258,11 +2279,13 @@ impl AiManager {
                 terminal_snapshots: HashMap::new(),
                 active_workflow: None,
                 active_workflow_agent_id: None,
+                visibility_events: Vec::new(),
                 skills: Vec::new(),
                 workflows: Vec::new(),
             });
         let title = format!("Chat {}", mount_state.next_chat_ordinal);
         mount_state.next_chat_ordinal += 1;
+        let updated_at = now_seconds();
         mount_state.active_agent_id = Some(agent_id);
         mount_state.order.push(agent_id);
         mount_state.agents.insert(
@@ -2278,7 +2301,7 @@ impl AiManager {
                 run_token: 0,
                 messages: Vec::new(),
                 history: Vec::new(),
-                updated_at: now_seconds(),
+                updated_at,
                 parent_agent_id: None,
                 role: None,
                 task: None,
@@ -2286,6 +2309,12 @@ impl AiManager {
                 current_action: None,
                 last_terminal_excerpt: None,
                 files_touched: Vec::new(),
+                active_terminal_path: None,
+                active_terminal_title: None,
+                state_changed_at: updated_at,
+                workflow_step_name: None,
+                workflow_step_status: None,
+                blocked_reason: None,
             },
         );
         self.persist_mount_state_best_effort(mount);
@@ -3021,6 +3050,12 @@ impl AiManager {
                     current_action: agent.current_action.clone(),
                     last_terminal_excerpt: agent.last_terminal_excerpt.clone(),
                     files_touched: agent.files_touched.clone(),
+                    active_terminal_path: agent.active_terminal_path.clone(),
+                    active_terminal_title: agent.active_terminal_title.clone(),
+                    state_changed_at: agent.state_changed_at,
+                    workflow_step_name: agent.workflow_step_name.clone(),
+                    workflow_step_status: agent.workflow_step_status.clone(),
+                    blocked_reason: agent.blocked_reason.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -3049,6 +3084,12 @@ impl AiManager {
                 current_action: agent.current_action.clone(),
                 last_terminal_excerpt: agent.last_terminal_excerpt.clone(),
                 files_touched: agent.files_touched.clone(),
+                active_terminal_path: agent.active_terminal_path.clone(),
+                active_terminal_title: agent.active_terminal_title.clone(),
+                state_changed_at: agent.state_changed_at,
+                workflow_step_name: agent.workflow_step_name.clone(),
+                workflow_step_status: agent.workflow_step_status.clone(),
+                blocked_reason: agent.blocked_reason.clone(),
             })
         });
         AiMountState {
@@ -3059,6 +3100,7 @@ impl AiManager {
             active_agent,
             live_markdown: self.ai_live_markdown(mount_state),
             active_workflow: mount_state.active_workflow.clone(),
+            visibility_events: mount_state.visibility_events.clone(),
         }
     }
 
@@ -3166,6 +3208,12 @@ impl AiManager {
                     current_action: None,
                     last_terminal_excerpt: None,
                     files_touched: Vec::new(),
+                    active_terminal_path: None,
+                    active_terminal_title: None,
+                    state_changed_at: chat.updated_at,
+                    workflow_step_name: None,
+                    workflow_step_status: None,
+                    blocked_reason: None,
                 },
             );
         }
@@ -6879,6 +6927,31 @@ Some intro text...
     }
 
     #[test]
+    fn snapshot_includes_default_visibility_fields() {
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.ensure_mount_entry("repo");
+
+        let state = manager.snapshot("repo");
+        let summary = state.agents.first().unwrap();
+        let active = state.active_agent.as_ref().unwrap();
+
+        assert!(summary.active_terminal_path.is_none());
+        assert!(summary.active_terminal_title.is_none());
+        assert_eq!(summary.state_changed_at, summary.updated_at);
+        assert!(summary.workflow_step_name.is_none());
+        assert!(summary.workflow_step_status.is_none());
+        assert!(summary.blocked_reason.is_none());
+        assert!(active.active_terminal_path.is_none());
+        assert!(active.active_terminal_title.is_none());
+        assert_eq!(active.state_changed_at, summary.state_changed_at);
+        assert!(active.workflow_step_name.is_none());
+        assert!(active.workflow_step_status.is_none());
+        assert!(active.blocked_reason.is_none());
+        assert!(state.visibility_events.is_empty());
+    }
+
+    #[test]
     fn snapshot_hides_legacy_completed_subagents() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
@@ -6921,6 +6994,12 @@ Some intro text...
                     current_action: None,
                     last_terminal_excerpt: None,
                     files_touched: Vec::new(),
+                    active_terminal_path: None,
+                    active_terminal_title: None,
+                    state_changed_at: now_seconds(),
+                    workflow_step_name: None,
+                    workflow_step_status: None,
+                    blocked_reason: None,
                 },
             );
         }

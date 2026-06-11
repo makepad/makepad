@@ -674,6 +674,15 @@ pub struct ActiveWorkflowState {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiVisibilityEvent {
+    pub kind: String,
+    pub agent_id: Option<AiAgentId>,
+    pub title: String,
+    pub detail: String,
+    pub timestamp: f64,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct AiAgentSummary {
     pub agent_id: AiAgentId,
     pub title: String,
@@ -687,6 +696,12 @@ pub struct AiAgentSummary {
     pub current_action: Option<String>,
     pub last_terminal_excerpt: Option<String>,
     pub files_touched: Vec<String>,
+    pub active_terminal_path: Option<String>,
+    pub active_terminal_title: Option<String>,
+    pub state_changed_at: f64,
+    pub workflow_step_name: Option<String>,
+    pub workflow_step_status: Option<String>,
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
@@ -703,6 +718,12 @@ pub struct AiAgentState {
     pub current_action: Option<String>,
     pub last_terminal_excerpt: Option<String>,
     pub files_touched: Vec<String>,
+    pub active_terminal_path: Option<String>,
+    pub active_terminal_title: Option<String>,
+    pub state_changed_at: f64,
+    pub workflow_step_name: Option<String>,
+    pub workflow_step_status: Option<String>,
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson)]
@@ -714,6 +735,7 @@ pub struct AiMountState {
     pub active_agent: Option<AiAgentState>,
     pub live_markdown: String,
     pub active_workflow: Option<ActiveWorkflowState>,
+    pub visibility_events: Vec<AiVisibilityEvent>,
 }
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct BuildBoxInfo {
