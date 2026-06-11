@@ -177,6 +177,22 @@ impl ActionDefaultRef for RunListRowData {
     }
 }
 
+trait Vec4fExt {
+    fn from_hex(hex: &str) -> Self;
+}
+
+impl Vec4fExt for Vec4f {
+    fn from_hex(hex: &str) -> Self {
+        let hex = hex.strip_prefix("#x").unwrap_or(hex.strip_prefix('#').unwrap_or(hex));
+        let val = u32::from_str_radix(hex, 16).unwrap_or(0);
+        if hex.len() <= 6 {
+            Vec4f::from_u32((val << 8) | 0xff)
+        } else {
+            Vec4f::from_u32(val)
+        }
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct DesktopRunList {
     #[deref]
@@ -238,6 +254,42 @@ impl DesktopRunList {
                 mount: active_mount.to_string(),
                 name: entry.name.clone(),
             });
+
+            let mut badge = item.view(cx, ids!(status_badge));
+            let mut status = None;
+            for state in data.run_tab_state.values() {
+                if state.mount == *active_mount && state.package == entry.name {
+                    status = Some(state.status.clone());
+                    break;
+                }
+            }
+
+            if let Some(status_str) = status {
+                if status_str == "building" {
+                    badge.set_visible(cx, true);
+                    badge.label(cx, ids!(label)).set_text(cx, "BUILDING");
+                    let bg_color = Vec4f::from_hex("#x3a2e1d");
+                    let txt_color = Vec4f::from_hex("#xe2c08d");
+                    script_apply_eval!(cx, badge, {
+                        draw_bg +: {color: #(bg_color)}
+                        label: {draw_text +: {color: #(txt_color)}}
+                    });
+                } else if status_str == "running" {
+                    badge.set_visible(cx, true);
+                    badge.label(cx, ids!(label)).set_text(cx, "RUNNING");
+                    let bg_color = Vec4f::from_hex("#x1c352d");
+                    let txt_color = Vec4f::from_hex("#x89ca78");
+                    script_apply_eval!(cx, badge, {
+                        draw_bg +: {color: #(bg_color)}
+                        label: {draw_text +: {color: #(txt_color)}}
+                    });
+                } else {
+                    badge.set_visible(cx, false);
+                }
+            } else {
+                badge.set_visible(cx, false);
+            }
+
             item.draw_all(cx, &mut Scope::empty());
         }
     }
