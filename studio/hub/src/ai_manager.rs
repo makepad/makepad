@@ -7229,6 +7229,47 @@ Some intro text...
     }
 
     #[test]
+    fn slash_workflow_prompt_persists_rewritten_accepted_prompt() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "makepad_ai_slash_workflow_persist_test_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let (event_tx, _event_rx) = channel();
+        let mut manager = AiManager::new(event_tx);
+        manager.register_mount("repo", &root);
+        let agent_id = manager
+            .mounts
+            .get("repo")
+            .and_then(|mount_state| mount_state.active_agent_id)
+            .unwrap();
+        {
+            let mount_state = manager.mounts.get_mut("repo").unwrap();
+            mount_state.workflows = vec![ParsedWorkflow {
+                name: "review-prs".to_string(),
+                steps: vec![WorkflowStep {
+                    name: "Resolve PR Set".to_string(),
+                    description: "Find PRs.".to_string(),
+                }],
+            }];
+        }
+
+        manager.send_prompt("repo", agent_id, "/review-prs owner/repo#7");
+
+        let path = ai_chat_file_path(&root, agent_id);
+        let saved = fs::read_to_string(&path).expect("accepted workflow prompt should persist");
+        assert!(saved.contains("Execute workflow `review-prs`"));
+        assert!(saved.contains("Arguments: owner/repo#7"));
+        assert!(!saved.contains("/review-prs owner/repo#7"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn assistant_completion_advances_active_workflow_step() {
         let (event_tx, _event_rx) = channel();
         let mut manager = AiManager::new(event_tx);
