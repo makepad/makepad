@@ -235,7 +235,14 @@ impl MacosWindow {
 
             let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2];
 
-            let () = msg_send![self.window, setContentView: self.view];
+            let container_view: ObjcId = msg_send![class!(NSView), alloc];
+            let bounds: NSRect = msg_send![self.view, bounds];
+            let container_view: ObjcId = msg_send![container_view, initWithFrame: bounds];
+            let () = msg_send![container_view, setWantsLayer: YES];
+            let () = msg_send![container_view, setAutoresizingMask: (1 << 1) | (1 << 4)];
+            let () = msg_send![self.view, setAutoresizingMask: (1 << 1) | (1 << 4)];
+            let () = msg_send![container_view, addSubview: self.view];
+            let () = msg_send![self.window, setContentView: container_view];
             let () = msg_send![self.window, makeFirstResponder: self.view];
             if self.is_nonactivating_panel() {
                 let () = msg_send![self.window, orderFront: nil];
@@ -335,7 +342,14 @@ impl MacosWindow {
 
             let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
 
-            let () = msg_send![self.window, setContentView: self.view];
+            let container_view: ObjcId = msg_send![class!(NSView), alloc];
+            let bounds: NSRect = msg_send![self.view, bounds];
+            let container_view: ObjcId = msg_send![container_view, initWithFrame: bounds];
+            let () = msg_send![container_view, setWantsLayer: YES];
+            let () = msg_send![container_view, setAutoresizingMask: (1 << 1) | (1 << 4)];
+            let () = msg_send![self.view, setAutoresizingMask: (1 << 1) | (1 << 4)];
+            let () = msg_send![container_view, addSubview: self.view];
+            let () = msg_send![self.window, setContentView: container_view];
             let () = msg_send![self.window, makeFirstResponder: self.view];
 
             // orderFront instead of makeKeyAndOrderFront to avoid stealing key focus initially
@@ -526,7 +540,12 @@ impl MacosWindow {
                         effect_view,
                         setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE
                     ];
-                    let () = msg_send![self.view, addSubview: effect_view positioned: 0i64 relativeTo: nil];
+                    let superview: ObjcId = msg_send![self.view, superview];
+                    let () = if superview != nil {
+                        msg_send![superview, addSubview: effect_view positioned: -1i64 relativeTo: self.view]
+                    } else {
+                        msg_send![self.view, addSubview: effect_view positioned: -1i64 relativeTo: nil]
+                    };
                     self.visual_effect_view = effect_view;
                     effect_view
                 } else {

@@ -14,7 +14,21 @@ script_mod! {
         padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
         spacing: theme.space_2
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.15)
+                let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                
+                // Bottom separator line
+                let thickness = 1.0
+                if self.pos.y * self.rect_size.y >= self.rect_size.y - thickness {
+                    sdf.clear(vec4(1.0, 1.0, 1.0, 0.05))
+                }
+                return sdf.result
+            }
         }
     }
 
@@ -246,7 +260,16 @@ script_mod! {
         height: Fill
         flow: Overlay
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.35)
+                let highlight = 0.04 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.06), 1.0)
+                return sdf.result
+            }
         }
 
         ai_panel_content := View {
@@ -455,7 +478,16 @@ script_mod! {
             show_bg: true
             padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 14.0}
             draw_bg +: {
-                color: theme.color_bg_container * 1.02
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                    let color = vec4((theme.color_bg_container * 1.02).rgb, 0.25)
+                    let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                    let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                    sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                    sdf.stroke(vec4(1.0, 1.0, 1.0, 0.04), 1.0)
+                    return sdf.result
+                }
             }
             ai_chat_markdown := AiChatMarkdown {}
         }
@@ -642,12 +674,42 @@ script_mod! {
         width: Fill
         height: Fill
         flow: Down
-        code_editor := DesktopCodeEditor {}
+        code_editor := DesktopCodeEditor {
+            editor +: {
+                draw_bg +: {
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                        sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                        let color = vec4(theme.color_bg_container.rgb, 0.25)
+                        let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                        let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                        sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                        sdf.stroke(vec4(1.0, 1.0, 1.0, 0.04), 1.0)
+                        return sdf.result
+                    }
+                }
+                draw_cursor_bg +: {
+                    pixel: fn() {
+                        let color = theme.color_u_hidden.mix(vec4(1.0, 1.0, 1.0, 0.035), self.focus)
+                        return vec4(color.rgb * color.a, color.a)
+                    }
+                }
+            }
+        }
     }
 
     let EditorFirstPane = RectView {
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.3)
+                let highlight = 0.04 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.05), 1.0)
+                return sdf.result
+            }
         }
     }
 
@@ -696,7 +758,16 @@ script_mod! {
 
     let RunFirstPane = RectView {
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.3)
+                let highlight = 0.04 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.05), 1.0)
+                return sdf.result
+            }
         }
         View {
             width: Fill
@@ -789,7 +860,16 @@ script_mod! {
 
     let TerminalFirstPane = RectView {
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.3)
+                let highlight = 0.04 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.05), 1.0)
+                return sdf.result
+            }
         }
         View {
             width: Fill
@@ -857,15 +937,41 @@ script_mod! {
         padding: Inset {left: 5.0 right: 5.0 top: 0.0 bottom: 0.0}
         spacing: 4.0
         draw_bg +: {
-            color: theme.color_bg_container
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.12)
+                let highlight = 0.02 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                
+                // Top separator line
+                let thickness = 1.0
+                if self.pos.y * self.rect_size.y <= thickness {
+                    sdf.clear(vec4(1.0, 1.0, 1.0, 0.05))
+                }
+                return sdf.result
+            }
+        }
+
+        let BottomBarSeparator = View {
+            width: 1.0
+            height: 14.0
+            margin: Inset {left: 2.0 right: 2.0}
+            show_bg: true
+            draw_bg: {
+                color: vec4(1.0, 1.0, 1.0, 0.08)
+            }
         }
 
         bottom_file_tree_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_file.svg")
         }
+        BottomBarSeparator {}
         bottom_run_list_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_run.svg")
         }
+        BottomBarSeparator {}
         bottom_panel_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
         }
@@ -873,6 +979,7 @@ script_mod! {
             width: Fill
             height: Fill
         }
+        BottomBarSeparator {}
         bottom_agent_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_ai.svg")
         }
@@ -905,17 +1012,17 @@ script_mod! {
             color_active: theme.color_label_inner_active
         }
         draw_bg +: {
-            color: theme.color_bg_app * 0.84
-            color_hover: theme.color_bg_app * 0.96
-            color_active: theme.color_fg_app
+            color: vec4(1.0, 1.0, 1.0, 0.0)
+            color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+            color_active: vec4(1.0, 1.0, 1.0, 0.08)
 
             border_color: theme.color_u_hidden
             border_color_hover: theme.color_u_hidden
-            border_color_active: theme.color_bg_app * 0.92
+            border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
 
             border_color_2: theme.color_u_hidden
             border_color_2_hover: theme.color_u_hidden
-            border_color_2_active: theme.color_bg_app * 0.92
+            border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
         }
     }
 
@@ -990,17 +1097,17 @@ script_mod! {
             color_active: theme.color_label_inner_active
         }
         draw_bg +: {
-            color: theme.color_bg_app * 0.84
-            color_hover: theme.color_bg_app * 0.95
-            color_active: theme.color_fg_app
+            color: vec4(1.0, 1.0, 1.0, 0.0)
+            color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+            color_active: vec4(1.0, 1.0, 1.0, 0.08)
 
             border_color: theme.color_u_hidden
             border_color_hover: theme.color_u_hidden
-            border_color_active: theme.color_bg_app * 0.92
+            border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
 
             border_color_2: theme.color_u_hidden
             border_color_2_hover: theme.color_u_hidden
-            border_color_2_active: theme.color_bg_app * 0.92
+            border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
         }
         close_button +: {
             width: 11.0
@@ -1017,12 +1124,59 @@ script_mod! {
     let StudioDock = DockFlat {
         tab_bar +: {
             height: STUDIO_HEADER_HEIGHT
+            draw_bg +: {
+                color: vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            CloseableTab := mod.widgets.TabFlat {
+                closeable: true
+                spacing: theme.space_1
+                draw_text +: {
+                    color: theme.color_label_inner_inactive
+                    color_hover: theme.color_label_inner
+                    color_active: theme.color_label_inner_active
+                }
+                draw_bg +: {
+                    color: vec4(1.0, 1.0, 1.0, 0.0)
+                    color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+                    color_active: vec4(1.0, 1.0, 1.0, 0.08)
+
+                    border_color: theme.color_u_hidden
+                    border_color_hover: theme.color_u_hidden
+                    border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    border_color_2: theme.color_u_hidden
+                    border_color_2_hover: theme.color_u_hidden
+                    border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+                }
+            }
+            PermanentTab := mod.widgets.TabFlat {
+                closeable: false
+                spacing: theme.space_1
+                draw_text +: {
+                    color: theme.color_label_inner_inactive
+                    color_hover: theme.color_label_inner
+                    color_active: theme.color_label_inner_active
+                }
+                draw_bg +: {
+                    color: vec4(1.0, 1.0, 1.0, 0.0)
+                    color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+                    color_active: vec4(1.0, 1.0, 1.0, 0.08)
+
+                    border_color: theme.color_u_hidden
+                    border_color_hover: theme.color_u_hidden
+                    border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    border_color_2: theme.color_u_hidden
+                    border_color_2_hover: theme.color_u_hidden
+                    border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+                }
+            }
         }
         splitter +: {
             draw_bg +: {
-                color: theme.color_bg_container
-                color_hover: theme.color_bevel_outset_1_hover * 0.45
-                color_drag: theme.color_bevel_outset_1_hover * 0.7
+                color: vec4(1.0, 1.0, 1.0, 0.05)
+                color_hover: vec4(1.0, 1.0, 1.0, 0.20)
+                color_drag: vec4(1.0, 1.0, 1.0, 0.45)
                 border_radius: 1.5
                 splitter_pad: 1.5
             }
@@ -1030,13 +1184,30 @@ script_mod! {
     }
 
     mod.widgets.AppUI = Window {
+        pass +: { clear_color: #00000000 }
         window.inner_size: vec2(1400 900)
         caption_bar := SolidView {
             visible: true
             height: STUDIO_HEADER_HEIGHT
             flow: Right
             align: Align {x: 0.0 y: 0.5}
-            draw_bg.color: theme.color_bg_app
+            draw_bg +: {
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                    let color = vec4(theme.color_bg_app.rgb, 0.12)
+                    let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                    let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                    sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                    
+                    // Bottom separator line
+                    let thickness = 1.0
+                    if self.pos.y * self.rect_size.y >= self.rect_size.y - thickness {
+                        sdf.clear(vec4(1.0, 1.0, 1.0, 0.06))
+                    }
+                    return sdf.result
+                }
+            }
 
             left_controls := View {
                 visible: false
@@ -1100,7 +1271,10 @@ script_mod! {
         }
         draw_bg +: {
             pixel: fn() {
-                return theme.color_bg_app
+                let color = vec4(theme.color_bg_app.rgb, 0.55)
+                let highlight = 0.04 * smoothstep(2.0, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.008
+                return vec4(color.rgb + highlight + noise, color.a)
             }
         }
 

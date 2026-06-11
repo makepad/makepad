@@ -63,9 +63,16 @@ script_mod! {
             show_scroll_y: true
         }
         draw_bg +: {
-            color: uniform(#x1d1f21)
+            color: uniform(vec4(0.0))
             pixel: fn() {
-                return self.color
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4((theme.color_bg_container * 1.02).rgb, 0.25)
+                let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.04), 1.0)
+                return sdf.result
             }
         }
         draw_text +: {
@@ -402,7 +409,7 @@ impl DesktopTerminalView {
             ((rgb >> 16) & 0xff) as f32 / 255.0,
             ((rgb >> 8) & 0xff) as f32 / 255.0,
             (rgb & 0xff) as f32 / 255.0,
-            1.0,
+            0.20,
         )
     }
 

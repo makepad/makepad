@@ -162,6 +162,31 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        let window_id = CxWindowPool::id_zero();
+        let backdrop = if matches!(cx.os_type(), OsType::Windows) {
+            WindowBackdrop::Acrylic
+        } else if matches!(cx.os_type(), OsType::Macos) {
+            WindowBackdrop::Blur
+        } else {
+            WindowBackdrop::None
+        };
+        let visuals = WindowVisuals {
+            transparent: backdrop != WindowBackdrop::None,
+            backdrop,
+            backdrop_intensity: 1.0,
+        }
+        .normalized();
+
+        if cx.windows[window_id].window_visuals() != visuals {
+            cx.windows[window_id].transparent = visuals.transparent;
+            cx.windows[window_id].backdrop = visuals.backdrop;
+            cx.windows[window_id].backdrop_intensity = visuals.backdrop_intensity;
+
+            if cx.windows[window_id].is_created {
+                cx.push_unique_platform_op(CxOsOp::SetWindowVisuals(window_id, visuals));
+            }
+        }
+
         self.set_current_file_label(cx, None);
         self.start_backend(cx);
         self.load_state(cx, 0);

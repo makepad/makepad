@@ -244,35 +244,28 @@ impl App {
         cx: &mut Cx,
         button_id: LiveId,
         active: bool,
-        active_bg: Vec4f,
-        active_bg_hover: Vec4f,
+        _active_bg: Vec4f,
+        _active_bg_hover: Vec4f,
         active_icon: Vec4f,
     ) {
         let mut button = self.ui.widget(cx, &[button_id]);
-        let bg = if active {
-            active_bg
-        } else {
-            Vec4f::from_u32(0x00000000)
-        };
-        let bg_hover = if active {
-            active_bg_hover
-        } else {
-            Vec4f::from_u32(0x4c4c4cff)
-        };
-        let bg_down = if active {
-            active_bg_hover
-        } else {
-            Vec4f::from_u32(0x424242ff)
-        };
+        let bg = Vec4f::from_u32(0x00000000);
+        let bg_hover = Vec4f::from_u32(0xffffff15);
+        let bg_down = Vec4f::from_u32(0xffffff24);
         let icon = if active {
             active_icon
         } else {
-            Vec4f::from_u32(0xbdbdbdff)
+            Vec4f::from_u32(0x8c8c8cff)
         };
         let icon_hover = if active {
             active_icon
         } else {
-            Vec4f::from_u32(0xe0e0e0ff)
+            Vec4f::from_u32(0xffffffff)
+        };
+        let icon_down = if active {
+            active_icon
+        } else {
+            Vec4f::from_u32(0xffffffff)
         };
         script_apply_eval!(cx, button, {
             draw_bg +: {
@@ -284,7 +277,7 @@ impl App {
             draw_icon +: {
                 color: #(icon)
                 color_hover: #(icon_hover)
-                color_down: #(active_icon)
+                color_down: #(icon_down)
                 color_focus: #(icon)
             }
         });
@@ -320,37 +313,38 @@ impl App {
             })
             .unwrap_or(false);
 
+        let active_color = Vec4f::from_u32(0x61afefff);
         self.apply_bottom_bar_button_style(
             cx,
             id!(bottom_file_tree_toggle),
             file_active,
-            Vec4f::from_u32(0x1d3a31ff),
-            Vec4f::from_u32(0x285243ff),
-            Vec4f::from_u32(0x80ffbfff),
+            Vec4f::from_u32(0x0),
+            Vec4f::from_u32(0x0),
+            active_color,
         );
         self.apply_bottom_bar_button_style(
             cx,
             id!(bottom_run_list_toggle),
             run_active,
-            Vec4f::from_u32(0x493326ff),
-            Vec4f::from_u32(0x604432ff),
-            Vec4f::from_u32(0xffb368ff),
+            Vec4f::from_u32(0x0),
+            Vec4f::from_u32(0x0),
+            active_color,
         );
         self.apply_bottom_bar_button_style(
             cx,
             id!(bottom_panel_toggle),
             terminal_active,
-            Vec4f::from_u32(0x1b3540ff),
-            Vec4f::from_u32(0x264a59ff),
-            Vec4f::from_u32(0x80bfffff),
+            Vec4f::from_u32(0x0),
+            Vec4f::from_u32(0x0),
+            active_color,
         );
         self.apply_bottom_bar_button_style(
             cx,
             id!(bottom_agent_toggle),
             agent_active,
-            Vec4f::from_u32(0x48331fff),
-            Vec4f::from_u32(0x63472bff),
-            Vec4f::from_u32(0xffb368ff),
+            Vec4f::from_u32(0x0),
+            Vec4f::from_u32(0x0),
+            active_color,
         );
     }
 
