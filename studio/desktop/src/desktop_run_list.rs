@@ -13,13 +13,23 @@ script_mod! {
         show_bg: true
         draw_bg +: {
             hover: instance(0.0)
+            status: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.move_to(3.0, 2.0)
-                sdf.line_to(11.0, 7.0)
-                sdf.line_to(3.0, 12.0)
-                sdf.close_path()
-                sdf.fill(theme.color_label_inner.mix(#xFFFFFF, self.hover))
+                if self.status < 0.5 {
+                    sdf.move_to(3.0, 2.0)
+                    sdf.line_to(11.0, 7.0)
+                    sdf.line_to(3.0, 12.0)
+                    sdf.close_path()
+                    sdf.fill(theme.color_label_inner.mix(#xFFFFFF, self.hover))
+                } else if self.status < 1.5 {
+                    let center = self.rect_size * 0.5
+                    sdf.circle(center.x, center.y, 4.0)
+                    sdf.fill(#xe2c08d)
+                } else {
+                    sdf.box(3.0, 3.0, 8.0, 8.0, 1.0)
+                    sdf.fill(#x89ca78)
+                }
                 return sdf.result
             }
         }
@@ -89,24 +99,6 @@ script_mod! {
             }
         }
 
-        status_badge := RoundedView {
-            visible: false
-            width: Fit
-            height: Fit
-            margin: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
-            padding: Inset {left: 5.0 right: 5.0 top: 3.0 bottom: 3.0}
-            draw_bg +: {
-                color: #x252526
-                border_radius: 3.0
-            }
-            label := Label {
-                text: ""
-                draw_text +: {
-                    font_size: theme.font_size_p - 2.0
-                    color: #fff
-                }
-            }
-        }
     }
 
     mod.widgets.RunListEmpty = View {
@@ -177,21 +169,6 @@ impl ActionDefaultRef for RunListRowData {
     }
 }
 
-trait Vec4fExt {
-    fn from_hex(hex: &str) -> Self;
-}
-
-impl Vec4fExt for Vec4f {
-    fn from_hex(hex: &str) -> Self {
-        let hex = hex.strip_prefix("#x").unwrap_or(hex.strip_prefix('#').unwrap_or(hex));
-        let val = u32::from_str_radix(hex, 16).unwrap_or(0);
-        if hex.len() <= 6 {
-            Vec4f::from_u32((val << 8) | 0xff)
-        } else {
-            Vec4f::from_u32(val)
-        }
-    }
-}
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct DesktopRunList {
@@ -255,7 +232,7 @@ impl DesktopRunList {
                 name: entry.name.clone(),
             });
 
-            let mut badge = item.view(cx, ids!(status_badge));
+            let mut icon = item.view(cx, ids!(icon));
             let mut status = None;
             for state in data.run_tab_state.values() {
                 if state.mount == *active_mount && state.package == entry.name {
@@ -266,30 +243,23 @@ impl DesktopRunList {
 
             if let Some(status_str) = status {
                 if status_str == "building" {
-                    badge.set_visible(cx, true);
-                    badge.label(cx, ids!(label)).set_text(cx, "BUILDING");
-                    let bg_color = Vec4f::from_hex("#x3a2e1d");
-                    let txt_color = Vec4f::from_hex("#xe2c08d");
-                    script_apply_eval!(cx, badge, {
-                        draw_bg +: {color: #(bg_color)}
-                        label: {draw_text +: {color: #(txt_color)}}
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 1.0}
                     });
                 } else if status_str == "running" {
-                    badge.set_visible(cx, true);
-                    badge.label(cx, ids!(label)).set_text(cx, "RUNNING");
-                    let bg_color = Vec4f::from_hex("#x1c352d");
-                    let txt_color = Vec4f::from_hex("#x89ca78");
-                    script_apply_eval!(cx, badge, {
-                        draw_bg +: {color: #(bg_color)}
-                        label: {draw_text +: {color: #(txt_color)}}
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 2.0}
                     });
                 } else {
-                    badge.set_visible(cx, false);
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 0.0}
+                    });
                 }
             } else {
-                badge.set_visible(cx, false);
+                script_apply_eval!(cx, icon, {
+                    draw_bg +: {status: 0.0}
+                });
             }
-
             item.draw_all(cx, &mut Scope::empty());
         }
     }
