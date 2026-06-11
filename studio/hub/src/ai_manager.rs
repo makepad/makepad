@@ -144,6 +144,8 @@ struct MountAgents {
     queued_followups: VecDeque<AiQueuedFollowup>,
     terminal_snapshots: HashMap<String, AiTerminalSnapshot>,
     active_workflow: Option<ActiveWorkflowState>,
+    skills: Vec<ParsedSkill>,
+    workflows: Vec<ParsedWorkflow>,
 }
 
 #[derive(Clone, Debug)]
@@ -432,6 +434,25 @@ struct AssistantTurn {
     raw_event_sample: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ParsedSkill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedWorkflow {
+    pub name: String,
+    pub steps: Vec<WorkflowStep>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowStep {
+    pub name: String,
+    pub description: String,
+}
+
 pub struct AiManager {
     event_tx: Sender<HubEvent>,
     runtime: Arc<NetworkRuntime>,
@@ -472,6 +493,9 @@ impl AiManager {
 
     pub fn register_mount(&mut self, mount: &str, root: &Path) {
         let default_backend_id = self.default_backend_id();
+        let root_path_str = root.to_string_lossy().to_string();
+        let skills = self.load_skills_for_mount(&root_path_str);
+        let workflows = self.load_workflows_for_mount(&root_path_str);
         let mut should_load = false;
         {
             let entry = self
@@ -490,8 +514,12 @@ impl AiManager {
                     queued_followups: VecDeque::new(),
                     terminal_snapshots: HashMap::new(),
                     active_workflow: None,
+                    skills: Vec::new(),
+                    workflows: Vec::new(),
                 });
-            entry.root_path = root.to_string_lossy().to_string();
+            entry.skills = skills;
+            entry.workflows = workflows;
+            entry.root_path = root_path_str;
             if entry.active_backend_id.is_empty() {
                 entry.active_backend_id = default_backend_id.clone();
             }
@@ -2111,6 +2139,8 @@ impl AiManager {
                     queued_followups: VecDeque::new(),
                     terminal_snapshots: HashMap::new(),
                     active_workflow: None,
+                    skills: Vec::new(),
+                    workflows: Vec::new(),
                 },
             );
         }
@@ -2144,6 +2174,8 @@ impl AiManager {
                 queued_followups: VecDeque::new(),
                 terminal_snapshots: HashMap::new(),
                 active_workflow: None,
+                skills: Vec::new(),
+                workflows: Vec::new(),
             });
         let title = format!("Chat {}", mount_state.next_chat_ordinal);
         mount_state.next_chat_ordinal += 1;
@@ -3215,6 +3247,189 @@ impl AiManager {
             }
         }
         self.persist_mount_state_best_effort(mount);
+    }
+
+    pub fn parse_skill_markdown(content: &str) -> Option<ParsedSkill> {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut first_dash = None;
+        let mut second_dash = None;
+        for (idx, line) in lines.iter().enumerate() {
+            if line.trim() == "---" {
+                if first_dash.is_none() {
+                    first_dash = Some(idx);
+                } else {
+                    second_dash = Some(idx);
+                    break;
+                }
+            }
+        }
+
+        let (frontmatter_lines, body_lines) = match (first_dash, second_dash) {
+            (Some(start), Some(end)) if start < end => {
+                (&lines[start + 1..end], &lines[end + 1..])
+            }
+            _ => {
+                (&[][..], &lines[..])
+            }
+        };
+
+        let mut name = String::new();
+        let mut description = String::new();
+
+        for line in frontmatter_lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, val)) = line.split_once(':') {
+                let key = key.trim();
+                let val = val.trim().trim_matches('"').trim_matches('\'').trim();
+                if key == "name" {
+                    name = val.to_string();
+                } else if key == "description" {
+                    description = val.to_string();
+                }
+            }
+        }
+
+        let body_content = body_lines.join("\n");
+
+        if name.trim().is_empty() || body_content.trim().is_empty() {
+            return None;
+        }
+
+        Some(ParsedSkill {
+            name,
+            description,
+            content: body_content,
+        })
+    }
+
+    pub fn parse_workflow_markdown(content: &str) -> Option<ParsedWorkflow> {
+        let mut name = String::new();
+        let mut steps = Vec::new();
+        let mut in_steps = false;
+        let mut current_step_name = None;
+        let mut current_step_desc = Vec::new();
+
+        let lines: Vec<&str> = content.lines().collect();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("# ") {
+                if name.is_empty() {
+                    name = trimmed.strip_prefix("# ").unwrap_or(trimmed).trim().to_string();
+                }
+            } else if trimmed.starts_with("## ") {
+                if trimmed.to_lowercase().strip_prefix("##").unwrap_or("").trim() == "steps" {
+                    in_steps = true;
+                } else {
+                    in_steps = false;
+                }
+            } else if in_steps && trimmed.starts_with("### ") {
+                if let Some(s_name) = current_step_name.take() {
+                    let s_desc = current_step_desc.join("\n").trim().to_string();
+                    steps.push(WorkflowStep {
+                        name: s_name,
+                        description: s_desc,
+                    });
+                    current_step_desc.clear();
+                }
+
+                let raw_step_name = trimmed.strip_prefix("###").unwrap_or(trimmed).trim();
+                let mut chars = raw_step_name.chars().peekable();
+                let mut has_digits = false;
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() {
+                        has_digits = true;
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let parsed_name = if has_digits && chars.peek() == Some(&'.') {
+                    chars.next(); // consume '.'
+                    let rest: String = chars.collect();
+                    rest.trim().to_string()
+                } else {
+                    raw_step_name.to_string()
+                };
+
+                current_step_name = Some(parsed_name);
+            } else if in_steps && current_step_name.is_some() {
+                current_step_desc.push(line);
+            }
+        }
+
+        if let Some(s_name) = current_step_name {
+            let s_desc = current_step_desc.join("\n").trim().to_string();
+            steps.push(WorkflowStep {
+                name: s_name,
+                description: s_desc,
+            });
+        }
+
+        if name.trim().is_empty() || steps.is_empty() {
+            return None;
+        }
+
+        Some(ParsedWorkflow {
+            name,
+            steps,
+        })
+    }
+
+    pub fn load_skills_for_mount(&self, root_path: &str) -> Vec<ParsedSkill> {
+        let mut skills = Vec::new();
+        let path = Path::new(root_path).join(".studio").join("skills");
+        if !path.is_dir() {
+            return skills;
+        }
+        let entries = match fs::read_dir(path) {
+            Ok(e) => e,
+            Err(_) => return skills,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let file_path = entry.path();
+            if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
+                if let Ok(content) = fs::read_to_string(&file_path) {
+                    if let Some(parsed) = Self::parse_skill_markdown(&content) {
+                        skills.push(parsed);
+                    }
+                }
+            }
+        }
+        skills
+    }
+
+    pub fn load_workflows_for_mount(&self, root_path: &str) -> Vec<ParsedWorkflow> {
+        let mut workflows = Vec::new();
+        let path = Path::new(root_path).join(".studio").join("workflows");
+        if !path.is_dir() {
+            return workflows;
+        }
+        let entries = match fs::read_dir(path) {
+            Ok(e) => e,
+            Err(_) => return workflows,
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let file_path = entry.path();
+            if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
+                if let Ok(content) = fs::read_to_string(&file_path) {
+                    if let Some(parsed) = Self::parse_workflow_markdown(&content) {
+                        workflows.push(parsed);
+                    }
+                }
+            }
+        }
+        workflows
     }
 }
 
@@ -5412,6 +5627,89 @@ mod tests {
             "0123456789012345678901234567890123456789..."
         );
     }
+
+    #[test]
+    fn test_parse_skill_markdown() {
+        let content = r#"---
+name: "Semantic Compression"
+description: "Guidelines for compressing and summarizing files"
+---
+# Semantic Compression
+This is the body content of the skill.
+It has multiple lines.
+"#;
+        let parsed = AiManager::parse_skill_markdown(content).unwrap();
+        assert_eq!(parsed.name, "Semantic Compression");
+        assert_eq!(parsed.description, "Guidelines for compressing and summarizing files");
+        assert!(parsed.content.contains("# Semantic Compression"));
+        assert!(parsed.content.contains("It has multiple lines."));
+    }
+
+    #[test]
+    fn test_parse_workflow_markdown() {
+        let content = r#"# Review PRs Command
+
+Some intro text...
+
+## Steps
+### 1. Resolve PR Set
+Description of step 1...
+Detailed instructions...
+
+### 2. Verify Changes
+Description of step 2...
+
+## Feedback
+Not steps.
+"#;
+        let parsed = AiManager::parse_workflow_markdown(content).unwrap();
+        assert_eq!(parsed.name, "Review PRs Command");
+        assert_eq!(parsed.steps.len(), 2);
+        assert_eq!(parsed.steps[0].name, "Resolve PR Set");
+        assert_eq!(parsed.steps[0].description, "Description of step 1...\nDetailed instructions...");
+        assert_eq!(parsed.steps[1].name, "Verify Changes");
+        assert_eq!(parsed.steps[1].description, "Description of step 2...");
+    }
+
+    #[test]
+    fn test_parse_skill_markdown_validation() {
+        // Missing name in frontmatter
+        let content_no_name = r#"---
+description: "Guidelines for compressing and summarizing files"
+---
+# Semantic Compression
+This is the body content of the skill.
+"#;
+        assert!(AiManager::parse_skill_markdown(content_no_name).is_none());
+
+        // Missing content body
+        let content_no_body = r#"---
+name: "Semantic Compression"
+---
+"#;
+        assert!(AiManager::parse_skill_markdown(content_no_body).is_none());
+    }
+
+    #[test]
+    fn test_parse_workflow_markdown_validation() {
+        // Missing workflow name
+        let content_no_name = r#"
+## Steps
+### 1. Resolve PR Set
+Description of step 1...
+"#;
+        assert!(AiManager::parse_workflow_markdown(content_no_name).is_none());
+
+        // Missing steps
+        let content_no_steps = r#"# Review PRs Command
+
+Some intro text...
+
+## Steps
+"#;
+        assert!(AiManager::parse_workflow_markdown(content_no_steps).is_none());
+    }
+
 
     #[test]
     fn extracts_expected_paths_from_prompt() {
