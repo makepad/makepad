@@ -609,6 +609,10 @@ impl AiManager {
                     }
                 }
             }
+                if mount_state.active_workflow_agent_id == Some(agent_id) {
+                    mount_state.active_workflow = None;
+                    mount_state.active_workflow_agent_id = None;
+                }
             mount_state.order.retain(|existing| *existing != agent_id);
             if mount_state.active_agent_id == Some(agent_id) {
                 mount_state.active_agent_id = mount_state.order.last().copied();
