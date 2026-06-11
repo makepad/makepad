@@ -422,7 +422,7 @@ script_mod! {
 
         RectView {
             width: Fill
-            height: Fill
+            height: Fit
             flow: Overlay
             padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
             draw_bg +: {
@@ -431,10 +431,8 @@ script_mod! {
 
             composer_anchor := View {
                 width: Fill
-                height: Fill
+                height: Fit
                 flow: Down
-
-                Filler {}
 
                 prompt_card := RectView {
                     width: Fill
