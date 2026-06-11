@@ -184,7 +184,17 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             if let Some(active_mount) = self.data.active_mount.clone() {
-                self.toggle_mount_sidebar(cx, &active_mount);
+                self.select_sidebar_tab(cx, &active_mount, id!(tree_tab));
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(bottom_run_list_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.select_sidebar_tab(cx, &active_mount, id!(run_list_tab));
             }
         }
 
@@ -511,6 +521,11 @@ impl AppMain for App {
                     .button(cx, ids!(bottom_file_tree_toggle))
                     .area()
                     .rect(cx);
+                let bottom_run_list_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_run_list_toggle))
+                    .area()
+                    .rect(cx);
                 let bottom_agent_rect = self
                     .ui
                     .button(cx, ids!(bottom_agent_toggle))
@@ -519,6 +534,7 @@ impl AppMain for App {
                 if sidebar_rect.contains(dq.abs)
                     || panel_rect.contains(dq.abs)
                     || bottom_file_tree_rect.contains(dq.abs)
+                    || bottom_run_list_rect.contains(dq.abs)
                     || bottom_agent_rect.contains(dq.abs)
                 {
                     dq.response.set(WindowDragQueryResponse::Client);

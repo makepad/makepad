@@ -181,9 +181,10 @@ impl App {
         dock_items: HashMap<LiveId, DockItem>,
         allowed_tab_ids: &HashSet<LiveId>,
     ) -> Option<HashMap<LiveId, DockItem>> {
-        let dock_items = Self::sanitize_dock_items(dock_items, |tab_id, _, _, _| {
+        let mut dock_items = Self::sanitize_dock_items(dock_items, |tab_id, _, _, _| {
             allowed_tab_ids.contains(&tab_id)
         })?;
+        Self::normalize_workspace_dock_chrome(&mut dock_items);
         if Self::workspace_dock_has_required_sidebar_tabs(&dock_items)
             && Self::workspace_dock_has_required_agent_tabs(&dock_items)
             && dock_items.contains_key(&id!(log_first))
@@ -192,6 +193,22 @@ impl App {
             Some(dock_items)
         } else {
             None
+        }
+    }
+
+    fn normalize_workspace_dock_chrome(dock_items: &mut HashMap<LiveId, DockItem>) {
+        if let Some(DockItem::Tabs {
+            tabs,
+            selected,
+            closable,
+            hide_tab_bar,
+        }) = dock_items.get_mut(&id!(tree_tabs))
+        {
+            *hide_tab_bar = true;
+            *closable = false;
+            if *selected >= tabs.len() {
+                *selected = 0;
+            }
         }
     }
 
@@ -743,8 +760,17 @@ mod tests {
             id!(terminal_first),
         ]);
 
-        let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed);
+        let sanitized = App::sanitize_workspace_dock_items(dock_items, &allowed).unwrap();
+        let Some(DockItem::Tabs {
+            hide_tab_bar,
+            closable,
+            ..
+        }) = sanitized.get(&id!(tree_tabs))
+        else {
+            panic!("missing tree_tabs");
+        };
 
-        assert!(sanitized.is_some());
+        assert!(*hide_tab_bar);
+        assert!(!*closable);
     }
 }

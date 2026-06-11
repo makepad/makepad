@@ -299,7 +299,7 @@ impl App {
         };
 
         let mut changed = false;
-        for item in dock_items.values_mut() {
+        for (item_id, item) in dock_items.iter_mut() {
             let DockItem::Tabs {
                 tabs,
                 selected,
@@ -309,7 +309,7 @@ impl App {
             else {
                 continue;
             };
-            let should_hide = tabs.len() <= 1;
+            let should_hide = *item_id == id!(tree_tabs) || tabs.len() <= 1;
             if *hide_tab_bar == should_hide {
                 continue;
             }
@@ -324,6 +324,24 @@ impl App {
 
         if changed {
             dock.load_state(cx, dock_items);
+        }
+    }
+
+    pub(super) fn select_sidebar_tab(&mut self, cx: &mut Cx, mount: &str, tab_id: LiveId) {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return;
+        };
+        dock.select_tab(cx, tab_id);
+
+        let Some(current_width) = self.workspace_root_splitter_position(cx, mount) else {
+            return;
+        };
+        if current_width <= 1.0 {
+            let restore_width = self
+                .mount_state(mount)
+                .and_then(|state| state.sidebar_restore_width)
+                .unwrap_or(310.0);
+            self.start_sidebar_animation(cx, mount, restore_width);
         }
     }
 

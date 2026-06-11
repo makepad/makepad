@@ -730,12 +730,6 @@ script_mod! {
         }
     }
 
-    let CaptionPanelToggle = CaptionChromeToggle {
-        draw_icon +: {
-            svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
-        }
-    }
-
     let BottomBarIconButton = ButtonFlatterIcon {
         width: 30.0
         height: 24.0
@@ -769,6 +763,12 @@ script_mod! {
 
         bottom_file_tree_toggle := BottomBarIconButton {
             draw_icon.svg: crate_resource("self://resources/icons/icon_file.svg")
+        }
+        bottom_run_list_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_run.svg")
+        }
+        bottom_panel_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
         }
         bottom_bar_spacer := View {
             width: Fill
@@ -973,7 +973,6 @@ script_mod! {
                 spacing: theme.space_1
                 margin: Inset {left: 0.0 right: 96.0 top: 0.0 bottom: 0.0}
 
-                bottom_panel_toggle := CaptionPanelToggle {}
                 voice_wave := VoiceWave {
                     width: Fit
                     height: Fit
@@ -1123,6 +1122,7 @@ script_mod! {
                                 tabs: [@tree_tab @run_list_tab]
                                 selected: 0
                                 closable: false
+                                hide_tab_bar: true
                             }
 
                             agent_tabs := DockTabs {
