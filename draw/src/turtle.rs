@@ -1708,7 +1708,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let max = max.eval_width(self);
                     turtle = self.turtles.last_mut().unwrap();
                     if let Some(max) = max {
-                        turtle.width = turtle.width.min(max);
+                        // take the margin into account when calculating a Fit bound
+                        // with a relative-to-parent max value.
+                        turtle.width = turtle.width.min(max - turtle.walk.margin.width());
                     }
                 }
             }
@@ -1734,7 +1736,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     let max = max.eval_height(self);
                     turtle = self.turtles.last_mut().unwrap();
                     if let Some(max) = max {
-                        turtle.height = turtle.height.min(max);
+                        // See the width branch above, account for the margin in max calculations.
+                        turtle.height = turtle.height.min(max - turtle.walk.margin.height());
                     }
                 }
             }

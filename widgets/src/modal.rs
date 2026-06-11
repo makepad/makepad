@@ -115,19 +115,17 @@ impl Widget for Modal {
 
             // Close the modal if any of the following conditions occur:
             // * If the back navigational action/gesture was triggered (e.g., on Android),
-            // * If the Escape key was pressed while either the `bg_view` or `content` has key focus,
-            // * If there was a click/press in the background area, outside of the inner `content` view.
+            // * If the Escape key was released while `content` has key focus.
+            //   We look for KeyUp (not KeyDown) to match the FingerUp dismissal,
+            //   which also prevents a widget behind the modal from handling that Escape keypress.
+            // * If there was a click/tap in the background area, outside of the inner `content` view.
             let should_close = event.back_pressed()
                 || match bg_area_hit {
-                    Hit::KeyDown(KeyEvent {
-                        key_code: KeyCode::Escape,
-                        ..
-                    }) => true,
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
                 || match content_area_hit {
-                    Hit::KeyDown(KeyEvent {
+                    Hit::KeyUp(KeyEvent {
                         key_code: KeyCode::Escape,
                         ..
                     }) => true,
@@ -158,11 +156,10 @@ impl Widget for Modal {
         cx.end_pass_sized_turtle();
         self.draw_list.as_mut().unwrap().end(cx);
 
-        // After drawing the modal content, its area may have changed,
-        // so we need to update that area as a scrolling-allowed area bound.
+        // We must re-set the blocked scrolling area, as it might've changed after each draw.
         if self.is_open {
-            let content = self.view.widget(cx, ids!(content));
-            cx.block_scrolling_except_within(content.area());
+            let content_area = self.view.widget(cx, ids!(content)).area();
+            cx.block_scrolling_except_within(content_area);
         }
         DrawStep::done()
     }
@@ -179,6 +176,7 @@ impl Modal {
         self.draw_bg.redraw(cx);
         let content = self.view.widget(cx, ids!(content));
         cx.set_key_focus(content.area());
+        content.set_scroll_pos(cx, Vec2d { x: 0.0, y: 0.0 });
     }
 
     pub fn close(&mut self, cx: &mut Cx) {

@@ -2216,7 +2216,9 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit() {
+                    } else if self.drag_scrolling && fe.is_primary_hit()
+                        && cx.is_scrolling_allowed_within(&self.area)
+                    {
                         // Always enter drag state to enable drag-to-scroll even over
                         // interactive widgets (buttons, links, etc.). The drag threshold
                         // prevents micro-scrolling during taps/clicks, and child widgets
