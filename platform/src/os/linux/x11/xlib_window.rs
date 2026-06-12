@@ -539,6 +539,23 @@ impl XlibWindow {
         None
     }
 
+    fn screen_bottom_space_px(&self, rect: Rect, dpi_factor: f64) -> Option<f64> {
+        self.window?;
+        unsafe {
+            let display = get_xlib_app_global().display;
+            let default_screen = x11_sys::XDefaultScreen(display);
+            let root_window = x11_sys::XRootWindow(display, default_screen);
+            let mut xwa = mem::MaybeUninit::uninit();
+            if x11_sys::XGetWindowAttributes(display, root_window, xwa.as_mut_ptr()) == 0 {
+                return None;
+            }
+            let xwa = xwa.assume_init();
+            let window_pos = self.get_position();
+            let line_bottom_root_px = window_pos.y + (rect.pos.y + rect.size.y) * dpi_factor;
+            Some(xwa.height as f64 - line_bottom_root_px)
+        }
+    }
+
     pub fn set_ime_rect(&mut self, rect: Rect) {
         if self.ime_rect == rect {
             return;
@@ -548,20 +565,39 @@ impl XlibWindow {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
-        // Inflate by a fraction of the line height so the IM keeps a gap between
-        // its candidate window and the text rather than hugging it (matches the
-        // macOS clearance). Spot sits a clearance below the line bottom; area is
-        // the line inflated on both edges.
-        let clearance = rect.size.y * dpi_factor * 0.6;
+        // When there is room below the caret, anchor slightly below the line so
+        // the IM keeps a macOS-like gap. Near the screen bottom, many IMs flip
+        // the candidate window above the spot; anchor above the line instead so
+        // the flipped candidate does not cover the text being composed.
+        let line_height_px = rect.size.y * dpi_factor;
+        let line_top_px = rect.pos.y * dpi_factor;
+        let line_bottom_px = (rect.pos.y + rect.size.y) * dpi_factor;
+        let below_clearance = line_height_px * 0.6;
+        let above_clearance = line_height_px * 1.2;
+        let bottom_space_px = self.screen_bottom_space_px(rect, dpi_factor);
+        let anchor_above = bottom_space_px
+            .map(|space| space < line_height_px * 6.0)
+            .unwrap_or(false);
+        let spot_y_px = if anchor_above {
+            line_top_px - above_clearance
+        } else {
+            line_bottom_px + below_clearance
+        };
+        let area_top_px = if anchor_above {
+            spot_y_px
+        } else {
+            line_top_px - below_clearance
+        };
+        let area_bottom_px = line_bottom_px + below_clearance;
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
-            y: ((rect.pos.y + rect.size.y) * dpi_factor + clearance) as i16,
+            y: spot_y_px as i16,
         };
         let area_px = x11_sys::XRectangle {
             x: (rect.pos.x * dpi_factor) as i16,
-            y: (rect.pos.y * dpi_factor - clearance) as i16,
+            y: area_top_px as i16,
             width: (rect.size.x * dpi_factor).max(1.0) as u16,
-            height: (rect.size.y * dpi_factor + 2.0 * clearance).max(1.0) as u16,
+            height: (area_bottom_px - area_top_px).max(1.0) as u16,
         };
         unsafe {
             let mut xic = xim_context.xic;
@@ -655,7 +691,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) failed_attr={}{}",
+                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) anchor_above={} bottom_space_px={:?} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -670,6 +706,8 @@ impl XlibWindow {
                     area_px.y,
                     area_px.width,
                     area_px.height,
+                    anchor_above,
+                    bottom_space_px,
                     x11_ime_failed_attr_name(failed_attr),
                     fallback_note
                 );
