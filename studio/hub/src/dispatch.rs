@@ -1,4 +1,4 @@
-use crate::ai_manager::{AiManager, AiToolExecutionResult};
+use crate::ai_manager::AiManager;
 use crate::build_manager::BuildManager;
 use crate::log_store::{
     query_log_entries, AppendLogEntry, LogQuery, LogStore, ProfilerQuery, ProfilerStore,
@@ -20,6 +20,7 @@ use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::NetworkResponse;
 use makepad_script_std::makepad_network::ToUISender;
+use makepad_studio_ai::AiToolExecutionResult;
 use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,

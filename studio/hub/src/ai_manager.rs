@@ -9,25 +9,38 @@ use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::{NetworkConfig, NetworkResponse, NetworkRuntime};
 use makepad_studio_ai::{
-    append_workflow_focus, extract_expected_paths_from_prompt, matches_expected_path,
+    append_raw_event_sample, append_workflow_focus, apply_tool_call_delta,
+    collapse_repeated_tail_messages, drain_sse_events, extract_expected_paths_from_prompt,
+    extract_sse_event_data, finalize_stream_turn, first_non_empty_stream_reasoning,
+    format_terminal_observation_message, format_terminal_waiting_message, format_tool_call_message,
+    format_tool_result_message, is_empty_assistant_turn, is_terminal_tool_name, json_string,
+    last_terminal_waiting_message_from_history, live_task_title, matches_expected_path,
     native_delegation_prompt, parse_direct_subagent_command, parse_skill_markdown,
-    parse_workflow_markdown, subagent_kickoff_prompt, summarize_title, terminal_blocked_reason,
-    terminal_display_name, terminal_mode_and_summary as analyze_terminal_mode,
-    truncate_terminal_excerpt as shared_truncate_terminal_excerpt, workflow_command_matches,
-    workflow_command_slug, workflow_prompt_from_command, ParsedSkill, ParsedWorkflow,
+    parse_workflow_markdown, push_assistant_history_dedup, sanitize_conversation_history,
+    should_show_live_task, subagent_kickoff_prompt, summarize_title, terminal_blocked_reason,
+    terminal_display_name, terminal_followup_signature,
+    terminal_mode_and_summary as analyze_terminal_mode, tool_calls_action_summary,
+    tool_results_action_summary, trim_terminal_waiting_tail,
+    truncate_terminal_excerpt as shared_truncate_terminal_excerpt, truncate_text,
+    upsert_terminal_observation_history, upsert_terminal_observation_message,
+    upsert_terminal_waiting_message, workflow_command_matches, workflow_command_slug,
+    workflow_prompt_from_command, AiToolExecutionResult, AiTrackedTask, AssistantTurn,
+    ConversationItem, OpenAiErrorEnvelope, OpenAiStreamChunk, OpenAiStreamFunctionDelta,
+    OpenAiStreamToolCallDelta, ParsedSkill, ParsedWorkflow, StreamUpdate, StreamVisibleState,
+    StreamingTurnState, ToolCallRecord,
 };
+use makepad_studio_protocol::ai_format::{parse_json_string_field, AI_TASK_EVENT_PREFIX};
+#[cfg(test)]
 use makepad_studio_protocol::ai_format::{
-    parse_json_string_field, AI_TASK_EVENT_PREFIX, AI_TERMINAL_OBSERVATION_PREFIX,
-    AI_WAITING_MESSAGE_PREFIX,
+    AI_TERMINAL_OBSERVATION_PREFIX, AI_WAITING_MESSAGE_PREFIX,
 };
 use makepad_studio_protocol::hub_protocol::{
     ActiveWorkflowState, AiAgentId, AiAgentState, AiAgentSummary, AiBackendInfo, AiMessage,
     AiMessageRole, AiMountState, AiVisibilityEvent, WorkflowStepState,
 };
 use providers::AiProviderKind;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -89,36 +102,6 @@ struct AiBackendConfig {
     disable_thinking_via_chat_template: bool,
 }
 
-#[derive(Clone, Debug, SerJson, DeJson)]
-struct ToolCallRecord {
-    id: String,
-    name: String,
-    arguments_json: String,
-}
-
-#[derive(Clone, Debug, SerJson, DeJson)]
-enum ConversationItem {
-    User {
-        text: String,
-    },
-    Assistant {
-        text: String,
-        tool_calls: Vec<ToolCallRecord>,
-    },
-    ToolResult {
-        tool_call_id: String,
-        content: String,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct AiToolExecutionResult {
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub content: String,
-    pub is_error: bool,
-}
-
 struct RunningAgent {
     title: String,
     backend_id: String,
@@ -166,22 +149,6 @@ struct MountAgents {
 }
 
 #[derive(Clone, Debug)]
-struct AiTrackedTask {
-    id: u64,
-    agent_id: AiAgentId,
-    goal: String,
-    terminal_path: Option<String>,
-    expected_paths: Vec<String>,
-    touched_paths: Vec<String>,
-    status: String,
-    last_terminal_mode: String,
-    last_terminal_summary: String,
-    last_terminal_excerpt: String,
-    last_codex_status: Option<String>,
-    handled_followup_signatures: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
 struct AiQueuedFollowup {
     agent_id: AiAgentId,
     task_id: u64,
@@ -217,38 +184,6 @@ pub struct PendingClassifier {
     pub mount: String,
     pub agent_id: AiAgentId,
     pub original_prompt: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct ToolCallAccumulator {
-    id: String,
-    name: String,
-    arguments_json: String,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct StreamVisibleState {
-    thinking_message_index: Option<usize>,
-    assistant_message_index: Option<usize>,
-}
-
-#[derive(Default)]
-struct StreamingTurnState {
-    buffer: String,
-    raw_event_sample: String,
-    saw_text_delta: bool,
-    thinking_text: String,
-    assistant_text: String,
-    tool_calls: Vec<ToolCallAccumulator>,
-    finish_reason: Option<String>,
-    done_received: bool,
-    visible: StreamVisibleState,
-}
-
-#[derive(Default)]
-struct StreamUpdate {
-    changed: bool,
-    done: bool,
 }
 
 #[derive(Clone, Debug, SerJson, DeJson)]
@@ -289,42 +224,6 @@ struct OpenAiChoice {
 }
 
 #[derive(DeJson)]
-struct OpenAiStreamChunk {
-    choices: Vec<OpenAiStreamChoice>,
-    error: Option<OpenAiErrorEnvelope>,
-}
-
-#[derive(DeJson)]
-struct OpenAiStreamChoice {
-    delta: Option<OpenAiStreamDelta>,
-    finish_reason: Option<String>,
-}
-
-#[derive(DeJson)]
-struct OpenAiStreamDelta {
-    content: Option<String>,
-    reasoning_content: Option<String>,
-    reasoning: Option<String>,
-    reasoning_text: Option<String>,
-    tool_calls: Option<Vec<OpenAiStreamToolCallDelta>>,
-}
-
-#[derive(DeJson)]
-struct OpenAiStreamToolCallDelta {
-    index: Option<u32>,
-    id: Option<String>,
-    #[rename(type)]
-    kind: Option<String>,
-    function: Option<OpenAiStreamFunctionDelta>,
-}
-
-#[derive(DeJson)]
-struct OpenAiStreamFunctionDelta {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-#[derive(DeJson)]
 struct OpenAiResponseMessage {
     content: Option<String>,
     reasoning_content: Option<String>,
@@ -345,11 +244,6 @@ struct OpenAiResponseToolCall {
 struct OpenAiResponseFunctionCall {
     name: String,
     arguments: String,
-}
-
-#[derive(DeJson)]
-struct OpenAiErrorEnvelope {
-    message: Option<String>,
 }
 
 #[derive(DeJson)]
@@ -448,13 +342,6 @@ struct SpawnSubagentArgs {
 struct CompleteTaskArgs {
     summary: String,
     success: bool,
-}
-
-struct AssistantTurn {
-    text: String,
-    thinking_text: String,
-    tool_calls: Vec<ToolCallRecord>,
-    raw_event_sample: String,
 }
 
 pub struct AiManager {
@@ -4636,96 +4523,6 @@ fn render_system_prompt(
     base
 }
 
-fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
-    let completed_tool_call_ids = history
-        .iter()
-        .filter_map(|item| match item {
-            ConversationItem::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut retained_tool_call_ids = HashSet::new();
-    let mut sanitized = Vec::new();
-
-    for item in history {
-        match item {
-            ConversationItem::Assistant { text, tool_calls } => {
-                let tool_calls = tool_calls
-                    .into_iter()
-                    .filter(|tool_call| completed_tool_call_ids.contains(&tool_call.id))
-                    .collect::<Vec<_>>();
-                if is_empty_assistant_turn(&text, &tool_calls) {
-                    continue;
-                }
-                for tool_call in &tool_calls {
-                    retained_tool_call_ids.insert(tool_call.id.clone());
-                }
-                sanitized.push(ConversationItem::Assistant { text, tool_calls });
-            }
-            ConversationItem::ToolResult {
-                tool_call_id,
-                content,
-            } => {
-                if retained_tool_call_ids.contains(&tool_call_id) {
-                    sanitized.push(ConversationItem::ToolResult {
-                        tool_call_id,
-                        content,
-                    });
-                }
-            }
-            item => sanitized.push(item),
-        }
-    }
-
-    sanitized
-}
-
-fn push_assistant_history_dedup(
-    history: &mut Vec<ConversationItem>,
-    text: String,
-    tool_calls: Vec<ToolCallRecord>,
-) {
-    if tool_calls.is_empty()
-        && history.last().is_some_and(|item| {
-            matches!(
-                item,
-                ConversationItem::Assistant {
-                    text: previous,
-                    tool_calls
-                } if tool_calls.is_empty() && same_visible_text(previous, &text)
-            )
-        })
-    {
-        return;
-    }
-    history.push(ConversationItem::Assistant { text, tool_calls });
-}
-
-fn collapse_repeated_tail_messages(messages: &mut Vec<AiMessage>) {
-    loop {
-        let len = messages.len();
-        if len < 2 {
-            return;
-        }
-        let duplicate = {
-            let previous = &messages[len - 2];
-            let current = &messages[len - 1];
-            matches!(previous.role, AiMessageRole::Assistant)
-                && matches!(current.role, AiMessageRole::Assistant)
-                && same_visible_text(&previous.text, &current.text)
-        };
-        if duplicate {
-            messages.pop();
-        } else {
-            return;
-        }
-    }
-}
-
-fn same_visible_text(left: &str, right: &str) -> bool {
-    left.split_whitespace().collect::<Vec<_>>() == right.split_whitespace().collect::<Vec<_>>()
-}
-
 fn is_closed_subagent(agent: &RunningAgent) -> bool {
     agent.parent_agent_id.is_some()
         && matches!(agent.status.as_str(), "completed" | "done")
@@ -4756,60 +4553,11 @@ fn agent_title_for_event(mount_state: &MountAgents, agent_id: AiAgentId) -> Stri
         .unwrap_or_else(|| format!("Agent {}", agent_id.0))
 }
 
-fn is_empty_assistant_turn(text: &str, tool_calls: &[ToolCallRecord]) -> bool {
-    text.trim().is_empty() && tool_calls.is_empty()
-}
-
-fn should_show_live_task(task: &AiTrackedTask) -> bool {
-    !matches!(task.status.as_str(), "done" | "cancelled")
-        && task
-            .terminal_path
-            .as_deref()
-            .map(|_| task.last_terminal_mode != "idle" && task.last_terminal_mode != "done")
-            .unwrap_or(true)
-}
-
 fn should_show_live_terminal(terminal: &AiTerminalSnapshot) -> bool {
     matches!(
         terminal.mode,
         "working" | "awaiting-input" | "needs-attention" | "input"
     )
-}
-
-fn terminal_followup_signature(kind: &str, path: &str, task: &AiTrackedTask) -> String {
-    format!(
-        "terminal:{}:{}:{}:{}:{}:{}",
-        path,
-        kind,
-        task.last_terminal_mode,
-        task.last_terminal_summary,
-        task.last_codex_status.as_deref().unwrap_or(""),
-        stable_text_fingerprint(&task.last_terminal_excerpt)
-    )
-}
-
-fn stable_text_fingerprint(text: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn live_task_title(task: &AiTrackedTask) -> String {
-    if task.goal.starts_with("Observe Codex terminal `") {
-        let terminal = task
-            .terminal_path
-            .as_deref()
-            .map(terminal_display_name)
-            .unwrap_or_else(|| "terminal".to_string());
-        let action = match task.last_terminal_mode.as_str() {
-            "awaiting-input" => "Reply to",
-            "needs-attention" => "Resolve",
-            "working" => "Monitor",
-            _ => "Review",
-        };
-        return format!("{} `{}`", action, terminal);
-    }
-    truncate_inline(&task.goal, 96)
 }
 
 fn append_plain_message(out: &mut String, first_message: &mut bool, role: &str, content: &str) {
@@ -5020,78 +4768,6 @@ fn first_non_empty_reasoning(message: &OpenAiResponseMessage) -> Option<String> 
     .map(ToOwned::to_owned)
 }
 
-fn first_non_empty_stream_reasoning(delta: &OpenAiStreamDelta) -> Option<String> {
-    [
-        delta.reasoning_content.as_deref(),
-        delta.reasoning.as_deref(),
-        delta.reasoning_text.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|value| !value.trim().is_empty())
-    .map(ToOwned::to_owned)
-}
-
-fn drain_sse_events(buffer: &mut String, flush: bool) -> Vec<String> {
-    let mut events = Vec::new();
-    while let Some(index) = buffer.find("\n\n") {
-        let event = buffer[..index].to_string();
-        buffer.drain(..index + 2);
-        events.push(event);
-    }
-    if flush {
-        let trailing = buffer.trim();
-        if !trailing.is_empty() {
-            events.push(trailing.to_string());
-        }
-        buffer.clear();
-    }
-    events
-}
-
-fn extract_sse_event_data(event: &str) -> Option<String> {
-    let mut out = String::new();
-    for line in event.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.strip_prefix(' ').unwrap_or(data);
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(data);
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-fn apply_tool_call_delta(
-    tool_calls: &mut Vec<ToolCallAccumulator>,
-    delta: OpenAiStreamToolCallDelta,
-) -> Result<(), String> {
-    if let Some(kind) = &delta.kind {
-        if kind != "function" {
-            return Err(format!("unsupported streamed tool call type '{}'", kind));
-        }
-    }
-    let index = delta.index.unwrap_or(0) as usize;
-    while tool_calls.len() <= index {
-        tool_calls.push(ToolCallAccumulator::default());
-    }
-    let tool_call = &mut tool_calls[index];
-    if let Some(id) = delta.id {
-        tool_call.id = id;
-    }
-    if let Some(function) = delta.function {
-        if let Some(name) = function.name {
-            tool_call.name = name;
-        }
-        if let Some(arguments) = function.arguments {
-            tool_call.arguments_json.push_str(&arguments);
-        }
-    }
-    Ok(())
-}
-
 fn upsert_stream_message(
     messages: &mut Vec<AiMessage>,
     existing_index: Option<usize>,
@@ -5126,58 +4802,6 @@ fn stream_current_action(thinking_text: &str, assistant_text: &str) -> String {
 
 fn first_non_empty_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
-}
-
-fn finalize_stream_turn(
-    stream: StreamingTurnState,
-) -> Result<(AssistantTurn, StreamVisibleState), String> {
-    let tool_calls = stream
-        .tool_calls
-        .into_iter()
-        .filter(|tool_call| {
-            !tool_call.id.is_empty()
-                || !tool_call.name.is_empty()
-                || !tool_call.arguments_json.is_empty()
-        })
-        .map(|tool_call| {
-            if tool_call.id.is_empty() {
-                return Err("AI backend streamed a tool call without an id".to_string());
-            }
-            if tool_call.name.is_empty() {
-                return Err("AI backend streamed a tool call without a name".to_string());
-            }
-            Ok(ToolCallRecord {
-                id: tool_call.id,
-                name: tool_call.name,
-                arguments_json: tool_call.arguments_json,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok((
-        AssistantTurn {
-            text: stream.assistant_text,
-            thinking_text: stream.thinking_text,
-            tool_calls,
-            raw_event_sample: stream.raw_event_sample,
-        },
-        stream.visible,
-    ))
-}
-
-fn append_raw_event_sample(sample: &mut String, event: &str) {
-    const MAX_RAW_EVENT_SAMPLE: usize = 6000;
-    if sample.len() >= MAX_RAW_EVENT_SAMPLE {
-        return;
-    }
-    if !sample.is_empty() {
-        sample.push_str("\n\n");
-    }
-    let remaining = MAX_RAW_EVENT_SAMPLE.saturating_sub(sample.len());
-    if event.len() <= remaining {
-        sample.push_str(event);
-    } else {
-        sample.push_str(&event[..remaining]);
-    }
 }
 
 fn execute_tool_call(
@@ -5991,124 +5615,6 @@ fn read_pipe(pipe: Option<impl Read>) -> Result<String, std::io::Error> {
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-fn format_tool_call_message(tool_call: &ToolCallRecord) -> String {
-    format!(
-        "`{}`\n```json\n{}\n```",
-        tool_call.name,
-        tool_call.arguments_json.trim()
-    )
-}
-
-fn format_tool_result_message(result: &AiToolExecutionResult) -> String {
-    let label = if result.is_error {
-        format!("`{}` failed", result.tool_name)
-    } else {
-        format!("`{}` result", result.tool_name)
-    };
-    format!(
-        "{}\n```text\n{}\n```",
-        label,
-        truncate_text(result.content.trim(), MAX_RESULT_CHARS)
-    )
-}
-
-fn tool_calls_action_summary(tool_calls: &[ToolCallRecord]) -> String {
-    if tool_calls.len() == 1 {
-        return format!("Running {}", tool_call_activity_label(&tool_calls[0]));
-    }
-    let names = tool_calls
-        .iter()
-        .take(4)
-        .map(tool_call_activity_label)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let remaining = tool_calls.len().saturating_sub(4);
-    if remaining == 0 {
-        format!("Running {} tools: {}", tool_calls.len(), names)
-    } else {
-        format!(
-            "Running {} tools: {}, +{} more",
-            tool_calls.len(),
-            names,
-            remaining
-        )
-    }
-}
-
-fn tool_call_activity_label(tool_call: &ToolCallRecord) -> String {
-    let args = tool_call.arguments_json.as_str();
-    match tool_call.name.as_str() {
-        "read_file" | "write_file" | "replace_in_file" | "open_editor" => {
-            if let Some(path) = parse_json_string_field(args, "path") {
-                return format!("`{}` on `{}`", tool_call.name, truncate_inline(&path, 80));
-            }
-        }
-        "list_files" | "observe_filesystem" => {
-            let path = parse_json_string_field(args, "path").unwrap_or_else(|| ".".to_string());
-            return format!("`{}` in `{}`", tool_call.name, truncate_inline(&path, 80));
-        }
-        "search_text" => {
-            if let Some(pattern) = parse_json_string_field(args, "pattern") {
-                let path = parse_json_string_field(args, "path").unwrap_or_else(|| ".".to_string());
-                return format!(
-                    "`search_text` for `{}` in `{}`",
-                    truncate_inline(&pattern, 48),
-                    truncate_inline(&path, 80)
-                );
-            }
-        }
-        "bash" => {
-            if let Some(command) = parse_json_string_field(args, "command") {
-                return format!("`bash` `{}`", truncate_inline(&command, 96));
-            }
-        }
-        "read_terminal" | "send_terminal_text" | "send_terminal_key" => {
-            if let Some(path) = parse_json_string_field(args, "path") {
-                return format!("`{}` for `{}`", tool_call.name, truncate_inline(&path, 80));
-            }
-        }
-        "open_terminal" => {
-            if let Some(command) = parse_json_string_field(args, "command") {
-                return format!("`open_terminal` `{}`", truncate_inline(&command, 96));
-            }
-            if let Some(name) = parse_json_string_field(args, "name") {
-                return format!("`open_terminal` `{}`", truncate_inline(&name, 80));
-            }
-        }
-        "spawn_subagent" => {
-            let role =
-                parse_json_string_field(args, "role").unwrap_or_else(|| "subagent".to_string());
-            if let Some(task) = parse_json_string_field(args, "task") {
-                return format!(
-                    "`spawn_subagent` {}: {}",
-                    truncate_inline(&role, 32),
-                    truncate_inline(&task, 96)
-                );
-            }
-            return format!("`spawn_subagent` {}", truncate_inline(&role, 32));
-        }
-        _ => {}
-    }
-    format!("`{}`", tool_call.name)
-}
-
-fn tool_results_action_summary(results: &[AiToolExecutionResult]) -> String {
-    if results.len() == 1 {
-        let result = &results[0];
-        return if result.is_error {
-            format!("`{}` failed", result.tool_name)
-        } else {
-            format!("`{}` completed", result.tool_name)
-        };
-    }
-    let failed = results.iter().filter(|result| result.is_error).count();
-    if failed == 0 {
-        format!("Completed {} tools", results.len())
-    } else {
-        format!("Completed {} tools, {} failed", results.len(), failed)
-    }
-}
-
 struct NativeFileTouch {
     path: String,
     tool_name: String,
@@ -6139,205 +5645,6 @@ fn native_file_touch_from_tool_result(
         path,
         tool_name: tool_call.name.clone(),
     })
-}
-
-fn format_terminal_waiting_message(result: &AiToolExecutionResult) -> Option<String> {
-    if result.is_error || result.tool_name != "read_terminal" {
-        return None;
-    }
-    let mode = parse_json_string_field(&result.content, "mode").unwrap_or_default();
-    let path = parse_json_string_field(&result.content, "path").unwrap_or_default();
-    let detail = parse_json_string_field(&result.content, "codex_status")
-        .or_else(|| parse_json_string_field(&result.content, "summary"))
-        .unwrap_or_default();
-    let detail_lowered = detail.to_ascii_lowercase();
-    if mode != "working"
-        && !detail_lowered.contains("working")
-        && !detail_lowered.contains("esc to interrupt")
-    {
-        return None;
-    }
-
-    let mut message = format!("{}waiting", AI_WAITING_MESSAGE_PREFIX);
-    if !path.is_empty() {
-        message.push_str(" on `");
-        message.push_str(&path);
-        message.push('`');
-    }
-    if !detail.trim().is_empty() {
-        message.push_str(" - ");
-        message.push_str(&truncate_waiting_detail(&detail));
-    }
-    Some(message)
-}
-
-fn last_terminal_waiting_message_from_history(history: &[ConversationItem]) -> Option<String> {
-    let ConversationItem::ToolResult {
-        tool_call_id,
-        content,
-    } = history.last()?
-    else {
-        return None;
-    };
-
-    let tool_call = history.iter().rev().find_map(|item| {
-        let ConversationItem::Assistant { tool_calls, .. } = item else {
-            return None;
-        };
-        tool_calls
-            .iter()
-            .find(|tool_call| tool_call.id == *tool_call_id && tool_call.name == "read_terminal")
-    })?;
-
-    format_terminal_waiting_message(&AiToolExecutionResult {
-        tool_call_id: tool_call.id.clone(),
-        tool_name: tool_call.name.clone(),
-        content: content.clone(),
-        is_error: false,
-    })
-}
-
-fn format_terminal_observation_message(
-    path: &str,
-    mode: &str,
-    summary: &str,
-    codex_status: Option<&str>,
-    excerpt: &str,
-) -> String {
-    let mut message = format!("{} {}\n", AI_TERMINAL_OBSERVATION_PREFIX, path);
-    message.push_str(&format!("Mode: {}\n", mode));
-    if let Some(codex_status) = codex_status.filter(|value| !value.trim().is_empty()) {
-        message.push_str(&format!("Codex status: {}\n", codex_status.trim()));
-    }
-    if !summary.trim().is_empty() {
-        message.push_str(&format!("Summary: {}\n", summary.trim()));
-    }
-    if !excerpt.trim().is_empty() {
-        message.push_str("\nLatest output excerpt:\n```text\n");
-        message.push_str(excerpt.trim());
-        message.push_str("\n```");
-    }
-    message
-}
-
-fn upsert_terminal_observation_message(messages: &mut Vec<AiMessage>, text: &str) {
-    let path = terminal_observation_path(text);
-    if let Some(path) = path {
-        if let Some(last) = messages.last_mut() {
-            if matches!(last.role, AiMessageRole::System)
-                && terminal_observation_path(&last.text) == Some(path)
-            {
-                last.text = text.to_string();
-                return;
-            }
-        }
-    }
-    messages.push(AiMessage {
-        role: AiMessageRole::System,
-        text: text.to_string(),
-    });
-}
-
-fn upsert_terminal_observation_history(history: &mut Vec<ConversationItem>, text: &str) {
-    let path = terminal_observation_path(text);
-    if let Some(path) = path {
-        if let Some(ConversationItem::User { text: last }) = history.last_mut() {
-            if terminal_observation_path(last) == Some(path) {
-                *last = text.to_string();
-                return;
-            }
-        }
-    }
-    history.push(ConversationItem::User {
-        text: text.to_string(),
-    });
-}
-
-fn terminal_observation_path(text: &str) -> Option<&str> {
-    text.lines()
-        .next()?
-        .strip_prefix(AI_TERMINAL_OBSERVATION_PREFIX)?
-        .trim()
-        .split_whitespace()
-        .next()
-}
-
-fn upsert_terminal_waiting_message(messages: &mut Vec<AiMessage>, waiting_message: String) {
-    if let Some(last) = messages.last_mut() {
-        if matches!(last.role, AiMessageRole::Thinking)
-            && last.text.starts_with(AI_WAITING_MESSAGE_PREFIX)
-        {
-            last.text = waiting_message;
-            return;
-        }
-    }
-    messages.push(AiMessage {
-        role: AiMessageRole::Thinking,
-        text: waiting_message,
-    });
-}
-
-fn trim_terminal_waiting_tail(messages: &mut Vec<AiMessage>) {
-    if messages
-        .last()
-        .is_some_and(|message| message_tool_name(message) == Some("read_terminal"))
-    {
-        messages.pop();
-    }
-    while messages.last().is_some_and(|message| {
-        matches!(
-            message.role,
-            AiMessageRole::Thinking | AiMessageRole::Assistant
-        ) && looks_like_terminal_waiting_text(&message.text)
-    }) {
-        messages.pop();
-    }
-}
-
-fn message_tool_name(message: &AiMessage) -> Option<&str> {
-    if !matches!(message.role, AiMessageRole::ToolCall) {
-        return None;
-    }
-    let rest = message.text.strip_prefix('`')?;
-    let (tool_name, _) = rest.split_once('`')?;
-    Some(tool_name)
-}
-
-fn looks_like_terminal_waiting_text(text: &str) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    lowered.contains("working on the task")
-        || lowered.contains("still working")
-        || (lowered.contains("codex") && lowered.contains("working"))
-        || ((lowered.contains("wait") || lowered.contains("check again"))
-            && lowered.contains("progress"))
-}
-
-fn truncate_waiting_detail(text: &str) -> String {
-    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = single_line.chars().take(160).collect::<String>();
-    if single_line.chars().count() > 160 {
-        out.push_str("...");
-    }
-    out
-}
-
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    let mut out = text.chars().take(max_chars).collect::<String>();
-    if text.chars().count() > max_chars {
-        out.push_str("\n\n[output truncated]");
-    }
-    out
-}
-
-fn json_string(value: &str) -> String {
-    value.to_string().serialize_json()
-}
-
-fn is_terminal_tool_name(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_terminal" | "send_terminal_text" | "send_terminal_key" | "open_terminal"
-    )
 }
 
 fn should_track_ai_terminal_task(prompt: &str) -> bool {

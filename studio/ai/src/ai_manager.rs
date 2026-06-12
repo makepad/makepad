@@ -490,7 +490,7 @@ fn extract_code_block_body(text: &str) -> Option<&str> {
     Some(&body[..end])
 }
 
-fn truncate_inline(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_inline(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();

@@ -198,174 +198,55 @@ impl App {
         let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) else {
             return;
         };
-
-        workspace.widget(cx, ids!(ai_live_markdown)).set_text(
-            cx,
-            &self
-                .mount_state(&active_mount)
-                .and_then(|mount| mount.ai_state.as_ref())
-                .map(|state| ai_live_activity_markdown(&active_mount, state))
-                .unwrap_or_else(|| "_No live AI state yet._".to_string()),
+        let role_index = workspace
+            .drop_down(cx, ids!(ai_subagent_role_picker))
+            .selected_item();
+        let view_model = AiPanelViewModel::from_optional_state(
+            &active_mount,
+            self.mount_state(&active_mount)
+                .and_then(|mount| mount.ai_state.as_ref()),
+            role_index,
         );
 
-        workspace.widget(cx, ids!(ai_files_markdown)).set_text(
-            cx,
-            &self
-                .mount_state(&active_mount)
-                .and_then(|mount| mount.ai_state.as_ref())
-                .map(|state| ai_changed_files_markdown(&active_mount, state))
-                .unwrap_or_else(|| "_No files changed yet._".to_string()),
-        );
-
-        workspace.widget(cx, ids!(ai_swarm_markdown)).set_text(
-            cx,
-            &self
-                .mount_state(&active_mount)
-                .and_then(|mount| mount.ai_state.as_ref())
-                .map(|state| ai_task_board_markdown(&active_mount, state))
-                .unwrap_or_else(|| "_No active tasks._".to_string()),
-        );
-
-        let Some(state) = self
-            .mount_state(&active_mount)
-            .and_then(|mount| mount.ai_state.as_ref())
-        else {
-            workspace
-                .drop_down(cx, ids!(ai_agent_dropdown))
-                .set_labels(cx, vec!["Loading AI...".to_string()]);
-            workspace
-                .drop_down(cx, ids!(ai_agent_dropdown))
-                .set_selected_item(cx, 0);
-            workspace
-                .drop_down(cx, ids!(ai_model_picker))
-                .set_labels(cx, vec!["Loading...".to_string()]);
-            workspace
-                .drop_down(cx, ids!(ai_model_picker))
-                .set_selected_item(cx, 0);
-            workspace
-                .widget(cx, ids!(ai_chat_markdown))
-                .set_text(cx, "_No AI state yet._");
-            workspace
-                .label(cx, ids!(ai_status_label))
-                .set_text(cx, "Loading AI...");
-            workspace
-                .button(cx, ids!(ai_run_button))
-                .set_enabled(cx, false);
-            workspace
-                .drop_down(cx, ids!(ai_subagent_role_picker))
-                .set_labels(
-                    cx,
-                    AI_SUBAGENT_ROLES
-                        .iter()
-                        .map(|role| ai_subagent_role_label(role))
-                        .collect(),
-                );
-            workspace
-                .drop_down(cx, ids!(ai_subagent_role_picker))
-                .set_selected_item(cx, 0);
-            workspace.widget(cx, ids!(ai_run_button)).set_text(cx, "▶");
-            return;
-        };
-
-        let agent_labels = state
-            .agents
-            .iter()
-            .map(|agent| ai_agent_picker_label(agent, state))
-            .collect::<Vec<_>>();
-        let agent_selected = state
-            .active_agent_id
-            .and_then(|selected| {
-                state
-                    .agents
-                    .iter()
-                    .position(|agent| agent.agent_id == selected)
-            })
-            .unwrap_or(0);
+        workspace
+            .widget(cx, ids!(ai_live_markdown))
+            .set_text(cx, &view_model.live_markdown);
+        workspace
+            .widget(cx, ids!(ai_files_markdown))
+            .set_text(cx, &view_model.files_markdown);
+        workspace
+            .widget(cx, ids!(ai_swarm_markdown))
+            .set_text(cx, &view_model.task_board_markdown);
         workspace
             .drop_down(cx, ids!(ai_agent_dropdown))
-            .set_labels(cx, non_empty_labels(agent_labels, "Chat 1"));
+            .set_labels(cx, view_model.agent_labels);
         workspace
             .drop_down(cx, ids!(ai_agent_dropdown))
-            .set_selected_item(cx, agent_selected);
-
-        let active_backend = state.active_backend_id.as_ref().and_then(|active_id| {
-            state
-                .backends
-                .iter()
-                .find(|backend| &backend.id == active_id)
-        });
-        let active_backend_configured = active_backend
-            .map(|backend| backend.configured)
-            .unwrap_or(true);
-
-        let backend_labels = state
-            .backends
-            .iter()
-            .map(|backend| backend.label.clone())
-            .collect::<Vec<_>>();
-        let backend_selected = state
-            .active_backend_id
-            .as_ref()
-            .and_then(|active_id| {
-                state
-                    .backends
-                    .iter()
-                    .position(|backend| &backend.id == active_id)
-            })
-            .unwrap_or(0);
-
+            .set_selected_item(cx, view_model.agent_selected);
         workspace
             .drop_down(cx, ids!(ai_model_picker))
-            .set_labels(cx, non_empty_labels(backend_labels, "local"));
+            .set_labels(cx, view_model.backend_labels);
         workspace
             .drop_down(cx, ids!(ai_model_picker))
-            .set_selected_item(cx, backend_selected);
+            .set_selected_item(cx, view_model.backend_selected);
         workspace
             .drop_down(cx, ids!(ai_subagent_role_picker))
-            .set_labels(
-                cx,
-                AI_SUBAGENT_ROLES
-                    .iter()
-                    .map(|role| ai_subagent_role_label(role))
-                    .collect(),
-            );
-
-        if let Some(agent) = state.active_agent.as_ref() {
-            let selected_role_index = workspace
-                .drop_down(cx, ids!(ai_subagent_role_picker))
-                .selected_item();
-            workspace
-                .widget(cx, ids!(ai_chat_markdown))
-                .set_text(cx, &ai_chat_markdown(agent));
-            let status_text = if active_backend_configured {
-                ai_status_label(agent, selected_role_index)
-            } else {
-                "Configure backend".to_string()
-            };
-            workspace
-                .label(cx, ids!(ai_status_label))
-                .set_text(cx, &status_text);
-            workspace
-                .button(cx, ids!(ai_run_button))
-                .set_enabled(cx, active_backend_configured);
-            workspace
-                .widget(cx, ids!(ai_run_button))
-                .set_text(cx, if agent.pending { "■" } else { "▶" });
-        } else {
-            workspace
-                .widget(cx, ids!(ai_chat_markdown))
-                .set_text(cx, "_No AI chats for this mount._");
-            workspace
-                .label(cx, ids!(ai_status_label))
-                .set_text(cx, "No active AI chat");
-            workspace
-                .button(cx, ids!(ai_run_button))
-                .set_enabled(cx, false);
-            workspace
-                .drop_down(cx, ids!(ai_subagent_role_picker))
-                .set_selected_item(cx, 0);
-            workspace.widget(cx, ids!(ai_run_button)).set_text(cx, "▶");
-        }
+            .set_labels(cx, view_model.role_labels);
+        workspace
+            .drop_down(cx, ids!(ai_subagent_role_picker))
+            .set_selected_item(cx, view_model.role_selected);
+        workspace
+            .widget(cx, ids!(ai_chat_markdown))
+            .set_text(cx, &view_model.chat_markdown);
+        workspace
+            .label(cx, ids!(ai_status_label))
+            .set_text(cx, &view_model.status_label);
+        workspace
+            .button(cx, ids!(ai_run_button))
+            .set_enabled(cx, view_model.run_button_enabled);
+        workspace
+            .widget(cx, ids!(ai_run_button))
+            .set_text(cx, &view_model.run_button_label);
     }
 
     pub(super) fn schedule_ai_chat_scroll_to_bottom(&mut self, cx: &mut Cx) {
