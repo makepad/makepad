@@ -64,7 +64,7 @@ pub fn register_script_modules(vm: &mut ScriptVm) {
     crate::desktop_run_list::script_mod(vm);
     crate::desktop_run_view::script_mod(vm);
     crate::desktop_terminal_view::script_mod(vm);
-    crate::app_ui::script_mod(vm);
+    crate::app_ui::register_all(vm);
 }
 
 app_main!(App);
