@@ -75,6 +75,65 @@ impl App {
 
     pub(super) fn handle_studio_message(&mut self, cx: &mut Cx, msg: HubToClient) {
         match msg {
+            // File messages
+            HubToClient::FileTree { .. }
+            | HubToClient::TextFileOpened { .. }
+            | HubToClient::FileTreeDiff { .. }
+            | HubToClient::TextFileRead { .. }
+            | HubToClient::TextFileSaved { .. }
+            | HubToClient::FileChanged { .. }
+            | HubToClient::FindFileResults { .. } => {
+                self.handle_file_message(cx, msg);
+            }
+            
+            // Run messages
+            HubToClient::Builds { .. }
+            | HubToClient::RunItems { .. }
+            | HubToClient::BuildStarted { .. }
+            | HubToClient::BuildStopped { .. }
+            | HubToClient::BuildCleared { .. }
+            | HubToClient::RunViewCreated { .. }
+            | HubToClient::RunViewDrawComplete { .. }
+            | HubToClient::RunViewFrame { .. }
+            | HubToClient::RunViewCursor { .. }
+            | HubToClient::RunViewInputViz { .. }
+            | HubToClient::RunViewKeyFocusRect { .. }
+            | HubToClient::AppStarted { .. } => {
+                self.handle_run_message(cx, msg);
+            }
+
+            // Log / Profiler messages
+            HubToClient::QueryLogResults { .. }
+            | HubToClient::QueryProfilerResults { .. }
+            | HubToClient::QueryCancelled { .. }
+            | HubToClient::LogCleared => {
+                self.handle_log_profiler_message(cx, msg);
+            }
+
+            // Terminal messages
+            HubToClient::TerminalOpened { .. }
+            | HubToClient::TerminalFramebuffer { .. }
+            | HubToClient::TerminalTitle { .. }
+            | HubToClient::TerminalExited { .. } => {
+                self.handle_terminal_message(cx, msg);
+            }
+
+            // AI messages
+            HubToClient::AiMountState { .. } => {
+                self.handle_ai_message(cx, msg);
+            }
+
+            // Error
+            HubToClient::Error { message } => {
+                self.data.pending_reload_paths.clear();
+                self.set_status(cx, &format!("error: {}", message));
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_file_message(&mut self, cx: &mut Cx, msg: HubToClient) {
+        match msg {
             HubToClient::FileTree { mount, data } => {
                 let _ = self.ensure_mount_tab(cx, &mount);
                 self.mount_state_mut(&mount).file_tree_data = Some(data);
@@ -208,6 +267,12 @@ impl App {
                     self.refresh_active_mount_tree(cx);
                 }
             }
+            _ => {}
+        }
+    }
+
+    fn handle_run_message(&mut self, cx: &mut Cx, msg: HubToClient) {
+        match msg {
             HubToClient::Builds { builds } => {
                 for build in &builds {
                     self.data
@@ -526,6 +591,26 @@ impl App {
                     dock.redraw_tab(cx, tab_id);
                 }
             }
+            HubToClient::AppStarted { build_id } => {
+                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
+                    if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
+                        state.status = "running".to_string();
+                    }
+                    let mount = self.data.build_to_mount.get(&build_id).cloned();
+                    if let Some(mount) = mount {
+                        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+                            dock.redraw_tab(cx, tab_id);
+                        }
+                        self.refresh_active_mount_run_list(cx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_log_profiler_message(&mut self, cx: &mut Cx, msg: HubToClient) {
+        match msg {
             HubToClient::QueryLogResults {
                 query_id,
                 entries,
@@ -634,6 +719,12 @@ impl App {
                 self.clear_ui_log_entries(cx);
                 self.set_status(cx, "logs cleared");
             }
+            _ => {}
+        }
+    }
+
+    fn handle_terminal_message(&mut self, cx: &mut Cx, msg: HubToClient) {
+        match msg {
             HubToClient::TerminalOpened { path } => {
                 let redraw_path = path.clone();
                 self.data.terminal_open_paths.insert(path.clone());
@@ -672,26 +763,14 @@ impl App {
                 self.set_status(cx, &format!("terminal exited ({})", code));
                 self.refresh_ai_manager_report(cx);
             }
+            _ => {}
+        }
+    }
+
+    fn handle_ai_message(&mut self, cx: &mut Cx, msg: HubToClient) {
+        match msg {
             HubToClient::AiMountState { mount, state } => {
                 self.receive_ai_state(cx, &mount, state);
-            }
-            HubToClient::Error { message } => {
-                self.data.pending_reload_paths.clear();
-                self.set_status(cx, &format!("error: {}", message));
-            }
-            HubToClient::AppStarted { build_id } => {
-                if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
-                    if let Some(state) = self.data.run_tab_state.get_mut(&tab_id) {
-                        state.status = "running".to_string();
-                    }
-                    let mount = self.data.build_to_mount.get(&build_id).cloned();
-                    if let Some(mount) = mount {
-                        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
-                            dock.redraw_tab(cx, tab_id);
-                        }
-                        self.refresh_active_mount_run_list(cx);
-                    }
-                }
             }
             _ => {}
         }
