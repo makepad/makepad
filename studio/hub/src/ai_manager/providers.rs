@@ -68,7 +68,6 @@ pub(super) trait AiProviderBackend {
         history: &[ConversationItem],
         role: Option<&str>,
         task: Option<&str>,
-        active_terminals: &[String],
         skills: &[ParsedSkill],
         workflows: &[ParsedWorkflow],
         active_workflow: Option<&ActiveWorkflowState>,

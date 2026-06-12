@@ -1,6 +1,5 @@
 use makepad_studio_protocol::ai_format::{
-    parse_json_bool_field, parse_json_string_field, AI_TASK_EVENT_PREFIX,
-    AI_TERMINAL_OBSERVATION_PREFIX, AI_WAITING_MESSAGE_PREFIX,
+    parse_json_string_field, AI_TASK_EVENT_PREFIX, AI_WAITING_MESSAGE_PREFIX,
 };
 use makepad_studio_protocol::hub_protocol::{
     AiAgentId, AiAgentState, AiAgentSummary, AiMessage, AiMessageRole, AiMountState,
@@ -175,12 +174,6 @@ fn ai_activity_item(message: &AiMessage) -> Option<AiActivityItem> {
                 text: summarize_task_event_inline(&message.text),
             })
         }
-        AiMessageRole::System if message.text.starts_with(AI_TERMINAL_OBSERVATION_PREFIX) => {
-            Some(AiActivityItem {
-                kind: AiActivityKind::Observation,
-                text: summarize_terminal_observation_inline(&message.text),
-            })
-        }
         _ => None,
     }
 }
@@ -323,11 +316,7 @@ fn summarize_task_event_inline(text: &str) -> String {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| {
-            !line.starts_with("Continue supervising this delegated terminal task")
-                && !line.starts_with("Continue supervising this observed terminal task")
-                && !line.starts_with("Latest output excerpt:")
-                && *line != "```text"
-                && *line != "```"
+            !line.starts_with("Latest output excerpt:") && *line != "```text" && *line != "```"
         })
         .take(3)
         .collect::<Vec<_>>();
@@ -345,41 +334,6 @@ fn summarize_task_event_inline(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" - ");
     truncate_inline(&clean_activity_text(&parts), AI_CHAT_ACTIVITY_MAX_CHARS)
-}
-
-fn summarize_terminal_observation_inline(text: &str) -> String {
-    let mut parts = Vec::new();
-    for line in text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| {
-            !line.starts_with("Latest output excerpt:") && *line != "```text" && *line != "```"
-        })
-    {
-        if let Some(path) = line.strip_prefix(AI_TERMINAL_OBSERVATION_PREFIX) {
-            let path = path.trim();
-            if !path.is_empty() {
-                parts.push(format!("`{}`", truncate_inline(path, 80)));
-            }
-        } else if let Some(mode) = line.strip_prefix("Mode:") {
-            parts.push(format!("mode {}", mode.trim()));
-        } else if let Some(status) = line.strip_prefix("Codex status:") {
-            parts.push(status.trim().to_string());
-        } else if parts.len() < 2 {
-            parts.push(line.to_string());
-        }
-        if parts.len() >= 3 {
-            break;
-        }
-    }
-    if parts.is_empty() {
-        return truncate_inline(text.trim(), AI_CHAT_COMPACT_MAX_CHARS);
-    }
-    truncate_inline(
-        &clean_activity_text(&parts.join(" - ")),
-        AI_CHAT_ACTIVITY_MAX_CHARS,
-    )
 }
 
 fn clean_activity_text(text: &str) -> String {
@@ -402,9 +356,6 @@ fn summarize_tool_call_message(text: &str) -> String {
     let Some(tool_name) = extract_tool_name(text) else {
         return truncate_inline(text.trim(), AI_CHAT_COMPACT_MAX_CHARS);
     };
-    if tool_name == "read_terminal" {
-        return String::new();
-    }
     let summary = extract_code_block_body(text)
         .and_then(|payload| parse_json_string_field(payload, "path"))
         .map(|path| format!("`{}` `{}`", tool_name, path))
@@ -418,34 +369,6 @@ fn summarize_tool_result_message(text: &str) -> String {
     };
     let payload = extract_code_block_body(text).unwrap_or_default();
     match tool_name.as_str() {
-        "open_terminal" => parse_json_string_field(payload, "path")
-            .map(|path| format!("opened terminal `{}`", path))
-            .unwrap_or_else(|| "opened terminal".to_string()),
-        "send_terminal_text" => {
-            let path = parse_json_string_field(payload, "path").unwrap_or_default();
-            let submitted = parse_json_bool_field(payload, "submitted").unwrap_or(false);
-            if path.is_empty() {
-                if submitted {
-                    "sent text and pressed Enter in terminal".to_string()
-                } else {
-                    "sent text to terminal".to_string()
-                }
-            } else if submitted {
-                format!("sent text and pressed Enter in `{}`", path)
-            } else {
-                format!("sent text to `{}`", path)
-            }
-        }
-        "send_terminal_key" => parse_json_string_field(payload, "path")
-            .map(|path| format!("sent key to `{}`", path))
-            .unwrap_or_else(|| "sent key to terminal".to_string()),
-        "read_terminal" => {
-            if text.starts_with("`read_terminal` failed") {
-                "Read terminal failed".to_string()
-            } else {
-                "Read terminal".to_string()
-            }
-        }
         "observe_filesystem" => {
             let count = payload.matches("\"seconds_ago\":").count();
             if count == 0 {
@@ -455,7 +378,6 @@ fn summarize_tool_result_message(text: &str) -> String {
             }
         }
         "open_editor" => "opened editor".to_string(),
-        "list_terminals" => "listed terminals".to_string(),
         "bash" => {
             if payload.contains("failed") || payload.contains("error") || payload.contains("Error")
             {
@@ -700,10 +622,6 @@ pub fn matches_expected_path(path: &str, expected_paths: &[String]) -> bool {
     })
 }
 
-pub fn terminal_display_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
-}
-
 pub fn non_empty_labels(mut labels: Vec<String>, fallback: &str) -> Vec<String> {
     if labels.is_empty() {
         labels.push(fallback.to_string());
@@ -732,10 +650,7 @@ mod tests {
             parent_agent_id: None,
             role: None,
             current_action: None,
-            last_terminal_excerpt: None,
             files_touched: Vec::new(),
-            active_terminal_path: None,
-            active_terminal_title: None,
             state_changed_at: 0.0,
             workflow_step_name: None,
             workflow_step_status: None,
@@ -760,10 +675,7 @@ mod tests {
             role: None,
             subagents: Vec::new(),
             current_action: None,
-            last_terminal_excerpt: None,
             files_touched: Vec::new(),
-            active_terminal_path: None,
-            active_terminal_title: None,
             state_changed_at: 0.0,
             workflow_step_name: None,
             workflow_step_status: None,
@@ -996,40 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_chat_markdown_hides_background_terminal_observations() {
-        let agent = test_agent_state(
-            AiAgentId(1),
-            "ready",
-            false,
-            vec![
-                AiMessage {
-                    role: AiMessageRole::User,
-                    text: "review the PR".to_string(),
-                },
-                AiMessage {
-                    role: AiMessageRole::System,
-                    text: format!(
-                        "{} makepad/.makepad/manual-codex.term\nMode: working\nCodex status: Working (3s)",
-                        AI_TERMINAL_OBSERVATION_PREFIX
-                    ),
-                },
-                AiMessage {
-                    role: AiMessageRole::Assistant,
-                    text: "Still working.".to_string(),
-                },
-            ],
-        );
-
-        let markdown = ai_chat_markdown(&agent);
-        assert!(!markdown.contains("> **Observation**"));
-        assert!(!markdown.contains("```runsplash"));
-        assert!(!markdown.contains("makepad/.makepad/manual-codex.term"));
-        assert!(!markdown.contains("mode working"));
-        assert!(markdown.contains("> **User**"));
-        assert!(markdown.contains("> **Assistant**"));
-    }
-
-    #[test]
     fn ai_chat_markdown_keeps_tool_activity_between_cards() {
         let agent = test_agent_state(
             AiAgentId(1),
@@ -1038,15 +916,15 @@ mod tests {
             vec![
                 AiMessage {
                     role: AiMessageRole::User,
-                    text: "Inspect the terminal.".to_string(),
+                    text: "Inspect the file.".to_string(),
                 },
                 AiMessage {
                     role: AiMessageRole::ToolResult,
-                    text: "`read_terminal` result\n```text\n{}\n```".to_string(),
+                    text: "`read_file` result\n```text\nfn main() {}\n```".to_string(),
                 },
                 AiMessage {
                     role: AiMessageRole::Assistant,
-                    text: "Terminal is idle.".to_string(),
+                    text: "File is small.".to_string(),
                 },
             ],
         );
@@ -1057,33 +935,26 @@ mod tests {
         let assistant = markdown.find("> **Assistant**").unwrap();
         assert!(user < tools);
         assert!(tools < assistant);
-        assert!(markdown.contains("Read terminal"));
+        assert!(markdown.contains("read file"));
     }
 
     #[test]
-    fn read_terminal_tool_messages_are_compact() {
-        let call = "`read_terminal`\n```json\n{\"path\":\"makepad/.makepad/hello-world-makepad.term\"}\n```";
-        let result = "`read_terminal` result\n```text\n{\"path\":\"makepad/.makepad/hello-world-makepad.term\",\"mode\":\"done\",\"summary\":\"finished\"}\n```";
-        let failed = "`read_terminal` failed\n```text\nunknown terminal\n```";
+    fn file_tool_messages_are_compact() {
+        let call = "`read_file`\n```json\n{\"path\":\"studio/ai/src/lib.rs\"}\n```";
+        let result = "`read_file` result\n```text\npub mod ai_manager;\n```";
 
-        assert_eq!(summarize_tool_call_message(call), "");
-        assert_eq!(summarize_tool_result_message(result), "Read terminal");
         assert_eq!(
-            summarize_tool_result_message(failed),
-            "Read terminal failed"
+            summarize_tool_call_message(call),
+            "`read_file` `studio/ai/src/lib.rs`"
         );
+        assert_eq!(summarize_tool_result_message(result), "read file");
     }
 
     #[test]
     fn noisy_tool_results_are_summarized_without_payloads() {
-        let list_terminals = "`list_terminals` result\n```text\n[{\"path\":\"makepad/.makepad/a.term\",\"name\":\"a.term\",\"mode\":\"idle\",\"summary\":\"wheregmis@Sahins-MacBook...\"}]\n```";
         let bash_failed = "`bash` result\n```text\ninvalid bash arguments: JSON Deserialize error: Key not found command, line:1 col:3\n```";
         let search = "`search` result\n```text\nhuge matched file output\n```";
 
-        assert_eq!(
-            summarize_tool_result_message(list_terminals),
-            "listed terminals"
-        );
         assert_eq!(
             summarize_tool_result_message(bash_failed),
             "ran bash command (failed)"
@@ -1108,11 +979,11 @@ mod tests {
                 },
                 AiMessage {
                     role: AiMessageRole::ToolResult,
-                    text: "`read_terminal` result\n```text\n{}\n```".to_string(),
+                    text: "`read_file` result\n```text\n{}\n```".to_string(),
                 },
                 AiMessage {
                     role: AiMessageRole::ToolResult,
-                    text: "`read_terminal` result\n```text\n{}\n```".to_string(),
+                    text: "`read_file` result\n```text\n{}\n```".to_string(),
                 },
                 AiMessage {
                     role: AiMessageRole::Assistant,
@@ -1126,7 +997,7 @@ mod tests {
         assert!(markdown.contains("> **Thinking**"));
         assert!(markdown.contains("```runsplash"));
         assert!(markdown.contains("> **Tools**"));
-        assert!(markdown.contains("Read terminal x2"));
+        assert!(markdown.contains("read file x2"));
         assert!(markdown.contains("> **Assistant**"));
         assert_eq!(markdown.matches("### Tool").count(), 0);
     }
@@ -1394,23 +1265,6 @@ fn append_task_board_agent_timeline(
         append_line(markdown, "now", truncate_inline(action, 96));
     }
 
-    if let Some(path) = agent.active_terminal_path.as_deref() {
-        let title = agent.active_terminal_title.as_deref().unwrap_or("terminal");
-        append_line(
-            markdown,
-            "terminal",
-            format!(
-                "`{}` ({})",
-                truncate_inline(path, 80),
-                truncate_inline(title, 40)
-            ),
-        );
-    } else if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
-        if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
-            append_line(markdown, "terminal", truncate_inline(line, 120));
-        }
-    }
-
     if !agent.files_touched.is_empty() {
         let mut files = String::new();
         for (index, path) in agent.files_touched.iter().take(4).enumerate() {
@@ -1459,11 +1313,9 @@ fn append_live_agent_details(markdown: &mut String, mount: &str, state: &AiMount
             .as_deref()
             .map(|action| !action.trim().is_empty())
             .unwrap_or(false);
-        let has_terminal =
-            agent.active_terminal_path.is_some() || agent.last_terminal_excerpt.is_some();
         let has_files = !agent.files_touched.is_empty();
         let has_blocked = agent.blocked_reason.is_some();
-        if !has_action && !has_terminal && !has_files && !has_blocked {
+        if !has_action && !has_files && !has_blocked {
             continue;
         }
         if !wrote_header {
@@ -1488,21 +1340,6 @@ fn append_live_agent_details(markdown: &mut String, mount: &str, state: &AiMount
             let action = action.trim();
             if !action.is_empty() {
                 markdown.push_str(&format!("  action: {}\n", truncate_inline(action, 96)));
-            }
-        }
-        if let Some(path) = agent.active_terminal_path.as_deref() {
-            let path = path.trim();
-            if !path.is_empty() {
-                let title = agent.active_terminal_title.as_deref().unwrap_or("Codex");
-                markdown.push_str(&format!(
-                    "  terminal: `{}` ({})\n",
-                    truncate_inline(path, 80),
-                    truncate_inline(title, 40)
-                ));
-            }
-        } else if let Some(excerpt) = agent.last_terminal_excerpt.as_deref() {
-            if let Some(line) = excerpt.lines().map(str::trim).find(|line| !line.is_empty()) {
-                markdown.push_str(&format!("  terminal: {}\n", truncate_inline(line, 120)));
             }
         }
         if !agent.files_touched.is_empty() {
@@ -1541,9 +1378,6 @@ fn append_recent_activity(markdown: &mut String, mount: &str, state: &AiMountSta
             "subagent_completed" => "Subagent Done",
             "native_tools_started" => "Native Tools Started",
             "native_tools_finished" => "Native Tools Finished",
-            "terminal_attached" => "Terminal Open",
-            "terminal_needs_input" => "Awaiting Input",
-            "terminal_done" => "Terminal Done",
             "file_touched" => "File Touched",
             "agent_done" => "Agent Done",
             "agent_failed" => "Agent Failed",
@@ -1673,36 +1507,11 @@ fn polish_live_activity_line(line: &str) -> String {
     if trimmed == "**Tasks**" || trimmed == "**Todo**" {
         return "**Todo**".to_string();
     }
-    if trimmed == "**Terminals**" {
-        return "**Active Terminals**".to_string();
-    }
-    if trimmed == "_No delegated terminal tasks yet._" {
-        return "_No open AI todos._".to_string();
-    }
-    if trimmed == "_No terminal activity yet._" {
-        return "_No active terminal activity._".to_string();
-    }
     if let Some(rest) = trimmed.strip_prefix("- `T") {
         if let Some((id_and_status, goal)) = rest.split_once(']') {
             if let Some((id, status)) = id_and_status.split_once("` [") {
                 return format!("- Task `T{}` - **{}** - {}", id, status, goal.trim());
             }
-        }
-    }
-    if trimmed
-        .trim_start()
-        .starts_with("waiting for terminal assignment")
-    {
-        return "  terminal: waiting for assignment".to_string();
-    }
-    if let Some(path_line) = trimmed.trim_start().strip_prefix('`') {
-        if let Some((path, rest)) = path_line.split_once("` [") {
-            return format!("  terminal: `{}` - {}", path, rest.trim_end_matches(']'));
-        }
-    }
-    if let Some(path_line) = trimmed.strip_prefix("- `") {
-        if let Some((path, rest)) = path_line.split_once("` [") {
-            return format!("- Terminal `{}` - {}", path, rest.trim_end_matches(']'));
         }
     }
     if let Some(files) = trimmed.trim_start().strip_prefix("files:") {
@@ -1739,10 +1548,7 @@ mod ai_task_board_tests {
             parent_agent_id: parent,
             role: None,
             current_action: None,
-            last_terminal_excerpt: None,
             files_touched: Vec::new(),
-            active_terminal_path: None,
-            active_terminal_title: None,
             state_changed_at: 0.0,
             workflow_step_name: None,
             workflow_step_status: None,
@@ -1930,16 +1736,13 @@ mod ai_task_board_tests {
         let mut root = summary(1, "Plan Studio tasks", "thinking...", true, None);
         root.current_action = Some("Editing Agent panel timeline".to_string());
         root.blocked_reason = Some("Waiting for CI logs".to_string());
-        root.active_terminal_path = Some("makepad/.makepad/codex.term".to_string());
-        root.active_terminal_title = Some("Codex Terminal".to_string());
         root.files_touched = vec![
             "studio/desktop/src/ai_manager.rs".to_string(),
             "platform/studio/src/hub_protocol.rs".to_string(),
         ];
 
         let mut child = summary(2, "Review task UI", "ready", false, Some(AiAgentId(1)));
-        child.last_terminal_excerpt =
-            Some("cargo test -p makepad-studio ai_task_board_tests\nok".to_string());
+        child.current_action = Some("Reviewing task UI changes".to_string());
 
         let state = mount_state(vec![root, child], "");
 
@@ -1947,19 +1750,16 @@ mod ai_task_board_tests {
         assert!(markdown.contains("timeline:"));
         assert!(markdown.contains("- blocked: Waiting for CI logs"));
         assert!(markdown.contains("- now: Editing Agent panel timeline"));
-        assert!(markdown.contains("- terminal: `makepad/.makepad/codex.term` (Codex Terminal)"));
         assert!(markdown.contains(
             "- files: [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs), [platform/studio/src/hub_protocol.rs](makepad-studio-file:makepad/platform/studio/src/hub_protocol.rs)"
         ));
-        assert!(markdown.contains("cargo test -p makepad-studio ai_task_board_tests"));
+        assert!(markdown.contains("Reviewing task UI changes"));
     }
 
     #[test]
-    fn live_activity_renders_agent_action_terminal_excerpt_and_files() {
+    fn live_activity_renders_agent_action_and_files() {
         let mut agent = summary(1, "Task 4", "running", true, None);
         agent.current_action = Some("Editing ai_manager.rs".to_string());
-        agent.last_terminal_excerpt =
-            Some("cargo test -p makepad-studio ai_task_board_tests\nok".to_string());
         agent.files_touched = vec![
             "studio/desktop/src/ai_manager.rs".to_string(),
             "studio/desktop/src/app.rs".to_string(),
@@ -1971,24 +1771,21 @@ mod ai_task_board_tests {
         assert!(markdown.contains("**Agents**"));
         assert!(markdown.contains("**Task 4**"));
         assert!(markdown.contains("action: Editing ai_manager.rs"));
-        assert!(markdown.contains("terminal: cargo test -p makepad-studio ai_task_board_tests"));
         assert!(markdown.contains(
             "files touched: [studio/desktop/src/ai_manager.rs](makepad-studio-file:makepad/studio/desktop/src/ai_manager.rs), [studio/desktop/src/app.rs](makepad-studio-file:makepad/studio/desktop/src/app.rs)"
         ));
     }
     #[test]
-    fn live_activity_polishes_task_and_terminal_labels() {
+    fn live_activity_polishes_task_labels() {
         let state = mount_state(
             Vec::new(),
-            "**Tasks**\n\n- `T1` [working] Build task UI\n  `makepad/.makepad/task.term` [Working]\n  expecting: studio/desktop/src/ai_manager.rs\n\n**Terminals**\n\n- `makepad/.makepad/task.term` [working / codex]\n  Working (3s)",
+            "**Tasks**\n\n- `T1` [working] Build task UI\n  expecting: studio/desktop/src/ai_manager.rs",
         );
 
         let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Todo**"));
         assert!(markdown.contains("- Task `T1` - **working** - Build task UI"));
-        assert!(markdown.contains("terminal: `makepad/.makepad/task.term` - Working"));
         assert!(markdown.contains("expected files: studio/desktop/src/ai_manager.rs"));
-        assert!(markdown.contains("- Terminal `makepad/.makepad/task.term` - working / codex"));
     }
 
     #[test]
@@ -2106,17 +1903,14 @@ mod ai_task_board_tests {
     }
 
     #[test]
-    fn live_activity_renders_agent_blocked_reason_and_active_terminal() {
+    fn live_activity_renders_agent_blocked_reason() {
         let mut agent = summary(1, "Task 4", "running", true, None);
         agent.blocked_reason = Some("Waiting for user to clarify PR bounds".to_string());
-        agent.active_terminal_path = Some("repo/.makepad/codex.term".to_string());
-        agent.active_terminal_title = Some("Codex Terminal".to_string());
         let state = mount_state(vec![agent], "");
 
         let markdown = ai_live_activity_markdown("makepad", &state);
         assert!(markdown.contains("**Agents**"));
         assert!(markdown.contains("blocked: Waiting for user to clarify PR bounds"));
-        assert!(markdown.contains("terminal: `repo/.makepad/codex.term` (Codex Terminal)"));
     }
 
     #[test]

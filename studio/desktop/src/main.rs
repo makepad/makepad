@@ -37,10 +37,10 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use makepad_studio_widgets::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use makepad_studio_protocol::hub_protocol::{
     ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
 };
+use makepad_studio_widgets::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
@@ -163,7 +163,6 @@ pub struct App {
     pub ai_chat_scroll_next_frame: NextFrame,
     #[rust]
     pub ai_chat_scroll_frames_remaining: u8,
-
 }
 
 impl MatchEvent for App {
@@ -304,11 +303,16 @@ impl MatchEvent for App {
                         self.send_ai_manager_prompt(cx, &active_mount);
                     }
                 }
-                let ai_prompt_input = workspace.studio_command_text_input(cx, ids!(ai_prompt_input));
+                let ai_prompt_input =
+                    workspace.studio_command_text_input(cx, ids!(ai_prompt_input));
                 if ai_prompt_input.text_input_ref(cx).escaped(actions) {
                     self.cancel_ai_manager_prompt(&active_mount);
                 }
-                if ai_prompt_input.text_input_ref(cx).returned(actions).is_some() {
+                if ai_prompt_input
+                    .text_input_ref(cx)
+                    .returned(actions)
+                    .is_some()
+                {
                     self.send_ai_manager_prompt(cx, &active_mount);
                 }
                 if let Some((mount, name)) = workspace
@@ -538,7 +542,6 @@ impl AppMain for App {
             {
                 self.flush_ai_chat_scroll_to_bottom(cx);
             }
-
         }
 
         if let Event::WindowDragQuery(dq) = event {

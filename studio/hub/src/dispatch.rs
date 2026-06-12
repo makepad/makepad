@@ -28,7 +28,7 @@ use makepad_studio_protocol::{
     StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
     WidgetTreeDumpRequest,
 };
-use makepad_terminal_core::{StyleFlags, TermKeyCode, Terminal};
+use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -154,14 +154,6 @@ pub enum HubEvent {
         run_token: u64,
         results: Vec<AiToolExecutionResult>,
     },
-    AiOpenTerminalRequest {
-        mount: String,
-        name: Option<String>,
-        command: Option<String>,
-        cols: u16,
-        rows: u16,
-        reply_tx: Sender<Result<String, String>>,
-    },
     AiOpenEditorRequest {
         mount: String,
         path: String,
@@ -178,34 +170,6 @@ pub enum HubEvent {
         path: Option<String>,
         limit: usize,
         since_secs: u64,
-        reply_tx: Sender<Result<String, String>>,
-    },
-    AiListTerminalsRequest {
-        mount: String,
-        reply_tx: Sender<Result<String, String>>,
-    },
-    AiReadTerminalRequest {
-        mount: String,
-        path: String,
-        rows: Option<u16>,
-        top_row: Option<usize>,
-        reply_tx: Sender<Result<String, String>>,
-    },
-    AiSendTerminalTextRequest {
-        mount: String,
-        path: String,
-        text: String,
-        submit: Option<bool>,
-        bracketed_paste: Option<bool>,
-        reply_tx: Sender<Result<String, String>>,
-    },
-    AiSendTerminalKeyRequest {
-        mount: String,
-        path: String,
-        key: String,
-        shift: bool,
-        control: bool,
-        alt: bool,
         reply_tx: Sender<Result<String, String>>,
     },
     WorkerFindFilesDone {
@@ -256,7 +220,6 @@ const FS_RECENT_CHANGE_RETENTION: Duration = Duration::from_secs(300);
 const FS_DELTA_FLUSH_DELAY: Duration = Duration::from_millis(32);
 const FS_DELTA_RELOAD_THRESHOLD: usize = 768;
 const FS_SELF_SAVE_SUPPRESS: Duration = Duration::from_millis(300);
-const AI_TERMINAL_SUBMIT_DELAY: Duration = Duration::from_millis(60);
 const GIT_STATUS_CACHE_TTL: Duration = Duration::from_millis(250);
 const IN_PROCESS_UI_WEB_SOCKET_ID: u64 = 0;
 const MAX_UI_CLIENT_IDS: usize = backend_proto::QUERY_ID_CLIENT_LANES as usize;
@@ -328,55 +291,6 @@ struct TerminalSession {
 }
 
 #[derive(SerJson)]
-struct AiTerminalInfo {
-    path: String,
-    name: String,
-    terminal_title: String,
-    mode: String,
-    summary: String,
-    is_codex: bool,
-    codex_status: Option<String>,
-    cols: u16,
-    rows: u16,
-    is_tui: bool,
-    bracketed_paste: bool,
-    cursor_keys_application_mode: bool,
-    bell_pending: bool,
-}
-
-#[derive(SerJson)]
-struct AiTerminalReadResult {
-    path: String,
-    name: String,
-    terminal_title: String,
-    cols: u16,
-    rows: u16,
-    top_row: usize,
-    total_lines: usize,
-    cursor_col: u16,
-    cursor_row: i32,
-    cursor_visible: bool,
-    is_tui: bool,
-    mode: String,
-    summary: String,
-    is_codex: bool,
-    codex_status: Option<String>,
-    bracketed_paste: bool,
-    cursor_keys_application_mode: bool,
-    text: String,
-}
-
-#[derive(SerJson)]
-struct AiTerminalInputResult {
-    path: String,
-    name: String,
-    bytes_sent: usize,
-    submitted: bool,
-    bracketed_paste: bool,
-    preview: String,
-}
-
-#[derive(SerJson)]
 struct AiFilesystemChange {
     path: String,
     kind: String,
@@ -389,20 +303,6 @@ struct AiFilesystemObserveResult {
     path_filter: Option<String>,
     since_secs: u64,
     changes: Vec<AiFilesystemChange>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum AiTerminalKeyInput {
-    Named(TermKeyCode),
-    Text(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AiParsedTerminalKeySpec {
-    input: AiTerminalKeyInput,
-    shift: bool,
-    control: bool,
-    alt: bool,
 }
 
 #[derive(Default)]
@@ -768,14 +668,6 @@ impl HubCore {
                     self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
                 }
             }
-            HubEvent::AiOpenTerminalRequest {
-                mount,
-                name,
-                command,
-                cols,
-                rows,
-                reply_tx,
-            } => self.on_ai_open_terminal_request(mount, name, command, cols, rows, reply_tx),
             HubEvent::AiOpenEditorRequest {
                 mount,
                 path,
@@ -793,41 +685,6 @@ impl HubCore {
                 since_secs,
                 reply_tx,
             } => self.on_ai_observe_filesystem_request(mount, path, limit, since_secs, reply_tx),
-            HubEvent::AiListTerminalsRequest { mount, reply_tx } => {
-                self.on_ai_list_terminals_request(mount, reply_tx)
-            }
-            HubEvent::AiReadTerminalRequest {
-                mount,
-                path,
-                rows,
-                top_row,
-                reply_tx,
-            } => self.on_ai_read_terminal_request(mount, path, rows, top_row, reply_tx),
-            HubEvent::AiSendTerminalTextRequest {
-                mount,
-                path,
-                text,
-                submit,
-                bracketed_paste,
-                reply_tx,
-            } => self.on_ai_send_terminal_text_request(
-                mount,
-                path,
-                text,
-                submit,
-                bracketed_paste,
-                reply_tx,
-            ),
-            HubEvent::AiSendTerminalKeyRequest {
-                mount,
-                path,
-                key,
-                shift,
-                control,
-                alt,
-                reply_tx,
-            } => self
-                .on_ai_send_terminal_key_request(mount, path, key, shift, control, alt, reply_tx),
             HubEvent::WorkerFindFilesDone {
                 client_id,
                 query_id,
@@ -1034,130 +891,8 @@ fn terminal_framebuffer_text(frame: &TerminalFramebuffer) -> String {
     out
 }
 
-fn preview_text(text: &str) -> String {
-    let normalized = text.replace('\r', "\\r").replace('\n', "\\n");
-    let mut out = normalized.chars().take(160).collect::<String>();
-    if normalized.chars().count() > 160 {
-        out.push_str("...");
-    }
-    out
-}
-
-fn parse_ai_terminal_key_spec(
-    key: &str,
-    shift: bool,
-    control: bool,
-    alt: bool,
-) -> Result<AiParsedTerminalKeySpec, String> {
-    let mut shift = shift;
-    let mut control = control;
-    let mut alt = alt;
-    let raw = key.trim();
-    if raw.is_empty() {
-        return Err("terminal key cannot be empty".to_string());
-    }
-
-    let parts = raw
-        .split('+')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err("terminal key cannot be empty".to_string());
-    }
-    let base = parts.last().copied().unwrap_or(raw);
-    for modifier in &parts[..parts.len().saturating_sub(1)] {
-        match modifier.to_ascii_lowercase().as_str() {
-            "shift" => shift = true,
-            "ctrl" | "control" => control = true,
-            "alt" | "option" => alt = true,
-            other => return Err(format!("unsupported terminal key modifier '{}'", other)),
-        }
-    }
-
-    let input = match base.to_ascii_lowercase().as_str() {
-        "enter" | "return" => AiTerminalKeyInput::Named(TermKeyCode::Return),
-        "tab" => AiTerminalKeyInput::Named(TermKeyCode::Tab),
-        "backspace" | "bs" => AiTerminalKeyInput::Named(TermKeyCode::Backspace),
-        "escape" | "esc" => AiTerminalKeyInput::Named(TermKeyCode::Escape),
-        "delete" | "del" => AiTerminalKeyInput::Named(TermKeyCode::Delete),
-        "up" | "arrowup" => AiTerminalKeyInput::Named(TermKeyCode::Up),
-        "down" | "arrowdown" => AiTerminalKeyInput::Named(TermKeyCode::Down),
-        "left" | "arrowleft" => AiTerminalKeyInput::Named(TermKeyCode::Left),
-        "right" | "arrowright" => AiTerminalKeyInput::Named(TermKeyCode::Right),
-        "home" => AiTerminalKeyInput::Named(TermKeyCode::Home),
-        "end" => AiTerminalKeyInput::Named(TermKeyCode::End),
-        "pageup" | "page_up" | "pgup" => AiTerminalKeyInput::Named(TermKeyCode::PageUp),
-        "pagedown" | "page_down" | "pgdown" => AiTerminalKeyInput::Named(TermKeyCode::PageDown),
-        "insert" | "ins" => AiTerminalKeyInput::Named(TermKeyCode::Insert),
-        "f1" => AiTerminalKeyInput::Named(TermKeyCode::F1),
-        "f2" => AiTerminalKeyInput::Named(TermKeyCode::F2),
-        "f3" => AiTerminalKeyInput::Named(TermKeyCode::F3),
-        "f4" => AiTerminalKeyInput::Named(TermKeyCode::F4),
-        "f5" => AiTerminalKeyInput::Named(TermKeyCode::F5),
-        "f6" => AiTerminalKeyInput::Named(TermKeyCode::F6),
-        "f7" => AiTerminalKeyInput::Named(TermKeyCode::F7),
-        "f8" => AiTerminalKeyInput::Named(TermKeyCode::F8),
-        "f9" => AiTerminalKeyInput::Named(TermKeyCode::F9),
-        "f10" => AiTerminalKeyInput::Named(TermKeyCode::F10),
-        "f11" => AiTerminalKeyInput::Named(TermKeyCode::F11),
-        "f12" => AiTerminalKeyInput::Named(TermKeyCode::F12),
-        "space" => AiTerminalKeyInput::Text(" ".to_string()),
-        _ => {
-            if base.chars().count() == 1 {
-                AiTerminalKeyInput::Text(base.to_string())
-            } else {
-                return Err(format!("unsupported terminal key '{}'", base));
-            }
-        }
-    };
-
-    Ok(AiParsedTerminalKeySpec {
-        input,
-        shift,
-        control,
-        alt,
-    })
-}
-
-fn encode_ai_terminal_key(terminal: &Terminal, spec: &AiParsedTerminalKeySpec) -> Option<Vec<u8>> {
-    match &spec.input {
-        AiTerminalKeyInput::Named(key_code) => {
-            terminal.encode_key(*key_code, "", spec.shift, spec.control, spec.alt)
-        }
-        AiTerminalKeyInput::Text(text) => {
-            terminal.encode_key(TermKeyCode::None, text, spec.shift, spec.control, spec.alt)
-        }
-    }
-}
-
 fn rgb_to_u32(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
-}
-
-fn sanitize_terminal_stem(raw: &str) -> Option<String> {
-    let mut stem = String::new();
-    let mut last_was_dash = false;
-    for ch in raw.trim().chars() {
-        let ch = ch.to_ascii_lowercase();
-        if ch.is_ascii_alphanumeric() {
-            stem.push(ch);
-            last_was_dash = false;
-        } else if !stem.is_empty() && matches!(ch, '-' | '_' | ' ' | '.') && !last_was_dash {
-            stem.push('-');
-            last_was_dash = true;
-        }
-    }
-    while stem.ends_with('-') {
-        stem.pop();
-    }
-    (!stem.is_empty()).then_some(stem)
-}
-
-fn terminal_stem_from_command(command: &str) -> Option<String> {
-    let token = command.split_whitespace().next()?;
-    let token = token.rsplit('/').next().unwrap_or(token);
-    sanitize_terminal_stem(token)
 }
 
 fn mount_from_virtual_path(path: &str) -> Option<&str> {
@@ -1925,72 +1660,6 @@ mod tests {
 
         let frame = terminal_framebuffer_from_terminal(&term, 4, 2, 0, 1);
         assert_eq!(terminal_framebuffer_text(&frame), "A B\nC");
-    }
-
-    #[test]
-    fn parse_ai_terminal_key_spec_supports_modifiers_and_named_keys() {
-        let spec = parse_ai_terminal_key_spec("ctrl+shift+tab", false, false, false).unwrap();
-        assert_eq!(
-            spec,
-            AiParsedTerminalKeySpec {
-                input: AiTerminalKeyInput::Named(TermKeyCode::Tab),
-                shift: true,
-                control: true,
-                alt: false,
-            }
-        );
-
-        let spec = parse_ai_terminal_key_spec("F5", false, false, false).unwrap();
-        assert_eq!(
-            spec,
-            AiParsedTerminalKeySpec {
-                input: AiTerminalKeyInput::Named(TermKeyCode::F5),
-                shift: false,
-                control: false,
-                alt: false,
-            }
-        );
-    }
-
-    #[test]
-    fn encode_ai_terminal_key_supports_ctrl_letters() {
-        let spec = parse_ai_terminal_key_spec("ctrl+c", false, false, false).unwrap();
-        let terminal = Terminal::new(80, 24);
-        assert_eq!(encode_ai_terminal_key(&terminal, &spec), Some(vec![0x03]));
-    }
-
-    #[test]
-    fn terminal_auto_submit_ai_text_detects_agent_terminals() {
-        assert!(HubCore::terminal_auto_submit_ai_text(
-            "repo/.makepad/codex.term",
-            "",
-            "",
-            "write a poem into poem.txt"
-        ));
-        assert!(HubCore::terminal_auto_submit_ai_text(
-            "repo/.makepad/a.term",
-            "Claude Code",
-            "",
-            "continue"
-        ));
-        assert!(HubCore::terminal_auto_submit_ai_text(
-            "repo/.makepad/a.term",
-            "zsh",
-            "› Enter a prompt...",
-            "write a poem into poem.txt"
-        ));
-        assert!(!HubCore::terminal_auto_submit_ai_text(
-            "repo/.makepad/shell.term",
-            "zsh",
-            "",
-            "echo hi"
-        ));
-        assert!(!HubCore::terminal_auto_submit_ai_text(
-            "repo/.makepad/codex.term",
-            "",
-            "",
-            "already has newline\n"
-        ));
     }
 
     #[test]

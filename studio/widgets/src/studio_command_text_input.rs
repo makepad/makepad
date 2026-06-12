@@ -1,5 +1,5 @@
-use makepad_widgets::*;
 use makepad_draw::text::selection::Cursor;
+use makepad_widgets::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 script_mod! {

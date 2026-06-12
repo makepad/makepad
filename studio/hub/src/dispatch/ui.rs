@@ -922,7 +922,6 @@ impl HubCore {
                         rows,
                         usize::MAX,
                     );
-                    self.process_ai_terminal_observation_for_path(&path);
                 }
                 Err(err) => self.send_ui_error(client_id, err),
             },
@@ -930,7 +929,6 @@ impl HubCore {
                 match self.terminal_manager.send_input(&path, data) {
                     Ok(()) => {
                         self.set_terminal_bell_state(&path, false);
-                        self.process_ai_terminal_input_for_path(&path);
                     }
                     Err(err) => self.send_ui_error(client_id, err),
                 }

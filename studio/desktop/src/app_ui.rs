@@ -254,14 +254,14 @@ script_mod! {
                     empty_text: "Ask AI"
                     margin: Inset {}
                     padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 10.0}
-	                    draw_bg +: {
-	                        border_radius: 7.0
+                        draw_bg +: {
+                            border_radius: 7.0
 
-	                        color: vec4(0.045, 0.048, 0.052, 1.0)
-	                        color_hover: vec4(0.055, 0.058, 0.063, 1.0)
-	                        color_focus: vec4(0.055, 0.058, 0.063, 1.0)
-	                        color_down: vec4(0.050, 0.053, 0.058, 1.0)
-	                        color_empty: vec4(0.045, 0.048, 0.052, 1.0)
+                            color: vec4(0.045, 0.048, 0.052, 1.0)
+                            color_hover: vec4(0.055, 0.058, 0.063, 1.0)
+                            color_focus: vec4(0.055, 0.058, 0.063, 1.0)
+                            color_down: vec4(0.050, 0.053, 0.058, 1.0)
+                            color_empty: vec4(0.045, 0.048, 0.052, 1.0)
 
                         border_color: theme.color_u_hidden
                         border_color_hover: theme.color_u_hidden
@@ -276,16 +276,16 @@ script_mod! {
                         border_color_2_down: theme.color_u_hidden
                         border_color_2_empty: theme.color_u_hidden
                         border_color_2_disabled: theme.color_u_hidden
-	                    }
-	                    draw_text +: {
-	                        color: theme.color_label_outer
-	                        color_hover: theme.color_label_outer
-	                        color_focus: theme.color_label_outer
-	                        color_down: theme.color_label_outer
-	                        color_empty: theme.color_label_inner_inactive
-	                        color_empty_hover: theme.color_label_inner_inactive
-	                        color_empty_focus: theme.color_label_inner_inactive
-	                    }
+                        }
+                        draw_text +: {
+                            color: theme.color_label_outer
+                            color_hover: theme.color_label_outer
+                            color_focus: theme.color_label_outer
+                            color_down: theme.color_label_outer
+                            color_empty: theme.color_label_inner_inactive
+                            color_empty_hover: theme.color_label_inner_inactive
+                            color_empty_focus: theme.color_label_inner_inactive
+                        }
                 }
             }
             bottom := View {height: 0.0}

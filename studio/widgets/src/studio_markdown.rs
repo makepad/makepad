@@ -1,5 +1,5 @@
-use makepad_widgets::*;
 use crate::studio_text_flow::StudioTextFlow;
+use makepad_widgets::*;
 
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
@@ -288,10 +288,23 @@ impl StudioMarkdown {
         let mut i = 0;
         while i < events.len() {
             if i + 2 < events.len() {
-                if let (MdEvent::Text(t1), MdEvent::Text(t2), MdEvent::Text(t3)) = (&events[i], &events[i+1], &events[i+2]) {
+                if let (MdEvent::Text(t1), MdEvent::Text(t2), MdEvent::Text(t3)) =
+                    (&events[i], &events[i + 1], &events[i + 2])
+                {
                     if t1.as_ref() == "[" && t3.as_ref() == "]" {
                         let role = t2.as_ref();
-                        if ["User", "Assistant", "Thinking", "Tools", "Waiting", "Observation", "System", "Error"].contains(&role) {
+                        if [
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ]
+                        .contains(&role)
+                        {
                             let merged_text: pulldown_cmark::CowStr = format!("[{}]", role).into();
                             merged_events.push(MdEvent::Text(merged_text));
                             i += 3;
@@ -324,7 +337,16 @@ impl StudioMarkdown {
                 if j < events.len() {
                     if let MdEvent::Text(t1) = &events[j] {
                         let t1_ref = t1.as_ref();
-                        for role_name in &["User", "Assistant", "Thinking", "Tools", "Waiting", "Observation", "System", "Error"] {
+                        for role_name in &[
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ] {
                             let prefix = format!("[{}]", role_name);
                             if t1_ref.starts_with(&prefix) {
                                 is_header_pattern = true;
@@ -337,9 +359,25 @@ impl StudioMarkdown {
                 }
                 // Check for bold role header (e.g. **User**)
                 if !is_header_pattern && j + 2 < events.len() {
-                    if let (MdEvent::Start(Tag::Strong), MdEvent::Text(t_role), MdEvent::End(TagEnd::Strong)) = (&events[j], &events[j+1], &events[j+2]) {
+                    if let (
+                        MdEvent::Start(Tag::Strong),
+                        MdEvent::Text(t_role),
+                        MdEvent::End(TagEnd::Strong),
+                    ) = (&events[j], &events[j + 1], &events[j + 2])
+                    {
                         let role_name = t_role.as_ref();
-                        if ["User", "Assistant", "Thinking", "Tools", "Waiting", "Observation", "System", "Error"].contains(&role_name) {
+                        if [
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ]
+                        .contains(&role_name)
+                        {
                             is_header_pattern = true;
                             matched_role = Some(role_name);
                             header_skip_count = 3;
@@ -359,11 +397,11 @@ impl StudioMarkdown {
                         next_i += 1;
                     }
                 }
-                
+
                 // Skip the header events
                 let header_start = next_i;
                 i = header_start + header_skip_count;
-                
+
                 // Skip optional following SoftBreak or HardBreak or empty/space Text event
                 if i < events.len() {
                     match &events[i] {
@@ -389,7 +427,9 @@ impl StudioMarkdown {
                                 if text_ref.starts_with("User") {
                                     role = Some("User");
                                     break;
-                                } else if text_ref.starts_with("Assistant") || text_ref.starts_with("AI") {
+                                } else if text_ref.starts_with("Assistant")
+                                    || text_ref.starts_with("AI")
+                                {
                                     role = Some("Assistant");
                                     break;
                                 }
@@ -455,37 +495,67 @@ impl StudioMarkdown {
                                     // User bubble: soft translucent blue, right aligned
                                     quote_bg = vec4(0.24, 0.44, 0.67, 0.14);
                                     quote_fg = vec4(0.38, 0.69, 0.91, 0.75);
-                                    tf.quote_walk.margin = Inset { left: 48.0, right: 8.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 48.0,
+                                        right: 8.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                                 "Assistant" => {
                                     // Assistant bubble: soft translucent white/gray, left aligned
                                     quote_bg = vec4(1.0, 1.0, 1.0, 0.05);
                                     quote_fg = vec4(1.0, 1.0, 1.0, 0.35);
-                                    tf.quote_walk.margin = Inset { left: 8.0, right: 48.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                                 "Thinking" => {
                                     // Thinking bubble: soft translucent yellow
                                     quote_bg = vec4(1.0, 0.84, 0.0, 0.04);
                                     quote_fg = vec4(1.0, 0.84, 0.0, 0.25);
-                                    tf.quote_walk.margin = Inset { left: 8.0, right: 48.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                                 "Tools" => {
                                     // Tools bubble: soft translucent purple/magenta
                                     quote_bg = vec4(0.6, 0.3, 0.8, 0.05);
                                     quote_fg = vec4(0.7, 0.4, 0.9, 0.3);
-                                    tf.quote_walk.margin = Inset { left: 8.0, right: 48.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                                 "Error" => {
                                     // Error bubble: soft translucent red
                                     quote_bg = vec4(0.95, 0.33, 0.33, 0.08);
                                     quote_fg = vec4(0.95, 0.4, 0.4, 0.4);
-                                    tf.quote_walk.margin = Inset { left: 8.0, right: 48.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                                 _ => {
                                     // Default / Other (System, Waiting, etc.)
                                     quote_bg = vec4(1.0, 1.0, 1.0, 0.03);
                                     quote_fg = vec4(1.0, 1.0, 1.0, 0.2);
-                                    tf.quote_walk.margin = Inset { left: 8.0, right: 48.0, top: 0.0, bottom: 0.0 };
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
                                 }
                             }
                         }
@@ -711,19 +781,32 @@ impl StudioMarkdown {
                     } else {
                         let mut text_val = text.to_string();
                         let mut stripped = false;
-                        for prefix in &["[User]", "[Assistant]", "[Thinking]", "[Tools]", "[Waiting]", "[Observation]", "[System]", "[Error]", "User:", "Assistant:"] {
+                        for prefix in &[
+                            "[User]",
+                            "[Assistant]",
+                            "[Thinking]",
+                            "[Tools]",
+                            "[Waiting]",
+                            "[Observation]",
+                            "[System]",
+                            "[Error]",
+                            "User:",
+                            "Assistant:",
+                        ] {
                             if text_val.starts_with(prefix) {
                                 text_val = text_val.strip_prefix(prefix).unwrap().to_string();
                                 stripped = true;
                                 break;
                             }
                         }
-                        
+
                         let mut text_str = text_val.as_str();
                         if stripped {
-                            text_str = text_str.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\n' || ch == '\r');
+                            text_str = text_str.trim_start_matches(|ch: char| {
+                                ch.is_whitespace() || ch == '\n' || ch == '\r'
+                            });
                         }
-                        
+
                         let text_trimmed = text_str.trim_end_matches("\n");
                         if text_trimmed.is_empty() {
                             continue;

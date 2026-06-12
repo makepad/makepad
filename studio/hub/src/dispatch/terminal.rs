@@ -45,7 +45,6 @@ impl HubCore {
             self.set_terminal_bell_state(&path, true);
         }
         self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
-        self.process_ai_terminal_observation_for_path(&path);
         // Persist terminal history off the dispatch thread so fs I/O cannot
         // block terminal framebuffer delivery.
         let history_vfs = self.vfs.clone_for_search();
@@ -78,7 +77,6 @@ impl HubCore {
                 };
             }
             self.push_terminal_frame_updates(&path, false);
-            self.process_ai_terminal_observation_for_path(&path);
         }
     }
 
@@ -89,14 +87,7 @@ impl HubCore {
             path: path.clone(),
             code: exit_code,
         });
-        if let Some(mount) = mount {
-            if let Some(state) = self
-                .ai_manager
-                .process_terminal_closed(&mount, &path, exit_code)
-            {
-                self.broadcast_ui_message(HubToClient::AiMountState { mount, state });
-            }
-        }
+        let _ = mount;
     }
 
     pub(super) fn ensure_terminal_session_open(
