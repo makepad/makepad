@@ -505,12 +505,46 @@ impl XlibWindow {
         maximized
     }
 
+    unsafe fn create_position_xic_with_spot(
+        &self,
+        preferred_status_style: c_ulong,
+        spot_px: x11_sys::XPoint,
+        area_px: x11_sys::XRectangle,
+    ) -> Option<XimInputContext> {
+        let window = self.window?;
+        let xim = get_xlib_app_global().xim;
+        if let Some(context) = create_xim_position_input_context_with_spot(
+            xim,
+            window,
+            preferred_status_style,
+            spot_px,
+            area_px,
+        ) {
+            return Some(context);
+        }
+        for status_style in xim_status_candidates() {
+            if status_style == preferred_status_style {
+                continue;
+            }
+            if let Some(context) = create_xim_position_input_context_with_spot(
+                xim,
+                window,
+                status_style,
+                spot_px,
+                area_px,
+            ) {
+                return Some(context);
+            }
+        }
+        None
+    }
+
     pub fn set_ime_rect(&mut self, rect: Rect) {
         if self.ime_rect == rect {
             return;
         }
         self.ime_rect = rect;
-        let Some(xim_context) = self.xic else {
+        let Some(mut xim_context) = self.xic else {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
@@ -534,38 +568,35 @@ impl XlibWindow {
             if xim_context.preedit_style == XimPreeditStyle::Position
                 && !xim_context.spot_initialized_at_creation
             {
-                if let Some(window) = self.window {
-                    if let Some(new_context) = create_xim_position_input_context_with_spot(
-                        get_xlib_app_global().xim,
-                        window,
-                        xim_context.status_style(),
-                        spot_px,
-                        area_px,
-                    ) {
-                        if x11_ime_debug_enabled() {
-                            crate::log!(
-                                "X11 IME: recreated position XIC with initial spot=({}, {}) area=({}, {}, {}, {})",
-                                spot_px.x,
-                                spot_px.y,
-                                area_px.x,
-                                area_px.y,
-                                area_px.width,
-                                area_px.height
-                            );
-                        }
-                        x11_sys::XDestroyIC(xic);
-                        self.xic = Some(new_context);
-                        xic = new_context.xic;
-                        if self.ime_active {
-                            x11_sys::XSetICFocus(xic);
-                        }
-                    } else if x11_ime_debug_enabled() {
+                if let Some(new_context) = self.create_position_xic_with_spot(
+                    xim_context.status_style(),
+                    spot_px,
+                    area_px,
+                ) {
+                    if x11_ime_debug_enabled() {
                         crate::log!(
-                            "X11 IME: failed to recreate position XIC with initial spot=({}, {})",
+                            "X11 IME: recreated position XIC with initial spot=({}, {}) area=({}, {}, {}, {})",
                             spot_px.x,
-                            spot_px.y
+                            spot_px.y,
+                            area_px.x,
+                            area_px.y,
+                            area_px.width,
+                            area_px.height
                         );
                     }
+                    x11_sys::XDestroyIC(xic);
+                    self.xic = Some(new_context);
+                    xim_context = new_context;
+                    xic = new_context.xic;
+                    if self.ime_active {
+                        x11_sys::XSetICFocus(xic);
+                    }
+                } else if x11_ime_debug_enabled() {
+                    crate::log!(
+                        "X11 IME: failed to recreate position XIC with initial spot=({}, {})",
+                        spot_px.x,
+                        spot_px.y
+                    );
                 }
             }
 
@@ -581,15 +612,50 @@ impl XlibWindow {
                 return;
             }
 
-            let failed_attr = x11_sys::XSetICValues(
+            let mut failed_attr = x11_sys::XSetICValues(
                 xic,
                 x11_sys::XNPreeditAttributes.as_ptr(),
                 preedit_attr,
                 ptr::null_mut::<c_void>(),
             );
+            let mut fallback_note = "";
+            if !failed_attr.is_null() && xim_context.preedit_style != XimPreeditStyle::Position {
+                if let Some(new_context) = self.create_position_xic_with_spot(
+                    xim_context.status_style(),
+                    spot_px,
+                    area_px,
+                ) {
+                    if x11_ime_debug_enabled() {
+                        crate::log!(
+                            "X11 IME: callback rect update failed_attr={}; switching to position XIC input_style=0x{:x}",
+                            x11_ime_failed_attr_name(failed_attr),
+                            new_context.input_style
+                        );
+                    }
+                    x11_sys::XDestroyIC(xic);
+                    self.xic = Some(new_context);
+                    xim_context = new_context;
+                    xic = new_context.xic;
+                    if self.ime_active {
+                        x11_sys::XSetICFocus(xic);
+                    }
+                    failed_attr = x11_sys::XSetICValues(
+                        xic,
+                        x11_sys::XNPreeditAttributes.as_ptr(),
+                        preedit_attr,
+                        ptr::null_mut::<c_void>(),
+                    );
+                    fallback_note = " after callback-to-position retry";
+                } else if x11_ime_debug_enabled() {
+                    crate::log!(
+                        "X11 IME: callback rect update failed_attr={}; position XIC fallback creation failed",
+                        x11_ime_failed_attr_name(failed_attr)
+                    );
+                }
+            }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) failed_attr={}",
+                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -604,7 +670,8 @@ impl XlibWindow {
                     area_px.y,
                     area_px.width,
                     area_px.height,
-                    x11_ime_failed_attr_name(failed_attr)
+                    x11_ime_failed_attr_name(failed_attr),
+                    fallback_note
                 );
             }
             x11_sys::XFree(preedit_attr);

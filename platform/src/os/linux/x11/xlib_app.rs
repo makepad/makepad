@@ -164,7 +164,7 @@ fn xim_style_supported(styles: Option<&[c_ulong]>, style: c_ulong) -> bool {
         .unwrap_or(true)
 }
 
-fn xim_status_candidates() -> [c_ulong; 2] {
+pub fn xim_status_candidates() -> [c_ulong; 2] {
     [
         x11_sys::XIMStatusNothing as c_ulong,
         x11_sys::XIMStatusNone as c_ulong,
