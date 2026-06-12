@@ -171,6 +171,46 @@ pub fn xim_status_candidates() -> [c_ulong; 2] {
     ]
 }
 
+unsafe fn create_xim_font_set(display: *mut x11_sys::Display) -> x11_sys::XFontSet {
+    let font_names: &[&[u8]] = &[
+        b"-misc-fixed-medium-r-normal--14-*-*-*-*-*-*-*\0",
+        b"fixed\0",
+        b"*\0",
+    ];
+    for font_name in font_names {
+        let mut missing_list: *mut *mut c_char = ptr::null_mut();
+        let mut missing_count: c_int = 0;
+        let mut default_string: *mut c_char = ptr::null_mut();
+        let font_set = x11_sys::XCreateFontSet(
+            display,
+            font_name.as_ptr() as *const c_char,
+            &mut missing_list,
+            &mut missing_count,
+            &mut default_string,
+        );
+        if !missing_list.is_null() {
+            x11_sys::XFreeStringList(missing_list);
+        }
+        if !font_set.is_null() {
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: created XFontSet {:?} missing_charsets={}",
+                    CStr::from_ptr(font_name.as_ptr() as *const c_char),
+                    missing_count
+                );
+            }
+            return font_set;
+        }
+        if x11_ime_debug_enabled() {
+            crate::log!(
+                "X11 IME: XCreateFontSet failed for {:?}",
+                CStr::from_ptr(font_name.as_ptr() as *const c_char)
+            );
+        }
+    }
+    ptr::null_mut()
+}
+
 // XIM preedit start: reset our buffer and report "no length limit" (-1).
 unsafe extern "C" fn xim_preedit_start(
     _ic: x11_sys::XIC,
@@ -322,24 +362,49 @@ unsafe fn create_xim_position_input_context_internal(
     initial_ime_area: Option<(x11_sys::XPoint, x11_sys::XRectangle)>,
 ) -> Option<XimInputContext> {
     let default_spot = x11_sys::XPoint { x: 0, y: 0 };
-    let preedit_attr = if let Some((spot, area)) = initial_ime_area {
-        x11_sys::XVaCreateNestedList(
+    let font_set = get_xlib_app_global().xim_font_set;
+    let preedit_attr = match (initial_ime_area, font_set.is_null()) {
+        (Some((spot, area)), false) => x11_sys::XVaCreateNestedList(
+            0,
+            x11_sys::XNSpotLocation.as_ptr(),
+            &spot,
+            x11_sys::XNArea.as_ptr(),
+            &area,
+            x11_sys::XNFontSet.as_ptr(),
+            font_set,
+            ptr::null_mut::<c_void>(),
+        ),
+        (Some((spot, area)), true) => x11_sys::XVaCreateNestedList(
             0,
             x11_sys::XNSpotLocation.as_ptr(),
             &spot,
             x11_sys::XNArea.as_ptr(),
             &area,
             ptr::null_mut::<c_void>(),
-        )
-    } else {
-        x11_sys::XVaCreateNestedList(
+        ),
+        (None, false) => x11_sys::XVaCreateNestedList(
+            0,
+            x11_sys::XNSpotLocation.as_ptr(),
+            &default_spot,
+            x11_sys::XNFontSet.as_ptr(),
+            font_set,
+            ptr::null_mut::<c_void>(),
+        ),
+        (None, true) => x11_sys::XVaCreateNestedList(
             0,
             x11_sys::XNSpotLocation.as_ptr(),
             &default_spot,
             ptr::null_mut::<c_void>(),
-        )
+        ),
     };
     if preedit_attr.is_null() {
+        if x11_ime_debug_enabled() {
+            crate::log!(
+                "X11 IME: failed to create position preedit attributes input_style=0x{:x} font_set_present={}",
+                x11_sys::XIMPreeditPosition as c_ulong | status_style,
+                !font_set.is_null()
+            );
+        }
         return None;
     }
 
@@ -358,8 +423,24 @@ unsafe fn create_xim_position_input_context_internal(
     );
     x11_sys::XFree(preedit_attr);
     if xic.is_null() {
+        if x11_ime_debug_enabled() {
+            crate::log!(
+                "X11 IME: XCreateIC failed for position input_style=0x{:x} font_set_present={} initial_spot={}",
+                input_style,
+                !font_set.is_null(),
+                initial_ime_area.is_some()
+            );
+        }
         None
     } else {
+        if x11_ime_debug_enabled() {
+            crate::log!(
+                "X11 IME: XCreateIC succeeded for position input_style=0x{:x} font_set_present={} initial_spot={}",
+                input_style,
+                !font_set.is_null(),
+                initial_ime_area.is_some()
+            );
+        }
         Some(XimInputContext {
             xic,
             input_style,
@@ -585,6 +666,7 @@ pub struct XlibApp {
     pub display: *mut x11_sys::Display,
     event_loop_running: bool,
     pub xim: x11_sys::XIM,
+    pub xim_font_set: x11_sys::XFontSet,
     pub clipboard: String,
     pub primary_selection: String,
     pub display_fd: c_int,
@@ -630,6 +712,7 @@ impl XlibApp {
                     std::env::var("QT_IM_MODULE").ok()
                 );
             }
+            let xim_font_set = create_xim_font_set(display);
             //let mut signal_fds = [0, 0];
             //libc_sys::pipe(signal_fds.as_mut_ptr());
             x11_sys::XrmInitialize();
@@ -638,6 +721,7 @@ impl XlibApp {
                 event_callback: Some(event_callback),
                 atoms: XlibAtoms::new(display),
                 xim,
+                xim_font_set,
                 display,
                 display_fd,
                 //signal_fds,

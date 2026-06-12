@@ -17,6 +17,7 @@ pub type XIM = *mut _XIM;
 pub type Atom = c_ulong;
 pub type XEvent = _XEvent;
 pub type XIC = *mut _XIC;
+pub type XFontSet = *mut _XOC;
 pub type XExtData = _XExtData;
 pub type XPointer = *mut c_char;
 pub type VisualID = c_ulong;
@@ -122,6 +123,7 @@ pub const XNFocusWindow: &'static [u8; 12usize] = b"focusWindow\0";
 pub const XNPreeditAttributes: &'static [u8; 18usize] = b"preeditAttributes\0";
 pub const XNSpotLocation: &'static [u8; 13usize] = b"spotLocation\0";
 pub const XNArea: &'static [u8; 5usize] = b"area\0";
+pub const XNFontSet: &'static [u8; 8usize] = b"fontSet\0";
 // On-the-spot preedit callback attribute names (sized `&[u8]` slices so we don't
 // have to hand-count the lengths; only `.as_ptr()` is ever used).
 pub const XNPreeditStartCallback: &[u8] = b"preeditStartCallback\0";
@@ -343,6 +345,16 @@ extern "C" {
     ) -> XIM;
 
     pub fn XGetIMValues(arg1: XIM, ...) -> *mut c_char;
+
+    pub fn XCreateFontSet(
+        arg1: *mut Display,
+        arg2: *const c_char,
+        arg3: *mut *mut *mut c_char,
+        arg4: *mut c_int,
+        arg5: *mut *mut c_char,
+    ) -> XFontSet;
+
+    pub fn XFreeStringList(arg1: *mut *mut c_char);
 
     pub fn XInternAtom(arg1: *mut Display, arg2: *const c_char, arg3: c_int) -> Atom;
 
@@ -597,6 +609,12 @@ pub struct _XIM {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _XIC {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _XOC {
     _unused: [u8; 0],
 }
 
