@@ -1,6 +1,6 @@
 use {
     self::super::{x11_sys, xlib_app::*, xlib_event::XlibEvent},
-    crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::Vec2d, window::WindowId},
+    crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::{Rect, Vec2d}, window::WindowId},
     std::{
         cell::Cell,
         ffi::{CStr, CString, OsStr},
@@ -22,7 +22,9 @@ pub struct XlibWindow {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
 
-    pub ime_spot: Vec2d,
+    // Caret/composition line rect in window-relative native points (size includes
+    // the line height); fed to the IM as spot (line bottom) + area (whole line).
+    pub ime_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
@@ -52,7 +54,7 @@ impl XlibWindow {
             window_id,
             last_window_geom: WindowGeom::default(),
             last_nc_mode: None,
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ime_active: false,
@@ -503,24 +505,29 @@ impl XlibWindow {
         maximized
     }
 
-    pub fn set_ime_spot(&mut self, spot: Vec2d) {
-        if self.ime_spot == spot {
+    pub fn set_ime_rect(&mut self, rect: Rect) {
+        if self.ime_rect == rect {
             return;
         }
-        self.ime_spot = spot;
+        self.ime_rect = rect;
         let Some(xic) = self.xic else {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
+        // Inflate by a fraction of the line height so the IM keeps a gap between
+        // its candidate window and the text rather than hugging it (matches the
+        // macOS clearance). Spot sits a clearance below the line bottom; area is
+        // the line inflated on both edges.
+        let clearance = rect.size.y * dpi_factor * 0.6;
         let spot_px = x11_sys::XPoint {
-            x: (spot.x * dpi_factor) as i16,
-            y: (spot.y * dpi_factor) as i16,
+            x: (rect.pos.x * dpi_factor) as i16,
+            y: ((rect.pos.y + rect.size.y) * dpi_factor + clearance) as i16,
         };
         let area_px = x11_sys::XRectangle {
-            x: spot_px.x,
-            y: spot_px.y,
-            width: 1,
-            height: 1,
+            x: (rect.pos.x * dpi_factor) as i16,
+            y: (rect.pos.y * dpi_factor - clearance) as i16,
+            width: (rect.size.x * dpi_factor).max(1.0) as u16,
+            height: (rect.size.y * dpi_factor + 2.0 * clearance).max(1.0) as u16,
         };
         unsafe {
             let preedit_attr = x11_sys::XVaCreateNestedList(

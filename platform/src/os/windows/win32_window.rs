@@ -129,6 +129,27 @@ unsafe fn SetWindowCompositionAttribute(
     unsafe { SetWindowCompositionAttribute(hwnd, data) }
 }
 
+// IME candidate-window positioning (not generated in the vendored `windows`
+// bindings). `CFS_EXCLUDE` tells the IME to keep its candidate list out of
+// `rc_area` (the current text line), so it appears directly above or below the
+// line rather than on top of it.
+const CFS_EXCLUDE: u32 = 0x0080;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CANDIDATEFORM {
+    dw_index: u32,
+    dw_style: u32,
+    pt_current_pos: POINT,
+    rc_area: RECT,
+}
+
+#[inline]
+unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -> windows_core::BOOL {
+    windows_core::link!("imm32.dll" "system" fn ImmSetCandidateWindow(himc : HIMC, lpcandidate : *const CANDIDATEFORM) -> windows_core::BOOL);
+    unsafe { ImmSetCandidateWindow(himc, lpcandidate) }
+}
+
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -148,7 +169,9 @@ pub struct Win32Window {
 
     pub mouse_buttons_down: usize,
     pub last_key_mod: KeyModifiers,
-    pub ime_spot: Vec2d,
+    // Caret/composition line rect in window-relative logical points (size
+    // includes the line height); used to keep the IME candidate off the line.
+    pub ime_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     pub ignore_wmsize: usize,
@@ -218,7 +241,7 @@ impl Win32Window {
             mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
             last_key_mod: KeyModifiers::default(),
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ignore_wmsize: 0,
@@ -265,7 +288,7 @@ impl Win32Window {
             mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
             last_key_mod: KeyModifiers::default(),
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ignore_wmsize: 0,
@@ -609,23 +632,46 @@ impl Win32Window {
                 }
             }
             WM_IME_STARTCOMPOSITION => {
-                if window.ime_spot.x > 0.0 && window.ime_spot.y > 0.0 {
+                let rect = window.ime_rect;
+                if rect.size.y > 0.0 {
                     let himc = ImmGetContext(hwnd);
                     if !himc.is_invalid() {
                         let dpi_factor = window.get_dpi_factor();
-                        ImmSetCompositionWindow(
+                        let left = (rect.pos.x * dpi_factor) as i32;
+                        let top = (rect.pos.y * dpi_factor) as i32;
+                        let right = ((rect.pos.x + rect.size.x) * dpi_factor) as i32;
+                        let bottom = ((rect.pos.y + rect.size.y) * dpi_factor) as i32;
+                        // Inflate the excluded line vertically (by a fraction of the
+                        // line height) so the candidate list keeps a gap from the
+                        // text rather than hugging it. Matches the macOS clearance.
+                        let clearance = (rect.size.y * dpi_factor * 0.6) as i32;
+                        // Anchor the (makepad-drawn) composition string at the caret.
+                        let caret = POINT { x: left, y: bottom };
+                        let _ = ImmSetCompositionWindow(
                             himc,
                             &COMPOSITIONFORM {
                                 dwStyle: CFS_POINT,
-                                ptCurrentPos: POINT {
-                                    x: (window.ime_spot.x * dpi_factor) as i32,
-                                    y: (window.ime_spot.y * dpi_factor) as i32,
-                                },
+                                ptCurrentPos: caret,
                                 rcArea: RECT::default(),
                             },
-                        )
-                        .unwrap();
-                        ImmReleaseContext(hwnd, himc).unwrap();
+                        );
+                        // Exclude the whole text line so the candidate list pops up
+                        // directly above or below it instead of covering the text.
+                        let _ = ImmSetCandidateWindow(
+                            himc,
+                            &CANDIDATEFORM {
+                                dw_index: 0,
+                                dw_style: CFS_EXCLUDE,
+                                pt_current_pos: caret,
+                                rc_area: RECT {
+                                    left,
+                                    top: top - clearance,
+                                    right,
+                                    bottom: bottom + clearance,
+                                },
+                            },
+                        );
+                        let _ = ImmReleaseContext(hwnd, himc);
                     }
                 }
             }
@@ -985,8 +1031,8 @@ impl Win32Window {
         with_win32_app(|app| app.time_now())
     }
 
-    pub fn set_ime_spot(&mut self, spot: Vec2d) {
-        self.ime_spot = spot;
+    pub fn set_ime_rect(&mut self, rect: Rect) {
+        self.ime_rect = rect;
     }
 
     pub fn get_position(&self) -> Vec2d {

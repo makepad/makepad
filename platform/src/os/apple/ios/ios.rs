@@ -991,14 +991,24 @@ impl Cx {
                     window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(area, pos, config) => {
+                CxOsOp::ShowTextIME(area, cursor_rect, config) => {
                     let window_id = CxWindowPool::id_zero();
-                    let caret = area.clipped_rect(self).pos + pos;
-                    let caret = self.windows[window_id].layout_vec2d_to_native_points(caret);
+                    // iOS can't take the full line box without UIKit drawing a
+                    // native caret from it, so it keeps its caret-free anchoring
+                    // (see ios_text_input.rs) rather than the box-based approach the
+                    // desktop backends use. We still pass the caret-line bottom
+                    // (same point the pre-rect code sent) plus the real line height
+                    // (native points) so the candidate clearance scales with font.
+                    let area_pos = area.clipped_rect(self).pos;
+                    let line_top = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
+                    let caret = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
+                    let line_height = caret.y - line_top.y;
                     // configure_keyboard may recreate the view; set_ime_position must
                     // run after so it frames the final view (same-frame parking).
                     IosApp::configure_keyboard(&config);
-                    IosApp::set_ime_position(caret);
+                    IosApp::set_ime_position(caret, line_height);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {

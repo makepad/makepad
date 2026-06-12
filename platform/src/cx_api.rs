@@ -265,7 +265,10 @@ pub enum CxOsOp {
     /// (iOS only has a status bar).
     SetSystemBarDarkIcons(bool),
 
-    ShowTextIME(Area, Vec2d, TextInputConfig),
+    // The `Rect` is the caret/composition line's bounding box (top-left + size,
+    // line height included), so each backend can ask the OS to place the IME
+    // candidate window directly above/below the line instead of over it.
+    ShowTextIME(Area, Rect, TextInputConfig),
     HideTextIME,
     SyncImeState {
         text: String,
@@ -898,14 +901,28 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
-        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
+        // No line metrics from this entry point: a zero-height rect anchors the
+        // IME at the bare point (same behavior as before the rect change).
+        self.show_text_ime_with_config(
+            area,
+            Rect {
+                pos,
+                size: Vec2d::default(),
+            },
+            TextInputConfig::default(),
+        );
     }
 
-    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
+    pub fn show_text_ime_with_config(
+        &mut self,
+        area: Area,
+        cursor_rect: Rect,
+        config: TextInputConfig,
+    ) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
             self.platform_ops
-                .push(CxOsOp::ShowTextIME(area, pos, config));
+                .push(CxOsOp::ShowTextIME(area, cursor_rect, config));
         }
     }
 
