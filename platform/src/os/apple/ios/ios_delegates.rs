@@ -171,7 +171,7 @@ fn is_keycommand_nav_key(key_code: KeyCode) -> bool {
 
 fn text_input_is_first_responder() -> bool {
     try_with_ios_app(|app| {
-        app.text_input_view
+        app.makepad_text_view
             .map(|view| unsafe {
                 let is_fr: BOOL = msg_send![view, isFirstResponder];
                 is_fr == YES
@@ -191,7 +191,8 @@ unsafe fn makepad_key_press(press: ObjcId) -> Option<(KeyCode, crate::event::Key
     let usage: u64 = msg_send![key, keyCode];
     let key_code = hid_usage_to_key_code(usage);
     let is_enter = key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter;
-    if (!is_enter && !modifiers.logo && !is_hardware_navigation_key(key_code)) || key_code.is_unknown() {
+    let is_tab = key_code == KeyCode::Tab;
+    if (!is_enter && !is_tab && !modifiers.logo && !is_hardware_navigation_key(key_code)) || key_code.is_unknown() {
         None
     } else {
         Some((key_code, modifiers))
@@ -284,6 +285,26 @@ pub unsafe fn dispatch_hardware_key_presses(
         }
         if !dispatch_navigation && is_hardware_navigation_key(key_code) {
             continue;
+        }
+        if key_code == KeyCode::ReturnKey || key_code == KeyCode::NumpadEnter {
+            // Hardware Enter only reaches this path (never the view's text delegate).
+            // Newline mode: insert into the view so it syncs in-order; submit dispatches.
+            if let Some((is_multiline, submit_on_enter, is_read_only)) =
+                IosApp::text_view_enter_config()
+            {
+                let is_newline = is_multiline
+                    && !modifiers.is_primary()
+                    && !(submit_on_enter && !modifiers.any());
+                if is_newline {
+                    // A read-only field's view rejects edits; swallow the newline so the
+                    // view never desyncs from makepad (which rejects the read-only edit).
+                    if is_down && !is_read_only {
+                        IosApp::insert_newline_into_text_view();
+                    }
+                    handled_press = true;
+                    continue;
+                }
+            }
         }
         dispatch_makepad_key_code(key_code, modifiers, is_down);
         handled_press = true;
@@ -1015,7 +1036,7 @@ pub fn define_textfield_delegate() -> *const Class {
         // autocorrectionType (which dynamically checks CJK vs non-CJK).
         // Extract the view pointer first; reloadInputViews can trigger
         // synchronous UIKit callbacks that re-enter IOS_APP.
-        let view = try_with_ios_app(|app| app.text_input_view).flatten();
+        let view = try_with_ios_app(|app| app.makepad_text_view).flatten();
         if let Some(text_input_view) = view {
             unsafe {
                 let () = msg_send![text_input_view, reloadInputViews];
