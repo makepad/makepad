@@ -445,8 +445,10 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 }
             }
             xdg_toplevel::Event::Close => {
-                state.do_callback(XlibEvent::WindowClosed(WindowClosedEvent {
+                let accept_close = Rc::new(Cell::new(true));
+                state.do_callback(XlibEvent::WindowCloseRequested(WindowCloseRequestedEvent {
                     window_id: *window_id,
+                    accept_close,
                 }))
             }
             _ => {}

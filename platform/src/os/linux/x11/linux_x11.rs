@@ -65,6 +65,7 @@ impl X11Cx {
         cx.borrow_mut().gpu_info.performance = GpuPerformance::Tier1;
 
         let opengl_windows = Rc::new(RefCell::new(Vec::new()));
+        cx.borrow_mut().set_physical_keyboard_state(true);
         let is_stdin_loop = crate::app_main::should_run_stdin_loop_from_env();
         if is_stdin_loop {
             cx.borrow_mut().in_makepad_studio = true;
@@ -424,6 +425,15 @@ impl X11Cx {
                 }
 
                 cx.run_live_edit_if_needed("linux-x11");
+                let has_platform_ops = !cx.platform_ops.is_empty();
+                drop(cx);
+                if has_platform_ops {
+                    if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
+                        let mut cx = self.cx.borrow_mut();
+                        cx.call_event_handler(&Event::Shutdown);
+                        return EventFlow::Exit;
+                    }
+                }
                 return EventFlow::Wait;
             }
         }

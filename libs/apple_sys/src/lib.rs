@@ -85,6 +85,19 @@ extern "C" {
     pub static UIKeyboardAnimationDurationUserInfoKey: ObjcId;
     pub static UIKeyboardAnimationCurveUserInfoKey: ObjcId;
     pub static UITextInputCurrentInputModeDidChangeNotification: ObjcId;
+    pub static UIKeyInputUpArrow: ObjcId;
+    pub static UIKeyInputDownArrow: ObjcId;
+    pub static UIKeyInputLeftArrow: ObjcId;
+    pub static UIKeyInputRightArrow: ObjcId;
+    pub static UITextContentTypePassword: ObjcId;
+    pub static UITextContentTypeNone: ObjcId;
+    pub static UITextContentTypeUsername: ObjcId;
+    pub static UITextContentTypeNewPassword: ObjcId;
+    pub static UITextContentTypeEmailAddress: ObjcId;
+    pub static UITextContentTypeURL: ObjcId;
+    pub static UITextContentTypeFullStreetAddress: ObjcId;
+    pub static UITextContentTypeTelephoneNumber: ObjcId;
+    pub static UITextContentTypeOneTimeCode: ObjcId;
 }
 
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
