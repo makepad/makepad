@@ -127,20 +127,10 @@ unsafe extern "C" fn xim_preedit_draw(
     });
 }
 
-/// Creates an input context for `window`, preferring XIM on-the-spot
-/// (`XIMPreeditCallbacks`) so the in-progress composition (preedit) text is
-/// delivered to us for inline display. Falls back to `XIMPreeditNothing` (no
-/// inline preview, but committed text still arrives via `Xutf8LookupString`) if
-/// the input method server doesn't support callbacks. Returns `None` if there is
-/// no XIM or context creation fails entirely.
-pub unsafe fn create_xim_input_context(
+unsafe fn create_xim_callback_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
 ) -> Option<x11_sys::XIC> {
-    if xim.is_null() {
-        return None;
-    }
-
     let start_cb = x11_sys::XIMCallback {
         client_data: ptr::null_mut(),
         // The preedit-start callback returns an int (max length); transmute its
@@ -177,26 +167,71 @@ pub unsafe fn create_xim_input_context(
         &caret_cb,
         ptr::null_mut::<c_void>(),
     );
-    if !preedit_attr.is_null() {
-        let xic = x11_sys::XCreateIC(
-            xim,
-            x11_sys::XNInputStyle.as_ptr(),
-            (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as i32,
-            x11_sys::XNClientWindow.as_ptr(),
-            window,
-            x11_sys::XNFocusWindow.as_ptr(),
-            window,
-            x11_sys::XNPreeditAttributes.as_ptr(),
-            preedit_attr,
-            ptr::null_mut::<c_void>(),
-        );
-        x11_sys::XFree(preedit_attr);
-        if !xic.is_null() {
-            return Some(xic);
-        }
+    if preedit_attr.is_null() {
+        return None;
     }
 
-    // Fallback: let the IM server own the preedit display.
+    let xic = x11_sys::XCreateIC(
+        xim,
+        x11_sys::XNInputStyle.as_ptr(),
+        (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as i32,
+        x11_sys::XNClientWindow.as_ptr(),
+        window,
+        x11_sys::XNFocusWindow.as_ptr(),
+        window,
+        x11_sys::XNPreeditAttributes.as_ptr(),
+        preedit_attr,
+        ptr::null_mut::<c_void>(),
+    );
+    x11_sys::XFree(preedit_attr);
+    if xic.is_null() {
+        None
+    } else {
+        Some(xic)
+    }
+}
+
+unsafe fn create_xim_position_input_context(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+) -> Option<x11_sys::XIC> {
+    // Over-the-spot requires an initial spot in the creation-time preedit
+    // attributes; set_ime_rect updates it on every caret move.
+    let spot = x11_sys::XPoint { x: 0, y: 0 };
+    let preedit_attr = x11_sys::XVaCreateNestedList(
+        0,
+        x11_sys::XNSpotLocation.as_ptr(),
+        &spot,
+        ptr::null_mut::<c_void>(),
+    );
+    if preedit_attr.is_null() {
+        return None;
+    }
+
+    let xic = x11_sys::XCreateIC(
+        xim,
+        x11_sys::XNInputStyle.as_ptr(),
+        (x11_sys::XIMPreeditPosition | x11_sys::XIMStatusNothing) as i32,
+        x11_sys::XNClientWindow.as_ptr(),
+        window,
+        x11_sys::XNFocusWindow.as_ptr(),
+        window,
+        x11_sys::XNPreeditAttributes.as_ptr(),
+        preedit_attr,
+        ptr::null_mut::<c_void>(),
+    );
+    x11_sys::XFree(preedit_attr);
+    if xic.is_null() {
+        None
+    } else {
+        Some(xic)
+    }
+}
+
+unsafe fn create_xim_nothing_input_context(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+) -> Option<x11_sys::XIC> {
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
@@ -212,6 +247,110 @@ pub unsafe fn create_xim_input_context(
     } else {
         Some(xic)
     }
+}
+
+unsafe fn set_xic_spot_location(xic: x11_sys::XIC, spot: x11_sys::XPoint) -> bool {
+    let preedit_attr = x11_sys::XVaCreateNestedList(
+        0,
+        x11_sys::XNSpotLocation.as_ptr(),
+        &spot,
+        ptr::null_mut::<c_void>(),
+    );
+    if preedit_attr.is_null() {
+        return false;
+    }
+    let failed_attr = x11_sys::XSetICValues(
+        xic,
+        x11_sys::XNPreeditAttributes.as_ptr(),
+        preedit_attr,
+        ptr::null_mut::<c_void>(),
+    );
+    x11_sys::XFree(preedit_attr);
+    failed_attr.is_null()
+}
+
+unsafe fn get_xic_spot_location(xic: x11_sys::XIC) -> Option<x11_sys::XPoint> {
+    let mut spot_ptr: *mut x11_sys::XPoint = ptr::null_mut();
+    let preedit_attr = x11_sys::XVaCreateNestedList(
+        0,
+        x11_sys::XNSpotLocation.as_ptr(),
+        &mut spot_ptr,
+        ptr::null_mut::<c_void>(),
+    );
+    if preedit_attr.is_null() {
+        return None;
+    }
+    let failed_attr = x11_sys::XGetICValues(
+        xic,
+        x11_sys::XNPreeditAttributes.as_ptr(),
+        preedit_attr,
+        ptr::null_mut::<c_void>(),
+    );
+    x11_sys::XFree(preedit_attr);
+    if !failed_attr.is_null() || spot_ptr.is_null() {
+        if !spot_ptr.is_null() {
+            x11_sys::XFree(spot_ptr as *mut c_void);
+        }
+        return None;
+    }
+    let spot = *spot_ptr;
+    x11_sys::XFree(spot_ptr as *mut c_void);
+    Some(spot)
+}
+
+unsafe fn callback_xic_supports_spot_location(xic: x11_sys::XIC) -> bool {
+    // libX11 < 1.8.2 silently ignores XNSpotLocation for XIMPreeditCallbacks:
+    // both XSetICValues and XGetICValues report success while leaving the value
+    // untouched. A non-default sentinel that round-trips proves this Xlib has the
+    // callback-mode fix, without depending on a distro version string.
+    let sentinel = x11_sys::XPoint { x: 23, y: 47 };
+    if !set_xic_spot_location(xic, sentinel) {
+        return false;
+    }
+    let supports_spot = get_xic_spot_location(xic)
+        .map(|spot| spot.x == sentinel.x && spot.y == sentinel.y)
+        .unwrap_or(false);
+    let _ = set_xic_spot_location(xic, x11_sys::XPoint { x: 0, y: 0 });
+    supports_spot
+}
+
+/// Creates an input context for `window`.
+///
+/// Prefer XIM on-the-spot (`XIMPreeditCallbacks`) so the in-progress composition
+/// (preedit) text is delivered to us for inline display. libX11 before 1.8.2
+/// drops `XNSpotLocation` in that mode, so at runtime we probe whether the
+/// callback XIC can round-trip a spot location. If not, we fall back to
+/// over-the-spot (`XIMPreeditPosition`): the IM server draws the preedit, but
+/// the candidate window follows the cursor on older libX11 builds such as
+/// Ubuntu 20.04/22.04.
+/// Either way falls back to `XIMPreeditNothing` (committed text still arrives via
+/// `Xutf8LookupString`) if the chosen style isn't supported. Returns `None` if
+/// there is no XIM or context creation fails entirely.
+pub unsafe fn create_xim_input_context(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+) -> Option<x11_sys::XIC> {
+    if xim.is_null() {
+        return None;
+    }
+
+    if let Some(callback_xic) = create_xim_callback_input_context(xim, window) {
+        if callback_xic_supports_spot_location(callback_xic) {
+            return Some(callback_xic);
+        }
+        if let Some(position_xic) = create_xim_position_input_context(xim, window) {
+            x11_sys::XDestroyIC(callback_xic);
+            return Some(position_xic);
+        }
+        return Some(callback_xic);
+    }
+
+    if let Some(xic) = create_xim_position_input_context(xim, window) {
+        return Some(xic);
+    }
+
+    // Fallback: let the IM server own the preedit display.
+    create_xim_nothing_input_context(xim, window)
 }
 
 pub fn init_xlib_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) {
@@ -888,6 +1027,15 @@ impl XlibApp {
                 }
                 x11_sys::FocusIn => {
                     let event = event.xfocus;
+                    // Ignore grab-related and pointer focus changes (not real
+                    // keyboard focus changes) so an IME grab/ungrab pair doesn't
+                    // toggle the TextInput's focus.
+                    if event.mode == x11_sys::NotifyGrab
+                        || event.mode == x11_sys::NotifyUngrab
+                        || event.detail == x11_sys::NotifyPointer
+                    {
+                        continue;
+                    }
                     if let Some(window_ptr) = self.window_map.get(&event.window) {
                         let window = &mut (**window_ptr);
                         if window.ime_active {
@@ -899,6 +1047,17 @@ impl XlibApp {
                     }
                 }
                 x11_sys::FocusOut => {
+                    // Ignore grab-related and pointer focus changes. An IME (e.g.
+                    // ibus) grabbing the keyboard to test a Ctrl shortcut emits a
+                    // FocusOut(NotifyGrab); that is NOT real focus loss and must not
+                    // defocus the TextInput (the cause of "Ctrl shortcuts drop
+                    // focus" on X11).
+                    if event.xfocus.mode == x11_sys::NotifyGrab
+                        || event.xfocus.mode == x11_sys::NotifyUngrab
+                        || event.xfocus.detail == x11_sys::NotifyPointer
+                    {
+                        continue;
+                    }
                     if let Some(popup_window) = self.active_popup {
                         if let Some(window_ptr) = self.window_map.get(&popup_window) {
                             let window = &mut (**window_ptr);

@@ -102,6 +102,7 @@ pub const VisibilityPartiallyObscured: i32 = 1;
 pub const VisibilityFullyObscured: i32 = 2;
 
 pub const XIMPreeditCallbacks: u32 = 2;
+pub const XIMPreeditPosition: u32 = 4;
 pub const XIMPreeditNothing: u32 = 8;
 pub const XIMStatusNothing: u32 = 1024;
 
@@ -152,6 +153,15 @@ pub const Mod1Mask: u32 = 8;
 pub const ShiftMask: u32 = 1;
 pub const ControlMask: u32 = 4;
 pub const Mod4Mask: u32 = 64;
+
+// XFocusChangeEvent `mode` values, and the `detail` value for pointer focus.
+// Grab-induced focus changes (e.g. an IME grabbing the keyboard to test a Ctrl
+// shortcut) and pointer focus are NOT real keyboard-focus changes.
+pub const NotifyNormal: c_int = 0;
+pub const NotifyGrab: c_int = 1;
+pub const NotifyUngrab: c_int = 2;
+pub const NotifyWhileGrabbed: c_int = 3;
+pub const NotifyPointer: c_int = 5;
 
 pub const XK_A: u32 = 65;
 pub const XK_B: u32 = 66;
@@ -431,6 +441,8 @@ extern "C" {
 
     pub fn XCreateIC(arg1: XIM, ...) -> XIC;
 
+    pub fn XDestroyIC(arg1: XIC);
+
     pub fn XSetLocaleModifiers(arg1: *const c_char) -> *const c_char;
 
     pub fn XSetICFocus(arg1: XIC);
@@ -438,6 +450,8 @@ extern "C" {
     pub fn XUnsetICFocus(arg1: XIC);
 
     pub fn XSetICValues(arg1: XIC, ...) -> *mut c_char;
+
+    pub fn XGetICValues(arg1: XIC, ...) -> *mut c_char;
 
     pub fn XVaCreateNestedList(arg1: c_int, ...) -> *mut c_void;
 
