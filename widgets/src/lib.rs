@@ -5,6 +5,7 @@ pub use makepad_draw::makepad_platform;
 pub use makepad_draw::*;
 pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
+pub use makepad_platform::ScriptModKind;
 pub use makepad_script::script_eval;
 pub use makepad_script::{ScriptValue, ScriptVm};
 

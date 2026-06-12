@@ -2,6 +2,10 @@ use crate::cx::Cx;
 use crate::event::Event;
 use crate::ui_runner::UiRunner;
 use makepad_script::{ScriptValue, ScriptVm};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[cfg(target_env = "ohos")]
 pub use napi_ohos;
@@ -238,6 +242,8 @@ pub trait AppMain {
     {
     }
 
+    fn on_hotreload(&mut self, _cx: &mut Cx) {}
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self>
     where
@@ -248,16 +254,222 @@ pub trait AppMain {
     }
 }
 
+#[doc(hidden)]
+pub fn script_mod_value<T>(vm: &mut ScriptVm) -> ScriptValue
+where
+    T: AppMain,
+{
+    #[cfg(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    ))]
+    {
+        crate::hotreload::subsecond::HotFn::current(<T as AppMain>::script_mod).call((vm,))
+    }
+    #[cfg(not(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    )))]
+    {
+        <T as AppMain>::script_mod(vm)
+    }
+}
+
+#[doc(hidden)]
+pub fn build_app_from_script<T>(cx: &mut Cx) -> T
+where
+    T: AppMain + crate::ScriptNew,
+{
+    cx.with_vm(|vm| {
+        let value = script_mod_value::<T>(vm);
+        let mut app = <T as crate::ScriptNew>::script_from_value(vm, value);
+        <T as AppMain>::after_new_from_script(vm, &mut app);
+        app
+    })
+}
+
+#[doc(hidden)]
+pub fn apply_live_edit<T>(app: &mut T, cx: &mut Cx)
+where
+    T: AppMain + crate::ScriptApply,
+{
+    cx.with_vm(|vm| {
+        let value = vm.with_reload(script_mod_value::<T>);
+        <T as crate::ScriptApply>::script_apply(
+            app,
+            vm,
+            &crate::Apply::Reload,
+            &mut crate::Scope::empty(),
+            value,
+        );
+    });
+}
+
+#[doc(hidden)]
+pub fn dispatch_app_event<T>(app: &mut T, cx: &mut Cx, event: &Event)
+where
+    T: AppMain,
+{
+    #[cfg(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    ))]
+    {
+        crate::hotreload::subsecond::call(|| <dyn AppMain>::handle_event(app, cx, event));
+    }
+    #[cfg(not(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    )))]
+    {
+        <dyn AppMain>::handle_event(app, cx, event);
+    }
+}
+
+#[doc(hidden)]
+pub fn dispatch_app_hotreload<T>(app: &mut T, cx: &mut Cx)
+where
+    T: AppMain,
+{
+    #[cfg(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    ))]
+    {
+        crate::hotreload::subsecond::call(|| <dyn AppMain>::on_hotreload(app, cx));
+    }
+    #[cfg(not(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    )))]
+    {
+        <dyn AppMain>::on_hotreload(app, cx);
+    }
+}
+
+#[doc(hidden)]
+pub fn register_hotreload_handler(_flag: &Arc<AtomicBool>) {
+    #[cfg(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    ))]
+    crate::hotreload::register_signal_handler(_flag);
+}
+
+#[doc(hidden)]
+pub fn apply_hotreload_if_pending<T>(
+    app: &Rc<RefCell<Option<T>>>,
+    hotreload_flag: &Arc<AtomicBool>,
+    cx: &mut Cx,
+) where
+    T: AppMain,
+{
+    if !hotreload_flag.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+
+    if let Some(app) = app.borrow_mut().as_mut() {
+        dispatch_app_hotreload(app, cx);
+    }
+    cx.redraw_all();
+}
+
+#[cfg(test)]
+mod hotreload_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    struct HotreloadStateApp {
+        clicks: usize,
+        hotreloads: usize,
+    }
+
+    impl AppMain for HotreloadStateApp {
+        fn on_hotreload(&mut self, _cx: &mut Cx) {
+            self.hotreloads += 1;
+        }
+
+        fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) {}
+    }
+
+    #[test]
+    fn hotreload_pending_invokes_hook_and_keeps_existing_app_state() {
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp {
+            clicks: 7,
+            hotreloads: 0,
+        })));
+        let hotreload_flag = Arc::new(AtomicBool::new(true));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
+
+        assert_eq!(app.borrow().as_ref().unwrap().clicks, 7);
+        assert_eq!(app.borrow().as_ref().unwrap().hotreloads, 1);
+        assert!(!hotreload_flag.load(Ordering::Relaxed));
+        assert!(cx.new_draw_event.redraw_all);
+    }
+
+    #[test]
+    fn hotreload_pending_noops_when_no_patch_is_waiting() {
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp {
+            clicks: 3,
+            hotreloads: 0,
+        })));
+        let hotreload_flag = Arc::new(AtomicBool::new(false));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
+
+        assert_eq!(app.borrow().as_ref().unwrap().clicks, 3);
+        assert_eq!(app.borrow().as_ref().unwrap().hotreloads, 0);
+        assert!(!cx.new_draw_event.redraw_all);
+    }
+}
+
 /// Internal helper for [`app_main!`]. Emits the boxed event-handler
-/// closure that every platform entry point hands to `Cx::new`. Captures
-/// its own `app` and `app_value` `Rc<RefCell<…>>` slots, so the four
-/// platform entry points (desktop, Android activity, OHOS, wasm32) all
-/// share a single source of truth for `Event::Startup` / `LiveEdit` /
-/// `ScriptReapply` / `handle_event` dispatch.
-///
-/// `cx.start_hot_reload_file_observer_if_requested()` is called
-/// unconditionally — its body is `#[cfg]`-gated to desktop OSes, so on
-/// android / ohos / wasm32 it's a compile-time no-op.
+/// closure that every platform entry point hands to `Cx::new`.
 ///
 /// Not part of the public API. Use [`app_main!`] instead.
 #[doc(hidden)]
@@ -267,10 +479,12 @@ macro_rules! _app_main_event_closure {
         let app = std::rc::Rc::new(std::cell::RefCell::new(None));
         let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
+        let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        $crate::register_hotreload_handler(&hotreload_flag);
         Box::new(move |cx: &mut Cx, event: &Event| {
             if let Event::Startup = event {
                 *app.borrow_mut() = Some(cx.with_vm(|vm| {
-                    let value = <$app as AppMain>::script_mod(vm);
+                    let value = $crate::script_mod_value::<$app>(vm);
                     if let Some(obj) = value.as_object() {
                         *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
                     }
@@ -284,7 +498,7 @@ macro_rules! _app_main_event_closure {
                 let mut app_ref = app.borrow_mut();
                 if let Some(app) = app_ref.as_mut() {
                     cx.with_vm(|vm| {
-                        let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                        let value = vm.with_reload($crate::script_mod_value::<$app>);
                         if let Some(obj) = value.as_object() {
                             *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
                         }
@@ -318,8 +532,9 @@ macro_rules! _app_main_event_closure {
                     }
                 }
             }
+            $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
             if let Some(app) = &mut *app.borrow_mut() {
-                <dyn AppMain>::handle_event(app, cx, event);
+                $crate::dispatch_app_event(app, cx, event);
             }
         }) as Box<dyn FnMut(&mut Cx, &Event)>
     }};

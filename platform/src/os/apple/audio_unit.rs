@@ -1616,6 +1616,7 @@ impl AudioUnit {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub fn send_mouse_down(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
             unsafe {
@@ -1642,6 +1643,9 @@ impl AudioUnit {
             }
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn send_mouse_down(&self) {}
     /*
     pub fn ocr_ui(&self) {
         unsafe {

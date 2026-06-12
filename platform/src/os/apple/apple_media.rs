@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use {
     crate::{
         audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, os::apple::apple_sys::*,
@@ -6,6 +7,8 @@ use {
     },
     std::sync::{Arc, Mutex},
 };
+
+use std::{ffi::c_void, sync::OnceLock};
 
 #[derive(Default)]
 pub struct CxAppleMedia {
@@ -86,39 +89,47 @@ struct AppleH264Probe {
     decode_software: bool,
 }
 
-#[cfg(target_os = "macos")]
-fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
-    use std::ffi::c_void;
+unsafe fn videotoolbox_symbol(name: &'static [u8]) -> Option<*mut c_void> {
+    static VIDEOTOOLBOX_FRAMEWORK: OnceLock<usize> = OnceLock::new();
 
     unsafe extern "C" {
         fn dlopen(path: *const i8, mode: i32) -> *mut c_void;
         fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
     }
 
-    type ProbeFn = unsafe extern "C" fn(codec_type: u32) -> BOOL;
-
-    unsafe {
-        let framework_path =
-            b"/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox\0";
-        let handle = dlopen(framework_path.as_ptr() as *const i8, 1); // RTLD_LAZY
-        if handle.is_null() {
-            return false;
-        }
-        let symbol = dlsym(
-            handle,
-            b"VTIsHardwareEncodeSupported\0".as_ptr() as *const i8,
-        );
-        if symbol.is_null() {
-            return false;
-        }
-        let probe: ProbeFn = std::mem::transmute(symbol);
-        probe(codec_type) == YES
+    let handle = *VIDEOTOOLBOX_FRAMEWORK.get_or_init(|| {
+        let framework_path = b"/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox\0";
+        unsafe { dlopen(framework_path.as_ptr() as *const i8, 1) as usize }
+    });
+    if handle == 0 {
+        return None;
     }
+
+    let symbol = unsafe { dlsym(handle as *mut c_void, name.as_ptr() as *const i8) };
+    if symbol.is_null() {
+        return None;
+    }
+    Some(symbol)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
-    unsafe { VTIsHardwareEncodeSupported(codec_type) == YES }
+unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
+    type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
+
+    let Some(symbol) = (unsafe { videotoolbox_symbol(b"VTIsHardwareEncodeSupported\0") }) else {
+        return false;
+    };
+    let func: VtIsHardwareSupportedFn = unsafe { std::mem::transmute(symbol) };
+    unsafe { func(codec_type) == YES }
+}
+
+unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
+    type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
+
+    let Some(symbol) = (unsafe { videotoolbox_symbol(b"VTIsHardwareDecodeSupported\0") }) else {
+        return false;
+    };
+    let func: VtIsHardwareSupportedFn = unsafe { std::mem::transmute(symbol) };
+    unsafe { func(codec_type) == YES }
 }
 
 fn probe_apple_h264() -> AppleH264Probe {
@@ -147,7 +158,7 @@ fn probe_apple_h264() -> AppleH264Probe {
         }
         probe.encode_software = encode_available && !probe.encode_hardware;
 
-        probe.decode_hardware = VTIsHardwareDecodeSupported(kCMVideoCodecType_H264) == YES;
+        probe.decode_hardware = vt_is_hardware_decode_supported(kCMVideoCodecType_H264);
 
         // Baseline 64x64 SPS/PPS probe stream.
         let sps: [u8; 23] = [

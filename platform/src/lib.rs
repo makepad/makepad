@@ -42,6 +42,17 @@ mod debug;
 pub mod event;
 mod geometry;
 mod gpu_info;
+#[cfg(all(
+    feature = "hotreload",
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios",
+        target_os = "tvos"
+    )
+))]
+pub mod hotreload;
 mod id_pool;
 pub mod ime;
 mod live_reload;
@@ -89,6 +100,7 @@ pub use ::windows;
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
+pub use makepad_script_std::makepad_script::ScriptModKind;
 pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap

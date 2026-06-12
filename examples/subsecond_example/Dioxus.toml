@@ -1,0 +1,14 @@
+[application]
+name = "makepad-example-subsecond-example"
+
+[bundle]
+identifier = "com.example.MakepadExampleSubsecondExample"
+version = "1.0.0"
+
+[permissions]
+camera = { description = "This app needs access to the camera for video capture functionality." }
+microphone = { description = "This app needs access to the microphone for audio recording functionality." }
+
+[ios]
+deployment_target = "15.0"
+

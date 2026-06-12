@@ -8,7 +8,7 @@ use {
 
 pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    let ts = script_impl(input);
+    let ts = script_impl_with_kind(input, "TopLevel");
     tb.add("pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
     tb.add("    let sb=").stream(Some(ts)).add(";");
     tb.add("    vm.eval(sb)");
@@ -61,6 +61,10 @@ pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
 }
 
 pub fn script_impl(input: TokenStream) -> TokenStream {
+    script_impl_with_kind(input, "Eval")
+}
+
+fn script_impl_with_kind(input: TokenStream, kind: &str) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
 
@@ -85,6 +89,9 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
             .add("),");
         tb.add("    line:line!() as usize,");
         tb.add("    column:column!() as usize,");
+        tb.add("    kind: ScriptModKind::")
+            .add(kind)
+            .add(",");
 
         tb.add("    code:").string(&s).add(".to_string(),");
         tb.add("    values:{");

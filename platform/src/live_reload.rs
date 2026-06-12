@@ -1,7 +1,7 @@
 use crate::cx::Cx;
 use crate::makepad_script::{
-    parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptMod, ScriptModKey, ScriptSource,
-    ScriptValue,
+    parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptMod, ScriptModKey, ScriptModKind,
+    ScriptSource, ScriptValue,
 };
 use makepad_live_reload_core::{
     normalize_path, normalize_path_string, normalize_relative_path_string,
@@ -313,6 +313,9 @@ fn collect_compiled_sites_for_file(
         let ScriptSource::Mod(script_mod) = &body.source else {
             continue;
         };
+        if script_mod.kind != ScriptModKind::TopLevel {
+            continue;
+        }
         let Some(compiled_file_name) = resolve_matching_script_mod_file(script_mod, file_name)
         else {
             continue;
@@ -430,7 +433,25 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn hot_reload_requested_from_args() -> bool {
-    std::env::args().any(|arg| arg == "--hot")
+    hot_reload_requested(
+        std::env::args(),
+        std::env::var_os("DIOXUS_CLI_ENABLED").is_some(),
+        std::env::var_os("DIOXUS_DEVSERVER_PORT").is_some(),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn hot_reload_requested<I, S>(
+    args: I,
+    dioxus_cli_enabled: bool,
+    dioxus_devserver_port_present: bool,
+) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--hot")
+        || (dioxus_cli_enabled && dioxus_devserver_port_present)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -447,6 +468,9 @@ fn collect_hot_reload_watch_plan(
         let ScriptSource::Mod(script_mod) = &body.source else {
             continue;
         };
+        if script_mod.kind != ScriptModKind::TopLevel {
+            continue;
+        }
         let Some(root) = hot_reload_root_for_script_mod(script_mod, &excluded_manifest_paths)
         else {
             continue;
@@ -1004,6 +1028,16 @@ fn utf8_char_len(byte: u8) -> usize {
 mod tests {
     use super::*;
 
+    fn test_vm() -> crate::makepad_script::ScriptVm<'static> {
+        let host = Box::leak(Box::new(0i32));
+        let std = Box::leak(Box::new(0i32));
+        crate::makepad_script::ScriptVm {
+            host,
+            std,
+            bx: Box::new(crate::makepad_script::ScriptVmBase::new()),
+        }
+    }
+
     #[test]
     fn extracts_multiple_script_mods() {
         let source = r#"
@@ -1128,5 +1162,57 @@ mod tests {
         assert!(excluded.contains(&normalize_path_string(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../draw")
         )));
+    }
+
+    #[test]
+    fn compiled_sites_ignore_script_eval_bodies_from_same_file() {
+        let vm = &mut test_vm();
+        let file_name = "/tmp/subsecond_example_main.rs";
+
+        vm.add_script_mod(ScriptMod {
+            file: file_name.to_string(),
+            line: 11,
+            column: 1,
+            kind: ScriptModKind::TopLevel,
+            code: "startup()".to_string(),
+            ..Default::default()
+        });
+        vm.add_script_mod(ScriptMod {
+            file: file_name.to_string(),
+            line: 98,
+            column: 13,
+            kind: ScriptModKind::Eval,
+            code: "mod.state.clicks += 4".to_string(),
+            ..Default::default()
+        });
+        vm.add_script_mod(ScriptMod {
+            file: file_name.to_string(),
+            line: 106,
+            column: 13,
+            kind: ScriptModKind::Eval,
+            code: "ui.main_view.render()".to_string(),
+            ..Default::default()
+        });
+
+        let sites = collect_compiled_sites_for_file(vm.bx.as_ref(), file_name);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].key.line, 11);
+        assert_eq!(sites[0].key.column, 1);
+    }
+
+    #[test]
+    fn hot_reload_request_accepts_legacy_hot_flag() {
+        assert!(hot_reload_requested(["app", "--hot"], false, false));
+    }
+
+    #[test]
+    fn hot_reload_request_accepts_dioxus_devserver_launch() {
+        assert!(hot_reload_requested(["app"], true, true));
+    }
+
+    #[test]
+    fn hot_reload_request_rejects_unrelated_launches() {
+        assert!(!hot_reload_requested(["app"], true, false));
+        assert!(!hot_reload_requested(["app"], false, true));
     }
 }
