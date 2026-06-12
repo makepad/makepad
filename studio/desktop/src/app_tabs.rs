@@ -2,23 +2,18 @@ use super::*;
 
 #[path = "app_tabs/dock_helpers.rs"]
 pub mod dock_helpers;
-use dock_helpers::*;
 
 #[path = "app_tabs/editor.rs"]
 pub mod editor;
-use editor::*;
 
 #[path = "app_tabs/run.rs"]
 pub mod run;
-use run::*;
 
 #[path = "app_tabs/log.rs"]
 pub mod log;
-use log::*;
 
 #[path = "app_tabs/profiler.rs"]
 pub mod profiler;
-use profiler::*;
 
 impl App {
     pub(super) fn send_terminal_input(&mut self, path: &str, data: Vec<u8>) {

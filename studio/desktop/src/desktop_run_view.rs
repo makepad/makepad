@@ -1,17 +1,10 @@
-use crate::makepad_widgets::image_cache::{
-    load_image_from_cache, load_image_from_data_async, process_async_image_load, AsyncImageLoad,
-    AsyncLoadResult,
-};
 use crate::makepad_widgets::makepad_micro_serde::SerBin;
-use crate::makepad_widgets::makepad_platform::shared_framebuf::{
-    shared_swapchain_from_host_swapchain, HostSwapchain,
-};
+use crate::makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
 use crate::makepad_widgets::*;
-use makepad_studio_protocol::hub_protocol::{FrameCodec, QueryId, RunViewInputVizKind};
+use makepad_studio_protocol::hub_protocol::{QueryId, RunViewInputVizKind};
 use makepad_studio_protocol::{
     MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    RemoteMouseUp, RemoteScroll, RunViewFrameData, RunViewFrameRequest, StudioToApp,
-    StudioToAppVec,
+    RemoteMouseUp, RemoteScroll, RunViewFrameData, StudioToApp, StudioToAppVec,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -21,6 +14,15 @@ use std::sync::Arc;
 use crate::makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 use std::sync::Mutex;
+
+#[path = "desktop_run_view/swapchain.rs"]
+pub mod swapchain;
+
+#[path = "desktop_run_view/remote_decode.rs"]
+pub mod remote_decode;
+
+#[path = "desktop_run_view/input_viz.rs"]
+pub mod input_viz;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -128,24 +130,24 @@ script_mod! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RunTarget {
-    build_id: QueryId,
-    window_id: usize,
+pub(crate) struct RunTarget {
+    pub(crate) build_id: QueryId,
+    pub(crate) window_id: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct InputVizEvent {
-    kind: RunViewInputVizKind,
-    pos: Vec2d,
-    size: Option<Vec2d>,
+pub(crate) struct InputVizEvent {
+    pub(crate) kind: RunViewInputVizKind,
+    pub(crate) pos: Vec2d,
+    pub(crate) size: Option<Vec2d>,
 }
 
 #[derive(Clone, Debug)]
-struct PendingRemoteDecode {
-    path: PathBuf,
-    frame_id: u64,
-    width: u32,
-    height: u32,
+pub(crate) struct PendingRemoteDecode {
+    pub(crate) path: PathBuf,
+    pub(crate) frame_id: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -355,463 +357,6 @@ impl DesktopRunView {
         }
     }
 
-    fn clear_cached_remote_path(cx: &mut Cx, path: &PathBuf) {
-        cx.global::<crate::makepad_widgets::image_cache::ImageCache>()
-            .map
-            .remove(path);
-    }
-
-    fn apply_remote_texture(
-        &mut self,
-        cx: &mut Cx,
-        texture: &Texture,
-        width: u32,
-        height: u32,
-        y_flip: f32,
-    ) {
-        self.draw_app.set_texture(0, texture);
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(tex_scale), &[1.0f32, 1.0f32]);
-        self.draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(tex_size),
-            &[width.max(1) as f32, height.max(1) as f32],
-        );
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[y_flip]);
-        self.draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[0.0f32]);
-        self.redraw_countdown = self.redraw_countdown.max(20);
-        self.redraw(cx);
-    }
-
-    fn request_remote_frame_if_needed(&mut self, target: RunTarget) -> Option<StudioToApp> {
-        if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
-            return None;
-        }
-        if self.remote_frame_request_in_flight || self.remote_pending_decode.is_some() {
-            return None;
-        }
-        if !self.remote_mode && self.debug_present_ok_count > 0 {
-            return None;
-        }
-        let frame_id = self.remote_next_frame_id.max(1);
-        self.remote_next_frame_id = frame_id.wrapping_add(1).max(1);
-        self.remote_frame_request_in_flight = true;
-        self.remote_requested_frame_id = Some(frame_id);
-        Some(StudioToApp::RunViewFrameRequest(RunViewFrameRequest {
-            window_id: target.window_id,
-            frame_id,
-            width: (self.last_rect.size.x * self.last_dpi_factor)
-                .ceil()
-                .max(1.0) as u32,
-            height: (self.last_rect.size.y * self.last_dpi_factor)
-                .ceil()
-                .max(1.0) as u32,
-            dpi_factor: self.last_dpi_factor,
-        }))
-    }
-
-    fn set_remote_frame(&mut self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
-        let Some(target) = self.current_target else {
-            return;
-        };
-        if target.build_id != build_id || target.window_id != frame.window_id {
-            return;
-        }
-        if frame.frame_id < self.remote_current_frame_id {
-            return;
-        }
-        let codec = frame.codec.clone().unwrap_or(FrameCodec::Png);
-        self.remote_mode = true;
-        self.remote_frame_request_in_flight = false;
-        self.remote_requested_frame_id = None;
-
-        let ext = match codec {
-            FrameCodec::Png => "png",
-            FrameCodec::Jpeg => "jpg",
-            FrameCodec::ZstdRgba => return,
-        };
-        if let Some(prev_path) = self.remote_current_path.take() {
-            Self::clear_cached_remote_path(cx, &prev_path);
-        }
-        if let Some(pending) = self.remote_pending_decode.take() {
-            Self::clear_cached_remote_path(cx, &pending.path);
-        }
-        let path = PathBuf::from(format!(
-            "studio_remote_runview://build-{}-window-{}-frame-{}.{}",
-            build_id.0, frame.window_id, frame.frame_id, ext
-        ));
-        let bytes = Arc::new(frame.data);
-        match load_image_from_data_async(cx, &path, bytes) {
-            Ok(AsyncLoadResult::Loaded) => {
-                if let Some(texture) = load_image_from_cache(cx, &path) {
-                    let y_flip = if cfg!(all(target_os = "linux", not(target_env = "ohos"))) {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    self.apply_remote_texture(cx, &texture, frame.width, frame.height, y_flip);
-                    self.remote_current_frame_id = frame.frame_id;
-                    self.remote_current_path = Some(path);
-                    return;
-                }
-            }
-            Ok(AsyncLoadResult::Loading(_, _)) => {}
-            Err(_) => {
-                crate::log!(
-                    "runview remote frame decode start failed build={} frame={}",
-                    build_id.0,
-                    frame.frame_id,
-                );
-                Self::clear_cached_remote_path(cx, &path);
-                return;
-            }
-        }
-        self.remote_pending_decode = Some(PendingRemoteDecode {
-            path,
-            frame_id: frame.frame_id,
-            width: frame.width,
-            height: frame.height,
-        });
-        self.redraw(cx);
-    }
-
-    fn handle_remote_decode_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        for action in actions {
-            let Some(AsyncImageLoad { image_path, result }) = action.downcast_ref() else {
-                continue;
-            };
-            let Some((pending_path, pending_frame_id, pending_width, pending_height)) =
-                self.remote_pending_decode.as_ref().map(|pending| {
-                    (
-                        pending.path.clone(),
-                        pending.frame_id,
-                        pending.width,
-                        pending.height,
-                    )
-                })
-            else {
-                continue;
-            };
-            if image_path != &pending_path {
-                continue;
-            }
-            if let Some(result) = result.borrow_mut().take() {
-                process_async_image_load(cx, image_path, result);
-            }
-            if let Some(texture) = load_image_from_cache(cx, image_path) {
-                let y_flip = if cfg!(all(target_os = "linux", not(target_env = "ohos"))) {
-                    1.0
-                } else {
-                    0.0
-                };
-                self.apply_remote_texture(cx, &texture, pending_width, pending_height, y_flip);
-                self.remote_current_frame_id = pending_frame_id;
-                self.remote_current_path = Some(pending_path);
-                self.remote_pending_decode = None;
-            }
-        }
-    }
-
-    fn apply_presentable_draw_to_quad(
-        cx: &mut Cx,
-        draw_app: &mut DrawQuad,
-        redraw_countdown: &mut usize,
-        presentable_draw: PresentableDraw,
-        swapchain: &HostSwapchain,
-    ) -> bool {
-        // Ignore zero-sized frames from early startup races (before geom is applied).
-        // Treating these as "presented" can stall bootstrap until a manual resize.
-        if presentable_draw.width == 0 || presentable_draw.height == 0 {
-            return false;
-        }
-
-        let Some(drawn) = swapchain.get_image(presentable_draw.target_id) else {
-            return false;
-        };
-
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        if let Some(buffer) = drawn.software_buffer.as_ref() {
-            cx.upload_presentable_image_software_buffer(
-                &drawn.texture,
-                swapchain.alloc_width,
-                swapchain.alloc_height,
-                buffer.as_bytes(),
-            );
-        }
-
-        draw_app.set_texture(0, &drawn.texture);
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(tex_scale),
-            &[
-                (presentable_draw.width as f32) / (swapchain.alloc_width as f32),
-                (presentable_draw.height as f32) / (swapchain.alloc_height as f32),
-            ],
-        );
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(tex_size),
-            &[
-                (swapchain.alloc_width as f32),
-                (swapchain.alloc_height as f32),
-            ],
-        );
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[1.0f32]);
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
-
-        *redraw_countdown = (*redraw_countdown).max(20);
-        true
-    }
-
-    fn try_present_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) -> bool {
-        if let Some(swapchain) = self.swapchain.as_ref() {
-            if Self::apply_presentable_draw_to_quad(
-                cx,
-                &mut self.draw_app,
-                &mut self.redraw_countdown,
-                presentable_draw,
-                swapchain,
-            ) {
-                self.last_swapchain_with_completed_draws = None;
-                self.redraw(cx);
-                return true;
-            }
-        }
-        if let Some(swapchain) = self.last_swapchain_with_completed_draws.as_ref() {
-            if Self::apply_presentable_draw_to_quad(
-                cx,
-                &mut self.draw_app,
-                &mut self.redraw_countdown,
-                presentable_draw,
-                swapchain,
-            ) {
-                self.redraw(cx);
-                return true;
-            }
-        }
-        false
-    }
-
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    fn setup_aux_chan(&mut self, studio_addr: Option<&str>, build_id: QueryId) {
-        // Only create the listener once per target
-        if self.aux_chan_host_endpoint.is_some() {
-            return;
-        }
-        let Some(studio_addr) = studio_addr else {
-            return;
-        };
-        let listener = match aux_chan::ExternalEndpointListener::new_for_studio(
-            studio_addr,
-            &build_id.0.to_string(),
-        ) {
-            Ok(l) => l,
-            Err(err) => {
-                log!("aux_chan listener failed: {}", err);
-                return;
-            }
-        };
-        let slot = Arc::new(Mutex::new(None));
-        self.aux_chan_host_endpoint = Some(slot.clone());
-        // Accept in background — the child may take a long time to compile and start.
-        std::thread::Builder::new()
-            .name("aux-chan-accept".into())
-            .spawn(move || match listener.accept_host_endpoint() {
-                Ok(endpoint) => {
-                    *slot.lock().unwrap() = Some(endpoint);
-                }
-                Err(err) => {
-                    crate::log!("aux_chan accept failed: {}", err);
-                }
-            })
-            .ok();
-    }
-
-    fn ensure_swapchain_for_rect(
-        &mut self,
-        cx: &mut Cx,
-        rect: Rect,
-        dpi_factor: f64,
-        target: RunTarget,
-    ) {
-        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
-            return;
-        }
-
-        let min_width = ((rect.size.x * dpi_factor).ceil() as u32).max(1);
-        let min_height = ((rect.size.y * dpi_factor).ceil() as u32).max(1);
-        let needs_new_swapchain = self
-            .swapchain
-            .as_ref()
-            .map(|swapchain| {
-                #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-                {
-                    min_width != swapchain.alloc_width
-                        || min_height != swapchain.alloc_height
-                        || swapchain.window_id != target.window_id
-                }
-                #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-                {
-                    min_width > swapchain.alloc_width
-                        || min_height > swapchain.alloc_height
-                        || swapchain.window_id != target.window_id
-                }
-            })
-            .unwrap_or(true);
-
-        let rect_changed = self.last_rect != rect || self.last_dpi_factor != dpi_factor;
-        if needs_new_swapchain {
-            if self.last_swapchain_with_completed_draws.is_none() {
-                self.last_swapchain_with_completed_draws = self.swapchain.take();
-            } else {
-                self.swapchain = None;
-            }
-
-            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-            let (alloc_width, alloc_height) = (min_width.max(1), min_height.max(1));
-            #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-            let (alloc_width, alloc_height) = (
-                min_width.max(64).next_power_of_two(),
-                min_height.max(64).next_power_of_two(),
-            );
-
-            self.swapchain = Some(HostSwapchain::new(
-                target.window_id,
-                alloc_width,
-                alloc_height,
-                cx,
-            ));
-        }
-
-        if rect_changed || needs_new_swapchain {
-            self.bootstrap_pending = true;
-            self.bootstrap_tick_count = 0;
-        }
-
-        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some()
-            && (rect_changed || needs_new_swapchain)
-        {
-            log!(
-                "runview host ensure build={} window={} rect=({}, {}) dpi={} min_px=({}, {}) new_swapchain={} alloc={:?}",
-                target.build_id.0,
-                target.window_id,
-                rect.size.x,
-                rect.size.y,
-                dpi_factor,
-                min_width,
-                min_height,
-                needs_new_swapchain,
-                self.swapchain
-                    .as_ref()
-                    .map(|swapchain| (swapchain.alloc_width, swapchain.alloc_height))
-            );
-        }
-
-        self.last_rect = rect;
-        self.last_dpi_factor = dpi_factor;
-    }
-
-    fn build_bootstrap_msgs(&mut self, cx: &mut Cx, target: RunTarget) -> Vec<StudioToApp> {
-        if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
-            return Vec::new();
-        }
-
-        let mut outbound = vec![StudioToApp::WindowGeomChange {
-            window_id: target.window_id,
-            dpi_factor: self.last_dpi_factor,
-            left: 0.0,
-            top: 0.0,
-            width: self.last_rect.size.x,
-            height: self.last_rect.size.y,
-        }];
-
-        if std::env::var_os("MAKEPAD_RUNVIEW_DPI_TRACE").is_some() {
-            let trace_bootstrap = (
-                target.build_id.0,
-                target.window_id,
-                self.last_rect.size.x.to_bits(),
-                self.last_rect.size.y.to_bits(),
-                self.last_dpi_factor.to_bits(),
-            );
-            if self.last_trace_bootstrap != Some(trace_bootstrap) {
-                self.last_trace_bootstrap = Some(trace_bootstrap);
-                log!(
-                    "runview host bootstrap build={} window={} logical=({}, {}) dpi={} px=({}, {})",
-                    target.build_id.0,
-                    target.window_id,
-                    self.last_rect.size.x,
-                    self.last_rect.size.y,
-                    self.last_dpi_factor,
-                    self.last_rect.size.x * self.last_dpi_factor,
-                    self.last_rect.size.y * self.last_dpi_factor
-                );
-            }
-        }
-
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        {
-            if !self.app_ready_for_swapchain {
-                return outbound;
-            }
-            let Some(endpoint_slot) = self.aux_chan_host_endpoint.as_ref() else {
-                return outbound;
-            };
-            let endpoint_guard = endpoint_slot.lock().unwrap();
-            let Some(host_endpoint) = endpoint_guard.as_ref() else {
-                return outbound;
-            };
-            if let Some(swapchain) = self.swapchain.as_mut() {
-                match shared_swapchain_from_host_swapchain(swapchain, cx, host_endpoint) {
-                    Ok(shared) => outbound.push(StudioToApp::Swapchain(shared)),
-                    Err(err) => log!("swapchain share failed: {:?}", err),
-                }
-            }
-        }
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        {
-            // Keep websocket-only targets, such as Android app sockets, on the
-            // remote frame path unless the app has explicitly signaled stdin-loop
-            // style readiness via RunViewCreated.
-            if !self.app_ready_for_swapchain {
-                return outbound;
-            }
-            if let Some(swapchain) = self.swapchain.as_ref() {
-                let shared_swapchain = shared_swapchain_from_host_swapchain(swapchain, cx);
-                outbound.push(StudioToApp::Swapchain(shared_swapchain));
-            }
-        }
-
-        outbound
-    }
-
-    pub fn set_presentable_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) {
-        if self.try_present_draw(cx, presentable_draw) {
-            self.pending_draw = None;
-            self.debug_present_ok_count += 1;
-            self.bootstrap_pending = false;
-            self.bootstrap_tick_count = 0;
-            self.remote_mode = false;
-            self.remote_frame_request_in_flight = false;
-            self.remote_requested_frame_id = None;
-        } else {
-            self.pending_draw = Some(presentable_draw);
-        }
-    }
-
     pub fn set_run_target(
         &mut self,
         cx: &mut Cx,
@@ -864,109 +409,6 @@ impl DesktopRunView {
 
     pub fn clear_run_target(&mut self, cx: &mut Cx) {
         self.set_target(cx, None);
-    }
-
-    pub fn show_input_viz(
-        &mut self,
-        cx: &mut Cx,
-        kind: RunViewInputVizKind,
-        x: Option<f64>,
-        y: Option<f64>,
-    ) {
-        let has_target_size = self.last_rect.size.x > 0.0 && self.last_rect.size.y > 0.0;
-        let event = match kind {
-            RunViewInputVizKind::ClickDown | RunViewInputVizKind::ClickUp => {
-                self.awaiting_focus_rect = true;
-                self.input_focus_rect = None;
-                let local_pos = match (x, y) {
-                    (Some(x), Some(y)) => dvec2(x, y),
-                    _ if has_target_size => {
-                        dvec2(self.last_rect.size.x * 0.5, self.last_rect.size.y * 0.5)
-                    }
-                    _ => self.ai_viz_pos,
-                };
-                let local_pos = dvec2(
-                    local_pos.x.clamp(0.0, self.last_rect.size.x.max(0.0)),
-                    local_pos.y.clamp(0.0, self.last_rect.size.y.max(0.0)),
-                );
-                InputVizEvent {
-                    kind,
-                    pos: local_pos,
-                    size: None,
-                }
-            }
-            RunViewInputVizKind::TypeText | RunViewInputVizKind::Return => {
-                if self.awaiting_focus_rect {
-                    self.pending_focus_viz_queue.push_back(kind);
-                    return;
-                }
-                let Some(focus_rect) = self.input_focus_rect else {
-                    return;
-                };
-                InputVizEvent {
-                    kind,
-                    pos: focus_rect.pos,
-                    size: Some(focus_rect.size),
-                }
-            }
-        };
-        self.enqueue_or_start_input_viz(event);
-        self.redraw(cx);
-    }
-
-    fn start_input_viz(&mut self, event: InputVizEvent) {
-        let total_frames = match event.kind {
-            // Old studio model: quick down pulse, then longer up ripple.
-            RunViewInputVizKind::ClickDown => 4,
-            RunViewInputVizKind::ClickUp => 30,
-            RunViewInputVizKind::TypeText => 16,
-            RunViewInputVizKind::Return => 20,
-        };
-        self.ai_viz_kind = Some(event.kind);
-        self.ai_viz_pos = event.pos;
-        self.ai_viz_size = event.size;
-        self.ai_viz_frames_left = total_frames;
-        self.ai_viz_total_frames = total_frames;
-    }
-
-    fn enqueue_or_start_input_viz(&mut self, event: InputVizEvent) {
-        if self.ai_viz_kind.is_some() {
-            self.ai_viz_queue.push_back(event);
-        } else {
-            self.start_input_viz(event);
-        }
-    }
-
-    fn set_input_focus_rect(
-        &mut self,
-        cx: &mut Cx,
-        x: Option<f64>,
-        y: Option<f64>,
-        width: Option<f64>,
-        height: Option<f64>,
-    ) {
-        self.input_focus_rect = match (x, y, width, height) {
-            (Some(x), Some(y), Some(width), Some(height)) if width > 0.0 && height > 0.0 => {
-                Some(Rect {
-                    pos: dvec2(x, y),
-                    size: dvec2(width, height),
-                })
-            }
-            _ => None,
-        };
-        self.awaiting_focus_rect = false;
-        if let Some(focus_rect) = self.input_focus_rect {
-            while let Some(kind) = self.pending_focus_viz_queue.pop_front() {
-                self.enqueue_or_start_input_viz(InputVizEvent {
-                    kind,
-                    pos: focus_rect.pos,
-                    size: Some(focus_rect.size),
-                });
-            }
-        } else {
-            self.pending_focus_viz_queue.clear();
-        }
-        self.redraw(cx);
     }
 
     fn local_from_area(&self, cx: &Cx, abs: Vec2d) -> Option<Vec2d> {
@@ -1099,9 +541,7 @@ impl Widget for DesktopRunView {
                         RunViewInputVizKind::TypeText => {
                             ([1.00, 0.78, 0.24, 1.0], 0.0, 0.0, 0.0, 0.0)
                         }
-                        RunViewInputVizKind::Return => {
-                            ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0)
-                        }
+                        RunViewInputVizKind::Return => ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0),
                     };
                     (
                         color,
@@ -1110,13 +550,10 @@ impl Widget for DesktopRunView {
                         ripple_radius,
                         ripple_alpha,
                         0.0f32,
-                        6.0f32,
+                        0.0f32,
                         1.5f32,
                         Rect {
-                            pos: dvec2(
-                                rect.pos.x + self.ai_viz_pos.x - 28.0,
-                                rect.pos.y + self.ai_viz_pos.y - 28.0,
-                            ),
+                            pos: rect.pos + self.ai_viz_pos - dvec2(28.0, 28.0),
                             size: dvec2(56.0, 56.0),
                         },
                     )
@@ -1124,29 +561,21 @@ impl Widget for DesktopRunView {
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(dot_radius), &[dot_radius]);
-                self.draw_ai_viz.draw_vars.set_dyn_instance(
-                    cx,
-                    id!(dot_alpha),
-                    &[dot_alpha.max(0.0)],
-                );
-                self.draw_ai_viz.draw_vars.set_dyn_instance(
-                    cx,
-                    id!(ripple_radius),
-                    &[ripple_radius],
-                );
-                self.draw_ai_viz.draw_vars.set_dyn_instance(
-                    cx,
-                    id!(ripple_alpha),
-                    &[ripple_alpha.max(0.0)],
-                );
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(dot_alpha), &[dot_alpha]);
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(ripple_radius), &[ripple_radius]);
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(ripple_alpha), &[ripple_alpha]);
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(shape_kind), &[shape_kind]);
-                self.draw_ai_viz.draw_vars.set_dyn_instance(
-                    cx,
-                    id!(corner_radius),
-                    &[corner_radius],
-                );
+                self.draw_ai_viz
+                    .draw_vars
+                    .set_dyn_instance(cx, id!(corner_radius), &[corner_radius]);
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(stroke_width), &[stroke_width]);
@@ -1154,52 +583,57 @@ impl Widget for DesktopRunView {
                     .draw_vars
                     .set_dyn_instance(cx, id!(color), &color);
                 self.draw_ai_viz.draw_abs(cx, viz_rect);
-                self.ai_viz_frames_left = self.ai_viz_frames_left.saturating_sub(1);
-                if self.ai_viz_frames_left == 0 {
-                    self.ai_viz_kind = None;
-                    self.ai_viz_size = None;
-                    if let Some(next) = self.ai_viz_queue.pop_front() {
-                        self.start_input_viz(next);
-                    }
-                }
-                self.redraw(cx);
-            } else {
-                self.ai_viz_kind = None;
-                self.ai_viz_size = None;
             }
         }
 
         if waiting_for_framebuffer {
-            self.no_fb_view
-                .draw_walk_all(cx, scope, Walk::abs_rect(rect));
+            self.no_fb_view.draw_all(cx, scope);
         }
-        self.area = self.draw_app.area();
-        if target.is_some() && cx.has_key_focus(self.area) {
-            cx.show_text_ime(self.area, self.clamped_ime_pos(rect));
-        }
+
+        cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        let target = self.current_target;
-
-        if let Event::Timer(timer_event) = event {
-            if self.tick_timer.is_timer(timer_event).is_some() {
-                if let Some(target) = target {
-                    let mut msgs = Vec::new();
-                    let should_bootstrap =
-                        self.debug_present_ok_count == 0 || self.bootstrap_pending;
-                    if should_bootstrap {
-                        self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
-                        if self.bootstrap_tick_count == 1 || self.bootstrap_tick_count % 15 == 0 {
-                            msgs.extend(self.build_bootstrap_msgs(cx, target));
+        if let Event::Timer(te) = event {
+            if self.tick_timer.is_timer(te).is_some() {
+                let mut outbound = Vec::new();
+                if self.bootstrap_pending {
+                    self.bootstrap_tick_count = self.bootstrap_tick_count.wrapping_add(1);
+                    if self.bootstrap_tick_count % 30 == 1 {
+                        if let Some(target) = self.current_target {
+                            outbound.extend(self.build_bootstrap_msgs(cx, target));
+                            if self.bootstrap_tick_count % 120 == 1 {
+                                if let Some(msg) = self.request_remote_frame_if_needed(target) {
+                                    outbound.push(msg);
+                                }
+                            }
                         }
                     }
-                    if let Some(request) = self.request_remote_frame_if_needed(target) {
-                        msgs.push(request);
+                }
+
+                let mut advance_queue = false;
+                if self.ai_viz_kind.is_some() {
+                    if self.ai_viz_frames_left > 0 {
+                        self.ai_viz_frames_left -= 1;
+                        self.redraw(cx);
+                    } else {
+                        advance_queue = true;
                     }
-                    msgs.push(StudioToApp::Tick);
-                    self.emit_to_app(cx, target.build_id, msgs);
+                }
+                if advance_queue {
+                    if let Some(event) = self.ai_viz_queue.pop_front() {
+                        self.start_input_viz(event);
+                        self.redraw(cx);
+                    } else {
+                        self.ai_viz_kind = None;
+                        self.ai_viz_frames_left = 0;
+                        self.ai_viz_total_frames = 0;
+                    }
+                }
+
+                if let Some(target) = self.current_target {
+                    self.emit_to_app(cx, target.build_id, outbound);
                 }
             }
         }
@@ -1208,118 +642,95 @@ impl Widget for DesktopRunView {
             self.handle_remote_decode_actions(cx, actions);
         }
 
-        let Some(target) = target else {
+        let Some(target) = self.current_target else {
             return;
         };
 
+        let mut outbound = Vec::new();
         match event.hits(cx, self.area) {
-            Hit::KeyFocus(_) => {
-                self.redraw(cx);
-            }
-            Hit::KeyFocusLost(_) => {
-                cx.hide_text_ime();
-                self.redraw(cx);
-            }
-            Hit::FingerDown(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
-                    cx.set_key_focus(self.area);
-                    self.ime_pos = Some(local);
-                    self.redraw(cx);
-                    self.emit_to_app(
-                        cx,
-                        target.build_id,
-                        vec![StudioToApp::MouseDown(RemoteMouseDown {
-                            button_raw_bits: Self::default_mouse_button(&e.device).bits(),
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
-                }
-            }
-            Hit::FingerMove(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
-                        cx,
-                        target.build_id,
-                        vec![StudioToApp::MouseMove(RemoteMouseMove {
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
-                }
-            }
-            Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {
+            Hit::FingerDown(fe) => {
+                cx.set_key_focus(self.area);
+                cx.show_text_ime(self.area, self.clamped_ime_pos(fe.rect));
                 self.is_hovered = true;
                 cx.set_cursor(self.remote_cursor);
-                if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
-                        cx,
-                        target.build_id,
-                        vec![StudioToApp::MouseMove(RemoteMouseMove {
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
+                if let Some(local_pos) = self.local_from_area(cx, fe.abs) {
+                    outbound.push(StudioToApp::MouseDown(RemoteMouseDown {
+                        button_raw_bits: Self::default_mouse_button(&fe.device).bits(),
+                        x: local_pos.x,
+                        y: local_pos.y,
+                        time: fe.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&fe.modifiers),
+                    }));
                 }
+            }
+            Hit::FingerMove(fe) => {
+                self.is_hovered = true;
+                cx.set_cursor(self.remote_cursor);
+                if let Some(local_pos) = self.local_from_area(cx, fe.abs) {
+                    outbound.push(StudioToApp::MouseMove(RemoteMouseMove {
+                        x: local_pos.x,
+                        y: local_pos.y,
+                        time: fe.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&fe.modifiers),
+                    }));
+                }
+            }
+            Hit::FingerUp(fe) => {
+                if let Some(local_pos) = self.local_from_area(cx, fe.abs) {
+                    outbound.push(StudioToApp::MouseUp(RemoteMouseUp {
+                        button_raw_bits: Self::default_mouse_button(&fe.device).bits(),
+                        x: local_pos.x,
+                        y: local_pos.y,
+                        time: fe.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&fe.modifiers),
+                    }));
+                }
+            }
+            Hit::FingerScroll(fe) => {
+                if let Some(local_pos) = self.local_from_area(cx, fe.abs) {
+                    outbound.push(StudioToApp::Scroll(RemoteScroll {
+                        x: local_pos.x,
+                        y: local_pos.y,
+                        sx: fe.scroll.x,
+                        sy: fe.scroll.y,
+                        is_mouse: fe.device.is_mouse(),
+                        time: fe.time,
+                        modifiers: RemoteKeyModifiers::from_key_modifiers(&fe.modifiers),
+                    }));
+                }
+            }
+            Hit::FingerHoverIn(_) => {
+                self.is_hovered = true;
+                cx.set_cursor(self.remote_cursor);
             }
             Hit::FingerHoverOut(_) => {
                 self.is_hovered = false;
                 cx.set_cursor(MouseCursor::Default);
             }
-            Hit::FingerUp(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
-                        cx,
-                        target.build_id,
-                        vec![StudioToApp::MouseUp(RemoteMouseUp {
-                            button_raw_bits: Self::default_mouse_button(&e.device).bits(),
-                            x: local.x,
-                            y: local.y,
-                            time: e.time,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
-                }
+            Hit::KeyDown(ke) => {
+                outbound.push(StudioToApp::KeyDown(ke.clone()));
             }
-            Hit::FingerScroll(e) => {
-                if let Some(local) = self.local_from_area(cx, e.abs) {
-                    self.emit_to_app(
-                        cx,
-                        target.build_id,
-                        vec![StudioToApp::Scroll(RemoteScroll {
-                            is_mouse: e.device.is_mouse(),
-                            time: e.time,
-                            x: local.x,
-                            y: local.y,
-                            sx: e.scroll.x,
-                            sy: e.scroll.y,
-                            modifiers: RemoteKeyModifiers::from_key_modifiers(&e.modifiers),
-                        })],
-                    );
-                }
+            Hit::KeyUp(ke) => {
+                outbound.push(StudioToApp::KeyUp(ke.clone()));
             }
-            Hit::TextInput(e) => {
-                self.emit_to_app(cx, target.build_id, vec![StudioToApp::TextInput(e)]);
-            }
-            Hit::KeyDown(e) => {
-                self.emit_to_app(cx, target.build_id, vec![StudioToApp::KeyDown(e)]);
-            }
-            Hit::KeyUp(e) => {
-                self.emit_to_app(cx, target.build_id, vec![StudioToApp::KeyUp(e)]);
+            Hit::TextInput(te) => {
+                outbound.push(StudioToApp::TextInput(te.clone()));
             }
             Hit::TextCopy(_) => {
-                self.emit_to_app(cx, target.build_id, vec![StudioToApp::TextCopy]);
+                outbound.push(StudioToApp::TextCopy);
             }
             Hit::TextCut(_) => {
-                self.emit_to_app(cx, target.build_id, vec![StudioToApp::TextCut]);
+                outbound.push(StudioToApp::TextCut);
             }
-            _ => {}
+            Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
+                outbound.push(StudioToApp::Kill);
+            }
+            _ => (),
+        }
+
+        if !outbound.is_empty() {
+            self.emit_to_app(cx, target.build_id, outbound);
         }
     }
 }
@@ -1337,21 +748,37 @@ impl DesktopRunViewRef {
         }
     }
 
+    pub fn clear_run_target(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.clear_run_target(cx);
+        }
+    }
+
+    pub fn rebootstrap_after_app_ready(
+        &self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        window_id: usize,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.rebootstrap_after_app_ready(cx, build_id, window_id);
+        }
+    }
+
     pub fn set_presentable_draw(&self, cx: &mut Cx, presentable_draw: PresentableDraw) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_presentable_draw(cx, presentable_draw);
         }
     }
 
-    pub fn set_remote_frame(&self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
+    pub fn set_remote_frame(
+        &self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        frame: RunViewFrameData,
+    ) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_remote_frame(cx, build_id, frame);
-        }
-    }
-
-    pub fn clear_run_target(&self, cx: &mut Cx) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.clear_run_target(cx);
         }
     }
 
@@ -1385,10 +812,5 @@ impl DesktopRunViewRef {
             inner.set_input_focus_rect(cx, x, y, width, height);
         }
     }
-
-    pub fn rebootstrap_after_app_ready(&self, cx: &mut Cx, build_id: QueryId, window_id: usize) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.rebootstrap_after_app_ready(cx, build_id, window_id);
-        }
-    }
 }
+
