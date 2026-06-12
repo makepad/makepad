@@ -740,22 +740,36 @@ impl X11Cx {
                     let _ = cx.net.http_cancel(request_id);
                 }
                 CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
-                    let area_pos = area.clipped_rect(&cx).pos;
+                    let area_rect = area.clipped_rect(&cx);
+                    let area_pos = area_rect.pos;
                     let window_id = cx.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
                     let top_left = cx.windows[window_id]
                         .layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
                     let bottom_right = cx.windows[window_id]
                         .layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
+                    let area_top_left = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_rect.pos);
+                    let area_bottom_right = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_rect.pos + area_rect.size);
                     let ime_rect = Rect {
                         pos: top_left,
                         size: bottom_right - top_left,
                     };
+                    let ime_area_rect = Rect {
+                        pos: dvec2(area_top_left.x, top_left.y),
+                        size: dvec2(
+                            area_bottom_right.x - area_top_left.x,
+                            bottom_right.y - top_left.y,
+                        ),
+                    };
                     if x11_ime_debug_enabled() {
                         crate::log!(
-                            "X11 IME: ShowTextIME window_id={:?} area_pos=({}, {}) cursor_rect=({}, {}, {}, {}) ime_rect=({}, {}, {}, {})",
+                            "X11 IME: ShowTextIME window_id={:?} area_pos=({}, {}) area_size=({}, {}) cursor_rect=({}, {}, {}, {}) ime_rect=({}, {}, {}, {}) ime_area_rect=({}, {}, {}, {})",
                             window_id,
                             area_pos.x,
                             area_pos.y,
+                            area_rect.size.x,
+                            area_rect.size.y,
                             cursor_rect.pos.x,
                             cursor_rect.pos.y,
                             cursor_rect.size.x,
@@ -763,11 +777,15 @@ impl X11Cx {
                             ime_rect.pos.x,
                             ime_rect.pos.y,
                             ime_rect.size.x,
-                            ime_rect.size.y
+                            ime_rect.size.y,
+                            ime_area_rect.pos.x,
+                            ime_area_rect.pos.y,
+                            ime_area_rect.size.x,
+                            ime_area_rect.size.y
                         );
                     }
                     opengl_windows.iter_mut().for_each(|w| {
-                        w.xlib_window.set_ime_rect(ime_rect);
+                        w.xlib_window.set_ime_rect(ime_rect, ime_area_rect);
                         w.xlib_window.set_ime_active(true);
                     });
                 }
@@ -777,7 +795,7 @@ impl X11Cx {
                     }
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_active(false);
-                        w.xlib_window.set_ime_rect(Rect::default());
+                        w.xlib_window.set_ime_rect(Rect::default(), Rect::default());
                     });
                 }
                 CxOsOp::CheckPermission {

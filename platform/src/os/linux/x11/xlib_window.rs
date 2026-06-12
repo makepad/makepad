@@ -22,9 +22,10 @@ pub struct XlibWindow {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
 
-    // Caret/composition line rect in window-relative native points (size includes
-    // the line height); fed to the IM as spot (line bottom) + area (whole line).
+    // Caret/composition line and current-line area in window-relative native
+    // points; fed to the IM as spot plus clipping area.
     pub ime_rect: Rect,
+    pub ime_area_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
@@ -55,6 +56,7 @@ impl XlibWindow {
             last_window_geom: WindowGeom::default(),
             last_nc_mode: None,
             ime_rect: Rect::default(),
+            ime_area_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ime_active: false,
@@ -556,11 +558,12 @@ impl XlibWindow {
         }
     }
 
-    pub fn set_ime_rect(&mut self, rect: Rect) {
-        if self.ime_rect == rect {
+    pub fn set_ime_rect(&mut self, rect: Rect, area_rect: Rect) {
+        if self.ime_rect == rect && self.ime_area_rect == area_rect {
             return;
         }
         self.ime_rect = rect;
+        self.ime_area_rect = area_rect;
         let Some(mut xim_context) = self.xic else {
             return;
         };
@@ -573,7 +576,16 @@ impl XlibWindow {
         let line_top_px = rect.pos.y * dpi_factor;
         let line_bottom_px = (rect.pos.y + rect.size.y) * dpi_factor;
         let below_clearance = line_height_px * 0.6;
-        let above_clearance = line_height_px * 1.2;
+        let above_clearance = line_height_px * 3.0;
+        let line_area = if area_rect.size.x > 0.0 && area_rect.size.y > 0.0 {
+            area_rect
+        } else {
+            rect
+        };
+        let area_line_left_px = line_area.pos.x * dpi_factor;
+        let area_line_top_px = line_area.pos.y * dpi_factor;
+        let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
+        let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
         let bottom_space_px = self.screen_bottom_space_px(rect, dpi_factor);
         let anchor_above = bottom_space_px
             .map(|space| space < line_height_px * 6.0)
@@ -583,20 +595,24 @@ impl XlibWindow {
         } else {
             line_bottom_px + below_clearance
         };
+        let area_left_px = area_line_left_px.min(rect.pos.x * dpi_factor);
+        let area_right_px = area_line_right_px.max((rect.pos.x + rect.size.x) * dpi_factor);
         let area_top_px = if anchor_above {
-            spot_y_px
+            spot_y_px.min(area_line_top_px)
         } else {
-            line_top_px - below_clearance
+            (line_top_px - below_clearance).min(area_line_top_px)
         };
-        let area_bottom_px = line_bottom_px + below_clearance;
+        let area_bottom_px = (line_bottom_px + below_clearance)
+            .max(area_line_bottom_px)
+            .max(spot_y_px);
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
             y: spot_y_px as i16,
         };
         let area_px = x11_sys::XRectangle {
-            x: (rect.pos.x * dpi_factor) as i16,
+            x: area_left_px as i16,
             y: area_top_px as i16,
-            width: (rect.size.x * dpi_factor).max(1.0) as u16,
+            width: (area_right_px - area_left_px).max(1.0) as u16,
             height: (area_bottom_px - area_top_px).max(1.0) as u16,
         };
         unsafe {
@@ -691,7 +707,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) anchor_above={} bottom_space_px={:?} failed_attr={}{}",
+                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) anchor_above={} bottom_space_px={:?} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -700,6 +716,10 @@ impl XlibWindow {
                     rect.pos.y,
                     rect.size.x,
                     rect.size.y,
+                    area_rect.pos.x,
+                    area_rect.pos.y,
+                    area_rect.size.x,
+                    area_rect.size.y,
                     spot_px.x,
                     spot_px.y,
                     area_px.x,
@@ -726,8 +746,10 @@ impl XlibWindow {
                 unsafe { x11_sys::XSetICFocus(xim_context.xic) };
                 if self.ime_rect != Rect::default() {
                     let ime_rect = self.ime_rect;
+                    let ime_area_rect = self.ime_area_rect;
                     self.ime_rect = Rect::default();
-                    self.set_ime_rect(ime_rect);
+                    self.ime_area_rect = Rect::default();
+                    self.set_ime_rect(ime_rect, ime_area_rect);
                 }
             } else {
                 unsafe { x11_sys::XUnsetICFocus(xim_context.xic) };
