@@ -60,6 +60,7 @@ impl ProviderStreamDeltas {
 }
 
 pub(super) trait AiProviderBackend {
+    #[allow(clippy::too_many_arguments)]
     fn build_http_request(
         &self,
         backend: &AiBackendConfig,

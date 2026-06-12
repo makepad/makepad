@@ -1,26 +1,18 @@
 use super::*;
-use makepad_studio_protocol::hub_protocol::{FileNode, FileTreeChange};
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[path = "app_backend/cli.rs"]
 pub mod cli;
 use cli::*;
 #[path = "app_backend/panel_anim.rs"]
 pub mod panel_anim;
-use panel_anim::*;
 #[path = "app_backend/terminal_sync.rs"]
 pub mod terminal_sync;
-use terminal_sync::*;
 
 const FILE_FILTER_DEBOUNCE_SECONDS: f64 = 0.14;
 const FILE_FILTER_MAX_RESULTS: usize = 600;
 
 impl App {
-
-
-
-
     pub(super) fn start_backend(&mut self, cx: &mut Cx) {
         let current_path = match env::current_dir().and_then(|p| p.canonicalize()) {
             Ok(path) => path,
@@ -140,20 +132,15 @@ impl App {
                 .unwrap_or(id!(mount_first));
             let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, anchor)?;
             let tab_id = dock.unique_id(LiveId::from_str(&format!("mount/{}", mount)).0);
-            if dock
-                .create_tab(
-                    cx,
-                    tab_bar,
-                    tab_id,
-                    id!(MountWorkspace),
-                    mount.to_string(),
-                    id!(MountTab),
-                    Some(pos),
-                )
-                .is_none()
-            {
-                return None;
-            }
+            dock.create_tab(
+                cx,
+                tab_bar,
+                tab_id,
+                id!(MountWorkspace),
+                mount.to_string(),
+                id!(MountTab),
+                Some(pos),
+            )?;
             tab_id
         };
 
@@ -179,9 +166,7 @@ impl App {
     pub(super) fn mount_workspace_widget(&mut self, cx: &mut Cx, mount: &str) -> Option<WidgetRef> {
         let tab_id = self.ensure_mount_tab(cx, mount)?;
         let mount_dock = self.ui.dock(cx, ids!(mount_dock));
-        if mount_dock.find_tab_bar_of_tab(tab_id).is_none() {
-            return None;
-        }
+        mount_dock.find_tab_bar_of_tab(tab_id)?;
         Some(mount_dock.item(tab_id))
     }
 
@@ -197,20 +182,15 @@ impl App {
         }
         if dock.find_tab_bar_of_tab(id!(terminal_first)).is_none() {
             let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, id!(log_first))?;
-            if dock
-                .create_tab(
-                    cx,
-                    tab_bar,
-                    id!(terminal_first),
-                    id!(TerminalFirstPane),
-                    "Terminal".to_string(),
-                    id!(TerminalTab),
-                    Some(pos),
-                )
-                .is_none()
-            {
-                return None;
-            }
+            dock.create_tab(
+                cx,
+                tab_bar,
+                id!(terminal_first),
+                id!(TerminalFirstPane),
+                "Terminal".to_string(),
+                id!(TerminalTab),
+                Some(pos),
+            )?;
         }
         dock.set_tab_title(cx, id!(terminal_first), "Terminal".to_string());
         Some(dock)
@@ -499,7 +479,6 @@ impl App {
         let _ = self.send_studio(ClientToHub::ListBuilds);
         self.set_status(cx, &format!("requesting stop-all for {}", mount));
     }
-
 
     pub(super) fn select_mount(&mut self, cx: &mut Cx, mount: &str) {
         self.data.active_mount = Some(mount.to_string());

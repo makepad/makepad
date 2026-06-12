@@ -1,15 +1,15 @@
 use crate::makepad_widgets::*;
 
-#[path = "app_ui/shared.rs"]
-pub mod shared;
 #[path = "app_ui/ai_pane.rs"]
 pub mod ai_pane;
-#[path = "app_ui/sidebar_panes.rs"]
-pub mod sidebar_panes;
-#[path = "app_ui/editor_panes.rs"]
-pub mod editor_panes;
 #[path = "app_ui/bottom_panes.rs"]
 pub mod bottom_panes;
+#[path = "app_ui/editor_panes.rs"]
+pub mod editor_panes;
+#[path = "app_ui/shared.rs"]
+pub mod shared;
+#[path = "app_ui/sidebar_panes.rs"]
+pub mod sidebar_panes;
 
 pub fn register_all(vm: &mut ScriptVm) {
     shared::script_mod(vm);

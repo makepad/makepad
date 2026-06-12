@@ -31,17 +31,12 @@ pub fn parse_workflow_markdown(content: &str) -> Option<ParsedWorkflow> {
                     .to_string();
             }
         } else if trimmed.starts_with("## ") {
-            if trimmed
+            in_steps = trimmed
                 .to_lowercase()
                 .strip_prefix("##")
                 .unwrap_or("")
                 .trim()
-                == "steps"
-            {
-                in_steps = true;
-            } else {
-                in_steps = false;
-            }
+                == "steps";
         } else if in_steps && trimmed.starts_with("### ") {
             if let Some(s_name) = current_step_name.take() {
                 let s_desc = current_step_desc.join("\n").trim().to_string();

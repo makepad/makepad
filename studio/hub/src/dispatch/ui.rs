@@ -5,7 +5,7 @@ use makepad_studio_protocol::hub_protocol::{
     SaveResult,
 };
 use makepad_studio_protocol::{
-    KeyCode, KeyEvent, KeyModifiers, LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
     RemoteMouseUp, ScreenshotRequest, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
     WidgetTreeDumpRequest,
 };

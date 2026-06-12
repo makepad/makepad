@@ -34,6 +34,7 @@ pub struct TerminalManager {
 }
 
 impl TerminalManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn open_terminal(
         &mut self,
         path: String,
@@ -212,10 +213,7 @@ fn run_terminal_loop(
         }
 
         let mut output = Vec::new();
-        loop {
-            let Some(data) = pty.try_read() else {
-                break;
-            };
+        while let Some(data) = pty.try_read() {
             if data.is_empty() {
                 continue;
             }

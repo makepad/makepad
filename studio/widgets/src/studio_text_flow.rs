@@ -473,7 +473,7 @@ impl SelectionTracker {
                     };
                     let dist = Self::point_to_rect_distance(point, rect);
 
-                    if best.map_or(true, |(_, d)| dist < d) {
+                    if best.is_none_or(|(_, d)| dist < d) {
                         // Find cursor position within this segment
                         let local_point = TextPoint::new(
                             ((point.x - origin.x) / *font_scale as f64) as f32,
@@ -485,7 +485,7 @@ impl SelectionTracker {
                 }
                 SelectionSegment::Gap { rect, text_start } => {
                     let dist = Self::point_to_rect_distance(point, *rect);
-                    if best.map_or(true, |(_, d)| dist < d) {
+                    if best.is_none_or(|(_, d)| dist < d) {
                         best = Some((*text_start, dist));
                     }
                 }
@@ -497,7 +497,7 @@ impl SelectionTracker {
                     if area.is_valid(cx) {
                         let rect = area.rect(cx);
                         let dist = Self::point_to_rect_distance(point, rect);
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             // Linear interpolation based on y position
                             let local_y = (point.y - rect.pos.y).max(0.0);
                             let fraction = if rect.size.y > 0.0 {
@@ -791,10 +791,10 @@ pub struct StudioTextFlow {
     #[rust]
     last_rate_time: f64,
     /// Number of chars over which to fade (default 50)
-    #[live(50.0)]
+    #[live(50.0_f32)]
     pub fade_chars: f32,
     /// Minimum animation speed in chars per second
-    #[live(100.0)]
+    #[live(100.0_f32)]
     pub min_fade_speed: f32,
 }
 
@@ -865,11 +865,11 @@ impl RectAreasTracker {
 
     // this returns the range in the area vec
     pub fn pop_tracker(&mut self) -> (usize, usize) {
-        return (self.stack.pop().unwrap(), self.pos);
+        (self.stack.pop().unwrap(), self.pos)
     }
 
     pub fn track_rect(&mut self, cx: &mut Cx2d, rect: Rect) {
-        if self.stack.len() > 0 {
+        if !self.stack.is_empty() {
             if self.pos >= self.areas.len() {
                 self.areas.push(Area::Empty);
             }
@@ -950,7 +950,7 @@ impl Widget for StudioTextFlow {
             self.begin(cx, walk);
             return DrawStep::make_step();
         }
-        if let Some(_) = self.draw_state.get() {
+        if self.draw_state.get().is_some() {
             self.end(cx);
             self.draw_state.end();
         }
@@ -1779,7 +1779,7 @@ impl StudioTextFlow {
                 return;
             }
 
-            if (text == " " || text == "") && self.first_thing_on_a_line {
+            if (text == " " || text.is_empty()) && self.first_thing_on_a_line {
                 return;
             }
             let text = if self.first_thing_on_a_line {
@@ -1999,10 +1999,10 @@ impl StudioTextFlow {
                 let pad_l_rect = StudioTextFlow::walk_margin(cx, pad_l);
                 areas_tracker.track_rect(cx, pad_l_rect);
 
-                let code_pad_h = (self.inline_code_padding.top
+                let code_pad_h = self.inline_code_padding.top
                     + self.inline_code_padding.bottom
                     + self.inline_code_margin.top
-                    + self.inline_code_margin.bottom) as f64;
+                    + self.inline_code_margin.bottom;
                 let result = dt.draw_walk_resumable_with_background(cx, text, |cx, mut rect, _| {
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();

@@ -295,7 +295,7 @@ impl FlatFileTree {
             .iter()
             .map(|(id, node)| (node.path.matches('/').count(), *id))
             .collect();
-        ids_by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+        ids_by_depth.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         for (_, id) in ids_by_depth {
             let Some(node) = self.nodes.get(&id) else {

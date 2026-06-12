@@ -1471,13 +1471,12 @@ impl AiManager {
         if spawn_subagent_call.is_some() || complete_task_call.is_some() {
             if let Some(mount_state) = self.mounts.get_mut(mount) {
                 let (parent_id, backend_id) = {
-                    if let Some(agent) = mount_state.agents.get(&agent_id) {
+                    {
+                        let agent = mount_state.agents.get(&agent_id)?;
                         if agent.run_token != run_token {
                             return None;
                         }
                         (agent.parent_agent_id, agent.backend_id.clone())
-                    } else {
-                        return None;
                     }
                 };
 
@@ -2597,9 +2596,7 @@ impl AiManager {
             } else {
                 fallback_backend_id.clone()
             };
-            let status = if pending {
-                "ready".to_string()
-            } else if chat.status.trim().is_empty() {
+            let status = if pending || chat.status.trim().is_empty() {
                 "ready".to_string()
             } else {
                 chat.status
@@ -2818,7 +2815,7 @@ impl AiManager {
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.as_bytes().len(),
+                body.len(),
                 body
             );
             let _ = stream.write_all(response.as_bytes());
@@ -2899,7 +2896,7 @@ impl AiManager {
                 Err(_) => continue,
             };
             let file_path = entry.path();
-            if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
+            if file_path.is_file() && file_path.extension().is_some_and(|ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&file_path) {
                     if let Some(parsed) = parse_skill_markdown(&content) {
                         skills.push(parsed);
@@ -2926,7 +2923,7 @@ impl AiManager {
                 Err(_) => continue,
             };
             let file_path = entry.path();
-            if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
+            if file_path.is_file() && file_path.extension().is_some_and(|ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&file_path) {
                     if let Some(parsed) = parse_workflow_markdown(&content) {
                         workflows.push(parsed);
@@ -3072,11 +3069,8 @@ fn prune_history(history: &[ConversationItem]) -> Vec<ConversationItem> {
         match &mut new_item {
             ConversationItem::ToolResult { content, .. } => {
                 total_chars += content.len();
-                if total_chars > 16000 {
-                    if content.len() > 300 {
-                        *content =
-                            format!("{}... [truncated for context efficiency]", &content[..300]);
-                    }
+                if total_chars > 16000 && content.len() > 300 {
+                    *content = format!("{}... [truncated for context efficiency]", &content[..300]);
                 }
             }
             ConversationItem::User { text } => {
@@ -3092,6 +3086,7 @@ fn prune_history(history: &[ConversationItem]) -> Vec<ConversationItem> {
     pruned
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_request_body(
     backend: &AiBackendConfig,
     mount: &str,
@@ -3334,6 +3329,7 @@ fn chatgpt_model_from_str(model: &str) -> ChatGptModel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_chatgpt_request(
     backend: &AiBackendConfig,
     mount: &str,
@@ -4031,7 +4027,7 @@ fn tool_read_file(root_path: &Path, args: ReadFileArgs) -> Result<String, String
             bytes.len()
         ));
     }
-    if bytes.iter().any(|byte| *byte == 0) {
+    if bytes.contains(&0) {
         return Err(format!("'{}' looks like a binary file", args.path));
     }
     let text =
@@ -4278,7 +4274,7 @@ fn search_file(
     }
     let bytes =
         fs::read(path).map_err(|err| format!("failed to read '{}': {}", path.display(), err))?;
-    if bytes.len() > MAX_FILE_BYTES || bytes.iter().any(|byte| *byte == 0) {
+    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
         return Ok(());
     }
     let text = match String::from_utf8(bytes) {

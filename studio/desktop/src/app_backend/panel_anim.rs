@@ -1,7 +1,4 @@
-use crate::{
-    makepad_widgets::*,
-    App, SidebarAnimation, BottomPanelAnimation, AgentPanelAnimation,
-};
+use crate::{makepad_widgets::*, AgentPanelAnimation, App, BottomPanelAnimation, SidebarAnimation};
 
 impl App {
     pub(crate) fn panel_animation_progress(time: f64, start_time: &mut Option<f64>) -> f64 {
@@ -12,12 +9,21 @@ impl App {
         1.0 - (1.0 - progress).powi(3)
     }
 
-    pub(crate) fn workspace_root_splitter_position(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
+    pub(crate) fn workspace_root_splitter_position(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+    ) -> Option<f64> {
         let dock = self.mount_workspace_dock(cx, mount)?;
         dock.splitter_position(id!(root))
     }
 
-    pub(crate) fn set_workspace_root_splitter_width(&mut self, cx: &mut Cx, mount: &str, width: f64) -> bool {
+    pub(crate) fn set_workspace_root_splitter_width(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+        width: f64,
+    ) -> bool {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return false;
         };
@@ -61,7 +67,11 @@ impl App {
         }
     }
 
-    pub(crate) fn workspace_main_splitter_height(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
+    pub(crate) fn workspace_main_splitter_height(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+    ) -> Option<f64> {
         let dock = self.mount_workspace_dock(cx, mount)?;
         let dock_height = dock.area().rect(cx).size.y.max(0.0);
         let splitter_position = dock.splitter_position(id!(main_split))?;
@@ -85,7 +95,11 @@ impl App {
         )
     }
 
-    pub(crate) fn workspace_agent_splitter_width(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
+    pub(crate) fn workspace_agent_splitter_width(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+    ) -> Option<f64> {
         let dock = self.mount_workspace_dock(cx, mount)?;
         let dock_width = dock.area().rect(cx).size.x.max(0.0);
         if let Some(DockItem::Splitter { align, .. }) = dock.clone_state()?.get(&id!(agent_split)) {
@@ -99,7 +113,12 @@ impl App {
         Some((dock_width - splitter_position).max(0.0))
     }
 
-    pub(crate) fn set_workspace_agent_splitter_width(&mut self, cx: &mut Cx, mount: &str, width: f64) -> bool {
+    pub(crate) fn set_workspace_agent_splitter_width(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+        width: f64,
+    ) -> bool {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return false;
         };
@@ -111,7 +130,11 @@ impl App {
         )
     }
 
-    pub(crate) fn workspace_selected_sidebar_tab(&mut self, cx: &mut Cx, mount: &str) -> Option<LiveId> {
+    pub(crate) fn workspace_selected_sidebar_tab(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+    ) -> Option<LiveId> {
         let dock = self.mount_workspace_dock(cx, mount)?;
         let dock_items = dock.clone_state()?;
         let Some(DockItem::Tabs { tabs, selected, .. }) = dock_items.get(&id!(tree_tabs)) else {
@@ -241,7 +264,12 @@ impl App {
         );
     }
 
-    pub(crate) fn start_bottom_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_height: f64) {
+    pub(crate) fn start_bottom_panel_animation(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+        to_height: f64,
+    ) {
         let from_height = self
             .workspace_main_splitter_height(cx, mount)
             .unwrap_or(to_height);

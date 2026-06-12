@@ -60,15 +60,12 @@ impl App {
     }
 
     pub(super) fn drain_studio_messages(&mut self, cx: &mut Cx) {
-        loop {
-            let Some(msg) = self
-                .data
-                .studio
-                .as_ref()
-                .and_then(|studio| studio.try_recv())
-            else {
-                break;
-            };
+        while let Some(msg) = self
+            .data
+            .studio
+            .as_ref()
+            .and_then(|studio| studio.try_recv())
+        {
             self.handle_studio_message(cx, msg);
         }
     }
@@ -85,7 +82,7 @@ impl App {
             | HubToClient::FindFileResults { .. } => {
                 self.handle_file_message(cx, msg);
             }
-            
+
             // Run messages
             HubToClient::Builds { .. }
             | HubToClient::RunItems { .. }
@@ -768,11 +765,8 @@ impl App {
     }
 
     fn handle_ai_message(&mut self, cx: &mut Cx, msg: HubToClient) {
-        match msg {
-            HubToClient::AiMountState { mount, state } => {
-                self.receive_ai_state(cx, &mount, state);
-            }
-            _ => {}
+        if let HubToClient::AiMountState { mount, state } = msg {
+            self.receive_ai_state(cx, &mount, state);
         }
     }
 

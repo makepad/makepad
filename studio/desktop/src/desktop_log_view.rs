@@ -242,7 +242,7 @@ impl DesktopLogView {
         visible_rows.saturating_sub(used_rows)
     }
 
-    fn collect_entries<'a>(data: &'a AppData, tab_id: LiveId) -> Option<&'a VecDeque<UiLogEntry>> {
+    fn collect_entries(data: &AppData, tab_id: LiveId) -> Option<&VecDeque<UiLogEntry>> {
         if let Some(state) = data.log_tab_state.get(&tab_id) {
             return data.build_log_entries.get(&state.build_id);
         }
@@ -336,12 +336,12 @@ impl Widget for DesktopLogView {
             if let Some(mut list) = step.as_portal_list().borrow_mut() {
                 if let Some(data) = scope.data.get_mut::<AppData>() {
                     if let Some(entries) = Self::collect_entries(data, tab_id) {
-                        self.draw_entries(cx, &mut *list, entries);
+                        self.draw_entries(cx, &mut list, entries);
                     } else {
-                        self.draw_empty(cx, &mut *list, "No logs yet");
+                        self.draw_empty(cx, &mut list, "No logs yet");
                     }
                 } else {
-                    self.draw_empty(cx, &mut *list, "No app state");
+                    self.draw_empty(cx, &mut list, "No app state");
                 }
             }
         }

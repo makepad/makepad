@@ -1,13 +1,18 @@
 use super::*;
-use makepad_studio_protocol::hub_protocol::FrameCodec;
-use makepad_studio_protocol::RunViewFrameRequest;
 use crate::makepad_widgets::image_cache::{
     load_image_from_cache, load_image_from_data_async, process_async_image_load, AsyncImageLoad,
     AsyncLoadResult,
 };
+use makepad_studio_protocol::hub_protocol::FrameCodec;
+use makepad_studio_protocol::RunViewFrameRequest;
 
 impl DesktopRunView {
-    pub(crate) fn set_remote_frame(&mut self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
+    pub(crate) fn set_remote_frame(
+        &mut self,
+        cx: &mut Cx,
+        build_id: QueryId,
+        frame: RunViewFrameData,
+    ) {
         let Some(target) = self.current_target else {
             return;
         };
@@ -142,7 +147,10 @@ impl DesktopRunView {
             .remove(path);
     }
 
-    pub(crate) fn request_remote_frame_if_needed(&mut self, target: RunTarget) -> Option<StudioToApp> {
+    pub(crate) fn request_remote_frame_if_needed(
+        &mut self,
+        target: RunTarget,
+    ) -> Option<StudioToApp> {
         if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
             return None;
         }

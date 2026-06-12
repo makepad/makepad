@@ -284,9 +284,9 @@ impl Widget for DesktopRunList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 if let Some(data) = scope.data.get_mut::<AppData>() {
-                    self.draw_entries(cx, &mut *list, data);
+                    self.draw_entries(cx, &mut list, data);
                 } else {
-                    self.draw_empty(cx, &mut *list, "No app state");
+                    self.draw_empty(cx, &mut list, "No app state");
                 }
             }
         }

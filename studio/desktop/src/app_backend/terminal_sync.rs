@@ -1,9 +1,6 @@
-use crate::{
-    makepad_widgets::*,
-    App,
-};
-use makepad_studio_protocol::hub_protocol::{FileNode, FileNodeType, FileTreeChange, ClientToHub};
-use std::collections::{HashSet, HashMap};
+use crate::{makepad_widgets::*, App};
+use makepad_studio_protocol::hub_protocol::{ClientToHub, FileNode, FileNodeType, FileTreeChange};
+use std::collections::{HashMap, HashSet};
 
 impl App {
     pub(crate) fn apply_mount_file_tree_diff(
@@ -340,9 +337,7 @@ impl App {
             return;
         }
 
-        if known_before {
-            return;
-        }
+        if known_before {}
     }
 
     pub(crate) fn reveal_terminal_path(&mut self, cx: &mut Cx, path: &str) {

@@ -66,16 +66,15 @@ impl HubCore {
             session.applied_rows = rows;
             session.terminal.resize(cols as usize, rows as usize);
             Self::adjust_terminal_subscribers_for_resize(session);
-            if cols != session.cols || rows != session.rows {
-                if self
+            if (cols != session.cols || rows != session.rows)
+                && self
                     .terminal_manager
                     .resize(&path, session.cols, session.rows)
                     .is_err()
-                {
-                    // Ignore retry errors here; primary resize request path reports
-                    // user-visible errors.
-                };
-            }
+            {
+                // Ignore retry errors here; primary resize request path reports
+                // user-visible errors.
+            };
             self.push_terminal_frame_updates(&path, false);
         }
     }
@@ -145,6 +144,7 @@ impl HubCore {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub(super) fn is_terminal_path_taken(&self, path: &str) -> bool {
         self.terminal_sessions.contains_key(path)
             || self

@@ -105,10 +105,9 @@ impl HubCore {
                 }
                 let (relative_path, kind) = if virtual_path == mount {
                     (".".to_string(), "mount".to_string())
-                } else if let Some(rest) = virtual_path.strip_prefix(&mount_prefix) {
-                    (rest.to_string(), "path".to_string())
                 } else {
-                    return None;
+                    let rest = virtual_path.strip_prefix(&mount_prefix)?;
+                    (rest.to_string(), "path".to_string())
                 };
                 if let Some(filter) = normalized_filter.as_deref() {
                     if relative_path == "." {
@@ -130,7 +129,7 @@ impl HubCore {
                 ))
             })
             .collect::<Vec<_>>();
-        changes.sort_by(|a, b| b.0.cmp(&a.0));
+        changes.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         Ok(AiFilesystemObserveResult {
             mount: mount.to_string(),

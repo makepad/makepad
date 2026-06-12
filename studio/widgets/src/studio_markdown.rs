@@ -812,28 +812,28 @@ impl StudioMarkdown {
                             continue;
                         }
 
-                        if text_trimmed.starts_with("✓") {
+                        if let Some(stripped) = text_trimmed.strip_prefix("✓") {
                             tf.font_colors.push(vec4(0.29, 0.68, 0.31, 1.0)); // Green
                             tf.draw_text(cx, "✓");
                             tf.font_colors.pop();
-                            tf.draw_text(cx, &text_trimmed[3..]);
-                        } else if text_trimmed.starts_with("▶") {
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("▶") {
                             tf.font_colors.push(vec4(0.38, 0.69, 0.91, 1.0)); // Light Blue
                             tf.draw_text(cx, "▶");
                             tf.font_colors.pop();
-                            tf.draw_text(cx, &text_trimmed[3..]);
-                        } else if text_trimmed.starts_with("✗") {
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("✗") {
                             tf.font_colors.push(vec4(0.95, 0.33, 0.33, 1.0)); // Red
                             tf.draw_text(cx, "✗");
                             tf.font_colors.pop();
-                            tf.draw_text(cx, &text_trimmed[3..]);
-                        } else if text_trimmed.starts_with("○") {
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("○") {
                             tf.font_colors.push(vec4(1.0, 1.0, 1.0, 0.35)); // Soft gray/white
                             tf.draw_text(cx, "○");
                             tf.font_colors.pop();
-                            tf.draw_text(cx, &text_trimmed[3..]);
+                            tf.draw_text(cx, stripped);
                         } else {
-                            tf.draw_text(cx, &text_trimmed);
+                            tf.draw_text(cx, text_trimmed);
                         }
                     }
                 }

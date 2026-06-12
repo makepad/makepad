@@ -1,6 +1,8 @@
 use super::*;
 
-pub(crate) fn editor_tab_titles_for_paths(tab_to_path: &HashMap<LiveId, String>) -> HashMap<LiveId, String> {
+pub(crate) fn editor_tab_titles_for_paths(
+    tab_to_path: &HashMap<LiveId, String>,
+) -> HashMap<LiveId, String> {
     let mut parts_by_tab: HashMap<LiveId, Vec<String>> = HashMap::new();
     let mut depth_by_tab: HashMap<LiveId, usize> = HashMap::new();
     for (tab_id, path) in tab_to_path {
@@ -107,9 +109,7 @@ impl App {
             self.data.sessions.remove(&tab_id);
         }
 
-        let Some(anchor_tab_id) = self.find_editor_anchor_tab(&dock, mount) else {
-            return None;
-        };
+        let anchor_tab_id = self.find_editor_anchor_tab(&dock, mount)?;
         let (tab_bar, pos) = Self::reachable_tab_bar_of_tab(&dock, anchor_tab_id)?;
         let tab_id = dock.unique_id(LiveId::from_str(path).0);
         let created = if select {
@@ -133,9 +133,7 @@ impl App {
                 Some(pos),
             )
         };
-        if created.is_none() {
-            return None;
-        }
+        created.as_ref()?;
 
         self.data.path_to_tab.insert(path.to_string(), tab_id);
         self.data.tab_to_path.insert(tab_id, path.to_string());

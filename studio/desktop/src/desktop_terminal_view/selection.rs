@@ -1,5 +1,5 @@
-use crate::makepad_widgets::*;
 use crate::desktop_terminal_view::DesktopTerminalView;
+use crate::makepad_widgets::*;
 use makepad_studio_protocol::hub_protocol::TerminalFramebuffer;
 
 impl DesktopTerminalView {
@@ -71,7 +71,11 @@ impl DesktopTerminalView {
         Some((start, end))
     }
 
-    pub(super) fn frame_char(frame: &TerminalFramebuffer, frame_row: usize, col: usize) -> Option<char> {
+    pub(super) fn frame_char(
+        frame: &TerminalFramebuffer,
+        frame_row: usize,
+        col: usize,
+    ) -> Option<char> {
         let cols = frame.cols as usize;
         let idx = (frame_row * cols + col) * 10;
         if idx + 9 >= frame.cells.len() {
@@ -124,9 +128,7 @@ impl DesktopTerminalView {
         if cols == 0 {
             return None;
         }
-        let Some(((start_row, start_col), (end_row, end_col))) = self.selection_ordered() else {
-            return None;
-        };
+        let ((start_row, start_col), (end_row, end_col)) = self.selection_ordered()?;
 
         let mut out = String::new();
         for row in start_row..=end_row {

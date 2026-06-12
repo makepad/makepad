@@ -8,13 +8,12 @@ use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
 use backend_proto::{
-    AiAgentId, AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec,
-    BuildInfo, ClientId, ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample,
-    GCSample as StudioGCSample, GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec,
-    HubToClient, LogEntry, LogSource, QueryId, RunItem, RunViewInputVizKind, SaveResult,
+    AiAgentId, BuildBoxInfo, BuildInfo, ClientId, ClientToHub, ClientToHubEnvelope,
+    EventSample as HubEventSample, GCSample as StudioGCSample, GPUSample as StudioGPUSample,
+    HubToBuildBox, HubToClient, LogEntry, LogSource, QueryId, RunItem, RunViewInputVizKind,
     SearchResult, TerminalFramebuffer,
 };
-use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use makepad_filesystem_watcher::FileSystemWatcher;
 use makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
@@ -23,10 +22,8 @@ use makepad_script_std::makepad_network::ToUISender;
 use makepad_studio_ai::AiToolExecutionResult;
 use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
-    AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
-    LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
-    StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
-    WidgetTreeDumpRequest,
+    AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, LogLevel, StudioToApp,
+    StudioToAppVec,
 };
 use makepad_terminal_core::{StyleFlags, Terminal};
 use std::collections::{HashMap, HashSet};
@@ -854,15 +851,17 @@ fn terminal_framebuffer_from_terminal(
     }
 }
 
+#[allow(dead_code)]
 fn terminal_framebuffer_text(frame: &TerminalFramebuffer) -> String {
     let cols = frame.cols as usize;
     let rows = frame.rows as usize;
     let cell_count = cols.saturating_mul(rows);
-    let stride = if cell_count == 0 {
-        0
-    } else {
-        (frame.cells.len() / cell_count).max(4)
-    };
+    let stride = frame
+        .cells
+        .len()
+        .checked_div(cell_count)
+        .map(|d| d.max(4))
+        .unwrap_or(0);
     let mut out = String::new();
     for row in 0..rows {
         let mut line = String::with_capacity(cols);
@@ -1037,7 +1036,7 @@ fn parse_cargo_output_line(line: &str) -> ParsedCargoOutputLine {
     {
         return ParsedCargoOutputLine::IgnoredStructured;
     }
-    let fallback_text = message.rendered.unwrap_or_else(|| message.message);
+    let fallback_text = message.rendered.unwrap_or(message.message);
     ParsedCargoOutputLine::Structured(ParsedCargoLogEntry {
         level,
         message: fallback_text,
@@ -1391,6 +1390,31 @@ fn file_tree_diff(
         a_path.cmp(b_path)
     });
     changes
+}
+
+fn write_screenshot_png(
+    build_id: QueryId,
+    kind_id: u32,
+    request_id: u64,
+    png: &[u8],
+) -> Result<String, String> {
+    let mut dir = std::env::temp_dir();
+    dir.push("makepad_studio_hub");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("failed to create screenshot dir {}: {}", dir.display(), err))?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system time error: {}", err))?
+        .as_millis();
+    let file_name = format!(
+        "build-{}-kind-{}-req-{}-{}.png",
+        build_id.0, kind_id, request_id, now_ms
+    );
+    let path = dir.join(file_name);
+    fs::write(&path, png)
+        .map_err(|err| format!("failed to write screenshot {}: {}", path.display(), err))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -2620,29 +2644,4 @@ mod tests {
             "expected storm fallback to suppress per-path diff emission"
         );
     }
-}
-
-fn write_screenshot_png(
-    build_id: QueryId,
-    kind_id: u32,
-    request_id: u64,
-    png: &[u8],
-) -> Result<String, String> {
-    let mut dir = std::env::temp_dir();
-    dir.push("makepad_studio_hub");
-    fs::create_dir_all(&dir)
-        .map_err(|err| format!("failed to create screenshot dir {}: {}", dir.display(), err))?;
-
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| format!("system time error: {}", err))?
-        .as_millis();
-    let file_name = format!(
-        "build-{}-kind-{}-req-{}-{}.png",
-        build_id.0, kind_id, request_id, now_ms
-    );
-    let path = dir.join(file_name);
-    fs::write(&path, png)
-        .map_err(|err| format!("failed to write screenshot {}: {}", path.display(), err))?;
-    Ok(path.to_string_lossy().to_string())
 }

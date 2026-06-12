@@ -1,6 +1,6 @@
-use crate::makepad_widgets::*;
+use crate::desktop_terminal_view::{CachedTerminalGlyph, DesktopTerminalView};
 use crate::makepad_widgets::text::geom::Point;
-use crate::desktop_terminal_view::{DesktopTerminalView, CachedTerminalGlyph};
+use crate::makepad_widgets::*;
 use makepad_studio_protocol::hub_protocol::TerminalFramebuffer;
 
 impl DesktopTerminalView {
@@ -117,7 +117,11 @@ impl DesktopTerminalView {
         self.glyph_cache_dpi_factor = dpi_factor;
     }
 
-    pub(super) fn cached_terminal_glyph(&mut self, cx: &mut Cx2d, ch: char) -> Option<CachedTerminalGlyph> {
+    pub(super) fn cached_terminal_glyph(
+        &mut self,
+        cx: &mut Cx2d,
+        ch: char,
+    ) -> Option<CachedTerminalGlyph> {
         if let Some(cached) = self.glyph_cache.get(&ch) {
             return Some(*cached);
         }

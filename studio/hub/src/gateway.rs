@@ -77,7 +77,7 @@ pub fn start_http_gateway(
                         }
                         socket_roles.insert(web_socket_id, SocketRole::Client);
                         let _ = event_tx.send(HubEvent::ClientConnected {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             sender: ToUISender::from_sender(response_sender),
                             typed_sender: None,
                         });
@@ -96,7 +96,7 @@ pub fn start_http_gateway(
                         let _ = event_tx.send(HubEvent::AppConnected {
                             build_id: app_connect.build_id,
                             crate_name: app_connect.crate_name,
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             sender: response_sender,
                         });
                         continue;
@@ -110,7 +110,7 @@ pub fn start_http_gateway(
                         }
                         socket_roles.insert(web_socket_id, SocketRole::BuildBox);
                         let _ = event_tx.send(HubEvent::BuildBoxConnected {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             sender: response_sender,
                         });
                         continue;
@@ -144,19 +144,15 @@ pub fn start_http_gateway(
                         }
                         match role {
                             SocketRole::Client => {
-                                let _ = event_tx.send(HubEvent::ClientDisconnected {
-                                    web_socket_id: web_socket_id,
-                                });
+                                let _ =
+                                    event_tx.send(HubEvent::ClientDisconnected { web_socket_id });
                             }
                             SocketRole::App => {
-                                let _ = event_tx.send(HubEvent::AppDisconnected {
-                                    web_socket_id: web_socket_id,
-                                });
+                                let _ = event_tx.send(HubEvent::AppDisconnected { web_socket_id });
                             }
                             SocketRole::BuildBox => {
-                                let _ = event_tx.send(HubEvent::BuildBoxDisconnected {
-                                    web_socket_id: web_socket_id,
-                                });
+                                let _ =
+                                    event_tx.send(HubEvent::BuildBoxDisconnected { web_socket_id });
                             }
                         }
                     }
@@ -168,19 +164,19 @@ pub fn start_http_gateway(
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Client) => {
                         let _ = event_tx.send(HubEvent::ClientBinary {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::App) => {
                         let _ = event_tx.send(HubEvent::AppBinary {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             data,
                         });
                     }
                     Some(SocketRole::BuildBox) => {
                         let _ = event_tx.send(HubEvent::BuildBoxBinary {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             data,
                         });
                     }
@@ -193,7 +189,7 @@ pub fn start_http_gateway(
                 } => match socket_roles.get(&web_socket_id) {
                     Some(SocketRole::Client) => {
                         let _ = event_tx.send(HubEvent::ClientText {
-                            web_socket_id: web_socket_id,
+                            web_socket_id,
                             text: string,
                         });
                     }
@@ -260,10 +256,8 @@ fn parse_app_path(path: &str) -> Option<AppConnectInfo> {
                 };
                 build_id = Some(QueryId(id));
             }
-            "crate" => {
-                if !value.is_empty() {
-                    crate_name = Some(value.to_string());
-                }
+            "crate" if !value.is_empty() => {
+                crate_name = Some(value.to_string());
             }
             _ => {}
         }
@@ -277,6 +271,24 @@ fn parse_app_path(path: &str) -> Option<AppConnectInfo> {
         build_id,
         crate_name,
     })
+}
+
+fn ok_response(body: Vec<u8>, content_type: &str) -> HttpServerResponse {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        content_type,
+        body.len()
+    );
+    HttpServerResponse { header, body }
+}
+
+fn not_found_response() -> HttpServerResponse {
+    let body = b"not found".to_vec();
+    let header = format!(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    HttpServerResponse { header, body }
 }
 
 #[cfg(test)]
@@ -320,22 +332,4 @@ mod tests {
         );
         assert_eq!(parse_app_path("/ui"), None);
     }
-}
-
-fn ok_response(body: Vec<u8>, content_type: &str) -> HttpServerResponse {
-    let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        content_type,
-        body.len()
-    );
-    HttpServerResponse { header, body }
-}
-
-fn not_found_response() -> HttpServerResponse {
-    let body = b"not found".to_vec();
-    let header = format!(
-        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    HttpServerResponse { header, body }
 }

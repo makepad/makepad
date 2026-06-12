@@ -1,7 +1,6 @@
 use super::*;
 use makepad_studio_protocol::hub_protocol::{
-    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, HubToBuildBox, HubToClient,
-    QueryId,
+    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, HubToClient, QueryId,
 };
 use makepad_studio_protocol::LogLevel;
 

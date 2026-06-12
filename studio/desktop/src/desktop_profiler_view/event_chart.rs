@@ -16,7 +16,8 @@ pub(crate) const PROFILE_COUNTS_GRAPH_OFFSET_Y: f64 =
     PROFILE_FRAMETIME_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + PROFILE_GRAPH_LANE_GAP;
 pub(crate) const PROFILE_UPLOAD_GRAPH_OFFSET_Y: f64 =
     PROFILE_COUNTS_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + PROFILE_GRAPH_LANE_GAP;
-pub(crate) const PROFILE_STORE_HEIGHT: f64 = PROFILE_UPLOAD_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + 12.0;
+pub(crate) const PROFILE_STORE_HEIGHT: f64 =
+    PROFILE_UPLOAD_GRAPH_OFFSET_Y + PROFILE_GRAPH_LANE_HEIGHT + 12.0;
 pub(crate) const FRAME_BUDGET_SECONDS: f64 = 1.0 / 60.0;
 pub(crate) const FRAME_BUDGET_120HZ_SECONDS: f64 = 1.0 / 120.0;
 
@@ -754,7 +755,7 @@ impl DesktopProfilerEventChart {
                     &mut self.tmp_label,
                     "{}({meta}) {:.0} µs",
                     label,
-                    (sample_end - sample_start) * 1000_000.0
+                    (sample_end - sample_start) * 1_000_000.0
                 );
             }
         } else if sample_end - sample_start > 0.001 {
@@ -769,7 +770,7 @@ impl DesktopProfilerEventChart {
                 &mut self.tmp_label,
                 "{} {:.0} µs",
                 label,
-                (sample_end - sample_start) * 1000_000.0
+                (sample_end - sample_start) * 1_000_000.0
             );
         }
 
@@ -857,47 +858,41 @@ impl Widget for DesktopProfilerEventChart {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(_fe) => {
-                if !self.follow_live {
-                    cx.set_key_focus(self.draw_bg.area());
-                    self.time_drag = Some(self.time_range.clone());
-                }
+            Hit::FingerDown(_fe) if !self.follow_live => {
+                cx.set_key_focus(self.draw_bg.area());
+                self.time_drag = Some(self.time_range.clone());
             }
-            Hit::FingerMove(fe) => {
-                if !self.follow_live {
-                    if let Some(start) = &self.time_drag {
-                        let moved = fe.abs_start.x - fe.abs.x;
-                        let scale =
-                            self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / fe.rect.size.x;
-                        let shift_time = moved * scale;
-                        self.time_range = start.shifted(shift_time);
-                        self.draw_bg.redraw(cx);
-                    }
-                }
-            }
-            Hit::FingerScroll(e) => {
-                if e.device.is_mouse() {
-                    let zoom = (1.03).powf(e.scroll.y / 150.0);
-                    if self.follow_live {
-                        let window = self
-                            .current_window_seconds()
-                            .max(MIN_PROFILE_WINDOW_SECONDS);
-                        let next_window = (window * zoom).max(MIN_PROFILE_WINDOW_SECONDS);
-                        self.time_range = TimeRange {
-                            start: self.time_range.end - next_window,
-                            end: self.time_range.end,
-                        };
-                    } else {
-                        let scale =
-                            self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
-                        let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
-                        self.time_range = TimeRange {
-                            start: (self.time_range.start - time) * zoom + time,
-                            end: (self.time_range.end - time) * zoom + time,
-                        };
-                    }
+            Hit::FingerMove(fe) if !self.follow_live => {
+                if let Some(start) = &self.time_drag {
+                    let moved = fe.abs_start.x - fe.abs.x;
+                    let scale =
+                        self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / fe.rect.size.x;
+                    let shift_time = moved * scale;
+                    self.time_range = start.shifted(shift_time);
                     self.draw_bg.redraw(cx);
                 }
+            }
+            Hit::FingerScroll(e) if e.device.is_mouse() => {
+                let zoom = (1.03).powf(e.scroll.y / 150.0);
+                if self.follow_live {
+                    let window = self
+                        .current_window_seconds()
+                        .max(MIN_PROFILE_WINDOW_SECONDS);
+                    let next_window = (window * zoom).max(MIN_PROFILE_WINDOW_SECONDS);
+                    self.time_range = TimeRange {
+                        start: self.time_range.end - next_window,
+                        end: self.time_range.end,
+                    };
+                } else {
+                    let scale =
+                        self.time_range.len().max(MIN_PROFILE_WINDOW_SECONDS) / e.rect.size.x;
+                    let time = scale * (e.abs.x - e.rect.pos.x) + self.time_range.start;
+                    self.time_range = TimeRange {
+                        start: (self.time_range.start - time) * zoom + time,
+                        end: (self.time_range.end - time) * zoom + time,
+                    };
+                }
+                self.draw_bg.redraw(cx);
             }
             Hit::FingerUp(_) => {}
             _ => (),

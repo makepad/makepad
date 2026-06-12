@@ -325,7 +325,7 @@ impl Widget for StudioCommandTextInput {
                     .map(|fe| fe.tap_count == 1)
                     .unwrap_or(false)
                 {
-                    selected_by_click = Some((&*item).clone());
+                    selected_by_click = Some((*item).clone());
 
                     // Clear keyboard focus when mouse is clicked
                     self.keyboard_focus_index = None;
@@ -842,7 +842,7 @@ impl StudioCommandTextInputRef {
     /// See [`StudioCommandTextInput::should_build_items()`].
     pub fn should_build_items(&self, actions: &Actions) -> bool {
         self.borrow()
-            .map_or(false, |inner| inner.should_build_items(actions))
+            .is_some_and(|inner| inner.should_build_items(actions))
     }
 
     /// See [`StudioCommandTextInput::clear_items()`].

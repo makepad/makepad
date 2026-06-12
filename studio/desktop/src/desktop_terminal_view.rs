@@ -5,8 +5,8 @@ use makepad_studio_protocol::hub_protocol::TerminalFramebuffer;
 use makepad_terminal_core::{TermKeyCode, Terminal};
 use std::collections::HashMap;
 
-mod selection;
 mod renderer;
+mod selection;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

@@ -1,13 +1,9 @@
 use super::*;
 use makepad_studio_protocol::hub_protocol::{
-    AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildInfo, ClientId, HubToBuildBox,
-    HubToBuildBoxVec, HubToClient, LogSource, QueryId, RunItem,
+    AppSocketInfo, BuildBoxInfo, BuildInfo, ClientId, HubToBuildBox, HubToBuildBoxVec, HubToClient,
+    LogSource, QueryId, RunItem,
 };
-use makepad_studio_protocol::{
-    AppToStudio, KeyCode, KeyEvent, KeyModifiers, LogLevel, MouseButton, RemoteKeyModifiers,
-    RemoteMouseDown, RemoteMouseUp, ScreenshotRequest, StudioToApp, StudioToAppVec, TextInputEvent,
-    WidgetQueryRequest, WidgetSnapshotRequest, WidgetTreeDumpRequest,
-};
+use makepad_studio_protocol::{AppToStudio, LogLevel, StudioToApp, StudioToAppVec};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -96,7 +92,7 @@ impl HubCore {
         let mut frame_request = None;
         let mut saw_tick = false;
 
-        for msg in existing.into_iter().chain(incoming.into_iter()) {
+        for msg in existing.into_iter().chain(incoming) {
             match msg {
                 StudioToApp::WindowGeomChange { .. } => window_geom = Some(msg),
                 StudioToApp::Swapchain(_) => swapchain = Some(msg),
@@ -439,6 +435,7 @@ impl HubCore {
         self.broadcast_ui_message(HubToClient::RunItems { mount, items });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn on_script_run_request(
         &mut self,
         child_build_id: Option<QueryId>,

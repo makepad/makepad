@@ -5,7 +5,11 @@ use crate::makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_
 use crate::makepad_widgets::makepad_platform::shared_framebuf::aux_chan;
 
 impl DesktopRunView {
-    pub(crate) fn try_present_draw(&mut self, cx: &mut Cx, presentable_draw: PresentableDraw) -> bool {
+    pub(crate) fn try_present_draw(
+        &mut self,
+        cx: &mut Cx,
+        presentable_draw: PresentableDraw,
+    ) -> bool {
         if let Some(swapchain) = self.swapchain.as_ref() {
             if Self::apply_presentable_draw_to_quad(
                 cx,
@@ -153,7 +157,11 @@ impl DesktopRunView {
         self.last_dpi_factor = dpi_factor;
     }
 
-    pub(crate) fn build_bootstrap_msgs(&mut self, cx: &mut Cx, target: RunTarget) -> Vec<StudioToApp> {
+    pub(crate) fn build_bootstrap_msgs(
+        &mut self,
+        cx: &mut Cx,
+        target: RunTarget,
+    ) -> Vec<StudioToApp> {
         if self.last_rect.size.x <= 0.0 || self.last_rect.size.y <= 0.0 {
             return Vec::new();
         }

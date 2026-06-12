@@ -166,7 +166,7 @@ impl WidgetMatchEvent for DesktopProfilerView {
             build_id
         };
 
-        if self.view.button(cx, ids!(clear_button)).clicked(&actions) {
+        if self.view.button(cx, ids!(clear_button)).clicked(actions) {
             cx.widget_action(
                 self.widget_uid(),
                 DesktopProfilerViewAction::Clear { build_id },

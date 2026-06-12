@@ -541,7 +541,9 @@ impl Widget for DesktopRunView {
                         RunViewInputVizKind::TypeText => {
                             ([1.00, 0.78, 0.24, 1.0], 0.0, 0.0, 0.0, 0.0)
                         }
-                        RunViewInputVizKind::Return => ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0),
+                        RunViewInputVizKind::Return => {
+                            ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0)
+                        }
                     };
                     (
                         color,
@@ -564,18 +566,22 @@ impl Widget for DesktopRunView {
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(dot_alpha), &[dot_alpha]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(ripple_radius), &[ripple_radius]);
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(ripple_radius),
+                    &[ripple_radius],
+                );
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(ripple_alpha), &[ripple_alpha]);
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(shape_kind), &[shape_kind]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(corner_radius), &[corner_radius]);
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(corner_radius),
+                    &[corner_radius],
+                );
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(stroke_width), &[stroke_width]);
@@ -708,10 +714,10 @@ impl Widget for DesktopRunView {
                 cx.set_cursor(MouseCursor::Default);
             }
             Hit::KeyDown(ke) => {
-                outbound.push(StudioToApp::KeyDown(ke.clone()));
+                outbound.push(StudioToApp::KeyDown(ke));
             }
             Hit::KeyUp(ke) => {
-                outbound.push(StudioToApp::KeyUp(ke.clone()));
+                outbound.push(StudioToApp::KeyUp(ke));
             }
             Hit::TextInput(te) => {
                 outbound.push(StudioToApp::TextInput(te.clone()));
@@ -754,12 +760,7 @@ impl DesktopRunViewRef {
         }
     }
 
-    pub fn rebootstrap_after_app_ready(
-        &self,
-        cx: &mut Cx,
-        build_id: QueryId,
-        window_id: usize,
-    ) {
+    pub fn rebootstrap_after_app_ready(&self, cx: &mut Cx, build_id: QueryId, window_id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.rebootstrap_after_app_ready(cx, build_id, window_id);
         }
@@ -771,12 +772,7 @@ impl DesktopRunViewRef {
         }
     }
 
-    pub fn set_remote_frame(
-        &self,
-        cx: &mut Cx,
-        build_id: QueryId,
-        frame: RunViewFrameData,
-    ) {
+    pub fn set_remote_frame(&self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_remote_frame(cx, build_id, frame);
         }
@@ -813,4 +809,3 @@ impl DesktopRunViewRef {
         }
     }
 }
-

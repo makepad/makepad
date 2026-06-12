@@ -37,9 +37,7 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use makepad_studio_protocol::hub_protocol::{
-    ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
-};
+use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, LogEntry, QueryId};
 use makepad_studio_widgets::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
