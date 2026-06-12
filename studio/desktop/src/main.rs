@@ -2,6 +2,9 @@ pub mod ai_manager;
 pub mod app_data;
 pub mod app_ui;
 pub mod desktop_code_editor;
+pub mod studio_markdown;
+pub mod studio_command_text_input;
+pub mod studio_text_flow;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
 
@@ -36,6 +39,7 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
+use crate::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use makepad_studio_protocol::hub_protocol::{
     ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
 };
@@ -54,6 +58,9 @@ mod app_tabs;
 pub fn register_script_modules(vm: &mut ScriptVm) {
     crate::desktop_file_tree::script_mod(vm);
     crate::desktop_code_editor::script_mod(vm);
+    crate::studio_command_text_input::script_mod(vm);
+    crate::studio_text_flow::script_mod(vm);
+    crate::studio_markdown::script_mod(vm);
     crate::desktop_log_view::script_mod(vm);
     crate::desktop_profiler_view::script_mod(vm);
     crate::desktop_run_list::script_mod(vm);
@@ -158,6 +165,7 @@ pub struct App {
     pub ai_chat_scroll_next_frame: NextFrame,
     #[rust]
     pub ai_chat_scroll_frames_remaining: u8,
+
 }
 
 impl MatchEvent for App {
@@ -298,17 +306,11 @@ impl MatchEvent for App {
                         self.send_ai_manager_prompt(cx, &active_mount);
                     }
                 }
-                if workspace
-                    .text_input(cx, ids!(ai_prompt_input))
-                    .escaped(actions)
-                {
+                let ai_prompt_input = workspace.studio_command_text_input(cx, ids!(ai_prompt_input));
+                if ai_prompt_input.text_input_ref(cx).escaped(actions) {
                     self.cancel_ai_manager_prompt(&active_mount);
                 }
-                if workspace
-                    .text_input(cx, ids!(ai_prompt_input))
-                    .returned(actions)
-                    .is_some()
-                {
+                if ai_prompt_input.text_input_ref(cx).returned(actions).is_some() {
                     self.send_ai_manager_prompt(cx, &active_mount);
                 }
                 if let Some((mount, name)) = workspace
@@ -538,6 +540,7 @@ impl AppMain for App {
             {
                 self.flush_ai_chat_scroll_to_bottom(cx);
             }
+
         }
 
         if let Event::WindowDragQuery(dq) = event {
