@@ -6,6 +6,7 @@ use {
     std::{
         cell::{Cell, RefCell},
         collections::HashMap,
+        ffi::CStr,
         mem,
         os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void},
         ptr,
@@ -48,8 +49,30 @@ pub enum XimPreeditStyle {
 #[derive(Clone, Copy)]
 pub struct XimInputContext {
     pub xic: x11_sys::XIC,
+    pub input_style: c_ulong,
     pub preedit_style: XimPreeditStyle,
     pub spot_initialized_at_creation: bool,
+}
+
+impl XimInputContext {
+    pub fn status_style(self) -> c_ulong {
+        let preedit_mask = (x11_sys::XIMPreeditCallbacks
+            | x11_sys::XIMPreeditPosition
+            | x11_sys::XIMPreeditNothing) as c_ulong;
+        self.input_style & !preedit_mask
+    }
+}
+
+pub fn x11_ime_debug_enabled() -> bool {
+    std::env::var_os("MAKEPAD_X11_IME_DEBUG").is_some()
+}
+
+pub unsafe fn x11_ime_failed_attr_name(attr: *mut c_char) -> String {
+    if attr.is_null() {
+        "ok".to_string()
+    } else {
+        CStr::from_ptr(attr).to_string_lossy().into_owned()
+    }
 }
 
 // Splice `insert` into `buf`, replacing `char_len` characters starting at
@@ -68,6 +91,84 @@ fn xim_preedit_replace(buf: &mut String, char_first: usize, char_len: usize, ins
     if byte_start <= byte_end {
         buf.replace_range(byte_start..byte_end, insert);
     }
+}
+
+pub fn xim_preedit_style_name(style: XimPreeditStyle) -> &'static str {
+    match style {
+        XimPreeditStyle::Callback => "callback",
+        XimPreeditStyle::Position => "position",
+        XimPreeditStyle::Nothing => "nothing",
+    }
+}
+
+fn xim_style_label(style: c_ulong) -> String {
+    let preedit = if style & x11_sys::XIMPreeditCallbacks as c_ulong != 0 {
+        "callback"
+    } else if style & x11_sys::XIMPreeditPosition as c_ulong != 0 {
+        "position"
+    } else if style & x11_sys::XIMPreeditNothing as c_ulong != 0 {
+        "nothing"
+    } else {
+        "unknown-preedit"
+    };
+    let status = if style & x11_sys::XIMStatusNothing as c_ulong != 0 {
+        "status-nothing"
+    } else if style & x11_sys::XIMStatusNone as c_ulong != 0 {
+        "status-none"
+    } else {
+        "unknown-status"
+    };
+    format!("{}|{}(0x{:x})", preedit, status, style)
+}
+
+unsafe fn query_xim_supported_styles(xim: x11_sys::XIM) -> Option<Vec<c_ulong>> {
+    let mut styles_ptr: *mut x11_sys::XIMStyles = ptr::null_mut();
+    let failed_attr = x11_sys::XGetIMValues(
+        xim,
+        x11_sys::XNQueryInputStyle.as_ptr(),
+        &mut styles_ptr,
+        ptr::null_mut::<c_void>(),
+    );
+    if !failed_attr.is_null() || styles_ptr.is_null() {
+        if x11_ime_debug_enabled() {
+            crate::log!(
+                "X11 IME: XGetIMValues(XNQueryInputStyle) failed_attr={}",
+                x11_ime_failed_attr_name(failed_attr)
+            );
+        }
+        if !styles_ptr.is_null() {
+            x11_sys::XFree(styles_ptr as *mut c_void);
+        }
+        return None;
+    }
+
+    let styles = &*styles_ptr;
+    let supported = if styles.supported_styles.is_null() {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(
+            styles.supported_styles,
+            styles.count_styles as usize,
+        )
+        .iter()
+        .map(|style| *style as c_ulong)
+        .collect()
+    };
+    x11_sys::XFree(styles_ptr as *mut c_void);
+    Some(supported)
+}
+
+fn xim_style_supported(styles: Option<&[c_ulong]>, style: c_ulong) -> bool {
+    styles
+        .map(|styles| styles.iter().any(|supported| *supported == style))
+        .unwrap_or(true)
+}
+
+fn xim_status_candidates() -> [c_ulong; 2] {
+    [
+        x11_sys::XIMStatusNothing as c_ulong,
+        x11_sys::XIMStatusNone as c_ulong,
+    ]
 }
 
 // XIM preedit start: reset our buffer and report "no length limit" (-1).
@@ -146,6 +247,7 @@ unsafe extern "C" fn xim_preedit_draw(
 unsafe fn create_xim_callback_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
+    status_style: c_ulong,
 ) -> Option<XimInputContext> {
     let start_cb = x11_sys::XIMCallback {
         client_data: ptr::null_mut(),
@@ -187,10 +289,11 @@ unsafe fn create_xim_callback_input_context(
         return None;
     }
 
+    let input_style = x11_sys::XIMPreeditCallbacks as c_ulong | status_style;
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as c_ulong,
+        input_style,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -205,6 +308,7 @@ unsafe fn create_xim_callback_input_context(
     } else {
         Some(XimInputContext {
             xic,
+            input_style,
             preedit_style: XimPreeditStyle::Callback,
             spot_initialized_at_creation: false,
         })
@@ -214,6 +318,7 @@ unsafe fn create_xim_callback_input_context(
 unsafe fn create_xim_position_input_context_internal(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
+    status_style: c_ulong,
     initial_ime_area: Option<(x11_sys::XPoint, x11_sys::XRectangle)>,
 ) -> Option<XimInputContext> {
     let default_spot = x11_sys::XPoint { x: 0, y: 0 };
@@ -238,10 +343,11 @@ unsafe fn create_xim_position_input_context_internal(
         return None;
     }
 
+    let input_style = x11_sys::XIMPreeditPosition as c_ulong | status_style;
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditPosition | x11_sys::XIMStatusNothing) as c_ulong,
+        input_style,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -256,6 +362,7 @@ unsafe fn create_xim_position_input_context_internal(
     } else {
         Some(XimInputContext {
             xic,
+            input_style,
             preedit_style: XimPreeditStyle::Position,
             spot_initialized_at_creation: initial_ime_area.is_some(),
         })
@@ -265,27 +372,31 @@ unsafe fn create_xim_position_input_context_internal(
 unsafe fn create_xim_position_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
+    status_style: c_ulong,
 ) -> Option<XimInputContext> {
-    create_xim_position_input_context_internal(xim, window, None)
+    create_xim_position_input_context_internal(xim, window, status_style, None)
 }
 
 pub unsafe fn create_xim_position_input_context_with_spot(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
+    status_style: c_ulong,
     spot: x11_sys::XPoint,
     area: x11_sys::XRectangle,
 ) -> Option<XimInputContext> {
-    create_xim_position_input_context_internal(xim, window, Some((spot, area)))
+    create_xim_position_input_context_internal(xim, window, status_style, Some((spot, area)))
 }
 
 unsafe fn create_xim_nothing_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
+    status_style: c_ulong,
 ) -> Option<XimInputContext> {
+    let input_style = x11_sys::XIMPreeditNothing as c_ulong | status_style;
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as c_ulong,
+        input_style,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -297,6 +408,7 @@ unsafe fn create_xim_nothing_input_context(
     } else {
         Some(XimInputContext {
             xic,
+            input_style,
             preedit_style: XimPreeditStyle::Nothing,
             spot_initialized_at_creation: false,
         })
@@ -370,16 +482,11 @@ unsafe fn callback_xic_supports_spot_location(xic: x11_sys::XIC) -> bool {
 
 /// Creates an input context for `window`.
 ///
-/// Prefer XIM on-the-spot (`XIMPreeditCallbacks`) so the in-progress composition
-/// (preedit) text is delivered to us for inline display. libX11 before 1.8.2
-/// drops `XNSpotLocation` in that mode, so at runtime we probe whether the
-/// callback XIC can round-trip a spot location. If not, we fall back to
-/// over-the-spot (`XIMPreeditPosition`): the IM server draws the preedit, but
-/// the candidate window follows the cursor on older libX11 builds such as
-/// Ubuntu 20.04/22.04.
-/// Either way falls back to `XIMPreeditNothing` (committed text still arrives via
-/// `Xutf8LookupString`) if the chosen style isn't supported. Returns `None` if
-/// there is no XIM or context creation fails entirely.
+/// Prefer standard over-the-spot (`XIMPreeditPosition`) because XIM only
+/// specifies `XNSpotLocation` for that style. Callback/on-the-spot spot
+/// forwarding was added to libX11 later and remains implementation-defined, so
+/// it is only used when position style is unavailable. Committed text still
+/// arrives through `Xutf8LookupString` in every supported style.
 pub unsafe fn create_xim_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
@@ -388,23 +495,84 @@ pub unsafe fn create_xim_input_context(
         return None;
     }
 
-    if let Some(callback_context) = create_xim_callback_input_context(xim, window) {
-        if callback_xic_supports_spot_location(callback_context.xic) {
-            return Some(callback_context);
+    let supported_styles = query_xim_supported_styles(xim);
+    if x11_ime_debug_enabled() {
+        if let Some(supported_styles) = supported_styles.as_ref() {
+            let labels = supported_styles
+                .iter()
+                .map(|style| xim_style_label(*style))
+                .collect::<Vec<_>>()
+                .join(", ");
+            crate::log!("X11 IME: supported XIM styles [{}]", labels);
+        } else {
+            crate::log!("X11 IME: supported XIM styles unavailable; probing by XCreateIC");
         }
-        if let Some(position_context) = create_xim_position_input_context(xim, window) {
-            x11_sys::XDestroyIC(callback_context.xic);
+    }
+    let supported_styles = supported_styles.as_deref();
+
+    for status_style in xim_status_candidates() {
+        let input_style = x11_sys::XIMPreeditPosition as c_ulong | status_style;
+        if !xim_style_supported(supported_styles, input_style) {
+            continue;
+        }
+        if let Some(position_context) = create_xim_position_input_context(xim, window, status_style) {
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: selected style {}",
+                    xim_style_label(position_context.input_style)
+                );
+            }
             return Some(position_context);
         }
-        return Some(callback_context);
+        if x11_ime_debug_enabled() {
+            crate::log!("X11 IME: XCreateIC failed for {}", xim_style_label(input_style));
+        }
     }
 
-    if let Some(position_context) = create_xim_position_input_context(xim, window) {
-        return Some(position_context);
+    for status_style in xim_status_candidates() {
+        let input_style = x11_sys::XIMPreeditCallbacks as c_ulong | status_style;
+        if !xim_style_supported(supported_styles, input_style) {
+            continue;
+        }
+        if let Some(callback_context) = create_xim_callback_input_context(xim, window, status_style) {
+            let supports_spot = callback_xic_supports_spot_location(callback_context.xic);
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: selected style {}; callback_spot_roundtrip={}",
+                    xim_style_label(callback_context.input_style),
+                    supports_spot
+                );
+            }
+            return Some(callback_context);
+        }
+        if x11_ime_debug_enabled() {
+            crate::log!("X11 IME: XCreateIC failed for {}", xim_style_label(input_style));
+        }
     }
 
-    // Fallback: let the IM server own the preedit display.
-    create_xim_nothing_input_context(xim, window)
+    for status_style in xim_status_candidates() {
+        let input_style = x11_sys::XIMPreeditNothing as c_ulong | status_style;
+        if !xim_style_supported(supported_styles, input_style) {
+            continue;
+        }
+        if let Some(nothing_context) = create_xim_nothing_input_context(xim, window, status_style) {
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: selected fallback style {}",
+                    xim_style_label(nothing_context.input_style)
+                );
+            }
+            return Some(nothing_context);
+        }
+        if x11_ime_debug_enabled() {
+            crate::log!("X11 IME: XCreateIC failed for {}", xim_style_label(input_style));
+        }
+    }
+
+    if x11_ime_debug_enabled() {
+        crate::log!("X11 IME: failed to create any XIC style");
+    }
+    None
 }
 
 pub fn init_xlib_app_global(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) {
@@ -452,6 +620,15 @@ impl XlibApp {
             if xim.is_null() {
                 x11_sys::XSetLocaleModifiers(ptr::null());
                 xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            }
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: XOpenIM success={} XMODIFIERS={:?} GTK_IM_MODULE={:?} QT_IM_MODULE={:?}",
+                    !xim.is_null(),
+                    std::env::var("XMODIFIERS").ok(),
+                    std::env::var("GTK_IM_MODULE").ok(),
+                    std::env::var("QT_IM_MODULE").ok()
+                );
             }
             //let mut signal_fds = [0, 0];
             //libc_sys::pipe(signal_fds.as_mut_ptr());

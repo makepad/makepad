@@ -105,8 +105,18 @@ pub const XIMPreeditCallbacks: u32 = 2;
 pub const XIMPreeditPosition: u32 = 4;
 pub const XIMPreeditNothing: u32 = 8;
 pub const XIMStatusNothing: u32 = 1024;
+pub const XIMStatusNone: u32 = 2048;
+
+pub type XIMStyle = c_ulong;
+
+#[repr(C)]
+pub struct XIMStyles {
+    pub count_styles: c_ushort,
+    pub supported_styles: *mut XIMStyle,
+}
 
 pub const XNInputStyle: &'static [u8; 11usize] = b"inputStyle\0";
+pub const XNQueryInputStyle: &'static [u8; 16usize] = b"queryInputStyle\0";
 pub const XNClientWindow: &'static [u8; 13usize] = b"clientWindow\0";
 pub const XNFocusWindow: &'static [u8; 12usize] = b"focusWindow\0";
 pub const XNPreeditAttributes: &'static [u8; 18usize] = b"preeditAttributes\0";
@@ -331,6 +341,8 @@ extern "C" {
         arg3: *mut c_char,
         arg4: *mut c_char,
     ) -> XIM;
+
+    pub fn XGetIMValues(arg1: XIM, ...) -> *mut c_char;
 
     pub fn XInternAtom(arg1: *mut Display, arg2: *const c_char, arg3: c_int) -> Atom;
 

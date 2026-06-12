@@ -750,12 +750,31 @@ impl X11Cx {
                         pos: top_left,
                         size: bottom_right - top_left,
                     };
+                    if x11_ime_debug_enabled() {
+                        crate::log!(
+                            "X11 IME: ShowTextIME window_id={:?} area_pos=({}, {}) cursor_rect=({}, {}, {}, {}) ime_rect=({}, {}, {}, {})",
+                            window_id,
+                            area_pos.x,
+                            area_pos.y,
+                            cursor_rect.pos.x,
+                            cursor_rect.pos.y,
+                            cursor_rect.size.x,
+                            cursor_rect.size.y,
+                            ime_rect.pos.x,
+                            ime_rect.pos.y,
+                            ime_rect.size.x,
+                            ime_rect.size.y
+                        );
+                    }
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_rect(ime_rect);
                         w.xlib_window.set_ime_active(true);
                     });
                 }
                 CxOsOp::HideTextIME => {
+                    if x11_ime_debug_enabled() {
+                        crate::log!("X11 IME: HideTextIME");
+                    }
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_active(false);
                         w.xlib_window.set_ime_rect(Rect::default());
