@@ -546,9 +546,21 @@ pub fn apply_local_prompt_echo(state: &mut AiMountState, agent_id: AiAgentId, pr
 }
 
 pub fn native_delegation_echo(role: &str, prompt: &str) -> String {
+    native_delegation_prompt(role, prompt)
+}
+
+pub fn native_delegation_prompt(role: &str, task: &str) -> String {
     let role = role.trim();
     let role = if role.is_empty() { "agent" } else { role };
-    format!("Native {} subagent\n\n{}", role, prompt.trim())
+    format!("Native {} subagent\n\n{}", role, task.trim())
+}
+
+pub fn subagent_kickoff_prompt(role: &str, task: &str) -> String {
+    format!(
+        "You are the `{}` subagent.\n\nTask:\n{}\n\nWork only on this task. Use tools as needed. When finished, call `complete_task` with success and a concise summary so the parent agent can continue.",
+        role.trim(),
+        task.trim()
+    )
 }
 
 pub fn ai_file_link_path_from_href(href: &str) -> Option<String> {
@@ -609,6 +621,87 @@ fn summarized_chat_title(
         title.push_str("...");
     }
     Some(title)
+}
+
+pub fn summarize_title(prompt: &str) -> String {
+    let single_line = prompt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .replace('\t', " ");
+    if single_line.is_empty() {
+        return String::new();
+    }
+    let mut title = single_line.chars().take(40).collect::<String>();
+    if single_line.chars().count() > 40 {
+        title.push_str("...");
+    }
+    title
+}
+
+pub fn parse_direct_subagent_command(prompt: &str) -> Option<(String, String)> {
+    let trimmed = prompt.trim();
+    let rest = trimmed
+        .strip_prefix("/subagent")
+        .or_else(|| trimmed.strip_prefix("/agent"))?
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (role, task) = if let Some((role, task)) = rest.split_once(':') {
+        (role.trim(), task.trim())
+    } else {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        (parts.next()?.trim(), parts.next().unwrap_or("").trim())
+    };
+
+    if role.is_empty() || task.is_empty() {
+        return None;
+    }
+
+    Some((role.to_string(), task.to_string()))
+}
+
+pub fn extract_expected_paths_from_prompt(prompt: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in prompt.split_whitespace() {
+        let token = raw.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+            )
+        });
+        if token.is_empty() || token.starts_with('-') {
+            continue;
+        }
+        let looks_like_path = token.contains('/')
+            || token.contains('\\')
+            || token.rsplit_once('.').is_some_and(|(_, ext)| {
+                !ext.is_empty()
+                    && ext.len() <= 8
+                    && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+            });
+        if !looks_like_path {
+            continue;
+        }
+        let normalized = token.replace('\\', "/");
+        if !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+pub fn matches_expected_path(path: &str, expected_paths: &[String]) -> bool {
+    expected_paths.iter().any(|expected| {
+        path == expected || path.ends_with(&format!("/{}", expected)) || expected.ends_with(path)
+    })
+}
+
+pub fn terminal_display_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 pub fn non_empty_labels(mut labels: Vec<String>, fallback: &str) -> Vec<String> {
@@ -727,6 +820,58 @@ mod tests {
             "Native coder subagent\n\nimplement the native activity board"
         );
         assert!(!echo.contains("/subagent"));
+    }
+
+    #[test]
+    fn subagent_prompts_are_shared_between_hub_and_desktop() {
+        assert_eq!(
+            native_delegation_prompt("coder", "implement native runs"),
+            "Native coder subagent\n\nimplement native runs"
+        );
+        assert!(subagent_kickoff_prompt("coder", "implement native runs")
+            .contains("You are the `coder` subagent."));
+    }
+
+    #[test]
+    fn direct_subagent_command_accepts_agent_and_colon_forms() {
+        assert_eq!(
+            parse_direct_subagent_command("/subagent coder implement native runs"),
+            Some(("coder".to_string(), "implement native runs".to_string()))
+        );
+        assert_eq!(
+            parse_direct_subagent_command("/agent reviewer: inspect the hub diff"),
+            Some(("reviewer".to_string(), "inspect the hub diff".to_string()))
+        );
+        assert_eq!(parse_direct_subagent_command("/subagent coder"), None);
+        assert_eq!(
+            parse_direct_subagent_command("subagent coder do work"),
+            None
+        );
+    }
+
+    #[test]
+    fn title_summary_trims_and_truncates() {
+        assert_eq!(summarize_title("  hello world  "), "hello world");
+        assert_eq!(
+            summarize_title("01234567890123456789012345678901234567890"),
+            "0123456789012345678901234567890123456789..."
+        );
+    }
+
+    #[test]
+    fn expected_path_helpers_match_relative_targets() {
+        assert_eq!(
+            extract_expected_paths_from_prompt("tell codex to write a poem into `poem.txt`"),
+            vec!["poem.txt".to_string()]
+        );
+        assert!(matches_expected_path(
+            "src/poem.txt",
+            &[String::from("poem.txt")]
+        ));
+        assert!(matches_expected_path(
+            "poem.txt",
+            &[String::from("poem.txt")]
+        ));
     }
 
     #[test]

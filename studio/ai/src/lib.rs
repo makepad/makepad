@@ -1,2 +1,10 @@
 pub mod ai_manager;
+pub mod panel;
+pub mod skills;
+pub mod terminal_state;
+pub mod workflow;
 pub use ai_manager::*;
+pub use panel::*;
+pub use skills::*;
+pub use terminal_state::*;
+pub use workflow::*;

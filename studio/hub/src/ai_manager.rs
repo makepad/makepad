@@ -8,6 +8,14 @@ use makepad_chatgpt_provider::{
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
 use makepad_network::{NetworkConfig, NetworkResponse, NetworkRuntime};
+use makepad_studio_ai::{
+    append_workflow_focus, extract_expected_paths_from_prompt, matches_expected_path,
+    native_delegation_prompt, parse_direct_subagent_command, parse_skill_markdown,
+    parse_workflow_markdown, subagent_kickoff_prompt, summarize_title, terminal_blocked_reason,
+    terminal_display_name, terminal_mode_and_summary as analyze_terminal_mode,
+    truncate_terminal_excerpt as shared_truncate_terminal_excerpt, workflow_command_matches,
+    workflow_command_slug, workflow_prompt_from_command, ParsedSkill, ParsedWorkflow,
+};
 use makepad_studio_protocol::ai_format::{
     parse_json_string_field, AI_TASK_EVENT_PREFIX, AI_TERMINAL_OBSERVATION_PREFIX,
     AI_WAITING_MESSAGE_PREFIX,
@@ -447,25 +455,6 @@ struct AssistantTurn {
     thinking_text: String,
     tool_calls: Vec<ToolCallRecord>,
     raw_event_sample: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct ParsedSkill {
-    pub name: String,
-    pub description: String,
-    pub content: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct ParsedWorkflow {
-    pub name: String,
-    pub steps: Vec<WorkflowStep>,
-}
-
-#[derive(Clone, Debug)]
-pub struct WorkflowStep {
-    pub name: String,
-    pub description: String,
 }
 
 pub struct AiManager {
@@ -3494,170 +3483,17 @@ impl AiManager {
         title: &str,
         visible_text: &str,
     ) -> (&'static str, bool, String, Option<String>) {
-        let lines: Vec<String> = visible_text.lines().map(|line| line.to_string()).collect();
-        let lowered = format!("{}\n{}", title, visible_text).to_lowercase();
-        let codex_status = Self::detect_codex_status_line(&lines);
-        let codex_prompt_visible = lines
-            .iter()
-            .rev()
-            .take(6)
-            .any(|line| Self::is_codex_prompt_line(line));
-        let strong_codex_prompt_visible = lines
-            .iter()
-            .rev()
-            .take(6)
-            .any(|line| Self::is_strong_codex_prompt_line(line));
-        let codex_prompt_has_draft = lines
-            .iter()
-            .rev()
-            .take(6)
-            .any(|line| Self::is_codex_prompt_line(line) && Self::codex_prompt_has_draft(line));
-        let is_codex = lowered.contains("codex")
-            || lowered.contains("apply_patch")
-            || lowered.contains("exec_command")
-            || lowered.contains("functions.exec_command")
-            || lowered.contains("esc to interrupt")
-            || lowered.contains("left \u{00b7}")
-            || lowered.contains("gpt-5")
-            || codex_status.is_some()
-            || strong_codex_prompt_visible;
-        let codex_status = if is_codex { codex_status } else { None };
-        let needs_attention = lowered.contains("permission denied")
-            || lowered.contains("sandbox")
-            || lowered.contains("panic")
-            || lowered.contains("error:")
-            || lowered.contains("failed")
-            || lowered.contains("blocked")
-            || lowered.contains("approve")
-            || lowered.contains("how would you like to proceed");
-        let awaiting_input = lowered.contains("waiting for user")
-            || lowered.contains("request user input")
-            || lowered.contains("press enter")
-            || lowered.contains("press return")
-            || lowered.contains("continue?")
-            || lowered.contains("type 'continue'")
-            || lowered.contains("type \"continue\"");
-        let working = lowered.contains("apply_patch")
-            || lowered.contains("exec_command")
-            || lowered.contains("searching")
-            || lowered.contains("reading")
-            || lowered.contains("building")
-            || lowered.contains("testing")
-            || lowered.contains("running")
-            || lowered.contains("patching")
-            || codex_status.is_some();
-
-        let mode = if needs_attention {
-            "needs-attention"
-        } else if working {
-            "working"
-        } else if is_codex && codex_prompt_has_draft {
-            "awaiting-input"
-        } else if awaiting_input {
-            "awaiting-input"
-        } else if is_codex && codex_prompt_visible && codex_status.is_none() {
-            "done"
-        } else if visible_text.trim().is_empty() {
-            "starting"
-        } else {
-            "idle"
-        };
-
+        let analysis = analyze_terminal_mode(title, visible_text);
         (
-            mode,
-            is_codex,
-            Self::terminal_summary_line(&lines, is_codex, codex_status.as_deref()),
-            codex_status,
+            analysis.mode,
+            analysis.is_codex,
+            analysis.summary,
+            analysis.codex_status,
         )
     }
 
-    fn is_codex_prompt_line(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        trimmed.starts_with('\u{203a}')
-            || trimmed.starts_with('>')
-            || trimmed.contains("Enter a prompt...")
-    }
-
-    fn is_strong_codex_prompt_line(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        trimmed.starts_with('\u{203a}') || trimmed.contains("Enter a prompt...")
-    }
-
-    fn codex_prompt_has_draft(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        let rest = if let Some(rest) = trimmed.strip_prefix('\u{203a}') {
-            rest
-        } else if let Some(rest) = trimmed.strip_prefix('>') {
-            rest
-        } else {
-            return false;
-        };
-        let rest = rest.trim();
-        !rest.is_empty() && !rest.contains("Enter a prompt...")
-    }
-
-    fn detect_codex_status_line(lines: &[String]) -> Option<String> {
-        lines.iter().rev().take(8).find_map(|line| {
-            let trimmed = line.trim();
-            let lowered = trimmed.to_lowercase();
-            if (trimmed.contains("Working (") && trimmed.contains("esc to interrupt"))
-                || (lowered.contains("working")
-                    && (lowered.contains("esc to interrupt")
-                        || lowered.contains("gpt-")
-                        || lowered.contains("codex")))
-            {
-                Some(trimmed.to_string())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn terminal_summary_line(
-        lines: &[String],
-        is_codex: bool,
-        codex_status: Option<&str>,
-    ) -> String {
-        lines
-            .iter()
-            .rev()
-            .map(|line| line.trim())
-            .find(|line| {
-                !line.is_empty()
-                    && Some(*line) != codex_status
-                    && !(is_codex
-                        && (Self::is_codex_prompt_line(line)
-                            || line.contains("esc to interrupt")
-                            || line.contains("100% left")
-                            || line.contains("left \u{00b7}")))
-            })
-            .map(|line| truncate_inline(line, 140))
-            .unwrap_or_else(|| "No visible output yet".to_string())
-    }
-
     fn truncate_terminal_excerpt(text: &str, max_chars: usize, max_lines: usize) -> String {
-        let lines: Vec<&str> = text
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        if lines.is_empty() {
-            return String::new();
-        }
-        let start = lines.len().saturating_sub(max_lines);
-        let excerpt = lines[start..].join("\n");
-        if excerpt.chars().count() <= max_chars {
-            return excerpt;
-        }
-        let tail: String = excerpt
-            .chars()
-            .rev()
-            .take(max_chars.saturating_sub(3))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("...{}", tail)
+        shared_truncate_terminal_excerpt(text, max_chars, max_lines)
     }
 
     fn snapshot(&self, mount: &str) -> AiMountState {
@@ -4105,138 +3941,6 @@ impl AiManager {
         self.persist_mount_state_best_effort(mount);
     }
 
-    pub fn parse_skill_markdown(content: &str) -> Option<ParsedSkill> {
-        let lines: Vec<&str> = content.lines().collect();
-        let mut first_dash = None;
-        let mut second_dash = None;
-        for (idx, line) in lines.iter().enumerate() {
-            if line.trim() == "---" {
-                if first_dash.is_none() {
-                    first_dash = Some(idx);
-                } else {
-                    second_dash = Some(idx);
-                    break;
-                }
-            }
-        }
-
-        let (frontmatter_lines, body_lines) = match (first_dash, second_dash) {
-            (Some(start), Some(end)) if start < end => (&lines[start + 1..end], &lines[end + 1..]),
-            _ => (&[][..], &lines[..]),
-        };
-
-        let mut name = String::new();
-        let mut description = String::new();
-
-        for line in frontmatter_lines {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, val)) = line.split_once(':') {
-                let key = key.trim();
-                let val = val.trim().trim_matches('"').trim_matches('\'').trim();
-                if key == "name" {
-                    name = val.to_string();
-                } else if key == "description" {
-                    description = val.to_string();
-                }
-            }
-        }
-
-        let body_content = body_lines.join("\n");
-
-        if name.trim().is_empty() || body_content.trim().is_empty() {
-            return None;
-        }
-
-        Some(ParsedSkill {
-            name,
-            description,
-            content: body_content,
-        })
-    }
-
-    pub fn parse_workflow_markdown(content: &str) -> Option<ParsedWorkflow> {
-        let mut name = String::new();
-        let mut steps = Vec::new();
-        let mut in_steps = false;
-        let mut current_step_name = None;
-        let mut current_step_desc = Vec::new();
-
-        let lines: Vec<&str> = content.lines().collect();
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("# ") {
-                if name.is_empty() {
-                    name = trimmed
-                        .strip_prefix("# ")
-                        .unwrap_or(trimmed)
-                        .trim()
-                        .to_string();
-                }
-            } else if trimmed.starts_with("## ") {
-                if trimmed
-                    .to_lowercase()
-                    .strip_prefix("##")
-                    .unwrap_or("")
-                    .trim()
-                    == "steps"
-                {
-                    in_steps = true;
-                } else {
-                    in_steps = false;
-                }
-            } else if in_steps && trimmed.starts_with("### ") {
-                if let Some(s_name) = current_step_name.take() {
-                    let s_desc = current_step_desc.join("\n").trim().to_string();
-                    steps.push(WorkflowStep {
-                        name: s_name,
-                        description: s_desc,
-                    });
-                    current_step_desc.clear();
-                }
-
-                let raw_step_name = trimmed.strip_prefix("###").unwrap_or(trimmed).trim();
-                let mut chars = raw_step_name.chars().peekable();
-                let mut has_digits = false;
-                while let Some(&c) = chars.peek() {
-                    if c.is_ascii_digit() {
-                        has_digits = true;
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                let parsed_name = if has_digits && chars.peek() == Some(&'.') {
-                    chars.next(); // consume '.'
-                    let rest: String = chars.collect();
-                    rest.trim().to_string()
-                } else {
-                    raw_step_name.to_string()
-                };
-
-                current_step_name = Some(parsed_name);
-            } else if in_steps && current_step_name.is_some() {
-                current_step_desc.push(line);
-            }
-        }
-
-        if let Some(s_name) = current_step_name {
-            let s_desc = current_step_desc.join("\n").trim().to_string();
-            steps.push(WorkflowStep {
-                name: s_name,
-                description: s_desc,
-            });
-        }
-
-        if name.trim().is_empty() || steps.is_empty() {
-            return None;
-        }
-
-        Some(ParsedWorkflow { name, steps })
-    }
-
     pub fn load_skills_for_mount(&self, root_path: &str) -> Vec<ParsedSkill> {
         let mut skills = Vec::new();
         let path = Path::new(root_path).join(".studio").join("skills");
@@ -4255,7 +3959,7 @@ impl AiManager {
             let file_path = entry.path();
             if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&file_path) {
-                    if let Some(parsed) = Self::parse_skill_markdown(&content) {
+                    if let Some(parsed) = parse_skill_markdown(&content) {
                         skills.push(parsed);
                     }
                 }
@@ -4282,7 +3986,7 @@ impl AiManager {
             let file_path = entry.path();
             if file_path.is_file() && file_path.extension().map_or(false, |ext| ext == "md") {
                 if let Ok(content) = fs::read_to_string(&file_path) {
-                    if let Some(parsed) = Self::parse_workflow_markdown(&content) {
+                    if let Some(parsed) = parse_workflow_markdown(&content) {
                         workflows.push(parsed);
                     }
                 }
@@ -4680,18 +4384,6 @@ fn backend_configuration_message(backend: &AiBackendConfig) -> String {
     message
 }
 
-fn subagent_kickoff_prompt(role: &str, task: &str) -> String {
-    format!(
-        "You are the `{}` subagent.\n\nTask:\n{}\n\nWork only on this task. Use tools as needed. When finished, call `complete_task` with success and a concise summary so the parent agent can continue.",
-        role.trim(),
-        task.trim()
-    )
-}
-
-fn native_delegation_prompt(role: &str, task: &str) -> String {
-    format!("Native {} subagent\n\n{}", role.trim(), task.trim())
-}
-
 fn chatgpt_model_from_str(model: &str) -> ChatGptModel {
     match model.trim() {
         "gpt-5.4-mini" => ChatGptModel::Gpt54Mini,
@@ -4942,125 +4634,6 @@ fn render_system_prompt(
         ));
     }
     base
-}
-
-fn append_workflow_focus(
-    out: &mut String,
-    active_workflow: &ActiveWorkflowState,
-    workflows: &[ParsedWorkflow],
-) {
-    out.push_str("\n\n# Current Workflow\n");
-    out.push_str("Workflow: ");
-    out.push_str(active_workflow.name.trim());
-    out.push('\n');
-
-    if let Some(step) = active_workflow.steps.get(active_workflow.current_step) {
-        out.push_str("Current step: ");
-        out.push_str(&(active_workflow.current_step + 1).to_string());
-        out.push_str(". ");
-        out.push_str(step.name.trim());
-        out.push('\n');
-        out.push_str("Status: ");
-        out.push_str(step.status.trim());
-        out.push('\n');
-
-        if let Some(description) =
-            workflow_step_description(workflows, &active_workflow.name, &step.name)
-        {
-            out.push_str("Description:\n");
-            out.push_str(description.trim());
-            out.push('\n');
-        }
-    }
-}
-fn workflow_step_description<'a>(
-    workflows: &'a [ParsedWorkflow],
-    workflow_name: &str,
-    step_name: &str,
-) -> Option<&'a str> {
-    workflows
-        .iter()
-        .find(|workflow| workflow.name == workflow_name)
-        .and_then(|workflow| {
-            workflow
-                .steps
-                .iter()
-                .find(|step| step.name == step_name)
-                .map(|step| step.description.as_str())
-        })
-        .filter(|description| !description.trim().is_empty())
-}
-
-fn workflow_prompt_from_command(
-    prompt: &str,
-    workflows: &[ParsedWorkflow],
-) -> Option<(ActiveWorkflowState, String)> {
-    let command_line = prompt.strip_prefix('/')?;
-    let (command, arguments) = command_line
-        .split_once(char::is_whitespace)
-        .map(|(command, arguments)| (command.trim(), arguments.trim()))
-        .unwrap_or((command_line.trim(), ""));
-    if command.is_empty() {
-        return None;
-    }
-    let workflow = workflows
-        .iter()
-        .find(|workflow| workflow_command_matches(&workflow.name, command))?;
-    let first_step = workflow.steps.first()?;
-    let mut steps = Vec::with_capacity(workflow.steps.len());
-    for (index, step) in workflow.steps.iter().enumerate() {
-        steps.push(WorkflowStepState {
-            name: step.name.clone(),
-            status: if index == 0 { "active" } else { "pending" }.to_string(),
-        });
-    }
-
-    let mut instruction = String::new();
-    instruction.push_str("Execute workflow `");
-    instruction.push_str(&workflow.name);
-    instruction.push_str("`.");
-    if !arguments.is_empty() {
-        instruction.push_str("\nArguments: ");
-        instruction.push_str(arguments);
-    }
-    instruction.push_str("\nFocus on step 1: ");
-    instruction.push_str(&first_step.name);
-    instruction.push_str("\nStatus: active");
-    if !first_step.description.trim().is_empty() {
-        instruction.push_str("\nStep description:\n");
-        instruction.push_str(first_step.description.trim());
-    }
-    instruction.push_str("\n\nComplete this step before moving to later workflow steps.");
-
-    Some((
-        ActiveWorkflowState {
-            name: workflow.name.clone(),
-            current_step: 0,
-            steps,
-        },
-        instruction,
-    ))
-}
-
-fn workflow_command_matches(workflow_name: &str, command: &str) -> bool {
-    workflow_name == command || workflow_command_slug(workflow_name) == command
-}
-
-fn workflow_command_slug(name: &str) -> String {
-    let mut slug = String::new();
-    let mut pending_dash = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if pending_dash && !slug.is_empty() {
-                slug.push('-');
-            }
-            slug.push(ch.to_ascii_lowercase());
-            pending_dash = false;
-        } else {
-            pending_dash = true;
-        }
-    }
-    slug
 }
 
 fn sanitize_conversation_history(history: Vec<ConversationItem>) -> Vec<ConversationItem> {
@@ -6760,47 +6333,6 @@ fn json_string(value: &str) -> String {
     value.to_string().serialize_json()
 }
 
-fn parse_direct_subagent_command(prompt: &str) -> Option<(String, String)> {
-    let trimmed = prompt.trim();
-    let rest = trimmed
-        .strip_prefix("/subagent")
-        .or_else(|| trimmed.strip_prefix("/agent"))?
-        .trim();
-    if rest.is_empty() {
-        return None;
-    }
-
-    let (role, task) = if let Some((role, task)) = rest.split_once(':') {
-        (role.trim(), task.trim())
-    } else {
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        (parts.next()?.trim(), parts.next().unwrap_or("").trim())
-    };
-
-    if role.is_empty() || task.is_empty() {
-        return None;
-    }
-
-    Some((role.to_string(), task.to_string()))
-}
-
-fn summarize_title(prompt: &str) -> String {
-    let single_line = prompt
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .replace('\t', " ");
-    if single_line.is_empty() {
-        return String::new();
-    }
-    let mut title = single_line.chars().take(40).collect::<String>();
-    if single_line.chars().count() > 40 {
-        title.push_str("...");
-    }
-    title
-}
-
 fn is_terminal_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -6814,54 +6346,6 @@ fn should_track_ai_terminal_task(prompt: &str) -> bool {
         || lowered.contains("terminal")
         || lowered.contains("other agent")
         || lowered.contains("tell ") && lowered.contains(" to ")
-}
-
-fn extract_expected_paths_from_prompt(prompt: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for raw in prompt.split_whitespace() {
-        let token = raw.trim_matches(|ch: char| {
-            matches!(
-                ch,
-                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
-            )
-        });
-        if token.is_empty() || token.starts_with('-') {
-            continue;
-        }
-        let looks_like_path = token.contains('/')
-            || token.contains('\\')
-            || token.rsplit_once('.').is_some_and(|(_, ext)| {
-                !ext.is_empty()
-                    && ext.len() <= 8
-                    && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
-            });
-        if !looks_like_path {
-            continue;
-        }
-        let normalized = token.replace('\\', "/");
-        if !out.iter().any(|existing| existing == &normalized) {
-            out.push(normalized);
-        }
-    }
-    out
-}
-
-fn matches_expected_path(path: &str, expected_paths: &[String]) -> bool {
-    expected_paths.iter().any(|expected| {
-        path == expected || path.ends_with(&format!("/{}", expected)) || expected.ends_with(path)
-    })
-}
-
-fn terminal_display_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
-}
-
-fn terminal_blocked_reason(mode: &str) -> Option<&'static str> {
-    match mode {
-        "awaiting-input" => Some("Tracked terminal is awaiting input"),
-        "needs-attention" => Some("Tracked terminal needs attention"),
-        _ => None,
-    }
 }
 
 fn truncate_inline(text: &str, max_chars: usize) -> String {
@@ -7014,6 +6498,7 @@ mod tests {
     use super::*;
     use makepad_network::backend::{EventSink, NetworkBackend};
     use makepad_network::{HttpError, HttpMethod, HttpRequest, HttpResponse, NetworkError, WsSend};
+    use makepad_studio_ai::WorkflowStep;
     use std::collections::BTreeMap;
     use std::sync::mpsc::channel;
     use std::thread;
@@ -7025,94 +6510,6 @@ mod tests {
             summarize_title("01234567890123456789012345678901234567890"),
             "0123456789012345678901234567890123456789..."
         );
-    }
-
-    #[test]
-    fn test_parse_skill_markdown() {
-        let content = r#"---
-name: "Semantic Compression"
-description: "Guidelines for compressing and summarizing files"
----
-# Semantic Compression
-This is the body content of the skill.
-It has multiple lines.
-"#;
-        let parsed = AiManager::parse_skill_markdown(content).unwrap();
-        assert_eq!(parsed.name, "Semantic Compression");
-        assert_eq!(
-            parsed.description,
-            "Guidelines for compressing and summarizing files"
-        );
-        assert!(parsed.content.contains("# Semantic Compression"));
-        assert!(parsed.content.contains("It has multiple lines."));
-    }
-
-    #[test]
-    fn test_parse_workflow_markdown() {
-        let content = r#"# Review PRs Command
-
-Some intro text...
-
-## Steps
-### 1. Resolve PR Set
-Description of step 1...
-Detailed instructions...
-
-### 2. Verify Changes
-Description of step 2...
-
-## Feedback
-Not steps.
-"#;
-        let parsed = AiManager::parse_workflow_markdown(content).unwrap();
-        assert_eq!(parsed.name, "Review PRs Command");
-        assert_eq!(parsed.steps.len(), 2);
-        assert_eq!(parsed.steps[0].name, "Resolve PR Set");
-        assert_eq!(
-            parsed.steps[0].description,
-            "Description of step 1...\nDetailed instructions..."
-        );
-        assert_eq!(parsed.steps[1].name, "Verify Changes");
-        assert_eq!(parsed.steps[1].description, "Description of step 2...");
-    }
-
-    #[test]
-    fn test_parse_skill_markdown_validation() {
-        // Missing name in frontmatter
-        let content_no_name = r#"---
-description: "Guidelines for compressing and summarizing files"
----
-# Semantic Compression
-This is the body content of the skill.
-"#;
-        assert!(AiManager::parse_skill_markdown(content_no_name).is_none());
-
-        // Missing content body
-        let content_no_body = r#"---
-name: "Semantic Compression"
----
-"#;
-        assert!(AiManager::parse_skill_markdown(content_no_body).is_none());
-    }
-
-    #[test]
-    fn test_parse_workflow_markdown_validation() {
-        // Missing workflow name
-        let content_no_name = r#"
-## Steps
-### 1. Resolve PR Set
-Description of step 1...
-"#;
-        assert!(AiManager::parse_workflow_markdown(content_no_name).is_none());
-
-        // Missing steps
-        let content_no_steps = r#"# Review PRs Command
-
-Some intro text...
-
-## Steps
-"#;
-        assert!(AiManager::parse_workflow_markdown(content_no_steps).is_none());
     }
 
     #[test]
