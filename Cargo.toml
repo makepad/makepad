@@ -51,6 +51,7 @@ workspace.members = [
     "platform/script/test",
     "platform/script/std",
     "platform/studio",
+    "studio/ai",
     "studio/hub",
     "libs/makepad_test",
     "libs/makepad_test/macros",

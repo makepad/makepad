@@ -1,4 +1,4 @@
-pub mod ai_manager;
+mod ai_manager;
 pub mod app_data;
 pub mod app_ui;
 pub mod desktop_code_editor;
@@ -11,6 +11,7 @@ pub mod desktop_run_view;
 pub mod desktop_terminal_view;
 
 pub use makepad_code_editor;
+pub use makepad_studio_ai;
 pub use makepad_studio_hub;
 pub use makepad_widgets;
 pub use makepad_widgets::makepad_draw;
@@ -380,7 +381,7 @@ impl MatchEvent for App {
         for action in actions {
             if let Some(action) = action.as_widget_action() {
                 if let MarkdownAction::LinkNavigated(href) = action.cast::<MarkdownAction>() {
-                    if let Some(path) = ai_manager::ai_file_link_path_from_href(&href) {
+                    if let Some(path) = makepad_studio_ai::ai_file_link_path_from_href(&href) {
                         self.open_path_in_editor(cx, &path);
                         continue;
                     }
