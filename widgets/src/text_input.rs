@@ -7,7 +7,7 @@ use {
             event::keyboard::CharOffset,
             ime::{
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
-                TextInputConfig,
+                TextInputConfig, TextInputContentType,
             },
             text::{
                 geom::Point,
@@ -523,6 +523,8 @@ pub struct TextInput {
     #[live]
     input_mode: InputMode,
     #[live]
+    content_type: TextInputContentType,
+    #[live]
     autocapitalize: AutoCapitalize,
     #[live]
     autocorrect: AutoCorrect,
@@ -709,6 +711,13 @@ impl TextInput {
 
     pub fn set_is_read_only(&mut self, cx: &mut Cx, is_read_only: bool) {
         self.is_read_only = is_read_only;
+        // Flipped to read-only while focused: drop the keyboard now, since the draw
+        // path no longer re-shows it (gated on !is_read_only). Guard against Area::Empty
+        // (a never-drawn/reapplied field) so we don't false-match an Empty key focus.
+        let area = self.draw_bg.area();
+        if is_read_only && !area.is_empty() && cx.has_key_focus(area) {
+            cx.hide_text_ime();
+        }
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
@@ -1559,12 +1568,24 @@ impl TextInput {
         TextInputConfig {
             soft_keyboard: SoftKeyboardConfig {
                 input_mode: self.effective_input_mode(),
-                autocapitalize: self.autocapitalize,
-                autocorrect: self.autocorrect,
+                // A password must never auto-capitalize or autocorrect.
+                autocapitalize: if self.is_password {
+                    AutoCapitalize::None
+                } else {
+                    self.autocapitalize
+                },
+                autocorrect: if self.is_password {
+                    AutoCorrect::Disabled
+                } else {
+                    self.autocorrect
+                },
                 return_key_type: self.return_key_type,
             },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
+            submit_on_enter: self.submit_on_enter,
+            content_type: self.content_type,
+            is_read_only: self.is_read_only,
         }
     }
 
@@ -2031,7 +2052,8 @@ impl Widget for TextInput {
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
-        if cx.has_key_focus(self.draw_bg.area()) {
+        // A read-only field does no IME work at all (no state push, no keyboard).
+        if cx.has_key_focus(self.draw_bg.area()) && !self.is_read_only {
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
@@ -2429,21 +2451,29 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
-                modifiers: KeyModifiers { shift: true, .. },
+                modifiers: mods @ KeyModifiers { shift: true, .. },
                 ..
             }) if !self.is_read_only => {
-                self.reset_blink_timer(cx);
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: "\n".to_string(),
-                    },
-                );
-                self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid);
+                if !self.is_multiline {
+                    // Single-line fields submit on Enter regardless of Shift; never embed
+                    // a raw newline.
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
@@ -2510,24 +2540,94 @@ impl Widget for TextInput {
                 self.preserved_selection_cursor = None;
                 self.pending_outside_focus_loss_touch = None;
 
-                // Handle Android full state sync (authoritative from Java InputConnection)
+                // Full state sync (authoritative: Android InputConnection / iOS UITextView)
                 if let Some(full_state) = &event.full_state_sync {
-                    let text_changed = self.text != full_state.text;
-                    if text_changed {
-                        self.history
-                            .create_or_extend_edit_group(EditKind::Other, self.selection);
-                        self.text = full_state.text.clone();
-                        self.laidout_text = None;
-                    }
+                    // The view can deliver characters a restricted field disallows (paste,
+                    // hardware keyboard); filter so iOS/Android match every other platform.
+                    // A selection-only sync (text unchanged) skips the filter pass + its
+                    // per-keystroke allocation.
+                    let (text_changed, rejected) = if self.text == full_state.text {
+                        (false, false)
+                    } else {
+                        let filtered = self.filter_input(&full_state.text, true);
+                        let rejected = filtered != full_state.text;
+                        let changed = self.text != filtered;
+                        if changed {
+                            // Apply only the changed middle span so undo records a small
+                            // delta; a whole-text replace would clone the entire old text
+                            // onto the undo stack on every keystroke.
+                            let common_prefix = self
+                                .text
+                                .chars()
+                                .zip(filtered.chars())
+                                .take_while(|(a, b)| a == b)
+                                .count();
+                            let old_count = self.text.chars().count();
+                            let new_count = filtered.chars().count();
+                            let max_suffix = old_count.min(new_count) - common_prefix;
+                            let common_suffix = self
+                                .text
+                                .chars()
+                                .rev()
+                                .zip(filtered.chars().rev())
+                                .take_while(|(a, b)| a == b)
+                                .count()
+                                .min(max_suffix);
+                            let start = CharOffset(common_prefix).to_byte_index(&self.text);
+                            let old_end =
+                                CharOffset(old_count - common_suffix).to_byte_index(&self.text);
+                            let new_end =
+                                CharOffset(new_count - common_suffix).to_byte_index(&filtered);
+                            self.create_or_extend_edit_group(EditKind::Other);
+                            // history.apply_edit records the inverse + rewrites self.text; the
+                            // selection is set authoritatively below, so skip the wasted
+                            // selection transform apply_edit_preserving_selection would do.
+                            self.history.apply_edit(
+                                Edit {
+                                    start,
+                                    end: old_end,
+                                    replace_with: filtered[start..new_end].to_string(),
+                                },
+                                &mut self.text,
+                            );
+                            self.laidout_text = None;
+                        }
+                        (changed, rejected)
+                    };
 
-                    let sel_start_byte = floor_grapheme_boundary(
-                        &self.text,
-                        full_state.selection.start.to_byte_index(&self.text),
-                    );
-                    let sel_end_byte = floor_grapheme_boundary(
-                        &self.text,
-                        full_state.selection.end.to_byte_index(&self.text),
-                    );
+                    // The view's selection offsets index the UNFILTERED full_state.text.
+                    // When chars were rejected, self.text is now shorter, so map each
+                    // endpoint through the filter (count filtered chars in the prefix)
+                    // before resolving to a byte index; otherwise self.text == the source
+                    // text and the offsets map directly.
+                    let remap_char_offset = |this: &Self, offset: CharOffset| -> usize {
+                        let char_idx = if rejected {
+                            // self.text is the filtered subsequence of full_state.text; count
+                            // the kept chars falling at or before this source offset (greedy
+                            // match), which avoids re-filtering a prefix.
+                            let mut kept = this.text.chars();
+                            let mut next_kept = kept.next();
+                            let mut count = 0;
+                            for (i, c) in full_state.text.chars().enumerate() {
+                                if i >= offset.0 {
+                                    break;
+                                }
+                                if Some(c) == next_kept {
+                                    count += 1;
+                                    next_kept = kept.next();
+                                }
+                            }
+                            count
+                        } else {
+                            offset.0
+                        };
+                        floor_grapheme_boundary(
+                            &this.text,
+                            CharOffset(char_idx).to_byte_index(&this.text),
+                        )
+                    };
+                    let sel_start_byte = remap_char_offset(self, full_state.selection.start);
+                    let sel_end_byte = remap_char_offset(self, full_state.selection.end);
                     self.needs_scroll_to_cursor = true;
                     self.selection = Selection {
                         anchor: Cursor {
@@ -2541,17 +2641,40 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start = composition_range.start.to_byte_index(&self.text);
-                        self.composition_end = composition_range.end.to_byte_index(&self.text);
+                        // Same filter remap as the selection: when chars were rejected the
+                        // composition offsets index the unfiltered source, so map them onto
+                        // the filtered self.text (remap_char_offset also grapheme-floors).
+                        self.composition_start = remap_char_offset(self, composition_range.start);
+                        self.composition_end = remap_char_offset(self, composition_range.end);
                     } else {
                         self.composition_start = 0;
                         self.composition_end = 0;
                     }
 
-                    self.last_sent_ime_text = self.text.clone();
-                    self.last_sent_ime_sel_start = sel_start_byte;
-                    self.last_sent_ime_sel_end = sel_end_byte;
-                    self.ime_update_frame = cx.redraw_id();
+                    if rejected && self.has_composition() {
+                        // update_ime_context skips the re-push while composing, so push the
+                        // cleaned text (with the remapped composition) directly so the view
+                        // drops the rejected chars before the composition commits.
+                        let sel = CharOffset(self.text[..sel_start_byte].chars().count())
+                            ..CharOffset(self.text[..sel_end_byte].chars().count());
+                        let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                            ..CharOffset(self.text[..self.composition_end].chars().count());
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                        cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+                    } else if rejected {
+                        // The view still holds the rejected chars; force update_ime_context
+                        // to re-push the cleaned text back to it (sentinel selection).
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.last_sent_ime_sel_end = usize::MAX;
+                    } else {
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                    }
 
                     // This path bypasses apply_edit(), so keep placeholder/color state in sync.
                     self.check_text_is_empty(cx);
