@@ -2,9 +2,6 @@ pub mod ai_manager;
 pub mod app_data;
 pub mod app_ui;
 pub mod desktop_code_editor;
-pub mod studio_markdown;
-pub mod studio_command_text_input;
-pub mod studio_text_flow;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
 
@@ -39,7 +36,7 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use crate::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
+use makepad_studio_widgets::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use makepad_studio_protocol::hub_protocol::{
     ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
 };
@@ -58,9 +55,9 @@ mod app_tabs;
 pub fn register_script_modules(vm: &mut ScriptVm) {
     crate::desktop_file_tree::script_mod(vm);
     crate::desktop_code_editor::script_mod(vm);
-    crate::studio_command_text_input::script_mod(vm);
-    crate::studio_text_flow::script_mod(vm);
-    crate::studio_markdown::script_mod(vm);
+    makepad_studio_widgets::studio_command_text_input::script_mod(vm);
+    makepad_studio_widgets::studio_text_flow::script_mod(vm);
+    makepad_studio_widgets::studio_markdown::script_mod(vm);
     crate::desktop_log_view::script_mod(vm);
     crate::desktop_profiler_view::script_mod(vm);
     crate::desktop_run_list::script_mod(vm);

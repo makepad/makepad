@@ -1,0 +1,9 @@
+[package]
+name = "makepad-studio-widgets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+unicode-segmentation = { version = "1.12.0", path = "../../libs/unicode/unicode-segmentation" }
+pulldown-cmark = { version = "0.12.2", path = "../../libs/pulldown-cmark", default-features = false, features = ["simd"] }

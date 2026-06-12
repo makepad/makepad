@@ -1,9 +1,9 @@
-use crate::makepad_draw::text::{
+use makepad_widgets::makepad_draw::text::{
     geom::Point as TextPoint,
     layouter::LaidoutText,
     selection::{Cursor, Selection},
 };
-use crate::{
+use makepad_widgets::{
     animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
     makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
