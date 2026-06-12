@@ -14,7 +14,7 @@ use {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    pub xic: Option<x11_sys::XIC>,
+    pub xic: Option<XimInputContext>,
     pub attributes: Option<x11_sys::XSetWindowAttributes>,
     pub visual_info: Option<x11_sys::XVisualInfo>,
     //pub child_windows: Vec<XlibChildWindow>,
@@ -510,7 +510,7 @@ impl XlibWindow {
             return;
         }
         self.ime_rect = rect;
-        let Some(xic) = self.xic else {
+        let Some(xim_context) = self.xic else {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
@@ -530,6 +530,27 @@ impl XlibWindow {
             height: (rect.size.y * dpi_factor + 2.0 * clearance).max(1.0) as u16,
         };
         unsafe {
+            let mut xic = xim_context.xic;
+            if xim_context.preedit_style == XimPreeditStyle::Position
+                && !xim_context.spot_initialized_at_creation
+            {
+                if let Some(window) = self.window {
+                    if let Some(new_context) = create_xim_position_input_context_with_spot(
+                        get_xlib_app_global().xim,
+                        window,
+                        spot_px,
+                        area_px,
+                    ) {
+                        x11_sys::XDestroyIC(xic);
+                        self.xic = Some(new_context);
+                        xic = new_context.xic;
+                        if self.ime_active {
+                            x11_sys::XSetICFocus(xic);
+                        }
+                    }
+                }
+            }
+
             let preedit_attr = x11_sys::XVaCreateNestedList(
                 0,
                 x11_sys::XNSpotLocation.as_ptr(),
@@ -557,11 +578,11 @@ impl XlibWindow {
             return;
         }
         self.ime_active = active;
-        if let Some(xic) = self.xic {
+        if let Some(xim_context) = self.xic {
             if self.ime_active {
-                unsafe { x11_sys::XSetICFocus(xic) };
+                unsafe { x11_sys::XSetICFocus(xim_context.xic) };
             } else {
-                unsafe { x11_sys::XUnsetICFocus(xic) };
+                unsafe { x11_sys::XUnsetICFocus(xim_context.xic) };
             }
         }
     }

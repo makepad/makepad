@@ -15,6 +15,8 @@ use {
 
 static mut XLIB_APP: *mut XlibApp = 0 as *mut _;
 
+const MAX_X11_EVENTS_BEFORE_PAINT: usize = 64;
+
 pub fn get_xlib_app_global() -> &'static mut XlibApp {
     unsafe { &mut *(XLIB_APP) }
 }
@@ -34,6 +36,20 @@ thread_local! {
 struct XimPreedit {
     text: String,
     dirty: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum XimPreeditStyle {
+    Callback,
+    Position,
+    Nothing,
+}
+
+#[derive(Clone, Copy)]
+pub struct XimInputContext {
+    pub xic: x11_sys::XIC,
+    pub preedit_style: XimPreeditStyle,
+    pub spot_initialized_at_creation: bool,
 }
 
 // Splice `insert` into `buf`, replacing `char_len` characters starting at
@@ -130,7 +146,7 @@ unsafe extern "C" fn xim_preedit_draw(
 unsafe fn create_xim_callback_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
-) -> Option<x11_sys::XIC> {
+) -> Option<XimInputContext> {
     let start_cb = x11_sys::XIMCallback {
         client_data: ptr::null_mut(),
         // The preedit-start callback returns an int (max length); transmute its
@@ -174,7 +190,7 @@ unsafe fn create_xim_callback_input_context(
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as i32,
+        (x11_sys::XIMPreeditCallbacks | x11_sys::XIMStatusNothing) as c_ulong,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -187,23 +203,37 @@ unsafe fn create_xim_callback_input_context(
     if xic.is_null() {
         None
     } else {
-        Some(xic)
+        Some(XimInputContext {
+            xic,
+            preedit_style: XimPreeditStyle::Callback,
+            spot_initialized_at_creation: false,
+        })
     }
 }
 
-unsafe fn create_xim_position_input_context(
+unsafe fn create_xim_position_input_context_internal(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
-) -> Option<x11_sys::XIC> {
-    // Over-the-spot requires an initial spot in the creation-time preedit
-    // attributes; set_ime_rect updates it on every caret move.
-    let spot = x11_sys::XPoint { x: 0, y: 0 };
-    let preedit_attr = x11_sys::XVaCreateNestedList(
-        0,
-        x11_sys::XNSpotLocation.as_ptr(),
-        &spot,
-        ptr::null_mut::<c_void>(),
-    );
+    initial_ime_area: Option<(x11_sys::XPoint, x11_sys::XRectangle)>,
+) -> Option<XimInputContext> {
+    let default_spot = x11_sys::XPoint { x: 0, y: 0 };
+    let preedit_attr = if let Some((spot, area)) = initial_ime_area {
+        x11_sys::XVaCreateNestedList(
+            0,
+            x11_sys::XNSpotLocation.as_ptr(),
+            &spot,
+            x11_sys::XNArea.as_ptr(),
+            &area,
+            ptr::null_mut::<c_void>(),
+        )
+    } else {
+        x11_sys::XVaCreateNestedList(
+            0,
+            x11_sys::XNSpotLocation.as_ptr(),
+            &default_spot,
+            ptr::null_mut::<c_void>(),
+        )
+    };
     if preedit_attr.is_null() {
         return None;
     }
@@ -211,7 +241,7 @@ unsafe fn create_xim_position_input_context(
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditPosition | x11_sys::XIMStatusNothing) as i32,
+        (x11_sys::XIMPreeditPosition | x11_sys::XIMStatusNothing) as c_ulong,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -224,18 +254,38 @@ unsafe fn create_xim_position_input_context(
     if xic.is_null() {
         None
     } else {
-        Some(xic)
+        Some(XimInputContext {
+            xic,
+            preedit_style: XimPreeditStyle::Position,
+            spot_initialized_at_creation: initial_ime_area.is_some(),
+        })
     }
+}
+
+unsafe fn create_xim_position_input_context(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+) -> Option<XimInputContext> {
+    create_xim_position_input_context_internal(xim, window, None)
+}
+
+pub unsafe fn create_xim_position_input_context_with_spot(
+    xim: x11_sys::XIM,
+    window: x11_sys::Window,
+    spot: x11_sys::XPoint,
+    area: x11_sys::XRectangle,
+) -> Option<XimInputContext> {
+    create_xim_position_input_context_internal(xim, window, Some((spot, area)))
 }
 
 unsafe fn create_xim_nothing_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
-) -> Option<x11_sys::XIC> {
+) -> Option<XimInputContext> {
     let xic = x11_sys::XCreateIC(
         xim,
         x11_sys::XNInputStyle.as_ptr(),
-        (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
+        (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as c_ulong,
         x11_sys::XNClientWindow.as_ptr(),
         window,
         x11_sys::XNFocusWindow.as_ptr(),
@@ -245,7 +295,11 @@ unsafe fn create_xim_nothing_input_context(
     if xic.is_null() {
         None
     } else {
-        Some(xic)
+        Some(XimInputContext {
+            xic,
+            preedit_style: XimPreeditStyle::Nothing,
+            spot_initialized_at_creation: false,
+        })
     }
 }
 
@@ -329,24 +383,24 @@ unsafe fn callback_xic_supports_spot_location(xic: x11_sys::XIC) -> bool {
 pub unsafe fn create_xim_input_context(
     xim: x11_sys::XIM,
     window: x11_sys::Window,
-) -> Option<x11_sys::XIC> {
+) -> Option<XimInputContext> {
     if xim.is_null() {
         return None;
     }
 
-    if let Some(callback_xic) = create_xim_callback_input_context(xim, window) {
-        if callback_xic_supports_spot_location(callback_xic) {
-            return Some(callback_xic);
+    if let Some(callback_context) = create_xim_callback_input_context(xim, window) {
+        if callback_xic_supports_spot_location(callback_context.xic) {
+            return Some(callback_context);
         }
-        if let Some(position_xic) = create_xim_position_input_context(xim, window) {
-            x11_sys::XDestroyIC(callback_xic);
-            return Some(position_xic);
+        if let Some(position_context) = create_xim_position_input_context(xim, window) {
+            x11_sys::XDestroyIC(callback_context.xic);
+            return Some(position_context);
         }
-        return Some(callback_xic);
+        return Some(callback_context);
     }
 
-    if let Some(xic) = create_xim_position_input_context(xim, window) {
-        return Some(xic);
+    if let Some(position_context) = create_xim_position_input_context(xim, window) {
+        return Some(position_context);
     }
 
     // Fallback: let the IM server own the preedit display.
@@ -430,9 +484,13 @@ impl XlibApp {
     }
 
     pub unsafe fn event_loop_poll(&mut self) {
-        // Update the current time, and compute the amount of time that elapsed since we
-        // last recorded the current time.
-        while self.display != ptr::null_mut() && x11_sys::XPending(self.display) != 0 {
+        // Bound X event draining so large key bursts cannot starve redraws.
+        let mut processed_events = 0;
+        while self.display != ptr::null_mut()
+            && processed_events < MAX_X11_EVENTS_BEFORE_PAINT
+            && x11_sys::XPending(self.display) != 0
+        {
+            processed_events += 1;
             let mut event = mem::MaybeUninit::uninit();
             x11_sys::XNextEvent(self.display, event.as_mut_ptr());
             let mut event = event.assume_init();
@@ -921,12 +979,12 @@ impl XlibApp {
 
                         if !block_text {
                             // Decode committed characters from XIM/XIC (e.g. ibus, fcitx)
-                            if let Some(xic) = window.xic {
+                            if let Some(xim_context) = window.xic {
                                 let mut buffer = [0u8; 128];
                                 let mut keysym = mem::MaybeUninit::uninit();
                                 let mut status = mem::MaybeUninit::uninit();
                                 let count = x11_sys::Xutf8LookupString(
-                                    xic,
+                                    xim_context.xic,
                                     &mut event.xkey,
                                     buffer.as_mut_ptr() as *mut c_char,
                                     buffer.len() as c_int,
@@ -1039,8 +1097,8 @@ impl XlibApp {
                     if let Some(window_ptr) = self.window_map.get(&event.window) {
                         let window = &mut (**window_ptr);
                         if window.ime_active {
-                            if let Some(xic) = window.xic {
-                                x11_sys::XSetICFocus(xic);
+                            if let Some(xim_context) = window.xic {
+                                x11_sys::XSetICFocus(xim_context.xic);
                             }
                         }
                         window.send_focus_event();
@@ -1071,8 +1129,8 @@ impl XlibApp {
                     let event = event.xfocus;
                     if let Some(window_ptr) = self.window_map.get(&event.window) {
                         let window = &mut (**window_ptr);
-                        if let Some(xic) = window.xic {
-                            x11_sys::XUnsetICFocus(xic);
+                        if let Some(xim_context) = window.xic {
+                            x11_sys::XUnsetICFocus(xim_context.xic);
                         }
                         window.send_focus_lost_event();
                     }
@@ -1082,6 +1140,12 @@ impl XlibApp {
         }
         if self.event_loop_running && !self.display.is_null() {
             self.do_callback(XlibEvent::Paint);
+            if self.event_loop_running
+                && !self.display.is_null()
+                && x11_sys::XPending(self.display) != 0
+            {
+                self.event_flow = EventFlow::Poll;
+            }
         }
     }
 
