@@ -562,19 +562,22 @@ impl XlibWindow {
         } else {
             rect
         };
-        let padding_px = if line_height_px > 0.0 {
-            (line_height_px * 0.25).max(3.0)
+        let (padding_x_px, padding_y_px) = if line_height_px > 0.0 {
+            (
+                (line_height_px * 0.25).max(3.0),
+                (line_height_px * 0.5).max(8.0),
+            )
         } else {
-            0.0
+            (0.0, 0.0)
         };
         let area_line_left_px = line_area.pos.x * dpi_factor;
         let area_line_top_px = line_area.pos.y * dpi_factor;
         let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
         let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
-        let area_left_px = (area_line_left_px - padding_px).max(0.0);
-        let area_top_px = (area_line_top_px - padding_px).max(0.0);
-        let area_right_px = area_line_right_px + padding_px;
-        let area_bottom_px = area_line_bottom_px + padding_px;
+        let area_left_px = (area_line_left_px - padding_x_px).max(0.0);
+        let area_top_px = (area_line_top_px - padding_y_px).max(0.0);
+        let area_right_px = area_line_right_px + padding_x_px;
+        let area_bottom_px = area_line_bottom_px + padding_y_px;
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
             y: baseline_px as i16,
@@ -677,7 +680,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding_px={} baseline_y={} failed_attr={}{}",
+                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -696,7 +699,8 @@ impl XlibWindow {
                     area_px.y,
                     area_px.width,
                     area_px.height,
-                    padding_px,
+                    padding_x_px,
+                    padding_y_px,
                     baseline_px,
                     x11_ime_failed_attr_name(failed_attr),
                     fallback_note
