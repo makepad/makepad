@@ -588,7 +588,6 @@ impl XlibWindow {
         let area_line_top_px = line_area.pos.y * dpi_factor;
         let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
         let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
-        let line_area_height_px = (area_line_bottom_px - area_line_top_px).max(line_height_px);
         let area_left_px = (area_line_left_px - padding_x_px).max(0.0);
         let area_top_px = (area_line_top_px - padding_y_px).max(0.0);
         let area_right_px = area_line_right_px + padding_x_px;
@@ -603,8 +602,10 @@ impl XlibWindow {
         } else {
             line_top_px
         };
+        let spot_below_y_px = line_top_px + line_height_px + spot_clearance_px;
+        let line_area_height_px = (area_line_bottom_px - area_line_top_px).max(line_height_px);
         let candidate_height_guess_px = if line_height_px > 0.0 {
-            (line_area_height_px * 4.8).max(line_height_px * 10.0).max(180.0).min(320.0)
+            (line_area_height_px * 3.3).max(line_height_px * 7.0).max(124.0).min(260.0)
         } else {
             0.0
         };
@@ -638,11 +639,14 @@ impl XlibWindow {
                     {
                         let root_attrs = root_attrs.assume_init();
                         let above_anchor_root_y_px = root_y as f64 + spot_above_y_px;
+                        let below_anchor_root_y_px = root_y as f64 + spot_below_y_px;
                         let line_top_root_px = root_y as f64 + line_top_px;
                         let line_bottom_root_px = line_top_root_px + line_height_px;
                         root_space_px = Some((
                             above_anchor_root_y_px,
                             root_attrs.height as f64 - above_anchor_root_y_px,
+                            below_anchor_root_y_px,
+                            root_attrs.height as f64 - below_anchor_root_y_px,
                             line_top_root_px,
                             root_attrs.height as f64 - line_bottom_root_px,
                             root_attrs.height as f64,
@@ -652,9 +656,9 @@ impl XlibWindow {
             }
         }
         let anchor_above = root_space_px
-            .map(|(anchor_top_space_px, anchor_bottom_space_px, _, _, _)| {
-                anchor_bottom_space_px < flip_above_cutoff_px
-                    && anchor_top_space_px > anchor_bottom_space_px
+            .map(|(above_anchor_top_space_px, _, _, below_anchor_bottom_space_px, _, _, _)| {
+                below_anchor_bottom_space_px < flip_above_cutoff_px
+                    && above_anchor_top_space_px > below_anchor_bottom_space_px
             })
             .unwrap_or(false);
         let spot_y_px = if line_height_px <= 0.0 {
@@ -662,7 +666,7 @@ impl XlibWindow {
         } else if anchor_above {
             spot_above_y_px
         } else {
-            line_top_px + line_height_px + spot_clearance_px
+            spot_below_y_px
         };
         let spot_side = if line_height_px <= 0.0 {
             "baseline"
@@ -743,7 +747,7 @@ impl XlibWindow {
 
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} anchor_top_y={} root_space(anchor_top,bottom_from_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
+                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} anchor_top_y={} anchor_bottom_y={} root_space(above_anchor,bottom_from_above_anchor,below_anchor,bottom_from_below_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -752,6 +756,7 @@ impl XlibWindow {
                     spot_side,
                     spot_clearance_px,
                     spot_above_y_px,
+                    spot_below_y_px,
                     root_space_px,
                     candidate_height_guess_px,
                     flip_above_cutoff_px,
@@ -804,7 +809,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} anchor_top_y={} root_space(anchor_top,bottom_from_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
+                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} anchor_top_y={} anchor_bottom_y={} root_space(above_anchor,bottom_from_above_anchor,below_anchor,bottom_from_below_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -830,6 +835,7 @@ impl XlibWindow {
                     baseline_px,
                     spot_clearance_px,
                     spot_above_y_px,
+                    spot_below_y_px,
                     root_space_px,
                     candidate_height_guess_px,
                     flip_above_cutoff_px,
