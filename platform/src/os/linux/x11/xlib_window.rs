@@ -597,11 +597,6 @@ impl XlibWindow {
         } else {
             0.0
         };
-        let spot_above_clearance_px = if line_height_px > 0.0 {
-            spot_clearance_px + line_height_px
-        } else {
-            0.0
-        };
         let candidate_height_guess_px = if line_height_px > 0.0 {
             (line_height_px * 5.5).max(96.0).min(220.0)
         } else {
@@ -656,7 +651,7 @@ impl XlibWindow {
         let spot_y_px = if line_height_px <= 0.0 {
             baseline_px
         } else if anchor_above {
-            (line_top_px - spot_above_clearance_px).max(0.0)
+            line_top_px
         } else {
             line_top_px + line_height_px + spot_clearance_px
         };
@@ -739,7 +734,7 @@ impl XlibWindow {
 
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} above_clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
+                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -747,7 +742,6 @@ impl XlibWindow {
                     spot_px.y,
                     spot_side,
                     spot_clearance_px,
-                    spot_above_clearance_px,
                     root_space_px,
                     candidate_height_guess_px,
                     flip_above_cutoff_px,
@@ -800,7 +794,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} above_clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
+                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -825,7 +819,6 @@ impl XlibWindow {
                     padding_y_px,
                     baseline_px,
                     spot_clearance_px,
-                    spot_above_clearance_px,
                     root_space_px,
                     candidate_height_guess_px,
                     flip_above_cutoff_px,
