@@ -548,19 +548,6 @@ impl XlibWindow {
         self.ime_rect = rect;
         self.ime_area_rect = area_rect;
         let Some(mut xim_context) = self.xic else {
-            if x11_ime_debug_enabled() {
-                crate::log!(
-                    "X11 IME: set rect skipped; no XIC rect=({}, {}, {}, {}) line_area=({}, {}, {}, {})",
-                    rect.pos.x,
-                    rect.pos.y,
-                    rect.size.x,
-                    rect.size.y,
-                    area_rect.pos.x,
-                    area_rect.pos.y,
-                    area_rect.size.x,
-                    area_rect.size.y
-                );
-            }
             return;
         };
         let dpi_factor = self.get_dpi_factor();
@@ -640,23 +627,16 @@ impl XlibWindow {
                         let root_attrs = root_attrs.assume_init();
                         let above_anchor_root_y_px = root_y as f64 + spot_above_y_px;
                         let below_anchor_root_y_px = root_y as f64 + spot_below_y_px;
-                        let line_top_root_px = root_y as f64 + line_top_px;
-                        let line_bottom_root_px = line_top_root_px + line_height_px;
                         root_space_px = Some((
                             above_anchor_root_y_px,
-                            root_attrs.height as f64 - above_anchor_root_y_px,
-                            below_anchor_root_y_px,
                             root_attrs.height as f64 - below_anchor_root_y_px,
-                            line_top_root_px,
-                            root_attrs.height as f64 - line_bottom_root_px,
-                            root_attrs.height as f64,
                         ));
                     }
                 }
             }
         }
         let anchor_above = root_space_px
-            .map(|(above_anchor_top_space_px, _, _, below_anchor_bottom_space_px, _, _, _)| {
+            .map(|(above_anchor_top_space_px, below_anchor_bottom_space_px)| {
                 below_anchor_bottom_space_px < flip_above_cutoff_px
                     && above_anchor_top_space_px > below_anchor_bottom_space_px
             })
@@ -667,13 +647,6 @@ impl XlibWindow {
             spot_above_y_px
         } else {
             spot_below_y_px
-        };
-        let spot_side = if line_height_px <= 0.0 {
-            "baseline"
-        } else if anchor_above {
-            "above"
-        } else {
-            "below"
         };
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
@@ -695,17 +668,6 @@ impl XlibWindow {
                     spot_px,
                     area_px,
                 ) {
-                    if x11_ime_debug_enabled() {
-                        crate::log!(
-                            "X11 IME: recreated position XIC with initial spot=({}, {}) area=({}, {}, {}, {})",
-                            spot_px.x,
-                            spot_px.y,
-                            area_px.x,
-                            area_px.y,
-                            area_px.width,
-                            area_px.height
-                        );
-                    }
                     x11_sys::XDestroyIC(xic);
                     self.xic = Some(new_context);
                     xim_context = new_context;
@@ -713,12 +675,6 @@ impl XlibWindow {
                     if self.ime_active {
                         x11_sys::XSetICFocus(xic);
                     }
-                } else if x11_ime_debug_enabled() {
-                    crate::log!(
-                        "X11 IME: failed to recreate position XIC with initial spot=({}, {})",
-                        spot_px.x,
-                        spot_px.y
-                    );
                 }
             }
 
@@ -731,117 +687,33 @@ impl XlibWindow {
                 ptr::null_mut::<c_void>(),
             );
             if preedit_attr.is_null() {
-                if x11_ime_debug_enabled() {
-                    crate::log!(
-                        "X11 IME: set rect aborted; XVaCreateNestedList failed spot=({}, {}) area=({}, {}, {}, {})",
-                        spot_px.x,
-                        spot_px.y,
-                        area_px.x,
-                        area_px.y,
-                        area_px.width,
-                        area_px.height
-                    );
-                }
                 return;
             }
 
-            if x11_ime_debug_enabled() {
-                crate::log!(
-                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} anchor_top_y={} anchor_bottom_y={} root_space(above_anchor,bottom_from_above_anchor,below_anchor,bottom_from_below_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
-                    self.window,
-                    xim_preedit_style_name(xim_context.preedit_style),
-                    xim_context.input_style,
-                    spot_px.x,
-                    spot_px.y,
-                    spot_side,
-                    spot_clearance_px,
-                    spot_above_y_px,
-                    spot_below_y_px,
-                    root_space_px,
-                    candidate_height_guess_px,
-                    flip_above_cutoff_px,
-                    area_px.x,
-                    area_px.y,
-                    area_px.width,
-                    area_px.height
-                );
-            }
-            let mut failed_attr = x11_sys::XSetICValues(
+            let failed_attr = x11_sys::XSetICValues(
                 xic,
                 x11_sys::XNPreeditAttributes.as_ptr(),
                 preedit_attr,
                 ptr::null_mut::<c_void>(),
             );
-            let mut fallback_note = "";
             if !failed_attr.is_null() && xim_context.preedit_style != XimPreeditStyle::Position {
                 if let Some(new_context) = self.create_position_xic_with_spot(
                     xim_context.status_style(),
                     spot_px,
                     area_px,
                 ) {
-                    if x11_ime_debug_enabled() {
-                        crate::log!(
-                            "X11 IME: callback rect update failed_attr={}; switching to position XIC input_style=0x{:x}",
-                            x11_ime_failed_attr_name(failed_attr),
-                            new_context.input_style
-                        );
-                    }
                     x11_sys::XDestroyIC(xic);
                     self.xic = Some(new_context);
-                    xim_context = new_context;
-                    xic = new_context.xic;
                     if self.ime_active {
-                        x11_sys::XSetICFocus(xic);
+                        x11_sys::XSetICFocus(new_context.xic);
                     }
-                    failed_attr = x11_sys::XSetICValues(
-                        xic,
+                    let _ = x11_sys::XSetICValues(
+                        new_context.xic,
                         x11_sys::XNPreeditAttributes.as_ptr(),
                         preedit_attr,
                         ptr::null_mut::<c_void>(),
                     );
-                    fallback_note = " after callback-to-position retry";
-                } else if x11_ime_debug_enabled() {
-                    crate::log!(
-                        "X11 IME: callback rect update failed_attr={}; position XIC fallback creation failed",
-                        x11_ime_failed_attr_name(failed_attr)
-                    );
                 }
-            }
-            if x11_ime_debug_enabled() {
-                crate::log!(
-                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} anchor_top_y={} anchor_bottom_y={} root_space(above_anchor,bottom_from_above_anchor,below_anchor,bottom_from_below_anchor,line_top,bottom_from_line,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
-                    self.window,
-                    xim_preedit_style_name(xim_context.preedit_style),
-                    xim_context.input_style,
-                    dpi_factor,
-                    rect.pos.x,
-                    rect.pos.y,
-                    rect.size.x,
-                    rect.size.y,
-                    area_rect.pos.x,
-                    area_rect.pos.y,
-                    area_rect.size.x,
-                    area_rect.size.y,
-                    spot_px.x,
-                    spot_px.y,
-                    spot_side,
-                    spot_y_px,
-                    area_px.x,
-                    area_px.y,
-                    area_px.width,
-                    area_px.height,
-                    padding_x_px,
-                    padding_y_px,
-                    baseline_px,
-                    spot_clearance_px,
-                    spot_above_y_px,
-                    spot_below_y_px,
-                    root_space_px,
-                    candidate_height_guess_px,
-                    flip_above_cutoff_px,
-                    x11_ime_failed_attr_name(failed_attr),
-                    fallback_note
-                );
             }
             x11_sys::XFree(preedit_attr);
         }

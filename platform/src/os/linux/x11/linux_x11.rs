@@ -759,37 +759,12 @@ impl X11Cx {
                         pos: area_top_left,
                         size: area_bottom_right - area_top_left,
                     };
-                    if x11_ime_debug_enabled() {
-                        crate::log!(
-                            "X11 IME: ShowTextIME window_id={:?} area_pos=({}, {}) area_size=({}, {}) cursor_rect=({}, {}, {}, {}) ime_rect=({}, {}, {}, {}) ime_area_rect=({}, {}, {}, {})",
-                            window_id,
-                            area_pos.x,
-                            area_pos.y,
-                            area_rect.size.x,
-                            area_rect.size.y,
-                            cursor_rect.pos.x,
-                            cursor_rect.pos.y,
-                            cursor_rect.size.x,
-                            cursor_rect.size.y,
-                            ime_rect.pos.x,
-                            ime_rect.pos.y,
-                            ime_rect.size.x,
-                            ime_rect.size.y,
-                            ime_area_rect.pos.x,
-                            ime_area_rect.pos.y,
-                            ime_area_rect.size.x,
-                            ime_area_rect.size.y
-                        );
-                    }
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_rect(ime_rect, ime_area_rect);
                         w.xlib_window.set_ime_active(true);
                     });
                 }
                 CxOsOp::HideTextIME => {
-                    if x11_ime_debug_enabled() {
-                        crate::log!("X11 IME: HideTextIME");
-                    }
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_active(false);
                         w.xlib_window.set_ime_rect(Rect::default(), Rect::default());
