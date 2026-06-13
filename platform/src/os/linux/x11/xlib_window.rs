@@ -541,68 +541,6 @@ impl XlibWindow {
         None
     }
 
-    unsafe fn get_xic_spot_location(
-        xic: x11_sys::XIC,
-    ) -> (String, Option<x11_sys::XPoint>) {
-        let mut spot_ptr: *mut x11_sys::XPoint = ptr::null_mut();
-        let preedit_attr = x11_sys::XVaCreateNestedList(
-            0,
-            x11_sys::XNSpotLocation.as_ptr(),
-            &mut spot_ptr,
-            ptr::null_mut::<c_void>(),
-        );
-        if preedit_attr.is_null() {
-            return ("XVaCreateNestedList".to_string(), None);
-        }
-        let failed_attr = x11_sys::XGetICValues(
-            xic,
-            x11_sys::XNPreeditAttributes.as_ptr(),
-            preedit_attr,
-            ptr::null_mut::<c_void>(),
-        );
-        x11_sys::XFree(preedit_attr);
-        let spot = if failed_attr.is_null() && !spot_ptr.is_null() {
-            Some(*spot_ptr)
-        } else {
-            None
-        };
-        if !spot_ptr.is_null() {
-            x11_sys::XFree(spot_ptr as *mut c_void);
-        }
-        (x11_ime_failed_attr_name(failed_attr), spot)
-    }
-
-    unsafe fn get_xic_area(
-        xic: x11_sys::XIC,
-    ) -> (String, Option<x11_sys::XRectangle>) {
-        let mut area_ptr: *mut x11_sys::XRectangle = ptr::null_mut();
-        let preedit_attr = x11_sys::XVaCreateNestedList(
-            0,
-            x11_sys::XNArea.as_ptr(),
-            &mut area_ptr,
-            ptr::null_mut::<c_void>(),
-        );
-        if preedit_attr.is_null() {
-            return ("XVaCreateNestedList".to_string(), None);
-        }
-        let failed_attr = x11_sys::XGetICValues(
-            xic,
-            x11_sys::XNPreeditAttributes.as_ptr(),
-            preedit_attr,
-            ptr::null_mut::<c_void>(),
-        );
-        x11_sys::XFree(preedit_attr);
-        let area = if failed_attr.is_null() && !area_ptr.is_null() {
-            Some(*area_ptr)
-        } else {
-            None
-        };
-        if !area_ptr.is_null() {
-            x11_sys::XFree(area_ptr as *mut c_void);
-        }
-        (x11_ime_failed_attr_name(failed_attr), area)
-    }
-
     pub fn set_ime_rect(&mut self, rect: Rect, area_rect: Rect) {
         if self.ime_rect == rect && self.ime_area_rect == area_rect {
             return;
@@ -610,6 +548,19 @@ impl XlibWindow {
         self.ime_rect = rect;
         self.ime_area_rect = area_rect;
         let Some(mut xim_context) = self.xic else {
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: set rect skipped; no XIC rect=({}, {}, {}, {}) line_area=({}, {}, {}, {})",
+                    rect.pos.x,
+                    rect.pos.y,
+                    rect.size.x,
+                    rect.size.y,
+                    area_rect.pos.x,
+                    area_rect.pos.y,
+                    area_rect.size.x,
+                    area_rect.size.y
+                );
+            }
             return;
         };
         let dpi_factor = self.get_dpi_factor();
@@ -697,9 +648,34 @@ impl XlibWindow {
                 ptr::null_mut::<c_void>(),
             );
             if preedit_attr.is_null() {
+                if x11_ime_debug_enabled() {
+                    crate::log!(
+                        "X11 IME: set rect aborted; XVaCreateNestedList failed spot=({}, {}) area=({}, {}, {}, {})",
+                        spot_px.x,
+                        spot_px.y,
+                        area_px.x,
+                        area_px.y,
+                        area_px.width,
+                        area_px.height
+                    );
+                }
                 return;
             }
 
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) area=({}, {}, {}, {})",
+                    self.window,
+                    xim_preedit_style_name(xim_context.preedit_style),
+                    xim_context.input_style,
+                    spot_px.x,
+                    spot_px.y,
+                    area_px.x,
+                    area_px.y,
+                    area_px.width,
+                    area_px.height
+                );
+            }
             let mut failed_attr = x11_sys::XSetICValues(
                 xic,
                 x11_sys::XNPreeditAttributes.as_ptr(),
@@ -742,21 +718,8 @@ impl XlibWindow {
                 }
             }
             if x11_ime_debug_enabled() {
-                let (readback_spot_attr, readback_spot) = Self::get_xic_spot_location(xic);
-                let (readback_area_attr, readback_area) = Self::get_xic_area(xic);
-                let readback_spot_matches = readback_spot
-                    .map(|spot| spot.x == spot_px.x && spot.y == spot_px.y)
-                    .unwrap_or(false);
-                let readback_area_matches = readback_area
-                    .map(|area| {
-                        area.x == area_px.x
-                            && area.y == area_px.y
-                            && area.width == area_px.width
-                            && area.height == area_px.height
-                    })
-                    .unwrap_or(false);
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} failed_attr={}{} readback_spot_attr={} readback_spot={:?} readback_spot_matches={} readback_area_attr={} readback_area={:?} readback_area_matches={}",
+                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -779,13 +742,7 @@ impl XlibWindow {
                     padding_y_px,
                     baseline_px,
                     x11_ime_failed_attr_name(failed_attr),
-                    fallback_note,
-                    readback_spot_attr,
-                    readback_spot,
-                    readback_spot_matches,
-                    readback_area_attr,
-                    readback_area,
-                    readback_area_matches
+                    fallback_note
                 );
             }
             x11_sys::XFree(preedit_attr);
