@@ -593,15 +593,16 @@ impl XlibWindow {
         let area_right_px = area_line_right_px + padding_x_px;
         let area_bottom_px = area_line_bottom_px + padding_y_px;
         let spot_clearance_px = if line_height_px > 0.0 {
-            (line_height_px * 1.1).max(20.0).min(32.0)
+            (line_height_px * 0.65).max(10.0).min(18.0)
         } else {
             0.0
         };
         let candidate_height_guess_px = if line_height_px > 0.0 {
-            (line_height_px * 7.0).max(120.0).min(260.0)
+            (line_height_px * 5.5).max(96.0).min(220.0)
         } else {
             0.0
         };
+        let flip_above_cutoff_px = candidate_height_guess_px;
         let mut root_space_px = None;
         if line_height_px > 0.0 {
             if let Some(window) = self.window {
@@ -643,7 +644,7 @@ impl XlibWindow {
         }
         let anchor_above = root_space_px
             .map(|(top_space_px, bottom_space_px, _)| {
-                bottom_space_px < candidate_height_guess_px + spot_clearance_px
+                bottom_space_px < flip_above_cutoff_px
                     && top_space_px > bottom_space_px
             })
             .unwrap_or(false);
@@ -733,7 +734,7 @@ impl XlibWindow {
 
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} area=({}, {}, {}, {})",
+                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) side={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} area=({}, {}, {}, {})",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -743,6 +744,7 @@ impl XlibWindow {
                     spot_clearance_px,
                     root_space_px,
                     candidate_height_guess_px,
+                    flip_above_cutoff_px,
                     area_px.x,
                     area_px.y,
                     area_px.width,
@@ -792,7 +794,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} failed_attr={}{}",
+                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) side={} spot_y={} area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} clearance={} root_space(line_top,bottom,root_height)={:?} candidate_height_guess={} flip_above_cutoff={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -819,6 +821,7 @@ impl XlibWindow {
                     spot_clearance_px,
                     root_space_px,
                     candidate_height_guess_px,
+                    flip_above_cutoff_px,
                     x11_ime_failed_attr_name(failed_attr),
                     fallback_note
                 );
