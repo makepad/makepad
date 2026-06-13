@@ -565,7 +565,7 @@ impl XlibWindow {
         let (padding_x_px, padding_y_px) = if line_height_px > 0.0 {
             (
                 (line_height_px * 0.25).max(3.0),
-                (line_height_px * 0.5).max(8.0),
+                (line_height_px * 0.75).max(12.0),
             )
         } else {
             (0.0, 0.0)
