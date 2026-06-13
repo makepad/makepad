@@ -52,6 +52,8 @@ const X11_IME_POPUP_ADJUST_INTERVAL: f64 = 1.0 / 30.0;
 struct ImePopupCandidate {
     window: x11_sys::Window,
     class_name: String,
+    class_match: bool,
+    override_redirect: bool,
     x: c_int,
     y: c_int,
     width: c_int,
@@ -596,6 +598,52 @@ impl XlibWindow {
         Some(class_name)
     }
 
+    unsafe fn window_or_child_wm_class(
+        display: *mut x11_sys::Display,
+        window: x11_sys::Window,
+        wm_class_atom: x11_sys::Atom,
+        depth: usize,
+    ) -> Option<String> {
+        if let Some(class_name) = Self::window_wm_class(display, window, wm_class_atom) {
+            return Some(class_name);
+        }
+        if depth == 0 {
+            return None;
+        }
+
+        let mut root_return = 0;
+        let mut parent_return = 0;
+        let mut children: *mut x11_sys::Window = ptr::null_mut();
+        let mut child_count: c_uint = 0;
+        if x11_sys::XQueryTree(
+            display,
+            window,
+            &mut root_return,
+            &mut parent_return,
+            &mut children,
+            &mut child_count,
+        ) == 0
+        {
+            return None;
+        }
+
+        let mut class_name = None;
+        if !children.is_null() {
+            for child_window in
+                std::slice::from_raw_parts(children, child_count as usize).iter().copied()
+            {
+                if let Some(child_class) =
+                    Self::window_or_child_wm_class(display, child_window, wm_class_atom, depth - 1)
+                {
+                    class_name = Some(child_class);
+                    break;
+                }
+            }
+            x11_sys::XFree(children as *mut c_void);
+        }
+        class_name
+    }
+
     unsafe fn ime_popup_candidate(
         &self,
         display: *mut x11_sys::Display,
@@ -615,8 +663,11 @@ impl XlibWindow {
         if xwa.map_state != X11_IS_VIEWABLE || xwa.width <= 0 || xwa.height <= 0 {
             return None;
         }
-        let class_name = Self::window_wm_class(display, window, wm_class_atom)?;
-        if !class_name.contains("ibus") && !class_name.contains("fcitx") {
+        let class_name = Self::window_or_child_wm_class(display, window, wm_class_atom, 2)
+            .unwrap_or_else(|| "<none>".to_string());
+        let class_match = class_name.contains("ibus") || class_name.contains("fcitx");
+        let override_redirect = xwa.override_redirect != 0;
+        if !class_match && !override_redirect {
             return None;
         }
 
@@ -644,6 +695,9 @@ impl XlibWindow {
         if width < 20 || height < 12 || width > 1400 || height > 700 {
             return None;
         }
+        if !class_match && (width > 1200 || height > 320) {
+            return None;
+        }
         let line_left = line_rect_root_px.pos.x;
         let line_top = line_rect_root_px.pos.y;
         let line_right = line_rect_root_px.pos.x + line_rect_root_px.size.x;
@@ -666,18 +720,102 @@ impl XlibWindow {
         } else {
             0.0
         };
+        if !class_match && (vertical_gap > 220.0 || horizontal_gap > 160.0) {
+            return None;
+        }
         if vertical_gap > 500.0 || horizontal_gap > 500.0 {
             return None;
         }
         Some(ImePopupCandidate {
             window,
             class_name,
+            class_match,
+            override_redirect,
             x: root_x,
             y: root_y,
             width,
             height,
             score: vertical_gap + horizontal_gap * 0.5,
         })
+    }
+
+    unsafe fn ime_debug_window_summary(
+        display: *mut x11_sys::Display,
+        root_window: x11_sys::Window,
+        window: x11_sys::Window,
+        wm_class_atom: x11_sys::Atom,
+        line_rect_root_px: Rect,
+    ) -> Option<(f64, String)> {
+        let mut xwa = mem::MaybeUninit::uninit();
+        if x11_sys::XGetWindowAttributes(display, window, xwa.as_mut_ptr()) == 0 {
+            return None;
+        }
+        let xwa = xwa.assume_init();
+        if xwa.map_state != X11_IS_VIEWABLE || xwa.width <= 0 || xwa.height <= 0 {
+            return None;
+        }
+
+        let mut root_x = 0;
+        let mut root_y = 0;
+        let mut child = 0;
+        if x11_sys::XTranslateCoordinates(
+            display,
+            window,
+            root_window,
+            0,
+            0,
+            &mut root_x,
+            &mut root_y,
+            &mut child,
+        ) == 0
+        {
+            return None;
+        }
+
+        let line_left = line_rect_root_px.pos.x;
+        let line_top = line_rect_root_px.pos.y;
+        let line_right = line_rect_root_px.pos.x + line_rect_root_px.size.x;
+        let line_bottom = line_rect_root_px.pos.y + line_rect_root_px.size.y;
+        let popup_left = root_x as f64;
+        let popup_top = root_y as f64;
+        let popup_right = popup_left + xwa.width as f64;
+        let popup_bottom = popup_top + xwa.height as f64;
+        let vertical_gap = if popup_bottom < line_top {
+            line_top - popup_bottom
+        } else if popup_top > line_bottom {
+            popup_top - line_bottom
+        } else {
+            0.0
+        };
+        let horizontal_gap = if popup_right < line_left {
+            line_left - popup_right
+        } else if popup_left > line_right {
+            popup_left - line_right
+        } else {
+            0.0
+        };
+        if vertical_gap > 900.0 || horizontal_gap > 900.0 {
+            return None;
+        }
+
+        let class_name = Self::window_or_child_wm_class(display, window, wm_class_atom, 2)
+            .unwrap_or_else(|| "<none>".to_string());
+        let score = vertical_gap + horizontal_gap * 0.5;
+        Some((
+            score,
+            format!(
+                "win={} class={:?} override={} pos=({}, {}) size=({}, {}) gap=({}, {})",
+                window,
+                class_name,
+                xwa.override_redirect != 0,
+                root_x,
+                root_y,
+                xwa.width,
+                xwa.height,
+                horizontal_gap,
+                vertical_gap
+            ),
+        ))
     }
 
     pub fn adjust_ime_candidate_popup(&mut self) {
@@ -738,11 +876,25 @@ impl XlibWindow {
                 return;
             }
 
+            let want_miss_log =
+                x11_ime_debug_enabled() && now - self.ime_popup_last_miss_log_time >= 1.0;
+            let mut nearby_windows = Vec::new();
             let mut best: Option<ImePopupCandidate> = None;
             if !children.is_null() {
                 for child_window in
                     std::slice::from_raw_parts(children, child_count as usize).iter().copied()
                 {
+                    if want_miss_log {
+                        if let Some(summary) = Self::ime_debug_window_summary(
+                            display,
+                            root_window,
+                            child_window,
+                            get_xlib_app_global().atoms.wm_class,
+                            line_rect_root_px,
+                        ) {
+                            nearby_windows.push(summary);
+                        }
+                    }
                     if let Some(candidate) = self.ime_popup_candidate(
                         display,
                         root_window,
@@ -763,15 +915,24 @@ impl XlibWindow {
             }
 
             let Some(candidate) = best else {
-                if x11_ime_debug_enabled() && now - self.ime_popup_last_miss_log_time >= 1.0 {
+                if want_miss_log {
                     self.ime_popup_last_miss_log_time = now;
+                    nearby_windows
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                    let nearby = nearby_windows
+                        .iter()
+                        .take(8)
+                        .map(|(_, summary)| summary.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
                     crate::log!(
-                        "X11 IME: no ibus/fcitx candidate popup found root_children={} line_root=({}, {}, {}, {})",
+                        "X11 IME: no ibus/fcitx candidate popup found root_children={} line_root=({}, {}, {}, {}) nearby=[{}]",
                         child_count,
                         line_rect_root_px.pos.x,
                         line_rect_root_px.pos.y,
                         line_rect_root_px.size.x,
-                        line_rect_root_px.size.y
+                        line_rect_root_px.size.y,
+                        nearby
                     );
                 }
                 return;
@@ -804,9 +965,11 @@ impl XlibWindow {
             x11_sys::XFlush(display);
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: adjusted candidate popup window={} class={:?} side={} from=({}, {}) to=({}, {}) size=({}, {}) line_root=({}, {}, {}, {}) gap={}",
+                    "X11 IME: adjusted candidate popup window={} class={:?} class_match={} override_redirect={} side={} from=({}, {}) to=({}, {}) size=({}, {}) line_root=({}, {}, {}, {}) gap={}",
                     candidate.window,
                     candidate.class_name,
+                    candidate.class_match,
+                    candidate.override_redirect,
                     if place_above { "above" } else { "below" },
                     candidate.x,
                     candidate.y,
