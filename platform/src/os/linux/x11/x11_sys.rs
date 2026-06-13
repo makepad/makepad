@@ -491,6 +491,15 @@ extern "C" {
         arg3: *mut XWindowAttributes,
     ) -> c_int;
 
+    pub fn XQueryTree(
+        display: *mut Display,
+        window: Window,
+        root_return: *mut Window,
+        parent_return: *mut Window,
+        children_return: *mut *mut Window,
+        nchildren_return: *mut c_uint,
+    ) -> c_int;
+
     pub fn XTranslateCoordinates(
         display: *mut Display,
         src_window: Window,

@@ -5,7 +5,7 @@ use {
         cell::Cell,
         ffi::{CStr, CString, OsStr},
         mem,
-        os::raw::{c_char, c_int, c_long, c_ulong, c_void},
+        os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void},
         ptr,
         rc::Rc,
     },
@@ -26,6 +26,8 @@ pub struct XlibWindow {
     // points; fed to the IM as spot plus clipping area.
     pub ime_rect: Rect,
     pub ime_area_rect: Rect,
+    ime_popup_last_adjust_time: f64,
+    ime_popup_last_miss_log_time: f64,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
@@ -44,6 +46,19 @@ pub struct XlibChildWindow {
     h: u32
 }*/
 
+const X11_IS_VIEWABLE: c_int = 2;
+const X11_IME_POPUP_ADJUST_INTERVAL: f64 = 1.0 / 30.0;
+
+struct ImePopupCandidate {
+    window: x11_sys::Window,
+    class_name: String,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    score: f64,
+}
+
 impl XlibWindow {
     pub fn new(window_id: WindowId) -> XlibWindow {
         XlibWindow {
@@ -57,6 +72,8 @@ impl XlibWindow {
             last_nc_mode: None,
             ime_rect: Rect::default(),
             ime_area_rect: Rect::default(),
+            ime_popup_last_adjust_time: 0.0,
+            ime_popup_last_miss_log_time: 0.0,
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ime_active: false,
@@ -541,21 +558,269 @@ impl XlibWindow {
         None
     }
 
-    fn screen_space_around_rect_px(&self, rect: Rect, dpi_factor: f64) -> Option<(f64, f64)> {
-        self.window?;
+    unsafe fn window_wm_class(
+        display: *mut x11_sys::Display,
+        window: x11_sys::Window,
+        wm_class_atom: x11_sys::Atom,
+    ) -> Option<String> {
+        let mut actual_type = 0;
+        let mut actual_format = 0;
+        let mut nitems = 0;
+        let mut bytes_after = 0;
+        let mut prop = ptr::null_mut();
+        let result = x11_sys::XGetWindowProperty(
+            display,
+            window,
+            wm_class_atom,
+            0,
+            1024,
+            x11_sys::False as c_int,
+            x11_sys::AnyPropertyType as c_ulong,
+            &mut actual_type,
+            &mut actual_format,
+            &mut nitems,
+            &mut bytes_after,
+            &mut prop,
+        );
+        if result != 0 || prop.is_null() || actual_format != 8 || nitems == 0 {
+            if !prop.is_null() {
+                x11_sys::XFree(prop as *mut c_void);
+            }
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(prop as *const u8, nitems as usize);
+        let class_name = String::from_utf8_lossy(bytes)
+            .replace('\0', " ")
+            .to_lowercase();
+        x11_sys::XFree(prop as *mut c_void);
+        Some(class_name)
+    }
+
+    unsafe fn ime_popup_candidate(
+        &self,
+        display: *mut x11_sys::Display,
+        root_window: x11_sys::Window,
+        window: x11_sys::Window,
+        wm_class_atom: x11_sys::Atom,
+        line_rect_root_px: Rect,
+    ) -> Option<ImePopupCandidate> {
+        if Some(window) == self.window {
+            return None;
+        }
+        let mut xwa = mem::MaybeUninit::uninit();
+        if x11_sys::XGetWindowAttributes(display, window, xwa.as_mut_ptr()) == 0 {
+            return None;
+        }
+        let xwa = xwa.assume_init();
+        if xwa.map_state != X11_IS_VIEWABLE || xwa.width <= 0 || xwa.height <= 0 {
+            return None;
+        }
+        let class_name = Self::window_wm_class(display, window, wm_class_atom)?;
+        if !class_name.contains("ibus") && !class_name.contains("fcitx") {
+            return None;
+        }
+
+        let mut root_x = 0;
+        let mut root_y = 0;
+        let mut child = 0;
+        if x11_sys::XTranslateCoordinates(
+            display,
+            window,
+            root_window,
+            0,
+            0,
+            &mut root_x,
+            &mut root_y,
+            &mut child,
+        ) == 0
+        {
+            return None;
+        }
+
+        // Keep this scoped to plausible candidate popups near the focused line;
+        // ibus/fcitx may also expose panels or tray windows with the same class.
+        let width = xwa.width;
+        let height = xwa.height;
+        if width < 20 || height < 12 || width > 1400 || height > 700 {
+            return None;
+        }
+        let line_left = line_rect_root_px.pos.x;
+        let line_top = line_rect_root_px.pos.y;
+        let line_right = line_rect_root_px.pos.x + line_rect_root_px.size.x;
+        let line_bottom = line_rect_root_px.pos.y + line_rect_root_px.size.y;
+        let popup_left = root_x as f64;
+        let popup_top = root_y as f64;
+        let popup_right = popup_left + width as f64;
+        let popup_bottom = popup_top + height as f64;
+        let vertical_gap = if popup_bottom < line_top {
+            line_top - popup_bottom
+        } else if popup_top > line_bottom {
+            popup_top - line_bottom
+        } else {
+            0.0
+        };
+        let horizontal_gap = if popup_right < line_left {
+            line_left - popup_right
+        } else if popup_left > line_right {
+            popup_left - line_right
+        } else {
+            0.0
+        };
+        if vertical_gap > 500.0 || horizontal_gap > 500.0 {
+            return None;
+        }
+        Some(ImePopupCandidate {
+            window,
+            class_name,
+            x: root_x,
+            y: root_y,
+            width,
+            height,
+            score: vertical_gap + horizontal_gap * 0.5,
+        })
+    }
+
+    pub fn adjust_ime_candidate_popup(&mut self) {
+        if !self.ime_active || self.ime_rect.size.y <= 0.0 {
+            return;
+        }
+        let now = self.time_now();
+        if now - self.ime_popup_last_adjust_time < X11_IME_POPUP_ADJUST_INTERVAL {
+            return;
+        }
+        self.ime_popup_last_adjust_time = now;
+
         unsafe {
+            let Some(window) = self.window else {
+                return;
+            };
             let display = get_xlib_app_global().display;
             let default_screen = x11_sys::XDefaultScreen(display);
             let root_window = x11_sys::XRootWindow(display, default_screen);
-            let mut xwa = mem::MaybeUninit::uninit();
-            if x11_sys::XGetWindowAttributes(display, root_window, xwa.as_mut_ptr()) == 0 {
-                return None;
+            let mut root_x = 0;
+            let mut root_y = 0;
+            let mut child = 0;
+            if x11_sys::XTranslateCoordinates(
+                display,
+                window,
+                root_window,
+                0,
+                0,
+                &mut root_x,
+                &mut root_y,
+                &mut child,
+            ) == 0
+            {
+                return;
             }
-            let xwa = xwa.assume_init();
-            let window_pos = self.get_position();
-            let line_top_root_px = window_pos.y + rect.pos.y * dpi_factor;
-            let line_bottom_root_px = window_pos.y + (rect.pos.y + rect.size.y) * dpi_factor;
-            Some((line_top_root_px, xwa.height as f64 - line_bottom_root_px))
+            let dpi_factor = self.get_dpi_factor();
+            let line_rect_root_px = Rect {
+                pos: crate::makepad_math::dvec2(
+                    root_x as f64 + self.ime_rect.pos.x * dpi_factor,
+                    root_y as f64 + self.ime_rect.pos.y * dpi_factor,
+                ),
+                size: self.ime_rect.size * dpi_factor,
+            };
+
+            let mut root_return = 0;
+            let mut parent_return = 0;
+            let mut children: *mut x11_sys::Window = ptr::null_mut();
+            let mut child_count: c_uint = 0;
+            if x11_sys::XQueryTree(
+                display,
+                root_window,
+                &mut root_return,
+                &mut parent_return,
+                &mut children,
+                &mut child_count,
+            ) == 0
+            {
+                return;
+            }
+
+            let mut best: Option<ImePopupCandidate> = None;
+            if !children.is_null() {
+                for child_window in
+                    std::slice::from_raw_parts(children, child_count as usize).iter().copied()
+                {
+                    if let Some(candidate) = self.ime_popup_candidate(
+                        display,
+                        root_window,
+                        child_window,
+                        get_xlib_app_global().atoms.wm_class,
+                        line_rect_root_px,
+                    ) {
+                        if best
+                            .as_ref()
+                            .map(|best| candidate.score < best.score)
+                            .unwrap_or(true)
+                        {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+                x11_sys::XFree(children as *mut c_void);
+            }
+
+            let Some(candidate) = best else {
+                if x11_ime_debug_enabled() && now - self.ime_popup_last_miss_log_time >= 1.0 {
+                    self.ime_popup_last_miss_log_time = now;
+                    crate::log!(
+                        "X11 IME: no ibus/fcitx candidate popup found root_children={} line_root=({}, {}, {}, {})",
+                        child_count,
+                        line_rect_root_px.pos.x,
+                        line_rect_root_px.pos.y,
+                        line_rect_root_px.size.x,
+                        line_rect_root_px.size.y
+                    );
+                }
+                return;
+            };
+            let mut root_attrs = mem::MaybeUninit::uninit();
+            if x11_sys::XGetWindowAttributes(display, root_window, root_attrs.as_mut_ptr()) == 0 {
+                return;
+            }
+            let root_attrs = root_attrs.assume_init();
+            let line_top = line_rect_root_px.pos.y;
+            let line_bottom = line_rect_root_px.pos.y + line_rect_root_px.size.y;
+            let line_center = (line_top + line_bottom) * 0.5;
+            let popup_center = candidate.y as f64 + candidate.height as f64 * 0.5;
+            let gap = (line_rect_root_px.size.y * 0.8).max(14.0).min(32.0);
+            let place_above = popup_center < line_center;
+            let desired_y = if place_above {
+                line_top - gap - candidate.height as f64
+            } else {
+                line_bottom + gap
+            }
+            .round()
+            .max(0.0)
+            .min((root_attrs.height - candidate.height).max(0) as f64)
+                as c_int;
+
+            if (desired_y - candidate.y).abs() <= 1 {
+                return;
+            }
+            x11_sys::XMoveWindow(display, candidate.window, candidate.x, desired_y);
+            x11_sys::XFlush(display);
+            if x11_ime_debug_enabled() {
+                crate::log!(
+                    "X11 IME: adjusted candidate popup window={} class={:?} side={} from=({}, {}) to=({}, {}) size=({}, {}) line_root=({}, {}, {}, {}) gap={}",
+                    candidate.window,
+                    candidate.class_name,
+                    if place_above { "above" } else { "below" },
+                    candidate.x,
+                    candidate.y,
+                    candidate.x,
+                    desired_y,
+                    candidate.width,
+                    candidate.height,
+                    line_rect_root_px.pos.x,
+                    line_rect_root_px.pos.y,
+                    line_rect_root_px.size.x,
+                    line_rect_root_px.size.y,
+                    gap
+                );
+            }
         }
     }
 
@@ -584,24 +849,12 @@ impl XlibWindow {
         let dpi_factor = self.get_dpi_factor();
         // XIM defines XNSpotLocation.y as the current text line baseline. We do
         // not have the real font baseline here, so approximate it from the line
-        // rect and give the IM the symmetrically padded current-line bounds as
-        // XNArea.
+        // rect and give the IM the padded current-line bounds as XNArea. ibus'
+        // XIM bridge currently forwards only XNSpotLocation to its candidate UI,
+        // so this area is only useful for XIM implementations that honor it.
         let line_height_px = rect.size.y * dpi_factor;
         let line_top_px = rect.pos.y * dpi_factor;
         let baseline_px = line_top_px + line_height_px * 0.85;
-        let screen_space_px = self.screen_space_around_rect_px(rect, dpi_factor);
-        let candidate_height_guess_px = (line_height_px * 7.0).max(112.0);
-        let spot_margin_px = (line_height_px * 0.45).max(8.0);
-        let anchor_above = screen_space_px
-            .map(|(top_space, bottom_space)| {
-                bottom_space < candidate_height_guess_px && top_space > bottom_space
-            })
-            .unwrap_or(false);
-        let spot_y_px = if anchor_above {
-            (baseline_px - spot_margin_px).max(0.0)
-        } else {
-            baseline_px + spot_margin_px
-        };
         let line_area = if area_rect.size.x > 0.0 && area_rect.size.y > 0.0 {
             area_rect
         } else {
@@ -625,7 +878,7 @@ impl XlibWindow {
         let area_bottom_px = area_line_bottom_px + padding_y_px;
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
-            y: spot_y_px as i16,
+            y: baseline_px as i16,
         };
         let area_px = x11_sys::XRectangle {
             x: area_left_px as i16,
@@ -695,7 +948,7 @@ impl XlibWindow {
 
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) area=({}, {}, {}, {}) anchor_above={} screen_space_px={:?}",
+                    "X11 IME: setting rect window={:?} style={} input_style=0x{:x} spot=({}, {}) area=({}, {}, {}, {})",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -704,9 +957,7 @@ impl XlibWindow {
                     area_px.x,
                     area_px.y,
                     area_px.width,
-                    area_px.height,
-                    anchor_above,
-                    screen_space_px
+                    area_px.height
                 );
             }
             let mut failed_attr = x11_sys::XSetICValues(
@@ -752,7 +1003,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} spot_y={} spot_margin={} anchor_above={} screen_space_px={:?} candidate_height_guess={} failed_attr={}{}",
+                    "X11 IME: set rect returned window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding=({}, {}) baseline_y={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -774,11 +1025,6 @@ impl XlibWindow {
                     padding_x_px,
                     padding_y_px,
                     baseline_px,
-                    spot_y_px,
-                    spot_margin_px,
-                    anchor_above,
-                    screen_space_px,
-                    candidate_height_guess_px,
                     x11_ime_failed_attr_name(failed_attr),
                     fallback_note
                 );
