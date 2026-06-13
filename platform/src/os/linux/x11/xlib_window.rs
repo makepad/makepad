@@ -541,23 +541,6 @@ impl XlibWindow {
         None
     }
 
-    fn screen_bottom_space_px(&self, rect: Rect, dpi_factor: f64) -> Option<f64> {
-        self.window?;
-        unsafe {
-            let display = get_xlib_app_global().display;
-            let default_screen = x11_sys::XDefaultScreen(display);
-            let root_window = x11_sys::XRootWindow(display, default_screen);
-            let mut xwa = mem::MaybeUninit::uninit();
-            if x11_sys::XGetWindowAttributes(display, root_window, xwa.as_mut_ptr()) == 0 {
-                return None;
-            }
-            let xwa = xwa.assume_init();
-            let window_pos = self.get_position();
-            let line_bottom_root_px = window_pos.y + (rect.pos.y + rect.size.y) * dpi_factor;
-            Some(xwa.height as f64 - line_bottom_root_px)
-        }
-    }
-
     pub fn set_ime_rect(&mut self, rect: Rect, area_rect: Rect) {
         if self.ime_rect == rect && self.ime_area_rect == area_rect {
             return;
@@ -568,46 +551,33 @@ impl XlibWindow {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
-        // XIM defines XNSpotLocation.y as the text baseline. We do not have the
-        // real baseline here, so use a conservative baseline approximation for
-        // normal placement. Near the screen bottom, some IMs place the candidate
-        // window below the spot even when visually using an above-line popup, so
-        // move the spot to the top of an above-line band and keep XNArea out of
-        // the current text line.
+        // XIM defines XNSpotLocation.y as the current text line baseline. We do
+        // not have the real font baseline here, so approximate it from the line
+        // rect and give the IM the padded current-line bounds as XNArea.
         let line_height_px = rect.size.y * dpi_factor;
         let line_top_px = rect.pos.y * dpi_factor;
-        let line_bottom_px = (rect.pos.y + rect.size.y) * dpi_factor;
         let baseline_px = line_top_px + line_height_px * 0.85;
-        let above_gap_px = (line_height_px * 0.35).max(4.0);
-        let above_band_height_px = (line_height_px * 7.0).max(112.0);
-        let above_threshold_px = (above_band_height_px + line_height_px * 2.0).max(160.0);
         let line_area = if area_rect.size.x > 0.0 && area_rect.size.y > 0.0 {
             area_rect
         } else {
             rect
         };
+        let padding_px = if line_height_px > 0.0 {
+            (line_height_px * 0.25).max(3.0)
+        } else {
+            0.0
+        };
         let area_line_left_px = line_area.pos.x * dpi_factor;
         let area_line_top_px = line_area.pos.y * dpi_factor;
         let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
         let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
-        let bottom_space_px = self.screen_bottom_space_px(rect, dpi_factor);
-        let anchor_above = bottom_space_px
-            .map(|space| space < above_threshold_px)
-            .unwrap_or(false);
-        let (spot_y_px, area_top_px, area_bottom_px) = if anchor_above {
-            let area_bottom_px = (line_top_px - above_gap_px).max(0.0);
-            let area_top_px = (area_bottom_px - above_band_height_px).max(0.0);
-            (area_top_px, area_top_px, area_bottom_px.max(area_top_px + 1.0))
-        } else {
-            let area_top_px = area_line_top_px.min(line_top_px);
-            let area_bottom_px = area_line_bottom_px.max(line_bottom_px).max(baseline_px);
-            (baseline_px, area_top_px, area_bottom_px)
-        };
-        let area_left_px = area_line_left_px.min(rect.pos.x * dpi_factor);
-        let area_right_px = area_line_right_px.max((rect.pos.x + rect.size.x) * dpi_factor);
+        let area_left_px = (area_line_left_px - padding_px).max(0.0);
+        let area_top_px = (area_line_top_px - padding_px).max(0.0);
+        let area_right_px = area_line_right_px + padding_px;
+        let area_bottom_px = area_line_bottom_px + padding_px;
         let spot_px = x11_sys::XPoint {
             x: (rect.pos.x * dpi_factor) as i16,
-            y: spot_y_px as i16,
+            y: baseline_px as i16,
         };
         let area_px = x11_sys::XRectangle {
             x: area_left_px as i16,
@@ -707,7 +677,7 @@ impl XlibWindow {
             }
             if x11_ime_debug_enabled() {
                 crate::log!(
-                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) anchor_above={} bottom_space_px={:?} above_threshold_px={} baseline_y={} failed_attr={}{}",
+                    "X11 IME: set rect window={:?} style={} input_style=0x{:x} dpi={} rect=({}, {}, {}, {}) line_area=({}, {}, {}, {}) spot=({}, {}) area=({}, {}, {}, {}) padding_px={} baseline_y={} failed_attr={}{}",
                     self.window,
                     xim_preedit_style_name(xim_context.preedit_style),
                     xim_context.input_style,
@@ -726,9 +696,7 @@ impl XlibWindow {
                     area_px.y,
                     area_px.width,
                     area_px.height,
-                    anchor_above,
-                    bottom_space_px,
-                    above_threshold_px,
+                    padding_px,
                     baseline_px,
                     x11_ime_failed_attr_name(failed_attr),
                     fallback_note
