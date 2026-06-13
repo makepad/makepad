@@ -588,6 +588,7 @@ impl XlibWindow {
         let area_line_top_px = line_area.pos.y * dpi_factor;
         let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
         let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
+        let line_area_height_px = (area_line_bottom_px - area_line_top_px).max(line_height_px);
         let area_left_px = (area_line_left_px - padding_x_px).max(0.0);
         let area_top_px = (area_line_top_px - padding_y_px).max(0.0);
         let area_right_px = area_line_right_px + padding_x_px;
@@ -603,7 +604,7 @@ impl XlibWindow {
             line_top_px
         };
         let candidate_height_guess_px = if line_height_px > 0.0 {
-            (line_height_px * 5.5).max(96.0).min(220.0)
+            (line_area_height_px * 4.8).max(line_height_px * 10.0).max(180.0).min(320.0)
         } else {
             0.0
         };
