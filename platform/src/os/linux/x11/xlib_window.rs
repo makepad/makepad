@@ -553,7 +553,8 @@ impl XlibWindow {
         let dpi_factor = self.get_dpi_factor();
         // XIM defines XNSpotLocation.y as the current text line baseline. We do
         // not have the real font baseline here, so approximate it from the line
-        // rect and give the IM the padded current-line bounds as XNArea.
+        // rect and give the IM the symmetrically padded current-line bounds as
+        // XNArea.
         let line_height_px = rect.size.y * dpi_factor;
         let line_top_px = rect.pos.y * dpi_factor;
         let baseline_px = line_top_px + line_height_px * 0.85;
@@ -565,7 +566,7 @@ impl XlibWindow {
         let (padding_x_px, padding_y_px) = if line_height_px > 0.0 {
             (
                 (line_height_px * 0.25).max(3.0),
-                (line_height_px * 0.75).max(12.0),
+                (line_height_px * 1.25).max(20.0),
             )
         } else {
             (0.0, 0.0)
