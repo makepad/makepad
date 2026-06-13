@@ -756,11 +756,8 @@ impl X11Cx {
                         size: bottom_right - top_left,
                     };
                     let ime_area_rect = Rect {
-                        pos: dvec2(area_top_left.x, top_left.y),
-                        size: dvec2(
-                            area_bottom_right.x - area_top_left.x,
-                            bottom_right.y - top_left.y,
-                        ),
+                        pos: area_top_left,
+                        size: area_bottom_right - area_top_left,
                     };
                     if x11_ime_debug_enabled() {
                         crate::log!(
