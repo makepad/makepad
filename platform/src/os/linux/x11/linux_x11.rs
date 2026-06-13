@@ -787,7 +787,6 @@ impl X11Cx {
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_rect(ime_rect, ime_area_rect);
                         w.xlib_window.set_ime_active(true);
-                        w.xlib_window.adjust_ime_candidate_popup();
                     });
                 }
                 CxOsOp::HideTextIME => {
