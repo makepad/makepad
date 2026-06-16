@@ -1598,11 +1598,35 @@ impl TextInput {
         }
     }
 
+    /// Resolves the soft-keyboard layout for this field.
+    ///
+    /// An explicitly-set `input_mode` always wins. `InputMode::Text` is the
+    /// default ("no preference"), so we treat it as a request to infer a more
+    /// specific layout from the field's other hints: a numeric-only field gets
+    /// the decimal pad, otherwise the keyboard is derived from `content_type`
+    /// (e.g. an email field shows the email keyboard) so callers don't have to
+    /// set both. Inference only ever applies when `input_mode` was left at the
+    /// default, never overriding an explicit choice.
     fn effective_input_mode(&self) -> InputMode {
-        if self.is_numeric_only && self.input_mode == InputMode::Text {
-            InputMode::Decimal
-        } else {
-            self.input_mode
+        if self.input_mode != InputMode::Text {
+            return self.input_mode;
+        }
+        if self.is_numeric_only {
+            return InputMode::Decimal;
+        }
+        match self.content_type {
+            TextInputContentType::EmailAddress => InputMode::Email,
+            TextInputContentType::Url => InputMode::Url,
+            TextInputContentType::TelephoneNumber => InputMode::Tel,
+            TextInputContentType::OneTimeCode => InputMode::Numeric,
+            // Username / passwords / street address / unset keep the full
+            // default keyboard (e.g. a password needs every character, and a
+            // username may be either an email or a handle).
+            TextInputContentType::None
+            | TextInputContentType::Username
+            | TextInputContentType::Password
+            | TextInputContentType::NewPassword
+            | TextInputContentType::FullStreetAddress => InputMode::Text,
         }
     }
 
