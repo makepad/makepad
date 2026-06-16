@@ -21,7 +21,7 @@ pub struct Splash {
     body: ArcStringMut,
 }
 
-const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
+const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nuse mod.net\nView{height:Fit, ";
 
 impl Splash {
     /// Stable identity for the streaming script body, based on pointer address.
