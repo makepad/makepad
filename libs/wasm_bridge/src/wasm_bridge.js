@@ -675,22 +675,26 @@ export class ToWasmMsg {
 
     push_str(str) {
         let app = this.app;
-        const utf8 = TEXT_ENCODER.encode(str);
-        const bytes_len = utf8.length;
-        const u32_len = (bytes_len + 3) >> 2;
-        this.reserve_u32(u32_len + 1);
-        app.u32[this.u32_offset++] = bytes_len;
+        const max_bytes = str.length * 4;
+        const max_u32_len = (max_bytes + 3) >> 2;
+        this.reserve_u32(max_u32_len + 1);
 
-        const u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, bytes_len);
-        u8_view.set(utf8);
+        const len_offset = this.u32_offset++;
+        const byte_start_offset = this.u32_offset * 4;
+        const dest_u8 = new Uint8Array(app.memory.buffer, byte_start_offset, max_bytes);
+        const { read, written } = TEXT_ENCODER.encodeInto(str, dest_u8);
 
-        const remainder = bytes_len & 3;
+        app.u32[len_offset] = written;
+
+        const remainder = written & 3;
         if (remainder > 0) {
-            const remainder_view = new Uint8Array(app.memory.buffer, (this.u32_offset * 4) + bytes_len, 4 - remainder);
+            const remainder_view = new Uint8Array(app.memory.buffer, byte_start_offset + written, 4 - remainder);
             remainder_view.fill(0);
         }
 
-        this.u32_offset += u32_len;
+        const actual_u32_len = (written + 3) >> 2;
+        this.u32_offset += actual_u32_len;
+        this.u32_needed_capacity -= (max_u32_len - actual_u32_len);
     }
 }
 
