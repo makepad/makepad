@@ -246,6 +246,9 @@ impl<'a> ScriptVm<'a> {
     pub fn gc(&mut self) {
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
         self.bx.heap.sweep(false);
+        // Return memory held purely for reuse/over-allocation after the sweep (safe: no live
+        // slot is moved or removed). gc() is itself gated by `needs_gc()`, so this is rare.
+        self.bx.heap.shrink_to_fit();
     }
 
     /// Run garbage collection with status logging.
