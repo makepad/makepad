@@ -89,6 +89,7 @@ hub.set_run_items([
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}
+    RunStudioRelease{name: "makepad-example-move-after-draw"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudio{name: "makepad-studio"} 
     RunStudioExt{name: "makepad-studio-ext"} 
