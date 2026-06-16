@@ -29,7 +29,10 @@ pub struct MacosWindow {
     pub(crate) window_id: WindowId,
     pub(crate) view: ObjcId,
     pub(crate) window: ObjcId,
-    pub(crate) ime_spot: Vec2d,
+    // Caret/composition line rect in window content-view points (y-down from the
+    // view top). first_rect_for_character_range turns this into the screen rect
+    // the IME anchors its candidate window above/below.
+    pub(crate) ime_rect: Rect,
     // When ime_active is false, key events are not forward to NSTextInputContext so IME dose not active.
     pub(crate) ime_active: bool,
     pub(crate) is_fullscreen: bool,
@@ -64,7 +67,7 @@ impl MacosWindow {
                 window_id: window_id,
                 view: view,
                 last_window_geom: None,
-                ime_spot: Vec2d::default(),
+                ime_rect: Rect::default(),
                 last_mouse_pos: Vec2d::default(),
                 ime_active: false,
             }
@@ -412,8 +415,20 @@ impl MacosWindow {
         let () = msg_send![ns_app, setApplicationIconImage: ns_image];
     }
 
-    pub fn set_ime_spot(&mut self, spot: Vec2d) {
-        self.ime_spot = spot;
+    pub fn set_ime_rect(&mut self, rect: Rect) {
+        if self.ime_rect == rect {
+            return;
+        }
+        self.ime_rect = rect;
+        // The caret line moved, so the IME's cached character coordinates are
+        // stale. Invalidate them so it re-queries first_rect_for_character_range
+        // and repositions the candidate window relative to the new line.
+        unsafe {
+            let input_context: ObjcId = msg_send![self.view, inputContext];
+            if input_context != nil {
+                let () = msg_send![input_context, invalidateCharacterCoordinates];
+            }
+        }
     }
 
     pub fn start_live_resize(&mut self) {

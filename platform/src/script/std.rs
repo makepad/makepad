@@ -27,29 +27,65 @@ impl Cx {
         unsafe { f(&mut *host, &mut *std, &mut *script_vm) }
     }
 
+    /// Whether the script VM is currently held (`take()`n) by an enclosing
+    /// `with_vm`/`eval` on this thread, i.e. calling `with_vm` now would be
+    /// re-entrant and panic. Lets a call site that can degrade gracefully
+    /// (defer, skip) check first, or use [`Cx::try_with_vm`].
+    pub fn is_script_vm_held(&self) -> bool {
+        self.script_vm.is_none()
+    }
+
+    #[track_caller]
     pub fn with_vm_and_async<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
         self.with_script_std_vm(|host, std, script_vm| {
             makepad_script_std::with_vm_and_async(host, std, script_vm, f)
         })
     }
 
+    #[track_caller]
     pub fn with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
         self.with_script_std_vm(|host, std, script_vm| {
             makepad_script_std::with_vm(host, std, script_vm, f)
         })
     }
 
+    /// Like [`Cx::with_vm`], but returns `None` instead of panicking when the
+    /// VM is already held (swapped off) by an enclosing `with_vm`/`eval`.
+    pub fn try_with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> Option<R> {
+        self.with_script_std_vm(|host, std, script_vm| {
+            makepad_script_std::try_with_vm(host, std, script_vm, f)
+        })
+    }
+
+    #[track_caller]
     pub fn with_vm_thread<R, F: FnOnce(&mut ScriptVm) -> R>(
         &mut self,
         thread_id: ScriptThreadId,
         f: F,
     ) -> R {
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
         self.with_script_std_vm(|host, std, script_vm| {
             makepad_script_std::with_vm_thread(host, std, script_vm, thread_id, f)
         })
     }
 
+    #[track_caller]
     pub fn eval(&mut self, script_mod: ScriptMod) -> ScriptValue {
+        let _vm_guard = makepad_script_std::VmHolderGuard::enter(
+            self.script_vm.is_some(),
+            std::panic::Location::caller(),
+        );
         self.with_script_std_vm(|host, std, script_vm| {
             makepad_script_std::eval(host, std, script_vm, script_mod)
         })

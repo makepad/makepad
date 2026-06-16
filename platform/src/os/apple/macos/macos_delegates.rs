@@ -638,16 +638,45 @@ pub fn define_cocoa_view_class() -> *const Class {
                 marked_text.init_with_string(string);
             };
             *marked_text_ref = marked_text;
+
+            // Echo the composition (marked) text into the focused TextInput so it
+            // renders inline as the user types with an IME (e.g. CJK pinyin).
+            // `replace_last = true` tells the widget to treat this as a composition
+            // preview, replacing the previous preview; an empty string clears it.
+            // Without this, nothing shows until the IME commits a final character.
+            // (iOS does the equivalent in its own `set_marked_text`.)
+            let characters: ObjcId = if has_attr {
+                msg_send![string, string]
+            } else {
+                string
+            };
+            let composition = nsstring_to_string(characters);
+            get_cocoa_window(this).send_text_input(composition, true);
         }
+    }
+
+    // Clears the stored marked-text ivar and tells the input context the
+    // composition is finished. Does NOT notify the TextInput widget, so callers
+    // that have already updated/committed the widget can use it directly without
+    // emitting a second (and possibly destructive) text-input event.
+    unsafe fn clear_marked_text_ivar(this: &Object) {
+        let marked_text: ObjcId = *this.get_ivar("markedText");
+        let mutable_string = marked_text.mutable_string();
+        let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
+        let input_context: ObjcId = msg_send![this, inputContext];
+        let _: () = msg_send![input_context, discardMarkedText];
     }
 
     extern "C" fn unmark_text(this: &Object, _sel: Sel) {
         unsafe {
-            let marked_text: ObjcId = *this.get_ivar("markedText");
-            let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: get_apple_class_global().const_empty_string.as_id()];
-            let input_context: ObjcId = msg_send![this, inputContext];
-            let _: () = msg_send![input_context, discardMarkedText];
+            // AppKit asks us to discard the in-progress composition (e.g. the user
+            // pressed Escape or the input session was interrupted). Remove the
+            // inline preview from the focused TextInput, then clear our state.
+            // (After a commit, `insert_text` clears the ivar directly instead of
+            // routing through here, so this only fires for genuine discards and is
+            // a no-op when the widget has no active composition.)
+            get_cocoa_window(this).send_text_input(String::new(), true);
+            clear_marked_text_ivar(this);
         }
     }
 
@@ -676,27 +705,38 @@ pub fn define_cocoa_view_class() -> *const Class {
         _actual_range: *mut c_void,
     ) -> NSRect {
         let cw = get_cocoa_window(this);
-
         let view: ObjcId = this as *const _ as *mut _;
-        //let window_point = event.locationInWindow();
-        //et view_point = view.convertPoint_fromView_(window_point, nil);
-        let view_rect: NSRect = unsafe { msg_send![view, frame] };
-        //let window_rect: NSRect = unsafe {msg_send![cw.window, frame]};
-
-        let origin = cw.get_ime_origin();
-        //let shift_y = 20.0;
-        //let shift_x = 4.0;
-        //let bar = 0.0;// (window_rect.size.height - view_rect.size.height) as f32 - 5.;
-        NSRect {
-            origin: NSPoint {
-                x: (origin.x + cw.ime_spot.x),
-                y: (origin.y + (view_rect.size.height - cw.ime_spot.y)),
-            },
-            // as _, y as _),
-            size: NSSize {
-                width: 0.0,
-                height: 0.0,
-            },
+        unsafe {
+            let view_rect: NSRect = msg_send![view, frame];
+            // The render view is not flipped (AppKit default: y-up, origin at the
+            // view's bottom-left), while `ime_rect` is in makepad's y-down view
+            // points (origin top-left). Express the caret line box in the view's
+            // own y-up space, then let AppKit map it view -> window -> screen.
+            // Using AppKit's own conversion (rather than hand-rolled window-origin
+            // math with fudge offsets) keeps the rect exact, so the IME parks its
+            // candidate window flush above/below the line without covering it.
+            // Pad the reported line box vertically so the IME leaves a gap
+            // between its candidate window and the text rather than hugging the
+            // line. macOS parks the panel flush against an edge of this rect, so
+            // inflating it by `clearance` on both top and bottom pushes the panel
+            // that far away whichever side it lands on. Scaled to the line height
+            // so it tracks font size; tune via the multiplier.
+            let clearance = cw.ime_rect.size.y * 0.6;
+            let local = NSRect {
+                origin: NSPoint {
+                    x: cw.ime_rect.pos.x,
+                    y: view_rect.size.height
+                        - (cw.ime_rect.pos.y + cw.ime_rect.size.y)
+                        - clearance,
+                },
+                size: NSSize {
+                    width: cw.ime_rect.size.x,
+                    height: cw.ime_rect.size.y + 2.0 * clearance,
+                },
+            };
+            let in_window: NSRect = msg_send![view, convertRect: local toView: nil];
+            let in_screen: NSRect = msg_send![cw.window, convertRectToScreen: in_window];
+            in_screen
         }
     }
 
@@ -719,7 +759,10 @@ pub fn define_cocoa_view_class() -> *const Class {
             let input_context: ObjcId = msg_send![this, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             let () = msg_send![cw.view, setNeedsDisplay: YES];
-            unmark_text(this, _sel);
+            // The commit above already replaced any composition preview in the
+            // widget; just clear our marked-text state (don't route through
+            // `unmark_text`, which would emit a second text-input event).
+            clear_marked_text_ivar(this);
         }
     }
 

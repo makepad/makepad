@@ -1,6 +1,6 @@
 use {
     self::super::{x11_sys, xlib_app::*, xlib_event::XlibEvent},
-    crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::Vec2d, window::WindowId},
+    crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::{Rect, Vec2d}, window::WindowId},
     std::{
         cell::Cell,
         ffi::{CStr, CString, OsStr},
@@ -14,7 +14,7 @@ use {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    pub xic: Option<x11_sys::XIC>,
+    pub xic: Option<XimInputContext>,
     pub attributes: Option<x11_sys::XSetWindowAttributes>,
     pub visual_info: Option<x11_sys::XVisualInfo>,
     //pub child_windows: Vec<XlibChildWindow>,
@@ -22,7 +22,10 @@ pub struct XlibWindow {
     pub window_id: WindowId,
     pub last_window_geom: WindowGeom,
 
-    pub ime_spot: Vec2d,
+    // Caret/composition line and current-line area in window-relative native
+    // points; fed to the IM as spot plus clipping area.
+    pub ime_rect: Rect,
+    pub ime_area_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
@@ -52,7 +55,8 @@ impl XlibWindow {
             window_id,
             last_window_geom: WindowGeom::default(),
             last_nc_mode: None,
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
+            ime_area_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ime_active: false,
@@ -234,20 +238,7 @@ impl XlibWindow {
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
 
-            let xic = if !get_xlib_app_global().xim.is_null() {
-                Some(x11_sys::XCreateIC(
-                    get_xlib_app_global().xim,
-                    x11_sys::XNInputStyle.as_ptr(),
-                    (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                    x11_sys::XNClientWindow.as_ptr(),
-                    window,
-                    x11_sys::XNFocusWindow.as_ptr(),
-                    window,
-                    ptr::null_mut() as *mut c_void,
-                ))
-            } else {
-                None
-            };
+            let xic = create_xim_input_context(get_xlib_app_global().xim, window);
 
             // Create a window
             get_xlib_app_global().window_map.insert(window, self);
@@ -339,23 +330,14 @@ impl XlibWindow {
             x11_sys::XMapRaised(display, window);
             x11_sys::XFlush(display);
 
-            let xic = x11_sys::XCreateIC(
-                get_xlib_app_global().xim,
-                x11_sys::XNInputStyle.as_ptr(),
-                (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                x11_sys::XNClientWindow.as_ptr(),
-                window,
-                x11_sys::XNFocusWindow.as_ptr(),
-                window,
-                ptr::null_mut() as *mut c_void,
-            );
+            let xic = create_xim_input_context(get_xlib_app_global().xim, window);
 
             get_xlib_app_global().window_map.insert(window, self);
 
             self.attributes = Some(attributes);
             self.visual_info = Some(visual_info);
             self.window = Some(window);
-            self.xic = Some(xic);
+            self.xic = xic;
             self.last_window_geom = self.get_window_geom();
 
             let new_geom = self.get_window_geom();
@@ -525,26 +507,177 @@ impl XlibWindow {
         maximized
     }
 
-    pub fn set_ime_spot(&mut self, spot: Vec2d) {
-        if self.ime_spot == spot {
+    unsafe fn create_position_xic_with_spot(
+        &self,
+        preferred_status_style: c_ulong,
+        spot_px: x11_sys::XPoint,
+        area_px: x11_sys::XRectangle,
+    ) -> Option<XimInputContext> {
+        let window = self.window?;
+        let xim = get_xlib_app_global().xim;
+        if let Some(context) = create_xim_position_input_context_with_spot(
+            xim,
+            window,
+            preferred_status_style,
+            spot_px,
+            area_px,
+        ) {
+            return Some(context);
+        }
+        for status_style in xim_status_candidates() {
+            if status_style == preferred_status_style {
+                continue;
+            }
+            if let Some(context) = create_xim_position_input_context_with_spot(
+                xim,
+                window,
+                status_style,
+                spot_px,
+                area_px,
+            ) {
+                return Some(context);
+            }
+        }
+        None
+    }
+
+    pub fn set_ime_rect(&mut self, rect: Rect, area_rect: Rect) {
+        if self.ime_rect == rect && self.ime_area_rect == area_rect {
             return;
         }
-        self.ime_spot = spot;
-        let Some(xic) = self.xic else {
+        self.ime_rect = rect;
+        self.ime_area_rect = area_rect;
+        let Some(mut xim_context) = self.xic else {
             return;
         };
         let dpi_factor = self.get_dpi_factor();
+        // XIM defines XNSpotLocation.y as the current text line baseline, but
+        // ibus' XIM bridge uses it as the candidate anchor and ignores XNArea.
+        // Put that anchor just outside the current line so the popup has a real
+        // gap both when ibus places it below the line and when it flips above.
+        let line_height_px = rect.size.y * dpi_factor;
+        let line_top_px = rect.pos.y * dpi_factor;
+        let baseline_px = line_top_px + line_height_px * 0.85;
+        let line_area = if area_rect.size.x > 0.0 && area_rect.size.y > 0.0 {
+            area_rect
+        } else {
+            rect
+        };
+        let (padding_x_px, padding_y_px) = if line_height_px > 0.0 {
+            (
+                (line_height_px * 0.25).max(3.0),
+                (line_height_px * 1.25).max(20.0),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let area_line_left_px = line_area.pos.x * dpi_factor;
+        let area_line_top_px = line_area.pos.y * dpi_factor;
+        let area_line_right_px = (line_area.pos.x + line_area.size.x) * dpi_factor;
+        let area_line_bottom_px = (line_area.pos.y + line_area.size.y) * dpi_factor;
+        let area_left_px = (area_line_left_px - padding_x_px).max(0.0);
+        let area_top_px = (area_line_top_px - padding_y_px).max(0.0);
+        let area_right_px = area_line_right_px + padding_x_px;
+        let area_bottom_px = area_line_bottom_px + padding_y_px;
+        let spot_clearance_px = if line_height_px > 0.0 {
+            (line_height_px * 0.65).max(10.0).min(18.0)
+        } else {
+            0.0
+        };
+        let spot_above_y_px = if line_height_px > 0.0 && area_line_top_px < line_top_px {
+            area_line_top_px
+        } else {
+            line_top_px
+        };
+        let spot_below_y_px = line_top_px + line_height_px + spot_clearance_px;
+        let line_area_height_px = (area_line_bottom_px - area_line_top_px).max(line_height_px);
+        let candidate_height_guess_px = if line_height_px > 0.0 {
+            (line_area_height_px * 3.3).max(line_height_px * 7.0).max(124.0).min(260.0)
+        } else {
+            0.0
+        };
+        let flip_above_cutoff_px = candidate_height_guess_px;
+        let mut root_space_px = None;
+        if line_height_px > 0.0 {
+            if let Some(window) = self.window {
+                unsafe {
+                    let display = get_xlib_app_global().display;
+                    let default_screen = x11_sys::XDefaultScreen(display);
+                    let root_window = x11_sys::XRootWindow(display, default_screen);
+                    let mut root_x = 0;
+                    let mut root_y = 0;
+                    let mut child = 0;
+                    let mut root_attrs = mem::MaybeUninit::uninit();
+                    if x11_sys::XTranslateCoordinates(
+                        display,
+                        window,
+                        root_window,
+                        0,
+                        0,
+                        &mut root_x,
+                        &mut root_y,
+                        &mut child,
+                    ) != 0
+                        && x11_sys::XGetWindowAttributes(
+                            display,
+                            root_window,
+                            root_attrs.as_mut_ptr(),
+                        ) != 0
+                    {
+                        let root_attrs = root_attrs.assume_init();
+                        let above_anchor_root_y_px = root_y as f64 + spot_above_y_px;
+                        let below_anchor_root_y_px = root_y as f64 + spot_below_y_px;
+                        root_space_px = Some((
+                            above_anchor_root_y_px,
+                            root_attrs.height as f64 - below_anchor_root_y_px,
+                        ));
+                    }
+                }
+            }
+        }
+        let anchor_above = root_space_px
+            .map(|(above_anchor_top_space_px, below_anchor_bottom_space_px)| {
+                below_anchor_bottom_space_px < flip_above_cutoff_px
+                    && above_anchor_top_space_px > below_anchor_bottom_space_px
+            })
+            .unwrap_or(false);
+        let spot_y_px = if line_height_px <= 0.0 {
+            baseline_px
+        } else if anchor_above {
+            spot_above_y_px
+        } else {
+            spot_below_y_px
+        };
         let spot_px = x11_sys::XPoint {
-            x: (spot.x * dpi_factor) as i16,
-            y: (spot.y * dpi_factor) as i16,
+            x: (rect.pos.x * dpi_factor) as i16,
+            y: spot_y_px as i16,
         };
         let area_px = x11_sys::XRectangle {
-            x: spot_px.x,
-            y: spot_px.y,
-            width: 1,
-            height: 1,
+            x: area_left_px as i16,
+            y: area_top_px as i16,
+            width: (area_right_px - area_left_px).max(1.0) as u16,
+            height: (area_bottom_px - area_top_px).max(1.0) as u16,
         };
         unsafe {
+            let mut xic = xim_context.xic;
+            if xim_context.preedit_style == XimPreeditStyle::Position
+                && !xim_context.spot_initialized_at_creation
+            {
+                if let Some(new_context) = self.create_position_xic_with_spot(
+                    xim_context.status_style(),
+                    spot_px,
+                    area_px,
+                ) {
+                    x11_sys::XDestroyIC(xic);
+                    self.xic = Some(new_context);
+                    xim_context = new_context;
+                    xic = new_context.xic;
+                    if self.ime_active {
+                        x11_sys::XSetICFocus(xic);
+                    }
+                }
+            }
+
             let preedit_attr = x11_sys::XVaCreateNestedList(
                 0,
                 x11_sys::XNSpotLocation.as_ptr(),
@@ -557,12 +690,31 @@ impl XlibWindow {
                 return;
             }
 
-            x11_sys::XSetICValues(
+            let failed_attr = x11_sys::XSetICValues(
                 xic,
                 x11_sys::XNPreeditAttributes.as_ptr(),
                 preedit_attr,
                 ptr::null_mut::<c_void>(),
             );
+            if !failed_attr.is_null() && xim_context.preedit_style != XimPreeditStyle::Position {
+                if let Some(new_context) = self.create_position_xic_with_spot(
+                    xim_context.status_style(),
+                    spot_px,
+                    area_px,
+                ) {
+                    x11_sys::XDestroyIC(xic);
+                    self.xic = Some(new_context);
+                    if self.ime_active {
+                        x11_sys::XSetICFocus(new_context.xic);
+                    }
+                    let _ = x11_sys::XSetICValues(
+                        new_context.xic,
+                        x11_sys::XNPreeditAttributes.as_ptr(),
+                        preedit_attr,
+                        ptr::null_mut::<c_void>(),
+                    );
+                }
+            }
             x11_sys::XFree(preedit_attr);
         }
     }
@@ -572,11 +724,18 @@ impl XlibWindow {
             return;
         }
         self.ime_active = active;
-        if let Some(xic) = self.xic {
+        if let Some(xim_context) = self.xic {
             if self.ime_active {
-                unsafe { x11_sys::XSetICFocus(xic) };
+                unsafe { x11_sys::XSetICFocus(xim_context.xic) };
+                if self.ime_rect != Rect::default() {
+                    let ime_rect = self.ime_rect;
+                    let ime_area_rect = self.ime_area_rect;
+                    self.ime_rect = Rect::default();
+                    self.ime_area_rect = Rect::default();
+                    self.set_ime_rect(ime_rect, ime_area_rect);
+                }
             } else {
-                unsafe { x11_sys::XUnsetICFocus(xic) };
+                unsafe { x11_sys::XUnsetICFocus(xim_context.xic) };
             }
         }
     }
