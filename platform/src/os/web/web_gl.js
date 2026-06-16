@@ -212,6 +212,14 @@ export class WasmWebGL extends WasmWebBrowser {
     return index;
   }
 
+  get_f32_view() {
+    const buffer = this.memory.buffer;
+    if (!this._f32_view || this._f32_view.buffer !== buffer) {
+      this._f32_view = new Float32Array(buffer);
+    }
+    return this._f32_view;
+  }
+
   upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32) {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
@@ -225,8 +233,19 @@ export class WasmWebGL extends WasmWebBrowser {
     ) {
       return;
     }
-    let data = new Float32Array(this.memory.buffer, ptr_f32.ptr, ptr_f32.len);
-    this.upload_uniform_buffer_data(gl, gl_buf, data, gl.DYNAMIC_DRAW);
+    const f32_view = this.get_f32_view();
+    const offset = ptr_f32.ptr >> 2; // Convert byte offset to float index
+    const len = ptr_f32.len;
+
+    this.bind_buffer(gl, gl.UNIFORM_BUFFER, gl_buf);
+    const byte_length = len * 4;
+    if (gl_buf._buffer_byte_length !== byte_length) {
+      gl.bufferData(gl.UNIFORM_BUFFER, f32_view, gl.DYNAMIC_DRAW, offset, len);
+      gl_buf._buffer_byte_length = byte_length;
+    } else {
+      gl.bufferSubData(gl.UNIFORM_BUFFER, 0, f32_view, offset, len);
+    }
+
     gl_buf._last_upload_serial = this.buffer_upload_serial;
     gl_buf._last_upload_ptr = ptr_f32.ptr;
     gl_buf._last_upload_len = ptr_f32.len;
