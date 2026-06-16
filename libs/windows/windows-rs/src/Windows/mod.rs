@@ -44526,6 +44526,13 @@ pub unsafe fn ImmSetCompositionWindow(param0: HIMC, lpcompform: *const COMPOSITI
     windows_core::link!("imm32.dll" "system" fn ImmSetCompositionWindow(param0 : HIMC, lpcompform : *const COMPOSITIONFORM) -> windows_core::BOOL);
     unsafe { ImmSetCompositionWindow(param0, lpcompform) }
 }
+#[inline]
+pub unsafe fn ImmGetCompositionStringW(param0: HIMC, param1: u32, lpbuf: *mut core::ffi::c_void, dwbuflen: u32) -> i32 {
+    windows_core::link!("imm32.dll" "system" fn ImmGetCompositionStringW(param0 : HIMC, param1 : u32, lpbuf : *mut core::ffi::c_void, dwbuflen : u32) -> i32);
+    unsafe { ImmGetCompositionStringW(param0, param1, lpbuf, dwbuflen) }
+}
+pub const GCS_COMPSTR: u32 = 8u32;
+pub const GCS_RESULTSTR: u32 = 2048u32;
 pub const CFS_POINT: u32 = 2u32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -45609,6 +45616,8 @@ pub const WM_DPICHANGED: u32 = 736u32;
 pub const WM_ENTERSIZEMOVE: u32 = 561u32;
 pub const WM_ERASEBKGND: u32 = 20u32;
 pub const WM_EXITSIZEMOVE: u32 = 562u32;
+pub const WM_IME_COMPOSITION: u32 = 271u32;
+pub const WM_IME_ENDCOMPOSITION: u32 = 270u32;
 pub const WM_IME_STARTCOMPOSITION: u32 = 269u32;
 pub const WM_KEYDOWN: u32 = 256u32;
 pub const WM_KEYUP: u32 = 257u32;

@@ -191,6 +191,7 @@ unsafe fn create_makepad_text_view(mtk_view_obj: ObjcId) -> ObjcId {
     let view: ObjcId = msg_send![view, initWithFrame: mtk_bounds];
     (*view).set_ivar::<f64>("ime_pos_x", 0.0);
     (*view).set_ivar::<f64>("ime_pos_y", 0.0);
+    (*view).set_ivar::<f64>("ime_line_height", 0.0);
     (*view).set_ivar::<bool>("_is_multiline", false);
     (*view).set_ivar::<bool>("_submit_on_enter", false);
     (*view).set_ivar::<bool>("_is_read_only", false);
@@ -886,7 +887,7 @@ impl IosApp {
         }
     }
 
-    pub fn set_ime_position(caret: DVec2) {
+    pub fn set_ime_position(caret: DVec2, line_height: f64) {
         // Short sliver at the caret line, not the full box: a tall frame drops the
         // first candidate in multiline. 1pt wide + opaque so the HUD pill still shows.
         let frame = NSRect {
@@ -926,6 +927,7 @@ impl IosApp {
                 let () = msg_send![text_input_view, setFrame: frame];
                 (*text_input_view).set_ivar::<f64>("ime_pos_x", local_x);
                 (*text_input_view).set_ivar::<f64>("ime_pos_y", local_y);
+                (*text_input_view).set_ivar::<f64>("ime_line_height", line_height);
             }
         }
     }

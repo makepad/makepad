@@ -790,17 +790,24 @@ impl WaylandCx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     let _ = cx.net.http_cancel(request_id);
                 }
-                CxOsOp::ShowTextIME(area, pos, _config) => {
+                CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
                     if let Some(_window) = state.keyboard_window.or(state.pointer_window) {
                         if let Some(text_input) = state.text_input.as_ref() {
                             text_input.enable();
 
-                            // todo: follow the cursor while input
+                            // Report the caret line's bounding box (surface-local
+                            // logical coords) so the compositor anchors the IME
+                            // candidate window directly above/below the line.
+                            // Inflate it vertically by a fraction of the line height
+                            // so the candidate keeps a gap from the text rather than
+                            // hugging it (matches the macOS clearance).
+                            let rect_pos = area.clipped_rect(&*cx).pos + cursor_rect.pos;
+                            let clearance = cursor_rect.size.y * 0.6;
                             text_input.set_cursor_rectangle(
-                                state.last_mouse_pos.x as i32,
-                                state.last_mouse_pos.y as i32,
-                                0,
-                                0,
+                                rect_pos.x as i32,
+                                (rect_pos.y - clearance) as i32,
+                                cursor_rect.size.x.max(1.0) as i32,
+                                (cursor_rect.size.y + 2.0 * clearance) as i32,
                             );
                             text_input.commit();
                         }

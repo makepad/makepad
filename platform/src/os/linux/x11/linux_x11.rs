@@ -25,7 +25,7 @@ use {
         },
         gpu_info::GpuPerformance,
         makepad_live_id::*,
-        makepad_math::dvec2,
+        makepad_math::{dvec2, Rect},
         os::cx_native::EventFlow,
         texture::TextureFormat,
         thread::SignalToUI,
@@ -739,19 +739,35 @@ impl X11Cx {
                 CxOsOp::CancelHttpRequest { request_id } => {
                     let _ = cx.net.http_cancel(request_id);
                 }
-                CxOsOp::ShowTextIME(area, pos, _config) => {
-                    let pos = area.clipped_rect(&cx).pos + pos;
+                CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
+                    let area_rect = area.clipped_rect(&cx);
+                    let area_pos = area_rect.pos;
                     let window_id = cx.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
-                    let pos = cx.windows[window_id].layout_vec2d_to_native_points(pos);
+                    let top_left = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
+                    let bottom_right = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
+                    let area_top_left = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_rect.pos);
+                    let area_bottom_right = cx.windows[window_id]
+                        .layout_vec2d_to_native_points(area_rect.pos + area_rect.size);
+                    let ime_rect = Rect {
+                        pos: top_left,
+                        size: bottom_right - top_left,
+                    };
+                    let ime_area_rect = Rect {
+                        pos: area_top_left,
+                        size: area_bottom_right - area_top_left,
+                    };
                     opengl_windows.iter_mut().for_each(|w| {
-                        w.xlib_window.set_ime_spot(pos);
+                        w.xlib_window.set_ime_rect(ime_rect, ime_area_rect);
                         w.xlib_window.set_ime_active(true);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     opengl_windows.iter_mut().for_each(|w| {
                         w.xlib_window.set_ime_active(false);
-                        w.xlib_window.set_ime_spot(dvec2(0.0, 0.0));
+                        w.xlib_window.set_ime_rect(Rect::default(), Rect::default());
                     });
                 }
                 CxOsOp::CheckPermission {

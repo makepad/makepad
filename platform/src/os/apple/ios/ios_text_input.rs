@@ -219,6 +219,9 @@ pub fn define_makepad_text_view() -> *const Class {
     // text view's own (invisible) internal layout.
     decl.add_ivar::<f64>("ime_pos_x");
     decl.add_ivar::<f64>("ime_pos_y");
+    // Real caret-line height (native points) so the IME candidate clearance can
+    // scale with the font size instead of using a fixed proxy.
+    decl.add_ivar::<f64>("ime_line_height");
     // Whether the focused makepad field is multiline (set by configure_keyboard).
     decl.add_ivar::<bool>("_is_multiline");
     decl.add_ivar::<bool>("_submit_on_enter");
@@ -273,21 +276,53 @@ pub fn define_makepad_text_view() -> *const Class {
     extern "C" fn first_rect_for_range(this: &Object, _: Sel, _range: ObjcId) -> NSRect {
         unsafe {
             let x = *this.get_ivar::<f64>("ime_pos_x");
+            // ime_pos_y is the caret-line BOTTOM in this view's local (y-down) space.
             let y = *this.get_ivar::<f64>("ime_pos_y");
+            let line_height = *this.get_ivar::<f64>("ime_line_height");
+            // Fall back to the sliver height if no real line height was supplied.
+            let height = if line_height > 1.0 {
+                line_height
+            } else {
+                IOS_TEXT_INPUT_TARGET_HEIGHT
+            };
+
+            // Only hand iOS a real line box while actually COMPOSING marked text
+            // (when the CJK candidate window is up). The same method drives iOS's
+            // autocorrect/suggestion highlight when NOT composing, and a real
+            // height there makes iOS render an oversized highlight / stray caret
+            // over English text. So outside composition we return the degenerate
+            // rect, exactly like before the IME-positioning rework.
+            let marked_range: ObjcId = msg_send![this, markedTextRange];
+            if marked_range == nil {
+                return NSRect {
+                    origin: NSPoint {
+                        x,
+                        y: y - 1.5 * IOS_TEXT_INPUT_TARGET_HEIGHT,
+                    },
+                    size: NSSize {
+                        width: 1.0,
+                        height: 0.01,
+                    },
+                };
+            }
+
+            // Composing: return the TRUE composing-line box (top-left at the line
+            // top, real height) so iOS flips the candidate window around the real
+            // top/bottom edges - consistent spacing at any screen position, unlike
+            // the old degenerate point (huge gap at the bottom, overlap mid-screen).
+            // Inflate it by a fraction of the line height on both edges so the
+            // candidate sits a bit further from the text than iOS's tight native
+            // default (tune via the multiplier). This does NOT draw a caret - only
+            // caret_rect_for_position does, and it stays zero-size.
+            let clearance = height * 0.3;
             NSRect {
                 origin: NSPoint {
                     x,
-                    // Anchor above the caret line so the candidate bubble sits above the
-                    // text instead of covering it (the hairline height makes iOS plant the
-                    // bubble right at this anchor).
-                    y: y - 1.5 * IOS_TEXT_INPUT_TARGET_HEIGHT,
+                    y: y - height - clearance,
                 },
-                // Near-degenerate rect: a hairline height still anchors the autocorrect
-                // candidate bubble but is too small to draw a visible caret during marked
-                // text. The caret's height is this rect's height (makepad draws the real one).
                 size: NSSize {
                     width: 1.0,
-                    height: 0.01,
+                    height: height + 2.0 * clearance,
                 },
             }
         }

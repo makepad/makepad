@@ -49,8 +49,9 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmAssociateContext, ImmGetContext, ImmReleaseContext,
-                            ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM, HIMC,
+                            ImmAssociateContext, ImmGetCompositionStringW, ImmGetContext,
+                            ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
+                            GCS_COMPSTR, GCS_RESULTSTR, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -80,7 +81,8 @@ use {
                         LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
                         SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
                         WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-                        WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+                        WM_EXITSIZEMOVE, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+                        WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
                         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
                         WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
                         WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -127,6 +129,27 @@ unsafe fn SetWindowCompositionAttribute(
     unsafe { SetWindowCompositionAttribute(hwnd, data) }
 }
 
+// IME candidate-window positioning (not generated in the vendored `windows`
+// bindings). `CFS_EXCLUDE` tells the IME to keep its candidate list out of
+// `rc_area` (the current text line), so it appears directly above or below the
+// line rather than on top of it.
+const CFS_EXCLUDE: u32 = 0x0080;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CANDIDATEFORM {
+    dw_index: u32,
+    dw_style: u32,
+    pt_current_pos: POINT,
+    rc_area: RECT,
+}
+
+#[inline]
+unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -> windows_core::BOOL {
+    windows_core::link!("imm32.dll" "system" fn ImmSetCandidateWindow(himc : HIMC, lpcandidate : *const CANDIDATEFORM) -> windows_core::BOOL);
+    unsafe { ImmSetCandidateWindow(himc, lpcandidate) }
+}
+
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -146,7 +169,9 @@ pub struct Win32Window {
 
     pub mouse_buttons_down: usize,
     pub last_key_mod: KeyModifiers,
-    pub ime_spot: Vec2d,
+    // Caret/composition line rect in window-relative logical points (size
+    // includes the line height); used to keep the IME candidate off the line.
+    pub ime_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
     pub ignore_wmsize: usize,
@@ -216,7 +241,7 @@ impl Win32Window {
             mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
             last_key_mod: KeyModifiers::default(),
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ignore_wmsize: 0,
@@ -263,7 +288,7 @@ impl Win32Window {
             mouse_buttons_down: 0,
             last_window_geom: WindowGeom::default(),
             last_key_mod: KeyModifiers::default(),
-            ime_spot: Vec2d::default(),
+            ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
             ignore_wmsize: 0,
@@ -285,6 +310,34 @@ impl Win32Window {
         if self.is_fullscreen {
             self.maximize();
         }
+    }
+
+    /// Reads an IME composition string (`GCS_COMPSTR` for the in-progress
+    /// preedit, or `GCS_RESULTSTR` for the committed text) from the input
+    /// context as a Rust `String`. Returns `Some("")` for an empty string and
+    /// `None` only on error.
+    unsafe fn imm_get_composition_string(himc: HIMC, index: u32) -> Option<String> {
+        // A null buffer makes ImmGetCompositionStringW return the required byte
+        // length (the W variant returns UTF-16 code units, i.e. 2 bytes each).
+        let byte_len = ImmGetCompositionStringW(himc, index, std::ptr::null_mut(), 0);
+        if byte_len < 0 {
+            return None;
+        }
+        if byte_len == 0 {
+            return Some(String::new());
+        }
+        let mut buf = vec![0u16; byte_len as usize / 2];
+        let written = ImmGetCompositionStringW(
+            himc,
+            index,
+            buf.as_mut_ptr() as *mut c_void,
+            byte_len as u32,
+        );
+        if written <= 0 {
+            return Some(String::new());
+        }
+        let len = (written as usize / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
     }
 
     pub unsafe extern "system" fn window_class_proc(
@@ -579,25 +632,101 @@ impl Win32Window {
                 }
             }
             WM_IME_STARTCOMPOSITION => {
-                if window.ime_spot.x > 0.0 && window.ime_spot.y > 0.0 {
+                let rect = window.ime_rect;
+                if rect.size.y > 0.0 {
                     let himc = ImmGetContext(hwnd);
                     if !himc.is_invalid() {
                         let dpi_factor = window.get_dpi_factor();
-                        ImmSetCompositionWindow(
+                        let left = (rect.pos.x * dpi_factor) as i32;
+                        let top = (rect.pos.y * dpi_factor) as i32;
+                        let right = ((rect.pos.x + rect.size.x) * dpi_factor) as i32;
+                        let bottom = ((rect.pos.y + rect.size.y) * dpi_factor) as i32;
+                        // Inflate the excluded line vertically (by a fraction of the
+                        // line height) so the candidate list keeps a gap from the
+                        // text rather than hugging it. Matches the macOS clearance.
+                        let clearance = (rect.size.y * dpi_factor * 0.6) as i32;
+                        // Anchor the (makepad-drawn) composition string at the caret.
+                        let caret = POINT { x: left, y: bottom };
+                        let _ = ImmSetCompositionWindow(
                             himc,
                             &COMPOSITIONFORM {
                                 dwStyle: CFS_POINT,
-                                ptCurrentPos: POINT {
-                                    x: (window.ime_spot.x * dpi_factor) as i32,
-                                    y: (window.ime_spot.y * dpi_factor) as i32,
-                                },
+                                ptCurrentPos: caret,
                                 rcArea: RECT::default(),
                             },
-                        )
-                        .unwrap();
-                        ImmReleaseContext(hwnd, himc).unwrap();
+                        );
+                        // Exclude the whole text line so the candidate list pops up
+                        // directly above or below it instead of covering the text.
+                        let _ = ImmSetCandidateWindow(
+                            himc,
+                            &CANDIDATEFORM {
+                                dw_index: 0,
+                                dw_style: CFS_EXCLUDE,
+                                pt_current_pos: caret,
+                                rc_area: RECT {
+                                    left,
+                                    top: top - clearance,
+                                    right,
+                                    bottom: bottom + clearance,
+                                },
+                            },
+                        );
+                        let _ = ImmReleaseContext(hwnd, himc);
                     }
                 }
+            }
+            WM_IME_COMPOSITION => {
+                let himc = ImmGetContext(hwnd);
+                if !himc.is_invalid() {
+                    let flags = lparam.0 as u32;
+                    // GCS_RESULTSTR: the finalized text. Commit it with
+                    // `replace_last = false`, which replaces any active composition
+                    // preview and then clears the composition. We commit here (and
+                    // consume the message below) so DefWindowProc does NOT also
+                    // synthesize WM_CHAR for the same result and double-insert.
+                    if flags & GCS_RESULTSTR != 0 {
+                        if let Some(result) =
+                            Self::imm_get_composition_string(himc, GCS_RESULTSTR)
+                        {
+                            if !result.is_empty() {
+                                window.do_callback(Win32Event::TextInput(TextInputEvent {
+                                    input: result,
+                                    was_paste: false,
+                                    replace_last: false,
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+                    }
+                    // GCS_COMPSTR: the in-progress preedit. Show it inline with
+                    // `replace_last = true`; an empty string clears the preview.
+                    if flags & GCS_COMPSTR != 0 {
+                        let comp = Self::imm_get_composition_string(himc, GCS_COMPSTR)
+                            .unwrap_or_default();
+                        window.do_callback(Win32Event::TextInput(TextInputEvent {
+                            input: comp,
+                            was_paste: false,
+                            replace_last: true,
+                            ..Default::default()
+                        }));
+                    }
+                    let _ = ImmReleaseContext(hwnd, himc);
+                }
+                // Falls through to `return LRESULT(1)`, consuming the message so
+                // DefWindowProc draws no default composition window and synthesizes
+                // no WM_CHAR/WM_IME_CHAR for the result handled above.
+            }
+            WM_IME_ENDCOMPOSITION => {
+                // Composition finished or was cancelled. Clear any leftover inline
+                // preview (a no-op if it was already committed/cleared). This
+                // handles IMEs that end composition without first sending an empty
+                // GCS_COMPSTR (e.g. some Escape/cancel paths).
+                window.do_callback(Win32Event::TextInput(TextInputEvent {
+                    input: String::new(),
+                    was_paste: false,
+                    replace_last: true,
+                    ..Default::default()
+                }));
             }
             WM_ENTERSIZEMOVE => {
                 with_win32_app(|app| app.start_resize());
@@ -902,8 +1031,8 @@ impl Win32Window {
         with_win32_app(|app| app.time_now())
     }
 
-    pub fn set_ime_spot(&mut self, spot: Vec2d) {
-        self.ime_spot = spot;
+    pub fn set_ime_rect(&mut self, rect: Rect) {
+        self.ime_rect = rect;
     }
 
     pub fn get_position(&self) -> Vec2d {

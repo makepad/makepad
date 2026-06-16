@@ -949,7 +949,15 @@ impl Cx {
                     }
                     self.os.last_ime_visible = false;
                     self.os.last_ime_height = 0.0;
-                    self.text_ime_was_dismissed();
+                    // With a physical keyboard attached, Android auto-hides the
+                    // soft keyboard while the focused TextInput stays active.
+                    // Marking the IME dismissed (and re-issuing HideTextIME) would
+                    // stop the IME from composing hardware-key input and freeze the
+                    // IME position. Mirror the iOS guard (see ios.rs handling of
+                    // VirtualKeyboardEvent::DidHide).
+                    if !self.keyboard.has_physical_keyboard() {
+                        self.text_ime_was_dismissed();
+                    }
                     self.call_event_handler(&Event::VirtualKeyboard(
                         VirtualKeyboardEvent::DidHide { time },
                     ))
