@@ -285,10 +285,6 @@ impl Widget for Label {
             }
             return ScriptAsyncResult::Return(NIL);
         }
-        if method == live_id!(render) {
-            vm.with_cx_mut(|cx| self.redraw(cx));
-            return ScriptAsyncResult::Return(NIL);
-        }
         ScriptAsyncResult::MethodNotFound
     }
 
