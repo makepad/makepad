@@ -573,11 +573,44 @@ impl Default for ImageCache {
 }
 
 impl ImageCache {
+    /// Max distinct cached images before eviction kicks in. Each `Loaded` entry can hold a
+    /// decoded GPU texture, so without a cap this `HashMap` grows for the process lifetime.
+    const MAX_ENTRIES: usize = 512;
+
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
             thread_pool: None,
             pending_http_requests: HashMap::new(),
+        }
+    }
+
+    /// Insert a freshly-loaded texture, then bound the cache size if it has grown too large.
+    pub fn insert_loaded(&mut self, image_path: PathBuf, texture: Texture) {
+        self.map.insert(image_path, ImageCacheEntry::Loaded(texture));
+        self.evict_loaded_if_oversized();
+    }
+
+    /// Drop `Loaded` entries once the cache exceeds its cap. This is safe because widgets keep
+    /// their own clone of any texture they're currently displaying (via `set_texture`), so
+    /// eviction never affects a visible image — a later *fresh* request for an evicted path
+    /// simply re-loads it. In-flight `Loading` entries are preserved so decode work isn't
+    /// orphaned. There is no per-entry access timestamp, so eviction order is unspecified; the
+    /// cap is generous enough that this rarely triggers in practice.
+    fn evict_loaded_if_oversized(&mut self) {
+        if self.map.len() <= Self::MAX_ENTRIES {
+            return;
+        }
+        let excess = self.map.len() - (Self::MAX_ENTRIES * 3 / 4);
+        let to_remove: Vec<PathBuf> = self
+            .map
+            .iter()
+            .filter(|(_, e)| matches!(e, ImageCacheEntry::Loaded(_)))
+            .map(|(k, _)| k.clone())
+            .take(excess)
+            .collect();
+        for k in to_remove {
+            self.map.remove(&k);
         }
     }
 }
@@ -1445,8 +1478,7 @@ pub fn process_async_image_load(
             }
         }
         cx.get_global::<ImageCache>()
-            .map
-            .insert(image_path.into(), ImageCacheEntry::Loaded(texture));
+            .insert_loaded(image_path.into(), texture);
     } else {
         if image_decode_debug_enabled() {
             log!(
@@ -1520,8 +1552,7 @@ pub fn load_image_from_data_async(
         let image = decode_image_buffer(image_path, &data)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
-            .map
-            .insert(image_path.into(), ImageCacheEntry::Loaded(texture));
+            .insert_loaded(image_path.into(), texture);
         return Ok(AsyncLoadResult::Loaded);
     }
 
@@ -1814,8 +1845,7 @@ pub trait ImageCacheImpl {
         let texture = image.into_new_texture(cx);
         ensure_image_cache(cx);
         cx.get_global::<ImageCache>()
-            .map
-            .insert(image_path.into(), ImageCacheEntry::Loaded(texture.clone()));
+            .insert_loaded(image_path.into(), texture.clone());
         self.set_texture(Some(texture), id);
         Ok(())
     }

@@ -11,7 +11,7 @@ use {
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
-            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
+            CharOffset, Event, FullTextState, KeyEvent, TextInputEvent,
             VirtualKeyboardEvent,
         },
         makepad_live_id::*,
@@ -493,29 +493,6 @@ impl Cx {
         let time = with_ios_app(|app| app.time_now());
         for queued_event in queued_events {
             match queued_event {
-                ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                    self.call_event_handler(&Event::TextInput(TextInputEvent {
-                        input,
-                        replace_last,
-                        was_paste: false,
-                        ..Default::default()
-                    }));
-                }
-                ios_app::IosTextInputEvent::RangeReplace {
-                    start,
-                    end,
-                    text,
-                    replaced_text,
-                    fallback_to_insert,
-                } => {
-                    self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
-                        start,
-                        end,
-                        text,
-                        replaced_text,
-                        fallback_to_insert,
-                    }));
-                }
                 ios_app::IosTextInputEvent::SelectionChanged(text, start, end) => {
                     self.call_event_handler(&Event::TextInput(TextInputEvent {
                         full_state_sync: Some(FullTextState {
@@ -1014,14 +991,24 @@ impl Cx {
                     window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
-                CxOsOp::ShowTextIME(area, pos, config) => {
+                CxOsOp::ShowTextIME(area, cursor_rect, config) => {
                     let window_id = CxWindowPool::id_zero();
-                    let region = area.clipped_rect(self);
-                    let caret = region.pos + pos;
-                    let region = self.windows[window_id].layout_rect_to_native_points(region);
-                    let caret = self.windows[window_id].layout_vec2d_to_native_points(caret);
-                    IosApp::set_ime_position(region, caret);
+                    // iOS can't take the full line box without UIKit drawing a
+                    // native caret from it, so it keeps its caret-free anchoring
+                    // (see ios_text_input.rs) rather than the box-based approach the
+                    // desktop backends use. We still pass the caret-line bottom
+                    // (same point the pre-rect code sent) plus the real line height
+                    // (native points) so the candidate clearance scales with font.
+                    let area_pos = area.clipped_rect(self).pos;
+                    let line_top = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
+                    let caret = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
+                    let line_height = caret.y - line_top.y;
+                    // configure_keyboard may recreate the view; set_ime_position must
+                    // run after so it frames the final view (same-frame parking).
                     IosApp::configure_keyboard(&config);
+                    IosApp::set_ime_position(caret, line_height);
                     IosApp::show_keyboard();
                 }
                 CxOsOp::HideTextIME => {
