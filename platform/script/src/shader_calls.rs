@@ -1354,8 +1354,8 @@ impl ShaderFnCompiler {
             return;
         }
 
-        // WebGPU/WGSL: derivatives require uniform control flow. For now, emit safe
-        // no-op derivatives to keep shaders compiling during the WebGPU bring-up.
+        // WGSL: derivatives require uniform control flow. For now, emit safe
+        // no-op derivatives to keep shaders compiling.
         if matches!(output.backend, ShaderBackend::Wgsl)
             && is_derivative_builtin
             && !formatted_args.is_empty()

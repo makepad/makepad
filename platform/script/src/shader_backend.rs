@@ -1166,8 +1166,6 @@ impl ShaderBackend {
             Self::Wgsl => {
                 match name_in {
                     // WGSL uses dpdx/dpdy (derivatives) directly.
-                    // NOTE: During WebGPU bring-up we may override derivative emission
-                    // in the call compiler for validity; keep names canonical here.
                     id!(dFdx) => id!(dpdx),
                     id!(dFdy) => id!(dpdy),
                     id!(inverseSqrt) => id!(inverseSqrt),

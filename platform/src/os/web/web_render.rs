@@ -1,7 +1,7 @@
-//! Shared web rendering: builds the `FromWasm*` command stream consumed by both
-//! [`super::web_gl`] / `web_gl.js` (WebGL2) and [`super::web_gpu`] / `web_gpu.js` (WebGPU).
+//! Shared web rendering: builds the `FromWasm*` command stream consumed by
+//! [`super::web_gl`] / `web_gl.js` (WebGL2).
 //!
-//! Shader compilation and API-specific setup live in `web_gl.rs` and `web_gpu.rs` respectively.
+//! Shader compilation and API-specific setup live in `web_gl.rs`.
 
 use crate::{
     cx::Cx,
