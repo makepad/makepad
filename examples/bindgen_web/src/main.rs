@@ -1,3 +1,5 @@
+// cargo run -p cargo-makepad -- wasm run -p makepad-example-bindgen-web --release --bindgen
+
 pub use makepad_widgets;
 
 use makepad_widgets::*;
