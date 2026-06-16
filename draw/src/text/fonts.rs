@@ -240,6 +240,13 @@ impl Fonts {
             return false;
         }
         drop(rasterizer);
+        // Same idea for the append-only slug glyph atlas: if it grew past its cap, clear it
+        // here (before any upload below) and force a full redraw so every slug glyph rebuilds
+        // into the fresh atlas. Returning false leaves the existing slug textures intact for
+        // the current frame's GPU render.
+        if self.slug_atlas.reset_if_needed() {
+            return false;
+        }
         let completed = self.apply_completed_msdf_jobs();
         if completed > 0 {
             cx.redraw_all();

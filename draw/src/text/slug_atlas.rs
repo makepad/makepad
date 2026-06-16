@@ -13,6 +13,11 @@ const BAND_TEX_WIDTH: usize = 2048;
 const CUBIC_TO_QUAD_TOLERANCE: f32 = 0.05;
 const MAX_CUBIC_SPLIT_DEPTH: usize = 12;
 const RGBA_F32_TEXEL_FLOATS: usize = 4;
+/// Soft cap on the append-only `curve_data` buffer (~4 MB of f32). Slug glyphs are only
+/// used for very large text, so a realistic on-screen working set is far below this; the
+/// generous headroom means a reset (rebuild of all currently-visible glyphs) only happens
+/// after a lot of *distinct* large glyphs have scrolled through, and never thrashes.
+const MAX_CURVE_DATA_FLOATS: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SlugGlyphKey {
@@ -61,6 +66,7 @@ pub struct SlugAtlas {
     uploaded_generation: u64,
     cached_glyphs: FxHashMap<SlugGlyphKey, CachedSlugGlyphInfo>,
     missing_glyphs: FxHashSet<SlugGlyphKey>,
+    needs_reset: bool,
 }
 
 impl SlugAtlas {
@@ -94,7 +100,30 @@ impl SlugAtlas {
             uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
             missing_glyphs: FxHashSet::default(),
+            needs_reset: false,
         }
+    }
+
+    /// If a reset was requested (the curve buffer exceeded its cap), clear all cached glyph
+    /// data so it can be rebuilt from scratch, and report that a reset occurred. Mirrors the
+    /// raster atlas's `reset_if_needed`: the caller invokes this at a frame boundary (in
+    /// `Fonts::prepare_textures`, before any texture upload) and forces a full redraw, so no
+    /// stale `curve_offset` survives — all visible slug glyphs are re-built next frame.
+    pub fn reset_if_needed(&mut self) -> bool {
+        if !self.needs_reset {
+            return false;
+        }
+        self.needs_reset = false;
+        self.curve_data.clear();
+        self.band_data.clear();
+        self.cached_glyphs.clear();
+        self.missing_glyphs.clear();
+        self.curve_uploaded_floats = 0;
+        self.band_uploaded_floats = 0;
+        self.curve_dirty = true;
+        self.band_dirty = true;
+        self.cache_generation = self.cache_generation.wrapping_add(1);
+        true
     }
 
     pub fn curve_texture(&self) -> &Texture {
@@ -298,6 +327,13 @@ impl SlugAtlas {
         let (band_offset, band_count) = (0, 0);
         self.curve_dirty = true;
         self.cache_generation = self.cache_generation.wrapping_add(1);
+
+        // This glyph is still valid for the current frame; request a reset (performed at the
+        // next frame boundary) once the append-only buffer grows past its cap so it doesn't
+        // accumulate every distinct large glyph ever rendered.
+        if self.curve_data.len() > MAX_CURVE_DATA_FLOATS {
+            self.needs_reset = true;
+        }
 
         Some(SlugGlyphInfo {
             origin_in_ems: bounds.origin,

@@ -110,6 +110,21 @@ impl<T> GenVec<T> {
         self.slots.len()
     }
 
+    /// Reclaim over-allocated backing capacity. This only shrinks spare capacity (it never
+    /// changes `len`), so every existing raw index / `GenRef` remains valid. Useful after a
+    /// large allocation spike followed by a GC: the slot count stays at its high-water mark
+    /// (slots are reused via the free list), but the Vec's doubling overhead is returned.
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.slots.shrink_to_fit();
+    }
+
+    /// Backing capacity, for deciding whether a `shrink_to_fit` is worthwhile.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
     /// Check if empty
     #[inline]
     pub fn is_empty(&self) -> bool {
