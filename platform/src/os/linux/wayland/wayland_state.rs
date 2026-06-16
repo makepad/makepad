@@ -115,6 +115,12 @@ pub(crate) struct WaylandState {
     pub(crate) xkb_cx: xkb_sys::XkbContext,
     pub(crate) text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pub(crate) text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    /// zwp_text_input_v3 double-buffers preedit/commit; these accumulate the
+    /// pending IME state until the matching `Done` event applies it.
+    text_input_pending_preedit: Option<String>,
+    text_input_pending_commit: Option<String>,
+    /// Last composition preview forwarded to the widget, to skip redundant updates.
+    text_input_last_preedit: String,
     pub(crate) primary_selection_manager:
         Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
     pub(crate) primary_selection_device:
@@ -174,6 +180,9 @@ impl WaylandState {
             xkb_cx: xkb_sys::XkbContext::new().unwrap(),
             text_input: None,
             text_input_manager: None,
+            text_input_pending_preedit: None,
+            text_input_pending_commit: None,
+            text_input_last_preedit: String::new(),
             primary_selection_manager: None,
             primary_selection_device: None,
             primary_selection_source: None,
@@ -752,24 +761,56 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandState {
             zwp_text_input_v3::Event::Leave { surface } => {}
             zwp_text_input_v3::Event::PreeditString {
                 text,
-                cursor_begin,
-                cursor_end,
-            } => {}
+                cursor_begin: _,
+                cursor_end: _,
+            } => {
+                // Double-buffered: stash the preedit (composition) text and apply
+                // it on the matching `Done`. A `None`/absent preedit means the
+                // composition preview should be cleared for this cycle.
+                state.text_input_pending_preedit = text;
+            }
             zwp_text_input_v3::Event::CommitString { text } => {
-                if let Some(text_str) = text.filter(|text| !text.chars().all(char::is_control)) {
+                // Double-buffered: stash the committed text and apply on `Done`.
+                state.text_input_pending_commit = text;
+            }
+            zwp_text_input_v3::Event::DeleteSurroundingText {
+                before_length: _,
+                after_length: _,
+            } => {}
+            zwp_text_input_v3::Event::Done { serial: _ } => {
+                // Apply the IME state accumulated since the previous `Done`, in the
+                // protocol-mandated order: commit string first, then preedit. Per
+                // spec the pending state resets each cycle, so a `Done` carrying no
+                // preedit means the composition preview is cleared.
+                if let Some(commit) =
+                    state.text_input_pending_commit.take().filter(|t| {
+                        !t.is_empty() && !t.chars().all(char::is_control)
+                    })
+                {
+                    // `replace_last = false` commits: replaces any active
+                    // composition preview with the text, then clears composition.
                     state.do_callback(XlibEvent::TextInput(TextInputEvent {
-                        input: text_str,
+                        input: commit,
                         replace_last: false,
                         was_paste: false,
                         ..Default::default()
                     }));
+                    // The widget's composition is now cleared by the commit above.
+                    state.text_input_last_preedit.clear();
+                }
+                let preedit = state.text_input_pending_preedit.take().unwrap_or_default();
+                if preedit != state.text_input_last_preedit {
+                    // `replace_last = true` updates the inline composition preview;
+                    // an empty string clears it.
+                    state.do_callback(XlibEvent::TextInput(TextInputEvent {
+                        input: preedit.clone(),
+                        replace_last: true,
+                        was_paste: false,
+                        ..Default::default()
+                    }));
+                    state.text_input_last_preedit = preedit;
                 }
             }
-            zwp_text_input_v3::Event::DeleteSurroundingText {
-                before_length,
-                after_length,
-            } => {}
-            zwp_text_input_v3::Event::Done { serial } => {}
             _ => {}
         }
     }

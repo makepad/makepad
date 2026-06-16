@@ -261,6 +261,21 @@ struct AnimatorTrack {
     redraw: bool,
 }
 
+/// A `cut`/`play` requested while the script VM was held — e.g. from a widget's
+/// `on_after_apply` during a `ScriptReapply`/`Reload` walk, which runs inside
+/// the app's `cx.with_vm`. Calling `cut`/`play` then would re-enter `cx.with_vm`
+/// and panic ("Script VM swapped off"). Instead we queue the op here and replay
+/// it from `animator_handle_event_scoped` on the next frame, when the VM is free.
+struct DeferredImmediate {
+    state: [LiveId; 2],
+    kind: DeferredKind,
+}
+
+enum DeferredKind {
+    Cut,
+    Play(Option<Play>),
+}
+
 #[derive(Default, Script)]
 pub struct Animator {
     #[rust]
@@ -280,6 +295,11 @@ pub struct Animator {
     /// Uses ScriptObjectRef to prevent GC from freeing it
     #[rust]
     state_object: Option<ScriptObjectRef>,
+    /// Cut/play ops deferred because the script VM was held when they were
+    /// requested (see `DeferredImmediate`); replayed by `flush_deferred` once
+    /// the VM is free.
+    #[rust]
+    deferred: Vec<DeferredImmediate>,
 }
 
 impl ScriptHook for Animator {
@@ -594,6 +614,52 @@ impl Animator {
 
         // Return the apply object directly
         Some(target_apply.into())
+    }
+
+    /// Queue a `cut` that couldn't run now because the script VM is held (we're
+    /// inside an apply walk's `cx.with_vm`). Schedules a frame so the queued op
+    /// is replayed by `flush_deferred` once the VM is free. See [`DeferredImmediate`].
+    pub fn defer_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        self.deferred.push(DeferredImmediate {
+            state: *state,
+            kind: DeferredKind::Cut,
+        });
+        cx.new_next_frame();
+    }
+
+    /// Like [`Self::defer_cut`], but for a deferred `play`.
+    pub fn defer_play(&mut self, cx: &mut Cx, state: &[LiveId; 2], play: Option<Play>) {
+        self.deferred.push(DeferredImmediate {
+            state: *state,
+            kind: DeferredKind::Play(play),
+        });
+        cx.new_next_frame();
+    }
+
+    /// Replay any cut/play ops deferred while the VM was held, now that it's
+    /// free, returning their apply values for the caller to `script_apply`.
+    /// Returns empty (a no-op) when nothing is queued; if the VM is somehow
+    /// still held it keeps the queue and re-arms a frame to retry.
+    pub fn flush_deferred(&mut self, cx: &mut Cx) -> Vec<ScriptValue> {
+        if self.deferred.is_empty() {
+            return Vec::new();
+        }
+        if cx.is_script_vm_held() {
+            cx.new_next_frame();
+            return Vec::new();
+        }
+        let deferred = std::mem::take(&mut self.deferred);
+        let mut values = Vec::with_capacity(deferred.len());
+        for d in deferred {
+            let value = match d.kind {
+                DeferredKind::Cut => self.cut(cx, &d.state),
+                DeferredKind::Play(play) => self.play(cx, &d.state, play),
+            };
+            if let Some(value) = value {
+                values.push(value);
+            }
+        }
+        values
     }
 
     /// Check if the animator is in a specific state

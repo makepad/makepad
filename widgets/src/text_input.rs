@@ -967,24 +967,30 @@ impl TextInput {
         cursor_rect
     }
 
-    fn ime_position_bottom_pos(&self, cx: &Cx, text_rect: Rect, position: CursorPosition) -> Vec2d {
+    // The caret/composition-line rectangle (top-left + size, line height included)
+    // in IME-area-relative coordinates. Backends forward this to the OS so the
+    // candidate window anchors directly above/below the line near the cursor.
+    fn ime_position_rect(&self, cx: &Cx, text_rect: Rect, position: CursorPosition) -> Rect {
         let area_rect = self.draw_bg.area().rect(cx);
         let laidout_text = self
             .laidout_text
             .as_ref()
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
         let row = &laidout_text.rows[position.row_index];
-        text_rect.pos
-            - area_rect.pos
-            + dvec2(
-                position.x_in_lpxs as f64,
-                ((row.origin_in_lpxs.y - row.descender_in_lpxs) * self.draw_text.font_scale)
-                    as f64,
-            )
-            - dvec2(self.scroll_x, self.scroll_y)
+        let line_top =
+            ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let line_height =
+            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let top_left = text_rect.pos - area_rect.pos
+            + dvec2(position.x_in_lpxs as f64, line_top)
+            - dvec2(self.scroll_x, self.scroll_y);
+        Rect {
+            pos: top_left,
+            size: dvec2((2.0 * self.draw_text.font_scale) as f64, line_height),
+        }
     }
 
-    fn ime_cursor_bottom_pos(&self, cx: &Cx, text_rect: Rect, cursor_rect: Rect) -> Vec2d {
+    fn ime_cursor_rect(&self, cx: &Cx, text_rect: Rect, cursor_rect: Rect) -> Rect {
         if !self.has_composition() && self.selection.cursor.index > 0 {
             let previous_index = prev_grapheme_boundary(&self.text, self.selection.cursor.index);
             let previous_cursor = Cursor {
@@ -1007,13 +1013,16 @@ impl TextInput {
                 } else {
                     previous_position
                 };
-                return self.ime_position_bottom_pos(cx, text_rect, anchor_position);
+                return self.ime_position_rect(cx, text_rect, anchor_position);
             }
         }
 
         let area_rect = self.draw_bg.area().rect(cx);
-        text_rect.pos - area_rect.pos + cursor_rect.pos + cursor_rect.size
-            - dvec2(self.scroll_x, self.scroll_y)
+        Rect {
+            pos: text_rect.pos - area_rect.pos + cursor_rect.pos
+                - dvec2(self.scroll_x, self.scroll_y),
+            size: cursor_rect.size,
+        }
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
@@ -2058,10 +2067,10 @@ impl Widget for TextInput {
                 self.update_ime_context(cx);
             }
             if self.effective_input_mode() != InputMode::None {
-                let cursor_bottom_pos = self.ime_cursor_bottom_pos(cx, text_rect, cursor_rect);
+                let ime_cursor_rect = self.ime_cursor_rect(cx, text_rect, cursor_rect);
                 cx.show_text_ime_with_config(
                     self.draw_bg.area(),
-                    cursor_bottom_pos,
+                    ime_cursor_rect,
                     self.get_ime_config(),
                 );
             }
