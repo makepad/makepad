@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::makepad_shell::*;
 
 pub fn rustup_toolchain_install() -> Result<(), String> {

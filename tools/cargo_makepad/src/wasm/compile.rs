@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::makepad_network::http_server::*;
 use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
