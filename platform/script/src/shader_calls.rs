@@ -1291,88 +1291,6 @@ impl ShaderFnCompiler {
             return;
         }
 
-        if matches!(output.backend, ShaderBackend::Wgsl)
-            && name == id!(inverseSqrt)
-            && formatted_args.len() == 1
-        {
-            let arg = &formatted_args[0];
-            let first_ty = concrete_args.first().copied().unwrap_or(builtins.pod_f32);
-            match first_ty {
-                x if x == builtins.pod_vec4f => {
-                    write!(out, "inverseSqrt(max({}, vec4f(1.0e-20)))", arg).ok();
-                }
-                x if x == builtins.pod_vec3f => {
-                    write!(out, "inverseSqrt(max({}, vec3f(1.0e-20)))", arg).ok();
-                }
-                x if x == builtins.pod_vec2f => {
-                    write!(out, "inverseSqrt(max({}, vec2f(1.0e-20)))", arg).ok();
-                }
-                _ => {
-                    write!(out, "inverseSqrt(max({}, 1.0e-20))", arg).ok();
-                }
-            }
-            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
-            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
-            return;
-        }
-
-        if matches!(output.backend, ShaderBackend::Wgsl)
-            && name == id!(normalize)
-            && formatted_args.len() == 1
-        {
-            let arg = &formatted_args[0];
-            let first_ty = concrete_args.first().copied().unwrap_or(builtins.pod_void);
-            match first_ty {
-                x if x == builtins.pod_vec4f => {
-                    write!(
-                        out,
-                        "(({}) * inverseSqrt(max(dot(({}), ({})), 1.0e-20)) * sign(max(dot(({}), ({})), 1.0e-20) - 1.0e-20))",
-                        arg, arg, arg, arg, arg
-                    )
-                    .ok();
-                }
-                x if x == builtins.pod_vec3f => {
-                    write!(
-                        out,
-                        "(({}) * inverseSqrt(max(dot(({}), ({})), 1.0e-20)) * sign(max(dot(({}), ({})), 1.0e-20) - 1.0e-20))",
-                        arg, arg, arg, arg, arg
-                    )
-                    .ok();
-                }
-                x if x == builtins.pod_vec2f => {
-                    write!(
-                        out,
-                        "(({}) * inverseSqrt(max(dot(({}), ({})), 1.0e-20)) * sign(max(dot(({}), ({})), 1.0e-20) - 1.0e-20))",
-                        arg, arg, arg, arg, arg
-                    )
-                    .ok();
-                }
-                _ => {}
-            }
-            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
-            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
-            return;
-        }
-
-        // WGSL: derivatives require uniform control flow. For now, emit safe
-        // no-op derivatives to keep shaders compiling.
-        if matches!(output.backend, ShaderBackend::Wgsl)
-            && is_derivative_builtin
-            && !formatted_args.is_empty()
-        {
-            let first_ty = concrete_args.first().copied().unwrap_or(builtins.pod_f32);
-            match first_ty {
-                x if x == builtins.pod_vec4f => write!(out, "vec4f(0.0)").ok(),
-                x if x == builtins.pod_vec3f => write!(out, "vec3f(0.0)").ok(),
-                x if x == builtins.pod_vec2f => write!(out, "vec2f(0.0)").ok(),
-                _ => write!(out, "0.0").ok(),
-            };
-            // Preserve type table semantics.
-            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
-            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
-            return;
-        }
-
         // For Rust backend, dFdx/dFdy are emitted as inline record/compute blocks
         // using the 3-pass quad approach. In recording passes (quad_mode 0=dx, 1=dy),
         // the value is stored into quad_dx_buf/quad_dy_buf. In compute pass (mode 2),
@@ -1629,11 +1547,10 @@ impl ShaderFnCompiler {
                                 )
                                 .ok();
                             } else {
-                                // WGSL: prefer explicit LOD=0.0 to avoid uniform-control-flow
-                                // restrictions on implicit-derivative sampling in some pipelines.
+                                // WGSL: textureSample(texture, sampler, coord)
                                 write!(
                                     s,
-                                    "textureSampleLevel({}, _s{}, {}, 0.0)",
+                                    "textureSample({}, _s{}, {})",
                                     texture_expr, sampler_idx, coord
                                 )
                                 .ok();

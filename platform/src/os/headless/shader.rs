@@ -218,10 +218,6 @@ impl Cx {
                         fragment.as_str()
                     }
                 }
-                CxDrawShaderCode::Wgsl { .. } => {
-                    crate::error!("headless backend received WGSL shader code");
-                    continue;
-                }
             };
             if cx_shader.mapping.flags.debug_code {
                 crate::log!("{}", source);

@@ -978,13 +978,12 @@ impl DrawVars {
             let mut shared_defs = String::new();
             output.create_struct_defs(vm, &mut shared_defs);
 
-            let code = {
-                let mut vertex = String::new();
-                let mut fragment = String::new();
-                output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
-                output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
-                CxDrawShaderCode::Separate { vertex, fragment }
-            };
+            let mut vertex = String::new();
+            let mut fragment = String::new();
+            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+
+            let code = CxDrawShaderCode::Separate { vertex, fragment };
 
             {
                 let cx = vm.host.cx();

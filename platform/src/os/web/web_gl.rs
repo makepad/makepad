@@ -19,10 +19,6 @@ impl Cx {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
                         (vertex.clone(), fragment.clone())
                     }
-                    CxDrawShaderCode::Wgsl { .. } => {
-                        crate::error!("WGSL shader code is not supported on wasm webgl");
-                        continue;
-                    }
                     CxDrawShaderCode::Combined { .. } => {
                         crate::error!("Combined shader code is not supported on wasm webgl");
                         continue;

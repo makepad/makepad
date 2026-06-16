@@ -968,10 +968,6 @@ impl Cx {
                         CxDrawShaderCode::Separate { vertex, fragment } => {
                             (vertex.clone(), fragment.clone())
                         }
-                        CxDrawShaderCode::Wgsl { .. } => {
-                            crate::error!("OpenGL backend received WGSL shader code");
-                            continue;
-                        }
                         CxDrawShaderCode::Combined { code } => (code.clone(), code.clone()),
                     };
 

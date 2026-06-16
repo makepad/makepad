@@ -353,13 +353,6 @@ pub struct DrawShaderFlags {
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum CxDrawShaderCode {
     Separate { vertex: String, fragment: String },
-    Wgsl {
-        wgsl: String,
-        dyn_uniform_binding: u32,
-        texture_binding_base: u32,
-        sampler_binding_base: u32,
-        xr_depth_binding: u32,
-    },
     Combined { code: String },
 }
 
@@ -804,7 +797,6 @@ impl CxDrawShaderMapping {
             CxDrawShaderCode::Separate { vertex, fragment } => {
                 vertex.contains("draw_pass->time") || fragment.contains("draw_pass->time")
             }
-            CxDrawShaderCode::Wgsl { wgsl, .. } => wgsl.contains("draw_pass->time"),
         };
 
         CxDrawShaderMapping {
