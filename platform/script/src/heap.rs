@@ -59,6 +59,39 @@ pub struct ScriptHeap {
 }
 
 impl ScriptHeap {
+    /// Cap on the number of cleared `String` buffers kept around for reuse. Each one holds a
+    /// heap allocation; a big script burst can stash thousands of them in `strings_reuse`,
+    /// which would otherwise never be released.
+    const MAX_STRINGS_REUSE: usize = 1024;
+
+    /// Release memory the heap is holding purely for reuse / over-allocation, called after a
+    /// GC sweep. This is safe because it never removes or moves any live slot — it only:
+    ///   - drops excess pooled-for-reuse `String` buffers beyond a cap (re-allocated lazily),
+    ///   - returns over-allocated spare capacity in the slot arrays and free lists.
+    /// The slot arrays keep their high-water `len` (slots are reused via the free lists), so
+    /// every existing index / reference stays valid.
+    pub fn shrink_to_fit(&mut self) {
+        if self.strings_reuse.len() > Self::MAX_STRINGS_REUSE {
+            self.strings_reuse.truncate(Self::MAX_STRINGS_REUSE);
+        }
+        self.strings_reuse.shrink_to_fit();
+
+        self.objects.shrink_to_fit();
+        self.strings.shrink_to_fit();
+        self.arrays.shrink_to_fit();
+        self.pods.shrink_to_fit();
+        self.handles.shrink_to_fit();
+        self.regexes.shrink_to_fit();
+
+        self.objects_free.shrink_to_fit();
+        self.strings_free.shrink_to_fit();
+        self.arrays_free.shrink_to_fit();
+        self.pods_free.shrink_to_fit();
+        self.pod_types_free.shrink_to_fit();
+        self.handles_free.shrink_to_fit();
+        self.regexes_free.shrink_to_fit();
+    }
+
     pub fn empty() -> Self {
         let mut objects = GenVec::new();
         let mut arrays = GenVec::new();
