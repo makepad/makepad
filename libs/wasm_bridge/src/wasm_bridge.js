@@ -1,5 +1,17 @@
 const TEXT_DECODER = new TextDecoder();
 const TEXT_ENCODER = new TextEncoder();
+
+let DECODE_REQUIRES_UNSHARED_COPY = false;
+if (typeof SharedArrayBuffer !== "undefined") {
+    try {
+        const sab = new SharedArrayBuffer(1);
+        const view = new Uint8Array(sab);
+        TEXT_DECODER.decode(view);
+    } catch (e) {
+        DECODE_REQUIRES_UNSHARED_COPY = true;
+    }
+}
+
 export function init_env(env) {
     let _wasm = null;
 
@@ -232,9 +244,7 @@ export class WasmBridge {
     }
     u8_to_string(ptr, len) {
         const view = new Uint8Array(this.memory.buffer, ptr, len);
-        // Some browsers reject TextDecoder.decode() on SharedArrayBuffer-backed views.
-        // Copy to an unshared ArrayBuffer when needed.
-        if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+        if (DECODE_REQUIRES_UNSHARED_COPY) {
             return TEXT_DECODER.decode(view.slice());
         }
         return TEXT_DECODER.decode(view);
@@ -707,7 +717,7 @@ export class FromWasmMsg {
         let u32_len = (len + 3) >> 2;
         let u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, len);
         let str;
-        if (typeof SharedArrayBuffer !== "undefined" && app.memory.buffer instanceof SharedArrayBuffer) {
+        if (DECODE_REQUIRES_UNSHARED_COPY) {
             str = TEXT_DECODER.decode(u8_view.slice());
         } else {
             str = TEXT_DECODER.decode(u8_view);

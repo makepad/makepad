@@ -212,14 +212,6 @@ export class WasmWebGL extends WasmWebBrowser {
     return index;
   }
 
-  get_f32_view() {
-    const buffer = this.memory.buffer;
-    if (!this._f32_view || this._f32_view.buffer !== buffer) {
-      this._f32_view = new Float32Array(buffer);
-    }
-    return this._f32_view;
-  }
-
   upload_uniform_buffer_from_ptr(gl, gl_buf, ptr_f32) {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
@@ -233,7 +225,7 @@ export class WasmWebGL extends WasmWebBrowser {
     ) {
       return;
     }
-    const f32_view = this.get_f32_view();
+    const f32_view = this.f32;
     const offset = ptr_f32.ptr >> 2; // Convert byte offset to float index
     const len = ptr_f32.len;
 
