@@ -32,8 +32,7 @@ pub struct Splash {
     vm_id: SplashVmId,
 }
 
-const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
-const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
+const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nuse mod.net\nuse mod.std.*\nView{height:Fit, ";
 
 impl Splash {
     /// Stable identity for the streaming script body, based on pointer address.
