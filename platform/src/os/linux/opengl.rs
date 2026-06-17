@@ -16,7 +16,7 @@ use {
         makepad_script::{
             apply::Apply,
             shader::{
-                SamplerAddress, SamplerFilter, ShaderFnCompiler, ShaderMode, ShaderOutput,
+                ShaderFnCompiler, ShaderMode, ShaderOutput,
                 ShaderType,
             },
             shader_backend::ShaderBackend,
@@ -1355,6 +1355,20 @@ impl GlShader {
         pixel: &str,
         _os_type: &OsType,
     ) -> PendingGlShader {
+        static GL_INFO_ONCE: std::sync::Once = std::sync::Once::new();
+        GL_INFO_ONCE.call_once(|| {
+            crate::log!(
+                "Makepad GL: vendor={:?} renderer={:?} version={:?} glsl={:?} sampler_objects={}",
+                get_gl_string(gl, gl_sys::VENDOR),
+                get_gl_string(gl, gl_sys::RENDERER),
+                get_gl_string(gl, gl_sys::VERSION),
+                get_gl_string(gl, gl_sys::SHADING_LANGUAGE_VERSION),
+                gl.glGenSamplers.is_some()
+                    && gl.glBindSampler.is_some()
+                    && gl.glSamplerParameteri.is_some(),
+            );
+        });
+
         let vertex_len = Self::shader_source_len(vertex);
         let pixel_len = Self::shader_source_len(pixel);
         #[cfg(target_os = "android")]
@@ -1849,60 +1863,10 @@ impl GlShader {
         gl_texture_slots
     }
 
-    pub fn opengl_create_samplers(gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
-        let mut samplers = Vec::with_capacity(mapping.textures.len());
-        let Some(gl_gen_samplers) = gl.glGenSamplers else {
-            samplers.resize(mapping.textures.len(), OpenglSampler::default());
-            return samplers;
-        };
-        let Some(gl_sampler_parameteri) = gl.glSamplerParameteri else {
-            samplers.resize(mapping.textures.len(), OpenglSampler::default());
-            return samplers;
-        };
-
-        for texture_slot in 0..mapping.textures.len() {
-            let sampler_desc = mapping
-                .texture_sampler_indices
-                .get(texture_slot)
-                .and_then(|sampler_idx| mapping.samplers.get(*sampler_idx))
-                .copied()
-                .unwrap_or_default();
-
-            let mut sampler = 0u32;
-            unsafe {
-                gl_gen_samplers(1, &mut sampler);
-            }
-            if sampler == 0 {
-                samplers.push(OpenglSampler::default());
-                continue;
-            }
-
-            let filter = match sampler_desc.filter {
-                SamplerFilter::Nearest => gl_sys::NEAREST,
-                SamplerFilter::Linear => gl_sys::LINEAR,
-            };
-            let address = match sampler_desc.address {
-                SamplerAddress::Repeat => gl_sys::REPEAT,
-                SamplerAddress::ClampToEdge => gl_sys::CLAMP_TO_EDGE,
-                // CLAMP_TO_BORDER is not universally available on GLES3, keep it edge-safe.
-                SamplerAddress::ClampToZero => gl_sys::CLAMP_TO_EDGE,
-                SamplerAddress::MirroredRepeat => gl_sys::MIRRORED_REPEAT,
-            };
-
-            unsafe {
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MIN_FILTER, filter as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MAG_FILTER, filter as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_S, address as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_T, address as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_R, address as i32);
-            }
-
-            samplers.push(OpenglSampler {
-                sampler: Some(sampler),
-            });
-        }
-
-        samplers
+    pub fn opengl_create_samplers(_gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
+        // Rely on per-texture filter+wrap (set in update_vec_texture) instead of GL sampler objects:
+        // some Mesa drivers ignore the sampler MIN_FILTER and point-sample emoji/avatars (robrix #926).
+        vec![OpenglSampler::default(); mapping.textures.len()]
     }
 
     pub fn free_resources(self, gl: &LibGl) {
@@ -2788,15 +2752,18 @@ impl CxTexture {
             unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
                 TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
+                    // LINEAR: render targets are sampled with sample/sample_as_bgra (Linear), e.g. the
+                    // Gaussian blur and CachedView. Since we no longer bind sampler objects, the texture
+                    // object must carry that filter (it was previously supplied by the sampler object).
                     (gl.glTexParameteri)(
                         texture_target,
                         gl_sys::TEXTURE_MIN_FILTER,
-                        gl_sys::NEAREST as i32,
+                        gl_sys::LINEAR as i32,
                     );
                     (gl.glTexParameteri)(
                         texture_target,
                         gl_sys::TEXTURE_MAG_FILTER,
-                        gl_sys::NEAREST as i32,
+                        gl_sys::LINEAR as i32,
                     );
                     (gl.glTexParameteri)(
                         texture_target,
