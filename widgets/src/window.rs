@@ -415,9 +415,15 @@ pub struct DrawSsaaResolve {
 
 /// Full-window supersampling (SSAA) factor: render the whole UI at this multiple of the
 /// window's device resolution into an offscreen texture, then downscale it to the window.
-/// Brute-forces clean anti-aliasing for all geometry/text/images at the cost of fill rate
-/// (robrix #926). Env-gated `MAKEPAD_SUPERSAMPLE` (default 2.0); 1.0 disables. Clamped <=4.0
-/// (a 4x target on a 4K window already approaches GL_MAX_TEXTURE_SIZE).
+/// Brute-forces clean anti-aliasing for all geometry/text/images at the cost of fill rate.
+///
+/// DEFAULT 1.0 (OFF). SSAA re-renders the entire UI at NxN device pixels every frame and
+/// reallocates + re-renders the whole offscreen target on each dpi change — which made scrolling
+/// and (especially) UI-zoom noticeably laggy on robrix (#926 profiling: zoom froze ~1.6s with
+/// SSAA=2 vs ~0.9s with it off). The device-aware analytic AA (fringe/tolerance/round caps) gives
+/// most of the visual quality at ~zero cost, so SSAA is now opt-in only: set `MAKEPAD_SUPERSAMPLE`
+/// to 2 (or up to 4) to enable it. Clamped <=4.0 (a 4x target on a 4K window approaches
+/// GL_MAX_TEXTURE_SIZE).
 fn supersample_factor() -> f64 {
     // Read the env var once and cache it: begin()/end() query this every frame per window, and
     // std::env::var allocates a String each call. The factor can't change over a process's life.
@@ -426,7 +432,7 @@ fn supersample_factor() -> f64 {
         std::env::var("MAKEPAD_SUPERSAMPLE")
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
-            .unwrap_or(2.0)
+            .unwrap_or(1.0)
             .clamp(1.0, 4.0)
     })
 }
