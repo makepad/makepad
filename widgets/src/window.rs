@@ -116,6 +116,19 @@ script_mod! {
         }
     }
 
+    set_type_default() do #(DrawSsaaResolve::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        scene_texture: texture_2d(float)
+        source_y_flip: uniform(0.0)
+
+        // Downscale-resolve of the supersampled scene into the window. A single bilinear tap
+        // is exactly a 2x2 box average for supersample==2 (robrix #926).
+        pixel: fn() {
+            let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
+            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+    }
+
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
@@ -307,12 +320,18 @@ pub struct Window {
     draw_gauss_upsample: DrawGaussUpsample,
     #[live]
     draw_gauss_scene: DrawGaussScene,
+    #[live]
+    draw_ssaa_resolve: DrawSsaaResolve,
     #[rust]
     use_gauss_capture: bool,
+    #[rust]
+    use_ssaa: bool,
     #[rust]
     last_known_area: Area,
     #[rust(GaussStack::new(vm.cx_mut()))]
     gauss_stack: GaussStack,
+    #[rust(SsaaStack::new(vm.cx_mut()))]
+    ssaa_stack: SsaaStack,
     #[new]
     overlay: Overlay,
     #[new]
@@ -383,6 +402,33 @@ pub struct DrawGaussUpsample {
 pub struct DrawGaussScene {
     #[deref]
     draw_super: DrawQuad,
+}
+
+/// Resolve (downscale) shader for full-window supersampling: samples the supersized scene
+/// texture into the window framebuffer. See `DrawSsaaResolve` shader in the Window script.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSsaaResolve {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+/// Full-window supersampling (SSAA) factor: render the whole UI at this multiple of the
+/// window's device resolution into an offscreen texture, then downscale it to the window.
+/// Brute-forces clean anti-aliasing for all geometry/text/images at the cost of fill rate
+/// (robrix #926). Env-gated `MAKEPAD_SUPERSAMPLE` (default 2.0); 1.0 disables. Clamped <=4.0
+/// (a 4x target on a 4K window already approaches GL_MAX_TEXTURE_SIZE).
+fn supersample_factor() -> f64 {
+    // Read the env var once and cache it: begin()/end() query this every frame per window, and
+    // std::env::var allocates a String each call. The factor can't change over a process's life.
+    static FACTOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("MAKEPAD_SUPERSAMPLE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(2.0)
+            .clamp(1.0, 4.0)
+    })
 }
 
 struct GaussStackLevel {
@@ -618,6 +664,94 @@ impl GaussStack {
     }
 }
 
+/// Full-window supersampling target: one offscreen color+depth pass at `supersample` x the
+/// window's device resolution. The whole UI is rendered into it, then a single resolve quad
+/// downscales it into the window framebuffer (robrix #926). Modeled on GaussStack's scene pass.
+struct SsaaStack {
+    scene_pass: DrawPass,
+    scene_draw_list: DrawList2d,
+    scene_texture: Texture,
+    _scene_depth_texture: Texture,
+}
+
+impl SsaaStack {
+    fn new(cx: &mut Cx) -> Self {
+        let scene_pass = DrawPass::new_with_name(cx, "ssaa_scene");
+        let scene_draw_list = DrawList2d::new(cx);
+        let scene_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        let scene_depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        scene_pass.set_color_texture(
+            cx,
+            &scene_texture,
+            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+        );
+        scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        Self {
+            scene_pass,
+            scene_draw_list,
+            scene_texture,
+            _scene_depth_texture: scene_depth_texture,
+        }
+    }
+
+    /// Begin rendering the whole UI into the supersized scene pass. The dpi override
+    /// (dpi * supersample) inflates only the render-target pixel density + viewport; the pass
+    /// rect (logical layout size) is copied from the parent window pass, so layout/hit-testing
+    /// are unchanged — only rasterization happens at higher resolution.
+    fn begin_scene(&mut self, cx: &mut Cx2d, supersample: f64) {
+        let dpi = cx.current_dpi_factor();
+        // Logical size of the window pass. Set it explicitly on the scene pass (like the gauss
+        // mip passes do): begin_pass(Some(dpi)) does NOT auto-inherit the parent rect, so without
+        // set_size get_pass_rect returns None and the GL backend panics. With the dpi override =
+        // dpi*supersample, the same logical size rasterizes into a supersample-x device texture.
+        let size = cx.current_pass_size();
+        self.scene_pass.set_size(cx, size);
+        cx.make_child_pass(&self.scene_pass);
+        cx.begin_pass(&self.scene_pass, Some(dpi * supersample));
+        self.scene_draw_list.begin_always(cx);
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+    }
+
+    fn end_scene(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.scene_draw_list.end(cx);
+        cx.end_pass(&self.scene_pass);
+    }
+
+    /// Draw the single fullscreen resolve quad into the (now-active) window pass, sampling the
+    /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
+    fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
+        // The supersampled scene texture is stored bottom-up relative to the window, so the
+        // resolve needs the OPPOSITE flip from the gauss compositor (which works at 0.0 on
+        // desktop) — without it the whole UI presents upside-down (robrix #926).
+        let source_y_flip = 1.0 - gauss_render_texture_y_flip_for_os(cx.os_type());
+        resolve
+            .draw_vars
+            .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
+        resolve.draw_vars.set_texture(0, &self.scene_texture);
+        resolve.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: root_size,
+            },
+        );
+    }
+}
+
 impl Window {
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         match cx.os_type() {
@@ -795,10 +929,19 @@ impl Window {
         };
         begin_window_gauss_frame(cx, window_id, self.use_gauss_capture, gauss_snapshot);
 
+        // Full-window supersampling: render everything (incl. the overlay = tooltips/modals/
+        // context-menus) into the supersized scene pass, then downscale in end(). Skip when
+        // gauss capture is active for this window (avoid nesting the two scene mechanisms).
+        self.use_ssaa = !self.use_gauss_capture && supersample_factor() > 1.0;
+
         if self.use_gauss_capture {
             self.gauss_stack.begin_scene(cx);
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
+        } else if self.use_ssaa {
+            self.ssaa_stack.begin_scene(cx, supersample_factor());
+            self.overlay
+                .begin_for_pass(cx, self.ssaa_stack.scene_pass.draw_pass_id());
         } else {
             self.overlay.begin(cx);
         }
@@ -834,8 +977,20 @@ impl Window {
                 self.gauss_stack
                     .draw_scene(cx, &mut self.draw_gauss_scene, root_size);
             }
+            self.overlay.end(cx);
+        } else if self.use_ssaa {
+            // The overlay was begun for the scene pass, so finalize it BEFORE ending that pass.
+            self.overlay.end(cx);
+            self.ssaa_stack.end_scene(cx);
+            // Now the window pass is active again; downscale the supersized scene into it.
+            let root_size = cx.current_pass_size();
+            if root_size.x >= 0.5 && root_size.y >= 0.5 {
+                self.ssaa_stack
+                    .draw_resolve(cx, &mut self.draw_ssaa_resolve, root_size);
+            }
+        } else {
+            self.overlay.end(cx);
         }
-        self.overlay.end(cx);
         let window_id = self.window.handle.window_id();
         if finish_window_gauss_frame(cx, window_id) {
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());

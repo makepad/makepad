@@ -1408,6 +1408,22 @@ impl CxTexture {
                     4,
                     data.as_ref().unwrap().as_ptr() as *const _,
                 ),
+                // Mipmapped images (robrix #926): upload level 0 as a single-level texture for
+                // now (safe, no crash) — real per-level mip upload (MipLevels + a
+                // D3D11_SUBRESOURCE_DATA array, or GenerateMips with an RTV) is a TODO before
+                // MAKEPAD_IMAGE_MIPMAPS gives any benefit on D3D11.
+                TextureFormat::VecMipBGRAu8_32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                } => get_descs(
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    *width,
+                    *height,
+                    4,
+                    data.as_ref().unwrap().as_ptr() as *const _,
+                ),
                 _ => panic!(),
             };
 

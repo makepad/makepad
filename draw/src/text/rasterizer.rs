@@ -402,12 +402,55 @@ impl Rasterizer {
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
         const PADDING: usize = 2;
+        // Keep a little extra resolution above the display size so minor magnification
+        // (line scaling, fractional DPI) stays crisp without re-introducing aliasing.
+        const HEADROOM: f32 = 1.5;
 
         font.with_glyph_raster_image(glyph_id, dpxs_per_em, |raster_image| {
+            let native = raster_image.decode_size();
+            let native_dpxs = raster_image.dpxs_per_em();
+
+            // Color emoji ship at a single large native strike (~128px). Pre-shrink it toward
+            // the requested display size so it isn't heavily minified at draw time (which,
+            // with bilinear-without-mipmaps, aliases into a blocky look on low-DPI screens —
+            // robrix #926). Never upscale; only store smaller than the native strike.
+            let scale = if native_dpxs > 0.0 {
+                (dpxs_per_em * HEADROOM / native_dpxs).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let target = if scale < 1.0 {
+                Size::new(
+                    ((native.width as f32 * scale).round() as usize).max(1),
+                    ((native.height as f32 * scale).round() as usize).max(1),
+                )
+            } else {
+                native
+            };
+            // Scale actually achieved after integer rounding. Scaling both origin_in_dpxs
+            // and dpxs_per_em by it keeps the glyph's on-screen size & position invariant
+            // (the draw side works in em units = *_in_dpxs / dpxs_per_em).
+            //
+            // width and height are rounded independently above, so their ratios can differ
+            // slightly; we apply one uniform scale (origin is scaled on both axes and
+            // dpxs_per_em is a scalar), so use the geometric mean of the per-axis ratios to
+            // spread the sub-pixel rounding error evenly instead of distorting one axis.
+            let achieved_w = if native.width > 0 {
+                target.width as f32 / native.width as f32
+            } else {
+                1.0
+            };
+            let achieved_h = if native.height > 0 {
+                target.height as f32 / native.height as f32
+            } else {
+                1.0
+            };
+            let achieved = (achieved_w * achieved_h).sqrt();
+
             let key = GlyphImageKey {
                 font_id: font.id(),
                 glyph_id,
-                size: raster_image.decode_size() + Size::from(2 * PADDING),
+                size: target + Size::from(2 * PADDING),
                 kind: GlyphImageKind::Color,
             };
             let (slot, allocated) = self.allocate_shared_slot(key)?;
@@ -418,7 +461,7 @@ impl Rasterizer {
                 {
                     let size = image.size();
                     image = image.subimage_mut(Rect::from(size).unpad(PADDING));
-                    raster_image.decode(&mut image);
+                    raster_image.decode_scaled(&mut image);
                 }
                 slot.rect
             };
@@ -428,8 +471,8 @@ impl Rasterizer {
                 atlas_image_bounds,
                 atlas_image_padding: PADDING,
                 atlas_plane: AtlasPlane::R.index(),
-                origin_in_dpxs: raster_image.origin_in_dpxs(),
-                dpxs_per_em: raster_image.dpxs_per_em(),
+                origin_in_dpxs: raster_image.origin_in_dpxs() * achieved,
+                dpxs_per_em: native_dpxs * achieved,
             })
         })?
     }

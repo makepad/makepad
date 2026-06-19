@@ -292,6 +292,22 @@ pub struct DrawVector {
     pub cur_zbias: f32,
     #[rust]
     pub cur_gradient_row_v: f32,
+    /// AA fringe width (in path-local units) used by [`Self::fill`]. Callers that draw at a
+    /// known device scale (e.g. DrawSvg) set this so the baked fringe lands at ~1 device pixel
+    /// regardless of how much the geometry is GPU-scaled (robrix #926). 0.0 means "use 1.0".
+    #[rust]
+    pub cur_fill_aa: f32,
+    /// AA fringe width (path-local units) for strokes — same role as [`Self::cur_fill_aa`] but
+    /// for stroked paths (the stroke shader's analytic AA also needs the fringe to span ~1
+    /// device pixel, else thin strokes go jagged — robrix #926). 0.0 means "use the caller's aa".
+    #[rust]
+    pub cur_stroke_aa: f32,
+    /// Curve flattening tolerance (path-local units). Callers that draw at a known device scale
+    /// (e.g. DrawSvg) set this to ~`target_device_px / device_scale` so curves/round-caps keep a
+    /// constant on-screen smoothness regardless of icon size, instead of facets growing with the
+    /// icon (robrix #926). 0.0 means "use the default 0.25".
+    #[rust]
+    pub cur_tolerance: f32,
     // Effect bounding box (world-space): [min_x, min_y, max_x, max_y]
     // When set, stored in param1-param4 for solid-painted shapes with shader_id > 0,
     // enabling the pixel shader to compute proper UV coordinates from v_world.
@@ -427,6 +443,11 @@ impl DrawVector {
         miter_limit: f32,
         aa: f32,
     ) {
+        let tolerance = if self.cur_tolerance > 0.0 {
+            self.cur_tolerance
+        } else {
+            0.25
+        };
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
         self.cur_stroke_mult = tessellate_path_stroke(
@@ -439,6 +460,7 @@ impl DrawVector {
             join,
             miter_limit,
             aa,
+            tolerance,
         );
         self.append_geometry(&tv, &ti);
         self.tess_verts = tv;
@@ -446,7 +468,12 @@ impl DrawVector {
     }
 
     pub fn fill(&mut self) {
-        self.fill_opts(LineJoin::Miter, 4.0, 1.0);
+        let aa = if self.cur_fill_aa > 0.0 {
+            self.cur_fill_aa
+        } else {
+            1.0
+        };
+        self.fill_opts(LineJoin::Miter, 4.0, aa);
     }
 
     /// Fill with GPU-expandable fringe encoding (used by DrawSvg cache remapping).
@@ -459,6 +486,11 @@ impl DrawVector {
     }
 
     fn fill_opts_mode(&mut self, join: LineJoin, miter_limit: f32, aa: f32, gpu_expand_fill: bool) {
+        let tolerance = if self.cur_tolerance > 0.0 {
+            self.cur_tolerance
+        } else {
+            0.25
+        };
         let mut tv = std::mem::take(&mut self.tess_verts);
         let mut ti = std::mem::take(&mut self.tess_indices);
         tessellate_path_fill(
@@ -470,6 +502,7 @@ impl DrawVector {
             miter_limit,
             aa,
             gpu_expand_fill,
+            tolerance,
         );
         self.cur_stroke_mult = 1e6;
         self.append_geometry(&tv, &ti);

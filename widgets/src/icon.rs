@@ -11,6 +11,16 @@ script_mod! {
         width: Fit
         height: Fit
 
+        // Don't clip the icon to its (Fit) bounds. An SVG is fit to the icon rect by its path
+        // CONTENT bounds, which exclude the stroke/round-cap extent — so round caps reach ~half a
+        // stroke-width beyond the rect. A tight clip (the default) shears those caps flat, making
+        // round-cap strokes look SQUARE (robrix #926: the nav "+" vs the input-bar "+"). Button
+        // doesn't hit this only because its padding/label give its clip rect slack. Disabling the
+        // clip lets the caps render fully (matching Button) without resizing the icon. The icon's
+        // ~1px overflow is harmless for leaf icons.
+        clip_x: false
+        clip_y: false
+
         icon_walk: Walk{
             width: 17.5
             height: Fit

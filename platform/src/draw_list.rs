@@ -111,29 +111,33 @@ impl Cx {
             TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,
+                data,
                 updated,
                 ..
             } => {
                 if let TextureUpdated::Empty = updated {
                     0
                 } else {
-                    (*width as u64)
-                        .saturating_mul(*height as u64)
-                        .saturating_mul(4)
+                    // The data buffer holds the full mip chain (~4/3 of level 0), so use its
+                    // actual length when present rather than just level-0 (width*height*4).
+                    data.as_ref()
+                        .map(|d| (d.len() as u64).saturating_mul(4))
+                        .unwrap_or_else(|| (*width as u64).saturating_mul(*height as u64).saturating_mul(4))
                 }
             }
             TextureFormat::VecMipRGBAf32 {
                 width,
                 height,
+                data,
                 updated,
                 ..
             } => {
                 if let TextureUpdated::Empty = updated {
                     0
                 } else {
-                    (*width as u64)
-                        .saturating_mul(*height as u64)
-                        .saturating_mul(16)
+                    data.as_ref()
+                        .map(|d| (d.len() as u64).saturating_mul(16))
+                        .unwrap_or_else(|| (*width as u64).saturating_mul(*height as u64).saturating_mul(16))
                 }
             }
             TextureFormat::VecRGBAf32 {

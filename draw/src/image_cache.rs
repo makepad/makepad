@@ -32,6 +32,62 @@ pub struct ImageBuffer {
     pub animation: Option<TextureAnimation>,
 }
 
+/// Alpha-weighted average of up to four `0xAARRGGBB` texels (premultiplying RGB by alpha so
+/// transparent texels don't bleed their undefined color into the average).
+fn box_average_bgra(samples: &[u32]) -> u32 {
+    let (mut b, mut g, mut r, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for &p in samples {
+        let pa = (p >> 24) & 0xFF;
+        b += (p & 0xFF) * pa;
+        g += ((p >> 8) & 0xFF) * pa;
+        r += ((p >> 16) & 0xFF) * pa;
+        a += pa;
+        n += 1;
+    }
+    if a == 0 {
+        return 0;
+    }
+    let out_a = a / n.max(1);
+    (out_a << 24) | ((r / a) << 16) | ((g / a) << 8) | (b / a)
+}
+
+/// Build a full mip chain (level 0 down to 1x1) for a BGRA-`u32` image via an alpha-weighted
+/// 2x2 box filter. Returns the concatenated level data (level 0 first) and the highest mip
+/// level index. Backends that generate their own mips (e.g. OpenGL via `glGenerateMipmap`)
+/// upload level 0 and ignore the rest; backends that upload per-level read the whole chain.
+fn generate_bgra_mip_chain(width: usize, height: usize, level0: Vec<u32>) -> (Vec<u32>, usize) {
+    let mut out = level0;
+    let (mut w, mut h) = (width, height);
+    let mut level_start = 0usize;
+    let mut max_level = 0usize;
+    while w > 1 || h > 1 {
+        let nw = (w / 2).max(1);
+        let nh = (h / 2).max(1);
+        let mut next = Vec::with_capacity(nw * nh);
+        for y in 0..nh {
+            let sy0 = (y * 2).min(h - 1);
+            let sy1 = (y * 2 + 1).min(h - 1);
+            for x in 0..nw {
+                let sx0 = (x * 2).min(w - 1);
+                let sx1 = (x * 2 + 1).min(w - 1);
+                let at = |sx: usize, sy: usize| out[level_start + sy * w + sx];
+                next.push(box_average_bgra(&[
+                    at(sx0, sy0),
+                    at(sx1, sy0),
+                    at(sx0, sy1),
+                    at(sx1, sy1),
+                ]));
+            }
+        }
+        level_start = out.len();
+        out.extend_from_slice(&next);
+        w = nw;
+        h = nh;
+        max_level += 1;
+    }
+    (out, max_level)
+}
+
 /// Hard upper bound on a decoded image's width or height (per side). Matches
 /// zune's default cap; lets us reject decompression-bomb headers before
 /// allocating anything.
@@ -161,15 +217,26 @@ impl ImageBuffer {
     }
 
     pub fn into_new_texture(self, cx: &mut Cx) -> Texture {
-        let texture = Texture::new_with_format(
-            cx,
+        // Mipmap static images (not animations — their atlas frames must not bleed across
+        // mip levels) so they don't alias when minified on low-DPI screens (robrix #926).
+        let format = if self.animation.is_none() && image_cache_use_mipmaps() {
+            let (data, max_level) = generate_bgra_mip_chain(self.width, self.height, self.data);
+            TextureFormat::VecMipBGRAu8_32 {
+                width: self.width,
+                height: self.height,
+                data: Some(data),
+                max_level: Some(max_level),
+                updated: TextureUpdated::Full,
+            }
+        } else {
             TextureFormat::VecBGRAu8_32 {
                 width: self.width,
                 height: self.height,
                 data: Some(self.data),
                 updated: TextureUpdated::Full,
-            },
-        );
+            }
+        };
+        let texture = Texture::new_with_format(cx, format);
         texture.set_animation(cx, self.animation);
         texture
     }

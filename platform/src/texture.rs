@@ -6,6 +6,27 @@ use {
     std::rc::Rc,
 };
 
+/// Whether decoded images (e.g. room avatars, inline images) should be uploaded as
+/// mipmapped textures (`VecMipBGRAu8_32`) instead of single-level `VecBGRAu8_32`, so that
+/// minifying them on low-DPI screens uses a proper mip chain rather than bilinear
+/// undersampling (which aliases into a blocky look — robrix #926).
+///
+/// Mipmapping gives images a clean minification chain (trilinear) instead of bilinear
+/// undersampling, which is the standard way UI toolkits downscale appropriately-sized images
+/// (cf. Flutter's `FilterQuality.medium`). It only helps when the *source* has detail headroom
+/// over the display size — so it's paired with fetching avatars/images well above display size.
+///
+/// Verified on the desktop OpenGL backend and enabled there by default. The other backends
+/// (Metal / D3D11 / Vulkan / web) carry the upload path but are unverified, so they default
+/// off. Override on any backend with `MAKEPAD_IMAGE_MIPMAPS` (`1`/`true`/`on`, `0`/`false`/`off`).
+pub fn image_cache_use_mipmaps() -> bool {
+    if let Ok(v) = std::env::var("MAKEPAD_IMAGE_MIPMAPS") {
+        return matches!(v.trim(), "1" | "true" | "on" | "yes");
+    }
+    // The platform crate can see the `use_vulkan` cfg the draw crate cannot, so the gate lives here.
+    cfg!(all(target_os = "linux", not(use_vulkan)))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Texture(Rc<PoolId>);
 

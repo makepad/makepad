@@ -3692,6 +3692,10 @@ impl CxVulkan {
                 data,
                 ..
             }
+            // NOTE: VecMipBGRAu8_32 (robrix #926) is currently uploaded as a single level here
+            // (level 0 only, mip_levels=1) — safe, but no minification mip chain. Real Vulkan
+            // mips would need mip_levels>1 + a vkCmdBlitImage chain. TODO before
+            // MAKEPAD_IMAGE_MIPMAPS benefits Vulkan.
             | TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,

@@ -149,6 +149,11 @@ pub struct DrawSvg {
     pub cached_gradient_row_count: usize,
     #[rust]
     pub cache_valid: bool,
+    /// The device-pixel scale (`svg_scale * dpi`) the cached geometry was tessellated at.
+    /// When the draw-time scale departs from this, we re-tessellate so the baked AA fringe
+    /// stays ~1 device pixel (robrix #926).
+    #[rust]
+    pub cached_scale: f32,
     #[rust]
     pub has_animations: bool,
     #[live(true)]
@@ -201,14 +206,62 @@ impl DrawSvg {
         };
 
         let (lw, lh) = doc.logical_size();
+
+        // Device-pixel scale this icon is drawn at. Geometry is tessellated in content-local
+        // units and GPU-scaled by svg_scale (= target rect / content bounds), then the pass
+        // applies dpi, so device_scale = svg_scale * dpi. We bake an AA fringe of ~1 device
+        // pixel (and re-tessellate when that scale changes) so small icons keep their
+        // anti-aliasing instead of going hard/blocky on low-DPI screens (robrix #926).
+        let cbw = self.content_bounds.2 - self.content_bounds.0;
+        let cbh = self.content_bounds.3 - self.content_bounds.1;
+        let dpi = cx.current_dpi_factor() as f32;
+        let device_scale = if cbw > 0.0 && cbh > 0.0 {
+            let tw = rect.size.x as f32;
+            let th = rect.size.y as f32;
+            let s = if self.preserve_aspect {
+                (tw / cbw).min(th / cbh)
+            } else {
+                // Non-uniform scale: the X and Y fringes differ, so there is no single correct
+                // value. Use the geometric mean as an average compromise (the baked fringe is
+                // ~1 device px on average across the two axes).
+                ((tw / cbw) * (th / cbh)).max(0.0).sqrt()
+            };
+            (s * dpi).max(0.0001)
+        } else {
+            dpi.max(0.0001)
+        };
+        // Pick the fill AA fringe so it lands at ~1 device pixel, which is what the analytic
+        // fill shader (alpha = d/fwidth(d)) needs to resolve a smooth edge — a sub-pixel fringe
+        // gives it nothing to work with and the edge goes hard/blocky (robrix #926).
+        //
+        // NOTE the factor of 2: the tessellator's fringe half-width is `woff = aa * 0.5`
+        // (libs/svg/src/tessellate.rs), so the on-screen fringe is `fill_aa * 0.5 * device_scale`
+        // device px. To make that ~1px we need fill_aa = 2 / device_scale. Capped at 4.0 so the
+        // local fringe can't grow wide enough to bridge thin features on very small icons
+        // (which had made the download icon "wonky").
+        let fill_aa = (2.0 / device_scale).clamp(0.2, 4.0);
+        // Curve flatten tolerance: keep the polygon within ~0.05 device px of the true curve so
+        // circles and round stroke caps stay smooth at any icon size (the fixed 0.25 local
+        // tolerance let facets grow with the icon — e.g. the 30px nav "+" round caps and the
+        // magnifier ring looked choppy — robrix #926). Never coarser than the old 0.25.
+        let tolerance = (0.05 / device_scale).clamp(0.01, 0.25);
+        // Re-tessellate when the scale moved enough that the baked fringe would be noticeably off.
+        let scale_changed = (self.cached_scale - device_scale).abs() > device_scale * 0.05;
+
         let mut use_uploaded_cache = false;
 
         if self.has_animations {
             // Animated SVGs must re-tessellate every frame
+            self.draw_super.cur_fill_aa = fill_aa;
+            self.draw_super.cur_stroke_aa = fill_aa;
+            self.draw_super.cur_tolerance = tolerance;
             self.draw_super.begin();
             svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
-        } else if !self.cache_valid {
-            // Tessellate and cache on first render (or after invalidation)
+        } else if !self.cache_valid || scale_changed {
+            // Tessellate and cache on first render (or after invalidation / a scale change)
+            self.draw_super.cur_fill_aa = fill_aa;
+            self.draw_super.cur_stroke_aa = fill_aa;
+            self.draw_super.cur_tolerance = tolerance;
             self.draw_super.begin();
             svg::render_svg(&mut self.draw_super, &doc, 0.0, 0.0, lw, lh, time);
             self.cached_verts = self.draw_super.acc_verts.clone();
@@ -216,6 +269,7 @@ impl DrawSvg {
             self.cached_gradient_data = self.draw_super.gradient_texture_data.clone();
             self.cached_gradient_row_count = self.draw_super.gradient_row_count;
             self.cache_valid = true;
+            self.cached_scale = device_scale;
         } else {
             // Static SVG geometry is already uploaded; submit it directly.
             use_uploaded_cache = true;
