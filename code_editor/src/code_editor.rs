@@ -421,15 +421,17 @@ impl CodeEditor {
             KeepCursorInView::Off => {}
         }
 
-        // if height = Fit, we need to compute it based on layout
-        let height_is_fit = walk.height.is_fit();
-        //if height_is_fit{
-        //    walk.height = Size::Fixed(100000.0);
-        // }
-        const MAX_HEIGHT: f64 = 100_0000.0;
         self.scroll_bars.begin(cx, walk, Layout::default());
-
         let turtle_rect = cx.turtle().rect();
+
+        // When the height is `Fit` with a max value, use that max for the viewport.
+        let height_is_fit = walk.height.is_fit();
+        const MAX_HEIGHT: f64 = 10_000.0;
+        let fit_height = if let Size::Fit { max: Some(fb), .. } = walk.height {
+            fb.eval_height(cx).unwrap_or(MAX_HEIGHT)
+        } else {
+            MAX_HEIGHT
+        };
 
         let gutter_width = if self.show_gutter {
             self.gutter_chars = session
@@ -450,7 +452,7 @@ impl CodeEditor {
             size: Vec2d {
                 x: gutter_width,
                 y: if height_is_fit {
-                    MAX_HEIGHT
+                    fit_height
                 } else {
                     turtle_rect.size.y
                 },
@@ -464,7 +466,7 @@ impl CodeEditor {
             size: Vec2d {
                 x: turtle_rect.size.x - gutter_width,
                 y: if height_is_fit {
-                    MAX_HEIGHT
+                    fit_height
                 } else {
                     turtle_rect.size.y
                 },
@@ -498,7 +500,7 @@ impl CodeEditor {
             size: Vec2d {
                 x: self.unscrolled_rect.size.x,
                 y: if height_is_fit {
-                    MAX_HEIGHT
+                    fit_height
                 } else {
                     self.unscrolled_rect.size.y
                 },
