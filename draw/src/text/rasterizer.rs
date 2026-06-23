@@ -410,10 +410,8 @@ impl Rasterizer {
             let native = raster_image.decode_size();
             let native_dpxs = raster_image.dpxs_per_em();
 
-            // Color emoji ship at a single large native strike (~128px). Pre-shrink it toward
-            // the requested display size so it isn't heavily minified at draw time (which,
-            // with bilinear-without-mipmaps, aliases into a blocky look on low-DPI screens —
-            // robrix #926). Never upscale; only store smaller than the native strike.
+            // Color emoji ship at one large native strike; pre-shrink toward display size so it
+            // isn't minified (no mipmaps) into a blocky look. Never upscale.
             let scale = if native_dpxs > 0.0 {
                 (dpxs_per_em * HEADROOM / native_dpxs).clamp(0.0, 1.0)
             } else {

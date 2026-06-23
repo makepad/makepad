@@ -627,9 +627,7 @@ fn emit_shape(
             let stroke_alpha = style.stroke_opacity * opacity;
             set_paint(dv, paint, defs, stroke_alpha, xf, bbox, grad_map);
             let w = style.stroke_width * xf.scale_factor();
-            // Prefer the device-aware fringe (set by DrawSvg::render_to_rect so it lands at ~1
-            // device pixel after GPU scaling); the analytic stroke-edge AA needs that or thin
-            // strokes go jagged on low-DPI screens (robrix #926). Fall back to the old heuristic.
+            // Prefer the device-aware fringe (cur_stroke_aa) so stroke AA lands at ~1 device px; else the old heuristic.
             let aa = if dv.cur_stroke_aa > 0.0 {
                 dv.cur_stroke_aa
             } else {

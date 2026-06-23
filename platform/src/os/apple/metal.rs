@@ -2149,10 +2149,8 @@ impl CxTexture {
                     .saturating_mul(*height as u64)
                     .saturating_mul(4)
             }
-            // Mipmapped images (robrix #926). The texture is allocated with the full mip
-            // chain above; here we upload each provided level. NOTE: for this to actually
-            // improve minification, the sampler must use a mip filter (verify when enabling
-            // via MAKEPAD_IMAGE_MIPMAPS on macOS/iOS).
+            // Mipmapped images: texture is allocated with the full chain above; upload each level
+            // here. TODO: needs a mip-filter sampler to actually help (verify on macOS/iOS).
             TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,

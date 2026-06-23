@@ -1408,10 +1408,8 @@ impl CxTexture {
                     4,
                     data.as_ref().unwrap().as_ptr() as *const _,
                 ),
-                // Mipmapped images (robrix #926): upload level 0 as a single-level texture for
-                // now (safe, no crash) — real per-level mip upload (MipLevels + a
-                // D3D11_SUBRESOURCE_DATA array, or GenerateMips with an RTV) is a TODO before
-                // MAKEPAD_IMAGE_MIPMAPS gives any benefit on D3D11.
+                // Mipmapped images: upload level 0 only for now (safe). Real per-level mip upload
+                // is a TODO before MAKEPAD_IMAGE_MIPMAPS helps on D3D11.
                 TextureFormat::VecMipBGRAu8_32 {
                     width,
                     height,

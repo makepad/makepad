@@ -107,11 +107,8 @@ impl Cx {
                                         data: WasmPtrU32::new((*data).as_ref().unwrap()),
                                     });
                                 }
-                                // NOTE: VecMipBGRAu8_32 (robrix #926) is uploaded as a single
-                                // level here (level 0 only) — safe, but no minification mip
-                                // chain. Real web mips would need a gl.generateMipmap (or
-                                // per-level texImage2D) on the JS side. TODO before
-                                // MAKEPAD_IMAGE_MIPMAPS benefits the web backend.
+                                // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
+                                // Real mips (gl.generateMipmap) are a TODO for the web backend.
                                 TextureFormat::VecMipBGRAu8_32 {
                                     width,
                                     height,

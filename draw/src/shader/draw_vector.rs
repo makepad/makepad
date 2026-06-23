@@ -292,20 +292,13 @@ pub struct DrawVector {
     pub cur_zbias: f32,
     #[rust]
     pub cur_gradient_row_v: f32,
-    /// AA fringe width (in path-local units) used by [`Self::fill`]. Callers that draw at a
-    /// known device scale (e.g. DrawSvg) set this so the baked fringe lands at ~1 device pixel
-    /// regardless of how much the geometry is GPU-scaled (robrix #926). 0.0 means "use 1.0".
+    /// Fill AA fringe (path-local units); set so the baked fringe lands at ~1 device px after GPU scaling. 0.0 = use 1.0.
     #[rust]
     pub cur_fill_aa: f32,
-    /// AA fringe width (path-local units) for strokes — same role as [`Self::cur_fill_aa`] but
-    /// for stroked paths (the stroke shader's analytic AA also needs the fringe to span ~1
-    /// device pixel, else thin strokes go jagged — robrix #926). 0.0 means "use the caller's aa".
+    /// Stroke AA fringe (path-local units); like `cur_fill_aa` but for strokes. 0.0 = use the caller's aa.
     #[rust]
     pub cur_stroke_aa: f32,
-    /// Curve flattening tolerance (path-local units). Callers that draw at a known device scale
-    /// (e.g. DrawSvg) set this to ~`target_device_px / device_scale` so curves/round-caps keep a
-    /// constant on-screen smoothness regardless of icon size, instead of facets growing with the
-    /// icon (robrix #926). 0.0 means "use the default 0.25".
+    /// Curve flatten tolerance (path-local units); set ~`device_px / device_scale` for constant on-screen smoothness. 0.0 = use 0.25.
     #[rust]
     pub cur_tolerance: f32,
     // Effect bounding box (world-space): [min_x, min_y, max_x, max_y]

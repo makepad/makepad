@@ -121,8 +121,7 @@ script_mod! {
         scene_texture: texture_2d(float)
         source_y_flip: uniform(0.0)
 
-        // Downscale-resolve of the supersampled scene into the window. A single bilinear tap
-        // is exactly a 2x2 box average for supersample==2 (robrix #926).
+        // Downscale-resolve into the window: one bilinear tap = a 2x2 box average at supersample 2.
         pixel: fn() {
             let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
             return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
@@ -413,17 +412,9 @@ pub struct DrawSsaaResolve {
     draw_super: DrawQuad,
 }
 
-/// Full-window supersampling (SSAA) factor: render the whole UI at this multiple of the
-/// window's device resolution into an offscreen texture, then downscale it to the window.
-/// Brute-forces clean anti-aliasing for all geometry/text/images at the cost of fill rate.
-///
-/// DEFAULT 1.0 (OFF). SSAA re-renders the entire UI at NxN device pixels every frame and
-/// reallocates + re-renders the whole offscreen target on each dpi change — which made scrolling
-/// and (especially) UI-zoom noticeably laggy on robrix (#926 profiling: zoom froze ~1.6s with
-/// SSAA=2 vs ~0.9s with it off). The device-aware analytic AA (fringe/tolerance/round caps) gives
-/// most of the visual quality at ~zero cost, so SSAA is now opt-in only: set `MAKEPAD_SUPERSAMPLE`
-/// to 2 (or up to 4) to enable it. Clamped <=4.0 (a 4x target on a 4K window approaches
-/// GL_MAX_TEXTURE_SIZE).
+/// Full-window supersampling (SSAA) factor: renders the whole UI at NxN device pixels and
+/// downscales it — clean AA but costly, so it's off by default (the analytic AA covers most of
+/// it for free). Opt in with `MAKEPAD_SUPERSAMPLE` = 2 (clamped <=4).
 fn supersample_factor() -> f64 {
     // Read the env var once and cache it: begin()/end() query this every frame per window, and
     // std::env::var allocates a String each call. The factor can't change over a process's life.
@@ -670,9 +661,7 @@ impl GaussStack {
     }
 }
 
-/// Full-window supersampling target: one offscreen color+depth pass at `supersample` x the
-/// window's device resolution. The whole UI is rendered into it, then a single resolve quad
-/// downscales it into the window framebuffer (robrix #926). Modeled on GaussStack's scene pass.
+/// Full-window supersampling target: render the UI into a `supersample`x offscreen pass, then a resolve quad downscales it.
 struct SsaaStack {
     scene_pass: DrawPass,
     scene_draw_list: DrawList2d,
@@ -740,9 +729,7 @@ impl SsaaStack {
     /// Draw the single fullscreen resolve quad into the (now-active) window pass, sampling the
     /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
-        // The supersampled scene texture is stored bottom-up relative to the window, so the
-        // resolve needs the OPPOSITE flip from the gauss compositor (which works at 0.0 on
-        // desktop) — without it the whole UI presents upside-down (robrix #926).
+        // Scene texture is bottom-up — flip opposite to the gauss compositor or the UI shows upside-down.
         let source_y_flip = 1.0 - gauss_render_texture_y_flip_for_os(cx.os_type());
         resolve
             .draw_vars

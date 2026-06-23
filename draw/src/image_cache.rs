@@ -217,8 +217,7 @@ impl ImageBuffer {
     }
 
     pub fn into_new_texture(self, cx: &mut Cx) -> Texture {
-        // Mipmap static images (not animations — their atlas frames must not bleed across
-        // mip levels) so they don't alias when minified on low-DPI screens (robrix #926).
+        // Mipmap static images (not animations — frames must not bleed across mip levels) to avoid aliasing when minified.
         let format = if self.animation.is_none() && image_cache_use_mipmaps() {
             let (data, max_level) = generate_bgra_mip_chain(self.width, self.height, self.data);
             TextureFormat::VecMipBGRAu8_32 {

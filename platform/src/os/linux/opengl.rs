@@ -1865,7 +1865,7 @@ impl GlShader {
 
     pub fn opengl_create_samplers(_gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
         // Rely on per-texture filter+wrap (set in update_vec_texture) instead of GL sampler objects:
-        // some Mesa drivers ignore the sampler MIN_FILTER and point-sample emoji/avatars (robrix #926).
+        // some Mesa drivers ignore the sampler MIN_FILTER and point-sample minified textures.
         vec![OpenglSampler::default(); mapping.textures.len()]
     }
 

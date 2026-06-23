@@ -199,13 +199,9 @@ impl<'a> GlyphRasterImage<'a> {
         Some((width, height, out))
     }
 
-    /// Decode the raster image, box-downsampling (alpha-weighted) to fit `image`'s size.
-    ///
-    /// Color emoji ship at a single large native strike (~128px for Noto), but are usually
-    /// displayed much smaller. Storing the full strike in the atlas and minifying it at draw
-    /// time with bilinear-without-mipmaps undersamples badly and looks blocky on low-DPI
-    /// screens. Pre-shrinking to ~display size here (a proper area average) fixes that
-    /// (robrix #926). If the destination is >= the source, this is a straight copy.
+    /// Decode the raster image, box-downsampling (alpha-weighted) to fit `image`'s size — so large
+    /// emoji strikes shrink to ~display size here instead of looking blocky when minified at draw time.
+    /// If the destination is >= the source, this is a straight copy.
     pub fn decode_scaled(&self, image: &mut SubimageMut<Bgra>) {
         let Some((sw, sh, src)) = self.decode_native_bgra() else {
             return;
