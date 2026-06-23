@@ -198,7 +198,8 @@ impl ImageBuffer {
                 .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to decode PNG image data as a slice of u8 bytes",
                 )))?;
-        Self::new(&decoded_data, width, height)
+        let buffer = Self::new(&decoded_data, width, height)?;
+        Ok(orient(buffer, decoder.info().and_then(|i| i.exif.as_deref())))
     }
 
     fn decode_animated_png<T: makepad_zune_png::makepad_zune_core::bytestream::ZByteReaderTrait>(
@@ -327,7 +328,9 @@ impl ImageBuffer {
         if !decoder.is_animated() {
             let mut buf = vec![0u8; buf_size];
             decoder.read_image(&mut buf).map_err(ImageError::WebpDecode)?;
-            return Self::new(&buf, width, height);
+            let buffer = Self::new(&buf, width, height)?;
+            let exif = decoder.exif_metadata().ok().flatten();
+            return Ok(orient(buffer, exif.as_deref()));
         }
 
         // Animated WebP: the decoder composites each frame onto its own canvas,
@@ -501,10 +504,9 @@ impl ImageBuffer {
             JpgDecodeErrors::FormatStatic("Failed to decode JPG image dimensions"),
         ))?;
         checked_pixel_count(width, height)?;
-        match decoder.decode() {
-            Ok(data) => ImageBuffer::new(&data, width, height),
-            Err(err) => Err(ImageError::JpgDecode(err)),
-        }
+        let pixels = decoder.decode().map_err(ImageError::JpgDecode)?;
+        let buffer = ImageBuffer::new(&pixels, width, height)?;
+        Ok(orient(buffer, decoder.exif().map(Vec::as_slice)))
     }
 
     pub fn from_bmp(data: &[u8]) -> Result<Self, ImageError> {
@@ -897,6 +899,92 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
         "ico" => ImageBuffer::from_ico(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
+}
+
+/// Applies the EXIF orientation found in an already-decoded image's raw `exif`
+/// TIFF block (as handed back by the format decoders) so the pixels display
+/// upright. Returns the buffer unchanged when there's no usable orientation tag.
+fn orient(buffer: ImageBuffer, exif: Option<&[u8]>) -> ImageBuffer {
+    apply_exif_orientation(buffer, exif.and_then(tiff_orientation).unwrap_or(1))
+}
+
+/// Reads the Orientation tag (0x0112) from a TIFF/EXIF block that begins at the
+/// byte-order marker ("II" little-endian or "MM" big-endian). Returns the value
+/// only when it's a valid 1-8.
+fn tiff_orientation(tiff: &[u8]) -> Option<u16> {
+    // Some sources (e.g. WebP EXIF chunks) keep the JPEG-style "Exif\0\0" prefix.
+    let tiff = tiff.strip_prefix(b"Exif\0\0").unwrap_or(tiff);
+    let little_endian = match tiff.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    // checked_add so an attacker-controlled near-usize::MAX offset can't overflow
+    // (and panic on 32-bit builds) before the bounds check runs.
+    let u16_at = |off: usize| -> Option<u16> {
+        let b = tiff.get(off..off.checked_add(2)?)?;
+        Some(if little_endian {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        })
+    };
+    let u32_at = |off: usize| -> Option<u32> {
+        let b = tiff.get(off..off.checked_add(4)?)?;
+        Some(if little_endian {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        })
+    };
+    if u16_at(2)? != 0x002A {
+        return None;
+    }
+    let ifd0 = u32_at(4)? as usize;
+    let count = u16_at(ifd0)? as usize;
+    for n in 0..count {
+        let entry = ifd0 + 2 + n * 12;
+        if u16_at(entry)? == 0x0112 {
+            // Orientation is a SHORT: its value sits in the first 2 bytes of the
+            // entry's value field (offset 8 within the 12-byte entry).
+            let v = u16_at(entry + 8)?;
+            return (1..=8).contains(&v).then_some(v);
+        }
+    }
+    None
+}
+
+/// Rotates/flips a decoded buffer per its EXIF `orientation` (1-8) so it displays
+/// upright. Orientation 1 (or anything out of range, or an animation atlas) is
+/// returned unchanged.
+fn apply_exif_orientation(buf: ImageBuffer, orientation: u16) -> ImageBuffer {
+    if orientation <= 1 || orientation > 8 || buf.animation.is_some() {
+        return buf;
+    }
+    let (w, h) = (buf.width, buf.height);
+    if buf.data.len() < w * h {
+        return buf;
+    }
+    // Orientations 5-8 are 90°/diagonal turns, which swap width and height.
+    let swap = matches!(orientation, 5..=8);
+    let (dw, dh) = if swap { (h, w) } else { (w, h) };
+    let mut dst = vec![0u32; dw * dh];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = match orientation {
+                2 => (w - 1 - x, y),         // mirror horizontal
+                3 => (w - 1 - x, h - 1 - y), // rotate 180°
+                4 => (x, h - 1 - y),         // mirror vertical
+                5 => (y, x),                 // transpose
+                6 => (h - 1 - y, x),         // rotate 90° CW
+                7 => (h - 1 - y, w - 1 - x), // transverse
+                8 => (y, w - 1 - x),         // rotate 90° CCW
+                _ => (x, y),
+            };
+            dst[dy * dw + dx] = buf.data[y * w + x];
+        }
+    }
+    ImageBuffer { width: dw, height: dh, data: dst, animation: buf.animation }
 }
 
 /// Returns the `(width, height)` in pixels of an encoded image, auto-detecting
