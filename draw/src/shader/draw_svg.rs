@@ -224,8 +224,26 @@ impl DrawSvg {
         } else {
             dpi.max(0.0001)
         };
-        // Fill AA fringe ~1 device px so edges don't go blocky; capped so it can't bridge thin features.
-        let fill_aa = (2.0 / device_scale).clamp(0.2, 4.0);
+        // AA fringe width, in path-LOCAL (content) units. The fringe's on-screen HALF-width is
+        // `fill_aa * 0.5 * device_scale` device px, and the analytic coverage in draw_vector.rs
+        // (`alpha = clamp(d / fwidth(d))`) self-normalizes to a ~1px ramp, so this constant only
+        // controls WHERE the 50%-coverage contour sits relative to the path's true edge:
+        //   * a half-width of ~0.5 device px puts 50% coverage ON the true edge  -> centered AA,
+        //     no size distortion. That needs `fill_aa * 0.5 * device_scale = 0.5`, i.e. 1/device_scale.
+        //   * a wider fringe pushes the 50% contour OUTSIDE the true edge, dilating fills and — worse
+        //     — fattening strokes, whose half-width is `w/2 + aa/2` (tessellate.rs): at `2/device_scale`
+        //     every stroke gained a full device px per side and looked thick/chunky (robrix #926).
+        // So target 1.0/device_scale (the old 2.0 was 2x too wide).
+        //
+        // The cap must also be in content units: an absolute cap (the old `4.0`) means wildly
+        // different things across icons. A large-viewBox icon (forbidden.svg is 512×512) drawn at
+        // ~24px has a tiny device_scale, so `1.0/device_scale` blows past `4.0` and would clamp to a
+        // *sub-pixel* fringe — and a sub-pixel fringe makes the coverage (coarse on OpenGL-ES/Wayland)
+        // collapse to a hard, aliased step. Scaling the cap with the content keeps the fringe ~0.5
+        // device px regardless of viewBox, so icon SVGs need no particular size/viewBox to look right.
+        // `4.0` was tuned for a 24-unit icon (download.svg), i.e. ~content/6; `.max(4.0)` floors it.
+        let content_ref = cbw.min(cbh).max(1.0);
+        let fill_aa = (1.0 / device_scale).clamp(0.2, (content_ref / 6.0).max(4.0));
         // Curve flatten tolerance ~0.05 device px so curves/round caps stay smooth at any icon size.
         let tolerance = (0.05 / device_scale).clamp(0.01, 0.25);
         // Re-tessellate when the scale moved enough that the baked fringe would be noticeably off.
