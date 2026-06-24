@@ -1634,6 +1634,51 @@ impl ShaderFnCompiler {
             self.skip_next_pop_to_me = false;
             return;
         }
+        // A logic operator (`&&` / `||`) sitting on top of `mes` here means it was used
+        // in *argument* position, e.g. `max(x, float(a && b))`. The short-circuit RHS
+        // ends right at this point, so the consuming opcode reaches us before
+        // `handle_logic_phi` got a chance to fold the operands. Fold `(first op second)`
+        // now — exactly as `handle_logic_phi` does at statement level — and deliver the
+        // combined value to the enclosing expression. Previously this fell through to a
+        // `todo!()` that panicked inside makepad with no shader-level diagnostic.
+        if matches!(self.mes.last(), Some(ShaderMe::LogicOp { .. })) {
+            if let Some(ShaderMe::LogicOp {
+                op,
+                first_operand,
+                first_type,
+                ..
+            }) = self.mes.pop()
+            {
+                // Pop the second operand (the already-evaluated RHS). Resolve an `Id`
+                // to its pod type the same way the call/builtin arms below do — using
+                // the shader scope, so we only need shared `vm` access (no `pop_resolved`,
+                // which would require `&mut vm` and ripple through every caller).
+                let (second_type_raw, second_operand) = self.stack.pop(self.trap.pass());
+                let second_type = if let ShaderType::Id(id) = &second_type_raw {
+                    if let Some((v, _name)) = self.shader_scope.find_var(*id) {
+                        ShaderType::Pod(v.ty())
+                    } else {
+                        second_type_raw
+                    }
+                } else {
+                    second_type_raw
+                };
+                let mut s = self.stack.new_string();
+                write!(s, "({} {} {})", first_operand, op, second_operand).ok();
+                let ty = crate::shader_tables::type_table_logic(
+                    &first_type,
+                    &second_type,
+                    self.trap.pass(),
+                    &vm.bx.code.builtins.pod,
+                );
+                self.stack.free_string(second_operand);
+                self.stack.free_string(first_operand);
+                self.stack.push(self.trap.pass(), ty, s);
+            }
+            // Deliver the folded value to the real parent `me` now on top of the stack.
+            self.pop_to_me(vm, output);
+            return;
+        }
         if let Some(me) = self.mes.last_mut() {
             match me {
                 ShaderMe::FnBody { stack_depth, .. }
@@ -1759,6 +1804,8 @@ impl ShaderFnCompiler {
                     };
                     args.push((resolved_ty, s));
                 }
+                // `ShaderMe::LogicOp` is intercepted before this match (see the top of
+                // `pop_to_me`), so it never reaches here.
                 _ => todo!(),
             }
         }
