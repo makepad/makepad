@@ -193,33 +193,33 @@ script_mod! {
                         width: Fill
                         height: Fill
                         show_bg: true
-                        // Elegant aurora / mesh-gradient: a deep base with a few soft, large
-                        // colour glows, plus a sparse field of soft stars. The smooth aurora is
-                        // stylish; the stars add the HIGH-FREQUENCY detail the gauss blur needs to
-                        // be visible (a perfectly smooth gradient blurs to look identical).
+                        // Artsy abstract backdrop: large soft filled colour shapes plus flowing
+                        // ribbon lines. The shapes are stylish; the ribbons give the gauss blur
+                        // high-frequency detail to work on (a smooth gradient blurs to nothing).
                         draw_bg.pixel: fn(){
                             let p = self.pos
-                            let base = vec3(0.03, 0.04, 0.09)
-                            let g1 = vec3(0.12, 0.34, 0.86) * pow(smoothstep(0.85, 0.0, length(p - vec2(0.18, 0.12))), 1.4)
-                            let g2 = vec3(0.52, 0.16, 0.62) * pow(smoothstep(0.95, 0.0, length(p - vec2(0.88, 0.30))), 1.4)
-                            let g3 = vec3(0.10, 0.52, 0.55) * pow(smoothstep(1.05, 0.0, length(p - vec2(0.45, 0.98))), 1.4)
-                            let g4 = vec3(0.85, 0.42, 0.22) * pow(smoothstep(0.70, 0.0, length(p - vec2(1.02, 0.92))), 1.5)
-                            var col = base + g1 + g2 + g3 + g4
-                            // Sparse soft stars: grid cells, only the brightest ~18% light up.
-                            let g = p * vec2(46.0, 34.0)
-                            let cell = floor(g)
-                            let rnd = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453)
-                            let star = smoothstep(0.10, 0.0, length(fract(g) - vec2(0.5, 0.5))) * step(0.82, rnd)
-                            col = col + vec3(0.55, 0.62, 0.78) * star * (0.4 + rnd * 0.6)
+                            var col = vec3(0.04, 0.05, 0.11).mix(vec3(0.09, 0.05, 0.16), p.y)
+                            col = col + vec3(0.10, 0.32, 0.82) * smoothstep(0.62, 0.0, length((p - vec2(0.22, 0.28)) * vec2(1.0, 1.25)))
+                            col = col + vec3(0.62, 0.16, 0.58) * smoothstep(0.58, 0.0, length((p - vec2(0.82, 0.22)) * vec2(1.15, 1.0)))
+                            col = col + vec3(0.95, 0.52, 0.24) * smoothstep(0.52, 0.0, length(p - vec2(0.72, 0.92)))
+                            col = col + vec3(0.10, 0.55, 0.55) * smoothstep(0.60, 0.0, length(p - vec2(0.12, 0.95)))
+                            let r1 = abs(p.y - (0.34 + 0.09 * sin(p.x * 7.4 + 0.4)))
+                            col = col + vec3(0.65, 0.78, 1.0) * smoothstep(0.014, 0.0, r1) * 0.45
+                            let r2 = abs(p.y - (0.56 + 0.07 * sin(p.x * 9.2 + 1.8)))
+                            col = col + vec3(1.0, 0.72, 0.85) * smoothstep(0.011, 0.0, r2) * 0.40
+                            let r3 = abs(p.y - (0.74 + 0.11 * sin(p.x * 5.6 + 3.2)))
+                            col = col + vec3(0.72, 1.0, 0.92) * smoothstep(0.011, 0.0, r3) * 0.38
                             return vec4(col, 1.0)
                         }
                     }
-                    // Very light veil keeps chat text readable while letting the colour show.
+                    // Barely-there veil: just enough to seat the header text, but light enough
+                    // that the glass still refracts the FULL-brightness backdrop (a heavier veil
+                    // darkened the gauss and made the glass look black).
                     View{
                         width: Fill
                         height: Fill
                         show_bg: true
-                        draw_bg.color: #x05070e55
+                        draw_bg.color: #x05070e18
                     }
 
                     content_layer := View {

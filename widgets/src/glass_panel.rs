@@ -3,8 +3,10 @@ use crate::{
     gauss_view::{request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_script::ScriptFnRef,
     view::View,
     widget::*,
+    widget_async::CxWidgetToScriptCallExt,
 };
 
 script_mod! {
@@ -1125,6 +1127,9 @@ pub struct GlassRadio {
     #[live]
     draw_knob: DrawQuad,
 
+    #[live]
+    on_click: ScriptFnRef,
+
     #[visible]
     #[live(true)]
     pub visible: bool,
@@ -1280,6 +1285,7 @@ impl Widget for GlassRadio {
                     self.active_target = if self.active_target > 0.5 { 0.0 } else { 1.0 };
                     self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassRadioAction::Clicked);
+                    cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
                 }
                 self.redraw(cx);
             }
@@ -1374,6 +1380,8 @@ pub struct GlassButton {
     label_walk: Walk,
     #[live]
     pub text: ArcStringMut,
+    #[live]
+    on_click: ScriptFnRef,
 
     #[visible]
     #[live(true)]
@@ -1510,6 +1518,9 @@ impl Widget for GlassButton {
                 self.next_frame = cx.new_next_frame();
                 if fe.is_over {
                     cx.widget_action_with_data(&self.action_data, uid, GlassButtonAction::Clicked);
+                    // Fire the splash `on_click: || ...` handler so lensing glass buttons are
+                    // interactive in runsplash blocks (not just visual flourish).
+                    cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
                 }
                 self.redraw(cx);
             }
