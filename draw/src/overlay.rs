@@ -52,6 +52,15 @@ impl Overlay {
         // this means it didn't
         for i in 0..cx.draw_lists[self.draw_list.id()].draw_items.len() {
             if let Some(sub_id) = cx.draw_lists[self.draw_list.id()].draw_items[i].sub_list() {
+                // If the sub draw list's owning widget was DROPPED (its slot is in the free pool),
+                // its overlay must be removed — otherwise a glass widget whose chat message was
+                // cleared/recycled stays stuck (it's never drawn again to clear itself, and the
+                // redraw_id heuristic below can't catch a freed-but-not-yet-reused slot). Only
+                // freed lists hit this; live (still-drawn) glass keeps its slot, so no flicker.
+                if cx.draw_lists.is_id_freed(sub_id) {
+                    cx.draw_lists[self.draw_list.id()].clear_sub_list(sub_id);
+                    continue;
+                }
                 // Use checked_index to safely access draw lists that might have been recycled
                 if let Some(sub_draw_list) = cx.draw_lists.checked_index(sub_id) {
                     if let Some(cfp) = sub_draw_list.codeflow_parent_id {
