@@ -8,56 +8,51 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.glass.*
 
-    let TitleLabel = Label{
-        width: Fit
-        height: Fit
-        draw_text.color: #xffffffff
-        draw_text.text_style: theme.font_bold{font_size: 26}
+    let ToggleRow = View{
+        width: Fill
+        height: 40
+        flow: Right
+        spacing: 16
+        align: Align{x: 0.0, y: 0.5}
     }
 
-    let DetailLabel = Label{
+    let Row = View{
         width: Fill
         height: Fit
-        draw_text.color: #xd9e8ffcc
-        draw_text.text_style: theme.font_regular{font_size: 12}
+        flow: Right
+        spacing: 10
     }
 
-    let RadioLabel = Label{
+    let TabItem = Label{
         width: Fit
         height: Fit
-        draw_text.color: #xffffffff
+        draw_text.color: #xc9d8f0ff
         draw_text.text_style: theme.font_bold{font_size: 12}
-    }
-
-    let OptionLabel = Label{
-        width: Fit
-        height: Fit
-        draw_text.color: #xffffffff
-        draw_text.text_style: theme.font_bold{font_size: 17}
     }
 
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.title: "Glass Radio"
-                window.inner_size: vec2(430, 760)
-                pass.clear_color: #x090b12
+                window.title: "Glass Kit"
+                window.inner_size: vec2(430, 880)
+                pass.clear_color: #x05070e
                 body +: {
                     View{
                         width: Fill
                         height: Fill
                         flow: Overlay
-                        align: Align{x: 0.5 y: 0.0}
+                        align: Align{x: 0.5, y: 0.0}
                         show_bg: true
-                        draw_bg.color: #x090b12
+                        draw_bg.color: #x05070e
 
                         View{
                             width: 430
                             height: Fill
                             flow: Overlay
                             show_bg: true
-                            draw_bg.color: #x090b12
+                            draw_bg.color: #x05070e
 
+                            // Vibrant background so the lensing has something to refract.
                             Svg{
                                 width: Fill
                                 height: Fill
@@ -66,99 +61,76 @@ script_mod! {
                                     svg: crate_resource("self:resources/background.svg")
                                 }
                             }
-
                             View{
                                 width: Fill
                                 height: Fill
                                 show_bg: true
-                                draw_bg.color: #x02040a18
+                                draw_bg.color: #x02040a14
                             }
 
-                            View{
+                            // Content scrolls in the BACKGROUND pass so each toggle's lens
+                            // can refract its own track/knob (a Layer would hide the base).
+                            content := ScrollYView{
                                 width: Fill
                                 height: Fill
                                 flow: Down
                                 spacing: 12
-                                padding: Inset{left: 70, right: 28, top: 235, bottom: 28}
+                                padding: Inset{left: 24, right: 24, top: 54, bottom: 120}
 
-                                View{
-                                    width: Fill
-                                    height: 50
-                                    flow: Right
-                                    spacing: 16
-                                    align: Align{x: 0.0 y: 0.5}
-                                    radio_air := GlassRadio{}
-                                    OptionLabel{text: "Air"}
+                                glass.H1{text: "Glass Kit"}
+                                glass.Body{text: "A liquid-glass component showcase."}
+
+                                glass.Caption{text: "BUTTONS"}
+                                Row{
+                                    glass.GlassButtonProminent{text: "Continue"}
+                                    glass.GlassButton{text: "Cancel"}
                                 }
 
-                                View{
-                                    width: Fill
-                                    height: 50
-                                    flow: Right
-                                    spacing: 16
-                                    align: Align{x: 0.0 y: 0.5}
-                                    radio_water := GlassRadio{}
-                                    OptionLabel{text: "Water"}
+                                glass.Caption{text: "TOGGLES"}
+                                ToggleRow{ radio_air := GlassRadio{}  glass.OptionLabel{text: "Air"} }
+                                ToggleRow{ radio_water := GlassRadio{}  glass.OptionLabel{text: "Water"} }
+                                ToggleRow{ radio_light := GlassRadio{}  glass.OptionLabel{text: "Light"} }
+                                ToggleRow{ radio_matter := GlassRadio{}  glass.OptionLabel{text: "Matter"} }
+
+                                glass.Caption{text: "SEARCH & CHIPS"}
+                                glass.SearchField{ width: Fill }
+                                Row{
+                                    glass.Chip{text: "All"}
+                                    glass.Chip{text: "Photos"}
+                                    glass.Chip{text: "Videos"}
                                 }
 
-                                View{
-                                    width: Fill
-                                    height: 50
-                                    flow: Right
-                                    spacing: 16
-                                    align: Align{x: 0.0 y: 0.5}
-                                    radio_light := GlassRadio{}
-                                    OptionLabel{text: "Light"}
-                                }
-
-                                View{
-                                    width: Fill
-                                    height: 50
-                                    flow: Right
-                                    spacing: 16
-                                    align: Align{x: 0.0 y: 0.5}
-                                    radio_matter := GlassRadio{}
-                                    OptionLabel{text: "Matter"}
+                                glass.Caption{text: "CARD"}
+                                glass.List{
+                                    flow: Down
+                                    spacing: 6
+                                    padding: 18
+                                    glass.H2{text: "Liquid Glass"}
+                                    glass.Body{text: "Glass floats on the navigation layer, refracting the content beneath it."}
                                 }
                             }
-                        }
 
-                        // Previous mobile UI-kit dashboard is intentionally inactive while
-                        // the glass radio button is tuned as a focused widget.
-                        Layer{
-                            width: Fill
-                            height: Fill
-                            align: Align{x: 0.5 y: 0.0}
-
-                            View{
-                                width: 430
+                            // Floating glass tab bar.
+                            Layer{
+                                width: Fill
                                 height: Fill
-                                flow: Down
-                                spacing: 18
-                                padding: Inset{left: 28, right: 28, top: 72, bottom: 28}
-
-                                TitleLabel{text: "Gloopy Glass Radio"}
-                                DetailLabel{text: "Single-control test surface for lensing, active blobs, and selected-state feel."}
-
+                                align: Align{x: 0.5, y: 1.0}
                                 View{
                                     width: Fill
-                                    height: 316
-                                }
-
-                                ClearPanel{
-                                    width: Fill
-                                    height: 86
+                                    height: Fit
                                     flow: Down
-                                    spacing: 5
-                                    padding: 16
-                                    draw_bg +: {
-                                        corner_radius: 14.0
-                                        lensing_strength: 24.0
-                                        lensing_width: 18.0
-                                        tint_alpha: 0.006
+                                    align: Align{x: 0.5, y: 1.0}
+                                    padding: Inset{left: 24, right: 24, top: 0, bottom: 22}
+                                    glass.TabBar{
+                                        width: Fill
+                                        height: 60
+                                        flow: Right
+                                        align: Align{x: 0.5, y: 0.5}
+                                        spacing: 40
+                                        TabItem{text: "Home"}
+                                        TabItem{text: "Browse"}
+                                        TabItem{text: "You"}
                                     }
-                                    RadioLabel{text: "Selection"}
-                                    radio_status := DetailLabel{text: "Air selected"}
                                 }
                             }
                         }
@@ -178,64 +150,16 @@ pub struct App {
 }
 
 impl App {
-    fn glass_radio_clicked(&self, cx: &mut Cx, actions: &Actions, id: LiveId) -> bool {
-        self.ui
-            .widget(cx, &[id])
-            .borrow::<GlassRadio>()
-            .is_some_and(|radio| radio.clicked(actions))
-    }
-
     fn set_glass_radio_active(&mut self, cx: &mut Cx, id: LiveId, active: bool, animate: Animate) {
         if let Some(mut radio) = self.ui.widget(cx, &[id]).borrow_mut::<GlassRadio>() {
             radio.set_active(cx, active, animate);
         }
     }
-
-    fn glass_radio_active(&self, cx: &mut Cx, id: LiveId) -> bool {
-        self.ui
-            .widget(cx, &[id])
-            .borrow::<GlassRadio>()
-            .is_some_and(|radio| radio.active(cx))
-    }
-
-    const OPTIONS: [(LiveId, &'static str); 4] = [
-        (live_id!(radio_air), "Air"),
-        (live_id!(radio_water), "Water"),
-        (live_id!(radio_light), "Light"),
-        (live_id!(radio_matter), "Matter"),
-    ];
-
-    fn update_status(&mut self, cx: &mut Cx) {
-        let on: Vec<&str> = Self::OPTIONS
-            .iter()
-            .filter(|(id, _)| self.glass_radio_active(cx, *id))
-            .map(|(_, label)| *label)
-            .collect();
-        let text = if on.is_empty() {
-            "None selected".to_string()
-        } else {
-            format!("{} on", on.join(", "))
-        };
-        self.ui.label(cx, ids!(radio_status)).set_text(cx, &text);
-    }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // The widget tree is built lazily on the first draw, so defer the initial
-        // toggle state to the next frame when the radios actually exist.
         self.init_frame = cx.new_next_frame();
-    }
-
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // The widget toggles its own on/off state, so we just refresh the summary
-        // whenever any of them reports a click.
-        let clicked = Self::OPTIONS
-            .iter()
-            .any(|(id, _)| self.glass_radio_clicked(cx, actions, *id));
-        if clicked {
-            self.update_status(cx);
-        }
     }
 }
 
@@ -247,9 +171,8 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if self.init_frame.is_event(event).is_some() {
-            // Each toggle is an independent checkbox; start with just Air enabled.
             self.set_glass_radio_active(cx, live_id!(radio_air), true, Animate::No);
-            self.update_status(cx);
+            self.set_glass_radio_active(cx, live_id!(radio_light), true, Animate::No);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
