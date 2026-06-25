@@ -338,7 +338,7 @@ script_mod! {
                         screen_pos + vec2(self.draw_pass.time * 31.0, self.draw_pass.time * 17.0)
                     ) - 0.5
                 ) * self.noise_strength
-                let fill = vec4(material + highlight + noise, 1.0)
+                let fill = vec4(material + highlight + noise, self.surface_alpha)
 
                 sdf.fill_keep(fill)
                 if self.border_width > 0.0 {
@@ -436,7 +436,8 @@ script_mod! {
                         screen_pos + vec2(self.draw_pass.time * 31.0, self.draw_pass.time * 17.0)
                     ) - 0.5
                 ) * self.noise_strength
-                let fill = vec4(material + highlight + sparkle + noise, 1.0)
+                let fill_alpha = mix(self.surface_alpha, 1.0, self.has_gauss)
+                let fill = vec4(material + highlight + sparkle + noise, fill_alpha)
 
                 sdf.fill_keep(fill)
                 if self.border_width > 0.0 {
@@ -509,7 +510,7 @@ script_mod! {
                 let edge_uv = abs(self.pos * 2.0 - 1.0)
                 let edge_gradient = clamp((edge_uv.x + edge_uv.y) * 0.5, 0.0, 1.0)
                 let highlight = self.specular_strength * (0.45 * edge_gradient + 0.55 * center + 0.22 * (1.0 - self.pos.y))
-                let fill = vec4(material + highlight, 1.0)
+                let fill = vec4(material + highlight, self.surface_alpha)
 
                 sdf.fill_keep(fill)
                 if self.border_width > 0.0 {
