@@ -82,6 +82,10 @@ impl Splash {
             self.unregister_view_owners(cx);
             self.view = view;
             self.register_view_owners(cx);
+            // Make `ui` a global in this splash's VM (pointing at the freshly-built view root) so
+            // helper `fn`s inside the block can use `ui.<id>.set_text(...)`, not just inline
+            // handlers. Without this, calculators/forms that route through a helper silently fail.
+            crate::widget_async::inject_splash_ui_handle(cx, self.vm_id, self.view.widget_uid());
             cx.widget_tree_mark_dirty(self.uid);
         }
     }
