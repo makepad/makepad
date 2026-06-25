@@ -62,6 +62,11 @@ where
         self.free.0.borrow().len()
     }
 
+    /// True if `id`'s slot is currently in the free list (dropped, awaiting reuse).
+    pub fn is_free(&self, id: usize) -> bool {
+        self.free.0.borrow().contains(&id)
+    }
+
     pub fn live_count(&self) -> usize {
         self.slot_count().saturating_sub(self.free_count())
     }

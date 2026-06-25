@@ -322,6 +322,18 @@ impl CxDrawListPool {
         }
         return Some(&d.item);
     }
+
+    /// True if this draw list's slot has been handed back to the free pool (its owning widget
+    /// was dropped) but not yet reused. A freed slot keeps its generation until realloc, so
+    /// `checked_index` still returns it — this distinguishes "dropped, awaiting reuse" so callers
+    /// (e.g. the overlay flush) can drop a stale sub-list whose widget no longer exists.
+    pub fn is_id_freed(&self, index: DrawListId) -> bool {
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1 {
+            return true;
+        }
+        self.0.is_free(index.0)
+    }
 }
 
 impl std::ops::Index<DrawListId> for CxDrawListPool {
