@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::Animate,
     gauss_view::{request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -30,14 +30,14 @@ script_mod! {
     }
 
     mod.widgets.glass.GlassRadio = set_type_default() do mod.widgets.glass.GlassRadioBase{
-        width: 78
-        height: 44
+        width: 70
+        height: 34
         flow: Overlay
 
         draw_slot +: {
-            active: instance(0.0)
-            hover: instance(0.0)
-            down: instance(0.0)
+            active: uniform(0.0)
+            hover: uniform(0.0)
+            down: uniform(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let active = self.active
@@ -46,19 +46,32 @@ script_mod! {
                 let pad = 2.0
                 // Visual corner radius is 2*r, so (h-2*pad)/4 gives a clean capsule.
                 let r = (h - pad * 2.0) * 0.25
-                let top = smoothstep(0.0, 0.32, 1.0 - self.pos.y)
-                let bottom = smoothstep(0.60, 1.0, self.pos.y)
 
-                // Capsule track: dark translucent when off, the whole track turns
-                // accent-green when on, just like an Apple toggle.
+                // Track capsule: medium gray when off, accent green when on. Each element
+                // ends with `sdf.fill` (not fill_keep) which RESETS the shape, otherwise the
+                // following boxes union into it and the knob fill would paint everything.
                 sdf.box(pad, pad, w - pad * 2.0, h - pad * 2.0, r)
-                let off_color = vec4(0.02, 0.05, 0.06, 0.34 + self.hover * 0.05)
-                let on_color = vec4(0.17, 0.79, 0.37, 0.95)
-                sdf.fill_keep(off_color.mix(on_color, active))
-                sdf.fill_keep(vec4(1.0, 1.0, 1.0, 0.05 + active * 0.05) * top)
-                sdf.fill_keep(vec4(0.0, 0.0, 0.0, 0.10 + self.down * 0.08) * bottom)
-                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.08 + self.hover * 0.05), 1.0)
+                let off_color = vec4(0.46, 0.48, 0.51, 1.0)
+                let on_color = vec4(0.27, 0.80, 0.33, 1.0)
+                sdf.fill(off_color.mix(on_color, active))
 
+                // White rounded-box knob (wider than tall), with the track still visible.
+                let kpad = 3.0
+                let knob_h = h - kpad * 2.0
+                let knob_w = knob_h * 1.35
+                let knob_x = mix(kpad, w - knob_w - kpad, active)
+                let knob_y = (h - knob_h) * 0.5
+                let knob_r = knob_h * 0.22
+
+                // Soft drop shadow under the knob.
+                sdf.box(knob_x - 0.5, knob_y + 1.5, knob_w + 1.0, knob_h + 1.0, knob_r)
+                sdf.fill(vec4(0.0, 0.0, 0.0, 0.18))
+
+                // Clean white knob with a gentle top-down shade.
+                sdf.box(knob_x, knob_y, knob_w, knob_h, knob_r)
+                let ky = smoothstep(0.0, 1.0, self.pos.y)
+                let knob_col = vec3(1.0, 1.0, 1.0).mix(vec3(0.90, 0.91, 0.94), ky * 0.28)
+                sdf.fill(vec4(knob_col, 1.0))
                 return sdf.result
             }
         }
@@ -74,9 +87,9 @@ script_mod! {
             has_gauss: uniform(0.0)
             source_size: uniform(vec2(1.0, 1.0))
             source_y_flip: uniform(0.0)
-            active: instance(0.0)
-            hover: instance(0.0)
-            down: instance(0.0)
+            active: uniform(0.0)
+            hover: uniform(0.0)
+            down: uniform(0.0)
 
             sample_blur: fn(uv: vec2) -> vec4 {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
@@ -92,13 +105,22 @@ script_mod! {
                 let active = self.active
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let knob_d = h - 8.0
-                let knob_x = mix(4.0, w - knob_d - 4.0, active)
-                let knob_y = (h - knob_d) * 0.5
-                // True circle (sdf.box visual corner radius is 2*r, so d/4 = circle) -
-                // a round contour keeps the lens ring round instead of a square.
-                let knob_r = knob_d * 0.25
-                sdf.box(knob_x, knob_y, knob_d, knob_d, knob_r)
+
+                // Full-switch-size overlay: the lens nub position is driven entirely by
+                // `active` in-shader, so it glides (and gloops) from one side to the other in
+                // lockstep with the knob underneath.
+                let kpad = 3.0
+                let knob_h = h - kpad * 2.0
+                let knob_w = knob_h * 1.35
+                // Gloop: stretch the blob horizontally during the crossing (max at active=0.5),
+                // round at the ends - a liquid squash/stretch.
+                let gloop = sin(active * 3.14159265)
+                let lens_h = knob_h + 6.0 - gloop * 2.0
+                let lens_w = knob_w + 6.0 + gloop * knob_w * 0.55
+                let lens_cx = mix(kpad + knob_w * 0.5, w - kpad - knob_w * 0.5, active)
+                let lens_x = lens_cx - lens_w * 0.5
+                let lens_y = (h - lens_h) * 0.5
+                sdf.box(lens_x, lens_y, lens_w, lens_h, lens_h * 0.25)
 
                 let shape = sdf.shape
                 let screen_pos = self.rect_pos + self.pos * self.rect_size
@@ -106,87 +128,33 @@ script_mod! {
                 let gradient = vec2(dFdx(shape), dFdy(shape))
                 let normal = mix(vec2(0.0, 1.0), normalize(gradient), step(0.00001, length(gradient)))
 
-                // Spherical-dome refraction. `radial` is 0 at the centre and 1 at the rim;
-                // we both bend along the surface normal (rim) AND magnify the whole disc by
-                // pulling the sample toward the knob centre, so the centre is never a flat
-                // un-refracted hole that shows the dark backing as a black square.
-                let knob_c = vec2(knob_x + knob_d * 0.5, knob_y + knob_d * 0.5)
-                let local = (self.pos * self.rect_size - knob_c) / (knob_d * 0.5)
-                let radial = clamp(length(local), 0.0, 1.0)
-                let dome = sqrt(max(1.0 - radial * radial, 0.0))
-                let mag_off = -local * (0.32 * (1.0 - dome)) * (knob_d * 0.5) / max(self.source_size, vec2(1.0, 1.0))
-                let lens = pow(clamp(1.0 - abs(shape) / 18.0, 0.0, 1.0), 1.2)
-                let base_off = normal * (lens * 22.0) / max(self.source_size, vec2(1.0, 1.0)) + mag_off
-                let col_off = normal * (lens * 7.0) / max(self.source_size, vec2(1.0, 1.0))
-                let uv_g = clamp(uv + base_off, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let uv_r = clamp(uv_g + col_off, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let uv_b = clamp(uv_g - col_off, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let s_r = self.sample_blur(uv_r)
+                // Edge-only refraction: the rim bends the switch underneath, the centre looks
+                // straight through. No centre-pull magnification (that produced a dark box).
+                let rim = clamp(1.0 - abs(shape) / 9.0, 0.0, 1.0)
+                let bend = rim * rim
+                let disp = normal * (bend * 11.0) / max(self.source_size, vec2(1.0, 1.0))
+                let chroma = normal * (bend * 3.5) / max(self.source_size, vec2(1.0, 1.0))
+                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
                 let s_g = self.sample_blur(uv_g)
-                let s_b = self.sample_blur(uv_b)
+                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
                 let refracted = vec3(s_r.r, s_g.g, s_b.b)
-                let fallback = vec3(0.80, 0.92, 0.86)
+                let fallback = vec3(0.86, 0.92, 0.90)
                 let base = fallback.mix(refracted, self.has_gauss)
 
-                // Frosted glass body: lift the refraction onto a soft light base, brighter
-                // toward the top, so a dark backdrop reads as pale glass rather than black.
+                // Frosted-glass body so it always reads as bright glass, never a dark hole.
                 let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
-                let body = vec3(0.86, 0.92, 0.90) + top * 0.10
-                let material = base.mix(body, 0.42 + dome * 0.14)
+                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.20 + top * 0.12)
                 sdf.fill_keep(vec4(material, 1.0))
 
                 // Bright specular crescent on the light-facing (upper-right) rim.
-                let light_dir = normalize(vec2(0.55, -0.83))
+                let light_dir = normalize(vec2(0.50, -0.86))
                 let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
-                let rim = pow(clamp(1.0 - abs(shape) / 3.0, 0.0, 1.0), 1.0)
-                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * rim * (0.80 + self.hover * 0.10)))
+                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
+                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.45 + self.hover * 0.10)))
                 // Faint full edge to seal the glass.
-                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.14), 0.8)
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 0.8)
                 return sdf.result
-            }
-        }
-
-        animator: Animator{
-            hover: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.14}}
-                    apply: {
-                        draw_slot: {down: snap(0.0), hover: 0.0}
-                        draw_knob: {down: snap(0.0), hover: 0.0}
-                    }
-                }
-                on: AnimatorState{
-                    from: {all: Snap}
-                    apply: {
-                        draw_slot: {down: snap(0.0), hover: 1.0}
-                        draw_knob: {down: snap(0.0), hover: 1.0}
-                    }
-                }
-                down: AnimatorState{
-                    from: {all: Forward {duration: 0.08}}
-                    apply: {
-                        draw_slot: {down: 1.0, hover: 1.0}
-                        draw_knob: {down: 1.0, hover: 1.0}
-                    }
-                }
-            }
-            active: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.18}}
-                    apply: {
-                        draw_slot: {active: 0.0}
-                        draw_knob: {active: 0.0}
-                    }
-                }
-                on: AnimatorState{
-                    from: {all: Forward {duration: 0.24}}
-                    apply: {
-                        draw_slot: {active: 1.0}
-                        draw_knob: {active: 1.0}
-                    }
-                }
             }
         }
     }
@@ -773,7 +741,7 @@ pub enum GlassRadioAction {
     None,
 }
 
-#[derive(Script, Widget, Animator)]
+#[derive(Script, Widget)]
 pub struct GlassRadio {
     #[uid]
     uid: WidgetUid,
@@ -784,8 +752,6 @@ pub struct GlassRadio {
     walk: Walk,
     #[layout]
     layout: Layout,
-    #[apply_default]
-    animator: Animator,
 
     #[redraw]
     #[live]
@@ -804,6 +770,19 @@ pub struct GlassRadio {
 
     #[rust]
     draw_list: Option<DrawList2d>,
+
+    // State is driven directly from Rust (the script animator does not bind to these
+    // script-declared draw uniforms reliably). `active` eases toward `active_target`.
+    #[rust]
+    active: f32,
+    #[rust]
+    active_target: f32,
+    #[rust]
+    hover: f32,
+    #[rust]
+    down: f32,
+    #[rust]
+    next_frame: NextFrame,
 }
 
 impl ScriptHook for GlassRadio {
@@ -870,13 +849,26 @@ impl GlassRadio {
         }
     }
 
-    pub fn active(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, ids!(active.on))
+    pub fn active(&self, _cx: &Cx) -> bool {
+        self.active_target > 0.5
     }
 
     pub fn set_active(&mut self, cx: &mut Cx, value: bool, animate: Animate) {
-        self.animator_toggle(cx, value, animate, ids!(active.on), ids!(active.off));
+        self.active_target = if value { 1.0 } else { 0.0 };
+        if let Animate::No = animate {
+            self.active = self.active_target;
+        } else {
+            self.next_frame = cx.new_next_frame();
+        }
         self.redraw(cx);
+    }
+
+    fn push_state(&mut self, cx: &mut Cx) {
+        for draw in [&mut self.draw_slot, &mut self.draw_knob] {
+            draw.draw_vars.set_uniform(cx, live_id!(active), &[self.active]);
+            draw.draw_vars.set_uniform(cx, live_id!(hover), &[self.hover]);
+            draw.draw_vars.set_uniform(cx, live_id!(down), &[self.down]);
+        }
     }
 }
 
@@ -886,39 +878,46 @@ impl Widget for GlassRadio {
             return;
         }
         let uid = self.widget_uid();
-        if self.animator_handle_event(cx, event).must_redraw() {
+
+        // Ease `active` toward its target each frame for the sliding animation.
+        if self.next_frame.is_event(event).is_some() {
+            let delta = self.active_target - self.active;
+            if delta.abs() <= 0.004 {
+                self.active = self.active_target;
+            } else {
+                self.active += delta * 0.18;
+                self.next_frame = cx.new_next_frame();
+            }
             self.redraw(cx);
         }
 
         match event.hits(cx, self.draw_slot.area()) {
-            Hit::KeyFocus(_) => {}
-            Hit::KeyFocusLost(_) => {}
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
-                self.animator_play(cx, ids!(hover.on));
+                self.hover = 1.0;
+                self.redraw(cx);
             }
             Hit::FingerHoverOut(_) => {
                 cx.set_cursor(MouseCursor::Arrow);
-                self.animator_play(cx, ids!(hover.off));
+                self.hover = 0.0;
+                self.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.animator_play(cx, ids!(hover.down));
+                self.down = 1.0;
                 self.set_key_focus(cx);
+                self.redraw(cx);
             }
             Hit::FingerUp(fe) => {
-                self.animator_play(cx, ids!(hover.on));
+                self.down = 0.0;
                 // Checkbox semantics: a click toggles this control on or off
                 // independently (with the sliding animation), it is not a radio.
                 if fe.is_over {
-                    if self.animator_in_state(cx, ids!(active.on)) {
-                        self.animator_play(cx, ids!(active.off));
-                    } else {
-                        self.animator_play(cx, ids!(active.on));
-                    }
+                    self.active_target = if self.active_target > 0.5 { 0.0 } else { 1.0 };
+                    self.next_frame = cx.new_next_frame();
                     cx.widget_action_with_data(&self.action_data, uid, GlassRadioAction::Clicked);
                 }
+                self.redraw(cx);
             }
-            Hit::FingerMove(_fe) => {}
             _ => {}
         }
     }
@@ -940,9 +939,13 @@ impl Widget for GlassRadio {
         // slot precisely. Wrapping it in a `begin_root_turtle`/`end_pass_sized_turtle` pair
         // instead turns that range into a `SkipTurtle`, which the parent's shift skips over -
         // that is what left the knob detached from the background.
+        self.push_state(cx);
         let rect = self.draw_slot.draw_walk(cx, walk);
         cx.add_nav_stop(self.draw_slot.area(), NavRole::TextInput, Inset::default());
 
+        // The glass lens overlay: a full-switch-size rect drawn on top into the overlay draw
+        // list (so it can sample the blurred scene). Its nub position and gloop are computed
+        // from `active` entirely in the shader.
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
