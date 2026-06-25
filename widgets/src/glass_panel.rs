@@ -15,6 +15,7 @@ script_mod! {
 
     mod.widgets.glass.LayerBase = #(GlassLayer::register_widget(vm))
     mod.widgets.glass.GlassRadioBase = #(GlassRadio::register_widget(vm))
+    mod.widgets.glass.GlassButtonBase = #(GlassButton::register_widget(vm))
 
     mod.widgets.glass.Layer = mod.widgets.glass.LayerBase{
         width: Fill
@@ -156,6 +157,115 @@ script_mod! {
                 sdf.stroke(vec4(1.0, 1.0, 1.0, 0.16), 0.8)
                 return sdf.result
             }
+        }
+    }
+
+    mod.widgets.glass.GlassButton = set_type_default() do mod.widgets.glass.GlassButtonBase{
+        width: Fit
+        height: 44
+        padding: Inset{left: 22, right: 22, top: 0, bottom: 0}
+        align: Align{x: 0.5, y: 0.5}
+        label_walk: Walk{width: Fit, height: Fit}
+
+        draw_text +: {
+            color: #xffffffff
+            text_style: theme.font_bold{font_size: 13}
+        }
+
+        // Transparent base: nothing is captured here, so the glass overlay refracts the
+        // real background (clean glass) instead of muddying a semi-transparent fill.
+        draw_bg +: {
+            hover: uniform(0.0)
+            down: uniform(0.0)
+            press: uniform(0.0)
+            pixel: fn() {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+        }
+
+        draw_glass +: {
+            scene_texture: texture_2d(float)
+            mip0_texture: texture_2d(float)
+            mip1_texture: texture_2d(float)
+            mip2_texture: texture_2d(float)
+            mip3_texture: texture_2d(float)
+            mip4_texture: texture_2d(float)
+            mip5_texture: texture_2d(float)
+            has_gauss: uniform(0.0)
+            source_size: uniform(vec2(1.0, 1.0))
+            source_y_flip: uniform(0.0)
+            hover: uniform(0.0)
+            down: uniform(0.0)
+            press: uniform(0.0)
+            tint: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+            // Frosted sample (weight the blurred mips) so the button reads as glass and a
+            // hard background line doesn't show as a sharp dark bar behind the label.
+            sample_blur: fn(uv: vec2) -> vec4 {
+                let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
+                let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
+                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
+                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let r = 9.0
+                let ins = 2.0 + self.press * 1.5
+                sdf.box(ins, ins, w - ins * 2.0, h - ins * 2.0, r)
+
+                let shape = sdf.shape
+                let screen_pos = self.rect_pos + self.pos * self.rect_size
+                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
+                // The rounded box has a FLAT interior, so the gradient is exactly zero there
+                // and `normalize` would return NaN. `mix` does NOT guard it (NaN*0 = NaN),
+                // which propagated into the uv lookup as a black bar. Branch explicitly.
+                let gradient = vec2(dFdx(shape), dFdy(shape))
+                let glen = length(gradient)
+                var normal = vec2(0.0, 1.0)
+                if glen > 0.0001 {
+                    normal = gradient / glen
+                }
+
+                // Edge-only refraction so the centre passes the background straight through
+                // (clean glass) and the rim bends it.
+                let rim = clamp(1.0 - abs(shape) / 13.0, 0.0, 1.0)
+                let bend = rim * rim
+                let disp = normal * (bend * 14.0) / max(self.source_size, vec2(1.0, 1.0))
+                let chroma = normal * (bend * 4.0) / max(self.source_size, vec2(1.0, 1.0))
+                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let s_g = self.sample_blur(uv_g)
+                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let refracted = vec3(s_r.r, s_g.g, s_b.b)
+                let fallback = vec3(0.80, 0.88, 0.95)
+                let base = fallback.mix(refracted, self.has_gauss)
+
+                // Fully OPAQUE glass - the "transparent" look comes only from the refraction
+                // lookup (like the radio knob), never from alpha. The label is drawn crisply
+                // on top in the overlay, so it is not refracted into a dark smear.
+                let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
+                let frost = base.mix(vec3(1.0, 1.0, 1.0), 0.06 + top * 0.08 + self.hover * 0.04)
+                let material = frost.mix(self.tint.rgb, self.tint.a)
+                sdf.fill_keep(vec4(material, 1.0))
+
+                // Bright specular crescent on the upper-right rim.
+                let light_dir = normalize(vec2(0.5, -0.86))
+                let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
+                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
+                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.50 + self.hover * 0.12)))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.18 + self.hover * 0.10), 0.9)
+                return sdf.result
+            }
+        }
+    }
+
+    mod.widgets.glass.GlassButtonProminent = mod.widgets.glass.GlassButton{
+        draw_glass +: {
+            tint: uniform(vec4(0.16, 0.46, 0.92, 0.34))
         }
     }
 
@@ -438,12 +548,13 @@ script_mod! {
     }
 
     mod.widgets.glass.TextInput = mod.widgets.TextInputFlat{
-        height: 44
+        height: 40
         margin: 0
-        padding: Inset{left: 16, right: 16, top: 0, bottom: 0}
+        padding: Inset{left: 14, right: 14, top: 0, bottom: 0}
+        align: Align{x: 0.0, y: 0.5}
         empty_text: "Text"
         draw_bg +: {
-            border_radius: 14.0
+            border_radius: 9.0
             border_size: 1.0
             color: #x00081418
             color_hover: #xffffff10
@@ -667,6 +778,63 @@ script_mod! {
             border_size: 1.0
             border_radius: 9.0
         }
+    }
+
+    // Typography for glass UIs - kept in the library so generated app code can just
+    // reference `glass.H1`, `glass.Caption`, etc. instead of restyling labels inline.
+    mod.widgets.glass.H1 = Label{
+        width: Fit
+        height: Fit
+        draw_text.color: #xffffffff
+        draw_text.text_style: theme.font_bold{font_size: 30}
+    }
+    mod.widgets.glass.H2 = Label{
+        width: Fit
+        height: Fit
+        draw_text.color: #xffffffff
+        draw_text.text_style: theme.font_bold{font_size: 18}
+    }
+    mod.widgets.glass.Body = Label{
+        width: Fill
+        height: Fit
+        draw_text.color: #xd9e8ffcc
+        draw_text.text_style: theme.font_regular{font_size: 13}
+    }
+    mod.widgets.glass.Caption = Label{
+        width: Fit
+        height: Fit
+        draw_text.color: #x8fa6c8ff
+        draw_text.text_style: theme.font_bold{font_size: 11}
+    }
+    mod.widgets.glass.OptionLabel = Label{
+        width: Fit
+        height: Fit
+        draw_text.color: #xffffffff
+        draw_text.text_style: theme.font_bold{font_size: 16}
+    }
+
+    mod.widgets.glass.ButtonLabel = Label{
+        width: Fit
+        height: Fit
+        draw_text.color: #xffffffff
+        draw_text.text_style: theme.font_bold{font_size: 13}
+    }
+
+    // Lensing glass buttons: a refracting surface with a centered label slot.
+    mod.widgets.glass.LensButton = mod.widgets.glass.ButtonSurface{
+        height: 44
+        align: Align{x: 0.5, y: 0.5}
+        padding: Inset{left: 20, right: 20, top: 0, bottom: 0}
+    }
+    mod.widgets.glass.LensButtonProminent = mod.widgets.glass.ProminentButtonSurface{
+        height: 44
+        align: Align{x: 0.5, y: 0.5}
+        padding: Inset{left: 20, right: 20, top: 0, bottom: 0}
+    }
+    mod.widgets.glass.LensChip = mod.widgets.glass.ChipSurface{
+        height: 32
+        align: Align{x: 0.5, y: 0.5}
+        padding: Inset{left: 14, right: 14, top: 0, bottom: 0}
     }
 
     mod.widgets.GlassPanel = mod.widgets.glass.Panel{}
@@ -972,5 +1140,241 @@ impl GlassRadioRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, value, animate);
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum GlassButtonAction {
+    Clicked,
+    #[default]
+    None,
+}
+
+/// A clickable glass button that draws its solid base in the background pass and a
+/// self-managed lensing glass overlay on top (same approach as GlassRadio), so it
+/// refracts the scene and composes anywhere in normal flow.
+#[derive(Script, Widget)]
+pub struct GlassButton {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[redraw]
+    #[live]
+    draw_glass: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    label_walk: Walk,
+    #[live]
+    pub text: ArcStringMut,
+
+    #[visible]
+    #[live(true)]
+    pub visible: bool,
+
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
+
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust]
+    hover: f32,
+    #[rust]
+    down: f32,
+    #[rust]
+    press: f32,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl ScriptHook for GlassButton {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::script_new(vm));
+        }
+        vm.with_cx_mut(|cx| self.redraw(cx));
+    }
+}
+
+impl GlassButton {
+    fn bind_glass(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
+        let draw = &mut self.draw_glass.draw_vars;
+        if let Some(snapshot) = snapshot {
+            draw.set_texture(0, &snapshot.scene_texture);
+            for slot in 1..=GAUSS_VIEW_LEVELS {
+                if let Some(texture) = snapshot.mip_textures.get(slot - 1) {
+                    draw.set_texture(slot, texture);
+                } else {
+                    draw.empty_texture(slot);
+                }
+            }
+            draw.set_uniform(
+                cx,
+                live_id!(source_size),
+                &[snapshot.source_size.x as f32, snapshot.source_size.y as f32],
+            );
+            draw.set_uniform(cx, live_id!(source_y_flip), &[snapshot.source_y_flip]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[1.0]);
+        } else {
+            for slot in 0..=GAUSS_VIEW_LEVELS {
+                draw.empty_texture(slot);
+            }
+            draw.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+            draw.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[0.0]);
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_bg.redraw(cx);
+        self.draw_glass.redraw(cx);
+        self.draw_text.redraw(cx);
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+    }
+
+    fn push_state(&mut self, cx: &mut Cx) {
+        for draw in [&mut self.draw_bg, &mut self.draw_glass] {
+            draw.draw_vars.set_uniform(cx, live_id!(hover), &[self.hover]);
+            draw.draw_vars.set_uniform(cx, live_id!(down), &[self.down]);
+            draw.draw_vars.set_uniform(cx, live_id!(press), &[self.press]);
+        }
+    }
+
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            matches!(item.cast(), GlassButtonAction::Clicked)
+        } else {
+            false
+        }
+    }
+}
+
+impl Widget for GlassButton {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
+        let uid = self.widget_uid();
+
+        // Ease the gloopy press toward the current down state.
+        if self.next_frame.is_event(event).is_some() {
+            let delta = self.down - self.press;
+            if delta.abs() <= 0.01 {
+                self.press = self.down;
+            } else {
+                self.press += delta * 0.32;
+                self.next_frame = cx.new_next_frame();
+            }
+            self.redraw(cx);
+        }
+
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.hover = 1.0;
+                self.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
+                self.hover = 0.0;
+                self.redraw(cx);
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.down = 1.0;
+                self.next_frame = cx.new_next_frame();
+                self.set_key_focus(cx);
+                self.redraw(cx);
+            }
+            Hit::FingerUp(fe) => {
+                self.down = 0.0;
+                self.next_frame = cx.new_next_frame();
+                if fe.is_over {
+                    cx.widget_action_with_data(&self.action_data, uid, GlassButtonAction::Clicked);
+                }
+                self.redraw(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
+        // Draw the WHOLE button into a self-managed overlay so nothing (especially the label)
+        // is captured by the gauss scene - a captured label refracts into a dark bar. The
+        // transparent base just establishes layout + hit area, the opaque glass refracts the
+        // real background beneath, and the crisp label is drawn last on top.
+        self.push_state(cx);
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
+        }
+        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        let snapshot = request_window_gauss(cx);
+        self.bind_glass(cx, snapshot);
+
+        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        self.draw_bg.end(cx);
+        let rect = self.draw_bg.area().rect(cx);
+
+        self.draw_glass.draw_abs(cx, rect);
+        cx.begin_turtle(
+            Walk {
+                abs_pos: Some(rect.pos),
+                width: Size::Fixed(rect.size.x),
+                height: Size::Fixed(rect.size.y),
+                margin: Inset::default(),
+                metrics: Metrics::default(),
+            },
+            self.layout,
+        );
+        self.draw_text
+            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+        cx.end_turtle();
+        self.draw_list.as_mut().unwrap().end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+
+        DrawStep::done()
+    }
+
+    fn text(&self) -> String {
+        self.text.as_ref().to_string()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        self.text.set(v);
+        self.redraw(cx);
+    }
+}
+
+impl GlassButtonRef {
+    pub fn clicked(&self, actions: &Actions) -> bool {
+        self.borrow().is_some_and(|inner| inner.clicked(actions))
     }
 }
