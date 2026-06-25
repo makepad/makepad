@@ -340,6 +340,22 @@ pub fn ensure_widget_async_hooks_registered(cx: &mut Cx) {
     cx.global::<CxWidgetAsyncHooksInstalled>().0 = true;
 }
 
+/// Inject `ui` as a real global into an isolated Splash VM, resolving against that splash's own
+/// view root. The on_click/on_return callback path already injects `ui` into the *closure* scope,
+/// but a closure that calls a helper `fn` (the natural way to write e.g. a calculator) leaves the
+/// helper unable to see `ui`. Making `ui` a global on the splash VM fixes that so `ui.<id>` works
+/// everywhere inside a runsplash block, not just inline in the handler.
+pub(crate) fn inject_splash_ui_handle(cx: &mut Cx, vm_id: SplashVmId, root_uid: WidgetUid) {
+    if vm_id == MAIN_SPLASH_VM_ID {
+        return;
+    }
+    ensure_widget_async_hooks_registered(cx);
+    cx.with_script_vm_id(vm_id, |vm| {
+        let ui_handle = vm.build_ui_handle_for_uid(root_uid);
+        vm.set_injected_global(id!(ui), ui_handle);
+    });
+}
+
 pub(crate) fn update_global_ui_handle(cx: &mut Cx, root_uid: WidgetUid) {
     ensure_widget_async_hooks_registered(cx);
     if cx.global::<CxWidgetAsync>().global_ui_root_uid == root_uid {

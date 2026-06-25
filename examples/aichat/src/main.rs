@@ -96,8 +96,10 @@ script_mod! {
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
                 flow: Overlay
                 show_bg: true
+                // Transparent assistant bubble so glass UIs rendered inside refract the window
+                // backdrop (an opaque bubble would be all the glass could "see").
                 draw_bg +: {
-                    color: #2a2a3a
+                    color: #2a2a3a00
                     radius: 8.0
                 }
 
@@ -180,9 +182,52 @@ script_mod! {
                 window.inner_size: vec2(900, 700)
                 window.title: "AI Chat"
                 body +: {
-                    flow: Down
-                    padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
-                    spacing: 12
+                    flow: Overlay
+                    show_bg: true
+                    draw_bg.color: #x05070e
+
+                    // Styled backdrop: a detailed, colourful scene that FILLS the whole window
+                    // (resolution-independent, unlike a fixed-aspect SVG) so glass UIs rendered
+                    // in the chat have something to refract/blur. Flat black shows no glass.
+                    View{
+                        width: Fill
+                        height: Fill
+                        show_bg: true
+                        // Elegant aurora / mesh-gradient: a deep base with a few soft, large
+                        // colour glows, plus a sparse field of soft stars. The smooth aurora is
+                        // stylish; the stars add the HIGH-FREQUENCY detail the gauss blur needs to
+                        // be visible (a perfectly smooth gradient blurs to look identical).
+                        draw_bg.pixel: fn(){
+                            let p = self.pos
+                            let base = vec3(0.03, 0.04, 0.09)
+                            let g1 = vec3(0.12, 0.34, 0.86) * pow(smoothstep(0.85, 0.0, length(p - vec2(0.18, 0.12))), 1.4)
+                            let g2 = vec3(0.52, 0.16, 0.62) * pow(smoothstep(0.95, 0.0, length(p - vec2(0.88, 0.30))), 1.4)
+                            let g3 = vec3(0.10, 0.52, 0.55) * pow(smoothstep(1.05, 0.0, length(p - vec2(0.45, 0.98))), 1.4)
+                            let g4 = vec3(0.85, 0.42, 0.22) * pow(smoothstep(0.70, 0.0, length(p - vec2(1.02, 0.92))), 1.5)
+                            var col = base + g1 + g2 + g3 + g4
+                            // Sparse soft stars: grid cells, only the brightest ~18% light up.
+                            let g = p * vec2(46.0, 34.0)
+                            let cell = floor(g)
+                            let rnd = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453)
+                            let star = smoothstep(0.10, 0.0, length(fract(g) - vec2(0.5, 0.5))) * step(0.82, rnd)
+                            col = col + vec3(0.55, 0.62, 0.78) * star * (0.4 + rnd * 0.6)
+                            return vec4(col, 1.0)
+                        }
+                    }
+                    // Very light veil keeps chat text readable while letting the colour show.
+                    View{
+                        width: Fill
+                        height: Fill
+                        show_bg: true
+                        draw_bg.color: #x05070e55
+                    }
+
+                    content_layer := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
+                        spacing: 12
 
                     View {
                         width: Fill
@@ -253,6 +298,7 @@ script_mod! {
                             draw_text.text_style.font_size: 10
                             draw_text.color: #888
                         }
+                    }
                     }
                 }
             }
