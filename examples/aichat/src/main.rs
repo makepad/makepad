@@ -23,6 +23,9 @@ script_mod! {
             auto_tail: true
             smooth_tail: true
             selectable: true
+            // Drop (don't pool) items that leave the list so a removed glass message's overlay
+            // draw list is freed — the overlay flush then clears its stuck lensing widgets.
+            reuse_items: false
 
             User := RoundedView {
                 width: Fill
