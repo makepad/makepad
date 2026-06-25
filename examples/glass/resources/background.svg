@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 430 760">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#121a4f"/>
+      <stop offset="0.24" stop-color="#077397"/>
+      <stop offset="0.54" stop-color="#64d68e"/>
+      <stop offset="0.78" stop-color="#db6f96"/>
+      <stop offset="1" stop-color="#ffc15e"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="18%" cy="18%" r="62%">
+      <stop offset="0" stop-color="#d3fff5" stop-opacity="0.92"/>
+      <stop offset="0.42" stop-color="#71e9ff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#71e9ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="88%" cy="34%" r="48%">
+      <stop offset="0" stop-color="#fff0a0" stop-opacity="0.95"/>
+      <stop offset="0.46" stop-color="#ff73b2" stop-opacity="0.52"/>
+      <stop offset="1" stop-color="#ff73b2" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowC" cx="28%" cy="82%" r="58%">
+      <stop offset="0" stop-color="#7dffbb" stop-opacity="0.74"/>
+      <stop offset="0.48" stop-color="#129fa2" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#129fa2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="warmRidge" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#fff6d4" stop-opacity="0.76"/>
+      <stop offset="0.55" stop-color="#f5a0c5" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#101827" stop-opacity="0.18"/>
+    </linearGradient>
+    <pattern id="microgrid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M30 0H0V30" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.16"/>
+      <circle cx="7" cy="7" r="1.35" fill="#ffffff" opacity="0.26"/>
+    </pattern>
+  </defs>
+  <rect width="430" height="760" fill="url(#sky)"/>
+  <rect width="430" height="760" fill="url(#glowA)"/>
+  <rect width="430" height="760" fill="url(#glowB)"/>
+  <rect width="430" height="760" fill="url(#glowC)"/>
+  <rect width="430" height="760" fill="url(#microgrid)" opacity="0.32"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="M-32 104 C70 82 126 126 218 84 C306 44 358 54 470 -2" stroke="#ffffff" stroke-width="3" stroke-opacity="0.44"/>
+    <path d="M-38 142 C74 112 138 158 230 114 C324 70 364 86 472 30" stroke="#26ecff" stroke-width="2" stroke-opacity="0.62"/>
+    <path d="M-38 204 C86 168 154 206 260 160 C346 122 382 132 474 82" stroke="#fff4bf" stroke-width="20" stroke-opacity="0.15"/>
+    <path d="M-30 228 C86 196 164 226 268 184 C354 148 390 154 474 112" stroke="#ffffff" stroke-width="3" stroke-opacity="0.56"/>
+    <path d="M-26 254 C86 224 162 252 270 214 C354 184 392 188 474 146" stroke="#56f5ff" stroke-width="7" stroke-opacity="0.44"/>
+    <path d="M-34 316 C78 274 164 318 270 272 C360 234 390 242 474 194" stroke="#fff7d4" stroke-width="16" stroke-opacity="0.18"/>
+    <path d="M-28 340 C80 300 166 340 274 298 C362 264 392 270 476 224" stroke="#ffffff" stroke-width="3" stroke-opacity="0.50"/>
+    <path d="M-32 386 C84 344 166 382 274 342 C362 308 394 318 476 268" stroke="#ffd06b" stroke-width="5" stroke-opacity="0.42"/>
+    <path d="M-34 454 C82 408 166 444 278 402 C366 368 396 374 478 324" stroke="#ffffff" stroke-width="3" stroke-opacity="0.46"/>
+    <path d="M-30 494 C86 448 168 484 280 440 C368 406 398 412 478 362" stroke="#5ef2d7" stroke-width="7" stroke-opacity="0.36"/>
+    <path d="M-40 648 C84 590 160 630 282 574 C368 534 400 542 478 490" stroke="#ffffff" stroke-width="14" stroke-opacity="0.14"/>
+  </g>
+  <g opacity="0.58">
+    <rect x="42" y="146" width="78" height="24" rx="8" fill="#ffffff" opacity="0.16"/>
+    <rect x="164" y="162" width="126" height="18" rx="9" fill="#7ce7ff" opacity="0.22"/>
+    <rect x="318" y="128" width="82" height="22" rx="8" fill="#fff7d0" opacity="0.18"/>
+    <rect x="38" y="218" width="126" height="20" rx="8" fill="#ffffff" opacity="0.14"/>
+    <rect x="248" y="250" width="116" height="22" rx="8" fill="#7effc6" opacity="0.18"/>
+    <rect x="64" y="330" width="148" height="22" rx="8" fill="#ffffff" opacity="0.15"/>
+    <rect x="252" y="378" width="118" height="20" rx="8" fill="#ffd36b" opacity="0.19"/>
+    <rect x="54" y="466" width="118" height="20" rx="8" fill="#7effa8" opacity="0.20"/>
+    <rect x="256" y="548" width="118" height="22" rx="8" fill="#ffffff" opacity="0.15"/>
+    <circle cx="78" cy="232" r="4" fill="#ffffff" opacity="0.82"/>
+    <circle cx="190" cy="264" r="3" fill="#ffffff" opacity="0.72"/>
+    <circle cx="342" cy="224" r="4" fill="#ffffff" opacity="0.74"/>
+    <circle cx="358" cy="350" r="3" fill="#ffffff" opacity="0.78"/>
+    <circle cx="134" cy="430" r="4" fill="#ffffff" opacity="0.74"/>
+  </g>
+  <path d="M0 448 C76 390 150 410 226 352 C300 296 354 304 430 254 L430 760 L0 760 Z" fill="#101827" opacity="0.25"/>
+  <path d="M0 520 C88 480 150 498 228 444 C316 384 360 400 430 354 L430 760 L0 760 Z" fill="url(#warmRidge)" opacity="0.56"/>
+  <circle cx="86" cy="104" r="18" fill="#fff7d0" opacity="0.92"/>
+  <circle cx="352" cy="184" r="58" fill="#ffffff" opacity="0.11"/>
+  <circle cx="70" cy="604" r="90" fill="#70ffd4" opacity="0.13"/>
+  <circle cx="354" cy="612" r="124" fill="#ffdc7a" opacity="0.13"/>
+</svg>
