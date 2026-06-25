@@ -531,6 +531,10 @@ pub struct GaussRoundedView {
     source: ScriptObjectRef,
     #[deref]
     view: View,
+    // Used to self-manage an inline overlay so the glass refracts the scene even when this
+    // view is placed in the normal (background) flow rather than inside a `glass.Layer`.
+    #[rust]
+    draw_list: Option<DrawList2d>,
 }
 
 impl GaussRoundedView {
@@ -680,8 +684,24 @@ impl Widget for GaussRoundedView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let snapshot = request_window_gauss(cx);
-        self.bind_snapshot(cx, snapshot);
-        self.view.draw_walk(cx, scope, walk)
+        if cx.is_drawing_overlay() {
+            // Already inside an overlay (e.g. a glass.Layer): draw inline.
+            let snapshot = request_window_gauss(cx);
+            self.bind_snapshot(cx, snapshot);
+            self.view.draw_walk(cx, scope, walk)
+        } else {
+            // In normal flow: open our own overlay so the glass can sample the blurred scene
+            // and refract the background beneath it (the layout space is still reserved in the
+            // current turtle, so it composes like any other widget).
+            if self.draw_list.is_none() {
+                self.draw_list = Some(DrawList2d::new(cx));
+            }
+            self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+            let snapshot = request_window_gauss(cx);
+            self.bind_snapshot(cx, snapshot);
+            let step = self.view.draw_walk(cx, scope, walk);
+            self.draw_list.as_mut().unwrap().end(cx);
+            step
+        }
     }
 }

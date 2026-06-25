@@ -80,17 +80,17 @@ script_mod! {
                                 glass.H1{text: "Glass Kit"}
                                 glass.Body{text: "A liquid-glass component showcase."}
 
-                                glass.Caption{text: "BUTTONS"}
-                                Row{
-                                    glass.GlassButtonProminent{text: "Continue"}
-                                    glass.GlassButton{text: "Cancel"}
-                                }
-
                                 glass.Caption{text: "TOGGLES"}
                                 ToggleRow{ radio_air := GlassRadio{}  glass.OptionLabel{text: "Air"} }
                                 ToggleRow{ radio_water := GlassRadio{}  glass.OptionLabel{text: "Water"} }
                                 ToggleRow{ radio_light := GlassRadio{}  glass.OptionLabel{text: "Light"} }
                                 ToggleRow{ radio_matter := GlassRadio{}  glass.OptionLabel{text: "Matter"} }
+
+                                glass.Caption{text: "BUTTONS"}
+                                Row{
+                                    glass.GlassButtonProminent{text: "Continue"}
+                                    glass.GlassButton{text: "Cancel"}
+                                }
 
                                 glass.Caption{text: "SEARCH & CHIPS"}
                                 glass.SearchField{ width: Fill }
@@ -101,7 +101,9 @@ script_mod! {
                                 }
 
                                 glass.Caption{text: "CARD"}
-                                glass.List{
+                                glass.Card{
+                                    width: Fill
+                                    height: Fit
                                     flow: Down
                                     spacing: 6
                                     padding: 18
