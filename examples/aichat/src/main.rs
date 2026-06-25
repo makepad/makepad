@@ -457,7 +457,7 @@ impl Widget for ChatList {
 
 fn claude_splash_system_prompt() -> String {
     let splash_md_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../splash.md");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../splash.md");
     let splash_md = std::fs::read_to_string(&splash_md_path)
         .unwrap_or_else(|_| include_str!("../../../splash.md").to_string());
     format!(
@@ -583,7 +583,10 @@ impl App {
             data.save_to_disk();
         }
         self.create_backend_session(cx, self.active_backend);
-        self.ui.redraw(cx);
+        // Full repaint (not just ui.redraw) so the window overlay pass is rebuilt — the glass
+        // widgets draw into self-managed overlay draw lists, and a partial redraw can leave
+        // those stale lists composited (the "stuck glass after Clear" bug).
+        cx.redraw_all();
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
@@ -717,7 +720,8 @@ impl MatchEvent for App {
                     data.save_to_disk();
                 }
                 drop(data);
-                self.ui.redraw(cx);
+                // Full repaint so removing a glass message doesn't leave its overlay stuck.
+                cx.redraw_all();
             }
         }
     }
