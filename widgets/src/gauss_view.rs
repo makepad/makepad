@@ -57,7 +57,12 @@ pub(crate) fn begin_window_gauss_frame(
     let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
     entry.capture_active = capture_active;
     entry.requested_this_frame = false;
-    entry.snapshot = snapshot;
+    // Only replace the snapshot when we actually re-captured the scene this frame. On frames
+    // that skip the capture (e.g. a hover-only overlay repaint), keep the last good snapshot so
+    // the glass keeps refracting it instead of blinking to its flat fallback colour.
+    if capture_active {
+        entry.snapshot = snapshot;
+    }
 }
 
 pub(crate) fn finish_window_gauss_frame(cx: &mut Cx, window_id: WindowId) -> bool {
@@ -66,9 +71,10 @@ pub(crate) fn finish_window_gauss_frame(cx: &mut Cx, window_id: WindowId) -> boo
     entry.requested_last_frame = entry.requested_this_frame;
     entry.requested_this_frame = false;
     entry.capture_active = false;
-    if !entry.requested_last_frame {
-        entry.snapshot = None;
-    }
+    // Intentionally do NOT drop `entry.snapshot` here: a glass overlay can repaint on its own
+    // (hover/press) without the window running a full capture pass. Keeping the last snapshot
+    // means those repaints still refract the previously captured scene (≤1 capture stale, which
+    // is invisible) rather than flickering. It is refreshed whenever a full frame captures again.
     capture_changed
 }
 
@@ -79,11 +85,10 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     let window_id = cx.get_current_window_id()?;
     let entry = cx.global::<GaussWindowGlobal>().entry_mut(window_id);
     entry.requested_this_frame = true;
-    if entry.capture_active {
-        entry.snapshot.clone()
-    } else {
-        None
-    }
+    // Return the last captured snapshot regardless of whether THIS frame ran a capture pass.
+    // This keeps the lensing stable across overlay-only repaints (the source of the hover
+    // flicker). `requested_this_frame` still drives a fresh capture on the next full frame.
+    entry.snapshot.clone()
 }
 
 script_mod! {
