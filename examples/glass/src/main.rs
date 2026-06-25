@@ -173,6 +173,8 @@ script_mod! {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    init_frame: NextFrame,
 }
 
 impl App {
@@ -189,35 +191,50 @@ impl App {
         }
     }
 
-    fn set_radio_selection(&mut self, cx: &mut Cx, index: usize, animate: Animate) {
-        self.set_glass_radio_active(cx, live_id!(radio_air), index == 0, animate);
-        self.set_glass_radio_active(cx, live_id!(radio_water), index == 1, animate);
-        self.set_glass_radio_active(cx, live_id!(radio_light), index == 2, animate);
-        self.set_glass_radio_active(cx, live_id!(radio_matter), index == 3, animate);
+    fn glass_radio_active(&self, cx: &mut Cx, id: LiveId) -> bool {
+        self.ui
+            .widget(cx, &[id])
+            .borrow::<GlassRadio>()
+            .is_some_and(|radio| radio.active(cx))
+    }
+
+    const OPTIONS: [(LiveId, &'static str); 4] = [
+        (live_id!(radio_air), "Air"),
+        (live_id!(radio_water), "Water"),
+        (live_id!(radio_light), "Light"),
+        (live_id!(radio_matter), "Matter"),
+    ];
+
+    fn update_status(&mut self, cx: &mut Cx) {
+        let on: Vec<&str> = Self::OPTIONS
+            .iter()
+            .filter(|(id, _)| self.glass_radio_active(cx, *id))
+            .map(|(_, label)| *label)
+            .collect();
+        let text = if on.is_empty() {
+            "None selected".to_string()
+        } else {
+            format!("{} on", on.join(", "))
+        };
+        self.ui.label(cx, ids!(radio_status)).set_text(cx, &text);
     }
 }
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.set_radio_selection(cx, 0, Animate::No);
-        self.ui
-            .label(cx, ids!(radio_status))
-            .set_text(cx, "Air selected");
+        // The widget tree is built lazily on the first draw, so defer the initial
+        // toggle state to the next frame when the radios actually exist.
+        self.init_frame = cx.new_next_frame();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let options = [
-            (live_id!(radio_air), "Air selected"),
-            (live_id!(radio_water), "Water selected"),
-            (live_id!(radio_light), "Light selected"),
-            (live_id!(radio_matter), "Matter selected"),
-        ];
-        for (index, (id, label)) in options.iter().enumerate() {
-            if self.glass_radio_clicked(cx, actions, *id) {
-                self.set_radio_selection(cx, index, Animate::Yes);
-                self.ui.label(cx, ids!(radio_status)).set_text(cx, *label);
-                break;
-            };
+        // The widget toggles its own on/off state, so we just refresh the summary
+        // whenever any of them reports a click.
+        let clicked = Self::OPTIONS
+            .iter()
+            .any(|(id, _)| self.glass_radio_clicked(cx, actions, *id));
+        if clicked {
+            self.update_status(cx);
         }
     }
 }
@@ -229,6 +246,11 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.init_frame.is_event(event).is_some() {
+            // Each toggle is an independent checkbox; start with just Air enabled.
+            self.set_glass_radio_active(cx, live_id!(radio_air), true, Animate::No);
+            self.update_status(cx);
+        }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
