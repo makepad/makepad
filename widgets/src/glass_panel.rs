@@ -572,7 +572,8 @@ script_mod! {
             color_empty: #xd9e2f0aa
             color_empty_hover: #xffffffff
             color_empty_focus: #xffffffff
-            text_style: theme.font_regular{font_size: 12}
+            // Tight line spacing so `align: y:0.5` centres the glyphs, not a tall line box.
+            text_style: theme.font_regular{font_size: 12, line_spacing: 1.0}
         }
     }
 
