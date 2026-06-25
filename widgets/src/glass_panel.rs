@@ -418,10 +418,11 @@ script_mod! {
                 let h = self.rect_size.y
                 let seg_w = w / self.count
                 let pad = 3.0
-                // Gloop: stretch the pill horizontally while it travels between segments.
-                let gloop = abs(self.sel_pos - floor(self.sel_pos + 0.5))
-                let pill_x = self.sel_pos * seg_w + pad - gloop * seg_w * 0.18
-                let pill_w = seg_w - pad * 2.0 + gloop * seg_w * 0.36
+                // Gloop: stretch the pill horizontally as it travels (0 at rest, max at the
+                // midpoint between two segments), like the radio knob's squash/stretch.
+                let g = abs(self.sel_pos - floor(self.sel_pos + 0.5)) * 2.0
+                let pill_x = self.sel_pos * seg_w + pad - g * seg_w * 0.22
+                let pill_w = seg_w - pad * 2.0 + g * seg_w * 0.44
                 let pill_y = pad
                 let pill_h = h - pad * 2.0
                 let r = pill_h * 0.25
@@ -1968,21 +1969,15 @@ impl Widget for GlassSegmented {
             return DrawStep::done();
         }
         self.push_state(cx);
-        // Container + evenly-split segment labels in the background pass.
+        // Only the container is drawn into the background pass; the labels are drawn on TOP
+        // of the glass pill below so the text stays sharp (not refracted through the blurry
+        // gauss capture).
         self.draw_bg.begin(cx, walk, self.layout);
-        for label in self.labels.clone().iter() {
-            self.draw_text.draw_walk(
-                cx,
-                Walk::fill_fit(),
-                Align { x: 0.5, y: 0.5 },
-                label,
-            );
-        }
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         let rect = self.draw_bg.area().rect(cx);
 
-        // Lensing selection pill in a self-managed overlay.
+        // Lensing selection pill + crisp labels, both in a self-managed overlay.
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::new(cx));
         }
@@ -1990,6 +1985,32 @@ impl Widget for GlassSegmented {
         let snapshot = request_window_gauss(cx);
         self.bind_sel(cx, snapshot);
         self.draw_sel.draw_abs(cx, rect);
+        // Place each label explicitly at the centre of its segment so it lines up exactly
+        // with the pill (both divide the width by the same segment count).
+        let n = self.labels.len().max(1) as f64;
+        let seg_w = rect.size.x / n;
+        for (i, label) in self.labels.clone().iter().enumerate() {
+            let seg_pos = Vec2d {
+                x: rect.pos.x + i as f64 * seg_w,
+                y: rect.pos.y,
+            };
+            cx.begin_turtle(
+                Walk {
+                    abs_pos: Some(seg_pos),
+                    width: Size::Fixed(seg_w),
+                    height: Size::Fixed(rect.size.y),
+                    margin: Inset::default(),
+                    metrics: Metrics::default(),
+                },
+                Layout {
+                    align: Align { x: 0.5, y: 0.5 },
+                    ..Layout::default()
+                },
+            );
+            self.draw_text
+                .draw_walk(cx, Walk::fit(), Align::default(), label);
+            cx.end_turtle();
+        }
         self.draw_list.as_mut().unwrap().end(cx);
         DrawStep::done()
     }

@@ -80,9 +80,6 @@ script_mod! {
                                 glass.H1{text: "Glass Kit"}
                                 glass.Body{text: "A liquid-glass component showcase."}
 
-                                glass.Caption{text: "SEGMENTED"}
-                                glass.GlassSegmented{ width: Fill, labels: ["Day", "Week", "Month"] }
-
                                 glass.Caption{text: "TOGGLES"}
                                 ToggleRow{ radio_air := GlassRadio{}  glass.OptionLabel{text: "Air"} }
                                 ToggleRow{ radio_water := GlassRadio{}  glass.OptionLabel{text: "Water"} }
@@ -97,6 +94,9 @@ script_mod! {
 
                                 glass.Caption{text: "SLIDER"}
                                 glass.GlassSlider{ width: Fill }
+
+                                glass.Caption{text: "SEGMENTED"}
+                                glass.GlassSegmented{ width: Fill, labels: ["Day", "Week", "Month"] }
 
                                 glass.Caption{text: "SEARCH & CHIPS"}
                                 glass.SearchField{ width: Fill }
