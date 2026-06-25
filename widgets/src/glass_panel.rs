@@ -16,6 +16,8 @@ script_mod! {
     mod.widgets.glass.LayerBase = #(GlassLayer::register_widget(vm))
     mod.widgets.glass.GlassRadioBase = #(GlassRadio::register_widget(vm))
     mod.widgets.glass.GlassButtonBase = #(GlassButton::register_widget(vm))
+    mod.widgets.glass.GlassSliderBase = #(GlassSlider::register_widget(vm))
+    mod.widgets.glass.GlassSegmentedBase = #(GlassSegmented::register_widget(vm))
 
     mod.widgets.glass.Layer = mod.widgets.glass.LayerBase{
         width: Fill
@@ -266,6 +268,198 @@ script_mod! {
     mod.widgets.glass.GlassButtonProminent = mod.widgets.glass.GlassButton{
         draw_glass +: {
             tint: uniform(vec4(0.16, 0.46, 0.92, 0.34))
+        }
+    }
+
+    mod.widgets.glass.GlassSlider = set_type_default() do mod.widgets.glass.GlassSliderBase{
+        width: Fill
+        height: 32
+        value: 0.4
+
+        draw_track +: {
+            value: uniform(0.0)
+            hover: uniform(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let th = 6.0
+                let ty = (h - th) * 0.5
+                let r = th * 0.25
+                sdf.box(2.0, ty, w - 4.0, th, r)
+                sdf.fill(vec4(0.42, 0.45, 0.48, 1.0))
+                let fw = (w - 4.0) * self.value
+                sdf.box(2.0, ty, fw, th, r)
+                sdf.fill(vec4(0.20, 0.80, 0.34, 1.0))
+                return sdf.result
+            }
+        }
+
+        draw_knob +: {
+            scene_texture: texture_2d(float)
+            mip0_texture: texture_2d(float)
+            mip1_texture: texture_2d(float)
+            mip2_texture: texture_2d(float)
+            mip3_texture: texture_2d(float)
+            mip4_texture: texture_2d(float)
+            mip5_texture: texture_2d(float)
+            has_gauss: uniform(0.0)
+            source_size: uniform(vec2(1.0, 1.0))
+            source_y_flip: uniform(0.0)
+            value: uniform(0.0)
+            hover: uniform(0.0)
+
+            sample_blur: fn(uv: vec2) -> vec4 {
+                let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
+                let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
+                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
+                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let kd = h - 4.0
+                let kx = (w - kd) * self.value
+                let ky = (h - kd) * 0.5
+                sdf.box(kx, ky, kd, kd, kd * 0.25)
+
+                let shape = sdf.shape
+                let screen_pos = self.rect_pos + self.pos * self.rect_size
+                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
+                let gradient = vec2(dFdx(shape), dFdy(shape))
+                let glen = length(gradient)
+                var normal = vec2(0.0, 1.0)
+                if glen > 0.0001 {
+                    normal = gradient / glen
+                }
+
+                let rim = clamp(1.0 - abs(shape) / 11.0, 0.0, 1.0)
+                let bend = rim * rim
+                let disp = normal * (bend * 12.0) / max(self.source_size, vec2(1.0, 1.0))
+                let chroma = normal * (bend * 3.5) / max(self.source_size, vec2(1.0, 1.0))
+                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let s_g = self.sample_blur(uv_g)
+                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let refracted = vec3(s_r.r, s_g.g, s_b.b)
+                let fallback = vec3(0.85, 0.92, 0.90)
+                let base = fallback.mix(refracted, self.has_gauss)
+
+                let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
+                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.30 + top * 0.14)
+                sdf.fill_keep(vec4(material, 1.0))
+
+                let light_dir = normalize(vec2(0.5, -0.86))
+                let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
+                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
+                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.5 + self.hover * 0.1)))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.2), 0.9)
+                return sdf.result
+            }
+        }
+    }
+
+    mod.widgets.glass.GlassSegmented = set_type_default() do mod.widgets.glass.GlassSegmentedBase{
+        width: Fill
+        height: 38
+        flow: Right
+        align: Align{x: 0.5, y: 0.5}
+        labels: ["One", "Two", "Three"]
+
+        draw_text +: {
+            color: #xffffffff
+            text_style: theme.font_bold{font_size: 12, line_spacing: 1.0}
+        }
+
+        draw_bg +: {
+            sel_pos: uniform(0.0)
+            count: uniform(1.0)
+            hover: uniform(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let r = h * 0.22
+                sdf.box(1.0, 1.0, w - 2.0, h - 2.0, r)
+                sdf.fill(vec4(0.10, 0.13, 0.18, 0.60))
+                return sdf.result
+            }
+        }
+
+        draw_sel +: {
+            scene_texture: texture_2d(float)
+            mip0_texture: texture_2d(float)
+            mip1_texture: texture_2d(float)
+            mip2_texture: texture_2d(float)
+            mip3_texture: texture_2d(float)
+            mip4_texture: texture_2d(float)
+            mip5_texture: texture_2d(float)
+            has_gauss: uniform(0.0)
+            source_size: uniform(vec2(1.0, 1.0))
+            source_y_flip: uniform(0.0)
+            sel_pos: uniform(0.0)
+            count: uniform(1.0)
+            hover: uniform(0.0)
+
+            sample_blur: fn(uv: vec2) -> vec4 {
+                let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
+                let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
+                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
+                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let seg_w = w / self.count
+                let pad = 3.0
+                // Gloop: stretch the pill horizontally while it travels between segments.
+                let gloop = abs(self.sel_pos - floor(self.sel_pos + 0.5))
+                let pill_x = self.sel_pos * seg_w + pad - gloop * seg_w * 0.18
+                let pill_w = seg_w - pad * 2.0 + gloop * seg_w * 0.36
+                let pill_y = pad
+                let pill_h = h - pad * 2.0
+                let r = pill_h * 0.25
+                sdf.box(pill_x, pill_y, pill_w, pill_h, r)
+
+                let shape = sdf.shape
+                let screen_pos = self.rect_pos + self.pos * self.rect_size
+                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
+                let gradient = vec2(dFdx(shape), dFdy(shape))
+                let glen = length(gradient)
+                var normal = vec2(0.0, 1.0)
+                if glen > 0.0001 {
+                    normal = gradient / glen
+                }
+
+                let rim = clamp(1.0 - abs(shape) / 12.0, 0.0, 1.0)
+                let bend = rim * rim
+                let disp = normal * (bend * 12.0) / max(self.source_size, vec2(1.0, 1.0))
+                let chroma = normal * (bend * 3.5) / max(self.source_size, vec2(1.0, 1.0))
+                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let s_g = self.sample_blur(uv_g)
+                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let refracted = vec3(s_r.r, s_g.g, s_b.b)
+                let fallback = vec3(0.85, 0.92, 0.90)
+                let base = fallback.mix(refracted, self.has_gauss)
+
+                let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
+                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.16 + top * 0.10)
+                sdf.fill_keep(vec4(material, 1.0))
+
+                let light_dir = normalize(vec2(0.5, -0.86))
+                let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
+                let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
+                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.45 + self.hover * 0.1)))
+                sdf.stroke(vec4(1.0, 1.0, 1.0, 0.18), 0.9)
+                return sdf.result
+            }
         }
     }
 
@@ -548,10 +742,11 @@ script_mod! {
     }
 
     mod.widgets.glass.TextInput = mod.widgets.TextInputFlat{
-        height: 40
+        height: 38
         margin: 0
-        padding: Inset{left: 14, right: 14, top: 0, bottom: 0}
-        align: Align{x: 0.0, y: 0.5}
+        // TextInput pins its text to padding.top (layout align does not move it), so the
+        // vertical padding is what centres the glyphs in the 38px field.
+        padding: Inset{left: 14, right: 14, top: 11, bottom: 11}
         empty_text: "Text"
         draw_bg +: {
             border_radius: 9.0
@@ -1377,5 +1572,435 @@ impl Widget for GlassButton {
 impl GlassButtonRef {
     pub fn clicked(&self, actions: &Actions) -> bool {
         self.borrow().is_some_and(|inner| inner.clicked(actions))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum GlassSliderAction {
+    Changed,
+    #[default]
+    None,
+}
+
+/// A slider with a draggable lensing glass knob. The track (with its filled portion) is drawn
+/// in the background pass; the glass knob refracts it in a self-managed overlay (like
+/// GlassRadio), so it composes in normal flow.
+#[derive(Script, Widget)]
+pub struct GlassSlider {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    #[redraw]
+    #[live]
+    draw_track: DrawQuad,
+    #[redraw]
+    #[live]
+    draw_knob: DrawQuad,
+
+    #[visible]
+    #[live(true)]
+    pub visible: bool,
+
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
+
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[live(0.4)]
+    pub value: f32,
+    #[rust]
+    hover: f32,
+    #[rust]
+    dragging: bool,
+}
+
+impl ScriptHook for GlassSlider {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::script_new(vm));
+        }
+        vm.with_cx_mut(|cx| self.redraw(cx));
+    }
+}
+
+impl GlassSlider {
+    fn bind_knob(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
+        let draw = &mut self.draw_knob.draw_vars;
+        if let Some(snapshot) = snapshot {
+            draw.set_texture(0, &snapshot.scene_texture);
+            for slot in 1..=GAUSS_VIEW_LEVELS {
+                if let Some(texture) = snapshot.mip_textures.get(slot - 1) {
+                    draw.set_texture(slot, texture);
+                } else {
+                    draw.empty_texture(slot);
+                }
+            }
+            draw.set_uniform(
+                cx,
+                live_id!(source_size),
+                &[snapshot.source_size.x as f32, snapshot.source_size.y as f32],
+            );
+            draw.set_uniform(cx, live_id!(source_y_flip), &[snapshot.source_y_flip]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[1.0]);
+        } else {
+            for slot in 0..=GAUSS_VIEW_LEVELS {
+                draw.empty_texture(slot);
+            }
+            draw.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+            draw.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[0.0]);
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_track.redraw(cx);
+        self.draw_knob.redraw(cx);
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+    }
+
+    fn push_state(&mut self, cx: &mut Cx) {
+        for draw in [&mut self.draw_track, &mut self.draw_knob] {
+            draw.draw_vars.set_uniform(cx, live_id!(value), &[self.value]);
+            draw.draw_vars.set_uniform(cx, live_id!(hover), &[self.hover]);
+        }
+    }
+
+    fn set_value_from_x(&mut self, cx: &mut Cx, abs_x: f64) -> bool {
+        let rect = self.draw_track.area().rect(cx);
+        let v = (((abs_x - rect.pos.x) / rect.size.x.max(1.0)) as f32).clamp(0.0, 1.0);
+        if (v - self.value).abs() > 0.0001 {
+            self.value = v;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn value(&self) -> f32 {
+        self.value
+    }
+
+    pub fn changed(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            matches!(item.cast(), GlassSliderAction::Changed)
+        } else {
+            false
+        }
+    }
+}
+
+impl Widget for GlassSlider {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_track.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.hover = 1.0;
+                self.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
+                self.hover = 0.0;
+                self.redraw(cx);
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.dragging = true;
+                self.set_key_focus(cx);
+                if self.set_value_from_x(cx, fe.abs.x) {
+                    cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);
+                }
+                self.redraw(cx);
+            }
+            Hit::FingerMove(fe) => {
+                if self.dragging && self.set_value_from_x(cx, fe.abs.x) {
+                    cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);
+                    self.redraw(cx);
+                }
+            }
+            Hit::FingerUp(_) => {
+                self.dragging = false;
+                self.redraw(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+        self.push_state(cx);
+        let rect = self.draw_track.draw_walk(cx, walk);
+        cx.add_nav_stop(self.draw_track.area(), NavRole::TextInput, Inset::default());
+
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
+        }
+        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        let snapshot = request_window_gauss(cx);
+        self.bind_knob(cx, snapshot);
+        self.draw_knob.draw_abs(cx, rect);
+        self.draw_list.as_mut().unwrap().end(cx);
+        DrawStep::done()
+    }
+}
+
+impl GlassSliderRef {
+    pub fn value(&self) -> f32 {
+        self.borrow().map_or(0.0, |inner| inner.value())
+    }
+
+    pub fn changed(&self, actions: &Actions) -> bool {
+        self.borrow().is_some_and(|inner| inner.changed(actions))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum GlassSegmentedAction {
+    Selected,
+    #[default]
+    None,
+}
+
+/// A segmented control: N text segments with a lensing glass selection pill that gloops to
+/// the selected segment. Container + labels in the background pass; the pill refracts them in
+/// a self-managed overlay.
+#[derive(Script, Widget)]
+pub struct GlassSegmented {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[redraw]
+    #[live]
+    draw_sel: DrawQuad,
+    #[live]
+    draw_text: DrawText,
+
+    #[live]
+    labels: Vec<String>,
+    #[rust]
+    pub selected: usize,
+
+    #[visible]
+    #[live(true)]
+    pub visible: bool,
+
+    #[action_data]
+    #[rust]
+    action_data: WidgetActionData,
+
+    #[rust]
+    draw_list: Option<DrawList2d>,
+    #[rust]
+    sel_pos: f32,
+    #[rust]
+    hover: f32,
+    #[rust]
+    next_frame: NextFrame,
+}
+
+impl ScriptHook for GlassSegmented {
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        self.draw_list = Some(DrawList2d::script_new(vm));
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::script_new(vm));
+        }
+        self.sel_pos = self.selected as f32;
+        vm.with_cx_mut(|cx| self.redraw(cx));
+    }
+}
+
+impl GlassSegmented {
+    fn bind_sel(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
+        let draw = &mut self.draw_sel.draw_vars;
+        if let Some(snapshot) = snapshot {
+            draw.set_texture(0, &snapshot.scene_texture);
+            for slot in 1..=GAUSS_VIEW_LEVELS {
+                if let Some(texture) = snapshot.mip_textures.get(slot - 1) {
+                    draw.set_texture(slot, texture);
+                } else {
+                    draw.empty_texture(slot);
+                }
+            }
+            draw.set_uniform(
+                cx,
+                live_id!(source_size),
+                &[snapshot.source_size.x as f32, snapshot.source_size.y as f32],
+            );
+            draw.set_uniform(cx, live_id!(source_y_flip), &[snapshot.source_y_flip]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[1.0]);
+        } else {
+            for slot in 0..=GAUSS_VIEW_LEVELS {
+                draw.empty_texture(slot);
+            }
+            draw.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+            draw.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
+            draw.set_uniform(cx, live_id!(has_gauss), &[0.0]);
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_bg.redraw(cx);
+        self.draw_sel.redraw(cx);
+        self.draw_text.redraw(cx);
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+    }
+
+    fn count(&self) -> f32 {
+        self.labels.len().max(1) as f32
+    }
+
+    fn push_state(&mut self, cx: &mut Cx) {
+        let count = self.count();
+        for draw in [&mut self.draw_bg, &mut self.draw_sel] {
+            draw.draw_vars.set_uniform(cx, live_id!(sel_pos), &[self.sel_pos]);
+            draw.draw_vars.set_uniform(cx, live_id!(count), &[count]);
+            draw.draw_vars.set_uniform(cx, live_id!(hover), &[self.hover]);
+        }
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub fn changed(&self, actions: &Actions) -> bool {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            matches!(item.cast(), GlassSegmentedAction::Selected)
+        } else {
+            false
+        }
+    }
+}
+
+impl Widget for GlassSegmented {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
+        let uid = self.widget_uid();
+
+        if self.next_frame.is_event(event).is_some() {
+            let target = self.selected as f32;
+            let delta = target - self.sel_pos;
+            if delta.abs() <= 0.004 {
+                self.sel_pos = target;
+            } else {
+                self.sel_pos += delta * 0.30;
+                self.next_frame = cx.new_next_frame();
+            }
+            self.redraw(cx);
+        }
+
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.hover = 1.0;
+                self.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Arrow);
+                self.hover = 0.0;
+                self.redraw(cx);
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                let rect = self.draw_bg.area().rect(cx);
+                let n = self.labels.len().max(1);
+                let frac = ((fe.abs.x - rect.pos.x) / rect.size.x.max(1.0)).clamp(0.0, 0.999);
+                let idx = (frac * n as f64) as usize;
+                if idx != self.selected {
+                    self.selected = idx;
+                    self.next_frame = cx.new_next_frame();
+                    cx.widget_action_with_data(&self.action_data, uid, GlassSegmentedAction::Selected);
+                }
+                self.set_key_focus(cx);
+                self.redraw(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+        self.push_state(cx);
+        // Container + evenly-split segment labels in the background pass.
+        self.draw_bg.begin(cx, walk, self.layout);
+        for label in self.labels.clone().iter() {
+            self.draw_text.draw_walk(
+                cx,
+                Walk::fill_fit(),
+                Align { x: 0.5, y: 0.5 },
+                label,
+            );
+        }
+        self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        let rect = self.draw_bg.area().rect(cx);
+
+        // Lensing selection pill in a self-managed overlay.
+        if self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
+        }
+        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        let snapshot = request_window_gauss(cx);
+        self.bind_sel(cx, snapshot);
+        self.draw_sel.draw_abs(cx, rect);
+        self.draw_list.as_mut().unwrap().end(cx);
+        DrawStep::done()
+    }
+}
+
+impl GlassSegmentedRef {
+    pub fn selected(&self) -> usize {
+        self.borrow().map_or(0, |inner| inner.selected())
+    }
+
+    pub fn changed(&self, actions: &Actions) -> bool {
+        self.borrow().is_some_and(|inner| inner.changed(actions))
     }
 }
