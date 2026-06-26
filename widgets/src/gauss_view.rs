@@ -136,8 +136,8 @@ script_mod! {
             noise_strength: instance(0.012)
             fallback_color: instance(#8c8c8c)
             shadow_color: instance(#0007)
-            shadow_radius: uniform(28.0)
-            shadow_offset: uniform(vec2(0.0, 10.0))
+            shadow_radius: uniform(14.0)
+            shadow_offset: uniform(vec2(0.0, 5.0))
 
             rect_size2: varying(vec2(0.0))
             rect_size3: varying(vec2(0.0))
