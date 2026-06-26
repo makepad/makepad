@@ -152,6 +152,7 @@ pub use crate::{
     fold_button::*,
     fold_header::*,
     gauss_view::*,
+    glass_panel::*,
 
     icon::*,
 
