@@ -357,6 +357,8 @@ If you catch yourself writing `draw_bg.color` on a container, delete it and use 
 
 All surfaces already set `width`/`height`/`flow`/`padding`, so you can drop children straight in. They do NOT need `new_batch` (they manage their own batching), but the **outer dark root DOES** (`new_batch: true` + `show_bg: true`).
 
+Every glass surface already carries a **built-in soft drop shadow** (kept deliberately subtle by default). Do not add your own large shadows, and don't crank `shadow_radius`/`shadow_offset` — an oversized shadow reads as "fat" and gets clipped by tight parent bounds. If you ever need to tune it, keep it small (e.g. `draw_bg +: { shadow_radius: 9.0  shadow_offset: vec2(0.0, 3.0) }`).
+
 ## Buttons (reliable — use these for clicks)
 
 `glass.Button`, `glass.ProminentButton`, `glass.IconButton`, and `glass.Chip` are flat SDF glass buttons built on `ButtonFlat`. They are the **reliable interactive choice** and support `on_click`, `set_text()`, `text()` exactly like `Button`:

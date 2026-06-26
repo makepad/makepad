@@ -105,6 +105,35 @@ script_mod! {
                     + self.mip1_texture.sample_as_bgra(safe_uv) * 0.15
             }
 
+            // Re-create the switch underneath (track capsule + sliding knob) so the lens can refract
+            // the ACTUAL switch in-shader, not just the blurred window behind it. `p` is in the
+            // switch's local pixel space. This mirrors `draw_slot`'s geometry exactly.
+            slot_color: fn(p: vec2) -> vec3 {
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                let pad = 2.0
+                let r = (h - pad * 2.0) * 0.25
+                // rounded-box distance to the track capsule (inlined; no nested fn calls)
+                let tq = abs(p - vec2(w * 0.5, h * 0.5)) - vec2((w - pad * 2.0) * 0.5, (h - pad * 2.0) * 0.5) + vec2(r, r)
+                let d_track = min(max(tq.x, tq.y), 0.0) + length(max(tq, vec2(0.0, 0.0))) - r
+                let off_color = vec3(0.46, 0.48, 0.51)
+                let on_color = vec3(0.27, 0.80, 0.33)
+                let behind = vec3(0.16, 0.20, 0.30)
+                var col = behind.mix(off_color.mix(on_color, self.active), smoothstep(0.7, -0.7, d_track))
+                // sliding white knob (same placement as draw_slot)
+                let kpad = 3.0
+                let knob_h = h - kpad * 2.0
+                let knob_w = knob_h * 1.35
+                let knob_x = mix(kpad, w - knob_w - kpad, self.active)
+                let knob_y = (h - knob_h) * 0.5
+                let knob_r = knob_h * 0.22
+                let kq = abs(p - vec2(knob_x + knob_w * 0.5, knob_y + knob_h * 0.5)) - vec2(knob_w * 0.5, knob_h * 0.5) + vec2(knob_r, knob_r)
+                let d_knob = min(max(kq.x, kq.y), 0.0) + length(max(kq, vec2(0.0, 0.0))) - knob_r
+                let ky = clamp(p.y / max(h, 1.0), 0.0, 1.0)
+                let knob_col = vec3(1.0, 1.0, 1.0).mix(vec3(0.90, 0.91, 0.94), ky * 0.28)
+                return col.mix(knob_col, smoothstep(0.7, -0.7, d_knob))
+            }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let active = self.active
@@ -128,28 +157,39 @@ script_mod! {
                 sdf.box(lens_x, lens_y, lens_w, lens_h, lens_h * 0.25)
 
                 let shape = sdf.shape
-                let screen_pos = self.rect_pos + self.pos * self.rect_size
-                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
                 let gradient = vec2(dFdx(shape), dFdy(shape))
-                let normal = mix(vec2(0.0, 1.0), normalize(gradient), step(0.00001, length(gradient)))
+                let glen = length(gradient)
+                var normal = vec2(0.0, 1.0)
+                if glen > 0.0001 {
+                    normal = gradient / glen
+                }
 
-                // Edge-only refraction: the rim bends the switch underneath, the centre looks
-                // straight through. No centre-pull magnification (that produced a dark box).
+                // Refract the switch DIRECTLY in-shader. The interior gently magnifies what's under
+                // the lens (so the knob reads as enlarged through glass) and the rim bends the track
+                // in along the normal - then we read the recreated switch at that warped position.
                 let rim = clamp(1.0 - abs(shape) / 9.0, 0.0, 1.0)
                 let bend = rim * rim
-                let disp = normal * (bend * 11.0) / max(self.source_size, vec2(1.0, 1.0))
-                let chroma = normal * (bend * 3.5) / max(self.source_size, vec2(1.0, 1.0))
-                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-                let s_g = self.sample_blur(uv_g)
-                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-                let refracted = vec3(s_r.r, s_g.g, s_b.b)
-                let fallback = vec3(0.86, 0.92, 0.90)
-                let base = fallback.mix(refracted, self.has_gauss)
+                let local_p = self.pos * self.rect_size
+                let lens_center = vec2(lens_cx, h * 0.5)
+                let warped = local_p + (lens_center - local_p) * (0.20 * (1.0 - bend)) + normal * (bend * 9.0)
+                let chroma = normal * (bend * 3.0)
+                let switch_col = vec3(
+                    self.slot_color(warped + chroma).x,
+                    self.slot_color(warped).y,
+                    self.slot_color(warped - chroma).z
+                )
 
-                // Frosted-glass body so it always reads as bright glass, never a dark hole.
+                // Faint window-backdrop blend so it still reads as real glass (and keeps the gauss
+                // textures live), but the switch underneath stays clearly visible.
+                let screen_pos = self.rect_pos + self.pos * self.rect_size
+                let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
+                let disp = normal * (bend * 11.0) / max(self.source_size, vec2(1.0, 1.0))
+                let win = self.sample_blur(clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let base = switch_col.mix(vec3(win.x, win.y, win.z), self.has_gauss * 0.14)
+
+                // Light frost so the switch stays visible through the glass.
                 let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
-                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.20 + top * 0.12)
+                let material = base.mix(vec3(1.0, 1.0, 1.0), 0.12 + top * 0.10)
                 sdf.fill_keep(vec4(material, 1.0))
 
                 // Bright specular crescent on the light-facing (upper-right) rim.
@@ -489,8 +529,8 @@ script_mod! {
             noise_strength: 0.004
             fallback_color: #x334156
             shadow_color: #x0007
-            shadow_radius: 24.0
-            shadow_offset: vec2(0.0, 9.0)
+            shadow_radius: 13.0
+            shadow_offset: vec2(0.0, 5.0)
             diffraction_strength: 4.4
         }
     }
@@ -523,8 +563,8 @@ script_mod! {
             lensing_effect: 1.0
             lensing_strength: 36.0
             lensing_width: 18.0
-            shadow_radius: 20.0
-            shadow_offset: vec2(0.0, 7.0)
+            shadow_radius: 12.0
+            shadow_offset: vec2(0.0, 4.0)
         }
     }
 
@@ -549,8 +589,8 @@ script_mod! {
             tint_alpha: 0.004
             surface_alpha: 1.0
             border_alpha: 0.60
-            shadow_radius: 16.0
-            shadow_offset: vec2(0.0, 6.0)
+            shadow_radius: 10.0
+            shadow_offset: vec2(0.0, 3.0)
         }
     }
 
