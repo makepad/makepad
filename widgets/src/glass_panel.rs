@@ -48,23 +48,35 @@ script_mod! {
                 let active = self.active
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let pad = 2.0
-                // Visual corner radius is 2*r, so (h-2*pad)/4 gives a clean capsule.
-                let r = (h - pad * 2.0) * 0.25
+                // Track + nub are SHORTER than the full switch height (centred vertically), so more
+                // of the glass lens shows around them. Visual corner radius is 2*r -> r = height/4.
+                let track_h = h * 0.66
+                let track_y = (h - track_h) * 0.5
+                let r = track_h * 0.25
+
+                // Nub metrics first, so the track can be inset to match the nub's narrowed sides.
+                // `travel_w` (the original full nub width) is the basis the LENS travels on; the
+                // nub's CENTRE rides that same basis so the lens stays aligned over it, while
+                // `knob_w` is sized so its left/right glass gap matches the top/bottom gap.
+                let kpad = 3.0
+                let knob_h = track_h - 4.0
+                let travel_w = (h - kpad * 2.0) * 1.35
+                let knob_w = travel_w + 6.0 - h + knob_h
+                // Inset the track to the nub's outer travel edge so the green/gray track sides line
+                // up with the narrowed nub instead of running to the full switch width.
+                let track_xpad = kpad + (travel_w - knob_w) * 0.5
 
                 // Track capsule: medium gray when off, accent green when on. Each element
                 // ends with `sdf.fill` (not fill_keep) which RESETS the shape, otherwise the
                 // following boxes union into it and the knob fill would paint everything.
-                sdf.box(pad, pad, w - pad * 2.0, h - pad * 2.0, r)
+                sdf.box(track_xpad, track_y, w - track_xpad * 2.0, track_h, r)
                 let off_color = vec4(0.46, 0.48, 0.51, 1.0)
                 let on_color = vec4(0.27, 0.80, 0.33, 1.0)
                 sdf.fill(off_color.mix(on_color, active))
 
-                // White rounded-box knob (wider than tall), with the track still visible.
-                let kpad = 3.0
-                let knob_h = h - kpad * 2.0
-                let knob_w = knob_h * 1.35
-                let knob_x = mix(kpad, w - knob_w - kpad, active)
+                // White rounded nub - short and narrower (even glass padding on all sides).
+                let knob_cx = mix(kpad + travel_w * 0.5, w - kpad - travel_w * 0.5, active)
+                let knob_x = knob_cx - knob_w * 0.5
                 let knob_y = (h - knob_h) * 0.5
                 let knob_r = knob_h * 0.22
 
@@ -111,20 +123,24 @@ script_mod! {
             slot_color: fn(p: vec2) -> vec3 {
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let pad = 2.0
-                let r = (h - pad * 2.0) * 0.25
-                // rounded-box distance to the track capsule (inlined; no nested fn calls)
-                let tq = abs(p - vec2(w * 0.5, h * 0.5)) - vec2((w - pad * 2.0) * 0.5, (h - pad * 2.0) * 0.5) + vec2(r, r)
+                // Must mirror draw_slot's SHORTER + inset track and narrower nub exactly.
+                let track_h = h * 0.66
+                let r = track_h * 0.25
+                let kpad = 3.0
+                let knob_h = track_h - 4.0
+                let travel_w = (h - kpad * 2.0) * 1.35
+                let knob_w = travel_w + 6.0 - h + knob_h
+                let track_xpad = kpad + (travel_w - knob_w) * 0.5
+                // rounded-box distance to the (short, inset) track capsule (inlined; no nested fns)
+                let tq = abs(p - vec2(w * 0.5, h * 0.5)) - vec2((w - track_xpad * 2.0) * 0.5, track_h * 0.5) + vec2(r, r)
                 let d_track = min(max(tq.x, tq.y), 0.0) + length(max(tq, vec2(0.0, 0.0))) - r
                 let off_color = vec3(0.46, 0.48, 0.51)
                 let on_color = vec3(0.27, 0.80, 0.33)
                 let behind = vec3(0.16, 0.20, 0.30)
                 var col = behind.mix(off_color.mix(on_color, self.active), smoothstep(0.7, -0.7, d_track))
-                // sliding white knob (same placement as draw_slot)
-                let kpad = 3.0
-                let knob_h = h - kpad * 2.0
-                let knob_w = knob_h * 1.35
-                let knob_x = mix(kpad, w - knob_w - kpad, self.active)
+                // sliding white knob (short, narrower, centred on the full-width travel basis)
+                let knob_cx = mix(kpad + travel_w * 0.5, w - kpad - travel_w * 0.5, self.active)
+                let knob_x = knob_cx - knob_w * 0.5
                 let knob_y = (h - knob_h) * 0.5
                 let knob_r = knob_h * 0.22
                 let kq = abs(p - vec2(knob_x + knob_w * 0.5, knob_y + knob_h * 0.5)) - vec2(knob_w * 0.5, knob_h * 0.5) + vec2(knob_r, knob_r)
@@ -242,6 +258,15 @@ script_mod! {
             down: uniform(0.0)
             press: uniform(0.0)
             tint: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+            // Press response (ported from the examples/splash focus lens). `press_flatten` is the
+            // smoothstep flatten amount (>0 while pressing, <0 = un-flatten/restore on release).
+            // ripple_age / ripple_strength drive a single flattening WAVE that sweeps the lens, and
+            // the refraction is RGB-split for chromatic diffraction. `press` is a separate smooth
+            // shrink amount (the primary press indicator).
+            press_flatten: uniform(0.0)
+            ripple_age: uniform(1000.0)
+            ripple_strength: uniform(0.0)
+            diffraction_strength: uniform(4.0)
 
             // Frosted sample (weight the blurred mips) so the button reads as glass and a
             // hard background line doesn't show as a sharp dark bar behind the label.
@@ -258,15 +283,16 @@ script_mod! {
                 let w = self.rect_size.x
                 let h = self.rect_size.y
                 let r = 9.0
-                let ins = 2.0 + self.press * 1.5
+                // Smooth shrink is the primary press indicator (eased in Rust, no jiggle).
+                let shrink = clamp(self.press, 0.0, 1.0)
+                let ins = 2.0 + shrink * 2.6
                 sdf.box(ins, ins, w - ins * 2.0, h - ins * 2.0, r)
 
                 let shape = sdf.shape
                 let screen_pos = self.rect_pos + self.pos * self.rect_size
                 let uv = screen_pos / max(self.source_size, vec2(1.0, 1.0))
-                // The rounded box has a FLAT interior, so the gradient is exactly zero there
-                // and `normalize` would return NaN. `mix` does NOT guard it (NaN*0 = NaN),
-                // which propagated into the uv lookup as a black bar. Branch explicitly.
+                let src = max(self.source_size, vec2(1.0, 1.0))
+                // Rounded box has a flat interior (gradient 0 -> normalize = NaN); branch explicitly.
                 let gradient = vec2(dFdx(shape), dFdy(shape))
                 let glen = length(gradient)
                 var normal = vec2(0.0, 1.0)
@@ -274,33 +300,61 @@ script_mod! {
                     normal = gradient / glen
                 }
 
-                // Edge-only refraction so the centre passes the background straight through
-                // (clean glass) and the rim bends it.
+                // Flattening WAVE (examples/splash focus lens). An expanding Gaussian ring whose
+                // crest both ripples the surface and FLATTENS the lens as it passes - on release
+                // (press_flatten < 0) it un-flattens the same way. No spring, so no jiggle.
+                let lens_pos = self.pos * 2.0 - 1.0
+                let ripple_dist = length(lens_pos)
+                let ripple_age = max(self.ripple_age, 0.0)
+                let ripple_life = clamp(1.0 - ripple_age / 1.30, 0.0, 1.0)
+                let wave_t = clamp(ripple_age / 1.05, 0.0, 1.0)
+                let wave_center = mix(0.0, 1.25, wave_t * wave_t * (3.0 - 2.0 * wave_t))
+                let wave_width = 0.24
+                let wave_delta = ripple_dist - wave_center
+                let wave = exp(-(wave_delta * wave_delta) / (wave_width * wave_width))
+                let wave_mask = smoothstep(0.0, 0.10, ripple_age) * (1.0 - smoothstep(1.16, 1.44, ripple_dist))
+                let ripple_wave = wave * ripple_life * ripple_life * self.ripple_strength * wave_mask
+                let ripple_slope = (-wave_delta / wave_width) * ripple_wave
+                let ripple_dir = lens_pos / max(ripple_dist, 0.001)
+                let press = clamp(self.press_flatten, 0.0, 1.0)
+                let restore = clamp(-self.press_flatten, 0.0, 1.0)
+                let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
+                let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
+                let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
+                let ripple_surface = ripple_slope * 0.85 + ripple_wave * 0.20
+                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.18, 0.0, 1.55)
+                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.15, 0.0, 2.10)
+
+                // Edge lens + RGB-split diffraction. The base offset bends the background at the rim
+                // (scaled by the flattening wave); the colour offset samples R/G/B at slightly
+                // different positions for the chromatic splice.
                 let rim = clamp(1.0 - abs(shape) / 13.0, 0.0, 1.0)
-                let bend = rim * rim
-                let disp = normal * (bend * 14.0) / max(self.source_size, vec2(1.0, 1.0))
-                let chroma = normal * (bend * 4.0) / max(self.source_size, vec2(1.0, 1.0))
-                let uv_g = clamp(uv + disp, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let s_r = self.sample_blur(clamp(uv_g + chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+                let lens = rim * rim * lens_depth
+                let water_offset = ripple_dir * (ripple_surface * 22.0) / src
+                let base_offset = normal * (lens * 18.0) / src + water_offset
+                let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / src
+                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / src
+                let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let s_r = self.sample_blur(uv_r)
                 let s_g = self.sample_blur(uv_g)
-                let s_b = self.sample_blur(clamp(uv_g - chroma, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-                let refracted = vec3(s_r.r, s_g.g, s_b.b)
+                let s_b = self.sample_blur(uv_b)
+                let refracted = vec3(s_r.x, s_g.y, s_b.z)
                 let fallback = vec3(0.80, 0.88, 0.95)
                 let base = fallback.mix(refracted, self.has_gauss)
 
-                // Fully OPAQUE glass - the "transparent" look comes only from the refraction
-                // lookup (like the radio knob), never from alpha. The label is drawn crisply
-                // on top in the overlay, so it is not refracted into a dark smear.
+                // Fully OPAQUE glass - the "transparent" look comes only from the refraction lookup.
                 let top = smoothstep(0.0, 1.0, 1.0 - self.pos.y)
                 let frost = base.mix(vec3(1.0, 1.0, 1.0), 0.06 + top * 0.08 + self.hover * 0.04)
                 let material = frost.mix(self.tint.rgb, self.tint.a)
                 sdf.fill_keep(vec4(material, 1.0))
 
-                // Bright specular crescent on the upper-right rim.
+                // Bright specular crescent on the upper-right rim + a crest highlight on the wave.
                 let light_dir = normalize(vec2(0.5, -0.86))
                 let facing = clamp(dot(normal, light_dir), 0.0, 1.0)
                 let edgeband = clamp(1.0 - abs(shape) / 2.6, 0.0, 1.0)
-                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.50 + self.hover * 0.12)))
+                sdf.fill_keep(vec4(1.0, 1.0, 1.0, facing * edgeband * (0.50 + self.hover * 0.12) + ripple_wave * 0.11))
                 sdf.stroke(vec4(1.0, 1.0, 1.0, 0.18 + self.hover * 0.10), 0.9)
                 return sdf.result
             }
@@ -1440,6 +1494,20 @@ pub struct GlassButton {
     #[rust]
     press: f32,
     #[rust]
+    pressing: bool,
+    #[rust]
+    press_started_at: f64,
+    #[rust]
+    release_started_at: f64,
+    #[rust]
+    release_flatten: f32,
+    #[rust]
+    press_flatten: f32,
+    #[rust]
+    ripple_age: f32,
+    #[rust]
+    ripple_strength: f32,
+    #[rust]
     next_frame: NextFrame,
 }
 
@@ -1506,6 +1574,12 @@ impl GlassButton {
             draw.draw_vars.set_uniform(cx, live_id!(down), &[self.down]);
             draw.draw_vars.set_uniform(cx, live_id!(press), &[self.press]);
         }
+        // The press response lives on the lens only. `press` (set above) is the smooth shrink; the
+        // flattening wave is driven by press_flatten + ripple_age + ripple_strength.
+        let glass = &mut self.draw_glass.draw_vars;
+        glass.set_uniform(cx, live_id!(press_flatten), &[self.press_flatten]);
+        glass.set_uniform(cx, live_id!(ripple_age), &[self.ripple_age]);
+        glass.set_uniform(cx, live_id!(ripple_strength), &[self.ripple_strength]);
     }
 
     pub fn clicked(&self, actions: &Actions) -> bool {
@@ -1524,13 +1598,54 @@ impl Widget for GlassButton {
         }
         let uid = self.widget_uid();
 
-        // Ease the gloopy press toward the current down state.
-        if self.next_frame.is_event(event).is_some() {
-            let delta = self.down - self.press;
-            if delta.abs() <= 0.01 {
-                self.press = self.down;
+        // Drive the press response (ported from examples/splash). `press` smoothly eases toward
+        // `down` for the shrink (critically damped -> no jiggle). A flattening WAVE sweeps the lens
+        // on press (press_flatten 0 -> 1, smoothstep over ~0.95s) and inverts on release; the wave
+        // age/strength fade out over ~1.35s.
+        if let Some(time) = self.next_frame.is_event(event).map(|ne| ne.time) {
+            let d = self.down - self.press;
+            let mut keep = false;
+            if d.abs() > 0.002 {
+                self.press += d * 0.28;
+                keep = true;
             } else {
-                self.press += delta * 0.32;
+                self.press = self.down;
+            }
+
+            if self.pressing {
+                if self.press_started_at <= 0.0 {
+                    self.press_started_at = time;
+                }
+                let age = (time - self.press_started_at).max(0.0);
+                let t = (age / 0.95).min(1.0) as f32;
+                let flatten = t * t * (3.0 - 2.0 * t);
+                self.press_flatten = flatten;
+                self.ripple_age = age as f32;
+                self.ripple_strength = (1.0 - age / 1.30).max(0.0) as f32 * (1.0 - flatten * 0.10);
+                if age < 1.35 {
+                    keep = true;
+                }
+            } else if self.press_started_at > 0.0 {
+                if self.release_started_at <= 0.0 {
+                    self.release_started_at = time;
+                }
+                let age = (time - self.release_started_at).max(0.0);
+                // Hold the captured flatten as a negative value -> the wave un-flattens the lens.
+                self.press_flatten = -self.release_flatten.clamp(0.0, 1.0);
+                self.ripple_age = age as f32;
+                self.ripple_strength = (1.0 - age / 1.30).max(0.0) as f32 * 0.62;
+                if age < 1.35 {
+                    keep = true;
+                } else {
+                    self.press_started_at = 0.0;
+                    self.release_started_at = 0.0;
+                    self.press_flatten = 0.0;
+                    self.ripple_strength = 0.0;
+                }
+            }
+
+            self.push_state(cx);
+            if keep {
                 self.next_frame = cx.new_next_frame();
             }
             self.redraw(cx);
@@ -1549,12 +1664,21 @@ impl Widget for GlassButton {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.down = 1.0;
+                // Start the press flattening wave.
+                self.pressing = true;
+                self.press_started_at = 0.0;
+                self.release_started_at = 0.0;
+                self.ripple_strength = 0.0;
                 self.next_frame = cx.new_next_frame();
                 self.set_key_focus(cx);
                 self.redraw(cx);
             }
             Hit::FingerUp(fe) => {
                 self.down = 0.0;
+                // Release: capture the current flatten and run the inverse (un-flatten) wave.
+                self.pressing = false;
+                self.release_flatten = self.press_flatten.max(0.0);
+                self.release_started_at = 0.0;
                 self.next_frame = cx.new_next_frame();
                 if fe.is_over {
                     cx.widget_action_with_data(&self.action_data, uid, GlassButtonAction::Clicked);
@@ -1585,24 +1709,11 @@ impl Widget for GlassButton {
         let snapshot = request_window_gauss(cx);
         self.bind_glass(cx, snapshot);
 
-        self.draw_bg.begin(cx, walk, self.layout);
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
-        self.draw_bg.end(cx);
-        let rect = self.draw_bg.area().rect(cx);
-
-        self.draw_glass.draw_abs(cx, rect);
-
-        // Crisp label on top of the glass. It MUST be drawn as plain aligned glyph
-        // instances (draw_abs) registered in the CURRENT turtle's align range - exactly
-        // like the glass quad above - NOT inside a nested `begin_turtle(abs_pos: ...)`.
-        // An abs_pos walk records `deferred_before_count: 0` (see turtle.rs
-        // walk_turtle_internal), so when this button is laid out after a `Fill` sibling
-        // (e.g. the centered month title between the `<` / `>` buttons) the parent row's
-        // deferred-fill shift (`total_resolved_length_to`) never reaches the label: the
-        // glass quad slides to its final x while the label stays at the pre-shift x,
-        // leaving the glyph detached far to the left. Drawing the label as draw_abs glyph
-        // instances puts it in the same align range as the glass, so both ride the shift.
+        // Measure the label once. We RESERVE this size in the bg turtle (so Fit-width buttons
+        // still size to their text) but do NOT draw the glyphs there - drawing them in the bg
+        // turtle as well would batch with the crisp label below and render the text TWICE at
+        // slightly different positions (a ghost). The only visible label is the draw_abs pass on
+        // top of the glass.
         let text = self.text.as_ref();
         let laid = self
             .draw_text
@@ -1611,6 +1722,25 @@ impl Widget for GlassButton {
             laid.size_in_lpxs.width as f64 * self.draw_text.font_scale as f64,
             laid.size_in_lpxs.height as f64 * self.draw_text.font_scale as f64,
         );
+
+        self.draw_bg.begin(cx, walk, self.layout);
+        cx.walk_turtle(Walk {
+            abs_pos: None,
+            margin: Inset::default(),
+            width: Size::Fixed(text_size.x),
+            height: Size::Fixed(text_size.y),
+            metrics: Metrics::default(),
+        });
+        self.draw_bg.end(cx);
+        let rect = self.draw_bg.area().rect(cx);
+
+        self.draw_glass.draw_abs(cx, rect);
+
+        // Crisp label on top of the glass, as plain aligned glyph instances (draw_abs) registered
+        // in the CURRENT turtle's align range - exactly like the glass quad above - NOT inside a
+        // nested `begin_turtle(abs_pos: ...)`. An abs_pos walk records `deferred_before_count: 0`
+        // (turtle.rs walk_turtle_internal), so after a `Fill` sibling the parent's deferred-fill
+        // shift would skip the label and detach it. draw_abs keeps it in the shifted align range.
         let align = self.layout.align;
         let pos = dvec2(
             rect.pos.x + (rect.size.x - text_size.x) * align.x,

@@ -368,8 +368,11 @@ impl ChatData {
     }
 
     pub fn load_from_disk() -> Vec<ChatMessage> {
+        // Use the saved log if there is one; on a fresh install (no save file yet) seed the chat
+        // with the bundled default history so the showcase opens with example apps instead of blank.
         std::fs::read_to_string(CHAT_SAVE_PATH)
             .ok()
+            .or_else(|| Some(include_str!("../resources/default_history.json").to_string()))
             .and_then(|s| SavedHistory::deserialize_json(&s).ok())
             .map(|saved| {
                 saved
