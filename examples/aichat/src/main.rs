@@ -30,7 +30,9 @@ script_mod! {
             User := glass.Card {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
+                // Extra vertical margin gives the (now smaller) shadow room so it isn't clipped by
+                // the list-item bounds - the glass shader expands the quad by shadow_radius.
+                margin: Inset{top: 8 bottom: 10 left: 50 right: 8}
                 padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
                 flow: Overlay
                 // Frosted blue glass message bubble: refracts the vector backdrop and tints it
@@ -41,6 +43,9 @@ script_mod! {
                     tint_alpha: 0.16
                     lensing_effect: 0.5
                     border_alpha: 0.5
+                    // Smaller, tighter shadow so it doesn't read as fat or get cut off.
+                    shadow_radius: 9.0
+                    shadow_offset: vec2(0.0, 3.0)
                 }
 
                 selectable := Markdown {
