@@ -61,7 +61,14 @@ pub fn define_url_session_data_delegate() -> *const Class {
 
             let bytes: *const u8 = msg_send![data, bytes];
             let length: usize = msg_send![data, length];
-            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+            // `-[NSData bytes]` returns NULL for empty data; `from_raw_parts`
+            // with a null pointer trips Rust's pointer precondition check and
+            // aborts the thread. Treat an empty chunk as an empty slice.
+            let data_bytes: &[u8] = if bytes.is_null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(bytes, length)
+            };
 
             let message = NetworkResponse::HttpStreamChunk {
                 request_id: context_box.request_id,
@@ -315,7 +322,15 @@ impl AppleHttpRequests {
 
                         let bytes: *const u8 = msg_send![data, bytes];
                         let length: usize = msg_send![data, length];
-                        let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                        // `-[NSData bytes]` returns NULL for an empty body;
+                        // `from_raw_parts` with a null pointer trips Rust's
+                        // pointer precondition check and aborts. Treat an empty
+                        // response body as an empty slice.
+                        let data_bytes: &[u8] = if bytes.is_null() {
+                            &[]
+                        } else {
+                            std::slice::from_raw_parts(bytes, length)
+                        };
                         let status_code: u16 = msg_send![response, statusCode];
                         let headers: ObjcId = msg_send![response, allHeaderFields];
 
