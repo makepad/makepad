@@ -27,16 +27,20 @@ script_mod! {
             // draw list is freed — the overlay flush then clears its stuck lensing widgets.
             reuse_items: false
 
-            User := RoundedView {
+            User := glass.Card {
                 width: Fill
                 height: Fit
                 margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
+                padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
                 flow: Overlay
-                show_bg: true
+                // Frosted blue glass message bubble: refracts the vector backdrop and tints it
+                // blue, instead of a flat solid fill.
                 draw_bg +: {
-                    color: #3a5a8a
-                    radius: 8.0
+                    corner_radius: 10.0
+                    tint_color: #x6fa6ff
+                    tint_alpha: 0.16
+                    lensing_effect: 0.5
+                    border_alpha: 0.5
                 }
 
                 selectable := Markdown {
@@ -189,30 +193,20 @@ script_mod! {
                     show_bg: true
                     draw_bg.color: #x05070e
 
-                    // Styled backdrop: a detailed, colourful scene that FILLS the whole window
-                    // (resolution-independent, unlike a fixed-aspect SVG) so glass UIs rendered
-                    // in the chat have something to refract/blur. Flat black shows no glass.
-                    View{
+                    // Styled backdrop: a crisp VECTOR scene (resolution-independent) so the glass
+                    // UIs in the chat have real high-frequency detail to refract/blur. A pre-blurred
+                    // shader gradient blurs to nothing; hard vector edges (shapes, rings, ribbons,
+                    // dots) are exactly what makes the gauss lensing read as glass.
+                    Svg{
                         width: Fill
                         height: Fill
-                        show_bg: true
-                        // Artsy abstract backdrop: large soft filled colour shapes plus flowing
-                        // ribbon lines. The shapes are stylish; the ribbons give the gauss blur
-                        // high-frequency detail to work on (a smooth gradient blurs to nothing).
-                        draw_bg.pixel: fn(){
-                            let p = self.pos
-                            var col = vec3(0.04, 0.05, 0.11).mix(vec3(0.09, 0.05, 0.16), p.y)
-                            col = col + vec3(0.10, 0.32, 0.82) * smoothstep(0.62, 0.0, length((p - vec2(0.22, 0.28)) * vec2(1.0, 1.25)))
-                            col = col + vec3(0.62, 0.16, 0.58) * smoothstep(0.58, 0.0, length((p - vec2(0.82, 0.22)) * vec2(1.15, 1.0)))
-                            col = col + vec3(0.95, 0.52, 0.24) * smoothstep(0.52, 0.0, length(p - vec2(0.72, 0.92)))
-                            col = col + vec3(0.10, 0.55, 0.55) * smoothstep(0.60, 0.0, length(p - vec2(0.12, 0.95)))
-                            let r1 = abs(p.y - (0.34 + 0.09 * sin(p.x * 7.4 + 0.4)))
-                            col = col + vec3(0.65, 0.78, 1.0) * smoothstep(0.014, 0.0, r1) * 0.45
-                            let r2 = abs(p.y - (0.56 + 0.07 * sin(p.x * 9.2 + 1.8)))
-                            col = col + vec3(1.0, 0.72, 0.85) * smoothstep(0.011, 0.0, r2) * 0.40
-                            let r3 = abs(p.y - (0.74 + 0.11 * sin(p.x * 5.6 + 3.2)))
-                            col = col + vec3(0.72, 1.0, 0.92) * smoothstep(0.011, 0.0, r3) * 0.38
-                            return vec4(col, 1.0)
+                        // Drive the SVG's animateTransform clock (slowly drifting swirl drapes).
+                        animating: true
+                        draw_svg +: {
+                            // Stretch the art to fill the window (default preserve_aspect letterboxes
+                            // a fixed-ratio viewBox, leaving dead flat areas the glass can't lens).
+                            preserve_aspect: false
+                            svg: crate_resource("self:resources/background.svg")
                         }
                     }
                     // Barely-there veil: just enough to seat the header text, but light enough
@@ -267,26 +261,29 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 1.0}
 
-                        input := TextInput {
+                        input := glass.TextInput {
                             width: Fill
-                            height: Fit
+                            height: 42
                             empty_text: "Type a message... (Enter to send)"
                         }
 
-                        send_button := Button {
+                        send_button := glass.GlassButtonProminent {
                             text: "Send"
-                            width: 80
+                            width: 84
+                            height: 42
                         }
 
-                        cancel_button := Button {
+                        cancel_button := glass.GlassButton {
                             text: "Cancel"
-                            width: 80
+                            width: 84
+                            height: 42
                             visible: false
                         }
 
-                        clear_button := Button {
+                        clear_button := glass.GlassButton {
                             text: "Clear"
-                            width: 80
+                            width: 84
+                            height: 42
                         }
                     }
 
@@ -633,7 +630,7 @@ impl App {
         }
 
         self.current_prompt = Some(agent.send_prompt(cx, session_id, &text));
-        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
+        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         let list = chat_list.portal_list(cx, ids!(list));
@@ -657,7 +654,7 @@ impl App {
             data.is_streaming = false;
             drop(data);
 
-            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+            self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
     }
@@ -679,13 +676,13 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(send_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
-        if self.ui.button(cx, ids!(cancel_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(cancel_button)).clicked(actions) {
             self.cancel_request(cx);
         }
-        if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(clear_button)).clicked(actions) {
             self.clear_chat(cx);
         }
         if self
@@ -792,13 +789,13 @@ impl AppMain for App {
                         drop(data);
 
                         self.current_prompt = None;
-                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
                         CHAT_DATA.write().unwrap().is_streaming = false;
                         self.current_prompt = None;
-                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.ui
                             .label(cx, ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));
