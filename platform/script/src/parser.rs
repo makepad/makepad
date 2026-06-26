@@ -3806,6 +3806,18 @@ impl ScriptParser {
                             self.state.push(last);
                         }
                     }
+                    // `{...}{...}` is NOT object-inherits-from-object. If the value we just
+                    // finished is a bare object literal (last opcode END_BARE), a following
+                    // `{` begins a NEW value separated by an implicit ("magic") comma - not a
+                    // proto-inherit. EndExpr was already popped, so returning 0 without
+                    // consuming `{` lets the enclosing collection/argument/block loop (where
+                    // commas are optional) parse it as the next element. This makes comma-less
+                    // `[{a} {b}]`, `f({a} {b})` and `{ {a} {b} }` parse as separate items
+                    // instead of silently collapsing into one. `Ident{...}` instantiation ends
+                    // in END_PROTO / an id (not END_BARE), so it is unaffected and still protos.
+                    if self.code_last() == Some(&Opcode::END_BARE.into()) {
+                        return 0;
+                    }
                     self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                     self.state.push(State::EndProto);
                     self.state.push(State::BeginStmt {
