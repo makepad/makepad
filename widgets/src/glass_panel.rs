@@ -1552,19 +1552,31 @@ impl Widget for GlassButton {
         let rect = self.draw_bg.area().rect(cx);
 
         self.draw_glass.draw_abs(cx, rect);
-        cx.begin_turtle(
-            Walk {
-                abs_pos: Some(rect.pos),
-                width: Size::Fixed(rect.size.x),
-                height: Size::Fixed(rect.size.y),
-                margin: Inset::default(),
-                metrics: Metrics::default(),
-            },
-            self.layout,
+
+        // Crisp label on top of the glass. It MUST be drawn as plain aligned glyph
+        // instances (draw_abs) registered in the CURRENT turtle's align range - exactly
+        // like the glass quad above - NOT inside a nested `begin_turtle(abs_pos: ...)`.
+        // An abs_pos walk records `deferred_before_count: 0` (see turtle.rs
+        // walk_turtle_internal), so when this button is laid out after a `Fill` sibling
+        // (e.g. the centered month title between the `<` / `>` buttons) the parent row's
+        // deferred-fill shift (`total_resolved_length_to`) never reaches the label: the
+        // glass quad slides to its final x while the label stays at the pre-shift x,
+        // leaving the glyph detached far to the left. Drawing the label as draw_abs glyph
+        // instances puts it in the same align range as the glass, so both ride the shift.
+        let text = self.text.as_ref();
+        let laid = self
+            .draw_text
+            .layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        let text_size = dvec2(
+            laid.size_in_lpxs.width as f64 * self.draw_text.font_scale as f64,
+            laid.size_in_lpxs.height as f64 * self.draw_text.font_scale as f64,
         );
-        self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
-        cx.end_turtle();
+        let align = self.layout.align;
+        let pos = dvec2(
+            rect.pos.x + (rect.size.x - text_size.x) * align.x,
+            rect.pos.y + (rect.size.y - text_size.y) * align.y,
+        );
+        self.draw_text.draw_abs(cx, pos, text);
         self.draw_list.as_mut().unwrap().end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
 
