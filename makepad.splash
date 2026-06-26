@@ -90,6 +90,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
+    RunStudioRelease{name: "makepad-example-bugfix"}
     RunStudioRelease{name: "makepad-example-move-after-draw"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudio{name: "makepad-studio"} 

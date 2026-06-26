@@ -28,6 +28,7 @@ workspace.members = [
     "examples/windows_blur",
     "examples/floating_panel",
     "examples/glass",
+    "examples/bugfix",
     "examples/move_after_draw",
     "examples/xr",
     "examples/cad",
