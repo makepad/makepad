@@ -14,6 +14,7 @@ General Makepad Splash DSL patterns that apply to ANY app body.
 - **Colons inside string arguments work correctly** — `"Time: 2:30"` is fine
 - Every `TextInput` must have a fixed numeric height (e.g. `34`)
 - No `on_render` in embedded apps
+- **Array / argument / object-body items may be separated by whitespace, newlines, OR commas — all work.** Adjacent values like `{a:1} {b:2}` (or one per line) are TWO separate items. Two object literals next to each other are NEVER "object inherits from object" — to extend/merge an object use `base += {field: val}` or a named prototype `Proto{...}`, not bare `{...}{...}`. (So `let days = [{...} {...} {...}]` correctly yields a 3-element array; a stray earlier bug collapsed comma-less object arrays to length 1.)
 
 ## Widget Availability
 
