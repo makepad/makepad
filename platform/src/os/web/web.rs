@@ -100,6 +100,14 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
+
+                    // Build the app (and its `Root{Window}`) BEFORE touching the
+                    // window pool: Script-DSL apps allocate their window during
+                    // `Event::Startup` (see `app_main!`'s event closure), so the
+                    // pool is empty until this runs. Indexing `windows[id_zero]`
+                    // first panics on web ("index out of bounds: len 0").
+                    self.call_event_handler(&Event::Startup);
+
                     let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     {
@@ -111,7 +119,6 @@ impl Cx {
                     self.windows[id_zero].window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
-                    self.call_event_handler(&Event::Startup);
                     self.redraw_all();
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
