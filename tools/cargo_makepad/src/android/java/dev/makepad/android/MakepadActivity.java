@@ -1630,9 +1630,8 @@ public class MakepadActivity
         mSurfaceRecoveryOverlayVisible = true;
         cacheWarmResumeSurfaceSnapshot(mLatestSurfaceSnapshot);
         updateSurfaceSnapshotBackdrop();
-        if (view != null) {
-            view.setVisibility(View.INVISIBLE);
-        }
+        // Don't hide the SurfaceView or make it invisible. That destroys its surface
+        // and causes visual flashing behind any system overlay (like a share sheet).
         showSurfaceRecoverySnapshotIfAvailable();
         refreshSurfaceSnapshotCache();
     }
