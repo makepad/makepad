@@ -1466,9 +1466,12 @@ fn ensure_thread_pool(cx: &mut Cx) {
     }
 }
 
-fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
+fn spawn_decode_job<D>(cx: &mut Cx, image_path: PathBuf, data: Arc<D>)
+where
+    D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+{
     ensure_thread_pool(cx);
-    let image_size_bytes = data.len();
+    let image_size_bytes = (*data).as_ref().len();
     cx.get_global::<ImageCache>()
         .thread_pool
         .as_mut()
@@ -1482,7 +1485,7 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
                     image_size_bytes
                 );
             }
-            let result = decode_image_buffer(&image_path, &data);
+            let result = decode_image_buffer(&image_path, (*data).as_ref());
             if image_decode_debug_enabled() {
                 let status = match &result {
                     Ok(buffer) => format!("ok {}x{}", buffer.width, buffer.height),
@@ -1588,20 +1591,24 @@ fn read_image_file_limited(image_path: &Path) -> Result<Vec<u8>, ImageError> {
     Ok(data)
 }
 
-pub fn load_image_from_data_async(
+pub fn load_image_from_data_async<D>(
     cx: &mut Cx,
     image_path: &Path,
-    data: Arc<Vec<u8>>,
-) -> Result<AsyncLoadResult, ImageError> {
+    data: Arc<D>,
+) -> Result<AsyncLoadResult, ImageError>
+where
+    D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+{
     ensure_image_cache_inner(cx);
     match cx.get_global::<ImageCache>().map.get(image_path) {
         Some(ImageCacheEntry::Loaded(_)) => return Ok(AsyncLoadResult::Loaded),
         Some(ImageCacheEntry::Loading(w, h)) => return Ok(AsyncLoadResult::Loading(*w, *h)),
         None => {}
     }
-    if data.len() > MAX_IMAGE_DECODED_BYTES {
+    let bytes: &[u8] = (*data).as_ref();
+    if bytes.len() > MAX_IMAGE_DECODED_BYTES {
         return Err(ImageError::DataTooLarge {
-            bytes: data.len(),
+            bytes: bytes.len(),
             limit: MAX_IMAGE_DECODED_BYTES,
         });
     }
@@ -1615,19 +1622,19 @@ pub fn load_image_from_data_async(
     let force_sync = headless_mode_enabled();
 
     if force_sync {
-        let image = decode_image_buffer(image_path, &data)?;
+        let image = decode_image_buffer(image_path, bytes)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture);
         return Ok(AsyncLoadResult::Loaded);
     }
 
-    let (w, h) = image_size_by_data(&data, image_path)?;
+    let (w, h) = image_size_by_data(bytes, image_path)?;
     if image_decode_debug_enabled() {
         log!(
             "ImageCache: queue_decode key={} bytes={} size={}x{}",
             image_path.display(),
-            data.len(),
+            bytes.len(),
             w,
             h
         );
@@ -1859,13 +1866,17 @@ pub trait ImageCacheImpl {
         }
     }
 
-    fn load_image_from_data_async_impl(
+    fn load_image_from_data_async_impl<D>(
         &mut self,
         cx: &mut Cx,
         image_path: &Path,
-        data: Arc<Vec<u8>>,
+        data: Arc<D>,
         id: usize,
-    ) -> Result<AsyncLoadResult, ImageError> {
+    ) -> Result<AsyncLoadResult, ImageError>
+    where
+        D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+        Self: Sized,
+    {
         let result = load_image_from_data_async(cx, image_path, data)?;
         if matches!(result, AsyncLoadResult::Loaded) {
             let _ = self.load_image_from_cache(cx, image_path, id);

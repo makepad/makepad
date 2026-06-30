@@ -651,12 +651,15 @@ impl Image {
         Ok(())
     }
 
-    pub fn load_image_from_data_async(
+    pub fn load_image_from_data_async<D>(
         &mut self,
         cx: &mut Cx,
         image_path: &Path,
-        data: Arc<Vec<u8>>,
-    ) -> Result<(), ImageError> {
+        data: Arc<D>,
+    ) -> Result<(), ImageError>
+    where
+        D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+    {
         self.lazy_create_image_cache(cx);
         if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0) {
             match result {
@@ -740,12 +743,15 @@ impl ImageRef {
     }
 
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_from_data_async(
+    pub fn load_image_from_data_async<D>(
         &self,
         cx: &mut Cx,
         image_path: &Path,
-        data: Arc<Vec<u8>>,
-    ) -> Result<(), ImageError> {
+        data: Arc<D>,
+    ) -> Result<(), ImageError>
+    where
+        D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+    {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_from_data_async(cx, image_path, data);
         }
