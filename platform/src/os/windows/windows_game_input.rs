@@ -111,7 +111,10 @@ pub struct WindowsGameInput {
     /// Which XInput slots (0..4) were connected at the last poll. Disconnected slots are only
     /// re-probed occasionally because `XInputGetState` on an empty slot is very slow (it stalls
     /// on device/USB enumeration) — calling it for 4 empty slots on every event-loop callback
-    /// was blocking the UI thread and causing scroll judder.
+    /// was blocking the UI thread and causing scroll judder. A controller already plugged in at
+    /// launch is found by the one-shot full scan on the first poll; one plugged in later is found
+    /// within ~16s worst case at the 125 Hz poll rate (one empty slot re-probed per 512 polls,
+    /// round-robin over the 4 slots).
     pub xinput_connected: [bool; 4],
 }
 
@@ -160,19 +163,23 @@ impl WindowsGameInput {
         // doing device/USB enumeration and waits on the driver). `poll()` runs on every event-loop
         // callback, so probing 4 empty slots every callback was blocking the UI thread tens of ms
         // at a time — the dominant cause of scroll-deceleration judder. Connected slots are still
-        // polled every call (cheap + keeps input responsive); empty slots are re-probed only
-        // periodically so a newly-plugged-in controller is still detected within ~a second.
-        // Re-probe at most ONE disconnected slot per cycle (round-robin), so a slow probe is never
-        // multiplied across slots into a multi-slot stall. A newly-connected controller is still
-        // detected within a few seconds, after which it is polled every call.
+        // polled every call (cheap + keeps input responsive). For empty slots:
+        //   * On the very FIRST poll we do a one-shot full scan, so a controller already plugged in
+        //     at launch is detected immediately rather than up to ~16s later.
+        //   * After that we re-probe at most ONE empty slot per cycle (round-robin starting at
+        //     slot 0 / Player 1, so the primary controller is not served last), which keeps a slow
+        //     probe from being multiplied across 4 slots into a multi-slot stall during steady-state
+        //     idle. A controller plugged in at runtime is detected within ~16s worst case.
+        let full_scan = self.enum_timer == 1;
         let probe_slot: Option<u32> = if self.enum_timer % 512 == 0 {
-            Some(((self.enum_timer / 512) % 4) as u32)
+            // -1 so the round-robin starts at slot 0 (enum_timer/512 is >= 1 here).
+            Some(((self.enum_timer / 512 - 1) % 4) as u32)
         } else {
             None
         };
         // 1. Poll XInput (Xbox Controllers)
         for i in 0..4 {
-            if !self.xinput_connected[i as usize] && probe_slot != Some(i) {
+            if !self.xinput_connected[i as usize] && !full_scan && probe_slot != Some(i) {
                 continue;
             }
             let mut state = XINPUT_STATE::default();
@@ -359,9 +366,12 @@ impl WindowsGameInput {
                 }
 
                 // Enumerate attached devices. `EnumDevices` is slow (tens of ms) and blocks the UI
-                // thread — running it on every poll produces a periodic scroll hitch — so run it
-                // very rarely; a newly-attached racing wheel is still picked up within ~a minute.
-                if self.enum_timer % 8192 == 0 {
+                // thread — running it on every poll produces a periodic scroll hitch — so run it on
+                // the first poll (to catch a wheel already attached at launch) and then very rarely
+                // afterward; a wheel attached at runtime is picked up within ~a minute. The phase
+                // (== 256, not == 0) keeps the periodic enumeration from ever landing on the same
+                // poll as the every-512 XInput empty-slot probe, which would stack two slow probes.
+                if self.enum_timer == 1 || self.enum_timer % 8192 == 256 {
                     let _ = di.EnumDevices(
                         DI8DEVCLASS_GAMECTRL,
                         Some(enum_callback),

@@ -394,6 +394,12 @@ impl Cx {
                     return EventFlow::Exit;
                 }
 
+                // Poll connected game controllers on the signal-poll tick so gamepad input is
+                // serviced even while the app is otherwise idle: a controller produces no Win32
+                // message, so nothing else would call this and a button press could not wake the
+                // loop. Any resulting redraw/animation is picked up by the resume check below.
+                self.handle_game_input_events();
+
                 // If a signal handler dirtied the UI (redraw / animation / dirty pass),
                 // resume the vsync-paced Poll loop so it paints promptly; otherwise go
                 // back to sleep in `GetMessageW`.
@@ -428,8 +434,6 @@ impl Cx {
         d3d11_windows: &mut Vec<D3d11Window>,
         d3d11_cx: &mut D3d11Cx,
     ) {
-        // Whether to present the window paced to the display refresh (vsync). See
-        // `windows_window_vsync()` below for why this defaults to ON.
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -446,6 +450,8 @@ impl Cx {
                             window.sync_background_color(self.passes[*draw_pass_id].clear_color);
                         }
                         window.resize_buffers(&d3d11_cx);
+                        // Present paced to the display refresh (vsync); see `windows_window_vsync()`
+                        // for why this defaults to ON.
                         self.draw_pass_to_window(*draw_pass_id, windows_window_vsync(), window, d3d11_cx);
                     }
                 }

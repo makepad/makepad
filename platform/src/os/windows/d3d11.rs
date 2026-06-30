@@ -28,7 +28,7 @@ use crate::{
             PCSTR,
         },
         Win32::{
-            Foundation::{HANDLE, HMODULE, S_FALSE},
+            Foundation::{CloseHandle, HANDLE, HMODULE, S_FALSE},
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
@@ -814,8 +814,14 @@ pub struct D3d11Window {
     /// retrieving it via `IDXGISwapChain2::GetFrameLatencyWaitableObject`.
     /// For windows that do not use waitable pacing (e.g. popups), this is a
     /// null/invalid `HANDLE` and callers must skip waiting on it.
-    /// The handle is owned by the swap chain; we must NOT close it ourselves.
+    /// The handle is owned by the *application* (it is a separate kernel object,
+    /// not the swap chain itself), so we close it in `Drop`.
     pub frame_latency_waitable: HANDLE,
+    /// Whether this swap chain was created with the `FRAME_LATENCY_WAITABLE_OBJECT`
+    /// flag. `ResizeBuffers` must pass the SAME flags the chain was created with, so
+    /// we track this at creation rather than inferring it from `frame_latency_waitable`
+    /// (which can be null even on a waitable chain if the `IDXGISwapChain2` cast failed).
+    pub waitable_swap_chain: bool,
 }
 
 impl D3d11Window {
@@ -899,6 +905,7 @@ impl D3d11Window {
                 render_target_view: render_target_view,
                 swap_chain: swap_chain,
                 frame_latency_waitable,
+                waitable_swap_chain: true,
             }
         }
     }
@@ -937,6 +944,13 @@ impl D3d11Window {
                 .CreateSwapChainForHwnd(&d3d11_cx.device, win32_window.hwnd, &sc_desc, None, None)
                 .unwrap();
 
+            // Keep the low (1-frame) latency that the old device-level
+            // SetMaximumFrameLatency(1) used to give popups, but WITHOUT requesting
+            // the waitable flag (popups are not paced via a waitable object).
+            if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+                let _ = swap_chain2.SetMaximumFrameLatency(1);
+            }
+
             let swap_texture = swap_chain.GetBuffer(0).unwrap();
             let mut render_target_view = None;
             d3d11_cx
@@ -955,10 +969,9 @@ impl D3d11Window {
                 render_target_view,
                 swap_chain,
                 // Popups are not paced via a waitable object; store a null handle
-                // and the render loop will skip waiting on it. The popup swap
-                // chain is created WITHOUT the FRAME_LATENCY_WAITABLE_OBJECT flag,
-                // so resize_buffers must pass flag 0 for it (derived from this).
+                // and the render loop will skip waiting on it.
                 frame_latency_waitable: HANDLE(std::ptr::null_mut()),
+                waitable_swap_chain: false,
             }
         }
     }
@@ -1004,14 +1017,14 @@ impl D3d11Window {
         unsafe {
             let wg = &self.window_geom;
             // ResizeBuffers must be given the SAME flags the swap chain was
-            // created with, or it fails with DXGI_ERROR_INVALID_CALL. The main
-            // window was created with FRAME_LATENCY_WAITABLE_OBJECT (it has a
-            // valid waitable handle); popups were created with flag 0 (null
-            // handle). Derive the correct flag from the handle so both work.
-            let resize_flags = if self.frame_latency_waitable.is_invalid() {
-                DXGI_SWAP_CHAIN_FLAG(0)
-            } else {
+            // created with, or it fails with DXGI_ERROR_INVALID_CALL. We track how
+            // the chain was created (`waitable_swap_chain`) rather than inferring it
+            // from the handle, which can be null even on a waitable chain if the
+            // IDXGISwapChain2 cast failed.
+            let resize_flags = if self.waitable_swap_chain {
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+            } else {
+                DXGI_SWAP_CHAIN_FLAG(0)
             };
             self.swap_chain
                 .ResizeBuffers(
@@ -1037,8 +1050,13 @@ impl D3d11Window {
 
     pub fn present(&mut self, vsync: bool) {
         unsafe {
+            // During an active window resize, present without the vsync interval and rely on
+            // dwm_flush() below for compositor sync: a blocking Present(1) would add up to a refresh
+            // interval of latency to every resize frame, making live-resize feel heavier. Steady-
+            // state frames still present with vsync.
+            let sync_interval = if vsync && !self.is_in_resize { 1 } else { 0 };
             self.swap_chain
-                .Present(if vsync { 1 } else { 0 }, DXGI_PRESENT(0))
+                .Present(sync_interval, DXGI_PRESENT(0))
                 .unwrap();
 
             // During an active window resize, synchronize with the DWM compositor so the
@@ -1047,6 +1065,21 @@ impl D3d11Window {
                 dwm_flush();
             }
         };
+    }
+}
+
+impl Drop for D3d11Window {
+    fn drop(&mut self) {
+        // The frame-latency waitable is a separate kernel handle owned by the application
+        // (GetFrameLatencyWaitableObject hands back a new reference), so close it on window
+        // teardown — otherwise each main-window lifecycle leaks a handle. Popups store a null
+        // handle and are skipped. The window is moved by value into/out of the window Vec, so
+        // this runs exactly once.
+        if !self.frame_latency_waitable.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.frame_latency_waitable);
+            }
+        }
     }
 }
 
@@ -2309,6 +2342,7 @@ impl AsyncHlslCompile {
     /// them for D3D11 object creation this frame (the rest stay queued for following frames so a
     /// burst of finished compiles doesn't stall a single frame). Returns `(results, has_more)`.
     fn drain_ready(&self, budget: usize) -> (Vec<AsyncCompileResult>, bool) {
+        debug_assert!(budget >= 1, "drain_ready budget must be >= 1 or the backlog never drains");
         let mut inner = self.inner.lock().unwrap();
         while let Ok(result) = inner.rx.try_recv() {
             inner.pending.remove(&result.shader_id);

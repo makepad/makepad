@@ -362,6 +362,12 @@ pub struct Window {
     /// invalidate on `WindowGeomChange`.
     #[rust]
     drag_query_cache: Option<(bool, Rect, Rect)>,
+    /// The caption-layout inputs (show_caption_bar, height override, system caption height) that
+    /// `drag_query_cache` was last computed against. When they change without a platform
+    /// `WindowGeomChange` (e.g. a live/DSL reload toggling the caption), we drop the cache in
+    /// `ensure_initialized`.
+    #[rust]
+    caption_query_sig: Option<(bool, Option<f64>, Option<f64>)>,
     #[deref]
     view: View,
 
@@ -871,6 +877,19 @@ impl Window {
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
+        // If the inputs that drive caption layout changed without a platform WindowGeomChange
+        // (e.g. a live/DSL reload toggling the caption bar or changing its height), the cached
+        // WindowDragQuery geometry is stale — drop it so the next hit-test recomputes.
+        let caption_sig = (
+            self.show_caption_bar,
+            self.window.caption_bar_height_override,
+            self.system_caption_bar_height,
+        );
+        if self.caption_query_sig != Some(caption_sig) {
+            self.caption_query_sig = Some(caption_sig);
+            self.drag_query_cache = None;
+        }
+
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
@@ -1263,10 +1282,19 @@ impl Widget for Window {
                         None => {
                             let visible = self.view(cx, ids!(caption_bar)).visible();
                             let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
-                            let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
-                            // Only cache once the caption bar has actually been laid out, so an
-                            // early (zero-size) query doesn't get pinned.
-                            if !visible || caption_rect.size != Vec2d::default() {
+                            let buttons_view = self.view(cx, ids!(windows_buttons));
+                            let buttons_visible = buttons_view.visible();
+                            let buttons_rect = buttons_view.area().rect(cx);
+                            // Only cache once the caption bar AND its (visible) buttons have actually
+                            // been laid out, so an early query doesn't pin a stale rect. Pinning a
+                            // zero buttons_rect while the buttons are visible-but-not-yet-laid-out
+                            // would make the min/max/close strip respond as draggable Caption (a
+                            // click on Close would drag the window) until the next geometry change. A
+                            // window with no (hidden) buttons keeps a zero buttons_rect, which is fine.
+                            let caption_ready = caption_rect.size != Vec2d::default();
+                            let buttons_ready =
+                                !buttons_visible || buttons_rect.size != Vec2d::default();
+                            if !visible || (caption_ready && buttons_ready) {
                                 self.drag_query_cache = Some((visible, caption_rect, buttons_rect));
                             }
                             (visible, caption_rect, buttons_rect)

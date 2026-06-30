@@ -183,8 +183,16 @@ pub struct Win32Window {
     /// Cached WM_NCHITTEST `WindowDragQuery` result, keyed by the raw lparam (cursor screen pos).
     /// The OS sends several WM_NCHITTEST for the SAME cursor position per frame (move + setcursor
     /// + ...), and each otherwise runs a full WindowDragQuery event dispatch through the widget
-    /// tree. We dedupe per position; invalidated on resize (the window/caption geometry changes).
+    /// tree. We dedupe per position; invalidated on resize and move (window/caption geometry
+    /// changes). One residual staleness window remains: if the caption is re-laid-out WITHOUT any
+    /// window geometry change (e.g. a responsive layout toggling the caption bar) while the cursor
+    /// is perfectly stationary, the cached answer persists until the next geometry change or cursor
+    /// move; the widget-side `drag_query_cache` in `window.rs` is kept fresh independently.
     pub nc_dq_cache: Cell<Option<(isize, WindowDragQueryResponse)>>,
+    /// Generation counter, bumped on every `nc_dq_cache` invalidation. The WM_NCHITTEST miss path
+    /// snapshots it before dispatching `WindowDragQuery` and only writes the result back if it is
+    /// unchanged, so a reentrant invalidation during that dispatch is not clobbered by a stale write.
+    pub nc_dq_gen: Cell<u32>,
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
@@ -257,6 +265,7 @@ impl Win32Window {
             last_mouse_pos: Vec2d::default(),
             cached_dpi: Cell::new(0.0),
             nc_dq_cache: Cell::new(None),
+            nc_dq_gen: Cell::new(0),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -306,6 +315,7 @@ impl Win32Window {
             last_mouse_pos: Vec2d::default(),
             cached_dpi: Cell::new(0.0),
             nc_dq_cache: Cell::new(None),
+            nc_dq_gen: Cell::new(0),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -456,6 +466,10 @@ impl Win32Window {
                 let response_val = match window.nc_dq_cache.get() {
                     Some((lp, rv)) if lp == lparam.0 => rv,
                     _ => {
+                        // Snapshot the cache generation: dispatching WindowDragQuery can reenter the
+                        // window proc (nested SendMessage) and invalidate the cache mid-flight; if it
+                        // does, we must NOT write our now-stale result back over that invalidation.
+                        let gen = window.nc_dq_gen.get();
                         let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                         window.do_callback(Win32Event::WindowDragQuery(WindowDragQueryEvent {
                             window_id: window.window_id,
@@ -463,7 +477,9 @@ impl Win32Window {
                             response: response.clone(),
                         }));
                         let rv = response.get();
-                        window.nc_dq_cache.set(Some((lparam.0, rv)));
+                        if window.nc_dq_gen.get() == gen {
+                            window.nc_dq_cache.set(Some((lparam.0, rv)));
+                        }
                         rv
                     }
                 };
@@ -775,6 +791,14 @@ impl Win32Window {
                 // DPI so send_change_event() (and subsequent hit-tests) re-read the new value.
                 window.invalidate_cached_dpi();
                 window.send_change_event();
+            }
+            // WM_MOVE (0x0003): the window changed position without necessarily changing size, so
+            // WM_SIZE / send_change_event do not fire. nc_dq_cache is keyed by screen-space cursor
+            // position, which goes stale when the window moves under a stationary cursor, so drop
+            // it here. Falls through to DefWindowProc for default processing.
+            0x0003 => {
+                window.nc_dq_cache.set(None);
+                window.nc_dq_gen.set(window.nc_dq_gen.get().wrapping_add(1));
             }
             WM_CLOSE => {
                 // close requested
@@ -1290,8 +1314,10 @@ impl Win32Window {
     }
 
     pub fn send_change_event(&mut self) {
-        // The window/caption geometry changed; drop the WM_NCHITTEST hit-test cache.
+        // The window/caption geometry changed; drop the WM_NCHITTEST hit-test cache and bump its
+        // generation so an in-flight WindowDragQuery dispatch does not write a stale result back.
         self.nc_dq_cache.set(None);
+        self.nc_dq_gen.set(self.nc_dq_gen.get().wrapping_add(1));
         let new_geom = self.get_window_geom();
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();

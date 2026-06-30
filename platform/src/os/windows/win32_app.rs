@@ -100,6 +100,10 @@ P1: IntoParam<IDropSource>,
 ///
 /// macOS gets this for free from Cocoa's built-in mouse-move coalescing, and
 /// the Android backend already coalesces consecutive touch-moves explicitly.
+///
+/// This discards the intermediate cursor positions within a run, which is correct
+/// for hover/hit-testing but loses the full pointer path; a widget that needs every
+/// sample (freehand drawing/ink, gesture recognition) would have to read raw input.
 unsafe fn coalesce_mouse_move(mut msg: MSG) -> MSG {
     if msg.message != WM_MOUSEMOVE {
         return msg;
