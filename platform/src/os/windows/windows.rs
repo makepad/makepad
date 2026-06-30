@@ -31,7 +31,10 @@ use {
         //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::{CxWindowPool, WindowId},
-        windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        windows::Win32::{
+            Graphics::Direct3D11::ID3D11Device,
+            System::Threading::WaitForSingleObject,
+        },
     },
     std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
 };
@@ -251,6 +254,25 @@ impl Cx {
                     }
                 }
 
+                // Pace the CPU render loop to the display refresh (vblank) using the
+                // main window's DXGI frame-latency waitable object. This is the
+                // canonical low-latency present pattern: waiting here once per frame
+                // makes the loop run ~once per vblank instead of spinning, so the OS
+                // can coalesce mouse-move messages (avoiding the WM_NCHITTEST storm)
+                // and frames are delivered without judder. We wait on the first
+                // window that has a valid waitable (the main window); popups store a
+                // null handle and are skipped. A finite 100ms timeout guarantees the
+                // loop can never deadlock if DWM stops signaling (e.g. occlusion).
+                if let Some(waitable) = d3d11_windows
+                    .iter()
+                    .map(|w| w.frame_latency_waitable)
+                    .find(|h| !h.is_invalid())
+                {
+                    unsafe {
+                        let _ = WaitForSingleObject(waitable, 100);
+                    }
+                }
+
                 let time_now = with_win32_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
@@ -359,28 +381,46 @@ impl Cx {
                 self.run_live_edit_if_needed("windows");
                 self.handle_networking_events();
 
-                // The recursive Paint pass drains `platform_ops` (e.g. a `CxOsOp::Quit`
-                // pushed by `handle_termination_signal` above). Propagate its `Exit` so
-                // that Ctrl+C/SIGTERM actually terminates the process.
-                if let EventFlow::Exit =
-                    self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows)
-                {
+                // Drain platform_ops queued by the signal handlers above (e.g. a
+                // `CxOsOp::Quit` pushed by `handle_termination_signal`) so Ctrl+C /
+                // SIGTERM still terminate the process. Unlike the old code this must
+                // NOT unconditionally repaint: an idle 8ms signal-poll tick with
+                // nothing dirty should do zero GPU work (the old recursive `Paint`
+                // here was the ~125 Hz idle repaint that dominated CPU). This is the
+                // same drain that runs at the top of every callback and returns
+                // `Exit` on `Quit`.
+                if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
+                    self.call_event_handler(&Event::Shutdown);
                     return EventFlow::Exit;
                 }
 
+                // If a signal handler dirtied the UI (redraw / animation / dirty pass),
+                // resume the vsync-paced Poll loop so it paints promptly; otherwise go
+                // back to sleep in `GetMessageW`.
+                if self.any_passes_dirty()
+                    || self.need_redrawing()
+                    || self.new_next_frames.len() != 0
+                {
+                    return EventFlow::Poll;
+                }
                 return EventFlow::Wait;
             }
         }
 
         self.handle_game_input_events();
 
-        return EventFlow::Poll;
-        /*
-        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+        // Pace painting like macOS/Linux: spin (Poll) only while there is visible work
+        // pending — a pass is dirty, a redraw was requested, or an animation NextFrame
+        // is queued. Otherwise block (Wait) so the loop sleeps in `GetMessageW` at ~0%
+        // CPU until the next input / timer / signal. While Poll-ing, the vsync-blocking
+        // D3D11 `Present` (`handle_repaint` -> `draw_pass_to_window` -> `Present(1,..)`) is what
+        // actually paces frames to the display; this replaces the old hard-forced Poll
+        // that repainted unconditionally at the 8 ms signal-timer rate (~125 Hz).
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             EventFlow::Poll
         } else {
             EventFlow::Wait
-        }*/
+        }
     }
 
     pub(crate) fn handle_repaint(
@@ -388,6 +428,8 @@ impl Cx {
         d3d11_windows: &mut Vec<D3d11Window>,
         d3d11_cx: &mut D3d11Cx,
     ) {
+        // Whether to present the window paced to the display refresh (vsync). See
+        // `windows_window_vsync()` below for why this defaults to ON.
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -404,7 +446,7 @@ impl Cx {
                             window.sync_background_color(self.passes[*draw_pass_id].clear_color);
                         }
                         window.resize_buffers(&d3d11_cx);
-                        self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
+                        self.draw_pass_to_window(*draw_pass_id, windows_window_vsync(), window, d3d11_cx);
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
@@ -802,6 +844,27 @@ impl Cx {
         }
         ret
     }
+}
+
+/// Whether to present the window paced to the display's refresh rate (vsync).
+///
+/// Defaults to ON, matching the Linux/EGL backend (`swap_interval = 1`, see
+/// `os/linux/opengl_cx.rs`). Previously the Windows backend always presented uncapped
+/// (`Present(0, ...)`) from inside the free-spinning `EventFlow::Poll` loop, so during any
+/// scroll/animation it rendered far more frames than the monitor could display (e.g. ~127 fps
+/// on a 99 Hz panel). The surplus frames are discarded unevenly by the DWM compositor, and
+/// because makepad's scroll/fling animations advance by a fixed step *per rendered frame*, the
+/// uneven display cadence makes scrolling visibly judder — perceived as "laggy scrolling" even
+/// though the raw frame rate is high. Pacing to vblank renders exactly one frame per refresh,
+/// so each displayed frame advances the scroll by a constant step (smooth), and it also stops
+/// the loop from burning CPU/GPU rendering invisible frames.
+///
+/// Set the `MAKEPAD_NO_VSYNC` env var to opt out (e.g. for benchmarking), mirroring the Linux
+/// backend's env var of the same name.
+fn windows_window_vsync() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("MAKEPAD_NO_VSYNC").is_none())
 }
 
 impl CxGameInputApi for Cx {

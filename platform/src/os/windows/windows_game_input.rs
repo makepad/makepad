@@ -108,6 +108,11 @@ pub struct WindowsGameInput {
     )>,
     pub next_wheel_id: u64,
     pub enum_timer: u64,
+    /// Which XInput slots (0..4) were connected at the last poll. Disconnected slots are only
+    /// re-probed occasionally because `XInputGetState` on an empty slot is very slow (it stalls
+    /// on device/USB enumeration) — calling it for 4 empty slots on every event-loop callback
+    /// was blocking the UI thread and causing scroll judder.
+    pub xinput_connected: [bool; 4],
 }
 
 impl WindowsGameInput {
@@ -138,6 +143,7 @@ impl WindowsGameInput {
             di_devices: Vec::new(),
             next_wheel_id: 128,
             enum_timer: 0,
+            xinput_connected: [false; 4],
         }
     }
 
@@ -149,10 +155,29 @@ impl WindowsGameInput {
     where
         F: FnMut(GameInputConnectedEvent),
     {
+        self.enum_timer = self.enum_timer.wrapping_add(1);
+        // `XInputGetState` on a DISCONNECTED slot is pathologically slow on Windows (it stalls
+        // doing device/USB enumeration and waits on the driver). `poll()` runs on every event-loop
+        // callback, so probing 4 empty slots every callback was blocking the UI thread tens of ms
+        // at a time — the dominant cause of scroll-deceleration judder. Connected slots are still
+        // polled every call (cheap + keeps input responsive); empty slots are re-probed only
+        // periodically so a newly-plugged-in controller is still detected within ~a second.
+        // Re-probe at most ONE disconnected slot per cycle (round-robin), so a slow probe is never
+        // multiplied across slots into a multi-slot stall. A newly-connected controller is still
+        // detected within a few seconds, after which it is polled every call.
+        let probe_slot: Option<u32> = if self.enum_timer % 512 == 0 {
+            Some(((self.enum_timer / 512) % 4) as u32)
+        } else {
+            None
+        };
         // 1. Poll XInput (Xbox Controllers)
         for i in 0..4 {
+            if !self.xinput_connected[i as usize] && probe_slot != Some(i) {
+                continue;
+            }
             let mut state = XINPUT_STATE::default();
             let result = unsafe { XInputGetState(i, &mut state) };
+            self.xinput_connected[i as usize] = result == 0;
 
             // Construct a stable ID for this XInput slot
             let id = LiveId(i as u64);
@@ -333,16 +358,16 @@ impl WindowsGameInput {
                     BOOL(DIENUM_CONTINUE as i32)
                 }
 
-                // Enumerate attached devices (Throttle this to every 200 polls ~ 3 seconds at 60fps)
-                if self.enum_timer % 200 == 0 {
+                // Enumerate attached devices. `EnumDevices` is slow (tens of ms) and blocks the UI
+                // thread — running it on every poll produces a periodic scroll hitch — so run it
+                // very rarely; a newly-attached racing wheel is still picked up within ~a minute.
+                if self.enum_timer % 8192 == 0 {
                     let _ = di.EnumDevices(
                         DI8DEVCLASS_GAMECTRL,
                         Some(enum_callback),
                         &mut ctx as *mut _ as *mut _,
                         DIEDFL_ATTACHEDONLY,
                     );
-
-                    self.enum_timer += 1;
 
                     let mut active_di_indices = Vec::new();
 

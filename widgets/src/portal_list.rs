@@ -47,7 +47,11 @@ enum ScrollState {
         committed: bool,
     },
     Flick {
-        delta: f64,
+        /// Current fling velocity in pixels per second. Decays per the native (iOS-style)
+        /// exponential momentum model in the handler — frame-rate-independent.
+        velocity: f64,
+        /// Wall-clock time of the previous fling step (0.0 = not yet started).
+        last_time: f64,
         next_frame: NextFrame,
     },
     Pulldown {
@@ -370,6 +374,10 @@ pub struct PortalList {
     flick_scroll_scaling: f64,
     #[live(0.97)]
     flick_scroll_decay: f64,
+    /// Running EMA (seconds) of the momentum-fling inter-frame interval. The deceleration step is
+    /// driven off a `dt` clamped to a tight band around this, so frame-delivery jitter (a late or
+    /// early frame) does not turn into an uneven jump/stall in the motion. Reset per fling.
+    #[rust] fling_dt_ema: f64,
     #[live(80.0)]
     max_pull_down: f64,
     #[live(true)]
@@ -721,6 +729,20 @@ impl PortalList {
                     tree.update_default_height(new_avg);
                 }
 
+                // An active scroll gesture/animation — a momentum fling, a pulldown bounce, or a
+                // finger drag — owns `first_scroll` directly. The tail auto-scroll below re-asserts
+                // position by subtracting `overflow` from `first_scroll` on every draw; during such
+                // an animation that races and cancels its smooth sub-pixel motion. At the slow end of
+                // a flick (or while dragging near the bottom), where the real per-frame motion is
+                // sub-pixel, this snap-back dominates and the content shakes in place instead of
+                // moving cleanly. So skip computing/applying the tail adjustment while a gesture owns
+                // the scroll position (symmetrical with the scroll-bar guard above); auto-tail
+                // re-evaluates cleanly once the gesture settles.
+                let animation_owns_scroll = matches!(
+                    self.scroll_state,
+                    ScrollState::Flick { .. } | ScrollState::Pulldown { .. } | ScrollState::Drag { .. }
+                );
+
                 // When tail_range is true and we're not already at the end, we need to scroll
                 // down to keep the bottom of the content visible
                 if self.tail_range && !self.at_end {
@@ -730,7 +752,9 @@ impl PortalList {
                     if let Some(last_pos) = last_item_pos {
                         let viewport_height = viewport.size.index(vi);
                         let overflow = last_pos - viewport_height;
-                        if overflow > 0.5 {
+                        // Don't store an adjustment while an animation owns the scroll position —
+                        // applying it would fight the active fling/drag (see note above).
+                        if overflow > 0.5 && !animation_owns_scroll {
                             // Content extends beyond viewport, store the adjustment needed
                             self.tail_adjustment_needed = overflow;
                         }
@@ -739,7 +763,11 @@ impl PortalList {
 
                 // Apply tail scroll adjustment - scroll down to keep bottom visible
                 if self.tail_adjustment_needed > 0.5 {
-                    if self.smooth_tail {
+                    if animation_owns_scroll {
+                        // Discard any pending adjustment so it can't apply mid-fling (or on the
+                        // first post-fling frame), which would fight the momentum animation.
+                        self.tail_adjustment_needed = 0.0;
+                    } else if self.smooth_tail {
                         // Start or continue smooth tailing animation via scroll state
                         if !matches!(self.scroll_state, ScrollState::Tailing { .. }) {
                             // Start new tailing animation with initial velocity
@@ -1780,25 +1808,42 @@ impl Widget for PortalList {
             });
 
         if let Some((scroll_to, at_end)) = scroll_to {
-            // Set tail_range based on whether we're at the end
-            self.tail_range = at_end && self.auto_tail;
+            // A momentum fling / programmatic scroll owns `first_scroll` directly and updates the
+            // scroll bar only to reflect itself (via `set_scroll_pos_no_action`). The bar can still
+            // emit a Scroll action whose height-tree position is quantized to the nearest item/offset;
+            // honoring it here snaps `first_scroll` back by up to ~1px every frame, fighting the
+            // animation. At the slow end of a flick — where the real per-frame motion is sub-pixel —
+            // that snap-back dominates and the content shakes in place instead of gliding to a stop.
+            // So ignore bar-driven scroll resets while an animation owns the position; honor them only
+            // for genuine user scroll-bar drags (when no such animation is active).
+            let animation_owns_scroll = matches!(
+                self.scroll_state,
+                ScrollState::Flick { .. }
+                    | ScrollState::Pulldown { .. }
+                    | ScrollState::ScrollingTo { .. }
+                    | ScrollState::Tailing { .. }
+            );
+            if !animation_owns_scroll {
+                // Set tail_range based on whether we're at the end
+                self.tail_range = at_end && self.auto_tail;
 
-            // Use height_tree to map scroll position to item + offset
-            if let Some(ref tree) = self.height_tree {
-                let (item_idx, offset) = tree.find_position(scroll_to);
-                self.first_id = self.range_start + item_idx;
-                // first_scroll is negative when scrolled into the item
-                self.first_scroll = -offset;
-            } else {
-                // Fallback to old integer-based calculation
-                self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
-                    * self.view_window as f64) as usize;
-                self.first_scroll = 0.0;
+                // Use height_tree to map scroll position to item + offset
+                if let Some(ref tree) = self.height_tree {
+                    let (item_idx, offset) = tree.find_position(scroll_to);
+                    self.first_id = self.range_start + item_idx;
+                    // first_scroll is negative when scrolled into the item
+                    self.first_scroll = -offset;
+                } else {
+                    // Fallback to old integer-based calculation
+                    self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
+                        * self.view_window as f64) as usize;
+                    self.first_scroll = 0.0;
+                }
+
+                cx.widget_action(uid, PortalListAction::Scroll);
+                self.was_scrolling = false;
+                self.area.redraw(cx);
             }
-
-            cx.widget_action(uid, PortalListAction::Scroll);
-            self.was_scrolling = false;
-            self.area.redraw(cx);
         }
 
         // When selectable, we handle mouse/touch events at PortalList level for cross-item selection.
@@ -2002,18 +2047,54 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Flick { delta, next_frame } => {
-                if next_frame.is_event(event).is_some() {
-                    *delta = *delta * self.flick_scroll_decay;
-                    if delta.abs() > self.flick_scroll_minimum {
+            ScrollState::Flick { velocity, last_time, next_frame } => {
+                if let Some(ne) = next_frame.is_event(event) {
+                    if *last_time <= 0.0 {
+                        // First fling frame: establish the time baseline, no movement yet.
+                        *last_time = ne.time;
                         *next_frame = cx.new_next_frame();
-                        let delta = *delta;
-                        self.delta_top_scroll(cx, delta, false, true);
-                        cx.widget_action(uid, PortalListAction::Scroll);
-                        self.area.redraw(cx);
+                        self.fling_dt_ema = 0.0; // re-seed the frame-interval estimate per fling
                     } else {
-                        self.was_scrolling = false;
-                        self.scroll_state = ScrollState::Stopped;
+                        // Native (iOS UIScrollView) momentum model: velocity decays continuously as
+                        // `v *= decelerationRate^(elapsed_ms)`, with the standard "normal" rate of
+                        // 0.998 (UIScrollViewDecelerationRateNormal). Android's OverScroller spline
+                        // is a touch firmer but feels essentially the same; this matches both
+                        // closely. The per-frame displacement is the exact integral of that decay
+                        // over the elapsed time, so motion is smooth and frame-rate-independent. dt
+                        // is clamped so a hitch produces a small catch-up rather than a jump.
+                        const DECEL_RATE_PER_MS: f64 = 0.998;
+                        let raw_dt = (ne.time - *last_time).clamp(0.0, 0.1);
+                        *last_time = ne.time;
+                        // Frame delivery on Windows is not perfectly vsync-uniform: `Present(1,0)`
+                        // can return early or span more than one vblank, so the raw inter-frame dt
+                        // jitters (≈5–27 ms around a ~10 ms vblank). Integrating the deceleration on
+                        // that raw dt turns the jitter into uneven per-frame displacement — the
+                        // choppiness at the slow end of a flick. Track an EMA of the interval and
+                        // clamp the dt actually used to a tight band around it, so a single late/early
+                        // frame can't produce a visible jump or stall. The EMA adapts to the real
+                        // refresh, keeping the motion frame-rate-independent.
+                        if self.fling_dt_ema <= 0.0 {
+                            self.fling_dt_ema = raw_dt;
+                        } else {
+                            self.fling_dt_ema = self.fling_dt_ema * 0.85 + raw_dt * 0.15;
+                        }
+                        let dt = raw_dt.clamp(self.fling_dt_ema * 0.5, self.fling_dt_ema * 1.5);
+                        let factor = DECEL_RATE_PER_MS.powf(dt * 1000.0);
+                        // v(t) = v0 * e^(-λt); displacement over dt = v0 * (1 - factor) / λ.
+                        let lambda = -DECEL_RATE_PER_MS.ln() * 1000.0;
+                        let displacement = *velocity * (1.0 - factor) / lambda;
+                        *velocity *= factor;
+                        // Stop once the speed drops below the minimum (px/s; the per-frame
+                        // `flick_scroll_minimum` ×60 → per-second).
+                        if velocity.abs() > self.flick_scroll_minimum * 60.0 {
+                            *next_frame = cx.new_next_frame();
+                            self.delta_top_scroll(cx, displacement, false, true);
+                            cx.widget_action(uid, PortalListAction::Scroll);
+                            self.area.redraw(cx);
+                        } else {
+                            self.was_scrolling = false;
+                            self.scroll_state = ScrollState::Stopped;
+                        }
                     }
                 }
             }
@@ -2330,30 +2411,41 @@ impl Widget for PortalList {
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                         } else {
-                            let mut last = None;
-                            let mut scaled_delta = 0.0;
+                            // Estimate the release velocity (pixels/second) like a native
+                            // VelocityTracker: average over the most recent retained samples
+                            // (the oldest→newest of the last ~4 finger positions). `abs` is the
+                            // finger position along the scroll axis in the same pixel units as
+                            // `first_scroll`, so this is directly a scroll velocity.
                             let mut total_delta = 0.0;
-                            for sample in samples.iter().rev() {
-                                if last.is_none() {
-                                    last = Some(sample);
-                                } else {
-                                    total_delta += last.unwrap().abs - sample.abs;
-                                    scaled_delta += (last.unwrap().abs - sample.abs)
-                                        / (last.unwrap().time - sample.time);
-                                }
+                            for w in samples.windows(2) {
+                                total_delta += w[1].abs - w[0].abs;
                             }
-                            scaled_delta *= self.flick_scroll_scaling;
+                            let release_velocity = if let (Some(first), Some(last_s)) =
+                                (samples.first(), samples.last())
+                            {
+                                let dt = last_s.time - first.time;
+                                if dt > 0.0001 { (last_s.abs - first.abs) / dt } else { 0.0 }
+                            } else {
+                                0.0
+                            };
+                            // Cap to a sane maximum flick speed (px/s). `flick_scroll_maximum`
+                            // is a per-frame value; ×60 converts it to per-second.
+                            let max_velocity = self.flick_scroll_maximum * 60.0;
+                            let release_velocity =
+                                release_velocity.clamp(-max_velocity, max_velocity);
+                            // Minimum release speed (px/s) below which a lift is treated as a stop,
+                            // not a fling. `flick_scroll_minimum` is per-frame; ×60 → per-second.
+                            let min_velocity = self.flick_scroll_minimum * 60.0;
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {
                                     next_frame: cx.new_next_frame(),
                                 };
                             } else if total_delta.abs() > 10.0
-                                && scaled_delta.abs() > self.flick_scroll_minimum
+                                && release_velocity.abs() > min_velocity
                             {
                                 self.scroll_state = ScrollState::Flick {
-                                    delta: scaled_delta
-                                        .min(self.flick_scroll_maximum)
-                                        .max(-self.flick_scroll_maximum),
+                                    velocity: release_velocity,
+                                    last_time: 0.0,
                                     next_frame: cx.new_next_frame(),
                                 };
                             } else {
@@ -2500,9 +2592,9 @@ impl PortalListRef {
                 state = "Drag";
                 drag_samples = samples.len();
             }
-            ScrollState::Flick { delta: d, .. } => {
+            ScrollState::Flick { velocity: v, .. } => {
                 state = "Flick";
-                delta = *d;
+                delta = *v;
             }
             ScrollState::Pulldown { .. } => {
                 state = "Pulldown";

@@ -174,6 +174,17 @@ pub struct Win32Window {
     pub ime_rect: Rect,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
+    /// Cached window DPI scale. `get_dpi_factor()` is hot — it is called several times per
+    /// WM_NCHITTEST and per WM_MOUSEMOVE (via `get_mouse_pos_from_lparam`), and otherwise syscalls
+    /// `GetDeviceCaps` every time. WM_NCHITTEST is OS-sent on every mouse move (uncoalesced), so at
+    /// a high mouse report rate these syscalls flood the message pump and cause scroll jitter. The
+    /// DPI only changes on WM_DPICHANGED, where we invalidate this (set to 0.0 -> re-query once).
+    pub cached_dpi: Cell<f64>,
+    /// Cached WM_NCHITTEST `WindowDragQuery` result, keyed by the raw lparam (cursor screen pos).
+    /// The OS sends several WM_NCHITTEST for the SAME cursor position per frame (move + setcursor
+    /// + ...), and each otherwise runs a full WindowDragQuery event dispatch through the widget
+    /// tree. We dedupe per position; invalidated on resize (the window/caption geometry changes).
+    pub nc_dq_cache: Cell<Option<(isize, WindowDragQueryResponse)>>,
     pub ignore_wmsize: usize,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
@@ -244,6 +255,8 @@ impl Win32Window {
             ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
+            cached_dpi: Cell::new(0.0),
+            nc_dq_cache: Cell::new(None),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -291,6 +304,8 @@ impl Win32Window {
             ime_rect: Rect::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
+            cached_dpi: Cell::new(0.0),
+            nc_dq_cache: Cell::new(None),
             ignore_wmsize: 0,
             hwnd,
             track_mouse_event: false,
@@ -384,8 +399,6 @@ impl Win32Window {
                 }
             }
             WM_NCHITTEST => {
-                //let ycoord = (lparam.0 >> 16) as u16 as i16 as i32;
-                //let xcoord = (lparam.0 & 0xffff) as u16 as i16 as i32;
                 let abs = window.get_mouse_pos_from_lparam(lparam);
                 let mut rect = RECT {
                     left: 0,
@@ -394,6 +407,9 @@ impl Win32Window {
                     right: 0,
                 };
                 const EDGE: f64 = 4.0;
+                // WM_NCHITTEST is OS-sent on every mouse move (uncoalesced); `get_dpi_factor()` is
+                // now cached so this (and the two calls inside `get_mouse_pos_from_lparam`) no
+                // longer syscall `GetDeviceCaps` per move.
                 let dpi = window.get_dpi_factor();
                 GetWindowRect(hwnd, &mut rect).unwrap();
                 let rect = Rect {
@@ -435,13 +451,23 @@ impl Win32Window {
                     with_win32_app(|app| app.set_mouse_cursor(MouseCursor::NsResize));
                     return LRESULT(HTBOTTOM as isize);
                 }
-                let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
-                window.do_callback(Win32Event::WindowDragQuery(WindowDragQueryEvent {
-                    window_id: window.window_id,
-                    abs: window.get_mouse_pos_from_lparam(lparam) - rect.pos,
-                    response: response.clone(),
-                }));
-                match response.get() {
+                // Dedupe: return the cached WindowDragQuery result for a repeated cursor position
+                // (the loop is vsync-paced, so the OS sends several same-position hit-tests/frame).
+                let response_val = match window.nc_dq_cache.get() {
+                    Some((lp, rv)) if lp == lparam.0 => rv,
+                    _ => {
+                        let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+                        window.do_callback(Win32Event::WindowDragQuery(WindowDragQueryEvent {
+                            window_id: window.window_id,
+                            abs: window.get_mouse_pos_from_lparam(lparam) - rect.pos,
+                            response: response.clone(),
+                        }));
+                        let rv = response.get();
+                        window.nc_dq_cache.set(Some((lparam.0, rv)));
+                        rv
+                    }
+                };
+                match response_val {
                     WindowDragQueryResponse::Client => {
                         return LRESULT(HTCLIENT as isize);
                     }
@@ -745,6 +771,9 @@ impl Win32Window {
                 window.send_sizing_event(proposed_rect);
             }
             WM_SIZE | WM_DPICHANGED => {
+                // The window may have moved to a monitor with a different scale; drop the cached
+                // DPI so send_change_event() (and subsequent hit-tests) re-read the new value.
+                window.invalidate_cached_dpi();
                 window.send_change_event();
             }
             WM_CLOSE => {
@@ -1242,7 +1271,18 @@ impl Win32Window {
     }
 
     pub fn get_dpi_factor(&self) -> f64 {
-        with_win32_app(|app| app.dpi_functions.hwnd_dpi_factor(self.hwnd) as f64)
+        let cached = self.cached_dpi.get();
+        if cached > 0.0 {
+            return cached;
+        }
+        let dpi = with_win32_app(|app| app.dpi_functions.hwnd_dpi_factor(self.hwnd) as f64);
+        self.cached_dpi.set(dpi);
+        dpi
+    }
+
+    /// Drop the cached DPI so the next `get_dpi_factor()` re-queries it. Call on WM_DPICHANGED.
+    pub fn invalidate_cached_dpi(&self) {
+        self.cached_dpi.set(0.0);
     }
 
     pub fn do_callback(&mut self, event: Win32Event) {
@@ -1250,6 +1290,8 @@ impl Win32Window {
     }
 
     pub fn send_change_event(&mut self) {
+        // The window/caption geometry changed; drop the WM_NCHITTEST hit-test cache.
+        self.nc_dq_cache.set(None);
         let new_geom = self.get_window_geom();
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();

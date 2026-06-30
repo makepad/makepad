@@ -355,6 +355,13 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
+    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. That event
+    /// fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and resolving the
+    /// views + their areas each time runs widget-tree lookups, a real source of scroll jitter when
+    /// the mouse is moved during a fling. These only change on relayout, so we recompute lazily and
+    /// invalidate on `WindowGeomChange`.
+    #[rust]
+    drag_query_cache: Option<(bool, Rect, Rect)>,
     #[deref]
     view: View,
 
@@ -1192,6 +1199,9 @@ impl Widget for Window {
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
+                    // geometry cache so it is recomputed on the next hit-test.
+                    self.drag_query_cache = None;
                     match cx.os_type() {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
@@ -1246,10 +1256,23 @@ impl Widget for Window {
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    if self.view(cx, ids!(caption_bar)).visible() {
-                        let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
-                        let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
-
+                    // Resolve the caption / buttons geometry at most once per relayout; this event
+                    // arrives per mouse-move (per WM_NCHITTEST) and the view lookups are not free.
+                    let (visible, caption_rect, buttons_rect) = match self.drag_query_cache {
+                        Some(c) => c,
+                        None => {
+                            let visible = self.view(cx, ids!(caption_bar)).visible();
+                            let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
+                            let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
+                            // Only cache once the caption bar has actually been laid out, so an
+                            // early (zero-size) query doesn't get pinned.
+                            if !visible || caption_rect.size != Vec2d::default() {
+                                self.drag_query_cache = Some((visible, caption_rect, buttons_rect));
+                            }
+                            (visible, caption_rect, buttons_rect)
+                        }
+                    };
+                    if visible {
                         if caption_rect.contains(dq.abs) {
                             if buttons_rect.size != Vec2d::default()
                                 && buttons_rect.contains(dq.abs)

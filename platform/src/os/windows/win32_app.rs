@@ -45,8 +45,8 @@ use {
                         LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
                         SetTimer, ShowCursor, TranslateMessage, CS_OWNDC, HICON, IDC_ARROW,
                         IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
-                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, PM_REMOVE,
-                        WM_QUIT, WNDCLASSEXW,
+                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, MSG,
+                        PM_NOREMOVE, PM_REMOVE, WM_MOUSEMOVE, WM_QUIT, WNDCLASSEXW,
                     },
                 },
             },
@@ -86,6 +86,44 @@ P1: IntoParam<IDropSource>,
     ::windows_targets::link!("ole32.dll" "system" fn DoDragDrop(pdataobj: *mut::core::ffi::c_void, pdropsource: *mut::core::ffi::c_void, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT);
     DoDragDrop(pdataobj.into_param().abi(), pdropsource.into_param().abi(), dwokeffects, pdweffect)
 }*/
+
+/// Coalesce a run of consecutive `WM_MOUSEMOVE` messages for the same window
+/// into just the latest one.
+///
+/// A high-polling-rate mouse (500–1000+ Hz) floods the message queue with
+/// mouse-moves. Dispatching each one separately runs redundant hover
+/// hit-testing across the whole widget tree (and a paint per move), which
+/// steals frame budget from an in-progress fling — producing the visible
+/// scroll judder when the mouse is moved during deceleration. We only merge
+/// *adjacent* moves: we peek the next queued message and stop at the first
+/// non-move, so no button / key / wheel message is ever dropped or reordered.
+///
+/// macOS gets this for free from Cocoa's built-in mouse-move coalescing, and
+/// the Android backend already coalesces consecutive touch-moves explicitly.
+unsafe fn coalesce_mouse_move(mut msg: MSG) -> MSG {
+    if msg.message != WM_MOUSEMOVE {
+        return msg;
+    }
+    loop {
+        // Peek (without removing) the next queued message for this window.
+        let mut peek = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(peek.as_mut_ptr(), Some(msg.hwnd), 0, 0, PM_NOREMOVE) == FALSE {
+            break;
+        }
+        if peek.assume_init().message != WM_MOUSEMOVE {
+            break; // next message isn't a move — don't reorder past it
+        }
+        // It is a move: remove it and let it supersede the current one.
+        let mut taken = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(taken.as_mut_ptr(), Some(msg.hwnd), WM_MOUSEMOVE, WM_MOUSEMOVE, PM_REMOVE)
+            == FALSE
+        {
+            break;
+        }
+        msg = taken.assume_init();
+    }
+    msg
+}
 
 pub struct Win32App {
     event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow>>,
@@ -279,6 +317,7 @@ impl Win32App {
                             debug_assert_eq!(msg.message, WM_QUIT);
                             with_win32_app(|app| app.event_flow = EventFlow::Exit);
                         } else {
+                            let msg = coalesce_mouse_move(msg);
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !with_win32_app(|app| app.was_signal_poll()) {
@@ -287,14 +326,37 @@ impl Win32App {
                         }
                     }
                     EventFlow::Poll => {
+                        // Dispatch at most one pending message (mouse-moves coalesced into the
+                        // latest), then ALWAYS paint once per loop pass.
+                        //
+                        // The animation frame-advance (`call_next_frame_event`, e.g. a momentum
+                        // fling) AND the vsync-blocking `Present` both live in the Paint callback.
+                        // A NextFrame is internal Cx state, not a win32 message, so it can only be
+                        // serviced by reaching this Paint. The previous code only painted when the
+                        // message queue was momentarily empty (`ret == FALSE`); a moving mouse
+                        // injects WM_MOUSEMOVE at 500–1000 Hz, so the queue almost never emptied
+                        // during a fling and the Paint — hence the fling step and its Present — was
+                        // starved, freezing the scroll until the mouse paused, then jumping. That is
+                        // the "judder when moving the mouse during deceleration" bug, and it is a
+                        // pure scheduling effect (independent of per-move CPU cost, which is why
+                        // coalescing alone didn't fix it).
+                        //
+                        // Painting once per pass advances the animation and presents every loop
+                        // iteration; `Present(1,..)` (vsync) still paces us to the display refresh,
+                        // and we only stay in Poll while there is animation/dirty work (otherwise the
+                        // callback returns `Wait` and we sleep in `GetMessageW`), so this does not
+                        // busy-loop.
                         let mut msg = std::mem::MaybeUninit::uninit();
                         let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
-                        let msg = msg.assume_init();
-                        if ret == FALSE {
-                            Win32App::do_callback(Win32Event::Paint)
-                        } else {
+                        if ret != FALSE {
+                            let msg = coalesce_mouse_move(msg.assume_init());
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
+                        }
+                        // Skip the paint only if the dispatched message asked us to exit, so we
+                        // don't run an extra callback (double shutdown) on the way out.
+                        if !matches!(with_win32_app(|app| app.event_flow.clone()), EventFlow::Exit) {
+                            Win32App::do_callback(Win32Event::Paint);
                         }
                     }
                     EventFlow::Exit => panic!(),
