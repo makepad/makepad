@@ -70,6 +70,17 @@ impl ScriptObjectRef {
     pub fn as_object(&self) -> ScriptObject {
         self.obj
     }
+
+    /// A stable, unique identity for the heap that minted this ref. All refs from
+    /// the same heap share one `root_objects` `Rc`, so its pointer identifies the
+    /// heap for the heap's lifetime. Returns 0 for a heap-less (empty) ref. Use
+    /// this to route a widget's script objects back to their owning VM instead of
+    /// dereferencing them against the wrong heap.
+    pub fn heap_key(&self) -> usize {
+        self.roots
+            .as_ref()
+            .map_or(0, |rc| Rc::as_ptr(rc) as *const () as usize)
+    }
 }
 
 pub trait ScriptRefOptionExt {

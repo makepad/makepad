@@ -5,6 +5,7 @@ use {
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_tree::CxWidgetExt,
     std::any::Any,
+    std::cell::RefCell,
     std::collections::{HashMap, VecDeque},
     std::sync::atomic::{AtomicU64, Ordering},
 };
@@ -29,6 +30,55 @@ impl ScriptAsyncId {
 pub struct SplashVmId(pub u64);
 
 pub const MAIN_SPLASH_VM_ID: SplashVmId = SplashVmId(0);
+
+thread_local! {
+    /// Splash isolate VMs whose owning `Splash` widget has been dropped, awaiting
+    /// reclamation. `Drop` can't reach `Cx`, so it only records the id here; the
+    /// real teardown happens in [`gc_dead_splash_isolates`] on the next isolate
+    /// allocation. We defer rather than free in `Drop` because the isolate owns a
+    /// live `ScriptHeap`/`ScriptStd` that must be dropped with a `Cx` in hand and
+    /// while nothing is executing in it.
+    static DEAD_SPLASH_ISOLATES: RefCell<Vec<SplashVmId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Queue a Splash isolate for reclamation on the next isolate alloc. Called from
+/// `Splash::drop`, which has no `Cx`. Ignores the main VM (id 0), never an isolate.
+pub(crate) fn mark_splash_isolate_dead(vm_id: SplashVmId) {
+    if vm_id == MAIN_SPLASH_VM_ID {
+        return;
+    }
+    DEAD_SPLASH_ISOLATES.with(|g| g.borrow_mut().push(vm_id));
+}
+
+/// Reclaim any isolates queued by [`mark_splash_isolate_dead`]. Called on each new
+/// isolate allocation so the live count tracks live Splashes instead of growing
+/// unboundedly. Dropping an isolate frees its `ScriptHeap` (and every widget object
+/// minted in it) plus its `ScriptStd`, so we must also purge every queue/map that
+/// could later swap into the now-missing VM (which would panic in
+/// `with_script_vm_id`) or dereference its freed heap. Cheap no-op when nothing is
+/// queued.
+pub(crate) fn gc_dead_splash_isolates(cx: &mut Cx) {
+    let dead: Vec<SplashVmId> = DEAD_SPLASH_ISOLATES.with(|g| {
+        let mut g = g.borrow_mut();
+        std::mem::take(&mut *g)
+    });
+    if dead.is_empty() {
+        return;
+    }
+    let state = cx.global::<CxWidgetAsync>();
+    for vm_id in dead {
+        state.isolated_vms.vms.remove(&vm_id);
+        state.heap_to_vm.retain(|_, v| *v != vm_id);
+        state.ui_handle_types.remove(&vm_id);
+        state.done.retain(|d| d.vm_id != vm_id);
+        state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
+        state.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
+        state
+            .pending_script_to_widget_returns
+            .retain(|(v, _), _| *v != vm_id);
+        state.thread_map.retain(|(v, _), _| *v != vm_id);
+    }
+}
 
 #[derive(Clone)]
 pub struct ScriptAsyncCall {
@@ -129,7 +179,13 @@ struct CxWidgetAsync {
     thread_map: HashMap<(SplashVmId, usize), (WidgetUid, ScriptAsyncId)>,
     ui_handle_types: HashMap<SplashVmId, ScriptHandleType>,
     global_ui_root_uid: WidgetUid,
-    widget_owners: HashMap<WidgetUid, SplashVmId>,
+    /// Maps a heap identity (see [`ScriptObjectRef::heap_key`]) to the isolate VM
+    /// that owns it. Only isolate heaps are inserted; a ref whose heap isn't here
+    /// (the main app heap, or an empty ref) resolves to `MAIN_SPLASH_VM_ID`. This
+    /// replaces per-widget uid registration: a widget's owning VM is derived
+    /// directly from its own `source` ref, so there are no coverage gaps for
+    /// lazily-created widgets and no wrong-heap fallbacks.
+    heap_to_vm: HashMap<usize, SplashVmId>,
     isolated_vms: IsolatedScriptVms,
     current_vm_id: SplashVmId,
 }
@@ -159,14 +215,19 @@ pub trait CxSplashVmExt {
         thread_id: ScriptThreadId,
         f: impl FnOnce(&mut ScriptVm) -> R,
     ) -> R;
-    fn widget_vm_id(&mut self, target_uid: WidgetUid) -> SplashVmId;
-    fn register_widget_vm_id(&mut self, target_uid: WidgetUid, vm_id: SplashVmId);
-    fn unregister_widget_vm_id(&mut self, target_uid: WidgetUid);
+    /// Resolve the VM that owns a widget's script objects directly from a ref
+    /// minted by that widget (its `source`, a template, an `on_click` fn). This
+    /// is exact — the heap identity comes from the ref itself — so it never
+    /// mis-routes lazily-created widgets the way a uid registry could.
+    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> SplashVmId;
 }
 
 impl CxSplashVmExt for Cx {
     fn alloc_splash_vm(&mut self) -> SplashVmId {
         ensure_widget_async_hooks_registered(self);
+        // Reclaim isolates from dropped Splashes before growing, so the live count
+        // tracks the number of live Splash widgets rather than accumulating.
+        gc_dead_splash_isolates(self);
 
         let id = {
             let state = self.global::<CxWidgetAsync>();
@@ -190,7 +251,12 @@ impl CxSplashVmExt for Cx {
             vm.bx
         };
 
-        self.global::<CxWidgetAsync>().isolated_vms.vms.insert(
+        // Record this isolate's heap identity so any ref minted here (widget
+        // sources, templates, on_click fns) routes back to this VM.
+        let heap_key = bx.heap.heap_key();
+        let state = self.global::<CxWidgetAsync>();
+        state.heap_to_vm.insert(heap_key, id);
+        state.isolated_vms.vms.insert(
             id,
             IsolatedSplashVm {
                 std,
@@ -292,26 +358,16 @@ impl CxSplashVmExt for Cx {
         out
     }
 
-    fn widget_vm_id(&mut self, target_uid: WidgetUid) -> SplashVmId {
+    fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> SplashVmId {
+        let heap_key = script_ref.heap_key();
+        if heap_key == 0 {
+            return MAIN_SPLASH_VM_ID;
+        }
         self.global::<CxWidgetAsync>()
-            .widget_owners
-            .get(&target_uid)
+            .heap_to_vm
+            .get(&heap_key)
             .copied()
             .unwrap_or(MAIN_SPLASH_VM_ID)
-    }
-
-    fn register_widget_vm_id(&mut self, target_uid: WidgetUid, vm_id: SplashVmId) {
-        if target_uid != WidgetUid(0) {
-            self.global::<CxWidgetAsync>()
-                .widget_owners
-                .insert(target_uid, vm_id);
-        }
-    }
-
-    fn unregister_widget_vm_id(&mut self, target_uid: WidgetUid) {
-        self.global::<CxWidgetAsync>()
-            .widget_owners
-            .remove(&target_uid);
     }
 }
 
@@ -708,7 +764,7 @@ impl CxWidgetToScriptCallExt for Cx {
         args: ScriptValue,
         from_method: LiveId,
     ) -> ScriptAsyncResult {
-        let vm_id = self.widget_vm_id(target_uid);
+        let vm_id = self.script_ref_vm_id(&source);
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_async_call_fwd(
                 target_uid,
@@ -732,7 +788,7 @@ impl CxWidgetToScriptCallExt for Cx {
         args: &[ScriptValue],
         from_method: LiveId,
     ) -> ScriptAsyncResult {
-        let vm_id = self.widget_vm_id(target_uid);
+        let vm_id = self.script_ref_vm_id(&source);
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_async_call(
                 target_uid,
@@ -754,7 +810,7 @@ impl CxWidgetToScriptCallExt for Cx {
         script_fn: ScriptFnRef,
         args: ScriptValue,
     ) {
-        let vm_id = self.widget_vm_id(target_uid);
+        let vm_id = self.script_ref_vm_id(&source);
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_call_fwd(target_uid, me, source, script_fn, args);
         });
@@ -768,7 +824,7 @@ impl CxWidgetToScriptCallExt for Cx {
         script_fn: ScriptFnRef,
         args: &[ScriptValue],
     ) {
-        let vm_id = self.widget_vm_id(target_uid);
+        let vm_id = self.script_ref_vm_id(&source);
         self.with_script_vm_id(vm_id, |vm| {
             vm.widget_to_script_call(target_uid, me, source, script_fn, args);
         });
