@@ -7,6 +7,7 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         widget::*,
+        widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
     },
     std::collections::HashMap,
@@ -1099,6 +1100,13 @@ impl PortalList {
 
         if let Some(template_ref) = self.templates.get(&template) {
             let template_value: ScriptValue = template_ref.as_object().into();
+            // Instantiate items in the VM whose heap actually minted the template.
+            // Using `cx.with_vm` (the main VM) here would dereference an isolate-heap
+            // object id against the main heap and panic out-of-bounds. Resolving from
+            // the template ref itself is exact; for a non-isolated (main-app) list it
+            // yields MAIN_SPLASH_VM_ID, i.e. exactly `cx.with_vm`, so normal usage is
+            // unchanged.
+            let vm_id = cx.script_ref_vm_id(template_ref);
             match self.items.entry(entry_id) {
                 Entry::Occupied(mut occ) => {
                     if occ.get().template == template {
@@ -1112,7 +1120,7 @@ impl PortalList {
                             let widget_ref = reused.widget;
                             // Reused items must be reset to template defaults, otherwise
                             // stale instance/animator state (e.g. selected) can leak to a new entry.
-                            cx.with_vm(|vm| {
+                            cx.with_script_vm_id(vm_id, |vm| {
                                 let mut widget_ref = widget_ref.clone();
                                 widget_ref.script_apply(
                                     vm,
@@ -1123,7 +1131,9 @@ impl PortalList {
                             });
                             widget_ref
                         } else {
-                            cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
+                            cx.with_script_vm_id(vm_id, |vm| {
+                                WidgetRef::script_from_value(vm, template_value)
+                            })
                         };
                         occ.insert(WidgetItem {
                             template,
@@ -1146,7 +1156,7 @@ impl PortalList {
                         let widget_ref = reused.widget;
                         // Reused items must be reset to template defaults, otherwise
                         // stale instance/animator state (e.g. selected) can leak to a new entry.
-                        cx.with_vm(|vm| {
+                        cx.with_script_vm_id(vm_id, |vm| {
                             let mut widget_ref = widget_ref.clone();
                             widget_ref.script_apply(
                                 vm,
@@ -1157,7 +1167,9 @@ impl PortalList {
                         });
                         widget_ref
                     } else {
-                        cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
+                        cx.with_script_vm_id(vm_id, |vm| {
+                            WidgetRef::script_from_value(vm, template_value)
+                        })
                     };
                     vac.insert(WidgetItem {
                         template,

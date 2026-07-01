@@ -4,6 +4,7 @@ use crate::{
     makepad_draw::*,
     text_input::{TextInput, TextInputAction},
     widget::*,
+    widget_async::ScriptAsyncResult,
 };
 
 script_mod! {
@@ -1511,6 +1512,30 @@ impl Widget for Slider {
 
     fn disabled(&self, cx: &Cx) -> bool {
         self.animator_in_state(cx, ids!(disabled.on))
+    }
+
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(value) {
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(self.value()));
+        }
+        if method == live_id!(set_value) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if let Some(v) = value.as_f64() {
+                    vm.with_cx_mut(|cx| {
+                        self.set_value(cx, v);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {

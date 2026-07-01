@@ -1,4 +1,5 @@
 use crate::{cx::Cx, id_pool::*, makepad_error_log::*, makepad_script::*, os::CxOsGeometry};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Geometry(PoolId);
@@ -6,6 +7,22 @@ pub struct Geometry(PoolId);
 impl ScriptHandleGc for Geometry {
     fn gc(&mut self) {
         self.0.free()
+    }
+}
+
+impl Geometry {
+    /// A non-owning handle to an existing geometry slot. Dropping it does NOT free
+    /// the shared `cx.geometries` slot (its `PoolId` carries a detached free list),
+    /// so it's safe to hand out per-VM references to a Cx-owned singleton geometry.
+    /// Without this, each isolate VM allocated its own copy of the standard shader
+    /// geometries and freed them on teardown — leaving the Cx-global shader cache
+    /// pointing at a reclaimed slot (geometry generation mismatch).
+    pub fn new_borrowed(id: GeometryId) -> Self {
+        Geometry(PoolId {
+            id: id.0,
+            generation: id.1,
+            free: IdPoolFree::default(),
+        })
     }
 }
 
@@ -31,11 +48,33 @@ impl GeometryId {
 }
 
 #[derive(Default)]
-pub struct CxGeometryPool(pub(crate) IdPool<CxGeometry>);
+pub struct CxGeometryPool(
+    pub(crate) IdPool<CxGeometry>,
+    /// Cx-owned singleton geometries (e.g. the standard quad/triangle/cube shader
+    /// meshes), keyed by name. Owned here so their slots live for the whole app and
+    /// are never freed by a script VM being torn down; VMs get non-owning handles
+    /// via [`Geometry::new_borrowed`].
+    pub(crate) HashMap<LiveId, Geometry>,
+);
 
 impl CxGeometryPool {
     pub fn alloc(&mut self) -> Geometry {
         Geometry(self.0.alloc())
+    }
+}
+
+impl Cx {
+    /// Return the id of a Cx-owned singleton geometry named `key`, creating it via
+    /// `make` on first use. All VMs share this one slot through non-owning handles,
+    /// so it is never freed by an individual VM/isolate teardown.
+    pub fn shared_geometry(&mut self, key: LiveId, make: impl FnOnce(&mut Cx) -> Geometry) -> GeometryId {
+        if let Some(g) = self.geometries.1.get(&key) {
+            return g.geometry_id();
+        }
+        let geometry = make(self);
+        let id = geometry.geometry_id();
+        self.geometries.1.insert(key, geometry);
+        id
     }
 }
 
