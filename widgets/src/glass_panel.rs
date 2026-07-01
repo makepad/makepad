@@ -321,19 +321,20 @@ script_mod! {
                 let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
                 let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
                 let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
-                let ripple_surface = ripple_slope * 0.85 + ripple_wave * 0.20
-                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.18, 0.0, 1.55)
-                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.15, 0.0, 2.10)
+                let ripple_surface = ripple_slope * 1.35 + ripple_wave * 0.34
+                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.45, 0.0, 1.85)
+                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.6, 0.0, 2.60)
 
                 // Edge lens + RGB-split diffraction. The base offset bends the background at the rim
                 // (scaled by the flattening wave); the colour offset samples R/G/B at slightly
-                // different positions for the chromatic splice.
+                // different positions for the chromatic splice. The click-ripple displacement is
+                // cranked WAY up here to try out a much stronger lensing pulse.
                 let rim = clamp(1.0 - abs(shape) / 13.0, 0.0, 1.0)
                 let lens = rim * rim * lens_depth
-                let water_offset = ripple_dir * (ripple_surface * 22.0) / src
+                let water_offset = ripple_dir * (ripple_surface * 85.0) / src
                 let base_offset = normal * (lens * 18.0) / src + water_offset
                 let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / src
-                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / src
+                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 14.0) / src
                 let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))

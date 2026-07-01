@@ -98,44 +98,44 @@ pub struct DepthMeshVertex {
 }
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    // Each of these standard shader geometries is a single Cx-owned slot shared by
+    // every VM. A VM (main or Splash isolate) only gets a *non-owning* handle to it,
+    // so tearing an isolate down never frees the slot and the Cx-global shader cache
+    // (which bakes in the geometry id) can't be left pointing at a reclaimed slot.
+    fn shared(vm: &mut ScriptVm, key: LiveId, make: impl FnOnce() -> GeometryGen) -> ScriptValue {
+        let id = vm
+            .cx_mut()
+            .shared_geometry(key, |cx| make().into_geometry(cx));
+        Geometry::new_borrowed(id).into_script_handle(vm)
+    }
+
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
     set_script_value_to_pod!(vm, geom.QuadVertex);
     // now lets also build a quad vertexbuffer
-    let gen = GeometryGen::from_quad_2d(0., 0., 1., 1.)
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let gen = shared(vm, id!(QuadGeom), || GeometryGen::from_quad_2d(0., 0., 1., 1.));
     set_script_value!(vm, geom.QuadGeom = gen);
     // Vector geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.VectorVertex);
-    let vgen = GeometryGen::from_triangle_2d()
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let vgen = shared(vm, id!(VectorGeom), GeometryGen::from_triangle_2d);
     set_script_value!(vm, geom.VectorGeom = vgen);
     // PBR geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.PbrVertex);
-    let pgen = GeometryGen::from_triangle_pbr()
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
     set_script_value!(vm, geom.PbrGeom = pgen);
     // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
     set_script_value_to_pod!(vm, geom.CubeVertex);
-    let cgen = GeometryGen::from_cube_3d(1.0, 1.0, 1.0, 1, 1, 1)
-        .into_cube_vertex_pod()
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let cgen = shared(vm, id!(CubeGeom), || {
+        GeometryGen::from_cube_3d(1.0, 1.0, 1.0, 1, 1, 1).into_cube_vertex_pod()
+    });
     set_script_value!(vm, geom.CubeGeom = cgen);
     // Ico geometry: minimal pos/normal layout for faceted solids.
     set_script_value_to_pod!(vm, geom.IcoVertex);
-    let igen = GeometryGen::from_triangle_ico()
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let igen = shared(vm, id!(IcoGeom), GeometryGen::from_triangle_ico);
     set_script_value!(vm, geom.IcoGeom = igen);
     // Depth mesh geometry: position plus per-triangle barycentrics.
     set_script_value_to_pod!(vm, geom.DepthMeshVertex);
-    let dgen = GeometryGen::from_triangle_depth_mesh()
-        .into_geometry(vm.cx_mut())
-        .into_script_handle(vm);
+    let dgen = shared(vm, id!(DepthMeshGeom), GeometryGen::from_triangle_depth_mesh);
     set_script_value!(vm, geom.DepthMeshGeom = dgen);
     NIL
 }

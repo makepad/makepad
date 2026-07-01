@@ -79,51 +79,13 @@ impl Splash {
         });
 
         if let Some(view) = new_view {
-            self.unregister_view_owners(cx);
             self.view = view;
-            self.register_view_owners(cx);
             // Make `ui` a global in this splash's VM (pointing at the freshly-built view root) so
             // helper `fn`s inside the block can use `ui.<id>.set_text(...)`, not just inline
             // handlers. Without this, calculators/forms that route through a helper silently fail.
             crate::widget_async::inject_splash_ui_handle(cx, self.vm_id, self.view.widget_uid());
             cx.widget_tree_mark_dirty(self.uid);
         }
-    }
-
-    fn register_view_owners(&self, cx: &mut Cx) {
-        Self::register_view_owner(cx, &self.view, self.vm_id);
-        self.view.children(&mut |_, child| {
-            Self::register_widget_ref_owner(cx, &child, self.vm_id);
-        });
-    }
-
-    fn unregister_view_owners(&self, cx: &mut Cx) {
-        Self::unregister_view_owner(cx, &self.view);
-        self.view.children(&mut |_, child| {
-            Self::unregister_widget_ref_owner(cx, &child);
-        });
-    }
-
-    fn register_view_owner(cx: &mut Cx, view: &View, vm_id: SplashVmId) {
-        cx.register_widget_vm_id(view.widget_uid(), vm_id);
-    }
-
-    fn unregister_view_owner(cx: &mut Cx, view: &View) {
-        cx.unregister_widget_vm_id(view.widget_uid());
-    }
-
-    fn register_widget_ref_owner(cx: &mut Cx, widget: &WidgetRef, vm_id: SplashVmId) {
-        cx.register_widget_vm_id(widget.widget_uid(), vm_id);
-        widget.children(&mut |_, child| {
-            Self::register_widget_ref_owner(cx, &child, vm_id);
-        });
-    }
-
-    fn unregister_widget_ref_owner(cx: &mut Cx, widget: &WidgetRef) {
-        cx.unregister_widget_vm_id(widget.widget_uid());
-        widget.children(&mut |_, child| {
-            Self::unregister_widget_ref_owner(cx, &child);
-        });
     }
 }
 
@@ -146,6 +108,16 @@ impl WidgetNode for Splash {
 
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         self.view.children(visit);
+    }
+}
+
+impl Drop for Splash {
+    fn drop(&mut self) {
+        // A Splash owns an isolate script VM. `Drop` has no `Cx`, so it can't free
+        // the VM here; it just marks the id for reclamation. The isolate is torn
+        // down later by `gc_dead_splash_isolates` (on the next isolate alloc, async
+        // pump, or Splash event) while a `Cx` is available and nothing runs in it.
+        crate::widget_async::mark_splash_isolate_dead(self.vm_id);
     }
 }
 

@@ -633,7 +633,7 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
         if let Some(handler) = self.on_change.as_object() {
             let text = self.text.clone();
-            let vm_id = cx.widget_vm_id(uid);
+            let vm_id = cx.script_ref_vm_id(&self.source);
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(
@@ -650,7 +650,7 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
         if let Some(handler) = self.on_return.as_object() {
             let text = self.text.clone();
-            let vm_id = cx.widget_vm_id(uid);
+            let vm_id = cx.script_ref_vm_id(&self.source);
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
                 vm.with_instruction_limit(

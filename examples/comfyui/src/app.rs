@@ -10,8 +10,8 @@ script_mod! {
     use mod.edmx
 
     let self_ip = "10.0.0.112"
-    let comfy_ip = "10.0.0.217:8000"
-    let llm_base = "http://10.0.0.168:8080"
+    let comfy_ip = "10.0.0.169:8000"
+    let llm_base = "http://10.0.0.169:8080"
     let prompt_path = "/Users/admin/prompt.txt"
     let comfy_client_id = "8a327a3e4961419ea7386c542f0ea491"
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
@@ -116,14 +116,19 @@ script_mod! {
         if !auto_enabled return
         if auto_task_pending return
         auto_task_pending = true
-        ui_log("Auto loop queued next render")
-        background_tasks.push(std.task(|task| {
+        // Delay the rerun via a timeout (not an immediate task): if post() fails
+        // fast (e.g. a server is unreachable), an immediate reschedule would busy-loop
+        // the task pump at 100% CPU. The timeout yields to the event loop between runs.
+        // The delay is read live from the UI slider (0s = near-instant .. 600s = 10 min).
+        let delay = ui.delay_slider.value()
+        ui_log("Auto loop queued next render in " + delay + "s")
+        std.start_timeout(delay, || {
             auto_task_pending = false
             if auto_enabled && !is_running{
                 ui_log("Auto loop starting next run")
                 post()
             }
-        }))
+        })
     }
 
     fn wait_for_image_request(file_id, timeout_seconds){
@@ -398,12 +403,25 @@ script_mod! {
             }
         }
 
-        let idx = headers.search.to_f64()
+        if headers.path.search("/img/") == 0{
+            let body = mod.edmx.image_body
+            return net.HttpServerResponse{
+                header:
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/html; charset=utf-8\r\n" +
+                    "Cache-Control: no-store, max-age=0\r\n" +
+                    "Content-Length: " + body.len() + "\r\n" +
+                    "Connection: close\r\n\r\n"
+                body: body
+            }
+        }
+
+        let idx = if headers.search != nil && headers.search != "" headers.search.to_f64() else -1
         let body =
-            if idx.is_number()
+            if idx.is_number() && idx >= 0 && idx < displays.len()
                 displays[idx].prompt
             else
-                mod.edmx.http_body
+                mod.edmx.prompt_body
         net.HttpServerResponse{
             header:
                 "HTTP/1.1 200 OK\r\n" +
@@ -611,6 +629,23 @@ script_mod! {
                                         if auto_enabled stop_auto_loop()
                                         else resume_auto_loop()
                                     }
+                                }
+                            }
+
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{y: 0.5}
+
+                                Label{text: "Auto delay" draw_text.color: #9fb3c8 draw_text.text_style.font_size: 10}
+                                delay_slider := Slider{
+                                    width: Fill
+                                    text: "seconds between images (0 = near-instant, 600 = 10 min)"
+                                    min: 0.0
+                                    max: 600.0
+                                    default: 2.0
                                 }
                             }
 

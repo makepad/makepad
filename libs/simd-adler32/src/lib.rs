@@ -95,7 +95,8 @@ pub mod hash;
 #[doc(hidden)]
 pub mod imp;
 
-pub use hash::*;
+// `hash` only holds `impl Adler32Hash for ...` blocks (no exported names); the impls apply
+// globally on their own, so there is nothing to re-export here.
 use imp::{get_imp, Adler32Imp};
 
 /// An adler32 hash generator type.
