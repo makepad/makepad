@@ -106,6 +106,13 @@ pub(crate) struct WaylandState {
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) popups: Vec<WaylandPopupWindow>,
     pub(crate) pointer_window: Option<WindowId>,
+    /// The latest un-dispatched pointer motion `(window_id, pos)`, coalesced across a whole
+    /// `dispatch_pending` batch. A high-Hz mouse queues many `wl_pointer` motion+frame pairs between
+    /// paints; dispatching each as a `MouseMove` runs a redundant hover hit-test across the whole
+    /// widget tree, stealing frame budget during a fling. We keep only the latest and flush it once
+    /// after the queue is drained (and before any intervening button/leave, to preserve ordering),
+    /// mirroring the Windows `coalesce_mouse_move`. See [`Self::flush_pending_motion`].
+    pub(crate) pending_motion: Option<(WindowId, Vec2d)>,
     pub(crate) keyboard_window: Option<WindowId>,
     pub(crate) modifiers: KeyModifiers,
     pub(crate) timers: SelectTimers,
@@ -172,6 +179,7 @@ impl WaylandState {
             windows: Vec::new(),
             popups: Vec::new(),
             pointer_window: None,
+            pending_motion: None,
             keyboard_window: None,
             pointer_serial: None,
             keyboard_serial: None,
@@ -1104,6 +1112,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.pointer_window = state.window_id_for_surface(&surface);
             }
             wl_pointer::Event::Leave { serial, surface: _ } => {
+                // Dispatch any buffered motion before the pointer leaves, so the final hover
+                // position is delivered to the right window first.
+                state.flush_pending_motion();
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
@@ -1190,22 +1201,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         }
                     }
 
-                    state.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
-                        abs: pos,
-                        window_id: window_id,
-                        modifiers: state.modifiers,
-                        time: state.time_now(),
-                        handled: Cell::new(Area::Empty),
-                    }));
-                    if let Some(items) = state.internal_drag_items.as_ref() {
-                        state.do_callback(XlibEvent::Drag(DragEvent {
-                            modifiers: state.modifiers,
-                            handled: Arc::new(Mutex::new(false)),
-                            abs: pos,
-                            items: items.clone(),
-                            response: Arc::new(Mutex::new(DragResponse::None)),
-                        }));
-                    }
+                    // Buffer this motion instead of dispatching immediately; the latest one is
+                    // flushed as a single MouseMove once the whole event batch is drained (or before
+                    // an intervening button/leave). The edge-resize cursor above still updates per
+                    // motion so the resize cursor stays responsive. See `flush_pending_motion`.
+                    state.pending_motion = Some((window_id, pos));
                 }
             }
             wl_pointer::Event::Button {
@@ -1214,6 +1214,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 button,
                 state: key_state,
             } => {
+                // Dispatch any buffered motion first so a MouseMove precedes this button's
+                // down/up (and the WindowDragQuery it triggers) at the correct hover position.
+                state.flush_pending_motion();
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 // Outside-click popup dismissal: if press lands on a
@@ -1663,6 +1666,32 @@ impl WaylandState {
         if let Some(mut callback) = self.event_callback.take() {
             callback(self, event);
             self.event_callback = Some(callback);
+        }
+    }
+
+    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove` (plus a `Drag`
+    /// while an internal drag is in flight), then clear it. Called once after the `wl_pointer` event
+    /// batch is drained and before any intervening button/leave, so a high-Hz mouse produces one
+    /// hover hit-test per frame instead of one per queued motion. See [`Self::pending_motion`].
+    pub(crate) fn flush_pending_motion(&mut self) {
+        let Some((window_id, pos)) = self.pending_motion.take() else {
+            return;
+        };
+        self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
+            abs: pos,
+            window_id,
+            modifiers: self.modifiers,
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+        }));
+        if let Some(items) = self.internal_drag_items.as_ref() {
+            self.do_callback(XlibEvent::Drag(DragEvent {
+                modifiers: self.modifiers,
+                handled: Arc::new(Mutex::new(false)),
+                abs: pos,
+                items: items.clone(),
+                response: Arc::new(Mutex::new(DragResponse::None)),
+            }));
         }
     }
 

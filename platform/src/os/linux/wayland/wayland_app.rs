@@ -94,6 +94,10 @@ impl WaylandApp {
             return;
         }
 
+        // The whole pointer-event batch is drained; dispatch the single latest coalesced motion
+        // (one hover hit-test instead of one per queued motion) before painting.
+        self.state.flush_pending_motion();
+
         self.do_callback(XlibEvent::Paint);
     }
     fn do_callback(&mut self, event: XlibEvent) {
