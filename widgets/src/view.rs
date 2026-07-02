@@ -131,6 +131,14 @@ pub struct View {
     scroll_bars_obj: Option<Box<ScrollBars>>,
     #[rust]
     view_size: Option<Vec2d>,
+    // Forces the next Texture-mode draw to re-render its offscreen pass instead of cache-hitting.
+    // Set on a repopulate or optimize-mode flip, since neither moves the rect that will_redraw sees.
+    #[rust]
+    force_texture_redraw: bool,
+    // Caps the offscreen texture's height (in Texture mode only) so a huge Fit-height view never
+    // allocates a render target past the GPU's max texture size. Content past the cap is clipped.
+    #[rust]
+    texture_max_height: Option<f64>,
 
     #[rust]
     area: Area,
@@ -314,6 +322,22 @@ impl ViewRef {
     pub fn repaint(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.repaint(cx);
+        }
+    }
+
+    /// Forces the next Texture-mode draw to re-render its offscreen texture. Call after
+    /// repopulating a texture-cached view whose content changed.
+    pub fn redraw_texture_cache(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.redraw_texture_cache();
+        }
+    }
+
+    /// Caps the offscreen texture's height in Texture mode (`None` = uncapped). See the `View`
+    /// method for details.
+    pub fn set_texture_max_height(&self, max: Option<f64>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_texture_max_height(max);
         }
     }
 
@@ -832,7 +856,12 @@ impl Widget for View {
             match self.optimize {
                 ViewOptimize::Texture => {
                     let walk = self.walk_from_previous_size(walk);
-                    if !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
+                    // A repopulate or optimize-mode flip forces one real re-render: the size-based
+                    // cache check can't see content changes on a recycled/toggled view.
+                    let force = std::mem::take(&mut self.force_texture_redraw);
+                    // Re-render whenever the on-screen rect changes (position or size) or a
+                    // repopulate/mode-flip forced it; only a truly unchanged view cache-hits.
+                    if !force && !cx.will_redraw(self.draw_list.as_mut().unwrap(), walk) {
                         if let Some(texture_cache) = &self.texture_cache {
                             self.draw_bg
                                 .draw_vars
@@ -912,6 +941,14 @@ impl Widget for View {
                 self.layout.scroll
             };
 
+            // Only Texture mode allocates an offscreen render target sized to this turtle, so cap
+            // its height there. None/DrawList render into the parent turtle and must stay uncapped.
+            let walk = if self.optimize.is_texture() {
+                self.walk_with_texture_max_height(walk)
+            } else {
+                walk
+            };
+
             if self.show_bg {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
@@ -973,9 +1010,12 @@ impl Widget for View {
                     scroll_bars.end_nav_area(cx);
                 };
 
+                // Track measured size in every mode. The None path must update it too, or a later
+                // Texture draw sizes its offscreen turtle to a stale height and clips the content.
+                self.view_size = Some(self.area.rect(cx).size);
+
                 if self.optimize.needs_draw_list() {
                     let rect = self.area.rect(cx);
-                    self.view_size = Some(rect.size);
                     self.draw_list.as_mut().unwrap().end(cx);
 
                     if self.optimize.is_texture() {
@@ -1066,6 +1106,45 @@ impl View {
 
     pub fn area(&self) -> Area {
         self.area
+    }
+
+    /// Switch this view's draw optimization at runtime (e.g. toggle texture caching per frame).
+    /// Allocates the backing draw_list on demand when promoting to a draw-list-backed mode.
+    pub fn set_optimize(&mut self, cx: &mut Cx, optimize: ViewOptimize) {
+        // A mode flip (e.g. None<->Texture) is a guaranteed content/layout change, and the None
+        // path never updates view_size, so force one fresh texture re-render on the change.
+        if core::mem::discriminant(&self.optimize) != core::mem::discriminant(&optimize) {
+            self.redraw_texture_cache();
+        }
+        self.optimize = optimize;
+        if self.optimize.needs_draw_list() && self.draw_list.is_none() {
+            self.draw_list = Some(DrawList2d::new(cx));
+        }
+    }
+
+    /// Forces the next Texture-mode draw to re-render its offscreen texture instead of compositing
+    /// the cached one, and drops the stale measured size so the re-render sizes to the new content.
+    /// Call after repopulating a texture-cached view's children.
+    pub fn redraw_texture_cache(&mut self) {
+        self.force_texture_redraw = true;
+        self.view_size = None;
+    }
+
+    /// Caps the offscreen texture's height when this view is in Texture mode. `None` (the default)
+    /// leaves it uncapped. Only useful for a Fit-height cached view whose content can be taller than
+    /// the GPU's max texture size; content past the cap is clipped.
+    pub fn set_texture_max_height(&mut self, max: Option<f64>) {
+        if self.texture_max_height != max {
+            self.texture_max_height = max;
+            self.redraw_texture_cache();
+        }
+    }
+
+    fn walk_with_texture_max_height(&self, walk: Walk) -> Walk {
+        match self.texture_max_height {
+            Some(max) if !walk.height.is_fill() => Walk { height: Size::Fixed(max), ..walk },
+            _ => walk,
+        }
     }
 
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
