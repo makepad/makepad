@@ -589,6 +589,12 @@ pub struct TextInput {
     /// Cached maximum horizontal scroll offset from the last draw pass.
     #[rust]
     cached_max_scroll_x: f64,
+    /// Caret rect relative to the draw_bg box, cached each draw. This offset is
+    /// stable across draw-list spaces, so we add the box's window position later.
+    #[rust]
+    cached_caret_offset: DVec2,
+    #[rust]
+    cached_caret_size: DVec2,
     /// Skip finger move after long press to prevent selection changes
     #[rust]
     ignore_next_move: bool,
@@ -933,6 +939,19 @@ impl TextInput {
         };
         cx.add_aligned_rect_area(&mut self.text_area, text_rect);
         text_rect
+    }
+
+    /// The caret's rect (top-left + size, line height included) in window coords:
+    /// the draw_bg box's window position plus the cached box-relative offset. Query
+    /// during events, not draw, or the box position is draw-local. None before first draw.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        if self.cached_caret_size.y <= 0.0 {
+            return None;
+        }
+        Some(Rect {
+            pos: self.draw_bg.area().rect(cx).pos + self.cached_caret_offset,
+            size: self.cached_caret_size,
+        })
     }
 
     fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Rect {
@@ -2087,6 +2106,11 @@ impl Widget for TextInput {
         self.draw_bg.end(cx);
         // A read-only field does no IME work at all (no state push, no keyboard).
         if cx.has_key_focus(self.draw_bg.area()) && !self.is_read_only {
+            // Cache the caret relative to the draw_bg box (same draw space) so
+            // cursor_rect_in_absolute can add the box's window position at event time.
+            // Only the focused field needs this, so we piggyback on the focus check.
+            self.cached_caret_offset = text_rect.pos + cursor_rect.pos - self.draw_bg.area().rect(cx).pos;
+            self.cached_caret_size = cursor_rect.size;
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
@@ -3069,6 +3093,12 @@ impl TextInputRef {
         } else {
             Default::default()
         }
+    }
+
+    /// The caret's rectangle in absolute screen coordinates, or `None` if the
+    /// text hasn't been laid out yet. Useful for anchoring a popup to the cursor.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        self.borrow().and_then(|inner| inner.cursor_rect_in_absolute(cx))
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
