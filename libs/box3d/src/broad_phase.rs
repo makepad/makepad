@@ -54,7 +54,19 @@ pub struct BroadPhase {
 
     /// These are the results from the pair query and are used to create new
     /// contacts in deterministic order.
+    /// C allocates the result array from the arena each step; the port keeps
+    /// the buffer (and the per-result pair list allocations) alive across
+    /// steps to avoid allocation churn. Contents are only meaningful inside
+    /// update_broad_phase_pairs — logically empty outside it, like the C NULL
+    /// pointers. Not serialized by snapshots.
     pub move_results: Vec<MoveResult>,
+
+    /// Reusable tree-query hit buffers for update_broad_phase_pairs (the C
+    /// code filters inside the tree callback and needs no buffer; the port
+    /// collects hits first and reuses these across steps). Same transient
+    /// semantics as move_results.
+    pub(crate) pair_hit_scratch: Vec<(i32, u64)>,
+    pub(crate) pair_child_hit_scratch: Vec<u64>,
 
     /// Tracks shape pairs that have a Contact.
     pub pair_set: crate::table::HashSet,
@@ -314,10 +326,12 @@ fn query_tree_for_pairs(
     query_tree_type: BodyType,
     query_proxy_key: i32,
     query_shape_index: i32,
+    hits: &mut Vec<(i32, u64)>,
+    child_hits: &mut Vec<u64>,
 ) {
     let require_all_bits = false;
 
-    let mut hits: Vec<(i32, u64)> = Vec::new();
+    hits.clear();
     dynamic_tree_query(
         &world.broad_phase.trees[query_tree_type as usize],
         fat_aabb,
@@ -329,7 +343,9 @@ fn query_tree_for_pairs(
         },
     );
 
-    for (proxy_id, user_data) in hits {
+    for k in 0..hits.len() {
+        let (proxy_id, user_data) = hits[k];
+
         // Outer query: userData is a shape index.
         let shape_index = user_data as i32;
 
@@ -348,14 +364,15 @@ fn query_tree_for_pairs(
             // recurse: inner query into the compound. userData is the compound
             // child index, not a shape index.
             let compound = compound.clone();
-            let mut child_hits: Vec<u64> = Vec::new();
+            child_hits.clear();
             dynamic_tree_query(&compound.tree, local_aabb, DEFAULT_MASK_BITS, require_all_bits, &mut |_child_proxy,
                                                                                                       child_user_data| {
                 child_hits.push(child_user_data);
                 true
             });
 
-            for child_user_data in child_hits {
+            for k2 in 0..child_hits.len() {
+                let child_user_data = child_hits[k2];
                 try_add_pair(
                     world,
                     custom_filter,
@@ -397,17 +414,29 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     }
 
     // C allocates moveResults/movePairs from the arena and links pairs into
-    // per-result lists; the port uses local Vecs (BroadPhase::move_results
-    // stays empty outside this function, like the C NULL pointers).
+    // per-result lists; the port reuses the persistent buffers on BroadPhase
+    // (taken out for the duration of the update so the world can be read
+    // immutably). Logical content is only valid inside this function, like
+    // the C arena pointers.
     let move_pair_capacity = 16 * move_count;
     let mut pair_count: i32 = 0;
-    let mut move_results: Vec<MoveResult> = Vec::with_capacity(move_count as usize);
+    let mut move_results = std::mem::take(&mut world.broad_phase.move_results);
+    let mut hits = std::mem::take(&mut world.broad_phase.pair_hit_scratch);
+    let mut child_hits = std::mem::take(&mut world.broad_phase.pair_child_hit_scratch);
+
+    // Reuse the per-result pair list allocations from previous steps.
+    if move_results.len() < move_count as usize {
+        move_results.resize_with(move_count as usize, MoveResult::default);
+    }
+    for result in &mut move_results[..move_count as usize] {
+        result.pair_list.clear();
+    }
 
     // Take the custom filter so the query phase can read the world immutably.
     let mut custom_filter = world.custom_filter_fcn.take();
 
     for i in 0..move_count as usize {
-        let mut result = MoveResult::default();
+        let result = &mut move_results[i];
 
         let query_proxy_key = world.broad_phase.move_array[i];
         let query_proxy_type = proxy_type(query_proxy_key);
@@ -428,24 +457,28 @@ pub fn update_broad_phase_pairs(world: &mut World) {
             query_tree_for_pairs(
                 world,
                 &mut custom_filter,
-                &mut result,
+                result,
                 &mut pair_count,
                 move_pair_capacity,
                 fat_aabb,
                 BodyType::Kinematic,
                 query_proxy_key,
                 query_shape_index,
+                &mut hits,
+                &mut child_hits,
             );
             query_tree_for_pairs(
                 world,
                 &mut custom_filter,
-                &mut result,
+                result,
                 &mut pair_count,
                 move_pair_capacity,
                 fat_aabb,
                 BodyType::Static,
                 query_proxy_key,
                 query_shape_index,
+                &mut hits,
+                &mut child_hits,
             );
         }
 
@@ -453,19 +486,21 @@ pub fn update_broad_phase_pairs(world: &mut World) {
         query_tree_for_pairs(
             world,
             &mut custom_filter,
-            &mut result,
+            result,
             &mut pair_count,
             move_pair_capacity,
             fat_aabb,
             BodyType::Dynamic,
             query_proxy_key,
             query_shape_index,
+            &mut hits,
+            &mut child_hits,
         );
-
-        move_results.push(result);
     }
 
     world.custom_filter_fcn = custom_filter;
+    world.broad_phase.pair_hit_scratch = hits;
+    world.broad_phase.pair_child_hit_scratch = child_hits;
 
     // Task that in C can run in parallel with contact creation:
     // rebuild the collision tree for dynamic and kinematic bodies to keep their
@@ -477,11 +512,16 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     // - Create contacts in deterministic order
     // C builds each pair list with head insertion and then walks it, so pairs
     // are consumed in reverse discovery order; .rev() replicates that.
-    for result in &move_results {
+    // Only the first move_count entries are valid this step (the buffer may
+    // retain more from a previous, larger step).
+    for result in &move_results[..move_count as usize] {
         for pair in result.pair_list.iter().rev() {
             crate::contact::create_contact(world, pair.shape_index_a, pair.shape_index_b, pair.child_index);
         }
     }
+
+    // Return the reusable buffer (capacity retained for the next step).
+    world.broad_phase.move_results = move_results;
 
     // Reset move buffer: clear only the bits that were set this step.
     // Invariant: bit set in moved_proxies[type] iff proxyKey is present in move_array.
