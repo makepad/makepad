@@ -216,15 +216,15 @@ pub struct World {
 
     pub worker_count: i32,
 
-    /// The built-in task scheduler (C: b3Scheduler). Some when worker_count > 1;
-    /// the serial path bypasses it entirely.
-    pub scheduler: Option<crate::scheduler::Scheduler>,
+    /// The task dispatch: serial, built-in scheduler, or user task system
+    /// (C: world->enqueueTaskFcn/finishTaskFcn/userTaskContext + scheduler).
+    pub task_system: crate::scheduler::TaskSystem,
 
-    /// Pending dynamic/kinematic tree rebuild task (slot + owned trees).
+    /// Pending dynamic/kinematic tree rebuild task (handle + owned trees).
     /// Enqueued by update_broad_phase_pairs to overlap contact creation and
     /// the narrow phase; joined by crate::broad_phase::finish_tree_task
     /// before the solve (C: world->userTreeTask).
-    pub tree_rebuild_task: Option<(i32, Box<crate::broad_phase::TreeRebuildJob>)>,
+    pub tree_rebuild_task: Option<(crate::scheduler::TaskHandle, Box<crate::broad_phase::TreeRebuildJob>)>,
 
     pub user_data: u64,
 
@@ -470,11 +470,23 @@ pub fn create_world(def: &WorldDef) -> World {
 
     // C: worker count clamped to [1, B3_MAX_WORKERS]; the built-in scheduler
     // runs worker_count - 1 background threads, the calling thread is worker 0.
-    // (The C external task-system callbacks are not ported; the built-in
-    // scheduler is always used.) worker_count == 1 keeps the fully serial path.
-    world.worker_count = clamp_int(def.worker_count as i32, 1, MAX_WORKERS as i32);
-    if world.worker_count > 1 {
-        world.scheduler = Some(crate::scheduler::create_scheduler(world.worker_count));
+    // worker_count == 1 with no user callbacks keeps the fully serial path.
+    if def.worker_count > 0 && def.enqueue_task.is_some() && def.finish_task.is_some() {
+        // External task system (C: def->enqueueTask/finishTask/userTaskContext)
+        world.worker_count = clamp_int(def.worker_count as i32, 1, MAX_WORKERS as i32);
+        world.task_system = crate::scheduler::TaskSystem::external(
+            def.enqueue_task.unwrap(),
+            def.finish_task.unwrap(),
+            def.user_task_context,
+        );
+    } else if def.worker_count as i32 > 1 {
+        // Built-in scheduler
+        world.worker_count = clamp_int(def.worker_count as i32, 1, MAX_WORKERS as i32);
+        world.task_system = crate::scheduler::TaskSystem::internal(world.worker_count);
+    } else {
+        // Serial fallback (C: b3DefaultAddTaskFcn/b3DefaultFinishTaskFcn)
+        world.worker_count = 1;
+        world.task_system = crate::scheduler::TaskSystem::serial();
     }
 
     create_worker_contexts(&mut world);
@@ -489,8 +501,9 @@ pub fn destroy_world(mut world: World) {
     b3_assert!(!world.locked);
     world.locked = true;
 
-    // C: b3DestroyScheduler — joins the background worker threads.
-    world.scheduler = None;
+    // C: b3DestroyScheduler — joins the background worker threads (no-op for
+    // the serial and external task systems).
+    world.task_system = crate::scheduler::TaskSystem::serial();
 
     destroy_worker_contexts(&mut world);
 
@@ -863,7 +876,7 @@ fn collide(world: &mut World, context: &mut StepContext) {
             // blocks until all blocks complete.
             unsafe {
                 crate::parallel_for::parallel_for(
-                    collide_ctx.world.scheduler.as_ref(),
+                    &collide_ctx.world.task_system,
                     effective_workers,
                     collide_task_trampoline,
                     contact_count as i32,
@@ -1046,6 +1059,10 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
 
     world.active_task_count = 0;
     world.task_count = 0;
+
+    // C: b3ResetScheduler at step start — recycle the task ring and the
+    // taskCount budget for this step (no tasks are pending here).
+    world.task_system.reset();
 
     let step_ticks = get_ticks();
 

@@ -284,6 +284,198 @@ pub fn scheduler_finish_task(scheduler: &Scheduler, slot: i32) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// External task system hooks (C: b3WorldDef enqueueTask/finishTask/userTaskContext)
+// ---------------------------------------------------------------------------
+
+/// C: b3EnqueueTaskCallback (types.h). Provided by the user to run Box3D tasks
+/// on their own job system. The user's system must run `task(task_context)`
+/// exactly once, on any thread. Returning null tells Box3D the task was
+/// executed inline (synchronously) and finish will not be called for it;
+/// otherwise the returned pointer is passed back to the finish callback.
+///
+/// # Safety contract (same as C)
+/// - `task_context` points at stack data of `world_step` and is only valid
+///   until the matching finish returns (or, for a null return, until the
+///   enqueue call returns).
+/// - The finish callback must BLOCK until the task has completed. Box3D holds
+///   its stack across every fork/join; a job system that cannot park a job's
+///   stack must not call `world_step` from inside a job (see the C types.h
+///   discussion).
+pub type EnqueueTaskCallback =
+    unsafe fn(task: TaskCallback, task_context: *mut (), user_context: *mut (), name: &str) -> *mut ();
+
+/// C: b3FinishTaskCallback. Must block until the user task has completed.
+pub type FinishTaskCallback = unsafe fn(user_task: *mut (), user_context: *mut ());
+
+/// Handle returned by TaskSystem::enqueue (C: the `void*` user task pointer,
+/// where NULL means the task already ran inline and needs no finish).
+#[derive(Clone, Copy, Debug)]
+pub enum TaskHandle {
+    /// The task was executed inline at the enqueue site (C: NULL return, or
+    /// the serial path, or the task ring budget was exhausted).
+    Inline,
+    /// Built-in scheduler task slot.
+    Internal(i32),
+    /// User task pointer from an external task system.
+    External(*mut ()),
+}
+
+/// The world's task dispatch (C: world->enqueueTaskFcn/finishTaskFcn/
+/// userTaskContext + world->scheduler, selected at world creation).
+pub enum TaskSystemKind {
+    /// worker_count == 1 and no user callbacks: every task runs inline at the
+    /// enqueue site (C: b3DefaultAddTaskFcn / b3DefaultFinishTaskFcn).
+    Serial,
+    /// The built-in scheduler (C: b3SchedulerEnqueueTask/b3SchedulerFinishTask).
+    Internal(Scheduler),
+    /// User-provided job system (C: def->enqueueTask/finishTask).
+    External {
+        enqueue: EnqueueTaskCallback,
+        finish: FinishTaskCallback,
+        user_context: *mut (),
+    },
+}
+
+pub struct TaskSystem {
+    pub kind: TaskSystemKind,
+    /// C: world->taskCount — enqueues since the last reset, used to bound the
+    /// task ring (B3_MAX_TASKS). The internal scheduler keeps its own count;
+    /// this counter serves the serial and external paths.
+    task_count: AtomicIndex,
+}
+
+impl Default for TaskSystem {
+    fn default() -> Self {
+        TaskSystem::serial()
+    }
+}
+
+impl TaskSystem {
+    pub fn serial() -> TaskSystem {
+        TaskSystem { kind: TaskSystemKind::Serial, task_count: AtomicIndex::new(0) }
+    }
+
+    pub fn internal(worker_count: i32) -> TaskSystem {
+        TaskSystem {
+            kind: TaskSystemKind::Internal(create_scheduler(worker_count)),
+            task_count: AtomicIndex::new(0),
+        }
+    }
+
+    /// # Safety
+    /// The callbacks must uphold the EnqueueTaskCallback/FinishTaskCallback
+    /// contracts; `user_context` must stay valid for the world's lifetime.
+    pub fn external(
+        enqueue: EnqueueTaskCallback,
+        finish: FinishTaskCallback,
+        user_context: *mut (),
+    ) -> TaskSystem {
+        TaskSystem {
+            kind: TaskSystemKind::External { enqueue, finish, user_context },
+            task_count: AtomicIndex::new(0),
+        }
+    }
+
+    /// True when tasks may run on other threads (internal or external system).
+    #[inline]
+    pub fn is_parallel(&self) -> bool {
+        !matches!(self.kind, TaskSystemKind::Serial)
+    }
+
+    /// C: world->taskCount (enqueues since the last reset).
+    pub fn task_count(&self) -> i32 {
+        match &self.kind {
+            TaskSystemKind::Internal(scheduler) => scheduler_task_count(scheduler),
+            _ => self.task_count.load(),
+        }
+    }
+
+    /// C call-site pattern:
+    ///   if (world->taskCount < B3_MAX_TASKS) { task = enqueueTaskFcn(...); taskCount += 1; }
+    ///   else { run inline }
+    /// The budget check is centralized here; when the ring budget is exhausted
+    /// or the system is Serial, the task runs inline (same execution position)
+    /// and TaskHandle::Inline is returned.
+    ///
+    /// # Safety
+    /// `task_context` (and everything it references) must stay valid until
+    /// `finish` returns for the returned handle. `task` may run concurrently
+    /// on another thread under its own data-access contract.
+    pub unsafe fn enqueue(&self, task: TaskCallback, task_context: *mut (), name: &str) -> TaskHandle {
+        match &self.kind {
+            TaskSystemKind::Serial => {
+                self.task_count.fetch_add(1);
+                // SAFETY: forwarded caller contract; inline execution.
+                unsafe { task(task_context) };
+                TaskHandle::Inline
+            }
+
+            TaskSystemKind::Internal(scheduler) => {
+                if scheduler_task_count(scheduler) < MAX_TASKS as i32 {
+                    // SAFETY: forwarded caller contract.
+                    let slot = unsafe { scheduler_enqueue_task(scheduler, task, task_context, name) };
+                    TaskHandle::Internal(slot)
+                } else {
+                    // SAFETY: forwarded caller contract; inline execution.
+                    unsafe { task(task_context) };
+                    TaskHandle::Inline
+                }
+            }
+
+            TaskSystemKind::External { enqueue, user_context, .. } => {
+                if self.task_count.load() < MAX_TASKS as i32 {
+                    self.task_count.fetch_add(1);
+                    // SAFETY: forwarded caller contract; the user system runs
+                    // the task exactly once per the EnqueueTaskCallback contract.
+                    let user_task = unsafe { enqueue(task, task_context, *user_context, name) };
+                    if user_task.is_null() {
+                        // C: NULL means the user executed the task inline.
+                        TaskHandle::Inline
+                    } else {
+                        TaskHandle::External(user_task)
+                    }
+                } else {
+                    // SAFETY: forwarded caller contract; inline execution.
+                    unsafe { task(task_context) };
+                    TaskHandle::Inline
+                }
+            }
+        }
+    }
+
+    /// C: world->finishTaskFcn(userTask, userTaskContext). Blocks until the
+    /// task completes. No-op for TaskHandle::Inline (C skips NULL user tasks).
+    pub fn finish(&self, handle: TaskHandle) {
+        match handle {
+            TaskHandle::Inline => {}
+
+            TaskHandle::Internal(slot) => match &self.kind {
+                TaskSystemKind::Internal(scheduler) => scheduler_finish_task(scheduler, slot),
+                _ => unreachable!("internal task handle without internal scheduler"),
+            },
+
+            TaskHandle::External(user_task) => match &self.kind {
+                TaskSystemKind::External { finish, user_context, .. } => {
+                    // SAFETY: handle came from this system's enqueue; the user
+                    // finish blocks until the task completes (contract).
+                    unsafe { finish(user_task, *user_context) };
+                }
+                _ => unreachable!("external task handle without external system"),
+            },
+        }
+    }
+
+    /// C: b3ResetScheduler + world->taskCount = 0. Recycle the task ring
+    /// between phases/steps. Only call when no tasks are pending or running.
+    pub fn reset(&self) {
+        if let TaskSystemKind::Internal(scheduler) = &self.kind {
+            reset_scheduler(scheduler);
+        }
+        self.task_count.store(0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +490,7 @@ mod tests {
         def.worker_count = 4;
         let mut world = crate::physics_world::create_world(&def);
         assert_eq!(world.worker_count, 4);
-        assert!(world.scheduler.is_some());
+        assert!(matches!(world.task_system.kind, TaskSystemKind::Internal(_)));
         assert_eq!(world.task_contexts.len(), 4);
 
         crate::physics_world::world_step(&mut world, 1.0 / 60.0, 4);

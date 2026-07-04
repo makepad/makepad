@@ -370,7 +370,7 @@ pub fn overlap_sensors(world: &mut World) {
             // indices, and the context outlives parallel_for (which blocks).
             unsafe {
                 crate::parallel_for::parallel_for(
-                    sensor_ctx.world.scheduler.as_ref(),
+                    &sensor_ctx.world.task_system,
                     effective_workers,
                     sensor_task_trampoline,
                     sensor_count,

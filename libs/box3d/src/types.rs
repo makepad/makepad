@@ -20,6 +20,11 @@ use crate::math_functions::{
 pub const DEFAULT_CATEGORY_BITS: u64 = u64::MAX;
 pub const DEFAULT_MASK_BITS: u64 = u64::MAX;
 
+/// Task interface (C: types.h b3TaskCallback/b3EnqueueTaskCallback/
+/// b3FinishTaskCallback). Defined next to the scheduler; re-exported here to
+/// mirror the C header layout.
+pub use crate::scheduler::{EnqueueTaskCallback, FinishTaskCallback, TaskCallback};
+
 /// Optional friction mixing callback.
 pub type FrictionCallback = fn(friction_a: f32, user_material_id_a: u64, friction_b: f32, user_material_id_b: u64) -> f32;
 
@@ -79,8 +84,26 @@ pub struct WorldDef {
     /// Enable continuous collision.
     pub enable_continuous: bool,
 
-    /// Number of workers. The Rust port always runs single-threaded; kept for API parity.
+    /// Number of workers to use with the provided task system. This is clamped
+    /// to the range [1, MAX_WORKERS]. Using a value above 1 turns on
+    /// multithreading. If task callbacks are provided then Box3D will use the
+    /// user provided task system, otherwise it creates its internal scheduler.
     pub worker_count: u32,
+
+    /// Function to spawn a task (C: b3WorldDef::enqueueTask). See
+    /// EnqueueTaskCallback for the safety contract. Both enqueue_task and
+    /// finish_task must be set (with worker_count > 0) to enable the external
+    /// task system.
+    pub enqueue_task: Option<EnqueueTaskCallback>,
+
+    /// Function to finish a task (C: b3WorldDef::finishTask). Must block until
+    /// the task completes.
+    pub finish_task: Option<FinishTaskCallback>,
+
+    /// User context provided to enqueue_task and finish_task
+    /// (C: b3WorldDef::userTaskContext). Must stay valid for the world's
+    /// lifetime. Note: this raw pointer makes WorldDef !Send/!Sync.
+    pub user_task_context: *mut (),
 
     /// User data associated with a world.
     pub user_data: u64,
@@ -110,6 +133,9 @@ pub fn default_world_def() -> WorldDef {
         enable_sleep: true,
         enable_continuous: true,
         worker_count: 0,
+        enqueue_task: None,
+        finish_task: None,
+        user_task_context: std::ptr::null_mut(),
         user_data: 0,
         capacity: Capacity::default(),
         internal_value: SECRET_COOKIE,
