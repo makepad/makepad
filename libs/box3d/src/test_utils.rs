@@ -63,8 +63,9 @@ pub fn random_vec3(lo: Vec3, hi: Vec3) -> Vec3 {
 }
 
 /// Random world position with coordinates in range [lo, hi].
+/// (C assigns the float components to the b3Pos fields; promotion in DP mode.)
 pub fn random_pos(lo: Vec3, hi: Vec3) -> Pos {
-    random_vec3(lo, hi)
+    crate::math_functions::to_pos(random_vec3(lo, hi))
 }
 
 pub fn random_vec3_uniform(lo: f32, hi: f32) -> Vec3 {

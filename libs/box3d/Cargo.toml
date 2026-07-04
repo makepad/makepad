@@ -5,4 +5,10 @@ edition = "2021"
 license = "MIT"
 description = "Rust port of Box3D by Erin Catto (https://github.com/erincatto/box3d)"
 
+[features]
+# C: BOX3D_DISABLE_SIMD — build the scalar fallback instead of SSE2/NEON.
+disable-simd = []
+# C: BOX3D_DOUBLE_PRECISION — large world mode. World positions in f64.
+double-precision = []
+
 [dependencies]
