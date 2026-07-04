@@ -507,7 +507,7 @@ fn create_shape(
 }
 
 pub fn create_sphere_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, sphere: &Sphere) -> ShapeId {
-    create_shape(
+    let shape_id = create_shape(
         world,
         body_id,
         def,
@@ -515,7 +515,16 @@ pub fn create_sphere_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, s
         Transform::IDENTITY,
         Vec3::ONE,
         false,
-    )
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateSphereShape, |b| {
+            b.w_bodyid(body_id);
+            b.w_shapedef(def);
+            b.w_sphere(sphere);
+            b.w_shapeid(shape_id);
+        });
+    }
+    shape_id
 }
 
 pub fn create_capsule_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, capsule: &Capsule) -> ShapeId {
@@ -525,7 +534,7 @@ pub fn create_capsule_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, 
             center: lerp(capsule.center1, capsule.center2, 0.5),
             radius: capsule.radius,
         };
-        create_shape(
+        let shape_id = create_shape(
             world,
             body_id,
             def,
@@ -533,9 +542,19 @@ pub fn create_capsule_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, 
             Transform::IDENTITY,
             Vec3::ONE,
             false,
-        )
+        );
+        if shape_id.index1 != 0 {
+            // Degenerate capsule becomes a sphere; record what was actually created (C parity).
+            crate::recording::rec_op(world, crate::recording::RecOp::CreateSphereShape, |b| {
+                b.w_bodyid(body_id);
+                b.w_shapedef(def);
+                b.w_sphere(&sphere);
+                b.w_shapeid(shape_id);
+            });
+        }
+        shape_id
     } else {
-        create_shape(
+        let shape_id = create_shape(
             world,
             body_id,
             def,
@@ -543,14 +562,23 @@ pub fn create_capsule_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, 
             Transform::IDENTITY,
             Vec3::ONE,
             false,
-        )
+        );
+        if shape_id.index1 != 0 {
+            crate::recording::rec_op(world, crate::recording::RecOp::CreateCapsuleShape, |b| {
+                b.w_bodyid(body_id);
+                b.w_shapedef(def);
+                b.w_capsule(capsule);
+                b.w_shapeid(shape_id);
+            });
+        }
+        shape_id
     }
 }
 
 pub fn create_hull_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, hull: &Arc<HullData>) -> ShapeId {
     b3_validate!(crate::hull::is_valid_hull(hull));
     b3_validate!(hull.hash != 0);
-    create_shape(
+    let shape_id = create_shape(
         world,
         body_id,
         def,
@@ -558,7 +586,19 @@ pub fn create_hull_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, hul
         Transform::IDENTITY,
         Vec3::ONE,
         false,
-    )
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::with_recording(world, |rec| {
+            let geometry_id = crate::recording::rec_intern_hull(rec, hull);
+            crate::recording::rec_begin_record(rec, crate::recording::RecOp::CreateHullShape as u8);
+            rec.buffer.w_bodyid(body_id);
+            rec.buffer.w_shapedef(def);
+            rec.buffer.w_geomid(geometry_id);
+            rec.buffer.w_shapeid(shape_id);
+            crate::recording::rec_end_record(rec);
+        });
+    }
+    shape_id
 }
 
 pub fn create_transformed_hull_shape(
@@ -570,7 +610,26 @@ pub fn create_transformed_hull_shape(
     scale: Vec3,
 ) -> ShapeId {
     b3_validate!(crate::hull::is_valid_hull(hull));
-    create_shape(world, body_id, def, &ShapeGeometryInput::Hull(hull), transform, scale, true)
+    let shape_id = create_shape(world, body_id, def, &ShapeGeometryInput::Hull(hull), transform, scale, true);
+    if shape_id.index1 != 0 && crate::recording::rec_active(world) {
+        // The transform and scale are baked into fresh hull data at create time.
+        // Record the baked hull as a plain hull shape so replay rebuilds
+        // identical geometry with no rebake (C parity).
+        let baked = match &world.shapes[(shape_id.index1 - 1) as usize].geom {
+            ShapeGeometry::Hull(h) => Arc::clone(h),
+            _ => unreachable!(),
+        };
+        crate::recording::with_recording(world, |rec| {
+            let geometry_id = crate::recording::rec_intern_hull(rec, &baked);
+            crate::recording::rec_begin_record(rec, crate::recording::RecOp::CreateHullShape as u8);
+            rec.buffer.w_bodyid(body_id);
+            rec.buffer.w_shapedef(def);
+            rec.buffer.w_geomid(geometry_id);
+            rec.buffer.w_shapeid(shape_id);
+            crate::recording::rec_end_record(rec);
+        });
+    }
+    shape_id
 }
 
 pub fn create_mesh_shape(
@@ -582,7 +641,7 @@ pub fn create_mesh_shape(
 ) -> ShapeId {
     b3_validate!(crate::mesh::is_valid_mesh(mesh_data));
     b3_validate!(mesh_data.hash != 0);
-    create_shape(
+    let shape_id = create_shape(
         world,
         body_id,
         def,
@@ -590,7 +649,20 @@ pub fn create_mesh_shape(
         Transform::IDENTITY,
         scale,
         true,
-    )
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::with_recording(world, |rec| {
+            let geometry_id = crate::recording::rec_intern_mesh(rec, mesh_data);
+            crate::recording::rec_begin_record(rec, crate::recording::RecOp::CreateMeshShape as u8);
+            rec.buffer.w_bodyid(body_id);
+            rec.buffer.w_shapedef(def);
+            rec.buffer.w_geomid(geometry_id);
+            rec.buffer.w_vec3(scale);
+            rec.buffer.w_shapeid(shape_id);
+            crate::recording::rec_end_record(rec);
+        });
+    }
+    shape_id
 }
 
 pub fn create_height_field_shape(
@@ -600,7 +672,7 @@ pub fn create_height_field_shape(
     height_field: &Arc<HeightFieldData>,
 ) -> ShapeId {
     b3_validate!(height_field.hash != 0);
-    create_shape(
+    let shape_id = create_shape(
         world,
         body_id,
         def,
@@ -608,11 +680,23 @@ pub fn create_height_field_shape(
         Transform::IDENTITY,
         Vec3::ONE,
         false,
-    )
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::with_recording(world, |rec| {
+            let geometry_id = crate::recording::rec_intern_height_field(rec, height_field);
+            crate::recording::rec_begin_record(rec, crate::recording::RecOp::CreateHeightFieldShape as u8);
+            rec.buffer.w_bodyid(body_id);
+            rec.buffer.w_shapedef(def);
+            rec.buffer.w_geomid(geometry_id);
+            rec.buffer.w_shapeid(shape_id);
+            crate::recording::rec_end_record(rec);
+        });
+    }
+    shape_id
 }
 
 pub fn create_compound_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, compound: &Arc<CompoundData>) -> ShapeId {
-    create_shape(
+    let shape_id = create_shape(
         world,
         body_id,
         def,
@@ -620,7 +704,19 @@ pub fn create_compound_shape(world: &mut World, body_id: BodyId, def: &ShapeDef,
         Transform::IDENTITY,
         Vec3::ONE,
         false,
-    )
+    );
+    if shape_id.index1 != 0 {
+        crate::recording::with_recording(world, |rec| {
+            let geometry_id = crate::recording::rec_intern_compound(rec, compound);
+            crate::recording::rec_begin_record(rec, crate::recording::RecOp::CreateCompoundShape as u8);
+            rec.buffer.w_bodyid(body_id);
+            rec.buffer.w_shapedef(def);
+            rec.buffer.w_geomid(geometry_id);
+            rec.buffer.w_shapeid(shape_id);
+            crate::recording::rec_end_record(rec);
+        });
+    }
+    shape_id
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +849,11 @@ pub fn destroy_shape(world: &mut World, shape_id: ShapeId, update_body_mass: boo
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::DestroyShape, |b| {
+        b.w_shapeid(shape_id);
+        b.w_bool(update_body_mass);
+    });
 
     world.locked = true;
 
@@ -1331,6 +1432,12 @@ pub fn shape_set_density(world: &mut World, shape_id: ShapeId, density: f32, upd
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetDensity, |b| {
+        b.w_shapeid(shape_id);
+        b.w_f32(density);
+        b.w_bool(update_body_mass);
+    });
+
     let shape_idx = get_shape_full_id(world, shape_id);
     if density == world.shapes[shape_idx as usize].density {
         // early return to avoid expensive function
@@ -1351,6 +1458,11 @@ pub fn shape_get_density(world: &World, shape_id: ShapeId) -> f32 {
 }
 
 pub fn shape_set_friction(world: &mut World, shape_id: ShapeId, friction: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetFriction, |b| {
+        b.w_shapeid(shape_id);
+        b.w_f32(friction);
+    });
     b3_assert!(is_valid_float(friction) && friction >= 0.0);
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
@@ -1364,6 +1476,11 @@ pub fn shape_get_friction(world: &World, shape_id: ShapeId) -> f32 {
 }
 
 pub fn shape_set_restitution(world: &mut World, shape_id: ShapeId, restitution: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetRestitution, |b| {
+        b.w_shapeid(shape_id);
+        b.w_f32(restitution);
+    });
     b3_assert!(is_valid_float(restitution) && restitution >= 0.0);
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
@@ -1377,6 +1494,11 @@ pub fn shape_get_restitution(world: &World, shape_id: ShapeId) -> f32 {
 }
 
 pub fn shape_set_surface_material(world: &mut World, shape_id: ShapeId, surface_material: SurfaceMaterial) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetSurfaceMaterial, |b| {
+        b.w_shapeid(shape_id);
+        b.w_material(&surface_material);
+    });
     b3_assert!(is_valid_float(surface_material.friction) && surface_material.friction >= 0.0);
     b3_assert!(is_valid_float(surface_material.restitution) && surface_material.restitution >= 0.0);
     b3_assert!(is_valid_float(surface_material.rolling_resistance) && surface_material.rolling_resistance >= 0.0);
@@ -1429,6 +1551,12 @@ pub fn shape_set_filter(world: &mut World, shape_id: ShapeId, filter: Filter, in
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetFilter, |b| {
+        b.w_shapeid(shape_id);
+        b.w_filter(filter);
+        b.w_bool(invoke_contacts);
+    });
+
     let shape_idx = get_shape_full_id(world, shape_id);
     {
         let shape = &world.shapes[shape_idx as usize];
@@ -1464,6 +1592,11 @@ pub fn shape_enable_sensor_events(world: &mut World, shape_id: ShapeId, flag: bo
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeEnableSensorEvents, |b| {
+        b.w_shapeid(shape_id);
+        b.w_bool(flag);
+    });
     let shape_idx = get_shape_full_id(world, shape_id);
     world.shapes[shape_idx as usize].enable_sensor_events = flag;
 }
@@ -1477,6 +1610,11 @@ pub fn shape_enable_contact_events(world: &mut World, shape_id: ShapeId, flag: b
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeEnableContactEvents, |b| {
+        b.w_shapeid(shape_id);
+        b.w_bool(flag);
+    });
     let shape_idx = get_shape_full_id(world, shape_id);
     world.shapes[shape_idx as usize].enable_contact_events = flag;
 }
@@ -1490,6 +1628,11 @@ pub fn shape_enable_pre_solve_events(world: &mut World, shape_id: ShapeId, flag:
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeEnablePreSolveEvents, |b| {
+        b.w_shapeid(shape_id);
+        b.w_bool(flag);
+    });
     let shape_idx = get_shape_full_id(world, shape_id);
     world.shapes[shape_idx as usize].enable_pre_solve_events = flag;
 }
@@ -1503,6 +1646,11 @@ pub fn shape_enable_hit_events(world: &mut World, shape_id: ShapeId, flag: bool)
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeEnableHitEvents, |b| {
+        b.w_shapeid(shape_id);
+        b.w_bool(flag);
+    });
     let shape_idx = get_shape_full_id(world, shape_id);
     world.shapes[shape_idx as usize].enable_hit_events = flag;
 }
@@ -1547,6 +1695,11 @@ pub fn shape_set_sphere(world: &mut World, shape_id: ShapeId, sphere: &Sphere) {
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetSphere, |b| {
+        b.w_shapeid(shape_id);
+        b.w_sphere(sphere);
+    });
+
     world.locked = true;
 
     let shape_idx = get_shape_full_id(world, shape_id);
@@ -1571,6 +1724,11 @@ pub fn shape_set_capsule(world: &mut World, shape_id: ShapeId, capsule: &Capsule
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetCapsule, |b| {
+        b.w_shapeid(shape_id);
+        b.w_capsule(capsule);
+    });
 
     world.locked = true;
 
@@ -1816,6 +1974,15 @@ pub fn shape_get_closest_point(world: &World, shape_id: ShapeId, target: Vec3) -
 // force = 0.5 * air_density * velocity^2 * area
 // https://en.wikipedia.org/wiki/Lift_(force)
 pub fn shape_apply_wind(world: &mut World, shape_id: ShapeId, wind: Vec3, drag: f32, lift: f32, max_speed: f32, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeApplyWind, |b| {
+        b.w_shapeid(shape_id);
+        b.w_vec3(wind);
+        b.w_f32(drag);
+        b.w_f32(lift);
+        b.w_f32(max_speed);
+        b.w_bool(wake);
+    });
     let shape_idx = get_shape_full_id(world, shape_id);
 
     let shape_type = world.shapes[shape_idx as usize].shape_type();

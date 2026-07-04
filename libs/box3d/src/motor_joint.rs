@@ -38,6 +38,11 @@ fn motor_joint_ref(base: &JointSim) -> &MotorJoint {
 }
 
 pub fn motor_joint_set_linear_velocity(world: &mut World, joint_id: JointId, velocity: Vec3) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetLinearVelocity, |b| {
+        b.w_jointid(joint_id);
+        b.w_vec3(velocity);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).linear_velocity = velocity;
 }
@@ -48,6 +53,11 @@ pub fn motor_joint_get_linear_velocity(world: &mut World, joint_id: JointId) -> 
 }
 
 pub fn motor_joint_set_angular_velocity(world: &mut World, joint_id: JointId, velocity: Vec3) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetAngularVelocity, |b| {
+        b.w_jointid(joint_id);
+        b.w_vec3(velocity);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).angular_velocity = velocity;
 }
@@ -58,6 +68,11 @@ pub fn motor_joint_get_angular_velocity(world: &mut World, joint_id: JointId) ->
 }
 
 pub fn motor_joint_set_max_velocity_torque(world: &mut World, joint_id: JointId, max_torque: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetMaxVelocityTorque, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(max_torque);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).max_velocity_torque = max_torque;
 }
@@ -68,6 +83,11 @@ pub fn motor_joint_get_max_velocity_torque(world: &mut World, joint_id: JointId)
 }
 
 pub fn motor_joint_set_max_velocity_force(world: &mut World, joint_id: JointId, max_force: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetMaxVelocityForce, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(max_force);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).max_velocity_force = max_force;
 }
@@ -78,6 +98,11 @@ pub fn motor_joint_get_max_velocity_force(world: &mut World, joint_id: JointId) 
 }
 
 pub fn motor_joint_set_linear_hertz(world: &mut World, joint_id: JointId, hertz: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetLinearHertz, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).linear_hertz = hertz;
 }
@@ -88,6 +113,11 @@ pub fn motor_joint_get_linear_hertz(world: &mut World, joint_id: JointId) -> f32
 }
 
 pub fn motor_joint_set_linear_damping_ratio(world: &mut World, joint_id: JointId, damping: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetLinearDampingRatio, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(damping);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).linear_damping_ratio = damping;
 }
@@ -98,6 +128,11 @@ pub fn motor_joint_get_linear_damping_ratio(world: &mut World, joint_id: JointId
 }
 
 pub fn motor_joint_set_angular_hertz(world: &mut World, joint_id: JointId, hertz: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetAngularHertz, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).angular_hertz = hertz;
 }
@@ -108,6 +143,11 @@ pub fn motor_joint_get_angular_hertz(world: &mut World, joint_id: JointId) -> f3
 }
 
 pub fn motor_joint_set_angular_damping_ratio(world: &mut World, joint_id: JointId, damping: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetAngularDampingRatio, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(damping);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).angular_damping_ratio = damping;
 }
@@ -118,6 +158,11 @@ pub fn motor_joint_get_angular_damping_ratio(world: &mut World, joint_id: JointI
 }
 
 pub fn motor_joint_set_max_spring_force(world: &mut World, joint_id: JointId, max_force: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetMaxSpringForce, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(max_force);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).max_spring_force = max_float(0.0, max_force);
 }
@@ -128,6 +173,11 @@ pub fn motor_joint_get_max_spring_force(world: &mut World, joint_id: JointId) ->
 }
 
 pub fn motor_joint_set_max_spring_torque(world: &mut World, joint_id: JointId, max_torque: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::MotorJointSetMaxSpringTorque, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(max_torque);
+    });
     let joint = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Motor);
     motor_joint_mut(joint).max_spring_torque = max_float(0.0, max_torque);
 }

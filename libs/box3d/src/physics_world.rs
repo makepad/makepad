@@ -249,6 +249,11 @@ pub struct World {
     pub enable_continuous: bool,
     pub enable_speculative: bool,
     pub in_use: bool,
+
+    /// Some while a recording session is active (C: world->recording). Hooks in
+    /// mutators check this before writing. RefCell because queries record
+    /// through &World; see the threading note in recording.rs.
+    pub recording: Option<Box<std::cell::RefCell<crate::recording::Recording>>>,
 }
 
 impl std::fmt::Debug for World {
@@ -1039,6 +1044,15 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
         return;
     }
 
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::Step, |b| {
+            b.w_worldid(wid);
+            b.w_f32(time_step);
+            b.w_i32(sub_step_count);
+        });
+    }
+
     world.locked = true;
 
     // Clear debug buffers
@@ -1164,6 +1178,34 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
     world.sensor_end_events[world.end_event_array_index as usize].clear();
     world.contact_end_events[world.end_event_array_index as usize].clear();
     world.locked = false;
+
+    if world.recording.is_some() {
+        let hash = crate::recording::hash_world_state(world);
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::StateHash, |b| {
+            b.w_worldid(wid);
+            b.w_u64(hash);
+        });
+
+        // Fold this step's world bounds into the recording so a viewer can
+        // frame the whole motion.
+        let mut world_bounds = AABB::default();
+        let mut have_bounds = false;
+        for i in 0..BODY_TYPE_COUNT {
+            let tree = &world.broad_phase.trees[i];
+            if dynamic_tree_get_proxy_count(tree) == 0 {
+                continue;
+            }
+            let bounds = crate::dynamic_tree::dynamic_tree_get_root_bounds(tree);
+            world_bounds = if have_bounds { crate::math_functions::aabb_union(world_bounds, bounds) } else { bounds };
+            have_bounds = true;
+        }
+        if have_bounds {
+            crate::recording::with_recording(world, |rec| {
+                crate::recording::rec_accumulate_bounds(rec, world_bounds);
+            });
+        }
+    }
 }
 
 /// C: b3World_GetBounds.
@@ -1341,6 +1383,14 @@ pub fn world_enable_sleeping(world: &mut World, flag: bool) {
         return;
     }
 
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldEnableSleeping, |b| {
+            b.w_worldid(wid);
+            b.w_bool(flag);
+        });
+    }
+
     if flag == world.enable_sleep {
         return;
     }
@@ -1368,6 +1418,14 @@ pub fn world_enable_warm_starting(world: &mut World, flag: bool) {
         b3_assert!(!world.locked);
         return;
     }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldEnableWarmStarting, |b| {
+            b.w_worldid(wid);
+            b.w_bool(flag);
+        });
+    }
     world.enable_warm_starting = flag;
 }
 
@@ -1388,6 +1446,14 @@ pub fn world_enable_continuous(world: &mut World, flag: bool) {
         b3_assert!(!world.locked);
         return;
     }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldEnableContinuous, |b| {
+            b.w_worldid(wid);
+            b.w_bool(flag);
+        });
+    }
     world.enable_continuous = flag;
 }
 
@@ -1402,6 +1468,14 @@ pub fn world_set_restitution_threshold(world: &mut World, value: f32) {
         b3_assert!(!world.locked);
         return;
     }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetRestitutionThreshold, |b| {
+            b.w_worldid(wid);
+            b.w_f32(value);
+        });
+    }
     world.restitution_threshold = clamp_float(value, 0.0, f32::MAX);
 }
 
@@ -1415,6 +1489,14 @@ pub fn world_set_hit_event_threshold(world: &mut World, value: f32) {
     if world.locked {
         b3_assert!(!world.locked);
         return;
+    }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetHitEventThreshold, |b| {
+            b.w_worldid(wid);
+            b.w_f32(value);
+        });
     }
     world.hit_event_threshold = clamp_float(value, 0.0, f32::MAX);
 }
@@ -1431,6 +1513,16 @@ pub fn world_set_contact_tuning(world: &mut World, hertz: f32, damping_ratio: f3
         return;
     }
 
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetContactTuning, |b| {
+            b.w_worldid(wid);
+            b.w_f32(hertz);
+            b.w_f32(damping_ratio);
+            b.w_f32(contact_speed);
+        });
+    }
+
     world.contact_hertz = clamp_float(hertz, 0.0, f32::MAX);
     world.contact_damping_ratio = clamp_float(damping_ratio, 0.0, f32::MAX);
     world.contact_speed = clamp_float(contact_speed, 0.0, f32::MAX);
@@ -1441,6 +1533,14 @@ pub fn world_set_contact_recycle_distance(world: &mut World, recycle_distance: f
     b3_assert!(!world.locked);
     if world.locked {
         return;
+    }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetContactRecycleDistance, |b| {
+            b.w_worldid(wid);
+            b.w_f32(recycle_distance);
+        });
     }
 
     world.contact_recycle_distance = clamp_float(recycle_distance, 0.0, f32::MAX);
@@ -1458,6 +1558,14 @@ pub fn world_set_maximum_linear_speed(world: &mut World, maximum_linear_speed: f
     if world.locked {
         b3_assert!(!world.locked);
         return;
+    }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetMaximumLinearSpeed, |b| {
+            b.w_worldid(wid);
+            b.w_f32(maximum_linear_speed);
+        });
     }
 
     world.max_linear_speed = maximum_linear_speed;
@@ -1598,6 +1706,14 @@ pub fn world_set_pre_solve_callback(world: &mut World, fcn: Option<Box<crate::ty
 
 /// C: b3World_SetGravity.
 pub fn world_set_gravity(world: &mut World, gravity: MVec3) {
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldSetGravity, |b| {
+            b.w_worldid(wid);
+            b.w_vec3(gravity);
+        });
+    }
+
     world.gravity = gravity;
 }
 
@@ -1613,6 +1729,13 @@ pub fn world_rebuild_static_tree(world: &mut World) {
         return;
     }
 
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldRebuildStaticTree, |b| {
+            b.w_worldid(wid);
+        });
+    }
+
     let static_tree = &mut world.broad_phase.trees[BodyType::Static as usize];
     dynamic_tree_rebuild(static_tree, true);
 }
@@ -1622,6 +1745,14 @@ pub fn world_enable_speculative(world: &mut World, flag: bool) {
     if world.locked {
         b3_assert!(!world.locked);
         return;
+    }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldEnableSpeculative, |b| {
+            b.w_worldid(wid);
+            b.w_bool(flag);
+        });
     }
 
     world.enable_speculative = flag;
@@ -1647,7 +1778,19 @@ pub fn world_overlap_aabb(
 
     b3_assert!(is_valid_aabb(aabb));
 
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_aabb(aabb);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
     for i in 0..BODY_TYPE_COUNT {
+        let rec_writer = &mut rec_writer;
         let mut callback = |_proxy_id: i32, user_data: u64| -> bool {
             let shape_id = user_data as i32;
             let shape = &world.shapes[shape_id as usize];
@@ -1657,13 +1800,24 @@ pub fn world_overlap_aabb(
             }
 
             let id = ShapeId { index1: shape_id + 1, world0: world.world_id, generation: shape.generation };
-            fcn(id)
+            let ret = fcn(id);
+            if let Some(w) = rec_writer.as_mut() {
+                w.write_overlap_hit(id, ret);
+            }
+            ret
         };
 
         let tree_result = dynamic_tree_query(&world.broad_phase.trees[i], aabb, filter.mask_bits, false, &mut callback);
 
         tree_stats.node_visits += tree_result.node_visits;
         tree_stats.leaf_visits += tree_result.leaf_visits;
+    }
+
+    if let Some(mut w) = rec_writer {
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        w.buf.w_treestats(tree_stats);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryOverlapAABB, w);
     }
 
     tree_stats
@@ -1686,10 +1840,23 @@ pub fn world_overlap_shape(
 
     b3_assert!(is_valid_position(origin));
 
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_shapeproxy(proxy);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
     // Bound the proxy in origin relative space then lift to a conservative world float box
     let aabb = offset_aabb(make_aabb(proxy.points, proxy.radius), origin);
 
     for i in 0..BODY_TYPE_COUNT {
+        let rec_writer = &mut rec_writer;
         let mut callback = |_proxy_id: i32, user_data: u64| -> bool {
             let shape_id = user_data as i32;
             let shape = &world.shapes[shape_id as usize];
@@ -1707,13 +1874,24 @@ pub fn world_overlap_shape(
             }
 
             let id = ShapeId { index1: shape.id + 1, world0: world.world_id, generation: shape.generation };
-            fcn(id)
+            let ret = fcn(id);
+            if let Some(w) = rec_writer.as_mut() {
+                w.write_overlap_hit(id, ret);
+            }
+            ret
         };
 
         let tree_result = dynamic_tree_query(&world.broad_phase.trees[i], aabb, filter.mask_bits, false, &mut callback);
 
         tree_stats.node_visits += tree_result.node_visits;
         tree_stats.leaf_visits += tree_result.leaf_visits;
+    }
+
+    if let Some(mut w) = rec_writer {
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        w.buf.w_treestats(tree_stats);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryOverlapShape, w);
     }
 
     tree_stats
@@ -1734,6 +1912,18 @@ pub fn world_collide_mover(
 
     b3_assert!(is_valid_position(origin));
 
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_capsule(mover);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
     let r = vec3(mover.radius, mover.radius, mover.radius);
 
     // Relative box lifted to world float with outward rounding, conservative for the tree
@@ -1744,6 +1934,7 @@ pub fn world_collide_mover(
     let aabb = offset_aabb(rel_box, origin);
 
     for i in 0..BODY_TYPE_COUNT {
+        let rec_writer = &mut rec_writer;
         let mut callback = |_proxy_id: i32, user_data: u64| -> bool {
             let shape_id = user_data as i32;
             let shape = &world.shapes[shape_id as usize];
@@ -1761,13 +1952,24 @@ pub fn world_collide_mover(
 
             if count > 0 {
                 let id = ShapeId { index1: shape.id + 1, world0: world.world_id, generation: shape.generation };
-                return fcn(id, &buffer[..count as usize]);
+                let ret = fcn(id, &buffer[..count as usize]);
+                if let Some(w) = rec_writer.as_mut() {
+                    w.write_plane_hit(id, &buffer[..count as usize], ret);
+                }
+                return ret;
             }
 
             true
         };
 
         dynamic_tree_query(&world.broad_phase.trees[i], aabb, filter.mask_bits, false, &mut callback);
+    }
+
+    if let Some(mut w) = rec_writer {
+        // CollideMover returns void: no treestats tail, just the per-shape plane batches.
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryCollideMover, w);
     }
 }
 
@@ -1780,7 +1982,7 @@ pub fn world_cast_ray(
     filter: QueryFilter,
     fcn: &mut dyn FnMut(ShapeId, crate::math_functions::Pos, MVec3, f32, u64, i32, i32) -> f32,
 ) -> TreeStats {
-    let mut tree_stats = TreeStats::default();
+    let tree_stats = TreeStats::default();
 
     if world.locked {
         b3_assert!(!world.locked);
@@ -1789,6 +1991,43 @@ pub fn world_cast_ray(
 
     b3_assert!(is_valid_position(origin));
     b3_assert!(is_valid_vec3(translation));
+
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_vec3(translation);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
+    let tree_stats = cast_ray_traverse(world, origin, translation, filter, fcn, &mut rec_writer);
+
+    if let Some(mut w) = rec_writer {
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        w.buf.w_treestats(tree_stats);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryCastRay, w);
+    }
+
+    tree_stats
+}
+
+// Shared ray traversal for world_cast_ray (records per-hit when a writer is
+// present) and world_cast_ray_closest (closed query — passes None and records
+// only the final RayResult, like C).
+fn cast_ray_traverse(
+    world: &World,
+    origin: crate::math_functions::Pos,
+    translation: MVec3,
+    filter: QueryFilter,
+    fcn: &mut dyn FnMut(ShapeId, crate::math_functions::Pos, MVec3, f32, u64, i32, i32) -> f32,
+    rec_writer: &mut Option<crate::recording::RecQueryWriter>,
+) -> TreeStats {
+    let mut tree_stats = TreeStats::default();
 
     // The tree traverses in float relative to the world origin. Each shape is then re-differenced at
     // full precision against the origin, so a hit stays accurate far from the origin.
@@ -1799,6 +2038,7 @@ pub fn world_cast_ray(
     for i in 0..BODY_TYPE_COUNT {
         {
             let fraction = &mut fraction;
+            let rec_writer = &mut *rec_writer;
             let mut callback = |input: &RayCastInput, _proxy_id: i32, user_data: u64| -> f32 {
                 let shape_id = user_data as i32;
                 let shape = &world.shapes[shape_id as usize];
@@ -1826,6 +2066,19 @@ pub fn world_cast_ray(
                     let child_index = output.child_index;
                     let new_fraction =
                         fcn(id, point, output.normal, output.fraction, user_material_id, triangle_index, child_index);
+
+                    if let Some(w) = rec_writer.as_mut() {
+                        w.write_cast_hit(
+                            id,
+                            point,
+                            output.normal,
+                            output.fraction,
+                            user_material_id,
+                            triangle_index,
+                            child_index,
+                            new_fraction,
+                        );
+                    }
 
                     // The user may return -1 to skip this shape
                     if 0.0 <= new_fraction && new_fraction <= 1.0 {
@@ -1901,13 +2154,26 @@ pub fn world_cast_ray_closest(
             fraction
         };
 
-        let tree_stats = world_cast_ray(world, origin, translation, filter, &mut closest_fcn);
+        let mut no_writer = None;
+        let tree_stats = cast_ray_traverse(world, origin, translation, filter, &mut closest_fcn, &mut no_writer);
         node_visits = tree_stats.node_visits;
         leaf_visits = tree_stats.leaf_visits;
     }
 
     result.node_visits = node_visits;
     result.leaf_visits = leaf_visits;
+
+    // Closed query, no user callback: record the inputs and the single result
+    // for the replay compare. (C: b3_recOpQueryCastRayClosest)
+    if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_vec3(translation);
+        w.buf.w_queryfilter(filter);
+        w.buf.w_rayresult(&result);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryCastRayClosest, w);
+    }
 
     result
 }
@@ -1931,6 +2197,19 @@ pub fn world_cast_shape(
     b3_assert!(is_valid_position(origin));
     b3_assert!(is_valid_vec3(translation));
 
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_shapeproxy(proxy);
+        w.buf.w_vec3(translation);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
     let mut fraction = 1.0f32;
 
     // Bound the proxy in origin relative space then lift to a conservative world float box.
@@ -1944,6 +2223,7 @@ pub fn world_cast_shape(
     for i in 0..BODY_TYPE_COUNT {
         {
             let fraction = &mut fraction;
+            let rec_writer = &mut rec_writer;
             let mut callback = |input: &crate::types::BoxCastInput, _proxy_id: i32, user_data: u64| -> f32 {
                 let shape_id = user_data as i32;
                 let shape = &world.shapes[shape_id as usize];
@@ -1973,15 +2253,29 @@ pub fn world_cast_shape(
 
                     let triangle_index = output.triangle_index;
                     let child_index = output.child_index;
+                    let hit_point = offset_pos(origin, output.point);
                     let new_fraction = fcn(
                         id,
-                        offset_pos(origin, output.point),
+                        hit_point,
                         output.normal,
                         output.fraction,
                         user_material_id,
                         triangle_index,
                         child_index,
                     );
+
+                    if let Some(w) = rec_writer.as_mut() {
+                        w.write_cast_hit(
+                            id,
+                            hit_point,
+                            output.normal,
+                            output.fraction,
+                            user_material_id,
+                            triangle_index,
+                            child_index,
+                            new_fraction,
+                        );
+                    }
 
                     // The user may return -1 to skip this shape
                     if 0.0 <= new_fraction && new_fraction <= 1.0 {
@@ -2007,6 +2301,13 @@ pub fn world_cast_shape(
         tree_input.max_fraction = fraction;
     }
 
+    if let Some(mut w) = rec_writer {
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        w.buf.w_treestats(tree_stats);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryCastShape, w);
+    }
+
     tree_stats
 }
 
@@ -2027,6 +2328,23 @@ pub fn world_cast_mover(
         return 1.0;
     }
 
+    // The mover filter is a per-shape bool(shapeId) decision, the same shape as
+    // an overlap callback, so it records through the overlap hit layout.
+    // Recording even when the user passed no filter captures an accept-all
+    // stream that replays identically (C: b3RecOverlapTrampoline with NULL fcn).
+    let mut rec_writer = if crate::recording::rec_active(world) {
+        let mut w = crate::recording::RecQueryWriter::begin(filter.id, filter.name);
+        w.buf.w_worldid(crate::recording::rec_world_id(world));
+        w.buf.w_position(origin);
+        w.buf.w_capsule(mover);
+        w.buf.w_vec3(translation);
+        w.buf.w_queryfilter(filter);
+        w.count_offset = w.buf.reserve_u32();
+        Some(w)
+    } else {
+        None
+    };
+
     let mut fraction = 1.0f32;
 
     let centers = [mover.center1, mover.center2];
@@ -2043,6 +2361,7 @@ pub fn world_cast_mover(
         {
             let fraction = &mut fraction;
             let fcn = &mut fcn;
+            let rec_writer = &mut rec_writer;
             let mut callback = |input: &crate::types::BoxCastInput, _proxy_id: i32, user_data: u64| -> f32 {
                 let shape_id = user_data as i32;
                 let shape = &world.shapes[shape_id as usize];
@@ -2051,9 +2370,15 @@ pub fn world_cast_mover(
                     return *fraction;
                 }
 
-                if let Some(filter_fcn) = fcn.as_mut() {
+                if fcn.is_some() || rec_writer.is_some() {
                     let id = ShapeId { index1: shape_id + 1, world0: world.world_id, generation: shape.generation };
-                    let should_collide = filter_fcn(id);
+                    let should_collide = match fcn.as_mut() {
+                        Some(filter_fcn) => filter_fcn(id),
+                        None => true,
+                    };
+                    if let Some(w) = rec_writer.as_mut() {
+                        w.write_overlap_hit(id, should_collide);
+                    }
                     if !should_collide {
                         return *fraction;
                     }
@@ -2090,6 +2415,14 @@ pub fn world_cast_mover(
         tree_input.max_fraction = fraction;
     }
 
+    if let Some(mut w) = rec_writer {
+        // Backpatch the accept count, then record the returned fraction as the tail.
+        let n = w.hit_count;
+        w.buf.patch_u32(w.count_offset, n);
+        w.buf.w_f32(fraction);
+        crate::recording::rec_query_commit(world, crate::recording::RecOp::QueryCastMover, w);
+    }
+
     fraction
 }
 
@@ -2111,6 +2444,14 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
     if world.locked {
         b3_assert!(!world.locked);
         return;
+    }
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::WorldExplode, |b| {
+            b.w_worldid(wid);
+            b.w_explosiondef(explosion_def);
+        });
     }
 
     // Locked due to waking
