@@ -5,7 +5,7 @@
 
 use makepad_box3d::body::*;
 use makepad_box3d::hull::{make_box_hull, make_cube_hull};
-use makepad_box3d::math_functions::{offset_pos, sub_pos, vec3, Pos, Vec3};
+use makepad_box3d::math_functions::{offset_pos, pos, sub_pos, vec3, Pos, Vec3};
 use makepad_box3d::physics_world::*;
 use makepad_box3d::shape::{create_hull_shape, create_sphere_shape, shape_ray_cast};
 use makepad_box3d::types::*;
@@ -25,7 +25,7 @@ struct StackResult {
 // Drop a short stack of boxes onto a ground box centered at baseX. Records each body's final
 // position relative to the base and the step on which the stack settles.
 fn run_stack(base_x: f32) -> StackResult {
-    let base: Pos = vec3(base_x, 0.0, 0.0);
+    let base: Pos = pos(base_x, 0.0, 0.0);
 
     let world_def = default_world_def();
     let mut world = create_world(&world_def);
@@ -79,7 +79,7 @@ fn large_world_stack_test() {
 // Fire a fast bullet at a thin wall. Returns the bullet's final x relative to the base. If
 // continuous collision works the bullet stops at the wall instead of tunneling past it.
 fn run_bullet(base_x: f32) -> f32 {
-    let base: Pos = vec3(base_x, 0.0, 0.0);
+    let base: Pos = pos(base_x, 0.0, 0.0);
 
     let world_def = default_world_def();
     let mut world = create_world(&world_def);
@@ -139,7 +139,7 @@ struct QueryResult {
 // Run the four origin relative spatial queries against a static box centered at the base. The query
 // inputs are all relative to the base, so passing base as the origin keeps them precise far out.
 fn run_queries(base_x: f32) -> QueryResult {
-    let base: Pos = vec3(base_x, 0.0, 0.0);
+    let base: Pos = pos(base_x, 0.0, 0.0);
 
     let world_def = default_world_def();
     let mut world = create_world(&world_def);
@@ -234,4 +234,54 @@ fn large_world_query_test() {
     ensure_small!(origin.ray_rel_x + 1.0, 0.05);
     ensure!(origin.shape_ray_hit);
     ensure_small!(origin.shape_ray_rel_x + 1.0, 0.05);
+}
+
+// Port of the BOX3D_DOUBLE_PRECISION halves: a stack, a bullet, and the queries far from
+// the origin must behave identically to the origin runs in double precision mode.
+
+#[cfg(feature = "double-precision")]
+#[test]
+fn large_world_stack_far_test() {
+    let origin = run_stack(0.0);
+    ensure!(origin.sleep_step >= 0);
+
+    let far = run_stack(1.0e7);
+    ensure!(far.sleep_step >= 0);
+
+    // Sleeps on the same frame and lands in the same relative configuration
+    ensure!(far.sleep_step == origin.sleep_step);
+    for i in 0..STACK_COUNT {
+        ensure_small!(far.relative_positions[i].x - origin.relative_positions[i].x, 1.0e-3);
+        ensure_small!(far.relative_positions[i].y - origin.relative_positions[i].y, 1.0e-3);
+        ensure_small!(far.relative_positions[i].z - origin.relative_positions[i].z, 1.0e-3);
+    }
+}
+
+#[cfg(feature = "double-precision")]
+#[test]
+fn large_world_bullet_far_test() {
+    // The blocking check is that the catch still holds far from the origin where the swept
+    // query box rounds back to float with large ULP.
+    let far_x = run_bullet(1.0e7);
+    ensure!(far_x < 5.0);
+}
+
+#[cfg(feature = "double-precision")]
+#[test]
+fn large_world_query_far_test() {
+    let origin = run_queries(0.0);
+
+    let far = run_queries(1.0e7);
+    ensure!(far.cast_hit);
+    ensure!(far.overlap_hit);
+    ensure!(far.mover_fraction < 1.0);
+    ensure!(far.plane_count > 0);
+    ensure!(far.ray_hit);
+    ensure!(far.shape_ray_hit);
+
+    ensure_small!(far.cast_rel_x - origin.cast_rel_x, 1.0e-3);
+    ensure_small!(far.mover_fraction - origin.mover_fraction, 1.0e-3);
+    ensure!(far.plane_count == origin.plane_count);
+    ensure_small!(far.ray_rel_x - origin.ray_rel_x, 1.0e-3);
+    ensure_small!(far.shape_ray_rel_x - origin.shape_ray_rel_x, 1.0e-3);
 }

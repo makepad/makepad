@@ -16,7 +16,7 @@ use makepad_box3d::ensure_small;
 use makepad_box3d::hull::make_cube_hull;
 use makepad_box3d::id::{BodyId, JointId, WorldId};
 use makepad_box3d::joint::*;
-use makepad_box3d::math_functions::{vec3, Quat, Transform, Vec3};
+use makepad_box3d::math_functions::{pos, vec3, Quat, Transform, Vec3};
 use makepad_box3d::motor_joint::*;
 use makepad_box3d::parallel_joint::*;
 use makepad_box3d::physics_world::*;
@@ -48,7 +48,7 @@ fn create_joint_fixture() -> JointFixture {
 
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
-    body_def.position = vec3(0.0, 4.0, 0.0);
+    body_def.position = pos(0.0, 4.0, 0.0);
     let body_id = create_body(&mut world, &body_def);
 
     let mut shape_def = default_shape_def();

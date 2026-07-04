@@ -5,9 +5,16 @@ use crate::core::get_length_units_per_meter;
 use crate::math_functions::PI;
 
 // Used to detect bad values. In float mode positions greater than about 16km have precision
-// problems, so 100km is a safe limit.
+// problems, so 100km is a safe limit. Large world mode keeps coordinates accurate much farther
+// from the origin, so the sanity limit widens to keep valid far-field positions from tripping it.
+#[cfg(not(feature = "double-precision"))]
 pub fn huge() -> f32 {
     1.0e5 * get_length_units_per_meter()
+}
+
+#[cfg(feature = "double-precision")]
+pub fn huge() -> f32 {
+    1.0e9 * get_length_units_per_meter()
 }
 
 /// Maximum parallel workers. Used for some fixed size arrays.

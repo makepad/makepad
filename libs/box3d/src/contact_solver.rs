@@ -4,9 +4,11 @@
 // becomes `constraint_start` (range into StepContext::manifold_constraints) and
 // `struct b3Contact* contact` becomes `contact_id` (index into World::contacts).
 //
-// SIMD: this is the B3_SIMD_NONE path. FloatW is the C scalar-fallback struct of
-// four floats; lanes hold four contacts. Per-lane float operation order matches
-// the C scalar fallback exactly.
+// SIMD: all three C paths are ported — NEON (aarch64), SSE2 (x86_64), and the
+// B3_SIMD_NONE scalar fallback (feature "disable-simd" / other targets). FloatW
+// holds four lanes, one per contact. Per-lane float operation order matches the
+// C path exactly; b3MulAddW is deliberately non-fused on every path, so the
+// arithmetic results are bit-identical across paths.
 //
 // Layout contract with the solver.c port (flat constraint arrays owned by
 // StepContext, see solver.rs):
@@ -837,38 +839,477 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
 // contact_solver.c — wide (4 lane) types and operations, B3_SIMD_NONE path
 // ---------------------------------------------------------------------------
 
-/// C b3FloatW (scalar fallback): four lanes, one per contact.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FloatW {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub w: f32,
-}
+// The primitive wide type and its operations exist in three variants matching
+// the C build. Comparison ops return all-bits masks on the SIMD paths and
+// 1.0f/0.0f on the scalar path; they are only consumed by or_w/blend_w/
+// all_zero_w within the same path, so the selected values are identical.
 
-impl FloatW {
-    /// C: ((float*)&w)[lane]
-    #[inline(always)]
-    pub fn get(self, lane: usize) -> f32 {
-        match lane {
-            0 => self.x,
-            1 => self.y,
-            2 => self.z,
-            _ => self.w,
+/// C: B3_SIMD_NEON
+#[cfg(all(target_arch = "aarch64", not(feature = "disable-simd")))]
+mod wide {
+    // SAFETY throughout this module: NEON is part of the aarch64 baseline, so
+    // every intrinsic used here is unconditionally available on this target.
+    use core::arch::aarch64::*;
+
+    /// C b3FloatW (NEON): wide float holds 4 numbers, one lane per contact.
+    #[derive(Clone, Copy, Debug)]
+    pub struct FloatW(pub(crate) float32x4_t);
+
+    impl Default for FloatW {
+        fn default() -> Self {
+            zero_w()
         }
     }
 
-    /// C: ((float*)&w)[lane] = value
+    impl FloatW {
+        /// C: ((float*)&w)[lane]
+        #[inline(always)]
+        pub fn get(self, lane: usize) -> f32 {
+            let mut f = [0.0f32; 4];
+            unsafe { vst1q_f32(f.as_mut_ptr(), self.0) };
+            f[lane]
+        }
+
+        /// C: ((float*)&w)[lane] = value
+        #[inline(always)]
+        pub fn set(&mut self, lane: usize, value: f32) {
+            let mut f = [0.0f32; 4];
+            unsafe { vst1q_f32(f.as_mut_ptr(), self.0) };
+            f[lane] = value;
+            self.0 = unsafe { vld1q_f32(f.as_ptr()) };
+        }
+    }
+
     #[inline(always)]
-    pub fn set(&mut self, lane: usize, value: f32) {
-        match lane {
-            0 => self.x = value,
-            1 => self.y = value,
-            2 => self.z = value,
-            _ => self.w = value,
+    pub fn zero_w() -> FloatW {
+        unsafe { FloatW(vdupq_n_f32(0.0)) }
+    }
+
+    #[inline(always)]
+    pub fn splat_w(scalar: f32) -> FloatW {
+        unsafe { FloatW(vdupq_n_f32(scalar)) }
+    }
+
+    #[inline(always)]
+    pub fn neg_w(a: FloatW) -> FloatW {
+        unsafe { FloatW(vnegq_f32(a.0)) }
+    }
+
+    #[inline(always)]
+    pub fn set_w(a: f32, b: f32, c: f32, d: f32) -> FloatW {
+        let array: [f32; 4] = [a, b, c, d];
+        unsafe { FloatW(vld1q_f32(array.as_ptr())) }
+    }
+
+    #[inline(always)]
+    pub fn add_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vaddq_f32(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn sub_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vsubq_f32(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn mul_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vmulq_f32(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn div_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vdivq_f32(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn sqrt_w(a: FloatW) -> FloatW {
+        unsafe { FloatW(vsqrtq_f32(a.0)) }
+    }
+
+    /// a + b * c
+    /// C: "Cannot use real FMA because it doesn't match the non-SIMD path"
+    #[inline(always)]
+    pub fn mul_add_w(a: FloatW, b: FloatW, c: FloatW) -> FloatW {
+        unsafe { FloatW(vaddq_f32(a.0, vmulq_f32(b.0, c.0))) }
+    }
+
+    #[inline(always)]
+    fn min_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vminq_f32(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn max_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vmaxq_f32(a.0, b.0)) }
+    }
+
+    /// clamp a to [-b, b]
+    #[inline(always)]
+    pub fn sym_clamp_w(a: FloatW, b: FloatW) -> FloatW {
+        let nb = neg_w(b);
+        let c = max_w(nb, a);
+        min_w(c, b)
+    }
+
+    #[inline(always)]
+    pub fn or_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe {
+            FloatW(vreinterpretq_f32_u32(vorrq_u32(
+                vreinterpretq_u32_f32(a.0),
+                vreinterpretq_u32_f32(b.0),
+            )))
+        }
+    }
+
+    #[inline(always)]
+    pub fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vreinterpretq_f32_u32(vcgtq_f32(a.0, b.0))) }
+    }
+
+    #[inline(always)]
+    pub fn equals_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(vreinterpretq_f32_u32(vceqq_f32(a.0, b.0))) }
+    }
+
+    #[inline(always)]
+    pub fn all_zero_w(a: FloatW) -> bool {
+        unsafe {
+            // Create a zero vector for comparison
+            let zero = vdupq_n_f32(0.0);
+
+            // Compare the input vector with zero
+            let cmp_result = vceqq_f32(a.0, zero);
+
+            // C (default build, no SVE): manually check all lanes
+            vgetq_lane_u32(cmp_result, 0) != 0
+                && vgetq_lane_u32(cmp_result, 1) != 0
+                && vgetq_lane_u32(cmp_result, 2) != 0
+                && vgetq_lane_u32(cmp_result, 3) != 0
+        }
+    }
+
+    /// component-wise returns mask ? b : a
+    #[inline(always)]
+    pub fn blend_w(a: FloatW, b: FloatW, mask: FloatW) -> FloatW {
+        unsafe {
+            let mask32 = vreinterpretq_u32_f32(mask.0);
+            FloatW(vbslq_f32(mask32, b.0, a.0))
         }
     }
 }
+
+/// C: B3_SIMD_SSE2
+#[cfg(all(target_arch = "x86_64", not(feature = "disable-simd")))]
+mod wide {
+    // SAFETY throughout this module: SSE2 is part of the x86_64 baseline, so
+    // every intrinsic used here is unconditionally available on this target.
+    use core::arch::x86_64::*;
+
+    /// C b3FloatW (SSE2): wide float holds 4 numbers, one lane per contact.
+    #[derive(Clone, Copy, Debug)]
+    pub struct FloatW(pub(crate) __m128);
+
+    impl Default for FloatW {
+        fn default() -> Self {
+            zero_w()
+        }
+    }
+
+    impl FloatW {
+        /// C: ((float*)&w)[lane]
+        #[inline(always)]
+        pub fn get(self, lane: usize) -> f32 {
+            let mut f = [0.0f32; 4];
+            unsafe { _mm_storeu_ps(f.as_mut_ptr(), self.0) };
+            f[lane]
+        }
+
+        /// C: ((float*)&w)[lane] = value
+        #[inline(always)]
+        pub fn set(&mut self, lane: usize, value: f32) {
+            let mut f = [0.0f32; 4];
+            unsafe { _mm_storeu_ps(f.as_mut_ptr(), self.0) };
+            f[lane] = value;
+            self.0 = unsafe { _mm_loadu_ps(f.as_ptr()) };
+        }
+    }
+
+    #[inline(always)]
+    pub fn zero_w() -> FloatW {
+        unsafe { FloatW(_mm_setzero_ps()) }
+    }
+
+    #[inline(always)]
+    pub fn splat_w(scalar: f32) -> FloatW {
+        unsafe { FloatW(_mm_set1_ps(scalar)) }
+    }
+
+    #[inline(always)]
+    pub fn neg_w(a: FloatW) -> FloatW {
+        unsafe {
+            // Create a mask with the sign bit set for each element
+            let mask = _mm_set1_ps(-0.0);
+
+            // XOR the input with the mask to negate each element
+            FloatW(_mm_xor_ps(a.0, mask))
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_w(a: f32, b: f32, c: f32, d: f32) -> FloatW {
+        unsafe { FloatW(_mm_setr_ps(a, b, c, d)) }
+    }
+
+    #[inline(always)]
+    pub fn add_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_add_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn sub_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_sub_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn mul_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_mul_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn div_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_div_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn sqrt_w(a: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_sqrt_ps(a.0)) }
+    }
+
+    /// a + b * c (non-fused, matches the other paths)
+    #[inline(always)]
+    pub fn mul_add_w(a: FloatW, b: FloatW, c: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_add_ps(a.0, _mm_mul_ps(b.0, c.0))) }
+    }
+
+    #[inline(always)]
+    fn min_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_min_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn max_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_max_ps(a.0, b.0)) }
+    }
+
+    /// clamp a to [-b, b]
+    #[inline(always)]
+    pub fn sym_clamp_w(a: FloatW, b: FloatW) -> FloatW {
+        let nb = neg_w(b);
+        let c = max_w(nb, a);
+        min_w(c, b)
+    }
+
+    #[inline(always)]
+    pub fn or_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_or_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_cmpgt_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn equals_w(a: FloatW, b: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_cmpeq_ps(a.0, b.0)) }
+    }
+
+    #[inline(always)]
+    pub fn all_zero_w(a: FloatW) -> bool {
+        unsafe {
+            // Compare each element with zero
+            let zero = _mm_setzero_ps();
+            let cmp = _mm_cmpeq_ps(a.0, zero);
+
+            // Create a mask from the comparison results
+            let mask = _mm_movemask_ps(cmp);
+
+            // If all elements are zero, the mask will be 0xF (1111 in binary)
+            mask == 0xF
+        }
+    }
+
+    /// component-wise returns mask ? b : a
+    #[inline(always)]
+    pub fn blend_w(a: FloatW, b: FloatW, mask: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_or_ps(_mm_and_ps(mask.0, b.0), _mm_andnot_ps(mask.0, a.0))) }
+    }
+}
+
+/// C: B3_SIMD_NONE (scalar fallback)
+#[cfg(any(
+    feature = "disable-simd",
+    not(any(target_arch = "aarch64", target_arch = "x86_64"))
+))]
+mod wide {
+    /// C b3FloatW (scalar fallback): four lanes, one per contact.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct FloatW {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
+    }
+
+    impl FloatW {
+        /// C: ((float*)&w)[lane]
+        #[inline(always)]
+        pub fn get(self, lane: usize) -> f32 {
+            match lane {
+                0 => self.x,
+                1 => self.y,
+                2 => self.z,
+                _ => self.w,
+            }
+        }
+
+        /// C: ((float*)&w)[lane] = value
+        #[inline(always)]
+        pub fn set(&mut self, lane: usize, value: f32) {
+            match lane {
+                0 => self.x = value,
+                1 => self.y = value,
+                2 => self.z = value,
+                _ => self.w = value,
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn zero_w() -> FloatW {
+        FloatW { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
+    }
+
+    #[inline(always)]
+    pub fn splat_w(scalar: f32) -> FloatW {
+        FloatW { x: scalar, y: scalar, z: scalar, w: scalar }
+    }
+
+    #[inline(always)]
+    pub fn neg_w(a: FloatW) -> FloatW {
+        FloatW { x: -a.x, y: -a.y, z: -a.z, w: -a.w }
+    }
+
+    #[inline(always)]
+    pub fn set_w(a: f32, b: f32, c: f32, d: f32) -> FloatW {
+        FloatW { x: a, y: b, z: c, w: d }
+    }
+
+    #[inline(always)]
+    pub fn add_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w }
+    }
+
+    #[inline(always)]
+    pub fn sub_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z, w: a.w - b.w }
+    }
+
+    #[inline(always)]
+    pub fn mul_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z, w: a.w * b.w }
+    }
+
+    #[inline(always)]
+    pub fn div_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z, w: a.w / b.w }
+    }
+
+    #[inline(always)]
+    pub fn sqrt_w(a: FloatW) -> FloatW {
+        FloatW { x: a.x.sqrt(), y: a.y.sqrt(), z: a.z.sqrt(), w: a.w.sqrt() }
+    }
+
+    /// a + b * c
+    #[inline(always)]
+    pub fn mul_add_w(a: FloatW, b: FloatW, c: FloatW) -> FloatW {
+        FloatW { x: a.x + b.x * c.x, y: a.y + b.y * c.y, z: a.z + b.z * c.z, w: a.w + b.w * c.w }
+    }
+
+    #[inline(always)]
+    pub fn max_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW {
+            x: if a.x >= b.x { a.x } else { b.x },
+            y: if a.y >= b.y { a.y } else { b.y },
+            z: if a.z >= b.z { a.z } else { b.z },
+            w: if a.w >= b.w { a.w } else { b.w },
+        }
+    }
+
+    /// clamp a to [-b, b]
+    #[inline(always)]
+    pub fn sym_clamp_w(a: FloatW, b: FloatW) -> FloatW {
+        let mut r = FloatW {
+            x: if a.x <= b.x { a.x } else { b.x },
+            y: if a.y <= b.y { a.y } else { b.y },
+            z: if a.z <= b.z { a.z } else { b.z },
+            w: if a.w <= b.w { a.w } else { b.w },
+        };
+        r.x = if r.x <= -b.x { -b.x } else { r.x };
+        r.y = if r.y <= -b.y { -b.y } else { r.y };
+        r.z = if r.z <= -b.z { -b.z } else { r.z };
+        r.w = if r.w <= -b.w { -b.w } else { r.w };
+        r
+    }
+
+    #[inline(always)]
+    pub fn or_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW {
+            x: if a.x != 0.0 || b.x != 0.0 { 1.0 } else { 0.0 },
+            y: if a.y != 0.0 || b.y != 0.0 { 1.0 } else { 0.0 },
+            z: if a.z != 0.0 || b.z != 0.0 { 1.0 } else { 0.0 },
+            w: if a.w != 0.0 || b.w != 0.0 { 1.0 } else { 0.0 },
+        }
+    }
+
+    #[inline(always)]
+    pub fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW {
+            x: if a.x > b.x { 1.0 } else { 0.0 },
+            y: if a.y > b.y { 1.0 } else { 0.0 },
+            z: if a.z > b.z { 1.0 } else { 0.0 },
+            w: if a.w > b.w { 1.0 } else { 0.0 },
+        }
+    }
+
+    #[inline(always)]
+    pub fn equals_w(a: FloatW, b: FloatW) -> FloatW {
+        FloatW {
+            x: if a.x == b.x { 1.0 } else { 0.0 },
+            y: if a.y == b.y { 1.0 } else { 0.0 },
+            z: if a.z == b.z { 1.0 } else { 0.0 },
+            w: if a.w == b.w { 1.0 } else { 0.0 },
+        }
+    }
+
+    #[inline(always)]
+    pub fn all_zero_w(a: FloatW) -> bool {
+        a.x == 0.0 && a.y == 0.0 && a.z == 0.0 && a.w == 0.0
+    }
+
+    /// component-wise returns mask ? b : a
+    #[inline(always)]
+    pub fn blend_w(a: FloatW, b: FloatW, mask: FloatW) -> FloatW {
+        FloatW {
+            x: if mask.x != 0.0 { b.x } else { a.x },
+            y: if mask.y != 0.0 { b.y } else { a.y },
+            z: if mask.z != 0.0 { b.z } else { a.z },
+            w: if mask.w != 0.0 { b.w } else { a.w },
+        }
+    }
+}
+
+pub use wide::*;
 
 /// Wide vec2
 #[derive(Clone, Copy, Debug, Default)]
@@ -909,124 +1350,6 @@ pub struct SymMatrix3W {
     pub cyy: FloatW,
     pub cyz: FloatW,
     pub czz: FloatW,
-}
-
-#[inline(always)]
-fn zero_w() -> FloatW {
-    FloatW { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
-}
-
-#[inline(always)]
-fn splat_w(scalar: f32) -> FloatW {
-    FloatW { x: scalar, y: scalar, z: scalar, w: scalar }
-}
-
-#[inline(always)]
-fn neg_w(a: FloatW) -> FloatW {
-    FloatW { x: -a.x, y: -a.y, z: -a.z, w: -a.w }
-}
-
-#[inline(always)]
-fn add_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w }
-}
-
-#[inline(always)]
-fn sub_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z, w: a.w - b.w }
-}
-
-#[inline(always)]
-fn mul_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW { x: a.x * b.x, y: a.y * b.y, z: a.z * b.z, w: a.w * b.w }
-}
-
-#[inline(always)]
-fn div_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW { x: a.x / b.x, y: a.y / b.y, z: a.z / b.z, w: a.w / b.w }
-}
-
-#[inline(always)]
-fn sqrt_w(a: FloatW) -> FloatW {
-    FloatW { x: a.x.sqrt(), y: a.y.sqrt(), z: a.z.sqrt(), w: a.w.sqrt() }
-}
-
-/// a + b * c
-#[inline(always)]
-fn mul_add_w(a: FloatW, b: FloatW, c: FloatW) -> FloatW {
-    FloatW { x: a.x + b.x * c.x, y: a.y + b.y * c.y, z: a.z + b.z * c.z, w: a.w + b.w * c.w }
-}
-
-#[inline(always)]
-fn max_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW {
-        x: if a.x >= b.x { a.x } else { b.x },
-        y: if a.y >= b.y { a.y } else { b.y },
-        z: if a.z >= b.z { a.z } else { b.z },
-        w: if a.w >= b.w { a.w } else { b.w },
-    }
-}
-
-/// clamp a to [-b, b]
-#[inline(always)]
-fn sym_clamp_w(a: FloatW, b: FloatW) -> FloatW {
-    let mut r = FloatW {
-        x: if a.x <= b.x { a.x } else { b.x },
-        y: if a.y <= b.y { a.y } else { b.y },
-        z: if a.z <= b.z { a.z } else { b.z },
-        w: if a.w <= b.w { a.w } else { b.w },
-    };
-    r.x = if r.x <= -b.x { -b.x } else { r.x };
-    r.y = if r.y <= -b.y { -b.y } else { r.y };
-    r.z = if r.z <= -b.z { -b.z } else { r.z };
-    r.w = if r.w <= -b.w { -b.w } else { r.w };
-    r
-}
-
-#[inline(always)]
-fn or_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW {
-        x: if a.x != 0.0 || b.x != 0.0 { 1.0 } else { 0.0 },
-        y: if a.y != 0.0 || b.y != 0.0 { 1.0 } else { 0.0 },
-        z: if a.z != 0.0 || b.z != 0.0 { 1.0 } else { 0.0 },
-        w: if a.w != 0.0 || b.w != 0.0 { 1.0 } else { 0.0 },
-    }
-}
-
-#[inline(always)]
-fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW {
-        x: if a.x > b.x { 1.0 } else { 0.0 },
-        y: if a.y > b.y { 1.0 } else { 0.0 },
-        z: if a.z > b.z { 1.0 } else { 0.0 },
-        w: if a.w > b.w { 1.0 } else { 0.0 },
-    }
-}
-
-#[inline(always)]
-fn equals_w(a: FloatW, b: FloatW) -> FloatW {
-    FloatW {
-        x: if a.x == b.x { 1.0 } else { 0.0 },
-        y: if a.y == b.y { 1.0 } else { 0.0 },
-        z: if a.z == b.z { 1.0 } else { 0.0 },
-        w: if a.w == b.w { 1.0 } else { 0.0 },
-    }
-}
-
-#[inline(always)]
-fn all_zero_w(a: FloatW) -> bool {
-    a.x == 0.0 && a.y == 0.0 && a.z == 0.0 && a.w == 0.0
-}
-
-/// component-wise returns mask ? b : a
-#[inline(always)]
-fn blend_w(a: FloatW, b: FloatW, mask: FloatW) -> FloatW {
-    FloatW {
-        x: if mask.x != 0.0 { b.x } else { a.x },
-        y: if mask.y != 0.0 { b.y } else { a.y },
-        z: if mask.z != 0.0 { b.z } else { a.z },
-        w: if mask.w != 0.0 { b.w } else { a.w },
-    }
 }
 
 /// s * a
@@ -1254,79 +1577,130 @@ struct BodyStateW {
     dq: QuatW,
 }
 
-// B3_SIMD_NONE gather
+// Shared gather: the C SIMD gather (dummy zero state with deltaRotation.s = 1,
+// b3SetW lane packing) and the C scalar gather (identity state, struct
+// literals) produce identical values, so one implementation serves all paths.
 fn gather_bodies(states: &[BodyState], indices: &[i32; SIMD_WIDTH]) -> BodyStateW {
+    // C SIMD path: b3BodyState dummy = {0}; dummy.deltaRotation.s = 1.0f;
+    // which is exactly the identity body state.
     let identity = IDENTITY_BODY_STATE;
 
+    // Indices are 0 for null
     let s1 = if indices[0] == 0 { identity } else { states[(indices[0] - 1) as usize] };
     let s2 = if indices[1] == 0 { identity } else { states[(indices[1] - 1) as usize] };
     let s3 = if indices[2] == 0 { identity } else { states[(indices[2] - 1) as usize] };
     let s4 = if indices[3] == 0 { identity } else { states[(indices[3] - 1) as usize] };
 
     let mut simd_body = BodyStateW::default();
-    simd_body.v.x = FloatW { x: s1.linear_velocity.x, y: s2.linear_velocity.x, z: s3.linear_velocity.x, w: s4.linear_velocity.x };
-    simd_body.v.y = FloatW { x: s1.linear_velocity.y, y: s2.linear_velocity.y, z: s3.linear_velocity.y, w: s4.linear_velocity.y };
-    simd_body.v.z = FloatW { x: s1.linear_velocity.z, y: s2.linear_velocity.z, z: s3.linear_velocity.z, w: s4.linear_velocity.z };
-    simd_body.w.x = FloatW { x: s1.angular_velocity.x, y: s2.angular_velocity.x, z: s3.angular_velocity.x, w: s4.angular_velocity.x };
-    simd_body.w.y = FloatW { x: s1.angular_velocity.y, y: s2.angular_velocity.y, z: s3.angular_velocity.y, w: s4.angular_velocity.y };
-    simd_body.w.z = FloatW { x: s1.angular_velocity.z, y: s2.angular_velocity.z, z: s3.angular_velocity.z, w: s4.angular_velocity.z };
-    simd_body.dp.x = FloatW { x: s1.delta_position.x, y: s2.delta_position.x, z: s3.delta_position.x, w: s4.delta_position.x };
-    simd_body.dp.y = FloatW { x: s1.delta_position.y, y: s2.delta_position.y, z: s3.delta_position.y, w: s4.delta_position.y };
-    simd_body.dp.z = FloatW { x: s1.delta_position.z, y: s2.delta_position.z, z: s3.delta_position.z, w: s4.delta_position.z };
-    simd_body.dq.v.x = FloatW { x: s1.delta_rotation.v.x, y: s2.delta_rotation.v.x, z: s3.delta_rotation.v.x, w: s4.delta_rotation.v.x };
-    simd_body.dq.v.y = FloatW { x: s1.delta_rotation.v.y, y: s2.delta_rotation.v.y, z: s3.delta_rotation.v.y, w: s4.delta_rotation.v.y };
-    simd_body.dq.v.z = FloatW { x: s1.delta_rotation.v.z, y: s2.delta_rotation.v.z, z: s3.delta_rotation.v.z, w: s4.delta_rotation.v.z };
-    simd_body.dq.s = FloatW { x: s1.delta_rotation.s, y: s2.delta_rotation.s, z: s3.delta_rotation.s, w: s4.delta_rotation.s };
+    simd_body.v.x = set_w(s1.linear_velocity.x, s2.linear_velocity.x, s3.linear_velocity.x, s4.linear_velocity.x);
+    simd_body.v.y = set_w(s1.linear_velocity.y, s2.linear_velocity.y, s3.linear_velocity.y, s4.linear_velocity.y);
+    simd_body.v.z = set_w(s1.linear_velocity.z, s2.linear_velocity.z, s3.linear_velocity.z, s4.linear_velocity.z);
+    simd_body.w.x = set_w(s1.angular_velocity.x, s2.angular_velocity.x, s3.angular_velocity.x, s4.angular_velocity.x);
+    simd_body.w.y = set_w(s1.angular_velocity.y, s2.angular_velocity.y, s3.angular_velocity.y, s4.angular_velocity.y);
+    simd_body.w.z = set_w(s1.angular_velocity.z, s2.angular_velocity.z, s3.angular_velocity.z, s4.angular_velocity.z);
+    simd_body.dp.x = set_w(s1.delta_position.x, s2.delta_position.x, s3.delta_position.x, s4.delta_position.x);
+    simd_body.dp.y = set_w(s1.delta_position.y, s2.delta_position.y, s3.delta_position.y, s4.delta_position.y);
+    simd_body.dp.z = set_w(s1.delta_position.z, s2.delta_position.z, s3.delta_position.z, s4.delta_position.z);
+    simd_body.dq.v.x = set_w(s1.delta_rotation.v.x, s2.delta_rotation.v.x, s3.delta_rotation.v.x, s4.delta_rotation.v.x);
+    simd_body.dq.v.y = set_w(s1.delta_rotation.v.y, s2.delta_rotation.v.y, s3.delta_rotation.v.y, s4.delta_rotation.v.y);
+    simd_body.dq.v.z = set_w(s1.delta_rotation.v.z, s2.delta_rotation.v.z, s3.delta_rotation.v.z, s4.delta_rotation.v.z);
+    simd_body.dq.s = set_w(s1.delta_rotation.s, s2.delta_rotation.s, s3.delta_rotation.s, s4.delta_rotation.s);
 
     simd_body
 }
 
 // This writes only the velocities back to the solver bodies.
+// SSE2/NEON scatter: applies the per-axis lock flags (the C scalar path does
+// not — upstream quirk preserved in the variant below).
+#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "disable-simd")))]
+fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
+    use crate::body::{
+        ALL_LOCKS, LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z, LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z,
+    };
+
+    // I don't use any dummy body in the body array because this will lead to
+    // multithreaded sharing and the associated cache flushing.
+
+    // Warning: indices start at 1 with 0 indicating null
+    // (C manually unrolls the four lanes; the loop body is identical.)
+    for lane in 0..SIMD_WIDTH {
+        if indices[lane] != 0 && (states[(indices[lane] - 1) as usize].flags & DYNAMIC_FLAG) != 0 {
+            let state = &mut states[(indices[lane] - 1) as usize];
+
+            let mut v = Vec3 {
+                x: simd_body.v.x.get(lane),
+                y: simd_body.v.y.get(lane),
+                z: simd_body.v.z.get(lane),
+            };
+            let mut w = Vec3 {
+                x: simd_body.w.x.get(lane),
+                y: simd_body.w.y.get(lane),
+                z: simd_body.w.z.get(lane),
+            };
+
+            let flags = state.flags;
+            if flags & ALL_LOCKS != 0 {
+                v.x = if flags & LOCK_LINEAR_X != 0 { 0.0 } else { v.x };
+                v.y = if flags & LOCK_LINEAR_Y != 0 { 0.0 } else { v.y };
+                v.z = if flags & LOCK_LINEAR_Z != 0 { 0.0 } else { v.z };
+                w.x = if flags & LOCK_ANGULAR_X != 0 { 0.0 } else { w.x };
+                w.y = if flags & LOCK_ANGULAR_Y != 0 { 0.0 } else { w.y };
+                w.z = if flags & LOCK_ANGULAR_Z != 0 { 0.0 } else { w.z };
+            }
+
+            state.linear_velocity = v;
+            state.angular_velocity = w;
+        }
+    }
+}
+
+// This writes only the velocities back to the solver bodies.
 // B3_SIMD_NONE scatter: note the scalar C path does not apply the lock flags
 // here (the SSE2/NEON path does); locks are enforced during integration.
+#[cfg(any(feature = "disable-simd", not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
     let index1 = indices[0] - 1;
     if index1 != -1 && (states[index1 as usize].flags & DYNAMIC_FLAG) != 0 {
         let state = &mut states[index1 as usize];
-        state.linear_velocity.x = simd_body.v.x.x;
-        state.linear_velocity.y = simd_body.v.y.x;
-        state.linear_velocity.z = simd_body.v.z.x;
-        state.angular_velocity.x = simd_body.w.x.x;
-        state.angular_velocity.y = simd_body.w.y.x;
-        state.angular_velocity.z = simd_body.w.z.x;
+        state.linear_velocity.x = simd_body.v.x.get(0);
+        state.linear_velocity.y = simd_body.v.y.get(0);
+        state.linear_velocity.z = simd_body.v.z.get(0);
+        state.angular_velocity.x = simd_body.w.x.get(0);
+        state.angular_velocity.y = simd_body.w.y.get(0);
+        state.angular_velocity.z = simd_body.w.z.get(0);
     }
 
     let index2 = indices[1] - 1;
     if index2 != -1 && (states[index2 as usize].flags & DYNAMIC_FLAG) != 0 {
         let state = &mut states[index2 as usize];
-        state.linear_velocity.x = simd_body.v.x.y;
-        state.linear_velocity.y = simd_body.v.y.y;
-        state.linear_velocity.z = simd_body.v.z.y;
-        state.angular_velocity.x = simd_body.w.x.y;
-        state.angular_velocity.y = simd_body.w.y.y;
-        state.angular_velocity.z = simd_body.w.z.y;
+        state.linear_velocity.x = simd_body.v.x.get(1);
+        state.linear_velocity.y = simd_body.v.y.get(1);
+        state.linear_velocity.z = simd_body.v.z.get(1);
+        state.angular_velocity.x = simd_body.w.x.get(1);
+        state.angular_velocity.y = simd_body.w.y.get(1);
+        state.angular_velocity.z = simd_body.w.z.get(1);
     }
 
     let index3 = indices[2] - 1;
     if index3 != -1 && (states[index3 as usize].flags & DYNAMIC_FLAG) != 0 {
         let state = &mut states[index3 as usize];
-        state.linear_velocity.x = simd_body.v.x.z;
-        state.linear_velocity.y = simd_body.v.y.z;
-        state.linear_velocity.z = simd_body.v.z.z;
-        state.angular_velocity.x = simd_body.w.x.z;
-        state.angular_velocity.y = simd_body.w.y.z;
-        state.angular_velocity.z = simd_body.w.z.z;
+        state.linear_velocity.x = simd_body.v.x.get(2);
+        state.linear_velocity.y = simd_body.v.y.get(2);
+        state.linear_velocity.z = simd_body.v.z.get(2);
+        state.angular_velocity.x = simd_body.w.x.get(2);
+        state.angular_velocity.y = simd_body.w.y.get(2);
+        state.angular_velocity.z = simd_body.w.z.get(2);
     }
 
     let index4 = indices[3] - 1;
     if index4 != -1 && (states[index4 as usize].flags & DYNAMIC_FLAG) != 0 {
         let state = &mut states[index4 as usize];
-        state.linear_velocity.x = simd_body.v.x.w;
-        state.linear_velocity.y = simd_body.v.y.w;
-        state.linear_velocity.z = simd_body.v.z.w;
-        state.angular_velocity.x = simd_body.w.x.w;
-        state.angular_velocity.y = simd_body.w.y.w;
-        state.angular_velocity.z = simd_body.w.z.w;
+        state.linear_velocity.x = simd_body.v.x.get(3);
+        state.linear_velocity.y = simd_body.v.y.get(3);
+        state.linear_velocity.z = simd_body.v.z.get(3);
+        state.angular_velocity.x = simd_body.w.x.get(3);
+        state.angular_velocity.y = simd_body.w.y.get(3);
+        state.angular_velocity.z = simd_body.w.z.get(3);
     }
 }
 

@@ -60,6 +60,11 @@ pub mod simd;
 pub mod solver;
 pub mod solver_set;
 
+// Snapshots (recording substrate subset)
+pub mod recording;
+pub mod recording_replay;
+pub mod world_snapshot;
+
 // Joints
 pub mod distance_joint;
 pub mod motor_joint;

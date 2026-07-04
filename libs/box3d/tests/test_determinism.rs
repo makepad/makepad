@@ -532,7 +532,7 @@ fn create_group(data: &mut FallingRagdollData, world: &mut World, row_index: usi
     let span = RAGDOLL_GRID_COUNT as f32 * GRID_SIZE;
     let group_distance = 1.0 * span / RAGDOLL_GRID_COUNT as f32;
 
-    let mut position = vec3(
+    let mut position = makepad_box3d::math_functions::pos(
         -0.5 * span + group_distance * (column_index as f32 + 0.5),
         15.0,
         -0.5 * span + group_distance * (row_index as f32 + 0.5),
@@ -565,25 +565,29 @@ fn create_falling_ragdolls(world: &mut World) -> FallingRagdollData {
     let mut body_def = default_body_def();
     let shape_def = default_shape_def();
 
-    body_def.position.x = -0.5 * span + 0.5 * GRID_SIZE;
+    // C mutates position.x/.z in place; track f32 locals and assign through pos()
+    // so the float expressions stay identical in both precision modes.
+    let mut px = -0.5 * span + 0.5 * GRID_SIZE;
     for i in 0..RAGDOLL_GRID_COUNT {
-        body_def.position.z = -0.5 * span + 0.5 * GRID_SIZE;
+        let mut pz = -0.5 * span + 0.5 * GRID_SIZE;
         for j in 0..RAGDOLL_GRID_COUNT {
+            body_def.position = makepad_box3d::math_functions::pos(px, 0.0, pz);
             let body = create_body(world, &body_def);
             create_mesh_shape(world, body, &shape_def, &grid_mesh, Vec3::ONE);
             create_mesh_shape(world, body, &shape_def, &torus_mesh, Vec3::ONE);
 
             create_group(&mut data, world, i, j);
 
-            body_def.position.z += GRID_SIZE;
+            pz += GRID_SIZE;
         }
 
-        body_def.position.x += GRID_SIZE;
+        px += GRID_SIZE;
     }
 
     data
 }
 
+#[cfg(not(feature = "double-precision"))]
 fn hash_world_transform(h: u32, xf: &WorldTransform) -> u32 {
     // C hashes the raw 28 bytes of b3WorldTransform (float mode): p then q.
     let mut bytes = [0u8; 28];
@@ -594,6 +598,20 @@ fn hash_world_transform(h: u32, xf: &WorldTransform) -> u32 {
     bytes[16..20].copy_from_slice(&xf.q.v.y.to_le_bytes());
     bytes[20..24].copy_from_slice(&xf.q.v.z.to_le_bytes());
     bytes[24..28].copy_from_slice(&xf.q.s.to_le_bytes());
+    hash(h, &bytes)
+}
+
+#[cfg(feature = "double-precision")]
+fn hash_world_transform(h: u32, xf: &WorldTransform) -> u32 {
+    // Double precision: the position is three f64 (C hashes the raw 40-byte struct).
+    let mut bytes = [0u8; 40];
+    bytes[0..8].copy_from_slice(&xf.p.x.to_le_bytes());
+    bytes[8..16].copy_from_slice(&xf.p.y.to_le_bytes());
+    bytes[16..24].copy_from_slice(&xf.p.z.to_le_bytes());
+    bytes[24..28].copy_from_slice(&xf.q.v.x.to_le_bytes());
+    bytes[28..32].copy_from_slice(&xf.q.v.y.to_le_bytes());
+    bytes[32..36].copy_from_slice(&xf.q.v.z.to_le_bytes());
+    bytes[36..40].copy_from_slice(&xf.q.s.to_le_bytes());
     hash(h, &bytes)
 }
 

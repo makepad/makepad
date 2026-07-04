@@ -5,7 +5,7 @@ use makepad_box3d::body::*;
 use makepad_box3d::ensure;
 use makepad_box3d::hull::make_box_hull;
 #[allow(unused_imports)]
-use makepad_box3d::math_functions::vec3;
+use makepad_box3d::math_functions::{pos, vec3};
 use makepad_box3d::physics_world::*;
 use makepad_box3d::shape::*;
 use makepad_box3d::types::*;
@@ -25,7 +25,7 @@ fn smoke_falling_sphere() {
     // Falling sphere
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
-    body_def.position = vec3(0.0, 5.0, 0.0);
+    body_def.position = pos(0.0, 5.0, 0.0);
     let body_id = create_body(&mut world, &body_def);
     let sphere = Sphere { center: vec3(0.0, 0.0, 0.0), radius: 0.5 };
     let _sphere_shape = create_sphere_shape(&mut world, body_id, &shape_def, &sphere);

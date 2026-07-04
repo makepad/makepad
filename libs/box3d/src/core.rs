@@ -71,7 +71,7 @@ pub fn get_version() -> Version {
 }
 
 pub fn is_double_precision() -> bool {
-    false
+    cfg!(feature = "double-precision")
 }
 
 /// b3GetByteCount: the Rust port does not track allocations; kept for API parity.

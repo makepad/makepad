@@ -784,6 +784,7 @@ pub fn compute_shape_aabb(shape: &Shape, transform: Transform) -> AABB {
     }
 }
 
+#[cfg(not(feature = "double-precision"))]
 pub fn compute_fat_shape_aabb(shape: &Shape, transform: WorldTransform, extra: f32) -> AABB {
     let r = vec3(extra, extra, extra);
     // Single precision mode: plain conversion.
@@ -791,6 +792,19 @@ pub fn compute_fat_shape_aabb(shape: &Shape, transform: WorldTransform, extra: f
     aabb.lower_bound = sub(aabb.lower_bound, r);
     aabb.upper_bound = add(aabb.upper_bound, r);
     aabb
+}
+
+/// Build the box in the body local frame, inflate, then translate by the double origin and
+/// round outward. Inflating before the single rounding matters far from the origin where the
+/// float margin would otherwise vanish.
+#[cfg(feature = "double-precision")]
+pub fn compute_fat_shape_aabb(shape: &Shape, transform: WorldTransform, extra: f32) -> AABB {
+    let r = vec3(extra, extra, extra);
+    let rotation = Transform { p: Vec3::ZERO, q: transform.q };
+    let mut local_box = compute_shape_aabb(shape, rotation);
+    local_box.lower_bound = sub(local_box.lower_bound, r);
+    local_box.upper_bound = add(local_box.upper_bound, r);
+    crate::math_functions::offset_aabb(local_box, transform.p)
 }
 
 pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB {

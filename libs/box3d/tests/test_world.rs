@@ -16,7 +16,7 @@ use makepad_box3d::ensure;
 use makepad_box3d::ensure_small;
 use makepad_box3d::hull::{create_cylinder, create_rock, make_box_hull, make_cube_hull, make_offset_box_hull};
 use makepad_box3d::id::WorldId;
-use makepad_box3d::math_functions::{compute_cos_sin, length, vec3, Pos, Quat, Transform, Vec3, WorldTransform, PI};
+use makepad_box3d::math_functions::{compute_cos_sin, length, pos, vec3, Pos, Quat, Transform, Vec3, WorldTransform, PI};
 use makepad_box3d::mesh::create_wave_mesh;
 use makepad_box3d::physics_world::*;
 use makepad_box3d::shape::*;
@@ -40,7 +40,7 @@ fn hello_world() {
 
     // Define the ground body.
     let mut ground_body_def = default_body_def();
-    ground_body_def.position = vec3(0.0, -10.0, 0.0);
+    ground_body_def.position = pos(0.0, -10.0, 0.0);
 
     let ground_id = create_body(&mut world, &ground_body_def);
     ensure!(body_is_valid(&world, ground_id));
@@ -55,7 +55,7 @@ fn hello_world() {
     // Define the dynamic body. We set its position and call the body factory.
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
-    body_def.position = vec3(0.0, 4.0, 0.0);
+    body_def.position = pos(0.0, 4.0, 0.0);
 
     let body_id = create_body(&mut world, &body_def);
 
@@ -281,7 +281,7 @@ fn test_sensor() {
     // Wall from x = 1 to x = 2
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Static;
-    body_def.position = vec3(1.5, 11.0, 0.0);
+    body_def.position = pos(1.5, 11.0, 0.0);
     let wall_id = create_body(&mut world, &body_def);
     let box_hull = make_box_hull(0.5, 10.0, 1.0);
     let mut shape_def = default_shape_def();
@@ -293,7 +293,7 @@ fn test_sensor() {
     body_def.body_type = BodyType::Dynamic;
     body_def.is_bullet = true;
     body_def.gravity_scale = 0.0;
-    body_def.position = vec3(7.39814, 4.0, 0.0);
+    body_def.position = pos(7.39814, 4.0, 0.0);
     body_def.linear_velocity = vec3(-20.0, 0.0, 0.0);
     let bullet_id = create_body(&mut world, &body_def);
     let mut shape_def = default_shape_def();
@@ -341,7 +341,7 @@ fn test_contact_events() {
     // Static ground
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Static;
-    body_def.position = vec3(0.0, -0.5, 0.0);
+    body_def.position = pos(0.0, -0.5, 0.0);
     let ground_id = create_body(&mut world, &body_def);
     let ground_box = make_box_hull(10.0, 0.5, 10.0);
     let ground_shape_def = default_shape_def();
@@ -350,7 +350,7 @@ fn test_contact_events() {
     // Dynamic sphere dropped onto the ground; restitution causes it to bounce so we get end events
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
-    body_def.position = vec3(0.0, 5.0, 0.0);
+    body_def.position = pos(0.0, 5.0, 0.0);
     let sphere_body_id = create_body(&mut world, &body_def);
     let mut shape_def = default_shape_def();
     shape_def.density = 1.0;
@@ -406,7 +406,7 @@ fn test_hit_events() {
     // Static ground
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Static;
-    body_def.position = vec3(0.0, -0.5, 0.0);
+    body_def.position = pos(0.0, -0.5, 0.0);
     let ground_id = create_body(&mut world, &body_def);
     let ground_box = make_box_hull(10.0, 0.5, 10.0);
     let ground_shape_def = default_shape_def();
@@ -416,7 +416,7 @@ fn test_hit_events() {
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
     body_def.gravity_scale = 0.0;
-    body_def.position = vec3(0.0, 2.0, 0.0);
+    body_def.position = pos(0.0, 2.0, 0.0);
     body_def.linear_velocity = vec3(0.0, -30.0, 0.0);
     let sphere_body_id = create_body(&mut world, &body_def);
     let mut shape_def = default_shape_def();
@@ -514,7 +514,7 @@ fn test_compound_hit_events() {
         let mut body_def = default_body_def();
         body_def.body_type = BodyType::Dynamic;
         body_def.gravity_scale = 0.0;
-        body_def.position = vec3(spawn_x, 3.0, 0.0);
+        body_def.position = pos(spawn_x, 3.0, 0.0);
         body_def.linear_velocity = vec3(0.0, -30.0, 0.0);
         let sphere_body_id = create_body(&mut world, &body_def);
         let mut sphere_shape_def = default_shape_def();
@@ -600,9 +600,9 @@ fn create_junkyard(world: &mut World) -> JunkyardData {
         for y in 0..count {
             for x in 0..=20 {
                 for z in 0..=20 {
-                    body_def.position.x = -40.0 + 4.0 * x as f32;
-                    body_def.position.y = 4.0 * y as f32 + height + 1.0;
-                    body_def.position.z = -40.0 + 4.0 * z as f32;
+                    let px = -40.0 + 4.0 * x as f32;
+                    let py = 4.0 * y as f32 + height + 1.0;
+                    let pz = -40.0 + 4.0 * z as f32; body_def.position = pos(px, py, pz);
                     let body_id = create_body(world, &body_def);
                     create_hull_shape(world, body_id, &shape_def, &rock_hull);
                 }
@@ -616,7 +616,7 @@ fn create_junkyard(world: &mut World) -> JunkyardData {
     let hull = create_cylinder(m_height, 4.0, 0.0, 16);
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Kinematic;
-    body_def.position = vec3(radius, 0.0, 0.0);
+    body_def.position = pos(radius, 0.0, 0.0);
     let pusher_id = create_body(world, &body_def);
     let shape_def = default_shape_def();
     create_hull_shape(world, pusher_id, &shape_def, &hull);
@@ -632,7 +632,7 @@ fn step_junkyard(world: &mut World, data: &mut JunkyardData) {
     data.degrees += omega * time_step;
     let cs = compute_cos_sin(data.degrees * PI / 180.0);
     let r = data.radius;
-    let target_pos: Pos = vec3(r * cs.cosine, 0.0, r * cs.sine);
+    let target_pos: Pos = pos(r * cs.cosine, 0.0, r * cs.sine);
     let target = WorldTransform { p: target_pos, q: Quat::IDENTITY };
     body_set_target_transform(world, data.pusher_id, target, time_step, false);
 }
@@ -726,7 +726,7 @@ fn test_mesh_drop() {
                 let linear_velocity = random_vec3_uniform(-1.0, 1.0);
                 let angular_velocity = random_vec3_uniform(-5.0, 5.0);
 
-                body_def.position = vec3(
+                body_def.position = pos(
                     0.5 * (i as f32 - 0.5 * grid_count as f32),
                     5.0,
                     0.5 * (j as f32 - 0.5 * grid_count as f32),
@@ -779,7 +779,7 @@ fn test_overflow_color_pile() {
     // Static ground (top surface at y = 0)
     {
         let mut body_def = default_body_def();
-        body_def.position = vec3(0.0, -1.0, 0.0);
+        body_def.position = pos(0.0, -1.0, 0.0);
         let ground_id = create_body(&mut world, &body_def);
 
         let box_hull = make_box_hull(20.0, 1.0, 20.0);
@@ -794,7 +794,7 @@ fn test_overflow_color_pile() {
     {
         let mut body_def = default_body_def();
         body_def.body_type = BodyType::Dynamic;
-        body_def.position = vec3(0.0, hub_half_y, 0.0);
+        body_def.position = pos(0.0, hub_half_y, 0.0);
         let hub_id = create_body(&mut world, &body_def);
 
         let box_hull = make_box_hull(hub_half_x, hub_half_y, hub_half_z);
@@ -827,7 +827,7 @@ fn test_overflow_color_pile() {
 
             let mut body_def = default_body_def();
             body_def.body_type = BodyType::Dynamic;
-            body_def.position = vec3(ring_radius * theta.cos(), y, ring_radius * theta.sin());
+            body_def.position = pos(ring_radius * theta.cos(), y, ring_radius * theta.sin());
             let body_id = create_body(&mut world, &body_def);
 
             create_hull_shape(&mut world, body_id, &neighbor_shape, &neighbor_box);
@@ -1064,7 +1064,7 @@ fn run_explosion(base: Pos) -> ExplosionResult {
 
 #[test]
 fn test_explosion() {
-    let origin = run_explosion(Vec3::ZERO);
+    let origin = run_explosion(makepad_box3d::math_functions::POS_ZERO);
 
     // Pushed away from the blast along -x. A centered sphere has no transverse
     // or angular component.
@@ -1074,7 +1074,7 @@ fn test_explosion() {
     ensure_small!(length(origin.angular_velocity), 1.0e-6);
 
     // The same blast far from the origin must produce the same impulse.
-    let far = run_explosion(vec3(1.0e7, 1.0e7, 1.0e7));
+    let far = run_explosion(pos(1.0e7, 1.0e7, 1.0e7));
     ensure_small!(far.linear_velocity.x - origin.linear_velocity.x, 1.0e-5);
     ensure_small!(far.linear_velocity.y - origin.linear_velocity.y, 1.0e-5);
     ensure_small!(far.linear_velocity.z - origin.linear_velocity.z, 1.0e-5);
@@ -1090,7 +1090,7 @@ fn test_continuous_move_event() {
     // Thin static wall, near face at x = 0.1
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Static;
-    body_def.position = vec3(0.0, 0.0, 0.0);
+    body_def.position = pos(0.0, 0.0, 0.0);
     let wall_id = create_body(&mut world, &body_def);
     let wall_box = make_box_hull(0.1, 5.0, 5.0);
     let shape_def = default_shape_def();
@@ -1100,7 +1100,7 @@ fn test_continuous_move_event() {
     let mut body_def = default_body_def();
     body_def.body_type = BodyType::Dynamic;
     body_def.gravity_scale = 0.0;
-    body_def.position = vec3(3.0, 0.0, 0.0);
+    body_def.position = pos(3.0, 0.0, 0.0);
     body_def.linear_velocity = vec3(-30.0, 0.0, 0.0);
     let ball_id = create_body(&mut world, &body_def);
     let mut shape_def = default_shape_def();
