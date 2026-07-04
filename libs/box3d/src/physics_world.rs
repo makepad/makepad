@@ -160,6 +160,10 @@ pub struct World {
     pub task_contexts: Vec<TaskContext>,
     pub sensor_task_contexts: Vec<SensorTaskContext>,
 
+    /// Persistent solver step scratch (C: reusable arena). Moved into the
+    /// StepContext for the duration of world_step; contents are transient.
+    pub solver_scratch: crate::solver::SolverScratch,
+
     pub body_move_events: Vec<BodyMoveEvent>,
     pub sensor_begin_events: Vec<SensorBeginTouchEvent>,
     pub contact_begin_events: Vec<ContactBeginTouchEvent>,
@@ -739,7 +743,10 @@ fn collide(world: &mut World, context: &mut StepContext) {
         return;
     }
 
-    let mut contact_indices: Vec<i32> = Vec::with_capacity(contact_count);
+    // Reuse the scratch buffer (C: arena allocation).
+    let mut contact_indices: Vec<i32> = std::mem::take(&mut context.awake_contact_indices);
+    contact_indices.clear();
+    contact_indices.reserve(contact_count);
 
     for i in 0..GRAPH_COLOR_COUNT {
         let color = &world.constraint_graph.colors[i];
@@ -771,7 +778,8 @@ fn collide(world: &mut World, context: &mut StepContext) {
     // C: b3ParallelFor(world, b3CollideTask, contactCount, 20, ...). Serial port.
     collide_task(world, context, 0, contact_count as i32, 0);
 
-    context.awake_contact_indices = Vec::new();
+    // C releases the arena allocation here; the port clears but keeps capacity.
+    context.awake_contact_indices.clear();
 
     // Serially update contact state
     let sat_multiplier = if context.dt > 0.0 { 1 } else { 0 };
@@ -947,6 +955,8 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
     }
 
     let mut context = StepContext::default();
+    // Reuse the persistent scratch capacity (C: arena allocations).
+    world.solver_scratch.attach(&mut context);
     context.dt = time_step;
     context.sub_step_count = max_int(1, sub_step_count);
     context.worker_count = world.worker_count;
@@ -995,6 +1005,9 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
     }
 
     world.profile.step = get_milliseconds(step_ticks);
+
+    // Return the scratch buffers so their capacity is reused next step.
+    world.solver_scratch.detach(&mut context);
 
     // Make sure all tasks that were started were also finished
     b3_assert!(world.active_task_count == 0);

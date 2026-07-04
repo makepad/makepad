@@ -61,9 +61,13 @@ pub struct SolverBlock {
 }
 
 /// Each stage must be completed before going to the next stage.
-#[derive(Clone, Debug)]
+/// The blocks are a (start, count) range into StepContext::blocks — the flat
+/// block array is reused across steps (C allocates the b3SyncBlock arrays from
+/// the arena; stages that share a block array in C share the range here).
+#[derive(Clone, Copy, Debug)]
 pub struct SolverStage {
-    pub blocks: Vec<SolverBlock>,
+    pub blocks_start: i32,
+    pub blocks_count: i32,
     pub stage_type: SolverStageType,
     pub color_index: u8,
 }
@@ -162,7 +166,64 @@ pub struct StepContext {
     pub worker_count: i32,
 
     pub stages: Vec<SolverStage>,
+
+    /// Flat solver block array referenced by the stage ranges.
+    pub blocks: Vec<SolverBlock>,
+
     pub enable_warm_starting: bool,
+}
+
+/// Persistent per-world solver scratch. The C engine allocates the step scratch
+/// from a reusable arena; the port keeps the Vecs on the world so their
+/// capacity survives across steps. world_step moves them into the StepContext
+/// and back (see attach/detach). Contents are transient — everything is
+/// cleared/overwritten each step, so reuse is value-identical to fresh
+/// allocations.
+#[derive(Default)]
+pub struct SolverScratch {
+    pub wide_constraints: Vec<crate::contact_solver::ContactConstraintWide>,
+    pub contact_constraints: Vec<crate::contact_solver::ContactConstraint>,
+    pub manifold_constraints: Vec<crate::contact_solver::ManifoldConstraint>,
+    pub wide_prepare_spans: Vec<WidePrepareSpan>,
+    pub contact_prepare_spans: Vec<ContactPrepareSpan>,
+    pub overflow_spans: Vec<ContactPrepareSpan>,
+    pub joint_prepare_spans: Vec<JointPrepareSpan>,
+    pub bullet_bodies: Vec<i32>,
+    pub awake_contact_indices: Vec<i32>,
+    pub stages: Vec<SolverStage>,
+    pub blocks: Vec<SolverBlock>,
+}
+
+impl SolverScratch {
+    /// Move the scratch buffers into a fresh step context (start of world_step).
+    pub fn attach(&mut self, context: &mut StepContext) {
+        context.wide_constraints = std::mem::take(&mut self.wide_constraints);
+        context.contact_constraints = std::mem::take(&mut self.contact_constraints);
+        context.manifold_constraints = std::mem::take(&mut self.manifold_constraints);
+        context.wide_prepare_spans = std::mem::take(&mut self.wide_prepare_spans);
+        context.contact_prepare_spans = std::mem::take(&mut self.contact_prepare_spans);
+        context.overflow_spans = std::mem::take(&mut self.overflow_spans);
+        context.joint_prepare_spans = std::mem::take(&mut self.joint_prepare_spans);
+        context.bullet_bodies = std::mem::take(&mut self.bullet_bodies);
+        context.awake_contact_indices = std::mem::take(&mut self.awake_contact_indices);
+        context.stages = std::mem::take(&mut self.stages);
+        context.blocks = std::mem::take(&mut self.blocks);
+    }
+
+    /// Move the scratch buffers back out of the context (end of world_step).
+    pub fn detach(&mut self, context: &mut StepContext) {
+        self.wide_constraints = std::mem::take(&mut context.wide_constraints);
+        self.contact_constraints = std::mem::take(&mut context.contact_constraints);
+        self.manifold_constraints = std::mem::take(&mut context.manifold_constraints);
+        self.wide_prepare_spans = std::mem::take(&mut context.wide_prepare_spans);
+        self.contact_prepare_spans = std::mem::take(&mut context.contact_prepare_spans);
+        self.overflow_spans = std::mem::take(&mut context.overflow_spans);
+        self.joint_prepare_spans = std::mem::take(&mut context.joint_prepare_spans);
+        self.bullet_bodies = std::mem::take(&mut context.bullet_bodies);
+        self.awake_contact_indices = std::mem::take(&mut context.awake_contact_indices);
+        self.stages = std::mem::take(&mut context.stages);
+        self.blocks = std::mem::take(&mut context.blocks);
+    }
 }
 
 #[inline]
@@ -1050,11 +1111,20 @@ fn compute_block_count(item_count: i32, min_size: i32, max_block_count: i32) -> 
     dim
 }
 
-// Initialize solver blocks for a contiguous range of items. (C: b3InitBlocks; the
-// atomic claim counters are dropped.)
-fn init_blocks(dim: BlockDim, item_count: i32, block_type: SolverBlockType, color_index: u8) -> Vec<SolverBlock> {
+// Initialize solver blocks for a contiguous range of items, appended to the
+// flat block array. Returns the (start, count) range. (C: b3InitBlocks into an
+// arena array; the atomic claim counters are dropped.)
+fn init_blocks(
+    blocks: &mut Vec<SolverBlock>,
+    dim: BlockDim,
+    item_count: i32,
+    block_type: SolverBlockType,
+    color_index: u8,
+) -> (i32, i32) {
+    let start = blocks.len() as i32;
+
     if dim.count == 0 {
-        return Vec::new();
+        return (start, 0);
     }
 
     b3_assert!(item_count >= dim.count);
@@ -1065,7 +1135,6 @@ fn init_blocks(dim: BlockDim, item_count: i32, block_type: SolverBlockType, colo
     // Simulation too big
     b3_assert!(block_size <= u16::MAX as i32);
 
-    let mut blocks = Vec::with_capacity(dim.count as usize);
     for i in 0..dim.count {
         blocks.push(SolverBlock {
             start_index: i * block_size,
@@ -1076,12 +1145,13 @@ fn init_blocks(dim: BlockDim, item_count: i32, block_type: SolverBlockType, colo
     }
 
     // The last block may not be full
-    blocks[(dim.count - 1) as usize].count = (item_count - (dim.count - 1) * block_size) as u16;
+    let last = (start + dim.count - 1) as usize;
+    blocks[last].count = (item_count - (dim.count - 1) * block_size) as u16;
 
-    b3_validate!(blocks[(dim.count - 1) as usize].count as i32 <= block_size);
-    b3_validate!((dim.count - 1) * dim.size + blocks[(dim.count - 1) as usize].count as i32 == item_count);
+    b3_validate!(blocks[last].count as i32 <= block_size);
+    b3_validate!((dim.count - 1) * dim.size + blocks[last].count as i32 == item_count);
 
-    blocks
+    (start, dim.count)
 }
 
 // C: b3ExecuteBlock. Serial dispatch of one block.
@@ -1158,22 +1228,29 @@ fn execute_block(
 
 // C: b3ExecuteMainStage/b3ExecuteStage. Serial: worker 0's home index is 0, so the
 // ring sweep degenerates to executing blocks in array order.
-fn execute_main_stage(stage_index: usize, stages: &[SolverStage], world: &mut World, context: &mut StepContext) {
+fn execute_main_stage(
+    stage_index: usize,
+    stages: &[SolverStage],
+    blocks: &[SolverBlock],
+    world: &mut World,
+    context: &mut StepContext,
+) {
     let stage = &stages[stage_index];
     let worker_index = 0;
-    let block_count = stage.blocks.len();
-    for block_index in 0..block_count {
-        let block = stage.blocks[block_index];
+    for block_index in 0..stage.blocks_count {
+        let block = blocks[(stage.blocks_start + block_index) as usize];
         execute_block(stage.stage_type, block, world, context, worker_index);
     }
 }
 
 // The serial equivalent of the C b3SolverTask worker-0 orchestration path.
 fn solver_task_main(world: &mut World, context: &mut StepContext) {
-    // The stages are owned by the context; take them so stage execution can borrow
-    // world and context freely. They are dropped at the end (C frees the arena
+    // The stages and flat block array are owned by the context; take them so
+    // stage execution can borrow world and context freely. They are returned at
+    // the end so the scratch capacity survives the step (C frees the arena
     // allocations after the solve).
     let stages = std::mem::take(&mut context.stages);
+    let blocks = std::mem::take(&mut context.blocks);
     let active_color_count = context.active_color_count as usize;
 
     let mut ticks = get_ticks();
@@ -1182,17 +1259,17 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
     // Prepare joint constraints
     b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareJoints);
-    execute_main_stage(stage_index, &stages, world, context);
+    execute_main_stage(stage_index, &stages, &blocks, world, context);
     stage_index += 1;
 
     // Prepare convex contact constraints
     b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareWideContacts);
-    execute_main_stage(stage_index, &stages, world, context);
+    execute_main_stage(stage_index, &stages, &blocks, world, context);
     stage_index += 1;
 
     // Prepare mesh contact constraints
     b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareContacts);
-    execute_main_stage(stage_index, &stages, world, context);
+    execute_main_stage(stage_index, &stages, &blocks, world, context);
     stage_index += 1;
 
     // Single-threaded overflow work. These constraints don't fit in the graph coloring.
@@ -1208,7 +1285,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
         // Integrate velocities
         b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::IntegrateVelocities);
-        execute_main_stage(iteration_stage_index, &stages, world, context);
+        execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
         iteration_stage_index += 1;
 
         world.profile.integrate_velocities += get_milliseconds_and_reset(&mut ticks);
@@ -1219,7 +1296,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
         for _color_index in 0..active_color_count {
             b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::WarmStart);
-            execute_main_stage(iteration_stage_index, &stages, world, context);
+            execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
             iteration_stage_index += 1;
         }
 
@@ -1234,7 +1311,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
             for _color_index in 0..active_color_count {
                 b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::Solve);
-                execute_main_stage(iteration_stage_index, &stages, world, context);
+                execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
                 iteration_stage_index += 1;
             }
         }
@@ -1243,7 +1320,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
         // Integrate positions
         b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::IntegratePositions);
-        execute_main_stage(iteration_stage_index, &stages, world, context);
+        execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
         iteration_stage_index += 1;
 
         world.profile.integrate_positions += get_milliseconds_and_reset(&mut ticks);
@@ -1256,7 +1333,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
 
             for _color_index in 0..active_color_count {
                 b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::Relax);
-                execute_main_stage(iteration_stage_index, &stages, world, context);
+                execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
                 iteration_stage_index += 1;
             }
         }
@@ -1279,7 +1356,7 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
         let mut iter_stage_index = stage_index;
         for _color_index in 0..active_color_count {
             b3_assert!(stages[iter_stage_index].stage_type == SolverStageType::Restitution);
-            execute_main_stage(iter_stage_index, &stages, world, context);
+            execute_main_stage(iter_stage_index, &stages, &blocks, world, context);
             iter_stage_index += 1;
         }
         stage_index += active_color_count;
@@ -1291,16 +1368,20 @@ fn solver_task_main(world: &mut World, context: &mut StepContext) {
     crate::contact_solver::store_impulses_overflow(world, context);
 
     b3_assert!(stages[stage_index].stage_type == SolverStageType::StoreWideImpulses);
-    execute_main_stage(stage_index, &stages, world, context);
+    execute_main_stage(stage_index, &stages, &blocks, world, context);
     stage_index += 1;
 
     b3_assert!(stages[stage_index].stage_type == SolverStageType::StoreImpulses);
-    execute_main_stage(stage_index, &stages, world, context);
+    execute_main_stage(stage_index, &stages, &blocks, world, context);
     stage_index += 1;
 
     world.profile.store_impulses += get_milliseconds_and_reset(&mut ticks);
 
     b3_assert!(stage_index == stages.len());
+
+    // Return the stage/block arrays so their capacity is reused next step.
+    context.stages = stages;
+    context.blocks = blocks;
 }
 
 // Solve with graph coloring
@@ -1444,13 +1525,22 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         }
 
         // Allocate the flat constraint arrays. Default-initialized wide constraints
-        // reproduce the C memset of remainder lanes.
-        step_context.wide_constraints =
-            vec![crate::contact_solver::ContactConstraintWide::default(); wide_contact_count as usize];
-        step_context.contact_constraints =
-            vec![crate::contact_solver::ContactConstraint::default(); (contact_count + overflow_count) as usize];
-        step_context.manifold_constraints =
-            vec![crate::contact_solver::ManifoldConstraint::default(); (manifold_count + overflow_manifold_count) as usize];
+        // reproduce the C memset of remainder lanes. clear + resize keeps the
+        // scratch capacity from previous steps while producing the same
+        // all-default contents as a fresh vec![default; n].
+        step_context.wide_constraints.clear();
+        step_context
+            .wide_constraints
+            .resize(wide_contact_count as usize, crate::contact_solver::ContactConstraintWide::default());
+        step_context.contact_constraints.clear();
+        step_context
+            .contact_constraints
+            .resize((contact_count + overflow_count) as usize, crate::contact_solver::ContactConstraint::default());
+        step_context.manifold_constraints.clear();
+        step_context.manifold_constraints.resize(
+            (manifold_count + overflow_manifold_count) as usize,
+            crate::contact_solver::ManifoldConstraint::default(),
+        );
         step_context.wide_contact_count = wide_contact_count;
 
         // Build the span table for the flat prepare/store parallel-for while slicing the
@@ -1575,11 +1665,16 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         // StoreImpulses
         stage_count += 1;
 
-        // Block arrays (C allocates b3SyncBlock arrays; the sync counters are dropped)
-        let body_blocks = init_blocks(body_dim, awake_body_count, SolverBlockType::Body, u8::MAX);
-        let convex_blocks = init_blocks(convex_prepare_dim, wide_contact_count, SolverBlockType::WideContact, u8::MAX);
-        let mesh_blocks = init_blocks(mesh_prepare_dim, contact_count, SolverBlockType::Contact, u8::MAX);
-        let joint_blocks = init_blocks(joint_prepare_dim, joint_count, SolverBlockType::Joint, u8::MAX);
+        // Block arrays (C allocates b3SyncBlock arrays; the sync counters are
+        // dropped). All blocks live in one flat reused array; stages reference
+        // (start, count) ranges, so the C pattern of several stages sharing one
+        // block array becomes shared ranges.
+        step_context.blocks.clear();
+        let body_blocks = init_blocks(&mut step_context.blocks, body_dim, awake_body_count, SolverBlockType::Body, u8::MAX);
+        let convex_blocks =
+            init_blocks(&mut step_context.blocks, convex_prepare_dim, wide_contact_count, SolverBlockType::WideContact, u8::MAX);
+        let mesh_blocks = init_blocks(&mut step_context.blocks, mesh_prepare_dim, contact_count, SolverBlockType::Contact, u8::MAX);
+        let joint_blocks = init_blocks(&mut step_context.blocks, joint_prepare_dim, joint_count, SolverBlockType::Joint, u8::MAX);
 
         // Split an awake island. This modifies:
         // - world island array and solver set
@@ -1592,54 +1687,69 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         }
 
         // Prepare graph work blocks. Each color gets joint blocks followed by
-        // wide contact blocks followed by contact blocks.
-        let mut graph_color_blocks: Vec<Vec<SolverBlock>> = Vec::with_capacity(active_color_count);
+        // wide contact blocks followed by contact blocks, appended contiguously
+        // to the flat block array so one (start, count) range covers the color.
+        let mut graph_color_ranges = [(0i32, 0i32); GRAPH_COLOR_COUNT];
         {
             let mut total = 0i32;
             for i in 0..active_color_count {
                 let color_index = active_color_indices[i] as u8;
 
-                let mut blocks = init_blocks(graph_joint_dims[i], color_joint_counts[i], SolverBlockType::GraphJoint, color_index);
-                blocks.extend(init_blocks(
+                let start = step_context.blocks.len() as i32;
+                init_blocks(&mut step_context.blocks, graph_joint_dims[i], color_joint_counts[i], SolverBlockType::GraphJoint, color_index);
+                init_blocks(
+                    &mut step_context.blocks,
                     graph_wide_contact_dims[i],
                     color_wide_contact_counts[i],
                     SolverBlockType::GraphWideContact,
                     color_index,
-                ));
-                blocks.extend(init_blocks(
+                );
+                init_blocks(
+                    &mut step_context.blocks,
                     graph_contact_dims[i],
                     color_contact_counts[i],
                     SolverBlockType::GraphContact,
                     color_index,
-                ));
+                );
+                let count = step_context.blocks.len() as i32 - start;
 
-                total += blocks.len() as i32;
-                graph_color_blocks.push(blocks);
+                total += count;
+                graph_color_ranges[i] = (start, count);
             }
             b3_assert!(total == graph_block_count);
         }
 
-        // Build the stage array in the C order.
-        let mut stages: Vec<SolverStage> = Vec::with_capacity(stage_count);
-        stages.push(SolverStage { blocks: joint_blocks, stage_type: SolverStageType::PrepareJoints, color_index: u8::MAX });
+        // Build the stage array in the C order. The Vec is reused across steps.
+        step_context.stages.clear();
+        let stages = &mut step_context.stages;
         stages.push(SolverStage {
-            blocks: convex_blocks.clone(),
+            blocks_start: joint_blocks.0,
+            blocks_count: joint_blocks.1,
+            stage_type: SolverStageType::PrepareJoints,
+            color_index: u8::MAX,
+        });
+        stages.push(SolverStage {
+            blocks_start: convex_blocks.0,
+            blocks_count: convex_blocks.1,
             stage_type: SolverStageType::PrepareWideContacts,
             color_index: u8::MAX,
         });
         stages.push(SolverStage {
-            blocks: mesh_blocks.clone(),
+            blocks_start: mesh_blocks.0,
+            blocks_count: mesh_blocks.1,
             stage_type: SolverStageType::PrepareContacts,
             color_index: u8::MAX,
         });
         stages.push(SolverStage {
-            blocks: body_blocks.clone(),
+            blocks_start: body_blocks.0,
+            blocks_count: body_blocks.1,
             stage_type: SolverStageType::IntegrateVelocities,
             color_index: u8::MAX,
         });
         for i in 0..active_color_count {
             stages.push(SolverStage {
-                blocks: graph_color_blocks[i].clone(),
+                blocks_start: graph_color_ranges[i].0,
+                blocks_count: graph_color_ranges[i].1,
                 stage_type: SolverStageType::WarmStart,
                 color_index: active_color_indices[i] as u8,
             });
@@ -1647,21 +1757,24 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         for _ in 0..ITERATIONS {
             for i in 0..active_color_count {
                 stages.push(SolverStage {
-                    blocks: graph_color_blocks[i].clone(),
+                    blocks_start: graph_color_ranges[i].0,
+                    blocks_count: graph_color_ranges[i].1,
                     stage_type: SolverStageType::Solve,
                     color_index: active_color_indices[i] as u8,
                 });
             }
         }
         stages.push(SolverStage {
-            blocks: body_blocks,
+            blocks_start: body_blocks.0,
+            blocks_count: body_blocks.1,
             stage_type: SolverStageType::IntegratePositions,
             color_index: u8::MAX,
         });
         for _ in 0..RELAX_ITERATIONS {
             for i in 0..active_color_count {
                 stages.push(SolverStage {
-                    blocks: graph_color_blocks[i].clone(),
+                    blocks_start: graph_color_ranges[i].0,
+                    blocks_count: graph_color_ranges[i].1,
                     stage_type: SolverStageType::Relax,
                     color_index: active_color_indices[i] as u8,
                 });
@@ -1670,18 +1783,21 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         // Note: joint blocks mixed in, could have joint limit restitution
         for i in 0..active_color_count {
             stages.push(SolverStage {
-                blocks: graph_color_blocks[i].clone(),
+                blocks_start: graph_color_ranges[i].0,
+                blocks_count: graph_color_ranges[i].1,
                 stage_type: SolverStageType::Restitution,
                 color_index: active_color_indices[i] as u8,
             });
         }
         stages.push(SolverStage {
-            blocks: convex_blocks,
+            blocks_start: convex_blocks.0,
+            blocks_count: convex_blocks.1,
             stage_type: SolverStageType::StoreWideImpulses,
             color_index: u8::MAX,
         });
         stages.push(SolverStage {
-            blocks: mesh_blocks,
+            blocks_start: mesh_blocks.0,
+            blocks_count: mesh_blocks.1,
             stage_type: SolverStageType::StoreImpulses,
             color_index: u8::MAX,
         });
@@ -1690,7 +1806,6 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
 
         step_context.active_color_count = active_color_count as i32;
         step_context.worker_count = worker_count;
-        step_context.stages = stages;
 
         world.profile.solver_setup = get_milliseconds_and_reset(&mut setup_ticks);
 
@@ -2123,10 +2238,12 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
     }
 
     // C frees the constraint stack allocations at the end of the constraint section;
-    // the consumers (store impulses, hit events) are done, so release them here.
-    step_context.wide_constraints = Vec::new();
-    step_context.contact_constraints = Vec::new();
-    step_context.manifold_constraints = Vec::new();
+    // the consumers (store impulses, hit events) are done. The port clears the
+    // arrays but keeps their capacity — they return to the world scratch at the
+    // end of world_step (arena-style reuse).
+    step_context.wide_constraints.clear();
+    step_context.contact_constraints.clear();
+    step_context.manifold_constraints.clear();
     step_context.wide_prepare_spans.clear();
     step_context.contact_prepare_spans.clear();
     step_context.overflow_spans.clear();
