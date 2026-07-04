@@ -1,0 +1,8 @@
+[package]
+name = "makepad-box3d"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust port of Box3D by Erin Catto (https://github.com/erincatto/box3d)"
+
+[dependencies]
