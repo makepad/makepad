@@ -655,6 +655,10 @@ fn run_scenario() -> (i32, u32) {
 fn run_scenario_with_workers(worker_count: u32) -> (i32, u32) {
     let mut world_def = default_world_def();
     world_def.worker_count = worker_count;
+    run_scenario_with_def(world_def)
+}
+
+fn run_scenario_with_def(world_def: makepad_box3d::types::WorldDef) -> (i32, u32) {
     let mut world = create_world(&world_def);
 
     let mut data = create_falling_ragdolls(&mut world);
@@ -693,6 +697,24 @@ fn determinism_across_worker_counts() {
         ensure!(hash == hash1);
     }
 
+    ensure!(hash1 != 0);
+}
+
+// The external task-system hooks (C: b3WorldDef enqueueTask/finishTask) must
+// also be bit-deterministic: the same tasks run, just on user threads.
+#[test]
+fn determinism_with_external_task_system() {
+    let (sleep_step1, hash1) = run_scenario_with_workers(1);
+
+    let mut world_def = default_world_def();
+    world_def.worker_count = 4;
+    world_def.enqueue_task = Some(makepad_box3d::test_utils::thread_per_task_enqueue);
+    world_def.finish_task = Some(makepad_box3d::test_utils::thread_per_task_finish);
+    let (sleep_step, hash) = run_scenario_with_def(world_def);
+    println!("external tasks: sleepStep={} hash=0x{:08X}", sleep_step, hash);
+
+    ensure!(sleep_step == sleep_step1);
+    ensure!(hash == hash1);
     ensure!(hash1 != 0);
 }
 

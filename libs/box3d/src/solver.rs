@@ -1663,39 +1663,35 @@ unsafe fn solver_task_trampoline(task_context: *mut ()) {
 // Enqueue workerCount solver tasks, participate as worker 0, and wait for all
 // of them. C: the enqueue/caller-race/finish block of b3Solve.
 fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
-    let scheduler = shared.world.scheduler.as_ref();
+    let task_system = &shared.world.task_system;
 
-    if worker_count <= 1 || scheduler.is_none() {
+    if worker_count <= 1 || !task_system.is_parallel() {
         // Serial fast path: the caller is the orchestrator (wins the race
         // unopposed) and executes every block in array order, bit-identically
         // to the pre-threading port.
         solver_task(shared, 0);
         return;
     }
-    let scheduler = scheduler.unwrap();
 
     let worker_contexts: Vec<SolverWorkerContext> = (0..worker_count)
         .map(|worker_index| SolverWorkerContext { shared, worker_index })
         .collect();
 
-    let mut handles: Vec<Option<i32>> = vec![None; worker_count as usize];
+    // An external system may run tasks synchronously inside enqueue (or the
+    // ring budget may force inline execution) — either way the mainClaimed
+    // race below keeps the orchestration correct (C solver.c comment).
+    let mut handles: Vec<crate::scheduler::TaskHandle> =
+        vec![crate::scheduler::TaskHandle::Inline; worker_count as usize];
     for i in 0..worker_count as usize {
-        if crate::scheduler::scheduler_task_count(scheduler) < crate::constants::MAX_TASKS as i32 {
-            // SAFETY: worker_contexts (and everything shared references) stay
-            // alive until the finish loop below returns.
-            let slot = unsafe {
-                crate::scheduler::scheduler_enqueue_task(
-                    scheduler,
-                    solver_task_trampoline,
-                    &worker_contexts[i] as *const SolverWorkerContext as *mut (),
-                    "solve",
-                )
-            };
-            handles[i] = Some(slot);
-        } else {
-            handles[i] = None;
-            solver_task(shared, i as i32);
-        }
+        // SAFETY: worker_contexts (and everything shared references) stay
+        // alive until the finish loop below returns.
+        handles[i] = unsafe {
+            task_system.enqueue(
+                solver_task_trampoline,
+                &worker_contexts[i] as *const SolverWorkerContext as *mut (),
+                "solve",
+            )
+        };
     }
 
     // The calling thread also enters as worker 0 and races for the orchestrator
@@ -1705,9 +1701,7 @@ fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
 
     // Finish constraint solve
     for handle in handles.iter().take(worker_count as usize) {
-        if let Some(slot) = *handle {
-            crate::scheduler::scheduler_finish_task(scheduler, slot);
-        }
+        task_system.finish(*handle);
     }
 }
 
@@ -2176,10 +2170,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             task_context.has_hit_events = false;
         }
 
-        // Recycle the scheduler task ring for this phase (no tasks are pending here).
-        if let Some(scheduler) = &world.scheduler {
-            crate::scheduler::reset_scheduler(scheduler);
-        }
+        // C resets the task ring once at step start (physics_world.rs), not here.
 
         let mut solve_profile = SolveProfile::default();
         {
