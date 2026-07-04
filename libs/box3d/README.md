@@ -46,12 +46,17 @@ To pull in upstream changes:
 - `benchmark/main.c` + `shared/benchmarks.c` → `examples/benchmark.rs`
   (`cargo run --release -p makepad-box3d --example benchmark`)
 - World snapshots: `world_snapshot.c` → `src/world_snapshot.rs`, on top of the
-  recording SUBSTRATE subset in `src/recording.rs` (byte buffer, LE writers,
-  geometry registry) and `src/recording_replay.rs` (bounds-checked readers,
-  registry loading). The op-stream/player layers are NOT ported. The snapshot
-  byte format is port-specific (own magic/version + struct-layout hash), not
-  C-compatible; the guarantee is bit-identical continuation after restore
-  (verified in `tests/test_snapshot.rs`).
+  recording layer in `src/recording.rs` (byte buffer, LE writers, geometry
+  registry, capture hooks in every mutator, `world_start/stop_recording`,
+  `hash_world_state`) and `src/recording_replay.rs` (bounds-checked readers,
+  registry + tag-table loading, the op dispatch table, `Player` with keyframe
+  scrubbing/seek/restart and the per-frame query store, `validate_replay`).
+  The snapshot/recording byte formats are port-specific (own magic/version +
+  struct-layout hash), not C-file-compatible; the logical record structure
+  mirrors C so hunks land in the same places. The guarantee is bit-identical
+  continuation after restore and hash-exact replay at every recorded step
+  (verified in `tests/test_snapshot.rs`, `tests/test_recording_capture.rs`,
+  `tests/test_recording.rs`).
 
 ## Cargo features
 
@@ -81,11 +86,14 @@ single-threaded C by 2.4–4.8× on heavy scenes.
 ## Intentional differences from C (keep these in mind when diffing)
 
 **Not ported** (skip these when syncing, or port them then):
-- Recording/replay op stream and player (`recording_ops.inl`, the capture
-  hooks in mutators, keyframes, file format) — only the substrate used by
-  snapshots exists (see above)
 - Debug draw (`b3World_Draw`, `b3DebugDraw`, draw fns in joints/shapes) and
-  dump/save/load debug helpers (`b3Dump*`, `b3DynamicTree_Save/Load`)
+  dump/save/load debug helpers (`b3Dump*`, `b3DynamicTree_Save/Load`). This
+  also excludes the player's draw-only surface: debug-shape callbacks
+  (`b3RecPlayer_SetDebugShapeCallbacks`) and `b3RecPlayer_DrawFrameQueries`
+  (the query info accessors ARE ported). The recording/replay op stream and
+  player are otherwise fully ported (see above); `recording_ops.inl`'s
+  X-macro table became the `RecOp` enum + the dispatch match in
+  `recording_replay.rs`
 - Compound byte serialization (`b3ConvertCompoundToBytes`/`BytesToCompound`)
   — compounds serialize through the snapshot geometry registry instead
 - Threading IS ported (scheduler.c/parallel_for.c + the solver's atomic
@@ -137,9 +145,13 @@ single-threaded C by 2.4–4.8× on heavy scenes.
   `lowerSuspensionImpulse`, spine_02 inherits spine_01's name in the human
   scenario
 
-**Test suite:** `cargo test -p makepad-box3d` (151 tests; 157 with
+**Test suite:** `cargo test -p makepad-box3d` (179 tests; 185 with
 `--features double-precision`). Also run `--features disable-simd` and the
-feature combinations when syncing. `test_recording.c` is not ported (op-stream
-recording skipped). `test_determinism.rs` asserts run-to-run equality instead
-of the C `EXPECTED_HASH` constant. `tests/test_smoke.rs`, `tests/test_simd.rs`
-and `tests/test_snapshot.rs` are port-specific (not from C).
+feature combinations when syncing. `test_recording.c` is ported as
+`tests/test_recording.rs` minus its two debug-draw-callback subtests
+(DebugShapeCallbacks, KeyframeHandleReuse — debug draw is not ported); it adds
+port-specific worker-count-invariance round trips (record at 4 workers, replay
+at 1 and 4). `test_determinism.rs` asserts run-to-run equality instead of the
+C `EXPECTED_HASH` constant. `tests/test_smoke.rs`, `tests/test_simd.rs`,
+`tests/test_snapshot.rs` and `tests/test_recording_capture.rs` are
+port-specific (not from C).
