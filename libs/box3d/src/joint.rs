@@ -829,6 +829,12 @@ fn destroy_contacts_between_bodies(world: &mut World, body_id_a: i32, body_id_b:
 }
 
 pub fn joint_set_constraint_tuning(world: &mut World, joint_id: JointId, hertz: f32, damping_ratio: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetConstraintTuning, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+        b.w_f32(damping_ratio);
+    });
     b3_assert!(is_valid_float(hertz) && hertz >= 0.0);
     b3_assert!(is_valid_float(damping_ratio) && damping_ratio >= 0.0);
 
@@ -846,6 +852,11 @@ pub fn joint_get_constraint_tuning(world: &World, joint_id: JointId, hertz: &mut
 }
 
 pub fn joint_set_force_threshold(world: &mut World, joint_id: JointId, threshold: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetForceThreshold, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(threshold);
+    });
     b3_assert!(is_valid_float(threshold) && threshold >= 0.0);
 
     let id = get_joint_full_id(world, joint_id);
@@ -860,6 +871,11 @@ pub fn joint_get_force_threshold(world: &World, joint_id: JointId) -> f32 {
 }
 
 pub fn joint_set_torque_threshold(world: &mut World, joint_id: JointId, threshold: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetTorqueThreshold, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(threshold);
+    });
     b3_assert!(is_valid_float(threshold) && threshold >= 0.0);
 
     let id = get_joint_full_id(world, joint_id);
@@ -915,7 +931,18 @@ pub fn create_distance_joint(world: &mut World, def: &DistanceJointDef) -> Joint
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Distance(distance_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateDistanceJoint, |b| {
+            b.w_worldid(wid);
+            b.w_distancejointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_motor_joint(world: &mut World, def: &MotorJointDef) -> JointId {
@@ -943,7 +970,18 @@ pub fn create_motor_joint(world: &mut World, def: &MotorJointDef) -> JointId {
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Motor(motor_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateMotorJoint, |b| {
+            b.w_worldid(wid);
+            b.w_motorjointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_filter_joint(world: &mut World, def: &FilterJointDef) -> JointId {
@@ -958,7 +996,18 @@ pub fn create_filter_joint(world: &mut World, def: &FilterJointDef) -> JointId {
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Filter;
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateFilterJoint, |b| {
+            b.w_worldid(wid);
+            b.w_filterjointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_parallel_joint(world: &mut World, def: &ParallelJointDef) -> JointId {
@@ -983,7 +1032,18 @@ pub fn create_parallel_joint(world: &mut World, def: &ParallelJointDef) -> Joint
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Parallel(parallel_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateParallelJoint, |b| {
+            b.w_worldid(wid);
+            b.w_paralleljointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_prismatic_joint(world: &mut World, def: &PrismaticJointDef) -> JointId {
@@ -1012,7 +1072,18 @@ pub fn create_prismatic_joint(world: &mut World, def: &PrismaticJointDef) -> Joi
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Prismatic(prismatic_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreatePrismaticJoint, |b| {
+            b.w_worldid(wid);
+            b.w_prismaticjointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_revolute_joint(world: &mut World, def: &RevoluteJointDef) -> JointId {
@@ -1043,7 +1114,18 @@ pub fn create_revolute_joint(world: &mut World, def: &RevoluteJointDef) -> Joint
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Revolute(revolute_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateRevoluteJoint, |b| {
+            b.w_worldid(wid);
+            b.w_revolutejointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_spherical_joint(world: &mut World, def: &SphericalJointDef) -> JointId {
@@ -1078,7 +1160,18 @@ pub fn create_spherical_joint(world: &mut World, def: &SphericalJointDef) -> Joi
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Spherical(spherical_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateSphericalJoint, |b| {
+            b.w_worldid(wid);
+            b.w_sphericaljointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_weld_joint(world: &mut World, def: &WeldJointDef) -> JointId {
@@ -1104,7 +1197,18 @@ pub fn create_weld_joint(world: &mut World, def: &WeldJointDef) -> JointId {
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Weld(weld_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateWeldJoint, |b| {
+            b.w_worldid(wid);
+            b.w_weldjointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn create_wheel_joint(world: &mut World, def: &WheelJointDef) -> JointId {
@@ -1140,7 +1244,18 @@ pub fn create_wheel_joint(world: &mut World, def: &WheelJointDef) -> JointId {
     let joint_sim = get_joint_sim_from_id_mut(world, joint_id);
     joint_sim.joint = JointUnion::Wheel(wheel_joint);
 
-    make_public_joint_id(world, joint_id)
+    let id = make_public_joint_id(world, joint_id);
+
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateWheelJoint, |b| {
+            b.w_worldid(wid);
+            b.w_wheeljointdef(def);
+            b.w_jointid(id);
+        });
+    }
+
+    id
 }
 
 pub fn destroy_joint_internal(world: &mut World, joint_id: i32, wake_bodies: bool) {
@@ -1234,6 +1349,11 @@ pub fn destroy_joint_internal(world: &mut World, joint_id: i32, wake_bodies: boo
 }
 
 pub fn destroy_joint(world: &mut World, joint_id: JointId, wake_attached: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::DestroyJoint, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(wake_attached);
+    });
     let id = get_joint_full_id(world, joint_id);
     destroy_joint_internal(world, id, wake_attached);
 }
@@ -1258,6 +1378,11 @@ pub fn joint_get_world(world: &World, joint_id: JointId) -> WorldId {
 }
 
 pub fn joint_set_local_frame_a(world: &mut World, joint_id: JointId, local_frame: Transform) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetLocalFrameA, |b| {
+        b.w_jointid(joint_id);
+        b.w_transform(local_frame);
+    });
     b3_assert!(is_valid_transform(local_frame));
 
     let id = get_joint_full_id(world, joint_id);
@@ -1271,6 +1396,11 @@ pub fn joint_get_local_frame_a(world: &World, joint_id: JointId) -> Transform {
 }
 
 pub fn joint_set_local_frame_b(world: &mut World, joint_id: JointId, local_frame: Transform) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetLocalFrameB, |b| {
+        b.w_jointid(joint_id);
+        b.w_transform(local_frame);
+    });
     b3_assert!(is_valid_transform(local_frame));
 
     let id = get_joint_full_id(world, joint_id);
@@ -1288,6 +1418,11 @@ pub fn joint_set_collide_connected(world: &mut World, joint_id: JointId, should_
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointSetCollideConnected, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(should_collide);
+    });
 
     let id = get_joint_full_id(world, joint_id);
     if world.joints[id as usize].collide_connected == should_collide {
@@ -1347,6 +1482,10 @@ pub fn joint_wake_bodies(world: &mut World, joint_id: JointId) {
     if world.locked {
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::JointWakeBodies, |b| {
+        b.w_jointid(joint_id);
+    });
 
     world.locked = true;
 

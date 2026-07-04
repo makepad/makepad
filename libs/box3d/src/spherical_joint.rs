@@ -42,6 +42,11 @@ fn get_spherical_ref(base: &JointSim) -> &crate::joint::SphericalJoint {
 }
 
 pub fn spherical_joint_enable_cone_limit(world: &mut World, joint_id: JointId, enable_limit: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointEnableConeLimit, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(enable_limit);
+    });
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     let joint = get_spherical(base);
     if enable_limit != joint.enable_cone_limit {
@@ -61,6 +66,11 @@ pub fn spherical_joint_get_cone_limit(world: &mut World, joint_id: JointId) -> f
 }
 
 pub fn spherical_joint_set_cone_limit(world: &mut World, joint_id: JointId, angle_radians: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetConeLimit, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(angle_radians);
+    });
     b3_assert!(is_valid_float(angle_radians) && 0.0 <= angle_radians && angle_radians <= 0.5 * PI);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).cone_angle = angle_radians;
@@ -90,6 +100,11 @@ pub fn spherical_joint_get_cone_angle(world: &mut World, joint_id: JointId) -> f
 }
 
 pub fn spherical_joint_enable_twist_limit(world: &mut World, joint_id: JointId, enable_limit: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointEnableTwistLimit, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(enable_limit);
+    });
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     let joint = get_spherical(base);
     if enable_limit != joint.enable_twist_limit {
@@ -115,6 +130,12 @@ pub fn spherical_joint_get_upper_twist_limit(world: &mut World, joint_id: JointI
 }
 
 pub fn spherical_joint_set_twist_limits(world: &mut World, joint_id: JointId, lower_limit_radians: f32, upper_limit_radians: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetTwistLimits, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(lower_limit_radians);
+        b.w_f32(upper_limit_radians);
+    });
     b3_assert!(is_valid_float(lower_limit_radians) && is_valid_float(upper_limit_radians));
 
     let lower_angle = min_float(lower_limit_radians, upper_limit_radians);
@@ -150,6 +171,11 @@ pub fn spherical_joint_get_twist_angle(world: &mut World, joint_id: JointId) -> 
 }
 
 pub fn spherical_joint_enable_spring(world: &mut World, joint_id: JointId, enable_spring: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointEnableSpring, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(enable_spring);
+    });
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     let joint = get_spherical(base);
     if enable_spring != joint.enable_spring {
@@ -164,6 +190,11 @@ pub fn spherical_joint_is_spring_enabled(world: &mut World, joint_id: JointId) -
 }
 
 pub fn spherical_joint_set_target_rotation(world: &mut World, joint_id: JointId, target_rotation: Quat) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetTargetRotation, |b| {
+        b.w_jointid(joint_id);
+        b.w_quat(target_rotation);
+    });
     b3_assert!(is_valid_quat(target_rotation));
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).target_rotation = target_rotation;
@@ -175,6 +206,11 @@ pub fn spherical_joint_get_target_rotation(world: &mut World, joint_id: JointId)
 }
 
 pub fn spherical_joint_set_spring_hertz(world: &mut World, joint_id: JointId, hertz: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetSpringHertz, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+    });
     b3_assert!(is_valid_float(hertz) && hertz >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).hertz = hertz;
@@ -186,6 +222,11 @@ pub fn spherical_joint_get_spring_hertz(world: &mut World, joint_id: JointId) ->
 }
 
 pub fn spherical_joint_set_spring_damping_ratio(world: &mut World, joint_id: JointId, damping_ratio: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetSpringDampingRatio, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(damping_ratio);
+    });
     b3_assert!(is_valid_float(damping_ratio) && damping_ratio >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).damping_ratio = damping_ratio;
@@ -197,6 +238,11 @@ pub fn spherical_joint_get_spring_damping_ratio(world: &mut World, joint_id: Joi
 }
 
 pub fn spherical_joint_enable_motor(world: &mut World, joint_id: JointId, enable_motor: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointEnableMotor, |b| {
+        b.w_jointid(joint_id);
+        b.w_bool(enable_motor);
+    });
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     let joint = get_spherical(base);
     if enable_motor != joint.enable_motor {
@@ -211,6 +257,11 @@ pub fn spherical_joint_is_motor_enabled(world: &mut World, joint_id: JointId) ->
 }
 
 pub fn spherical_joint_set_motor_velocity(world: &mut World, joint_id: JointId, motor_velocity: Vec3) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetMotorVelocity, |b| {
+        b.w_jointid(joint_id);
+        b.w_vec3(motor_velocity);
+    });
     b3_assert!(is_valid_vec3(motor_velocity));
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).motor_velocity = motor_velocity;
@@ -222,6 +273,11 @@ pub fn spherical_joint_get_motor_velocity(world: &mut World, joint_id: JointId) 
 }
 
 pub fn spherical_joint_set_max_motor_torque(world: &mut World, joint_id: JointId, max_force: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::SphericalJointSetMaxMotorTorque, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(max_force);
+    });
     b3_assert!(is_valid_float(max_force) && max_force >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Spherical);
     get_spherical(base).max_motor_torque = max_force;

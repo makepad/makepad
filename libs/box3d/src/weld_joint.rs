@@ -28,6 +28,11 @@ fn get_weld_ref(base: &JointSim) -> &crate::joint::WeldJoint {
 }
 
 pub fn weld_joint_set_linear_hertz(world: &mut World, joint_id: JointId, hertz: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::WeldJointSetLinearHertz, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+    });
     b3_assert!(is_valid_float(hertz) && hertz >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Weld);
     get_weld(base).linear_hertz = hertz;
@@ -39,6 +44,11 @@ pub fn weld_joint_get_linear_hertz(world: &mut World, joint_id: JointId) -> f32 
 }
 
 pub fn weld_joint_set_linear_damping_ratio(world: &mut World, joint_id: JointId, damping_ratio: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::WeldJointSetLinearDampingRatio, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(damping_ratio);
+    });
     b3_assert!(is_valid_float(damping_ratio) && damping_ratio >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Weld);
     get_weld(base).linear_damping_ratio = damping_ratio;
@@ -50,6 +60,11 @@ pub fn weld_joint_get_linear_damping_ratio(world: &mut World, joint_id: JointId)
 }
 
 pub fn weld_joint_set_angular_hertz(world: &mut World, joint_id: JointId, hertz: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::WeldJointSetAngularHertz, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(hertz);
+    });
     b3_assert!(is_valid_float(hertz) && hertz >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Weld);
     get_weld(base).angular_hertz = hertz;
@@ -61,6 +76,11 @@ pub fn weld_joint_get_angular_hertz(world: &mut World, joint_id: JointId) -> f32
 }
 
 pub fn weld_joint_set_angular_damping_ratio(world: &mut World, joint_id: JointId, damping_ratio: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::WeldJointSetAngularDampingRatio, |b| {
+        b.w_jointid(joint_id);
+        b.w_f32(damping_ratio);
+    });
     b3_assert!(is_valid_float(damping_ratio) && damping_ratio >= 0.0);
     let base = crate::joint::get_joint_sim_check_type(world, joint_id, JointType::Weld);
     get_weld(base).angular_damping_ratio = damping_ratio;
