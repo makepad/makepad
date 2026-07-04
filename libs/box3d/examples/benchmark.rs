@@ -1318,6 +1318,7 @@ fn main() {
     let mut run_count = 4;
     let mut single_benchmark = -1;
     let mut enable_continuous = true;
+    let mut worker_count: u32 = 1;
 
     for arg in std::env::args().skip(1) {
         if let Some(v) = arg.strip_prefix("-b=") {
@@ -1327,8 +1328,10 @@ fn main() {
         } else if arg.starts_with("-nc") {
             enable_continuous = false;
             println!("Continuous disabled");
-        } else if arg.starts_with("-t=") || arg.starts_with("-w=") || arg == "-s" {
-            println!("note: {} ignored (serial port, no step-time files)", arg);
+        } else if let Some(v) = arg.strip_prefix("-w=") {
+            worker_count = v.parse().unwrap_or(1);
+        } else if arg.starts_with("-t=") || arg == "-s" {
+            println!("note: {} ignored (no thread sweep, no step-time files)", arg);
         } else if arg == "-h" {
             println!(
                 "Usage\n-b=<integer>: run a single benchmark\n-r=<integer>: number of repeats (default is 4)\n-nc: disable continuous collision"
@@ -1337,7 +1340,7 @@ fn main() {
         }
     }
 
-    println!("Starting benchmarks (Rust port, single threaded)");
+    println!("Starting benchmarks (Rust port, workers = {})", worker_count);
     println!("======================================");
 
     let mut summaries: Vec<Summary> = Vec::new();
@@ -1364,7 +1367,7 @@ fn main() {
         for run_index in 0..run_count {
             let mut world_def = default_world_def();
             world_def.enable_continuous = enable_continuous;
-            world_def.worker_count = 1;
+            world_def.worker_count = worker_count;
 
             let mut scenario = (benchmark.make)();
             scenario.capacity(&mut world_def.capacity);

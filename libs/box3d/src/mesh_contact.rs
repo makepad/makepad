@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::b3_assert;
 use crate::b3_validate;
 use crate::constants::{linear_slop, max_aabb_margin, mesh_rest_offset, speculative_distance, MAX_MANIFOLD_POINTS};
-use crate::contact::{ContactCache, MeshContact, TriangleCache, FORCE_GHOST_COLLISIONS};
+use crate::contact::{Contact, ContactCache, MeshContact, TriangleCache, FORCE_GHOST_COLLISIONS};
 use crate::core::NULL_INDEX;
 use crate::manifold::make_feature_id;
 use crate::math_functions::{
@@ -488,9 +488,9 @@ struct Cluster {
 /// world for the duration of the computation so the world stays borrowable.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_mesh_manifolds(
-    world: &mut World,
-    worker_index: i32,
-    contact_id: i32,
+    world: &World,
+    task_context: &mut crate::physics_world::TaskContext,
+    contact: &mut Contact,
     shape_a: &Shape,
     material_map: Option<&[i32]>,
     xf_a: WorldTransform,
@@ -498,11 +498,11 @@ pub fn compute_mesh_manifolds(
     xf_b: WorldTransform,
     is_fast: bool,
 ) -> bool {
-    let mut mesh_contact = std::mem::take(&mut world.contacts[contact_id as usize].mesh_contact);
+    let mut mesh_contact = std::mem::take(&mut contact.mesh_contact);
     let touching = compute_mesh_manifolds_inner(
         world,
-        worker_index,
-        contact_id,
+        task_context,
+        contact,
         &mut mesh_contact,
         shape_a,
         material_map,
@@ -511,15 +511,15 @@ pub fn compute_mesh_manifolds(
         xf_b,
         is_fast,
     );
-    world.contacts[contact_id as usize].mesh_contact = mesh_contact;
+    contact.mesh_contact = mesh_contact;
     touching
 }
 
 #[allow(clippy::too_many_arguments)]
 fn compute_mesh_manifolds_inner(
-    world: &mut World,
-    worker_index: i32,
-    contact_id: i32,
+    world: &World,
+    task_context: &mut crate::physics_world::TaskContext,
+    contact: &mut Contact,
     mesh_contact: &mut MeshContact,
     shape_a: &Shape,
     material_map: Option<&[i32]>,
@@ -621,9 +621,8 @@ fn compute_mesh_manifolds_inner(
                     triangle.flags,
                     &mut cache.sat_cache,
                 );
-                let context = &mut world.task_contexts[worker_index as usize];
-                context.sat_call_count += 1;
-                context.sat_cache_hit_count += cache.sat_cache.hit as i32;
+                task_context.sat_call_count += 1;
+                task_context.sat_cache_hit_count += cache.sat_cache.hit as i32;
             }
 
             ShapeType::Sphere => {
@@ -802,7 +801,6 @@ fn compute_mesh_manifolds_inner(
     b3_assert!(accepted_manifolds.len() as i32 <= triangle_count);
 
     if accepted_manifolds.is_empty() {
-        let contact = &mut world.contacts[contact_id as usize];
         if contact.manifold_count() > 0 {
             contact.manifolds = Vec::new();
         }
@@ -905,7 +903,7 @@ fn compute_mesh_manifolds_inner(
     let cluster_count = clusters.len();
 
     // Make a temporary copy of previous manifolds
-    let mut old_manifolds = world.contacts[contact_id as usize].manifolds.clone();
+    let mut old_manifolds = contact.manifolds.clone();
     let old_manifold_count = old_manifolds.len();
 
     // Resize manifolds if needed. C frees + reallocates zeroed when the count
@@ -986,7 +984,7 @@ fn compute_mesh_manifolds_inner(
     }
 
     // Store the new manifolds (C wrote into contact->manifolds in place).
-    world.contacts[contact_id as usize].manifolds = new_manifolds;
+    contact.manifolds = new_manifolds;
 
     let materials_a = get_shape_materials(shape_a);
     let material_b = get_shape_materials(shape_b)[0];
@@ -1000,9 +998,9 @@ fn compute_mesh_manifolds_inner(
         let mut sample_count = 0.0;
 
         for i in 0..cluster_count {
-            let manifold_point_count = world.contacts[contact_id as usize].manifolds[i].point_count;
+            let manifold_point_count = contact.manifolds[i].point_count;
             for j in 0..manifold_point_count {
-                let triangle_index = world.contacts[contact_id as usize].manifolds[i].points[j as usize].triangle_index;
+                let triangle_index = contact.manifolds[i].points[j as usize].triangle_index;
                 let mut material_index: i32;
                 match &shape_a.geom {
                     ShapeGeometry::Mesh(mesh) => {
@@ -1043,17 +1041,13 @@ fn compute_mesh_manifolds_inner(
 
         if sample_count > 0.0 {
             let inv_count = 1.0 / sample_count;
-            let contact = &mut world.contacts[contact_id as usize];
             contact.friction = inv_count * friction;
             contact.restitution = inv_count * restitution;
             tangent_velocity_a = mul_sv(inv_count, tangent_velocity_a);
         }
 
-        {
-            let contact = &world.contacts[contact_id as usize];
-            b3_assert!(is_valid_float(contact.friction) && contact.friction >= 0.0);
-            b3_assert!(is_valid_float(contact.restitution) && contact.restitution >= 0.0);
-        }
+        b3_assert!(is_valid_float(contact.friction) && contact.friction >= 0.0);
+        b3_assert!(is_valid_float(contact.restitution) && contact.restitution >= 0.0);
     } else {
         // Keep these updated in case the values on the shapes are modified
         let friction = crate::contact::mix_friction(
@@ -1070,7 +1064,6 @@ fn compute_mesh_manifolds_inner(
             material_b.restitution,
             material_b.user_material_id,
         );
-        let contact = &mut world.contacts[contact_id as usize];
         contact.friction = friction;
         contact.restitution = restitution;
         tangent_velocity_a = materials_a[0].tangent_velocity;
@@ -1086,10 +1079,7 @@ fn compute_mesh_manifolds_inner(
     };
 
     let tangent_velocity_b = rotate_vector(xf_b.q, material_b.tangent_velocity);
-    {
-        let contact = &mut world.contacts[contact_id as usize];
-        contact.rolling_resistance = material_b.rolling_resistance * radius_b;
-        contact.tangent_velocity = sub(tangent_velocity_a, tangent_velocity_b);
-    }
+    contact.rolling_resistance = material_b.rolling_resistance * radius_b;
+    contact.tangent_velocity = sub(tangent_velocity_a, tangent_velocity_b);
     true
 }
