@@ -186,20 +186,49 @@ fn sensor_query_callback(
 
 /// C: b3SensorTask(startIndex, endIndex, workerIndex, context). The parallel-for
 /// wrapper is folded into a direct serial call from overlap_sensors.
-fn sensor_task(
-    world: &mut World,
-    start_index: i32,
-    end_index: i32,
-    worker_index: i32,
-    custom_filter: &mut Option<Box<CustomFilterFcn>>,
-) {
+/// Shared context for the parallel sensor pass. The sensors and per-worker
+/// sensor task contexts are taken out of the world; each task index owns
+/// exactly one sensor (disjoint) and each worker_index is exclusive per task
+/// (parallel_for contract). The custom filter slot is Some only on the serial
+/// fallback path (a single worker), so its SyncPtr access is exclusive.
+struct SensorCtx<'a> {
+    world: &'a World,
+    sensors: &'a crate::sync::SyncSlice<'a, Sensor>,
+    contexts: &'a crate::sync::SyncSlice<'a, SensorTaskContext>,
+    custom_filter: crate::sync::SyncPtr<Option<Box<CustomFilterFcn>>>,
+    use_custom_filter: bool,
+}
+
+// C: b3SensorTask trampoline for the scheduler.
+unsafe fn sensor_task_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
+    // SAFETY: the SensorCtx lives on the overlap_sensors stack frame, which
+    // blocks in parallel_for until every block completes.
+    let ctx = unsafe { &*(context as *const SensorCtx) };
+    sensor_task(ctx, start_index, end_index, worker_index);
+}
+
+fn sensor_task(ctx: &SensorCtx, start_index: i32, end_index: i32, worker_index: i32) {
+    let world = ctx.world;
     b3_assert!(worker_index < world.worker_count);
     b3_assert!(start_index < end_index);
 
+    // SAFETY: worker_index is exclusive to this task (parallel_for contract).
+    let sensor_task_context = unsafe { ctx.contexts.get_mut(worker_index as usize) };
+
+    let mut no_filter: Option<Box<CustomFilterFcn>> = None;
+    let custom_filter: &mut Option<Box<CustomFilterFcn>> = if ctx.use_custom_filter {
+        // SAFETY: use_custom_filter forces a single worker; exclusive access.
+        unsafe { ctx.custom_filter.get() }
+    } else {
+        &mut no_filter
+    };
+
     for sensor_index in start_index..end_index {
+        // SAFETY: each sensor index is visited by exactly one worker.
+        let sensor = unsafe { ctx.sensors.get_mut(sensor_index as usize) };
+
         // Swap overlap arrays, append the sensor hits, clear the hits.
         let (sensor_shape_id, mut overlaps2) = {
-            let sensor = &mut world.sensors[sensor_index as usize];
 
             // Swap overlap arrays
             std::mem::swap(&mut sensor.overlaps1, &mut sensor.overlaps2);
@@ -228,17 +257,11 @@ fn sensor_task(
 
         let body_set_index = world.bodies[body_id as usize].set_index;
         if body_set_index == DISABLED_SET || !enable_sensor_events {
-            let overlaps1_count = {
-                let sensor = &mut world.sensors[sensor_index as usize];
-                sensor.overlaps2 = overlaps2;
-                sensor.overlaps1.len()
-            };
+            sensor.overlaps2 = overlaps2;
+            let overlaps1_count = sensor.overlaps1.len();
             if overlaps1_count != 0 {
                 // This sensor is dropping all overlaps because it has been disabled.
-                set_bit(
-                    &mut world.sensor_task_contexts[worker_index as usize].event_bits,
-                    sensor_index as u32,
-                );
+                set_bit(&mut sensor_task_context.event_bits, sensor_index as u32);
             }
             continue;
         }
@@ -275,7 +298,6 @@ fn sensor_task(
         overlaps2.truncate(unique_count);
 
         let something_changed = {
-            let sensor = &world.sensors[sensor_index as usize];
             let count1 = sensor.overlaps1.len();
             let count2 = overlaps2.len();
             if count1 != count2 {
@@ -297,13 +319,10 @@ fn sensor_task(
             }
         };
 
-        world.sensors[sensor_index as usize].overlaps2 = overlaps2;
+        sensor.overlaps2 = overlaps2;
 
         if something_changed {
-            set_bit(
-                &mut world.sensor_task_contexts[worker_index as usize].event_bits,
-                sensor_index as u32,
-            );
+            set_bit(&mut sensor_task_context.event_bits, sensor_index as u32);
         }
     }
 }
@@ -322,10 +341,50 @@ pub fn overlap_sensors(world: &mut World) {
     }
 
     // Parallel-for sensor overlaps.
-    // C: b3ParallelFor(world, b3SensorTask, sensorCount, 16, world, "sensors")
-    let mut custom_filter = world.custom_filter_fcn.take();
-    sensor_task(world, 0, sensor_count, 0, &mut custom_filter);
-    world.custom_filter_fcn = custom_filter;
+    // C: b3ParallelFor(world, b3SensorTask, sensorCount, 16, world, "sensors").
+    // Sensors and per-worker contexts are taken out of the world so workers
+    // share a read-only &World; a world with a custom filter callback falls
+    // back to a single worker because Box<dyn FnMut> is not Sync (C requires
+    // the callback to be thread-safe instead).
+    {
+        let mut sensors = std::mem::take(&mut world.sensors);
+        let mut sensor_task_contexts = std::mem::take(&mut world.sensor_task_contexts);
+        let mut custom_filter = world.custom_filter_fcn.take();
+
+        let use_custom_filter = custom_filter.is_some();
+        let effective_workers = if use_custom_filter { 1 } else { world.worker_count };
+
+        {
+            let sensors_slice = crate::sync::SyncSlice::new(&mut sensors);
+            let contexts_slice = crate::sync::SyncSlice::new(&mut sensor_task_contexts);
+            let sensor_ctx = SensorCtx {
+                world: &*world,
+                sensors: &sensors_slice,
+                contexts: &contexts_slice,
+                custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
+                use_custom_filter,
+            };
+
+            let min_range = 16;
+            // SAFETY: disjoint sensor indices per block, exclusive worker
+            // indices, and the context outlives parallel_for (which blocks).
+            unsafe {
+                crate::parallel_for::parallel_for(
+                    sensor_ctx.world.scheduler.as_ref(),
+                    effective_workers,
+                    sensor_task_trampoline,
+                    sensor_count,
+                    min_range,
+                    &sensor_ctx as *const SensorCtx as *mut (),
+                    "sensors",
+                );
+            }
+        }
+
+        world.sensors = sensors;
+        world.sensor_task_contexts = sensor_task_contexts;
+        world.custom_filter_fcn = custom_filter;
+    }
 
     // Merge the per-worker event bits into worker 0 (no-op with one worker).
     {

@@ -54,6 +54,8 @@ pub mod island;
 pub mod joint;
 pub mod parallel_for;
 pub mod physics_world;
+pub mod scheduler;
+pub mod sync;
 pub mod sensor;
 pub mod shape;
 pub mod simd;

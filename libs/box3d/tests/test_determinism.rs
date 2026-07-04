@@ -649,7 +649,12 @@ fn update_falling_ragdolls(world: &World, data: &mut FallingRagdollData) -> bool
 }
 
 fn run_scenario() -> (i32, u32) {
-    let world_def = default_world_def();
+    run_scenario_with_workers(1)
+}
+
+fn run_scenario_with_workers(worker_count: u32) -> (i32, u32) {
+    let mut world_def = default_world_def();
+    world_def.worker_count = worker_count;
     let mut world = create_world(&world_def);
 
     let mut data = create_falling_ragdolls(&mut world);
@@ -672,6 +677,23 @@ fn run_scenario() -> (i32, u32) {
 
     assert!(done, "ragdolls did not settle within {} steps", step_limit);
     (data.sleep_step, data.hash)
+}
+
+// C: test_determinism.c runs the scenario with 1..N workers and requires the
+// same sleep step and hash for every worker count (thread-count determinism).
+#[test]
+fn determinism_across_worker_counts() {
+    let (sleep_step1, hash1) = run_scenario_with_workers(1);
+    println!("workers=1: sleepStep={} hash=0x{:08X}", sleep_step1, hash1);
+
+    for worker_count in [2u32, 4u32] {
+        let (sleep_step, hash) = run_scenario_with_workers(worker_count);
+        println!("workers={}: sleepStep={} hash=0x{:08X}", worker_count, sleep_step, hash);
+        ensure!(sleep_step == sleep_step1);
+        ensure!(hash == hash1);
+    }
+
+    ensure!(hash1 != 0);
 }
 
 #[test]

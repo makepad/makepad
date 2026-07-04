@@ -1717,67 +1717,66 @@ pub fn prepare_joint(joint: &mut JointSim, world: &World, context: &StepContext)
     }
 }
 
-pub fn warm_start_joint(joint: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_joint(joint: &mut JointSim, states: &crate::solver::StateAccess, context: &StepContext) {
     match joint.joint_type {
-        JointType::Parallel => crate::parallel_joint::warm_start_parallel_joint(joint, context),
-        JointType::Distance => crate::distance_joint::warm_start_distance_joint(joint, context),
+        JointType::Parallel => crate::parallel_joint::warm_start_parallel_joint(joint, states, context),
+        JointType::Distance => crate::distance_joint::warm_start_distance_joint(joint, states, context),
         JointType::Filter => {}
-        JointType::Motor => crate::motor_joint::warm_start_motor_joint(joint, context),
-        JointType::Prismatic => crate::prismatic_joint::warm_start_prismatic_joint(joint, context),
-        JointType::Revolute => crate::revolute_joint::warm_start_revolute_joint(joint, context),
-        JointType::Spherical => crate::spherical_joint::warm_start_spherical_joint(joint, context),
-        JointType::Weld => crate::weld_joint::warm_start_weld_joint(joint, context),
-        JointType::Wheel => crate::wheel_joint::warm_start_wheel_joint(joint, context),
+        JointType::Motor => crate::motor_joint::warm_start_motor_joint(joint, states, context),
+        JointType::Prismatic => crate::prismatic_joint::warm_start_prismatic_joint(joint, states, context),
+        JointType::Revolute => crate::revolute_joint::warm_start_revolute_joint(joint, states, context),
+        JointType::Spherical => crate::spherical_joint::warm_start_spherical_joint(joint, states, context),
+        JointType::Weld => crate::weld_joint::warm_start_weld_joint(joint, states, context),
+        JointType::Wheel => crate::wheel_joint::warm_start_wheel_joint(joint, states, context),
     }
 }
 
-pub fn solve_joint(joint: &mut JointSim, context: &mut StepContext, use_bias: bool) {
+pub fn solve_joint(joint: &mut JointSim, states: &crate::solver::StateAccess, context: &StepContext, use_bias: bool) {
     match joint.joint_type {
-        JointType::Parallel => crate::parallel_joint::solve_parallel_joint(joint, context),
-        JointType::Distance => crate::distance_joint::solve_distance_joint(joint, context, use_bias),
+        JointType::Parallel => crate::parallel_joint::solve_parallel_joint(joint, states, context),
+        JointType::Distance => crate::distance_joint::solve_distance_joint(joint, states, context, use_bias),
         JointType::Filter => {}
-        JointType::Motor => crate::motor_joint::solve_motor_joint(joint, context),
-        JointType::Prismatic => crate::prismatic_joint::solve_prismatic_joint(joint, context, use_bias),
-        JointType::Revolute => crate::revolute_joint::solve_revolute_joint(joint, context, use_bias),
-        JointType::Spherical => crate::spherical_joint::solve_spherical_joint(joint, context, use_bias),
-        JointType::Weld => crate::weld_joint::solve_weld_joint(joint, context, use_bias),
-        JointType::Wheel => crate::wheel_joint::solve_wheel_joint(joint, context, use_bias),
+        JointType::Motor => crate::motor_joint::solve_motor_joint(joint, states, context),
+        JointType::Prismatic => crate::prismatic_joint::solve_prismatic_joint(joint, states, context, use_bias),
+        JointType::Revolute => crate::revolute_joint::solve_revolute_joint(joint, states, context, use_bias),
+        JointType::Spherical => crate::spherical_joint::solve_spherical_joint(joint, states, context, use_bias),
+        JointType::Weld => crate::weld_joint::solve_weld_joint(joint, states, context, use_bias),
+        JointType::Wheel => crate::wheel_joint::solve_wheel_joint(joint, states, context, use_bias),
     }
 }
 
-// The overflow stages iterate the overflow color's joints. The Vec is moved out
-// of the graph for the loop so the joints can be mutated while world is read.
-pub fn prepare_joints_overflow(world: &mut World, context: &mut StepContext) {
-    let mut joints =
-        std::mem::take(&mut world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims);
+// The overflow stages iterate the overflow color's joints. They run on the
+// orchestrator only, between the parallel color stages (C: b3PrepareJoints_Overflow
+// and friends run inside the worker-0 task while the other workers spin), so
+// the overflow joint slice is accessed exclusively.
+pub fn prepare_joints_overflow(shared: &crate::solver::SolverShared) {
+    let joints = &shared.joint_colors[OVERFLOW_INDEX as usize];
 
-    for joint in joints.iter_mut() {
-        prepare_joint(joint, world, context);
+    for i in 0..joints.len() {
+        // SAFETY: orchestrator-only stage — exclusive access to the overflow joints.
+        let joint = unsafe { joints.get_mut(i) };
+        prepare_joint(joint, shared.world, shared.context);
     }
-
-    world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims = joints;
 }
 
-pub fn warm_start_joints_overflow(world: &mut World, context: &mut StepContext) {
-    let mut joints =
-        std::mem::take(&mut world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims);
+pub fn warm_start_joints_overflow(shared: &crate::solver::SolverShared) {
+    let joints = &shared.joint_colors[OVERFLOW_INDEX as usize];
 
-    for joint in joints.iter_mut() {
-        warm_start_joint(joint, context);
+    for i in 0..joints.len() {
+        // SAFETY: orchestrator-only stage — exclusive access to the overflow joints.
+        let joint = unsafe { joints.get_mut(i) };
+        warm_start_joint(joint, &shared.states, shared.context);
     }
-
-    world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims = joints;
 }
 
-pub fn solve_joints_overflow(world: &mut World, context: &mut StepContext, use_bias: bool) {
-    let mut joints =
-        std::mem::take(&mut world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims);
+pub fn solve_joints_overflow(shared: &crate::solver::SolverShared, use_bias: bool) {
+    let joints = &shared.joint_colors[OVERFLOW_INDEX as usize];
 
-    for joint in joints.iter_mut() {
-        solve_joint(joint, context, use_bias);
+    for i in 0..joints.len() {
+        // SAFETY: orchestrator-only stage — exclusive access to the overflow joints.
+        let joint = unsafe { joints.get_mut(i) };
+        solve_joint(joint, &shared.states, shared.context, use_bias);
     }
-
-    world.constraint_graph.colors[OVERFLOW_INDEX as usize].joint_sims = joints;
 }
 
 // b3DrawJoint (debug draw) is not ported.

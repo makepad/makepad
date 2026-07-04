@@ -12,26 +12,26 @@
 //
 // Layout contract with the solver.c port (flat constraint arrays owned by
 // StepContext, see solver.rs):
-// - context.contact_constraints / context.manifold_constraints hold the
+// - ctx.contact_constraints / ctx.manifold_constraints hold the
 //   non-overflow (mesh) constraints FIRST, then the overflow constraints at the
 //   tail. GraphColor.contact_constraint_start/manifold_constraint_start are flat
 //   offsets into those arrays for every color, including the overflow color.
-// - ContactSpec.manifold_start is a FLAT index into context.manifold_constraints
+// - ContactSpec.manifold_start is a FLAT index into ctx.manifold_constraints
 //   (for overflow specs too).
-// - context.contact_prepare_spans covers the non-overflow range with flat
-//   starts plus a sentinel; context.overflow_spans has starts RELATIVE to the
+// - ctx.contact_prepare_spans covers the non-overflow range with flat
+//   starts plus a sentinel; ctx.overflow_spans has starts RELATIVE to the
 //   overflow range (0-based) plus a sentinel, matching the C overflow arrays.
 // - Blocks: contactBlock/wideContactBlock start indices are flat;
 //   overflowBlock and graph*Block start indices are relative to the
 //   color's range (as in C).
-// - context.wide_constraints elements must be initialized with
+// - ctx.wide_constraints elements must be initialized with
 //   ContactConstraintWide::default() (the C memset-zero: null base-1 body
 //   indices and null per-lane contacts) so remainder lanes are inert.
 
 use crate::b3_assert;
 use crate::b3_validate;
 use crate::bitset::set_bit;
-use crate::body::{BodyState, DYNAMIC_FLAG, IDENTITY_BODY_STATE};
+use crate::body::{DYNAMIC_FLAG, IDENTITY_BODY_STATE};
 use crate::constants::MAX_MANIFOLD_POINTS;
 use crate::constraint_graph::OVERFLOW_INDEX;
 use crate::contact::{CONTACT_STATIC_FLAG, SIM_ENABLE_HIT_EVENT};
@@ -41,8 +41,7 @@ use crate::math_functions::{
     mul_sub, mul_sv, neg, perp, rotate_vector, sub, vec2, Matrix3, Vec2, Vec3,
 };
 use crate::math_internal::{dot2, invert2, mul_mv2, sub2, Matrix2};
-use crate::physics_world::World;
-use crate::solver::{Softness, SolverBlock, SolverBlockType, StepContext};
+use crate::solver::{Softness, SolverBlock, SolverBlockType, SolverShared};
 
 // B3_SIMD_WIDTH
 pub const SIMD_WIDTH: usize = 4;
@@ -109,19 +108,18 @@ pub struct ContactConstraint {
 // s_base = s0 + dot(cB0 - cA0, normal)
 
 // Prepare mesh constraints
-pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
+    let ctx = shared.context;
 
     let warm_start_scale = if world.enable_warm_starting { 1.0 } else { 0.0 };
 
-    let contact_softness = context.contact_softness;
-    let static_softness = context.static_softness;
-
-    let ctx = &mut *context;
+    let contact_softness = ctx.contact_softness;
+    let static_softness = ctx.static_softness;
     let body_sims = &ctx.sims;
-    let body_states = &ctx.states;
-    let manifold_constraints = &mut ctx.manifold_constraints;
-    let contact_constraints = &mut ctx.contact_constraints;
+    let body_states = &shared.states;
+    let manifold_constraints = &shared.manifold_constraints;
+    let contact_constraints = &shared.contact_constraints;
 
     // Need to use spans in order to find the associated b3Contact, which is per color.
     // Overflow constraints are stored separately (at the tail of the flat arrays).
@@ -157,7 +155,9 @@ pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mu
             b3_assert!(0 <= local_index && local_index < spans[color_index].count);
             let spec = specs[local_index as usize];
             let contact_id = spec.contact_id;
-            let contact = &world.contacts[contact_id as usize];
+            // SAFETY: each contact id appears in exactly one color slot and the
+            // blocks partition the range — no concurrent writer.
+            let contact = unsafe { shared.contacts.get_ref(contact_id as usize) };
             b3_assert!(contact.contact_id == contact_id);
 
             let index_a = contact.body_sim_index_a;
@@ -191,7 +191,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mu
                 m_a = sim_a.inv_mass;
                 i_a = sim_a.inv_inertia_world;
 
-                let state_a = &body_states[index_a as usize];
+                let state_a = body_states.get(index_a as usize);
                 v_a = state_a.linear_velocity;
                 w_a = state_a.angular_velocity;
             }
@@ -212,7 +212,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mu
                 m_b = sim_b.inv_mass;
                 i_b = sim_b.inv_inertia_world;
 
-                let state_b = &body_states[index_b as usize];
+                let state_b = body_states.get(index_b as usize);
                 v_b = state_b.linear_velocity;
                 w_b = state_b.angular_velocity;
             }
@@ -239,11 +239,11 @@ pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mu
                 restitution: contact.restitution,
                 rolling_resistance: contact.rolling_resistance,
             };
-            contact_constraints[(base_offset + index) as usize] = contact_constraint;
+            *unsafe { contact_constraints.get_mut(((base_offset + index) as usize) as usize) } = contact_constraint;
 
             for manifold_index in 0..manifold_count {
                 let manifold = &contact.manifolds[manifold_index as usize];
-                let constraint = &mut manifold_constraints[(spec.manifold_start + manifold_index) as usize];
+                let constraint = unsafe { manifold_constraints.get_mut(((spec.manifold_start + manifold_index) as usize) as usize) };
                 let point_count = manifold.point_count;
                 let normal = manifold.normal;
                 let tangent1 = perp(normal);
@@ -335,30 +335,30 @@ pub fn prepare_contacts_mesh(block: SolverBlock, world: &mut World, context: &mu
     }
 }
 
-pub fn warm_start_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn warm_start_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
     let color = &world.constraint_graph.colors[block.color_index as usize];
     let cc_start = color.contact_constraint_start;
 
-    let ctx = &mut *context;
+    
     // C reads the awake set body states; those are moved into the context
     // during the solve (see solver.rs).
-    let states = &mut ctx.states;
-    let manifold_constraints = &ctx.manifold_constraints;
-    let constraints = &ctx.contact_constraints;
+    let states = &shared.states;
+    let manifold_constraints = &shared.manifold_constraints;
+    let constraints = &shared.contact_constraints;
 
     let start_index = block.start_index;
     let end_index = start_index + block.count as i32;
 
     for constraint_index in start_index..end_index {
-        let contact_constraint = constraints[(cc_start + constraint_index) as usize];
+        let contact_constraint = *unsafe { constraints.get_ref(((cc_start + constraint_index) as usize) as usize) };
         let index_a = contact_constraint.index_a;
         let index_b = contact_constraint.index_b;
 
         // This is a dummy state to represent a static body because static bodies
         // don't have a solver body.
-        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_a as usize] };
-        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_b as usize] };
+        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
+        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
 
         let mut v_a = state_a.linear_velocity;
         let mut w_a = state_a.angular_velocity;
@@ -372,7 +372,7 @@ pub fn warm_start_contacts_mesh(block: SolverBlock, world: &mut World, context: 
 
         let manifold_count = contact_constraint.manifold_count;
         for manifold_index in 0..manifold_count {
-            let constraint = &manifold_constraints[(contact_constraint.constraint_start + manifold_index) as usize];
+            let constraint = unsafe { manifold_constraints.get_ref(((contact_constraint.constraint_start + manifold_index) as usize) as usize) };
 
             // Normal impulses
             let normal = constraint.normal;
@@ -420,37 +420,40 @@ pub fn warm_start_contacts_mesh(block: SolverBlock, world: &mut World, context: 
         }
 
         if index_a != NULL_INDEX && (state_a.flags & DYNAMIC_FLAG) != 0 {
-            states[index_a as usize].linear_velocity = v_a;
-            states[index_a as usize].angular_velocity = w_a;
+            let mut state_w = state_a;
+            state_w.linear_velocity = v_a;
+            state_w.angular_velocity = w_a;
+            states.set(index_a as usize, state_w);
         }
 
         if index_b != NULL_INDEX && (state_b.flags & DYNAMIC_FLAG) != 0 {
-            states[index_b as usize].linear_velocity = v_b;
-            states[index_b as usize].angular_velocity = w_b;
+            let mut state_w = state_b;
+            state_w.linear_velocity = v_b;
+            state_w.angular_velocity = w_b;
+            states.set(index_b as usize, state_w);
         }
     }
 }
 
 // Merged normal and friction loops. This is much more stable for the Jenga stack.
-pub fn solve_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut StepContext, use_bias: bool) {
-    let world = &*world;
+pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: bool) {
+    let world = shared.world;
+    let ctx = shared.context;
     let color = &world.constraint_graph.colors[block.color_index as usize];
     let cc_start = color.contact_constraint_start;
 
-    let inv_h = context.inv_h;
+    let inv_h = ctx.inv_h;
     let contact_speed = world.contact_speed;
-
-    let ctx = &mut *context;
-    let states = &mut ctx.states;
-    let manifold_constraints = &mut ctx.manifold_constraints;
-    let contact_constraints = &ctx.contact_constraints;
+    let states = &shared.states;
+    let manifold_constraints = &shared.manifold_constraints;
+    let contact_constraints = &shared.contact_constraints;
 
     // The last block might not be full
     let start_index = block.start_index;
     let end_index = start_index + block.count as i32;
 
     for i in start_index..end_index {
-        let contact_constraint = contact_constraints[(cc_start + i) as usize];
+        let contact_constraint = *unsafe { contact_constraints.get_ref(((cc_start + i) as usize) as usize) };
         let manifold_count = contact_constraint.manifold_count;
 
         let index_a = contact_constraint.index_a;
@@ -463,12 +466,12 @@ pub fn solve_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut 
 
         // This is a dummy state to represent a static body because static bodies
         // don't have a solver body.
-        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_a as usize] };
+        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
         let mut v_a = state_a.linear_velocity;
         let mut w_a = state_a.angular_velocity;
         let dq_a = state_a.delta_rotation;
 
-        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_b as usize] };
+        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
         let mut v_b = state_b.linear_velocity;
         let mut w_b = state_b.angular_velocity;
         let dq_b = state_b.delta_rotation;
@@ -479,7 +482,7 @@ pub fn solve_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut 
         let rolling_resistance = contact_constraint.rolling_resistance;
 
         for j in 0..manifold_count {
-            let constraint = &mut manifold_constraints[(contact_constraint.constraint_start + j) as usize];
+            let constraint = unsafe { manifold_constraints.get_mut(((contact_constraint.constraint_start + j) as usize) as usize) };
 
             let point_count = constraint.point_count;
             let normal = constraint.normal;
@@ -619,34 +622,38 @@ pub fn solve_contacts_mesh(block: SolverBlock, world: &mut World, context: &mut 
         }
 
         if index_a != NULL_INDEX && (state_a.flags & DYNAMIC_FLAG) != 0 {
-            states[index_a as usize].linear_velocity = v_a;
-            states[index_a as usize].angular_velocity = w_a;
+            let mut state_w = state_a;
+            state_w.linear_velocity = v_a;
+            state_w.angular_velocity = w_a;
+            states.set(index_a as usize, state_w);
         }
 
         if index_b != NULL_INDEX && (state_b.flags & DYNAMIC_FLAG) != 0 {
-            states[index_b as usize].linear_velocity = v_b;
-            states[index_b as usize].angular_velocity = w_b;
+            let mut state_w = state_b;
+            state_w.linear_velocity = v_b;
+            state_w.angular_velocity = w_b;
+            states.set(index_b as usize, state_w);
         }
     }
 }
 
-pub fn apply_restitution_mesh(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
     let color = &world.constraint_graph.colors[block.color_index as usize];
     let cc_start = color.contact_constraint_start;
 
     let threshold = world.restitution_threshold;
 
-    let ctx = &mut *context;
-    let states = &mut ctx.states;
-    let manifold_constraints = &mut ctx.manifold_constraints;
-    let contact_constraints = &ctx.contact_constraints;
+    let _ctx = shared.context;
+    let states = &shared.states;
+    let manifold_constraints = &shared.manifold_constraints;
+    let contact_constraints = &shared.contact_constraints;
 
     let start_index = block.start_index;
     let end_index = start_index + block.count as i32;
 
     for constraint_index in start_index..end_index {
-        let contact_constraint = contact_constraints[(cc_start + constraint_index) as usize];
+        let contact_constraint = *unsafe { contact_constraints.get_ref(((cc_start + constraint_index) as usize) as usize) };
         let restitution = contact_constraint.restitution;
         if restitution == 0.0 {
             continue;
@@ -655,8 +662,8 @@ pub fn apply_restitution_mesh(block: SolverBlock, world: &mut World, context: &m
         let index_a = contact_constraint.index_a;
         let index_b = contact_constraint.index_b;
 
-        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_a as usize] };
-        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states[index_b as usize] };
+        let state_a = if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
+        let state_b = if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
 
         let mut v_a = state_a.linear_velocity;
         let mut w_a = state_a.angular_velocity;
@@ -670,7 +677,7 @@ pub fn apply_restitution_mesh(block: SolverBlock, world: &mut World, context: &m
 
         let manifold_count = contact_constraint.manifold_count;
         for manifold_index in 0..manifold_count {
-            let cm = &mut manifold_constraints[(contact_constraint.constraint_start + manifold_index) as usize];
+            let cm = unsafe { manifold_constraints.get_mut(((contact_constraint.constraint_start + manifold_index) as usize) as usize) };
 
             let normal = cm.normal;
             let point_count = cm.point_count;
@@ -713,13 +720,17 @@ pub fn apply_restitution_mesh(block: SolverBlock, world: &mut World, context: &m
 
             // C writes the states back inside the manifold loop.
             if index_a != NULL_INDEX && (state_a.flags & DYNAMIC_FLAG) != 0 {
-                states[index_a as usize].linear_velocity = v_a;
-                states[index_a as usize].angular_velocity = w_a;
+                let mut state_w = state_a;
+                state_w.linear_velocity = v_a;
+                state_w.angular_velocity = w_a;
+                states.set(index_a as usize, state_w);
             }
 
             if index_b != NULL_INDEX && (state_b.flags & DYNAMIC_FLAG) != 0 {
-                states[index_b as usize].linear_velocity = v_b;
-                states[index_b as usize].angular_velocity = w_b;
+                let mut state_w = state_b;
+                state_w.linear_velocity = v_b;
+                state_w.angular_velocity = w_b;
+                states.set(index_b as usize, state_w);
             }
         }
     }
@@ -727,8 +738,9 @@ pub fn apply_restitution_mesh(block: SolverBlock, world: &mut World, context: &m
 
 // Don't need to use spans for colors for this because the constraint to contact
 // association is already linked (by contact id in the port).
-pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut StepContext, worker_index: i32) {
-    let ctx = &*context;
+pub fn store_impulses_mesh(block: SolverBlock, shared: &SolverShared, worker_index: i32) {
+    let world = shared.world;
+    let ctx = shared.context;
 
     // Mirror prepare_contacts_mesh: the per-color flat arrays and the overflow color
     // each have their own (base, spans).
@@ -741,7 +753,8 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
         (&ctx.contact_prepare_spans, 0)
     };
 
-    let mut has_hit_events = world.task_contexts[worker_index as usize].has_hit_events;
+    // SAFETY: worker_index identifies this task exclusively.
+    let mut has_hit_events = unsafe { shared.task_contexts.get_ref(worker_index as usize) }.has_hit_events;
     let neg_hit_threshold = -world.hit_event_threshold;
 
     let mut index = block.start_index;
@@ -761,7 +774,7 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
 
         // Loop over color
         while index < color_end_index {
-            let contact_constraint = ctx.contact_constraints[(base_offset + index) as usize];
+            let contact_constraint = *unsafe { shared.contact_constraints.get_ref(((base_offset + index) as usize) as usize) };
 
             let local_index = index - color_start;
             b3_assert!(0 <= local_index && local_index < spans[color_index].count);
@@ -778,7 +791,9 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
                     == world.constraint_graph.colors[specs_color].contacts[local_index as usize].contact_id
             );
 
-            let contact = &mut world.contacts[contact_id as usize];
+            // SAFETY: each contact id appears in exactly one color slot and the
+            // store blocks partition the constraint range — exclusive access.
+            let contact = unsafe { shared.contacts.get_mut(contact_id as usize) };
 
             let manifold_count = contact_constraint.manifold_count;
             b3_assert!(manifold_count == contact.manifolds.len() as i32);
@@ -789,7 +804,7 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
 
             for manifold_index in 0..manifold_count {
                 let manifold = &mut contact.manifolds[manifold_index as usize];
-                let constraint = &ctx.manifold_constraints[(contact_constraint.constraint_start + manifold_index) as usize];
+                let constraint = unsafe { shared.manifold_constraints.get_ref(((contact_constraint.constraint_start + manifold_index) as usize) as usize) };
                 manifold.twist_impulse = constraint.twist_impulse;
                 manifold.friction_impulse = blend2(
                     constraint.friction_impulse.x,
@@ -821,7 +836,8 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
             }
 
             if hit_contact_id != NULL_INDEX {
-                let task_context = &mut world.task_contexts[worker_index as usize];
+                // SAFETY: worker_index identifies this task exclusively.
+                let task_context = unsafe { shared.task_contexts.get_mut(worker_index as usize) };
                 set_bit(&mut task_context.hit_event_bit_set, hit_contact_id as u32);
             }
 
@@ -832,7 +848,8 @@ pub fn store_impulses_mesh(block: SolverBlock, world: &mut World, context: &mut 
         color_index += 1;
     }
 
-    world.task_contexts[worker_index as usize].has_hit_events = has_hit_events;
+    // SAFETY: worker_index identifies this task exclusively.
+    unsafe { shared.task_contexts.get_mut(worker_index as usize) }.has_hit_events = has_hit_events;
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,16 +1597,17 @@ struct BodyStateW {
 // Shared gather: the C SIMD gather (dummy zero state with deltaRotation.s = 1,
 // b3SetW lane packing) and the C scalar gather (identity state, struct
 // literals) produce identical values, so one implementation serves all paths.
-fn gather_bodies(states: &[BodyState], indices: &[i32; SIMD_WIDTH]) -> BodyStateW {
+fn gather_bodies(states: &crate::solver::StateAccess, indices: &[i32; SIMD_WIDTH]) -> BodyStateW {
     // C SIMD path: b3BodyState dummy = {0}; dummy.deltaRotation.s = 1.0f;
     // which is exactly the identity body state.
     let identity = IDENTITY_BODY_STATE;
 
     // Indices are 0 for null
-    let s1 = if indices[0] == 0 { identity } else { states[(indices[0] - 1) as usize] };
-    let s2 = if indices[1] == 0 { identity } else { states[(indices[1] - 1) as usize] };
-    let s3 = if indices[2] == 0 { identity } else { states[(indices[2] - 1) as usize] };
-    let s4 = if indices[3] == 0 { identity } else { states[(indices[3] - 1) as usize] };
+    // (graph coloring: no other worker touches these body indices this stage)
+    let s1 = if indices[0] == 0 { identity } else { states.get((indices[0] - 1) as usize) };
+    let s2 = if indices[1] == 0 { identity } else { states.get((indices[1] - 1) as usize) };
+    let s3 = if indices[2] == 0 { identity } else { states.get((indices[2] - 1) as usize) };
+    let s4 = if indices[3] == 0 { identity } else { states.get((indices[3] - 1) as usize) };
 
     let mut simd_body = BodyStateW::default();
     simd_body.v.x = set_w(s1.linear_velocity.x, s2.linear_velocity.x, s3.linear_velocity.x, s4.linear_velocity.x);
@@ -1613,7 +1631,7 @@ fn gather_bodies(states: &[BodyState], indices: &[i32; SIMD_WIDTH]) -> BodyState
 // SSE2/NEON scatter: applies the per-axis lock flags (the C scalar path does
 // not — upstream quirk preserved in the variant below).
 #[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "disable-simd")))]
-fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
+fn scatter_bodies(states: &crate::solver::StateAccess, indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
     use crate::body::{
         ALL_LOCKS, LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z, LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z,
     };
@@ -1623,9 +1641,13 @@ fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_bo
 
     // Warning: indices start at 1 with 0 indicating null
     // (C manually unrolls the four lanes; the loop body is identical.)
+    // Copy-modify-set: only the velocities change, matching the C in-place writes.
     for lane in 0..SIMD_WIDTH {
-        if indices[lane] != 0 && (states[(indices[lane] - 1) as usize].flags & DYNAMIC_FLAG) != 0 {
-            let state = &mut states[(indices[lane] - 1) as usize];
+        if indices[lane] != 0 {
+            let mut state = states.get((indices[lane] - 1) as usize);
+            if (state.flags & DYNAMIC_FLAG) == 0 {
+                continue;
+            }
 
             let mut v = Vec3 {
                 x: simd_body.v.x.get(lane),
@@ -1650,6 +1672,7 @@ fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_bo
 
             state.linear_velocity = v;
             state.angular_velocity = w;
+            states.set((indices[lane] - 1) as usize, state);
         }
     }
 }
@@ -1658,66 +1681,42 @@ fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_bo
 // B3_SIMD_NONE scatter: note the scalar C path does not apply the lock flags
 // here (the SSE2/NEON path does); locks are enforced during integration.
 #[cfg(any(feature = "disable-simd", not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
-fn scatter_bodies(states: &mut [BodyState], indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
-    let index1 = indices[0] - 1;
-    if index1 != -1 && (states[index1 as usize].flags & DYNAMIC_FLAG) != 0 {
-        let state = &mut states[index1 as usize];
-        state.linear_velocity.x = simd_body.v.x.get(0);
-        state.linear_velocity.y = simd_body.v.y.get(0);
-        state.linear_velocity.z = simd_body.v.z.get(0);
-        state.angular_velocity.x = simd_body.w.x.get(0);
-        state.angular_velocity.y = simd_body.w.y.get(0);
-        state.angular_velocity.z = simd_body.w.z.get(0);
-    }
-
-    let index2 = indices[1] - 1;
-    if index2 != -1 && (states[index2 as usize].flags & DYNAMIC_FLAG) != 0 {
-        let state = &mut states[index2 as usize];
-        state.linear_velocity.x = simd_body.v.x.get(1);
-        state.linear_velocity.y = simd_body.v.y.get(1);
-        state.linear_velocity.z = simd_body.v.z.get(1);
-        state.angular_velocity.x = simd_body.w.x.get(1);
-        state.angular_velocity.y = simd_body.w.y.get(1);
-        state.angular_velocity.z = simd_body.w.z.get(1);
-    }
-
-    let index3 = indices[2] - 1;
-    if index3 != -1 && (states[index3 as usize].flags & DYNAMIC_FLAG) != 0 {
-        let state = &mut states[index3 as usize];
-        state.linear_velocity.x = simd_body.v.x.get(2);
-        state.linear_velocity.y = simd_body.v.y.get(2);
-        state.linear_velocity.z = simd_body.v.z.get(2);
-        state.angular_velocity.x = simd_body.w.x.get(2);
-        state.angular_velocity.y = simd_body.w.y.get(2);
-        state.angular_velocity.z = simd_body.w.z.get(2);
-    }
-
-    let index4 = indices[3] - 1;
-    if index4 != -1 && (states[index4 as usize].flags & DYNAMIC_FLAG) != 0 {
-        let state = &mut states[index4 as usize];
-        state.linear_velocity.x = simd_body.v.x.get(3);
-        state.linear_velocity.y = simd_body.v.y.get(3);
-        state.linear_velocity.z = simd_body.v.z.get(3);
-        state.angular_velocity.x = simd_body.w.x.get(3);
-        state.angular_velocity.y = simd_body.w.y.get(3);
-        state.angular_velocity.z = simd_body.w.z.get(3);
+fn scatter_bodies(states: &crate::solver::StateAccess, indices: &[i32; SIMD_WIDTH], simd_body: &BodyStateW) {
+    // Copy-modify-set per lane: only the velocities change, matching the C
+    // in-place writes. (C manually unrolls; the loop body is identical.)
+    for lane in 0..SIMD_WIDTH {
+        let index = indices[lane] - 1;
+        if index != -1 {
+            let mut state = states.get(index as usize);
+            if (state.flags & DYNAMIC_FLAG) == 0 {
+                continue;
+            }
+            state.linear_velocity.x = simd_body.v.x.get(lane);
+            state.linear_velocity.y = simd_body.v.y.get(lane);
+            state.linear_velocity.z = simd_body.v.z.get(lane);
+            state.angular_velocity.x = simd_body.w.x.get(lane);
+            state.angular_velocity.y = simd_body.w.y.get(lane);
+            state.angular_velocity.z = simd_body.w.z.get(lane);
+            states.set(index as usize, state);
+        }
     }
 }
 
 // Prepare convex contact constraints
-pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
+    let ctx = shared.context;
 
     // Stiffer for static contacts to avoid bodies getting pushed through the ground
-    let contact_softness = context.contact_softness;
-    let static_softness = context.static_softness;
+    let contact_softness = ctx.contact_softness;
+    let static_softness = ctx.static_softness;
 
     let warm_start_scale = if world.enable_warm_starting { 1.0 } else { 0.0 };
 
-    let ctx = &mut *context;
+    let ctx = shared.context;
     let sims = &ctx.sims;
-    let states = &ctx.states;
-    let wide_base = &mut ctx.wide_constraints;
+    let states = &shared.states;
+    let wide_base = &shared.wide_constraints;
     let spans = &ctx.wide_prepare_spans;
 
     let mut wide_index = block.start_index;
@@ -1738,7 +1737,7 @@ pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &
 
         // Loop over color
         while wide_index < color_wide_end_index {
-            let constraint = &mut wide_base[wide_index as usize];
+            let constraint = unsafe { wide_base.get_mut((wide_index as usize) as usize) };
             let local_wide_index = wide_index - color_wide_start;
 
             for lane in 0..SIMD_WIDTH {
@@ -1749,7 +1748,9 @@ pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &
                 }
 
                 let contact_id = world.constraint_graph.colors[contacts_color].convex_contacts[contact_index as usize];
-                let contact = &world.contacts[contact_id as usize];
+                // SAFETY: each contact id appears in exactly one color slot and the
+            // blocks partition the range — no concurrent writer.
+            let contact = unsafe { shared.contacts.get_ref(contact_id as usize) };
                 b3_assert!(contact.manifold_count() == 1);
                 let manifold = &contact.manifolds[0];
 
@@ -1788,7 +1789,7 @@ pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &
                     m_a = sim_a.inv_mass;
                     i_a = sim_a.inv_inertia_world;
 
-                    let state_a = &states[index_a as usize];
+                    let state_a = states.get(index_a as usize);
                     v_a = state_a.linear_velocity;
                     w_a = state_a.angular_velocity;
                 }
@@ -1809,7 +1810,7 @@ pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &
                     m_b = sim_b.inv_mass;
                     i_b = sim_b.inv_inertia_world;
 
-                    let state_b = &states[index_b as usize];
+                    let state_b = states.get(index_b as usize);
                     v_b = state_b.linear_velocity;
                     w_b = state_b.angular_velocity;
                 }
@@ -1983,16 +1984,16 @@ pub fn prepare_contacts_convex(block: SolverBlock, world: &mut World, context: &
     }
 }
 
-pub fn warm_start_contacts_convex(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn warm_start_contacts_convex(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
     let wide_start = world.constraint_graph.colors[block.color_index as usize].wide_constraint_start;
 
-    let ctx = &mut *context;
-    let states = &mut ctx.states;
-    let constraints = &mut ctx.wide_constraints;
+    let _ctx = shared.context;
+    let states = &shared.states;
+    let constraints = &shared.wide_constraints;
 
     for i in block.start_index..block.start_index + block.count as i32 {
-        let c = &mut constraints[(wide_start + i) as usize];
+        let c = unsafe { constraints.get_mut(((wide_start + i) as usize) as usize) };
         let mut b_a = gather_bodies(states, &c.index_a);
         let mut b_b = gather_bodies(states, &c.index_b);
 
@@ -2047,21 +2048,22 @@ pub fn warm_start_contacts_convex(block: SolverBlock, world: &mut World, context
     }
 }
 
-pub fn solve_contacts_convex(block: SolverBlock, world: &mut World, context: &mut StepContext, use_bias: bool) {
-    let world = &*world;
+pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias: bool) {
+    let world = shared.world;
+    let ctx = shared.context;
     let wide_start = world.constraint_graph.colors[block.color_index as usize].wide_constraint_start;
 
-    let inv_h = splat_w(context.inv_h);
+    let inv_h = splat_w(ctx.inv_h);
     let contact_speed = splat_w(-world.contact_speed);
     let one_w = splat_w(1.0);
     let epsilon_w = splat_w(f32::EPSILON);
 
-    let ctx = &mut *context;
-    let states = &mut ctx.states;
-    let constraints = &mut ctx.wide_constraints;
+    let _ctx = shared.context;
+    let states = &shared.states;
+    let constraints = &shared.wide_constraints;
 
     for wide_index in block.start_index..block.start_index + block.count as i32 {
-        let c = &mut constraints[(wide_start + wide_index) as usize];
+        let c = unsafe { constraints.get_mut(((wide_start + wide_index) as usize) as usize) };
 
         let mut b_a = gather_bodies(states, &c.index_a);
         let mut b_b = gather_bodies(states, &c.index_b);
@@ -2243,19 +2245,19 @@ pub fn solve_contacts_convex(block: SolverBlock, world: &mut World, context: &mu
     }
 }
 
-pub fn apply_restitution_convex(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let world = &*world;
+pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
+    let world = shared.world;
     let wide_start = world.constraint_graph.colors[block.color_index as usize].wide_constraint_start;
 
     let threshold = splat_w(world.restitution_threshold);
     let zero = zero_w();
 
-    let ctx = &mut *context;
-    let states = &mut ctx.states;
-    let constraints = &mut ctx.wide_constraints;
+    let _ctx = shared.context;
+    let states = &shared.states;
+    let constraints = &shared.wide_constraints;
 
     for i in block.start_index..block.start_index + block.count as i32 {
-        let c = &mut constraints[(wide_start + i) as usize];
+        let c = unsafe { constraints.get_mut(((wide_start + i) as usize) as usize) };
 
         if all_zero_w(c.restitution) {
             // No lanes have restitution. Common case.
@@ -2311,12 +2313,14 @@ pub fn apply_restitution_convex(block: SolverBlock, world: &mut World, context: 
 }
 
 // Store impulses by contact constraint
-pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mut StepContext, worker_index: i32) {
-    let ctx = &*context;
+pub fn store_impulses_convex(block: SolverBlock, shared: &SolverShared, worker_index: i32) {
+    let world = shared.world;
+    let ctx = shared.context;
     let spans = &ctx.wide_prepare_spans;
-    let wide_base = &ctx.wide_constraints;
+    let wide_base = &shared.wide_constraints;
 
-    let mut has_hit_events = world.task_contexts[worker_index as usize].has_hit_events;
+    // SAFETY: worker_index identifies this task exclusively.
+    let mut has_hit_events = unsafe { shared.task_contexts.get_ref(worker_index as usize) }.has_hit_events;
     let neg_hit_threshold = -world.hit_event_threshold;
 
     let mut wide_index = block.start_index;
@@ -2335,7 +2339,7 @@ pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mu
         let contacts_color = spans[color_index].color_index as usize;
 
         while wide_index < color_wide_end_index {
-            let c = &wide_base[wide_index as usize];
+            let c = unsafe { wide_base.get_ref((wide_index as usize) as usize) };
 
             let local_wide_index = wide_index - color_wide_start;
 
@@ -2356,7 +2360,8 @@ pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mu
 
                 let point_count;
                 {
-                    let m = &mut world.contacts[manifold_contact_id as usize].manifolds[0];
+                    // SAFETY: convex lanes reference distinct contact ids within a block.
+                    let m = &mut unsafe { shared.contacts.get_mut(manifold_contact_id as usize) }.manifolds[0];
                     m.friction_impulse = Vec3 {
                         x: f1 * c.tangent1.x.get(lane) + f2 * c.tangent2.x.get(lane),
                         y: f1 * c.tangent1.y.get(lane) + f2 * c.tangent2.y.get(lane),
@@ -2381,7 +2386,9 @@ pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mu
 
                 let contact_id =
                     world.constraint_graph.colors[contacts_color].convex_contacts[contact_index as usize];
-                let contact = &world.contacts[contact_id as usize];
+                // SAFETY: each contact id appears in exactly one color slot and the
+            // blocks partition the range — no concurrent writer.
+            let contact = unsafe { shared.contacts.get_ref(contact_id as usize) };
                 if (contact.flags & SIM_ENABLE_HIT_EVENT) != 0 {
                     let mut hit = false;
                     {
@@ -2399,7 +2406,8 @@ pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mu
 
                     if hit {
                         let contact_id = contact.contact_id;
-                        let task_context = &mut world.task_contexts[worker_index as usize];
+                        // SAFETY: worker_index identifies this task exclusively.
+                        let task_context = unsafe { shared.task_contexts.get_mut(worker_index as usize) };
                         set_bit(&mut task_context.hit_event_bit_set, contact_id as u32);
                         has_hit_events = true;
                     }
@@ -2412,15 +2420,16 @@ pub fn store_impulses_convex(block: SolverBlock, world: &mut World, context: &mu
         color_index += 1;
     }
 
-    world.task_contexts[worker_index as usize].has_hit_events = has_hit_events;
+    // SAFETY: worker_index identifies this task exclusively.
+    unsafe { shared.task_contexts.get_mut(worker_index as usize) }.has_hit_events = has_hit_events;
 }
 
 // ---------------------------------------------------------------------------
 // Overflow wrappers: run the scalar (mesh) stages over the whole overflow range.
 // ---------------------------------------------------------------------------
 
-pub fn prepare_contacts_overflow(world: &mut World, context: &mut StepContext) {
-    let count = world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
+pub fn prepare_contacts_overflow(shared: &SolverShared) {
+    let count = shared.world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
     if count == 0 {
         return;
     }
@@ -2433,11 +2442,11 @@ pub fn prepare_contacts_overflow(world: &mut World, context: &mut StepContext) {
         color_index: OVERFLOW_INDEX as u8,
     };
 
-    prepare_contacts_mesh(block, world, context);
+    prepare_contacts_mesh(block, shared);
 }
 
-pub fn warm_start_contacts_overflow(world: &mut World, context: &mut StepContext) {
-    let count = world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
+pub fn warm_start_contacts_overflow(shared: &SolverShared) {
+    let count = shared.world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
     if count == 0 {
         return;
     }
@@ -2450,11 +2459,11 @@ pub fn warm_start_contacts_overflow(world: &mut World, context: &mut StepContext
         color_index: OVERFLOW_INDEX as u8,
     };
 
-    warm_start_contacts_mesh(block, world, context);
+    warm_start_contacts_mesh(block, shared);
 }
 
-pub fn solve_contacts_overflow(world: &mut World, context: &mut StepContext, use_bias: bool) {
-    let count = world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
+pub fn solve_contacts_overflow(shared: &SolverShared, use_bias: bool) {
+    let count = shared.world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
     if count == 0 {
         return;
     }
@@ -2467,11 +2476,11 @@ pub fn solve_contacts_overflow(world: &mut World, context: &mut StepContext, use
         color_index: OVERFLOW_INDEX as u8,
     };
 
-    solve_contacts_mesh(block, world, context, use_bias);
+    solve_contacts_mesh(block, shared, use_bias);
 }
 
-pub fn apply_restitution_overflow(world: &mut World, context: &mut StepContext) {
-    let count = world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
+pub fn apply_restitution_overflow(shared: &SolverShared) {
+    let count = shared.world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
     if count == 0 {
         return;
     }
@@ -2484,11 +2493,11 @@ pub fn apply_restitution_overflow(world: &mut World, context: &mut StepContext) 
         color_index: OVERFLOW_INDEX as u8,
     };
 
-    apply_restitution_mesh(block, world, context);
+    apply_restitution_mesh(block, shared);
 }
 
-pub fn store_impulses_overflow(world: &mut World, context: &mut StepContext) {
-    let count = world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
+pub fn store_impulses_overflow(shared: &SolverShared) {
+    let count = shared.world.constraint_graph.colors[OVERFLOW_INDEX as usize].contacts.len();
     if count == 0 {
         return;
     }
@@ -2501,5 +2510,5 @@ pub fn store_impulses_overflow(world: &mut World, context: &mut StepContext) {
         color_index: OVERFLOW_INDEX as u8,
     };
 
-    store_impulses_mesh(block, world, context, 0);
+    store_impulses_mesh(block, shared, 0);
 }

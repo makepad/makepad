@@ -18,7 +18,7 @@ use crate::math_functions::{
 };
 use crate::math_internal::{delta_quat_to_rotation, skew};
 use crate::physics_world::{World, AWAKE_SET};
-use crate::solver::{make_soft, StepContext};
+use crate::solver::{make_soft, StateAccess, StepContext};
 use crate::types::JointType;
 
 #[inline]
@@ -217,7 +217,7 @@ pub fn prepare_motor_joint(base: &mut JointSim, world: &World, context: &StepCon
     }
 }
 
-pub fn warm_start_motor_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_motor_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Motor);
 
     let m_a = base.inv_mass_a;
@@ -231,12 +231,12 @@ pub fn warm_start_motor_joint(base: &mut JointSim, context: &mut StepContext) {
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
@@ -252,14 +252,14 @@ pub fn warm_start_motor_joint(base: &mut JointSim, context: &mut StepContext) {
     state_b.angular_velocity = add(state_b.angular_velocity, mul_mv(i_b, add(cross(r_b, linear_impulse), angular_impulse)));
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }
 
-pub fn solve_motor_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn solve_motor_joint(base: &mut JointSim, states: &StateAccess, context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Motor);
 
     let m_a = base.inv_mass_a;
@@ -273,12 +273,12 @@ pub fn solve_motor_joint(base: &mut JointSim, context: &mut StepContext) {
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let mut v_a = state_a.linear_velocity;
@@ -430,9 +430,9 @@ pub fn solve_motor_joint(base: &mut JointSim, context: &mut StepContext) {
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }

@@ -603,19 +603,20 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
 }
 
 fn compute_convex_manifold(
-    world: &mut World,
-    worker_index: i32,
-    contact_id: i32,
+    world: &World,
+    task_context: &mut crate::physics_world::TaskContext,
+    contact: &mut Contact,
     shape_a: &Shape,
     xf_a: WorldTransform,
     shape_b: &Shape,
     xf_b: WorldTransform,
 ) -> bool {
+    let _ = world;
     let type_a = shape_a.shape_type();
     let type_b = shape_b.shape_type();
 
     // Copy the cache out of the contact (C mutates it in place through a pointer).
-    let mut cache = world.contacts[contact_id as usize].convex_contact.cache;
+    let mut cache = contact.convex_contact.cache;
 
     let point_capacity = 32;
 
@@ -683,25 +684,21 @@ fn compute_convex_manifold(
                 transform_b_to_a,
                 &mut cache.sat_cache,
             );
-            let context = &mut world.task_contexts[worker_index as usize];
-            context.sat_call_count += 1;
-            context.sat_cache_hit_count += cache.sat_cache.hit as i32;
+            task_context.sat_call_count += 1;
+            task_context.sat_cache_hit_count += cache.sat_cache.hit as i32;
         }
     }
 
     // Write the cache back.
-    world.contacts[contact_id as usize].convex_contact.cache = cache;
+    contact.convex_contact.cache = cache;
 
     if geom_manifold.point_count() == 0 {
-        let contact = &mut world.contacts[contact_id as usize];
         if contact.manifold_count() > 0 {
             contact.manifolds = Vec::new();
         }
 
         return false;
     }
-
-    let contact = &mut world.contacts[contact_id as usize];
 
     let mut old_points = [ManifoldPoint::default(); MAX_MANIFOLD_POINTS];
     let mut old_count = 0;
@@ -762,9 +759,10 @@ fn compute_convex_manifold(
 }
 
 fn update_convex_contact(
-    world: &mut World,
-    worker_index: i32,
-    contact_id: i32,
+    world: &World,
+    task_context: &mut crate::physics_world::TaskContext,
+    contact: &mut Contact,
+    pre_solve: Option<&mut Option<Box<crate::types::PreSolveFcn>>>,
     shape_a: &Shape,
     xf_a: WorldTransform,
     shape_b: &Shape,
@@ -772,18 +770,18 @@ fn update_convex_contact(
     flip: bool,
 ) -> bool {
     // Compute new manifold
-    let mut touching = compute_convex_manifold(world, worker_index, contact_id, shape_a, xf_a, shape_b, xf_b);
+    let mut touching = compute_convex_manifold(world, task_context, contact, shape_a, xf_a, shape_b, xf_b);
 
     if !touching {
-        b3_assert!(world.contacts[contact_id as usize].manifolds.is_empty());
+        b3_assert!(contact.manifolds.is_empty());
         return false;
     }
 
-    b3_assert!(world.contacts[contact_id as usize].manifold_count() == 1);
+    b3_assert!(contact.manifold_count() == 1);
 
     if flip {
         // Not flipping the feature ids because they just need to match and flipping is consistent.
-        let manifold = &mut world.contacts[contact_id as usize].manifolds[0];
+        let manifold = &mut contact.manifolds[0];
         manifold.normal = neg(manifold.normal);
         let point_count = manifold.point_count;
         for i in 0..point_count {
@@ -804,11 +802,8 @@ fn update_convex_contact(
         material_b.restitution,
         material_b.user_material_id,
     );
-    {
-        let contact = &mut world.contacts[contact_id as usize];
-        contact.friction = friction;
-        contact.restitution = restitution;
-    }
+    contact.friction = friction;
+    contact.restitution = restitution;
 
     if material_a.rolling_resistance > 0.0 || material_b.rolling_resistance > 0.0 {
         let radius_a = match &shape_a.geom {
@@ -826,39 +821,44 @@ fn update_convex_contact(
         };
 
         let max_radius = max_float(radius_a, radius_b);
-        world.contacts[contact_id as usize].rolling_resistance =
+        contact.rolling_resistance =
             max_float(material_a.rolling_resistance, material_b.rolling_resistance) * max_radius;
     } else {
-        world.contacts[contact_id as usize].rolling_resistance = 0.0;
+        contact.rolling_resistance = 0.0;
     }
 
     let tangent_velocity_a = rotate_vector(xf_a.q, material_a.tangent_velocity);
     let tangent_velocity_b = rotate_vector(xf_b.q, material_b.tangent_velocity);
-    world.contacts[contact_id as usize].tangent_velocity = sub(tangent_velocity_a, tangent_velocity_b);
+    contact.tangent_velocity = sub(tangent_velocity_a, tangent_velocity_b);
 
-    if world.pre_solve_fcn.is_some() && (world.contacts[contact_id as usize].flags & SIM_ENABLE_PRE_SOLVE_EVENTS) != 0 {
-        let shape_id_a_pub = ShapeId { index1: shape_a.id + 1, world0: world.world_id, generation: shape_a.generation };
-        let shape_id_b_pub = ShapeId { index1: shape_b.id + 1, world0: world.world_id, generation: shape_b.generation };
+    // The pre-solve slot is Some only on the serial collide path (the world
+    // callback is taken by the caller); when a callback is installed the
+    // collide pass falls back to a single worker, so this access is exclusive.
+    if let Some(pre_solve_slot) = pre_solve {
+        if pre_solve_slot.is_some() && (contact.flags & SIM_ENABLE_PRE_SOLVE_EVENTS) != 0 {
+            let shape_id_a_pub = ShapeId { index1: shape_a.id + 1, world0: world.world_id, generation: shape_a.generation };
+            let shape_id_b_pub = ShapeId { index1: shape_b.id + 1, world0: world.world_id, generation: shape_b.generation };
 
-        // this call assumes thread safety
-        let (point, normal) = {
-            let manifold = &world.contacts[contact_id as usize].manifolds[0];
-            (offset_pos(xf_a.p, manifold.points[0].anchor_a), manifold.normal)
-        };
-        let mut fcn = world.pre_solve_fcn.take().unwrap();
-        touching = fcn(shape_id_a_pub, shape_id_b_pub, point, normal);
-        world.pre_solve_fcn = Some(fcn);
-        if !touching {
-            // disable contact
-            world.contacts[contact_id as usize].manifolds = Vec::new();
-            return false;
+            // this call assumes thread safety
+            let (point, normal) = {
+                let manifold = &contact.manifolds[0];
+                (offset_pos(xf_a.p, manifold.points[0].anchor_a), manifold.normal)
+            };
+            let mut fcn = pre_solve_slot.take().unwrap();
+            touching = fcn(shape_id_a_pub, shape_id_b_pub, point, normal);
+            *pre_solve_slot = Some(fcn);
+            if !touching {
+                // disable contact
+                contact.manifolds = Vec::new();
+                return false;
+            }
         }
     }
 
     if shape_a.enable_hit_events || shape_b.enable_hit_events {
-        world.contacts[contact_id as usize].flags |= SIM_ENABLE_HIT_EVENT;
+        contact.flags |= SIM_ENABLE_HIT_EVENT;
     } else {
-        world.contacts[contact_id as usize].flags &= !SIM_ENABLE_HIT_EVENT;
+        contact.flags &= !SIM_ENABLE_HIT_EVENT;
     }
 
     true
@@ -868,9 +868,10 @@ fn update_convex_contact(
 // Note: do not assume the shape AABBs are overlapping or are valid.
 #[allow(clippy::too_many_arguments)]
 pub fn update_contact(
-    world: &mut World,
-    worker_index: i32,
-    contact_id: i32,
+    world: &World,
+    task_context: &mut crate::physics_world::TaskContext,
+    contact: &mut Contact,
+    pre_solve: Option<&mut Option<Box<crate::types::PreSolveFcn>>>,
     shape_id_a: i32,
     local_center_a: MVec3,
     xf_a: WorldTransform,
@@ -889,7 +890,7 @@ pub fn update_contact(
     b3_assert!(shape_b.shape_type() != ShapeType::Compound);
 
     if shape_a.shape_type() == ShapeType::Compound {
-        let child_index = world.contacts[contact_id as usize].child_index;
+        let child_index = contact.child_index;
         let child = crate::compound::get_compound_child(shape_a.as_compound(), child_index);
 
         // Temporary child shape to match existing function signatures
@@ -901,17 +902,20 @@ pub fn update_contact(
                 if shape_b.shape_type() == ShapeType::Hull {
                     // Flip
                     let flip = true;
-                    touching = update_convex_contact(world, worker_index, contact_id, &shape_b, xf_b, &child_shape_a, xf_a, flip);
+                    touching =
+                        update_convex_contact(world, task_context, contact, pre_solve, &shape_b, xf_b, &child_shape_a, xf_a, flip);
                 } else {
                     let flip = false;
-                    touching = update_convex_contact(world, worker_index, contact_id, &child_shape_a, xf_a, &shape_b, xf_b, flip);
+                    touching =
+                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, &shape_b, xf_b, flip);
                 }
             }
             crate::types::ChildShapeGeom::Hull(hull) => {
                 child_shape_a.geom = ShapeGeometry::Hull(hull.clone());
                 let xf_child = mul_world_transforms(xf_a, child.transform);
                 let flip = false;
-                touching = update_convex_contact(world, worker_index, contact_id, &child_shape_a, xf_child, &shape_b, xf_b, flip);
+                touching =
+                    update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_child, &shape_b, xf_b, flip);
             }
             crate::types::ChildShapeGeom::Mesh(mesh) => {
                 child_shape_a.geom = ShapeGeometry::Mesh(mesh.clone());
@@ -919,8 +923,8 @@ pub fn update_contact(
 
                 touching = crate::mesh_contact::compute_mesh_manifolds(
                     world,
-                    worker_index,
-                    contact_id,
+                    task_context,
+                    contact,
                     &child_shape_a,
                     Some(&child.material_indices),
                     xf_child,
@@ -930,14 +934,13 @@ pub fn update_contact(
                 );
 
                 if touching && (shape_a.enable_hit_events || shape_b.enable_hit_events) {
-                    world.contacts[contact_id as usize].flags |= SIM_ENABLE_HIT_EVENT;
+                    contact.flags |= SIM_ENABLE_HIT_EVENT;
                 } else {
-                    world.contacts[contact_id as usize].flags &= !SIM_ENABLE_HIT_EVENT;
+                    contact.flags &= !SIM_ENABLE_HIT_EVENT;
                 }
 
                 b3_assert!(
-                    (touching && world.contacts[contact_id as usize].manifold_count() > 0)
-                        || (!touching && world.contacts[contact_id as usize].manifold_count() == 0)
+                    (touching && contact.manifold_count() > 0) || (!touching && contact.manifold_count() == 0)
                 );
             }
             crate::types::ChildShapeGeom::Sphere(sphere) => {
@@ -945,10 +948,12 @@ pub fn update_contact(
                 if shape_b.shape_type() == ShapeType::Capsule || shape_b.shape_type() == ShapeType::Hull {
                     // Flip
                     let flip = true;
-                    touching = update_convex_contact(world, worker_index, contact_id, &shape_b, xf_b, &child_shape_a, xf_a, flip);
+                    touching =
+                        update_convex_contact(world, task_context, contact, pre_solve, &shape_b, xf_b, &child_shape_a, xf_a, flip);
                 } else {
                     let flip = false;
-                    touching = update_convex_contact(world, worker_index, contact_id, &child_shape_a, xf_a, &shape_b, xf_b, flip);
+                    touching =
+                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, &shape_b, xf_b, flip);
                 }
             }
         }
@@ -956,7 +961,6 @@ pub fn update_contact(
         // The anchor is relative to the child origin but oriented in world space.
         // Offset the anchor to be relative to the compound origin.
         let offset = rotate_vector(xf_a.q, child.transform.p);
-        let contact = &mut world.contacts[contact_id as usize];
         for manifold in contact.manifolds.iter_mut() {
             let point_count = manifold.point_count;
             for j in 0..point_count {
@@ -970,8 +974,8 @@ pub fn update_contact(
         // Compute mesh manifolds
         touching = crate::mesh_contact::compute_mesh_manifolds(
             world,
-            worker_index,
-            contact_id,
+            task_context,
+            contact,
             &shape_a,
             None,
             xf_a,
@@ -981,22 +985,18 @@ pub fn update_contact(
         );
 
         if touching && (shape_a.enable_hit_events || shape_b.enable_hit_events) {
-            world.contacts[contact_id as usize].flags |= SIM_ENABLE_HIT_EVENT;
+            contact.flags |= SIM_ENABLE_HIT_EVENT;
         } else {
-            world.contacts[contact_id as usize].flags &= !SIM_ENABLE_HIT_EVENT;
+            contact.flags &= !SIM_ENABLE_HIT_EVENT;
         }
 
-        b3_assert!(
-            (touching && world.contacts[contact_id as usize].manifold_count() > 0)
-                || (!touching && world.contacts[contact_id as usize].manifold_count() == 0)
-        );
+        b3_assert!((touching && contact.manifold_count() > 0) || (!touching && contact.manifold_count() == 0));
     } else {
         // Convex-vs-convex
         let flip = false;
-        touching = update_convex_contact(world, worker_index, contact_id, &shape_a, xf_a, &shape_b, xf_b, flip);
+        touching = update_convex_contact(world, task_context, contact, pre_solve, &shape_a, xf_a, &shape_b, xf_b, flip);
     }
 
-    let contact = &mut world.contacts[contact_id as usize];
     if touching {
         let center_a = rotate_vector(xf_a.q, local_center_a);
         let center_b = rotate_vector(xf_b.q, local_center_b);

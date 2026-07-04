@@ -170,6 +170,27 @@ pub struct StepContext {
     /// Flat solver block array referenced by the stage ranges.
     pub blocks: Vec<SolverBlock>,
 
+    /// Per-block sync index, parallel to `blocks` (C: b3SyncBlock::syncIndex).
+    /// Workers claim a block by CAS(previousSyncIndex, syncIndex); the indices
+    /// grow monotonically per block group so blocks can be reused across
+    /// sub-steps without resetting.
+    pub block_sync: Vec<crate::sync::AtomicIndex>,
+
+    /// Per-stage completion counter, parallel to `stages`
+    /// (C: b3SolverStage::completionCount).
+    pub stage_completion: Vec<crate::sync::AtomicIndex>,
+
+    /// C: b3StepContext::atomicSyncBits — (sync index << 16) | stage index.
+    /// Grows monotonically as the solve advances so a delayed worker catches up
+    /// without repeating completed work. -1 is the shutdown sentinel
+    /// (C uses UINT_MAX).
+    pub atomic_sync_bits: crate::sync::AtomicIndex,
+
+    /// C: b3StepContext::mainClaimed — the orchestrator slot race. The caller
+    /// of world_step and the queued worker-0 task both race for this via CAS;
+    /// the loser no-ops.
+    pub main_claimed: crate::sync::AtomicIndex,
+
     pub enable_warm_starting: bool,
 }
 
@@ -192,6 +213,8 @@ pub struct SolverScratch {
     pub awake_contact_indices: Vec<i32>,
     pub stages: Vec<SolverStage>,
     pub blocks: Vec<SolverBlock>,
+    pub block_sync: Vec<crate::sync::AtomicIndex>,
+    pub stage_completion: Vec<crate::sync::AtomicIndex>,
 }
 
 impl SolverScratch {
@@ -208,6 +231,8 @@ impl SolverScratch {
         context.awake_contact_indices = std::mem::take(&mut self.awake_contact_indices);
         context.stages = std::mem::take(&mut self.stages);
         context.blocks = std::mem::take(&mut self.blocks);
+        context.block_sync = std::mem::take(&mut self.block_sync);
+        context.stage_completion = std::mem::take(&mut self.stage_completion);
     }
 
     /// Move the scratch buffers back out of the context (end of world_step).
@@ -223,6 +248,8 @@ impl SolverScratch {
         self.awake_contact_indices = std::mem::take(&mut context.awake_contact_indices);
         self.stages = std::mem::take(&mut context.stages);
         self.blocks = std::mem::take(&mut context.blocks);
+        self.block_sync = std::mem::take(&mut context.block_sync);
+        self.stage_completion = std::mem::take(&mut context.stage_completion);
     }
 }
 
@@ -248,6 +275,102 @@ pub fn make_soft(hertz: f32, zeta: f32, h: f32) -> Softness {
         impulse_scale: a3,
     }
 }
+
+/// Copy-out/copy-in access to the awake body states shared across solver
+/// workers. The C solver writes states through raw pointers; disjointness is
+/// structural: within one graph-color stage no two constraints share a movable
+/// body, and integrate/prepare stages partition the body/constraint ranges
+/// into blocks each claimed by exactly one worker.
+///
+/// The accessors copy whole BodyState values (the pattern the stage code
+/// already used), so no reference to shared memory outlives a call.
+pub struct StateAccess<'a> {
+    slice: crate::sync::SyncSlice<'a, crate::body::BodyState>,
+}
+
+impl<'a> StateAccess<'a> {
+    #[inline]
+    pub fn new(states: &'a mut [crate::body::BodyState]) -> StateAccess<'a> {
+        StateAccess { slice: crate::sync::SyncSlice::new(states) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.slice.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.slice.is_empty()
+    }
+
+    /// Read the state at `i`. Caller guarantees no concurrent writer (graph
+    /// coloring / block partitioning).
+    #[inline]
+    pub fn get(&self, i: usize) -> crate::body::BodyState {
+        // SAFETY: stage structure guarantees no other thread mutates `i`
+        // while this stage may read it (see struct docs).
+        unsafe { *self.slice.get_ref(i) }
+    }
+
+    /// Write the state at `i`. Caller guarantees exclusive access to `i` for
+    /// the current stage (see struct docs).
+    #[inline]
+    pub fn set(&self, i: usize, state: crate::body::BodyState) {
+        // SAFETY: see get().
+        unsafe {
+            *self.slice.get_mut(i) = state;
+        }
+    }
+}
+
+/// Solve-stage profile accumulators written only by the orchestrator
+/// (mainClaimed winner); applied to world.profile after all tasks finish.
+#[derive(Default)]
+pub struct SolveProfile {
+    pub prepare_constraints: f32,
+    pub integrate_velocities: f32,
+    pub warm_start: f32,
+    pub solve_impulses: f32,
+    pub integrate_positions: f32,
+    pub relax_impulses: f32,
+    pub apply_restitution: f32,
+    pub store_impulses: f32,
+}
+
+/// The shared handle every solver stage function receives. This is the port of
+/// the C pattern where all workers share b3StepContext*/b3World* pointers; the
+/// mutable arrays are taken out of the world/context for the duration of the
+/// constraint solve and exposed through disjoint-access views:
+///
+/// - `states`: mutated by integrate/warm-start/solve/relax/restitution stages.
+///   Disjoint by graph coloring (no two constraints in a color share a movable
+///   body) and by block partitioning (integrate stages).
+/// - `contacts`: manifolds read by prepare, written by store. Each contact id
+///   appears in exactly one color/overflow slot, and blocks partition them.
+/// - `joint_colors[i]`: the graph color's joint sims (overflow included).
+///   Blocks partition each color's range; overflow runs orchestrator-only.
+/// - constraint arrays: blocks partition the flat ranges.
+/// - `task_contexts`: indexed by worker_index only.
+/// - `world`/`context`: read-only during the stages (the taken Vecs are empty
+///   in place; `context.sims` and the spans stay readable). The world's user
+///   callback Options are parked (taken) for the duration.
+pub struct SolverShared<'a> {
+    pub world: &'a crate::physics_world::World,
+    pub context: &'a StepContext,
+    pub states: StateAccess<'a>,
+    pub contacts: crate::sync::SyncSlice<'a, crate::contact::Contact>,
+    pub joint_colors: Vec<crate::sync::SyncSlice<'a, crate::joint::JointSim>>,
+    pub wide_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraintWide>,
+    pub manifold_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ManifoldConstraint>,
+    pub contact_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraint>,
+    pub task_contexts: crate::sync::SyncSlice<'a, crate::physics_world::TaskContext>,
+    pub profile: crate::sync::SyncPtr<SolveProfile>,
+}
+
+/// C: UINT_MAX sync-bits sentinel — workers exit their spin loop.
+/// -1 can never collide with valid sync bits (sync index > 0 makes them positive).
+pub const SYNC_SENTINEL: i32 = -1;
 
 // ---------------------------------------------------------------------------
 // Port of solver.c
@@ -321,20 +444,20 @@ fn zero_body_move_event() -> BodyMoveEvent {
 }
 
 // Integrate velocities, apply damping, and gyroscopic torque
-fn integrate_velocities_task(block: SolverBlock, world: &World, context: &mut StepContext) {
-    b3_validate!(
-        ((block.start_index + block.count as i32) as usize) <= context.states.len()
-    );
+fn integrate_velocities_task(block: SolverBlock, shared: &SolverShared) {
+    let context = shared.context;
+    b3_validate!(((block.start_index + block.count as i32) as usize) <= shared.states.len());
 
-    let states = &mut context.states;
+    let states = &shared.states;
     let sims = &context.sims;
 
-    let gravity = world.gravity;
+    let gravity = shared.world.gravity;
     let h = context.h;
 
     for i in block.start_index..block.start_index + block.count as i32 {
         let sim = &sims[i as usize];
-        let state = &mut states[i as usize];
+        // Body blocks partition the awake range: this worker exclusively owns i.
+        let mut state = states.get(i as usize);
 
         let mut v = state.linear_velocity;
         let mut w = state.angular_velocity;
@@ -426,13 +549,15 @@ fn integrate_velocities_task(block: SolverBlock, world: &World, context: &mut St
 
         state.linear_velocity = v;
         state.angular_velocity = w;
+        states.set(i as usize, state);
     }
 }
 
-fn integrate_positions_task(block: SolverBlock, context: &mut StepContext) {
-    b3_validate!(((block.start_index + block.count as i32) as usize) <= context.states.len());
+fn integrate_positions_task(block: SolverBlock, shared: &SolverShared) {
+    let context = shared.context;
+    b3_validate!(((block.start_index + block.count as i32) as usize) <= shared.states.len());
 
-    let states = &mut context.states;
+    let states = &shared.states;
     let h = context.h;
     let max_linear_speed = context.max_linear_velocity;
     let max_angular_speed = MAX_ROTATION * context.inv_dt;
@@ -440,7 +565,8 @@ fn integrate_positions_task(block: SolverBlock, context: &mut StepContext) {
     let max_angular_speed_squared = max_angular_speed * max_angular_speed;
 
     for i in block.start_index..block.start_index + block.count as i32 {
-        let state = &mut states[i as usize];
+        // Body blocks partition the awake range: this worker exclusively owns i.
+        let mut state = states.get(i as usize);
 
         let mut v = state.linear_velocity;
         let mut w = state.angular_velocity;
@@ -471,10 +597,13 @@ fn integrate_positions_task(block: SolverBlock, context: &mut StepContext) {
         state.angular_velocity = w;
         state.delta_position = mul_add(state.delta_position, h, v);
         state.delta_rotation = integrate_rotation(state.delta_rotation, mul_sv(h, w));
+
+        states.set(i as usize, state);
     }
 }
 
-fn prepare_joints_task(block: SolverBlock, world: &mut World, context: &StepContext) {
+fn prepare_joints_task(block: SolverBlock, shared: &SolverShared) {
+    let context = shared.context;
     let mut index = block.start_index;
     let end_index = block.start_index + block.count as i32;
 
@@ -491,21 +620,19 @@ fn prepare_joints_task(block: SolverBlock, world: &mut World, context: &StepCont
         let color_index = context.joint_prepare_spans[color_span].color_index;
 
         if index < color_end_index {
-            // The C code walks the color's joint array through a pointer; the port
-            // takes the Vec out of the graph so the joints can be mutated while
-            // prepare_joint reads the world.
-            let mut joints = std::mem::take(&mut world.constraint_graph.colors[color_index as usize].joint_sims);
+            let joints = &shared.joint_colors[color_index as usize];
 
             // Loop over color
             while index < color_end_index {
                 b3_assert!(
                     0 <= index - color_start && index - color_start < context.joint_prepare_spans[color_span].count
                 );
-                crate::joint::prepare_joint(&mut joints[(index - color_start) as usize], world, context);
+                // SAFETY: the prepare blocks partition the flat joint range,
+                // so this worker exclusively owns this joint index.
+                let joint = unsafe { joints.get_mut((index - color_start) as usize) };
+                crate::joint::prepare_joint(joint, shared.world, context);
                 index += 1;
             }
-
-            world.constraint_graph.colors[color_index as usize].joint_sims = joints;
         }
 
         // Advance to next color
@@ -513,50 +640,45 @@ fn prepare_joints_task(block: SolverBlock, world: &mut World, context: &StepCont
     }
 }
 
-fn warm_start_joints_task(block: SolverBlock, world: &mut World, context: &mut StepContext) {
-    let color_index = block.color_index as usize;
-    let mut joints = std::mem::take(&mut world.constraint_graph.colors[color_index].joint_sims);
+fn warm_start_joints_task(block: SolverBlock, shared: &SolverShared) {
+    let joints = &shared.joint_colors[block.color_index as usize];
 
     for i in block.start_index..block.start_index + block.count as i32 {
-        crate::joint::warm_start_joint(&mut joints[i as usize], context);
+        // SAFETY: blocks partition the color's joint range — exclusive index.
+        let joint = unsafe { joints.get_mut(i as usize) };
+        crate::joint::warm_start_joint(joint, &shared.states, shared.context);
     }
-
-    world.constraint_graph.colors[color_index].joint_sims = joints;
 }
 
-fn solve_joints_task(block: SolverBlock, world: &mut World, context: &mut StepContext, use_bias: bool, worker_index: i32) {
-    let color_index = block.color_index as usize;
-    let mut joints = std::mem::take(&mut world.constraint_graph.colors[color_index].joint_sims);
+fn solve_joints_task(block: SolverBlock, shared: &SolverShared, use_bias: bool, worker_index: i32) {
+    let context = shared.context;
+    let joints = &shared.joint_colors[block.color_index as usize];
 
     b3_assert!(0 <= block.start_index && block.start_index + block.count as i32 <= joints.len() as i32);
 
+    // SAFETY: worker_index identifies this task exclusively.
+    let task_context = unsafe { shared.task_contexts.get_mut(worker_index as usize) };
+
     for i in block.start_index..block.start_index + block.count as i32 {
-        let joint = &mut joints[i as usize];
-        crate::joint::solve_joint(joint, context, use_bias);
+        // SAFETY: blocks partition the color's joint range — exclusive index.
+        let joint = unsafe { joints.get_mut(i as usize) };
+        crate::joint::solve_joint(joint, &shared.states, context, use_bias);
 
         if use_bias
             && (joint.force_threshold < f32::MAX || joint.torque_threshold < f32::MAX)
-            && !get_bit(
-                &world.task_contexts[worker_index as usize].joint_state_bit_set,
-                joint.joint_id as u32,
-            )
+            && !get_bit(&task_context.joint_state_bit_set, joint.joint_id as u32)
         {
             let mut force = 0.0;
             let mut torque = 0.0;
-            crate::joint::get_joint_reaction(world, Some(context), joint, context.inv_h, &mut force, &mut torque);
+            crate::joint::get_joint_reaction(shared.world, Some(context), joint, context.inv_h, &mut force, &mut torque);
 
             // Check thresholds. A zero threshold means all awake joints get reported.
             if force >= joint.force_threshold || torque >= joint.torque_threshold {
                 // Flag this joint for processing.
-                set_bit(
-                    &mut world.task_contexts[worker_index as usize].joint_state_bit_set,
-                    joint.joint_id as u32,
-                );
+                set_bit(&mut task_context.joint_state_bit_set, joint.joint_id as u32);
             }
         }
     }
-
-    world.constraint_graph.colors[color_index].joint_sims = joints;
 }
 
 // Continuous collision of dynamic versus static (and versus everything for bullets).
@@ -1154,234 +1276,439 @@ fn init_blocks(
     (start, dim.count)
 }
 
-// C: b3ExecuteBlock. Serial dispatch of one block.
-fn execute_block(
-    stage_type: SolverStageType,
-    block: SolverBlock,
-    world: &mut World,
-    context: &mut StepContext,
-    worker_index: i32,
-) {
+// C: b3ExecuteBlock. Dispatch of one block; runs on any worker.
+fn execute_block(stage_type: SolverStageType, block: SolverBlock, shared: &SolverShared, worker_index: i32) {
     let block_type = block.block_type;
 
     match stage_type {
-        SolverStageType::PrepareJoints => prepare_joints_task(block, world, context),
+        SolverStageType::PrepareJoints => prepare_joints_task(block, shared),
 
-        SolverStageType::PrepareWideContacts => crate::contact_solver::prepare_contacts_convex(block, world, context),
+        SolverStageType::PrepareWideContacts => crate::contact_solver::prepare_contacts_convex(block, shared),
 
-        SolverStageType::PrepareContacts => crate::contact_solver::prepare_contacts_mesh(block, world, context),
+        SolverStageType::PrepareContacts => crate::contact_solver::prepare_contacts_mesh(block, shared),
 
-        SolverStageType::IntegrateVelocities => integrate_velocities_task(block, world, context),
+        SolverStageType::IntegrateVelocities => integrate_velocities_task(block, shared),
 
         SolverStageType::WarmStart => {
             if block_type == SolverBlockType::GraphJoint {
-                warm_start_joints_task(block, world, context);
+                warm_start_joints_task(block, shared);
             } else if block_type == SolverBlockType::GraphWideContact {
-                crate::contact_solver::warm_start_contacts_convex(block, world, context);
+                crate::contact_solver::warm_start_contacts_convex(block, shared);
             } else {
-                crate::contact_solver::warm_start_contacts_mesh(block, world, context);
+                crate::contact_solver::warm_start_contacts_mesh(block, shared);
             }
         }
 
         SolverStageType::Solve => {
             if block_type == SolverBlockType::GraphJoint {
                 let use_bias = true;
-                solve_joints_task(block, world, context, use_bias, worker_index);
+                solve_joints_task(block, shared, use_bias, worker_index);
             } else if block_type == SolverBlockType::GraphWideContact {
                 let use_bias = true;
-                crate::contact_solver::solve_contacts_convex(block, world, context, use_bias);
+                crate::contact_solver::solve_contacts_convex(block, shared, use_bias);
             } else {
                 let use_bias = true;
-                crate::contact_solver::solve_contacts_mesh(block, world, context, use_bias);
+                crate::contact_solver::solve_contacts_mesh(block, shared, use_bias);
             }
         }
 
-        SolverStageType::IntegratePositions => integrate_positions_task(block, context),
+        SolverStageType::IntegratePositions => integrate_positions_task(block, shared),
 
         SolverStageType::Relax => {
             if block_type == SolverBlockType::GraphJoint {
                 let use_bias = false;
-                solve_joints_task(block, world, context, use_bias, worker_index);
+                solve_joints_task(block, shared, use_bias, worker_index);
             } else if block_type == SolverBlockType::GraphWideContact {
                 let use_bias = false;
-                crate::contact_solver::solve_contacts_convex(block, world, context, use_bias);
+                crate::contact_solver::solve_contacts_convex(block, shared, use_bias);
             } else {
                 let use_bias = false;
-                crate::contact_solver::solve_contacts_mesh(block, world, context, use_bias);
+                crate::contact_solver::solve_contacts_mesh(block, shared, use_bias);
             }
         }
 
         SolverStageType::Restitution => {
             if block_type == SolverBlockType::GraphWideContact {
-                crate::contact_solver::apply_restitution_convex(block, world, context);
+                crate::contact_solver::apply_restitution_convex(block, shared);
             } else if block_type == SolverBlockType::GraphContact {
-                crate::contact_solver::apply_restitution_mesh(block, world, context);
+                crate::contact_solver::apply_restitution_mesh(block, shared);
             }
             // Joint blocks are mixed into the color stages but have no restitution.
         }
 
-        SolverStageType::StoreWideImpulses => crate::contact_solver::store_impulses_convex(block, world, context, worker_index),
+        SolverStageType::StoreWideImpulses => crate::contact_solver::store_impulses_convex(block, shared, worker_index),
 
-        SolverStageType::StoreImpulses => crate::contact_solver::store_impulses_mesh(block, world, context, worker_index),
+        SolverStageType::StoreImpulses => crate::contact_solver::store_impulses_mesh(block, shared, worker_index),
     }
 }
 
-// C: b3ExecuteMainStage/b3ExecuteStage. Serial: worker 0's home index is 0, so the
-// ring sweep degenerates to executing blocks in array order.
-fn execute_main_stage(
-    stage_index: usize,
-    stages: &[SolverStage],
-    blocks: &[SolverBlock],
-    world: &mut World,
-    context: &mut StepContext,
-) {
-    let stage = &stages[stage_index];
+// This staggers the worker start indices so they avoid touching the same solver blocks.
+// C: GetWorkerStartIndex.
+#[inline]
+fn get_worker_start_index(worker_index: i32, block_count: i32, worker_count: i32) -> i32 {
+    if block_count <= worker_count {
+        return if worker_index < block_count { worker_index } else { NULL_INDEX };
+    }
+
+    let blocks_per_worker = block_count / worker_count;
+    let remainder = block_count - blocks_per_worker * worker_count;
+    blocks_per_worker * worker_index + min_int(remainder, worker_index)
+}
+
+// Execute a stage, which is an array of solver blocks, each controlled with an
+// atomic sync index. Each worker starts at its home index and sweeps the ring,
+// CAS-claiming any unclaimed blocks. C: b3ExecuteStage.
+fn execute_stage(shared: &SolverShared, stage_index: usize, previous_sync_index: i32, sync_index: i32, worker_index: i32) {
+    let context = shared.context;
+    let stage = context.stages[stage_index];
+    let block_count = stage.blocks_count;
+
+    let start_index = get_worker_start_index(worker_index, block_count, context.worker_count);
+    if start_index == NULL_INDEX {
+        return;
+    }
+
+    b3_assert!(0 <= start_index && start_index < block_count);
+
+    let mut completed_count = 0;
+    let mut block_index = start_index;
+    for _ in 0..block_count {
+        let flat_index = (stage.blocks_start + block_index) as usize;
+        if context.block_sync[flat_index].compare_exchange(previous_sync_index, sync_index) {
+            b3_assert!(completed_count < block_count);
+
+            // Pass the descriptor by value — the atomic sync index lives in the
+            // parallel block_sync array, so the copy never aliases the CAS target.
+            execute_block(stage.stage_type, context.blocks[flat_index], shared, worker_index);
+            completed_count += 1;
+        }
+
+        block_index += 1;
+        if block_index >= block_count {
+            block_index = 0;
+        }
+    }
+
+    context.stage_completion[stage_index].fetch_add(completed_count);
+}
+
+// Execute a stage on worker 0 (the orchestrator). C: b3ExecuteMainStage.
+fn execute_main_stage(shared: &SolverShared, stage_index: usize, sync_bits: i32) {
+    let context = shared.context;
+    let stage = context.stages[stage_index];
+    let block_count = stage.blocks_count;
+    if block_count == 0 {
+        return;
+    }
+
     let worker_index = 0;
-    for block_index in 0..stage.blocks_count {
-        let block = blocks[(stage.blocks_start + block_index) as usize];
-        execute_block(stage.stage_type, block, world, context, worker_index);
+
+    if block_count == 1 {
+        execute_block(stage.stage_type, context.blocks[stage.blocks_start as usize], shared, worker_index);
+    } else {
+        context.atomic_sync_bits.store(sync_bits);
+
+        let sync_index = (sync_bits >> 16) & 0xFFFF;
+        b3_assert!(sync_index > 0);
+        let previous_sync_index = sync_index - 1;
+
+        execute_stage(shared, stage_index, previous_sync_index, sync_index, worker_index);
+
+        // Spin waiting for thieves to finish
+        while context.stage_completion[stage_index].load() != block_count {
+            std::hint::spin_loop();
+        }
+
+        context.stage_completion[stage_index].store(0);
     }
 }
 
-// The serial equivalent of the C b3SolverTask worker-0 orchestration path.
-fn solver_task_main(world: &mut World, context: &mut StepContext) {
-    // The stages and flat block array are owned by the context; take them so
-    // stage execution can borrow world and context freely. They are returned at
-    // the end so the scratch capacity survives the step (C frees the arena
-    // allocations after the solve).
-    let stages = std::mem::take(&mut context.stages);
-    let blocks = std::mem::take(&mut context.blocks);
+// Parallel solver task. C: b3SolverTask — worker 0 races for the orchestrator
+// slot; other workers spin on the sync bits and steal stage blocks.
+fn solver_task(shared: &SolverShared, worker_index: i32) {
+    let context = shared.context;
     let active_color_count = context.active_color_count as usize;
 
-    let mut ticks = get_ticks();
+    if worker_index == 0 {
+        // The orchestrator slot is a race. The calling thread of world_step also
+        // enters here as worker 0, so progress is guaranteed even if the queued
+        // worker-0 task runs late (or first). Whoever wins the CAS becomes the
+        // orchestrator; the loser returns.
+        if !context.main_claimed.compare_exchange(0, 1) {
+            return;
+        }
 
-    let mut stage_index = 0usize;
+        // Main thread synchronizes the workers and does work itself.
+        //
+        // Stages are re-used by loops so that more stages aren't needed for large
+        // substep counts. The sync indices grow monotonically for the
+        // body/graph/constraint groupings because they share solver blocks.
+        // SAFETY (profile): only the orchestrator (unique CAS winner) writes it.
+        let profile = unsafe { shared.profile.get() };
 
-    // Prepare joint constraints
-    b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareJoints);
-    execute_main_stage(stage_index, &stages, &blocks, world, context);
-    stage_index += 1;
+        let mut ticks = get_ticks();
 
-    // Prepare convex contact constraints
-    b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareWideContacts);
-    execute_main_stage(stage_index, &stages, &blocks, world, context);
-    stage_index += 1;
+        let mut body_sync_index = 1i32;
+        let mut stage_index = 0usize;
 
-    // Prepare mesh contact constraints
-    b3_assert!(stages[stage_index].stage_type == SolverStageType::PrepareContacts);
-    execute_main_stage(stage_index, &stages, &blocks, world, context);
-    stage_index += 1;
+        // Prepare joint constraints
+        let mut joint_sync_index = 1i32;
+        let mut sync_bits = (joint_sync_index << 16) | stage_index as i32;
+        b3_assert!(context.stages[stage_index].stage_type == SolverStageType::PrepareJoints);
+        execute_main_stage(shared, stage_index, sync_bits);
+        stage_index += 1;
+        joint_sync_index += 1;
+        let _ = joint_sync_index; // C keeps the symmetric increment; only convex/mesh indices are reused
 
-    // Single-threaded overflow work. These constraints don't fit in the graph coloring.
-    crate::joint::prepare_joints_overflow(world, context);
-    crate::contact_solver::prepare_contacts_overflow(world, context);
+        // Prepare convex contact constraints
+        let mut convex_sync_index = 1i32;
+        sync_bits = (convex_sync_index << 16) | stage_index as i32;
+        b3_assert!(context.stages[stage_index].stage_type == SolverStageType::PrepareWideContacts);
+        execute_main_stage(shared, stage_index, sync_bits);
+        stage_index += 1;
+        convex_sync_index += 1;
 
-    world.profile.prepare_constraints += get_milliseconds_and_reset(&mut ticks);
+        // Prepare mesh contact constraints
+        let mut mesh_sync_index = 1i32;
+        sync_bits = (mesh_sync_index << 16) | stage_index as i32;
+        b3_assert!(context.stages[stage_index].stage_type == SolverStageType::PrepareContacts);
+        execute_main_stage(shared, stage_index, sync_bits);
+        stage_index += 1;
+        mesh_sync_index += 1;
 
-    let sub_step_count = context.sub_step_count;
-    for _sub_step_index in 0..sub_step_count {
-        // stage_index restarted each iteration
-        let mut iteration_stage_index = stage_index;
+        // Single-threaded overflow work. These constraints don't fit in the graph coloring.
+        crate::joint::prepare_joints_overflow(shared);
+        crate::contact_solver::prepare_contacts_overflow(shared);
 
-        // Integrate velocities
-        b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::IntegrateVelocities);
-        execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
-        iteration_stage_index += 1;
+        profile.prepare_constraints += get_milliseconds_and_reset(&mut ticks);
 
-        world.profile.integrate_velocities += get_milliseconds_and_reset(&mut ticks);
+        let mut graph_sync_index = 1i32;
+        let sub_step_count = context.sub_step_count;
+        for _sub_step_index in 0..sub_step_count {
+            // stage_index restarted each iteration
+            // sync bits still increase monotonically because the upper bits increase each iteration
+            let mut iteration_stage_index = stage_index;
 
-        // Warm start constraints
-        crate::joint::warm_start_joints_overflow(world, context);
-        crate::contact_solver::warm_start_contacts_overflow(world, context);
-
-        for _color_index in 0..active_color_count {
-            b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::WarmStart);
-            execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
+            // Integrate velocities
+            sync_bits = (body_sync_index << 16) | iteration_stage_index as i32;
+            b3_assert!(context.stages[iteration_stage_index].stage_type == SolverStageType::IntegrateVelocities);
+            execute_main_stage(shared, iteration_stage_index, sync_bits);
             iteration_stage_index += 1;
-        }
+            body_sync_index += 1;
 
-        world.profile.warm_start += get_milliseconds_and_reset(&mut ticks);
+            profile.integrate_velocities += get_milliseconds_and_reset(&mut ticks);
 
-        // Solve constraints
-        let use_bias = true;
-        for _j in 0..ITERATIONS {
-            // Overflow constraints have lower priority. Typically these are dynamic-vs-dynamic.
-            crate::joint::solve_joints_overflow(world, context, use_bias);
-            crate::contact_solver::solve_contacts_overflow(world, context, use_bias);
+            // Warm start constraints
+            crate::joint::warm_start_joints_overflow(shared);
+            crate::contact_solver::warm_start_contacts_overflow(shared);
 
             for _color_index in 0..active_color_count {
-                b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::Solve);
-                execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
+                sync_bits = (graph_sync_index << 16) | iteration_stage_index as i32;
+                b3_assert!(context.stages[iteration_stage_index].stage_type == SolverStageType::WarmStart);
+                execute_main_stage(shared, iteration_stage_index, sync_bits);
                 iteration_stage_index += 1;
+            }
+            graph_sync_index += 1;
+
+            profile.warm_start += get_milliseconds_and_reset(&mut ticks);
+
+            // Solve constraints
+            let use_bias = true;
+            for _j in 0..ITERATIONS {
+                // Overflow constraints have lower priority. Typically these are dynamic-vs-dynamic.
+                crate::joint::solve_joints_overflow(shared, use_bias);
+                crate::contact_solver::solve_contacts_overflow(shared, use_bias);
+
+                for _color_index in 0..active_color_count {
+                    sync_bits = (graph_sync_index << 16) | iteration_stage_index as i32;
+                    b3_assert!(context.stages[iteration_stage_index].stage_type == SolverStageType::Solve);
+                    execute_main_stage(shared, iteration_stage_index, sync_bits);
+                    iteration_stage_index += 1;
+                }
+                graph_sync_index += 1;
+            }
+
+            profile.solve_impulses += get_milliseconds_and_reset(&mut ticks);
+
+            // Integrate positions
+            b3_assert!(context.stages[iteration_stage_index].stage_type == SolverStageType::IntegratePositions);
+            sync_bits = (body_sync_index << 16) | iteration_stage_index as i32;
+            execute_main_stage(shared, iteration_stage_index, sync_bits);
+            iteration_stage_index += 1;
+            body_sync_index += 1;
+
+            profile.integrate_positions += get_milliseconds_and_reset(&mut ticks);
+
+            // Relax constraints
+            let use_bias = false;
+            for _j in 0..RELAX_ITERATIONS {
+                crate::joint::solve_joints_overflow(shared, use_bias);
+                crate::contact_solver::solve_contacts_overflow(shared, use_bias);
+
+                for _color_index in 0..active_color_count {
+                    sync_bits = (graph_sync_index << 16) | iteration_stage_index as i32;
+                    b3_assert!(context.stages[iteration_stage_index].stage_type == SolverStageType::Relax);
+                    execute_main_stage(shared, iteration_stage_index, sync_bits);
+                    iteration_stage_index += 1;
+                }
+                graph_sync_index += 1;
+            }
+
+            profile.relax_impulses += get_milliseconds_and_reset(&mut ticks);
+        }
+
+        // Advance the stage according to the sub-stepping tasks just completed
+        // integrate velocities / warm start / solve / integrate positions / relax
+        stage_index += 1
+            + active_color_count
+            + ITERATIONS as usize * active_color_count
+            + 1
+            + RELAX_ITERATIONS as usize * active_color_count;
+
+        // Restitution
+        {
+            crate::contact_solver::apply_restitution_overflow(shared);
+
+            let mut iter_stage_index = stage_index;
+            for _color_index in 0..active_color_count {
+                sync_bits = (graph_sync_index << 16) | iter_stage_index as i32;
+                b3_assert!(context.stages[iter_stage_index].stage_type == SolverStageType::Restitution);
+                execute_main_stage(shared, iter_stage_index, sync_bits);
+                iter_stage_index += 1;
+            }
+            // graph_sync_index += 1;
+            stage_index += active_color_count;
+        }
+
+        profile.apply_restitution += get_milliseconds_and_reset(&mut ticks);
+
+        // Store impulses
+        crate::contact_solver::store_impulses_overflow(shared);
+
+        sync_bits = (convex_sync_index << 16) | stage_index as i32;
+        b3_assert!(context.stages[stage_index].stage_type == SolverStageType::StoreWideImpulses);
+        execute_main_stage(shared, stage_index, sync_bits);
+        stage_index += 1;
+
+        sync_bits = (mesh_sync_index << 16) | stage_index as i32;
+        b3_assert!(context.stages[stage_index].stage_type == SolverStageType::StoreImpulses);
+        execute_main_stage(shared, stage_index, sync_bits);
+        stage_index += 1;
+
+        profile.store_impulses += get_milliseconds_and_reset(&mut ticks);
+
+        // Signal workers to finish
+        context.atomic_sync_bits.store(SYNC_SENTINEL);
+
+        b3_assert!(stage_index == context.stages.len());
+        return;
+    }
+
+    // Worker spins and waits for work
+    let mut last_sync_bits = 0i32;
+    loop {
+        // Spin until the orchestrator bumps the sync bits. This can waste
+        // significant time overall, but it is necessary for parallel simulation
+        // with graph coloring.
+        let mut sync_bits;
+        let mut spin_count = 0;
+        loop {
+            sync_bits = context.atomic_sync_bits.load();
+            if sync_bits != last_sync_bits {
+                break;
+            }
+            if spin_count > 5 {
+                std::thread::yield_now();
+                spin_count = 0;
+            } else {
+                std::hint::spin_loop();
+                std::hint::spin_loop();
+                spin_count += 1;
             }
         }
 
-        world.profile.solve_impulses += get_milliseconds_and_reset(&mut ticks);
-
-        // Integrate positions
-        b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::IntegratePositions);
-        execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
-        iteration_stage_index += 1;
-
-        world.profile.integrate_positions += get_milliseconds_and_reset(&mut ticks);
-
-        // Relax constraints
-        let use_bias = false;
-        for _j in 0..RELAX_ITERATIONS {
-            crate::joint::solve_joints_overflow(world, context, use_bias);
-            crate::contact_solver::solve_contacts_overflow(world, context, use_bias);
-
-            for _color_index in 0..active_color_count {
-                b3_assert!(stages[iteration_stage_index].stage_type == SolverStageType::Relax);
-                execute_main_stage(iteration_stage_index, &stages, &blocks, world, context);
-                iteration_stage_index += 1;
-            }
+        if sync_bits == SYNC_SENTINEL {
+            // sentinel hit
+            break;
         }
 
-        world.profile.relax_impulses += get_milliseconds_and_reset(&mut ticks);
+        let stage_index = (sync_bits & 0xFFFF) as usize;
+        b3_assert!(stage_index < context.stages.len());
+
+        let sync_index = (sync_bits >> 16) & 0xFFFF;
+        b3_assert!(sync_index > 0);
+
+        let previous_sync_index = sync_index - 1;
+
+        execute_stage(shared, stage_index, previous_sync_index, sync_index, worker_index);
+
+        last_sync_bits = sync_bits;
     }
+}
 
-    // Advance the stage according to the sub-stepping tasks just completed
-    // integrate velocities / warm start / solve / integrate positions / relax
-    stage_index += 1
-        + active_color_count
-        + ITERATIONS as usize * active_color_count
-        + 1
-        + RELAX_ITERATIONS as usize * active_color_count;
+// Scheduler task wrapper. The context/shared structs live on solve()'s stack,
+// which blocks in scheduler_finish_task until every solver task completes.
+struct SolverWorkerContext<'a, 'b> {
+    shared: &'b SolverShared<'a>,
+    worker_index: i32,
+}
 
-    // Restitution
-    {
-        crate::contact_solver::apply_restitution_overflow(world, context);
+unsafe fn solver_task_trampoline(task_context: *mut ()) {
+    // SAFETY: enqueued by run_solver_tasks below; the pointee outlives the
+    // finish loop there.
+    let worker = unsafe { &*(task_context as *const SolverWorkerContext) };
+    solver_task(worker.shared, worker.worker_index);
+}
 
-        let mut iter_stage_index = stage_index;
-        for _color_index in 0..active_color_count {
-            b3_assert!(stages[iter_stage_index].stage_type == SolverStageType::Restitution);
-            execute_main_stage(iter_stage_index, &stages, &blocks, world, context);
-            iter_stage_index += 1;
+// Enqueue workerCount solver tasks, participate as worker 0, and wait for all
+// of them. C: the enqueue/caller-race/finish block of b3Solve.
+fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
+    let scheduler = shared.world.scheduler.as_ref();
+
+    if worker_count <= 1 || scheduler.is_none() {
+        // Serial fast path: the caller is the orchestrator (wins the race
+        // unopposed) and executes every block in array order, bit-identically
+        // to the pre-threading port.
+        solver_task(shared, 0);
+        return;
+    }
+    let scheduler = scheduler.unwrap();
+
+    let worker_contexts: Vec<SolverWorkerContext> = (0..worker_count)
+        .map(|worker_index| SolverWorkerContext { shared, worker_index })
+        .collect();
+
+    let mut handles: Vec<Option<i32>> = vec![None; worker_count as usize];
+    for i in 0..worker_count as usize {
+        if crate::scheduler::scheduler_task_count(scheduler) < crate::constants::MAX_TASKS as i32 {
+            // SAFETY: worker_contexts (and everything shared references) stay
+            // alive until the finish loop below returns.
+            let slot = unsafe {
+                crate::scheduler::scheduler_enqueue_task(
+                    scheduler,
+                    solver_task_trampoline,
+                    &worker_contexts[i] as *const SolverWorkerContext as *mut (),
+                    "solve",
+                )
+            };
+            handles[i] = Some(slot);
+        } else {
+            handles[i] = None;
+            solver_task(shared, i as i32);
         }
-        stage_index += active_color_count;
     }
 
-    world.profile.apply_restitution += get_milliseconds_and_reset(&mut ticks);
+    // The calling thread also enters as worker 0 and races for the orchestrator
+    // slot via the CAS inside; this guarantees progress even if the queued
+    // worker-0 task is delayed. The loser of the race no-ops.
+    solver_task(shared, 0);
 
-    // Store impulses
-    crate::contact_solver::store_impulses_overflow(world, context);
-
-    b3_assert!(stages[stage_index].stage_type == SolverStageType::StoreWideImpulses);
-    execute_main_stage(stage_index, &stages, &blocks, world, context);
-    stage_index += 1;
-
-    b3_assert!(stages[stage_index].stage_type == SolverStageType::StoreImpulses);
-    execute_main_stage(stage_index, &stages, &blocks, world, context);
-    stage_index += 1;
-
-    world.profile.store_impulses += get_milliseconds_and_reset(&mut ticks);
-
-    b3_assert!(stage_index == stages.len());
-
-    // Return the stage/block arrays so their capacity is reused next step.
-    context.stages = stages;
-    context.blocks = blocks;
+    // Finish constraint solve
+    for handle in handles.iter().take(worker_count as usize) {
+        if let Some(slot) = *handle {
+            crate::scheduler::scheduler_finish_task(scheduler, slot);
+        }
+    }
 }
 
 // Solve with graph coloring
@@ -1807,9 +2134,37 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         step_context.active_color_count = active_color_count as i32;
         step_context.worker_count = worker_count;
 
+        // Reset the stage synchronization (C allocates fresh SyncBlocks and
+        // stores the atomics in the setup). The atomic arrays are reused across
+        // steps; every slot in range is reset to zero.
+        {
+            let block_count = step_context.blocks.len();
+            if step_context.block_sync.len() < block_count {
+                step_context
+                    .block_sync
+                    .resize_with(block_count, || crate::sync::AtomicIndex::new(0));
+            }
+            for sync in step_context.block_sync.iter().take(block_count) {
+                sync.store(0);
+            }
+
+            let stage_count = step_context.stages.len();
+            if step_context.stage_completion.len() < stage_count {
+                step_context
+                    .stage_completion
+                    .resize_with(stage_count, || crate::sync::AtomicIndex::new(0));
+            }
+            for completion in step_context.stage_completion.iter().take(stage_count) {
+                completion.store(0);
+            }
+
+            step_context.atomic_sync_bits.store(0);
+            step_context.main_claimed.store(0);
+        }
+
         world.profile.solver_setup = get_milliseconds_and_reset(&mut setup_ticks);
 
-        // === Constraint solve (C: worker tasks + orchestrator race; serial here) ===
+        // === Constraint solve (C: worker tasks + orchestrator race) ===
         let mut constraint_ticks = get_ticks();
 
         let joint_id_capacity = get_id_capacity(&world.joint_id_pool);
@@ -1821,7 +2176,82 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             task_context.has_hit_events = false;
         }
 
-        solver_task_main(world, step_context);
+        // Recycle the scheduler task ring for this phase (no tasks are pending here).
+        if let Some(scheduler) = &world.scheduler {
+            crate::scheduler::reset_scheduler(scheduler);
+        }
+
+        let mut solve_profile = SolveProfile::default();
+        {
+            // Take the shared-mutable arrays out of the world/context for the
+            // duration of the constraint stages (see SolverShared docs). The
+            // world then presents a read-only view to all workers; disjoint
+            // mutation goes through the SyncSlice/StateAccess views.
+            let mut states = std::mem::take(&mut step_context.states);
+            let mut wide_constraints = std::mem::take(&mut step_context.wide_constraints);
+            let mut manifold_constraints = std::mem::take(&mut step_context.manifold_constraints);
+            let mut contact_constraints = std::mem::take(&mut step_context.contact_constraints);
+            let mut contacts = std::mem::take(&mut world.contacts);
+            let mut task_contexts = std::mem::take(&mut world.task_contexts);
+            let mut joint_colors: Vec<Vec<crate::joint::JointSim>> = world
+                .constraint_graph
+                .colors
+                .iter_mut()
+                .map(|color| std::mem::take(&mut color.joint_sims))
+                .collect();
+
+            // The user callbacks are not called during the constraint stages;
+            // park them so no thread can reach them through the shared world.
+            let pre_solve_fcn = world.pre_solve_fcn.take();
+            let custom_filter_fcn = world.custom_filter_fcn.take();
+
+            {
+                let world_ref: &World = world;
+                let context_ref: &StepContext = step_context;
+
+                let shared = SolverShared {
+                    world: world_ref,
+                    context: context_ref,
+                    states: StateAccess::new(&mut states),
+                    contacts: crate::sync::SyncSlice::new(&mut contacts),
+                    joint_colors: joint_colors
+                        .iter_mut()
+                        .map(|joints| crate::sync::SyncSlice::new(joints.as_mut_slice()))
+                        .collect(),
+                    wide_constraints: crate::sync::SyncSlice::new(&mut wide_constraints),
+                    manifold_constraints: crate::sync::SyncSlice::new(&mut manifold_constraints),
+                    contact_constraints: crate::sync::SyncSlice::new(&mut contact_constraints),
+                    task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
+                    profile: crate::sync::SyncPtr::new(&mut solve_profile),
+                };
+
+                run_solver_tasks(&shared, worker_count);
+            }
+
+            // Restore the taken arrays.
+            world.contacts = contacts;
+            world.task_contexts = task_contexts;
+            for (color, joints) in world.constraint_graph.colors.iter_mut().zip(joint_colors) {
+                color.joint_sims = joints;
+            }
+            world.pre_solve_fcn = pre_solve_fcn;
+            world.custom_filter_fcn = custom_filter_fcn;
+            step_context.states = states;
+            step_context.wide_constraints = wide_constraints;
+            step_context.manifold_constraints = manifold_constraints;
+            step_context.contact_constraints = contact_constraints;
+        }
+
+        // The orchestrator accumulated the per-stage times; apply them now that
+        // the world is exclusively borrowed again.
+        world.profile.prepare_constraints += solve_profile.prepare_constraints;
+        world.profile.integrate_velocities += solve_profile.integrate_velocities;
+        world.profile.warm_start += solve_profile.warm_start;
+        world.profile.solve_impulses += solve_profile.solve_impulses;
+        world.profile.integrate_positions += solve_profile.integrate_positions;
+        world.profile.relax_impulses += solve_profile.relax_impulses;
+        world.profile.apply_restitution += solve_profile.apply_restitution;
+        world.profile.store_impulses += solve_profile.store_impulses;
 
         world.split_island_id = NULL_INDEX;
 

@@ -101,6 +101,14 @@ pub struct TaskContext {
     pub lines: Vec<DebugLine>,
 
     pub manifold_counts: [i32; CONTACT_MANIFOLD_COUNT_BUCKETS],
+
+    /// Deferred (color_index, local_index, manifold_count) mesh contact spec
+    /// updates recorded during the parallel collide pass. C writes the specs
+    /// inline from workers (each touching contact owns exactly one spec slot);
+    /// the port defers them so workers never alias the constraint graph.
+    /// Applied serially after the parallel-for in worker order; slot-disjoint,
+    /// so the values are order independent.
+    pub mesh_spec_updates: Vec<(i32, i32, u16)>,
 }
 
 /// The world struct manages all physics entities and dynamic simulation.
@@ -207,6 +215,16 @@ pub struct World {
     pub custom_filter_fcn: Option<Box<crate::types::CustomFilterFcn>>,
 
     pub worker_count: i32,
+
+    /// The built-in task scheduler (C: b3Scheduler). Some when worker_count > 1;
+    /// the serial path bypasses it entirely.
+    pub scheduler: Option<crate::scheduler::Scheduler>,
+
+    /// Pending dynamic/kinematic tree rebuild task (slot + owned trees).
+    /// Enqueued by update_broad_phase_pairs to overlap contact creation and
+    /// the narrow phase; joined by crate::broad_phase::finish_tree_task
+    /// before the solve (C: world->userTreeTask).
+    pub tree_rebuild_task: Option<(i32, Box<crate::broad_phase::TreeRebuildJob>)>,
 
     pub user_data: u64,
 
@@ -450,9 +468,14 @@ pub fn create_world(def: &WorldDef) -> World {
     world.enable_speculative = true;
     world.user_data = def.user_data;
 
-    // Serial only: the C worker-count / external task system / built-in
-    // scheduler selection collapses to one worker.
-    world.worker_count = 1;
+    // C: worker count clamped to [1, B3_MAX_WORKERS]; the built-in scheduler
+    // runs worker_count - 1 background threads, the calling thread is worker 0.
+    // (The C external task-system callbacks are not ported; the built-in
+    // scheduler is always used.) worker_count == 1 keeps the fully serial path.
+    world.worker_count = clamp_int(def.worker_count as i32, 1, MAX_WORKERS as i32);
+    if world.worker_count > 1 {
+        world.scheduler = Some(crate::scheduler::create_scheduler(world.worker_count));
+    }
 
     create_worker_contexts(&mut world);
 
@@ -465,6 +488,9 @@ pub fn create_world(def: &WorldDef) -> World {
 pub fn destroy_world(mut world: World) {
     b3_assert!(!world.locked);
     world.locked = true;
+
+    // C: b3DestroyScheduler — joins the background worker threads.
+    world.scheduler = None;
 
     destroy_worker_contexts(&mut world);
 
@@ -508,23 +534,53 @@ fn remove_non_touching_contact(world: &mut World, set_index: i32, local_index: i
 }
 
 /// C: b3CollideTask — run serially over the whole contact range with worker 0.
-fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, end_index: i32, worker_index: i32) {
+/// Shared context for the parallel collide pass. The world reference has its
+/// contacts, task_contexts and pre_solve_fcn taken out for the duration; the
+/// SyncSlice disjointness comes from awake_contact_indices holding each contact
+/// id exactly once (a contact is either in one graph color slot or in the
+/// awake non-touching list, never both) and worker_index being exclusive per
+/// task (parallel_for contract).
+struct CollideCtx<'a> {
+    world: &'a World,
+    indices: &'a [i32],
+    contacts: &'a crate::sync::SyncSlice<'a, Contact>,
+    task_contexts: &'a crate::sync::SyncSlice<'a, TaskContext>,
+    /// Some only when running single-worker (serial fallback); see use_pre_solve.
+    pre_solve: crate::sync::SyncPtr<Option<Box<crate::types::PreSolveFcn>>>,
+    use_pre_solve: bool,
+}
+
+// C: b3CollideTask trampoline for the scheduler.
+unsafe fn collide_task_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
+    // SAFETY: the CollideCtx lives on the collide() stack frame, which blocks
+    // in parallel_for until every block completes.
+    let ctx = unsafe { &*(context as *const CollideCtx) };
+    collide_task(ctx, start_index, end_index, worker_index);
+}
+
+fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index: i32) {
     b3_assert!(start_index < end_index);
+
+    let world = ctx.world;
+    // SAFETY: worker_index is exclusive to this task for the whole range
+    // (parallel_for contract), so the per-worker context is unaliased.
+    let task_context = unsafe { ctx.task_contexts.get_mut(worker_index as usize) };
 
     let recycle_distance = world.contact_recycle_distance;
     let speculative_distance = speculative_distance();
     let recycle_distance_non_touching = min_float(recycle_distance, speculative_distance);
 
     for i in start_index..end_index {
-        let contact_index = context.awake_contact_indices[i as usize];
-        b3_assert!(contact_index < world.contacts.len() as i32);
+        let contact_index = ctx.indices[i as usize];
+        b3_assert!(contact_index < ctx.contacts.len() as i32);
 
-        b3_validate!(world.contacts[contact_index as usize].contact_id == contact_index);
+        // SAFETY: each contact id appears exactly once in the awake contact
+        // index array, so no other worker touches this element.
+        let contact = unsafe { ctx.contacts.get_mut(contact_index as usize) };
 
-        let (shape_id_a, shape_id_b, contact_flags) = {
-            let contact = &world.contacts[contact_index as usize];
-            (contact.shape_id_a, contact.shape_id_b, contact.flags)
-        };
+        b3_validate!(contact.contact_id == contact_index);
+
+        let (shape_id_a, shape_id_b, contact_flags) = (contact.shape_id_a, contact.shape_id_b, contact.flags);
 
         // Do proxies still overlap?
         let (fat_aabb_a, fat_aabb_b, body_id_a, body_id_b) = {
@@ -536,10 +592,9 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
         let overlap = aabb_overlaps(fat_aabb_a, fat_aabb_b);
         if !overlap {
             // This contact will be destroyed
-            let contact = &mut world.contacts[contact_index as usize];
             contact.flags |= SIM_DISJOINT;
             contact.flags &= !SIM_TOUCHING_FLAG;
-            set_bit(&mut world.task_contexts[worker_index as usize].contact_state_bit_set, contact_index as u32);
+            set_bit(&mut task_context.contact_state_bit_set, contact_index as u32);
             continue;
         }
 
@@ -575,11 +630,8 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
         // These are used by the contact solver. If the contact is between an awake body
         // and a sleeping body and the contact begins to touch, these will be invalid
         // but fixed when linked in the constraint graph.
-        {
-            let contact = &mut world.contacts[contact_index as usize];
-            contact.body_sim_index_a = if is_static_a { NULL_INDEX } else { local_index_a };
-            contact.body_sim_index_b = if is_static_b { NULL_INDEX } else { local_index_b };
-        }
+        contact.body_sim_index_a = if is_static_a { NULL_INDEX } else { local_index_a };
+        contact.body_sim_index_b = if is_static_b { NULL_INDEX } else { local_index_b };
         let recycle_tolerance = if was_touching { recycle_distance } else { recycle_distance_non_touching };
 
         // Contact recycling optimization. Please cite this library if you use this optimization.
@@ -590,8 +642,6 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
             && (contact_flags & RELATIVE_TRANSFORM_VALID) != 0
             && (contact_flags & CONTACT_RECYCLE_FLAG) != 0
         {
-            let contact = &mut world.contacts[contact_index as usize];
-
             let angle_a = dot_quat(transform_a.q, contact.cached_rotation_a);
             let angle_b = dot_quat(transform_b.q, contact.cached_rotation_b);
             let angular_distance = min_float(angle_a * angle_a, angle_b * angle_b);
@@ -643,7 +693,6 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
                     }
 
                     // Diagnostics
-                    let task_context = &mut world.task_contexts[worker_index as usize];
                     task_context.recycled_contact_count += 1;
                     let bucket_index = min_int(manifold_count, CONTACT_MANIFOLD_COUNT_BUCKETS as i32 - 1);
                     if bucket_index > 0 {
@@ -658,19 +707,26 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
         }
 
         // Caching for contact recycling.
-        {
-            let contact = &mut world.contacts[contact_index as usize];
-            contact.cached_rotation_a = transform_a.q;
-            contact.cached_rotation_b = transform_b.q;
-            contact.cached_relative_pose = inv_mul_world_transforms(transform_a, transform_b);
-            contact.flags |= RELATIVE_TRANSFORM_VALID;
-        }
+        contact.cached_rotation_a = transform_a.q;
+        contact.cached_rotation_b = transform_b.q;
+        contact.cached_relative_pose = inv_mul_world_transforms(transform_a, transform_b);
+        contact.flags |= RELATIVE_TRANSFORM_VALID;
+
+        // The pre-solve slot is only used on the serial fallback path (a
+        // single worker), so the SyncPtr access is exclusive.
+        let pre_solve = if ctx.use_pre_solve {
+            // SAFETY: use_pre_solve forces a single worker; exclusive access.
+            Some(unsafe { ctx.pre_solve.get() })
+        } else {
+            None
+        };
 
         // This updates solid contacts
         let touching = update_contact(
             world,
-            worker_index,
-            contact_index,
+            task_context,
+            contact,
+            pre_solve,
             shape_id_a,
             body_sim_a.local_center,
             transform_a,
@@ -680,37 +736,33 @@ fn collide_task(world: &mut World, context: &mut StepContext, start_index: i32, 
             is_fast,
         );
 
-        let manifold_count = world.contacts[contact_index as usize].manifold_count();
+        let manifold_count = contact.manifold_count();
         let bucket_index = min_int(manifold_count, CONTACT_MANIFOLD_COUNT_BUCKETS as i32 - 1);
         if bucket_index > 0 {
-            world.task_contexts[worker_index as usize].manifold_counts[bucket_index as usize - 1] += 1;
+            task_context.manifold_counts[bucket_index as usize - 1] += 1;
         }
 
-        // Update the mesh contact spec
-        let contact_flags = world.contacts[contact_index as usize].flags;
+        // Update the mesh contact spec. C writes the constraint graph slot
+        // inline (slot-disjoint per contact); the port defers to keep workers
+        // from aliasing the graph.
+        let contact_flags = contact.flags;
         if touching && was_touching && (contact_flags & SIM_MESH_CONTACT) != 0 {
-            let (color_index, local_index) = {
-                let contact = &world.contacts[contact_index as usize];
-                (contact.color_index, contact.local_index)
-            };
+            let (color_index, local_index) = (contact.color_index, contact.local_index);
             b3_assert!(color_index != NULL_INDEX);
             b3_assert!(0 <= color_index && color_index < GRAPH_COLOR_COUNT as i32);
-            let color = &mut world.constraint_graph.colors[color_index as usize];
-            let spec = &mut color.contacts[local_index as usize];
-            spec.manifold_count = manifold_count as u16;
+            task_context.mesh_spec_updates.push((color_index, local_index, manifold_count as u16));
         }
 
         // State changes that affect island connectivity. Also affects contact events.
         if touching && !was_touching {
-            world.contacts[contact_index as usize].flags |= SIM_STARTED_TOUCHING;
-            set_bit(&mut world.task_contexts[worker_index as usize].contact_state_bit_set, contact_index as u32);
+            contact.flags |= SIM_STARTED_TOUCHING;
+            set_bit(&mut task_context.contact_state_bit_set, contact_index as u32);
         } else if !touching && was_touching {
-            world.contacts[contact_index as usize].flags |= SIM_STOPPED_TOUCHING;
-            set_bit(&mut world.task_contexts[worker_index as usize].contact_state_bit_set, contact_index as u32);
+            contact.flags |= SIM_STOPPED_TOUCHING;
+            set_bit(&mut task_context.contact_state_bit_set, contact_index as u32);
         }
 
         {
-            let contact = &mut world.contacts[contact_index as usize];
             let manifold_count = contact.manifold_count();
             for manifold_index in 0..manifold_count {
                 let manifold = &mut contact.manifolds[manifold_index as usize];
@@ -773,10 +825,69 @@ fn collide(world: &mut World, context: &mut StepContext) {
         task_context.sat_cache_hit_count = 0;
         task_context.recycled_contact_count = 0;
         task_context.manifold_counts = [0; CONTACT_MANIFOLD_COUNT_BUCKETS];
+        task_context.mesh_spec_updates.clear();
     }
 
-    // C: b3ParallelFor(world, b3CollideTask, contactCount, 20, ...). Serial port.
-    collide_task(world, context, 0, contact_count as i32, 0);
+    // C: b3ParallelFor(world, b3CollideTask, contactCount, 20, context, "collide").
+    // The contacts, per-worker task contexts, and the pre-solve callback are
+    // taken out of the world so the parallel workers share a read-only &World;
+    // per-contact and per-worker mutation goes through SyncSlice (see
+    // CollideCtx invariants). A world with a pre-solve callback falls back to
+    // a single worker because Box<dyn FnMut> is not Sync (the C requires the
+    // callback to be thread-safe instead).
+    {
+        let mut contacts = std::mem::take(&mut world.contacts);
+        let mut task_contexts = std::mem::take(&mut world.task_contexts);
+        let mut pre_solve = world.pre_solve_fcn.take();
+
+        let use_pre_solve = pre_solve.is_some();
+        let effective_workers = if use_pre_solve { 1 } else { world.worker_count };
+
+        {
+            let contacts_slice = crate::sync::SyncSlice::new(&mut contacts);
+            let task_contexts_slice = crate::sync::SyncSlice::new(&mut task_contexts);
+            let collide_ctx = CollideCtx {
+                world: &*world,
+                indices: &context.awake_contact_indices,
+                contacts: &contacts_slice,
+                task_contexts: &task_contexts_slice,
+                pre_solve: crate::sync::SyncPtr::new(&mut pre_solve),
+                use_pre_solve,
+            };
+
+            // Task should take at least 40us on a 4GHz CPU (10K cycles)
+            let min_range = 20;
+            // SAFETY: the callback partitions [0, contact_count) into disjoint
+            // ranges; per-element access is disjoint by contact id and worker
+            // index (see CollideCtx). The context outlives parallel_for, which
+            // blocks until all blocks complete.
+            unsafe {
+                crate::parallel_for::parallel_for(
+                    collide_ctx.world.scheduler.as_ref(),
+                    effective_workers,
+                    collide_task_trampoline,
+                    contact_count as i32,
+                    min_range,
+                    &collide_ctx as *const CollideCtx as *mut (),
+                    "collide",
+                );
+            }
+        }
+
+        world.contacts = contacts;
+        world.task_contexts = task_contexts;
+        world.pre_solve_fcn = pre_solve;
+    }
+
+    // Apply the deferred mesh contact spec updates (slot-disjoint, so worker
+    // order does not matter; iterate in worker order like the C merges).
+    for i in 0..world.worker_count as usize {
+        for k in 0..world.task_contexts[i].mesh_spec_updates.len() {
+            let (color_index, local_index, manifold_count) = world.task_contexts[i].mesh_spec_updates[k];
+            world.constraint_graph.colors[color_index as usize].contacts[local_index as usize].manifold_count =
+                manifold_count;
+        }
+    }
 
     // C releases the arena allocation here; the port clears but keeps capacity.
     context.awake_contact_indices.clear();
@@ -784,10 +895,23 @@ fn collide(world: &mut World, context: &mut StepContext) {
     // Serially update contact state
     let sat_multiplier = if context.dt > 0.0 { 1 } else { 0 };
 
-    // Bitwise OR all contact bits (single worker: worker 0's set is the union)
+    // Bitwise OR all contact bits into worker 0 and sum the counters in
+    // worker order (C: b3InPlaceUnion loop). Order independent: union and
+    // sums are commutative.
     world.sat_call_count = sat_multiplier * world.task_contexts[0].sat_call_count;
     world.sat_cache_hit_count = sat_multiplier * world.task_contexts[0].sat_cache_hit_count;
     world.manifold_counts = world.task_contexts[0].manifold_counts;
+    {
+        let (first, rest) = world.task_contexts.split_at_mut(1);
+        for i in 1..world.worker_count as usize {
+            crate::bitset::in_place_union(&mut first[0].contact_state_bit_set, &rest[i - 1].contact_state_bit_set);
+            world.sat_call_count += sat_multiplier * rest[i - 1].sat_call_count;
+            world.sat_cache_hit_count += sat_multiplier * rest[i - 1].sat_cache_hit_count;
+            for j in 0..CONTACT_MANIFOLD_COUNT_BUCKETS {
+                world.manifold_counts[j] += rest[i - 1].manifold_counts[j];
+            }
+        }
+    }
 
     let end_event_array_index = world.end_event_array_index;
 
@@ -989,6 +1113,12 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
         collide(world, &mut context);
         world.profile.collide = get_milliseconds(collide_ticks);
     }
+
+    // Finish the tree rebuild task before the solve: continuous collision
+    // queries the dynamic/kinematic trees. C keeps the overlap window open
+    // into b3Solve and finishes it there; the port closes it here, which
+    // still overlaps the rebuild with contact creation and the narrow phase.
+    crate::broad_phase::finish_tree_task(world);
 
     // Integrate velocities, solve velocity constraints, and integrate positions.
     if time_step > 0.0 {
