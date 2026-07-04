@@ -498,6 +498,15 @@ pub fn create_body(world: &mut World, def: &BodyDef) -> BodyId {
 
     world.locked = false;
 
+    {
+        let wid = crate::recording::rec_world_id(world);
+        crate::recording::rec_op(world, crate::recording::RecOp::CreateBody, |b| {
+            b.w_worldid(wid);
+            b.w_bodydef(def);
+            b.w_bodyid(id);
+        });
+    }
+
     id
 }
 
@@ -530,6 +539,10 @@ pub fn destroy_body(world: &mut World, body_id: BodyId) {
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::DestroyBody, |b| {
+        b.w_bodyid(body_id);
+    });
 
     world.locked = true;
 
@@ -1180,6 +1193,12 @@ pub fn body_get_world_vector(world: &World, body_id: BodyId, local_vector: Vec3)
 }
 
 pub fn body_set_transform(world: &mut World, body_id: BodyId, position: Pos, rotation: Quat) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetTransform, |b| {
+        b.w_bodyid(body_id);
+        b.w_position(position);
+        b.w_quat(rotation);
+    });
     b3_assert!(is_valid_position(position));
     b3_assert!(is_valid_quat(rotation));
     b3_assert!(!world.locked);
@@ -1250,6 +1269,11 @@ pub fn body_get_angular_velocity(world: &World, body_id: BodyId) -> Vec3 {
 }
 
 pub fn body_set_linear_velocity(world: &mut World, body_id: BodyId, linear_velocity: Vec3) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetLinearVelocity, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(linear_velocity);
+    });
     b3_assert!(is_valid_vec3(linear_velocity));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1268,6 +1292,11 @@ pub fn body_set_linear_velocity(world: &mut World, body_id: BodyId, linear_veloc
 }
 
 pub fn body_set_angular_velocity(world: &mut World, body_id: BodyId, angular_velocity: Vec3) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetAngularVelocity, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(angular_velocity);
+    });
     b3_assert!(is_valid_vec3(angular_velocity));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1298,6 +1327,13 @@ pub fn body_set_angular_velocity(world: &mut World, body_id: BodyId, angular_vel
 }
 
 pub fn body_set_target_transform(world: &mut World, body_id: BodyId, target: WorldTransform, time_step: f32, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetTargetTransform, |b| {
+        b.w_bodyid(body_id);
+        b.w_worldxf(target);
+        b.w_f32(time_step);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_world_transform(target));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1395,6 +1431,13 @@ pub fn body_get_world_point_velocity(world: &World, body_id: BodyId, world_point
 }
 
 pub fn body_apply_force(world: &mut World, body_id: BodyId, force: Vec3, point: Pos, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyForce, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(force);
+        b.w_position(point);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(force));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1411,6 +1454,12 @@ pub fn body_apply_force(world: &mut World, body_id: BodyId, force: Vec3, point: 
 }
 
 pub fn body_apply_force_to_center(world: &mut World, body_id: BodyId, force: Vec3, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyForceToCenter, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(force);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(force));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1426,6 +1475,12 @@ pub fn body_apply_force_to_center(world: &mut World, body_id: BodyId, force: Vec
 }
 
 pub fn body_apply_torque(world: &mut World, body_id: BodyId, torque: Vec3, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyTorque, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(torque);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(torque));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1441,6 +1496,13 @@ pub fn body_apply_torque(world: &mut World, body_id: BodyId, torque: Vec3, wake:
 }
 
 pub fn body_apply_linear_impulse(world: &mut World, body_id: BodyId, impulse: Vec3, point: Pos, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyLinearImpulse, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(impulse);
+        b.w_position(point);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(impulse));
     b3_assert!(is_valid_position(point));
 
@@ -1469,6 +1531,12 @@ pub fn body_apply_linear_impulse(world: &mut World, body_id: BodyId, impulse: Ve
 }
 
 pub fn body_apply_linear_impulse_to_center(world: &mut World, body_id: BodyId, impulse: Vec3, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyLinearImpulseToCenter, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(impulse);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(impulse));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1492,6 +1560,12 @@ pub fn body_apply_linear_impulse_to_center(world: &mut World, body_id: BodyId, i
 }
 
 pub fn body_apply_angular_impulse(world: &mut World, body_id: BodyId, impulse: Vec3, wake: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyAngularImpulse, |b| {
+        b.w_bodyid(body_id);
+        b.w_vec3(impulse);
+        b.w_bool(wake);
+    });
     b3_assert!(is_valid_vec3(impulse));
 
     let body_index = get_body_full_id(world, body_id);
@@ -1526,6 +1600,11 @@ pub fn body_set_type(world: &mut World, body_id: BodyId, body_type: BodyType) {
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetType, |b| {
+        b.w_bodyid(body_id);
+        b.w_i32(body_type as i32);
+    });
 
     world.locked = true;
     let body_index = get_body_full_id(world, body_id);
@@ -1722,6 +1801,11 @@ pub fn body_set_type(world: &mut World, body_id: BodyId, body_type: BodyType) {
 }
 
 pub fn body_set_name(world: &mut World, body_id: BodyId, name: &str) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetName, |b| {
+        b.w_bodyid(body_id);
+        b.w_str(name);
+    });
     let body_index = get_body_full_id(world, body_id);
     world.bodies[body_index as usize].name = truncate_name(name);
 }
@@ -1781,6 +1865,11 @@ pub fn body_set_mass_data(world: &mut World, body_id: BodyId, mass_data: MassDat
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetMassData, |b| {
+        b.w_bodyid(body_id);
+        b.w_massdata(&mass_data);
+    });
+
     let body_index = get_body_full_id(world, body_id);
 
     {
@@ -1813,6 +1902,10 @@ pub fn body_apply_mass_from_shapes(world: &mut World, body_id: BodyId) {
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyApplyMassFromShapes, |b| {
+        b.w_bodyid(body_id);
+    });
+
     let body_index = get_body_full_id(world, body_id);
     update_body_mass_data(world, body_index);
 }
@@ -1824,6 +1917,11 @@ pub fn body_set_linear_damping(world: &mut World, body_id: BodyId, linear_dampin
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetLinearDamping, |b| {
+        b.w_bodyid(body_id);
+        b.w_f32(linear_damping);
+    });
 
     let body_index = get_body_full_id(world, body_id);
     get_body_sim_from_id_mut(world, body_index).linear_damping = linear_damping;
@@ -1842,6 +1940,11 @@ pub fn body_set_angular_damping(world: &mut World, body_id: BodyId, angular_damp
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetAngularDamping, |b| {
+        b.w_bodyid(body_id);
+        b.w_f32(angular_damping);
+    });
+
     let body_index = get_body_full_id(world, body_id);
     get_body_sim_from_id_mut(world, body_index).angular_damping = angular_damping;
 }
@@ -1858,6 +1961,11 @@ pub fn body_set_gravity_scale(world: &mut World, body_id: BodyId, gravity_scale:
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetGravityScale, |b| {
+        b.w_bodyid(body_id);
+        b.w_f32(gravity_scale);
+    });
 
     let body_index = get_body_full_id(world, body_id);
     get_body_sim_from_id_mut(world, body_index).gravity_scale = gravity_scale;
@@ -1878,6 +1986,11 @@ pub fn body_set_awake(world: &mut World, body_id: BodyId, awake: bool) {
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetAwake, |b| {
+        b.w_bodyid(body_id);
+        b.w_bool(awake);
+    });
 
     world.locked = true;
 
@@ -1911,6 +2024,11 @@ pub fn body_is_sleep_enabled(world: &World, body_id: BodyId) -> bool {
 }
 
 pub fn body_set_sleep_threshold(world: &mut World, body_id: BodyId, sleep_threshold: f32) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetSleepThreshold, |b| {
+        b.w_bodyid(body_id);
+        b.w_f32(sleep_threshold);
+    });
     let body_index = get_body_full_id(world, body_id);
     world.bodies[body_index as usize].sleep_threshold = sleep_threshold;
 }
@@ -1925,6 +2043,11 @@ pub fn body_enable_sleep(world: &mut World, body_id: BodyId, enable_sleep: bool)
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyEnableSleep, |b| {
+        b.w_bodyid(body_id);
+        b.w_bool(enable_sleep);
+    });
 
     let body_index = get_body_full_id(world, body_id);
 
@@ -1955,6 +2078,10 @@ pub fn body_disable(world: &mut World, body_id: BodyId) {
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyDisable, |b| {
+        b.w_bodyid(body_id);
+    });
 
     world.locked = true;
 
@@ -2021,6 +2148,10 @@ pub fn body_enable(world: &mut World, body_id: BodyId) {
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyEnable, |b| {
+        b.w_bodyid(body_id);
+    });
 
     let body_index = get_body_full_id(world, body_id);
     if world.bodies[body_index as usize].set_index != DISABLED_SET {
@@ -2095,6 +2226,11 @@ pub fn body_set_motion_locks(world: &mut World, body_id: BodyId, locks: MotionLo
         b3_assert!(!world.locked);
         return;
     }
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetMotionLocks, |b| {
+        b.w_bodyid(body_id);
+        b.w_locks(locks);
+    });
 
     let mut new_locks: u32 = 0;
     new_locks |= if locks.linear_x { LOCK_LINEAR_X } else { 0 };
@@ -2173,6 +2309,11 @@ pub fn body_set_bullet(world: &mut World, body_id: BodyId, flag: bool) {
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::BodySetBullet, |b| {
+        b.w_bodyid(body_id);
+        b.w_bool(flag);
+    });
+
     let new_flag = if flag { IS_BULLET } else { 0 };
 
     let body_index = get_body_full_id(world, body_id);
@@ -2200,6 +2341,11 @@ pub fn body_enable_contact_recycling(world: &mut World, body_id: BodyId, flag: b
         return;
     }
 
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyEnableContactRecycling, |b| {
+        b.w_bodyid(body_id);
+        b.w_bool(flag);
+    });
+
     let new_flag = if flag { BODY_ENABLE_CONTACT_RECYCLING } else { 0 };
 
     let body_index = get_body_full_id(world, body_id);
@@ -2222,6 +2368,11 @@ pub fn body_is_contact_recycling_enabled(world: &World, body_id: BodyId) -> bool
 }
 
 pub fn body_enable_hit_events(world: &mut World, body_id: BodyId, enable_hit_events: bool) {
+
+    crate::recording::rec_op(world, crate::recording::RecOp::BodyEnableHitEvents, |b| {
+        b.w_bodyid(body_id);
+        b.w_bool(enable_hit_events);
+    });
     let body_index = get_body_full_id(world, body_id);
     let mut shape_id = world.bodies[body_index as usize].head_shape_id;
     while shape_id != NULL_INDEX {
