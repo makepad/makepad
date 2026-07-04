@@ -61,15 +61,55 @@ pub struct BroadPhase {
     /// pointers. Not serialized by snapshots.
     pub move_results: Vec<MoveResult>,
 
-    /// Reusable tree-query hit buffers for update_broad_phase_pairs (the C
-    /// code filters inside the tree callback and needs no buffer; the port
-    /// collects hits first and reuses these across steps). Same transient
-    /// semantics as move_results.
-    pub(crate) pair_hit_scratch: Vec<(i32, u64)>,
-    pub(crate) pair_child_hit_scratch: Vec<u64>,
+    /// Reusable per-worker tree-query hit buffers for update_broad_phase_pairs
+    /// (the C code filters inside the tree callback and needs no buffer; the
+    /// port collects hits first and reuses these across steps). Sized to the
+    /// world worker count on first use. Same transient semantics as
+    /// move_results. Not serialized by snapshots.
+    pub(crate) pair_scratch: Vec<PairScratch>,
 
     /// Tracks shape pairs that have a Contact.
     pub pair_set: crate::table::HashSet,
+}
+
+/// Per-worker scratch for the pair query pass.
+#[derive(Debug, Default)]
+pub(crate) struct PairScratch {
+    pub(crate) hits: Vec<(i32, u64)>,
+    pub(crate) child_hits: Vec<u64>,
+}
+
+/// The C b3UpdateTreesTask: rebuild the dynamic and kinematic trees, run as a
+/// scheduler task overlapping contact creation and the narrow phase. The port
+/// TAKES the two trees out of the world for the task's lifetime (so there is
+/// no aliasing at all: the task owns them) and finish_tree_task puts them
+/// back. Nothing queries these trees inside the overlap window.
+#[derive(Default)]
+pub struct TreeRebuildJob {
+    pub dynamic_tree: DynamicTree,
+    pub kinematic_tree: DynamicTree,
+}
+
+// C: b3UpdateTreesTask
+pub(crate) unsafe fn tree_rebuild_trampoline(context: *mut ()) {
+    // SAFETY: the job is heap-boxed and owned by world.tree_rebuild_task until
+    // finish_tree_task joins it; the box address is stable.
+    let job = unsafe { &mut *(context as *mut TreeRebuildJob) };
+    dynamic_tree_rebuild(&mut job.dynamic_tree, false);
+    dynamic_tree_rebuild(&mut job.kinematic_tree, false);
+}
+
+/// Finish the pending tree rebuild task and restore the trees.
+/// C: world->finishTaskFcn(world->userTreeTask, ...). Must run before anything
+/// queries the dynamic/kinematic trees (the solve's continuous collision, or
+/// sensors).
+pub fn finish_tree_task(world: &mut World) {
+    if let Some((slot, mut job)) = world.tree_rebuild_task.take() {
+        let scheduler = world.scheduler.as_ref().expect("tree task without scheduler");
+        crate::scheduler::scheduler_finish_task(scheduler, slot);
+        world.broad_phase.trees[BodyType::Dynamic as usize] = std::mem::take(&mut job.dynamic_tree);
+        world.broad_phase.trees[BodyType::Kinematic as usize] = std::mem::take(&mut job.kinematic_tree);
+    }
 }
 
 /// This is what triggers new contact pairs to be created.
@@ -215,7 +255,7 @@ fn try_add_pair(
     world: &World,
     custom_filter: &mut Option<Box<CustomFilterFcn>>,
     result: &mut MoveResult,
-    pair_count: &mut i32,
+    pair_count: &crate::sync::AtomicIndex,
     pair_capacity: i32,
     shape_index: i32,
     proxy_id: i32,
@@ -298,8 +338,9 @@ fn try_add_pair(
     }
 
     // C claims a slot with an atomic fetch-add and ignores pairs beyond capacity.
-    let pair_index = *pair_count;
-    *pair_count += 1;
+    // C: atomic movePairIndex fetch-add, then bounds check (over-budget pairs
+    // are dropped; the 16x budget makes this effectively unreachable).
+    let pair_index = pair_count.fetch_add(1);
     if pair_index >= pair_capacity {
         return;
     }
@@ -320,7 +361,7 @@ fn query_tree_for_pairs(
     world: &World,
     custom_filter: &mut Option<Box<CustomFilterFcn>>,
     result: &mut MoveResult,
-    pair_count: &mut i32,
+    pair_count: &crate::sync::AtomicIndex,
     pair_capacity: i32,
     fat_aabb: AABB,
     query_tree_type: BodyType,
@@ -406,39 +447,48 @@ fn query_tree_for_pairs(
     }
 }
 
-pub fn update_broad_phase_pairs(world: &mut World) {
-    let move_count = world.broad_phase.move_array.len() as i32;
+/// Shared context for the parallel pair-finding pass. Each moved-proxy index
+/// is owned by exactly one worker (block partitioning), each worker_index is
+/// exclusive per task, and the pair budget is claimed atomically like the C
+/// movePairIndex. The custom filter slot is Some only on the serial fallback.
+struct FindPairsCtx<'a> {
+    world: &'a World,
+    move_results: &'a crate::sync::SyncSlice<'a, MoveResult>,
+    scratch: &'a crate::sync::SyncSlice<'a, PairScratch>,
+    pair_count: &'a crate::sync::AtomicIndex,
+    move_pair_capacity: i32,
+    custom_filter: crate::sync::SyncPtr<Option<Box<CustomFilterFcn>>>,
+    use_custom_filter: bool,
+}
 
-    if move_count == 0 {
-        return;
-    }
+// C: b3FindPairsTask trampoline.
+unsafe fn find_pairs_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
+    // SAFETY: the FindPairsCtx lives on the update_broad_phase_pairs stack
+    // frame, which blocks in parallel_for until every block completes.
+    let ctx = unsafe { &*(context as *const FindPairsCtx) };
+    find_pairs_task(ctx, start_index, end_index, worker_index);
+}
 
-    // C allocates moveResults/movePairs from the arena and links pairs into
-    // per-result lists; the port reuses the persistent buffers on BroadPhase
-    // (taken out for the duration of the update so the world can be read
-    // immutably). Logical content is only valid inside this function, like
-    // the C arena pointers.
-    let move_pair_capacity = 16 * move_count;
-    let mut pair_count: i32 = 0;
-    let mut move_results = std::mem::take(&mut world.broad_phase.move_results);
-    let mut hits = std::mem::take(&mut world.broad_phase.pair_hit_scratch);
-    let mut child_hits = std::mem::take(&mut world.broad_phase.pair_child_hit_scratch);
+// C: b3FindPairsTask.
+fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_index: i32) {
+    let world = ctx.world;
 
-    // Reuse the per-result pair list allocations from previous steps.
-    if move_results.len() < move_count as usize {
-        move_results.resize_with(move_count as usize, MoveResult::default);
-    }
-    for result in &mut move_results[..move_count as usize] {
-        result.pair_list.clear();
-    }
+    // SAFETY: worker_index is exclusive to this task (parallel_for contract).
+    let scratch = unsafe { ctx.scratch.get_mut(worker_index as usize) };
 
-    // Take the custom filter so the query phase can read the world immutably.
-    let mut custom_filter = world.custom_filter_fcn.take();
+    let mut no_filter: Option<Box<CustomFilterFcn>> = None;
+    let custom_filter: &mut Option<Box<CustomFilterFcn>> = if ctx.use_custom_filter {
+        // SAFETY: use_custom_filter forces a single worker; exclusive access.
+        unsafe { ctx.custom_filter.get() }
+    } else {
+        &mut no_filter
+    };
 
-    for i in 0..move_count as usize {
-        let result = &mut move_results[i];
+    for i in start_index..end_index {
+        // SAFETY: each moved-proxy index is visited by exactly one worker.
+        let result = unsafe { ctx.move_results.get_mut(i as usize) };
 
-        let query_proxy_key = world.broad_phase.move_array[i];
+        let query_proxy_key = world.broad_phase.move_array[i as usize];
         let query_proxy_type = proxy_type(query_proxy_key);
         let query_proxy_id = proxy_id(query_proxy_key);
 
@@ -456,57 +506,150 @@ pub fn update_broad_phase_pairs(world: &mut World) {
         if query_proxy_type == BodyType::Dynamic {
             query_tree_for_pairs(
                 world,
-                &mut custom_filter,
+                custom_filter,
                 result,
-                &mut pair_count,
-                move_pair_capacity,
+                ctx.pair_count,
+                ctx.move_pair_capacity,
                 fat_aabb,
                 BodyType::Kinematic,
                 query_proxy_key,
                 query_shape_index,
-                &mut hits,
-                &mut child_hits,
+                &mut scratch.hits,
+                &mut scratch.child_hits,
             );
             query_tree_for_pairs(
                 world,
-                &mut custom_filter,
+                custom_filter,
                 result,
-                &mut pair_count,
-                move_pair_capacity,
+                ctx.pair_count,
+                ctx.move_pair_capacity,
                 fat_aabb,
                 BodyType::Static,
                 query_proxy_key,
                 query_shape_index,
-                &mut hits,
-                &mut child_hits,
+                &mut scratch.hits,
+                &mut scratch.child_hits,
             );
         }
 
         // All proxies collide with dynamic proxies
         query_tree_for_pairs(
             world,
-            &mut custom_filter,
+            custom_filter,
             result,
-            &mut pair_count,
-            move_pair_capacity,
+            ctx.pair_count,
+            ctx.move_pair_capacity,
             fat_aabb,
             BodyType::Dynamic,
             query_proxy_key,
             query_shape_index,
-            &mut hits,
-            &mut child_hits,
+            &mut scratch.hits,
+            &mut scratch.child_hits,
         );
+    }
+}
+
+pub fn update_broad_phase_pairs(world: &mut World) {
+    let move_count = world.broad_phase.move_array.len() as i32;
+
+    if move_count == 0 {
+        return;
+    }
+
+    // C allocates moveResults/movePairs from the arena and links pairs into
+    // per-result lists; the port reuses the persistent buffers on BroadPhase
+    // (taken out for the duration of the update so the world can be read
+    // immutably). Logical content is only valid inside this function, like
+    // the C arena pointers.
+    let move_pair_capacity = 16 * move_count;
+    let pair_count = crate::sync::AtomicIndex::new(0);
+    let mut move_results = std::mem::take(&mut world.broad_phase.move_results);
+    let mut pair_scratch = std::mem::take(&mut world.broad_phase.pair_scratch);
+
+    // Reuse the per-result pair list allocations from previous steps.
+    if move_results.len() < move_count as usize {
+        move_results.resize_with(move_count as usize, MoveResult::default);
+    }
+    for result in &mut move_results[..move_count as usize] {
+        result.pair_list.clear();
+    }
+    if pair_scratch.len() < world.worker_count as usize {
+        pair_scratch.resize_with(world.worker_count as usize, PairScratch::default);
+    }
+
+    // Take the custom filter so the query phase can read the world immutably.
+    // A world with a custom filter falls back to a single worker because
+    // Box<dyn FnMut> is not Sync (C requires the callback to be thread-safe).
+    let mut custom_filter = world.custom_filter_fcn.take();
+
+    // C: b3ParallelFor(world, b3FindPairsTask, moveCount, 64, world, "pairs").
+    {
+        let use_custom_filter = custom_filter.is_some();
+        let effective_workers = if use_custom_filter { 1 } else { world.worker_count };
+
+        let results_slice = crate::sync::SyncSlice::new(&mut move_results[..move_count as usize]);
+        let scratch_slice = crate::sync::SyncSlice::new(&mut pair_scratch);
+        let find_ctx = FindPairsCtx {
+            world: &*world,
+            move_results: &results_slice,
+            scratch: &scratch_slice,
+            pair_count: &pair_count,
+            move_pair_capacity,
+            custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
+            use_custom_filter,
+        };
+
+        let min_range = 64;
+        // SAFETY: each moved-proxy index is visited by exactly one worker
+        // (block partitioning), each worker_index is exclusive per task, and
+        // the context outlives parallel_for (which blocks).
+        unsafe {
+            crate::parallel_for::parallel_for(
+                find_ctx.world.scheduler.as_ref(),
+                effective_workers,
+                find_pairs_trampoline,
+                move_count,
+                min_range,
+                &find_ctx as *const FindPairsCtx as *mut (),
+                "pairs",
+            );
+        }
     }
 
     world.custom_filter_fcn = custom_filter;
-    world.broad_phase.pair_hit_scratch = hits;
-    world.broad_phase.pair_child_hit_scratch = child_hits;
+    world.broad_phase.pair_scratch = pair_scratch;
 
-    // Task that in C can run in parallel with contact creation:
-    // rebuild the collision tree for dynamic and kinematic bodies to keep their
-    // query performance good. Serial port runs it inline (the C fallback path).
-    dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Dynamic as usize], false);
-    dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Kinematic as usize], false);
+    // Task that can be done in parallel with contact creation and the narrow
+    // phase: rebuild the collision tree for dynamic and kinematic bodies to
+    // keep their query performance good. The port takes the trees out of the
+    // world so the task owns them; world_step restores them via
+    // finish_tree_task before the solve (C keeps the window open until the
+    // solve's continuous pass finishes it).
+    let mut enqueued_tree_task = false;
+    if let Some(scheduler) = world.scheduler.as_ref() {
+        if world.worker_count > 1
+            && crate::scheduler::scheduler_task_count(scheduler) < crate::constants::MAX_TASKS as i32
+        {
+            b3_assert!(world.tree_rebuild_task.is_none());
+            let mut job = Box::new(TreeRebuildJob {
+                dynamic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Dynamic as usize]),
+                kinematic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Kinematic as usize]),
+            });
+            let job_ptr = &mut *job as *mut TreeRebuildJob as *mut ();
+            // SAFETY: the boxed job is stored on the world and outlives the
+            // task; finish_tree_task joins before the trees are used again.
+            let slot = unsafe {
+                crate::scheduler::scheduler_enqueue_task(scheduler, tree_rebuild_trampoline, job_ptr, "rebuild tree")
+            };
+            world.tree_rebuild_task = Some((slot, job));
+            enqueued_tree_task = true;
+        }
+    }
+    if !enqueued_tree_task {
+        // Serial fallback, exactly the C else-branch.
+        dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Dynamic as usize], false);
+        dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Kinematic as usize], false);
+    }
 
     // Single-threaded work
     // - Create contacts in deterministic order

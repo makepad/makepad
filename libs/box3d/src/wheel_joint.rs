@@ -13,7 +13,7 @@ use crate::joint::{JointSim, JointUnion};
 use crate::math_functions::*;
 use crate::math_internal::{blend3, solve2, Matrix2};
 use crate::physics_world::{World, AWAKE_SET};
-use crate::solver::{make_soft, StepContext};
+use crate::solver::{make_soft, StateAccess, StepContext};
 use crate::types::JointType;
 
 fn get_wheel(base: &mut JointSim) -> &mut crate::joint::WheelJoint {
@@ -418,7 +418,7 @@ pub fn prepare_wheel_joint(base: &mut JointSim, world: &World, context: &StepCon
     }
 }
 
-pub fn warm_start_wheel_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_wheel_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Wheel);
 
     let m_a = base.inv_mass_a;
@@ -432,9 +432,9 @@ pub fn warm_start_wheel_joint(base: &mut JointSim, context: &mut StepContext) {
     let index_a = joint.index_a;
     let index_b = joint.index_b;
     let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { context.states[index_a as usize] };
+        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
     let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { context.states[index_b as usize] };
+        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
 
     let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
     let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
@@ -507,14 +507,14 @@ pub fn warm_start_wheel_joint(base: &mut JointSim, context: &mut StepContext) {
     }
 
     if index_a != NULL_INDEX {
-        context.states[index_a as usize] = state_a;
+        states.set(index_a as usize, state_a);
     }
     if index_b != NULL_INDEX {
-        context.states[index_b as usize] = state_b;
+        states.set(index_b as usize, state_b);
     }
 }
 
-pub fn solve_wheel_joint(base: &mut JointSim, context: &mut StepContext, use_bias: bool) {
+pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &StepContext, use_bias: bool) {
     b3_assert!(base.joint_type == JointType::Wheel);
 
     let m_a = base.inv_mass_a;
@@ -530,9 +530,9 @@ pub fn solve_wheel_joint(base: &mut JointSim, context: &mut StepContext, use_bia
     let index_a = joint.index_a;
     let index_b = joint.index_b;
     let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { context.states[index_a as usize] };
+        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
     let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { context.states[index_b as usize] };
+        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
 
     let mut v_a = state_a.linear_velocity;
     let mut w_a = state_a.angular_velocity;
@@ -884,9 +884,9 @@ pub fn solve_wheel_joint(base: &mut JointSim, context: &mut StepContext, use_bia
     }
 
     if index_a != NULL_INDEX {
-        context.states[index_a as usize] = state_a;
+        states.set(index_a as usize, state_a);
     }
     if index_b != NULL_INDEX {
-        context.states[index_b as usize] = state_b;
+        states.set(index_b as usize, state_b);
     }
 }

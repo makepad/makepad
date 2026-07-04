@@ -20,7 +20,7 @@ use crate::math_functions::{
 };
 use crate::math_internal::{length2, length_squared2, solve2, sub2, Matrix2};
 use crate::physics_world::{World, AWAKE_SET};
-use crate::solver::{make_soft, StepContext};
+use crate::solver::{make_soft, StateAccess, StepContext};
 use crate::types::JointType;
 
 #[inline]
@@ -148,7 +148,7 @@ pub fn prepare_parallel_joint(base: &mut JointSim, world: &World, context: &Step
     }
 }
 
-pub fn warm_start_parallel_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_parallel_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Parallel);
 
     let i_a = base.inv_i_a;
@@ -160,12 +160,12 @@ pub fn warm_start_parallel_joint(base: &mut JointSim, context: &mut StepContext)
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let mut w_a = state_a.angular_velocity;
@@ -185,14 +185,14 @@ pub fn warm_start_parallel_joint(base: &mut JointSim, context: &mut StepContext)
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }
 
-pub fn solve_parallel_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn solve_parallel_joint(base: &mut JointSim, states: &StateAccess, context: &StepContext) {
     let i_a = base.inv_i_a;
     let i_b = base.inv_i_b;
     let fixed_rotation = base.fixed_rotation;
@@ -203,12 +203,12 @@ pub fn solve_parallel_joint(base: &mut JointSim, context: &mut StepContext) {
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let mut w_a = state_a.angular_velocity;
@@ -282,9 +282,9 @@ pub fn solve_parallel_joint(base: &mut JointSim, context: &mut StepContext) {
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }

@@ -19,7 +19,7 @@ use crate::math_functions::{
 };
 use crate::math_internal::{add2, blend3, delta_quat_to_rotation, mul_sv2, solve2, sub2, Matrix2};
 use crate::physics_world::{World, AWAKE_SET};
-use crate::solver::{make_soft, StepContext};
+use crate::solver::{make_soft, StateAccess, StepContext};
 use crate::types::JointType;
 
 // Linear constraint (point-to-line)
@@ -338,7 +338,7 @@ pub fn prepare_prismatic_joint(base: &mut JointSim, world: &World, context: &Ste
     }
 }
 
-pub fn warm_start_prismatic_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_prismatic_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Prismatic);
 
     let m_a = base.inv_mass_a;
@@ -352,12 +352,12 @@ pub fn warm_start_prismatic_joint(base: &mut JointSim, context: &mut StepContext
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     // todo make this code and the wheel joint more similar
@@ -403,14 +403,14 @@ pub fn warm_start_prismatic_joint(base: &mut JointSim, context: &mut StepContext
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }
 
-pub fn solve_prismatic_joint(base: &mut JointSim, context: &mut StepContext, use_bias: bool) {
+pub fn solve_prismatic_joint(base: &mut JointSim, states: &StateAccess, context: &StepContext, use_bias: bool) {
     let m_a = base.inv_mass_a;
     let m_b = base.inv_mass_b;
     let i_a = base.inv_i_a;
@@ -424,12 +424,12 @@ pub fn solve_prismatic_joint(base: &mut JointSim, context: &mut StepContext, use
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let mut v_a = state_a.linear_velocity;
@@ -670,9 +670,9 @@ pub fn solve_prismatic_joint(base: &mut JointSim, context: &mut StepContext, use
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }

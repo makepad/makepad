@@ -67,14 +67,16 @@ To pull in upstream changes:
   test halves (6 extra tests). Snapshot images record the precision mode and
   reject cross-mode loads.
 
-## Performance vs C (Apple Silicon, single worker, release + fat LTO)
+## Performance vs C (Apple Silicon, release + fat LTO, 2026-07-04)
 
-C compiled `clang -O2`, both sides serial, `-r=1`, 2026-07-04, commit above.
-Rust is 1.05–1.55× slower (geomean ≈ 1.3×); the residual gap sits in
-collide/constraints and comes from known deviations (per-step `Vec` scratch
-instead of C arenas, per-contact manifold `Vec`s instead of the block
-allocator, bounds checks). C at 8 workers is ~5× faster on heavy scenes —
-threading is the big remaining lever (not ported, see below).
+C compiled `clang -O3`, upstream benchmark scenarios (`examples/benchmark.rs`,
+`-w=<workers>`). Single worker: Rust is 1.04–1.56× slower (geomean ≈ 1.3×);
+the residual gap sits in collide/constraints codegen (bounds checks, no
+`restrict` aliasing). At 8 workers Rust scales 3.4–5.7× over its own serial
+times (large_pyramid 1676→366 ms, washer 30.6→8.7 s, junkyard 25.2→6.7 s) and
+lands 1.2–2.3× behind C at 8 workers (geomean ≈ 1.6× — parallel scaling
+efficiency is the current tuning frontier). Rust at 8 workers beats
+single-threaded C by 2.4–4.8× on heavy scenes.
 
 ## Intentional differences from C (keep these in mind when diffing)
 
@@ -86,9 +88,13 @@ threading is the big remaining lever (not ported, see below).
   dump/save/load debug helpers (`b3Dump*`, `b3DynamicTree_Save/Load`)
 - Compound byte serialization (`b3ConvertCompoundToBytes`/`BytesToCompound`)
   — compounds serialize through the snapshot geometry registry instead
-- Threading: everything runs serially (worker count 1). The C task/stage
-  atomics collapsed to in-order execution with identical iteration order; the
-  stage/block structure is preserved so the C control flow still maps
+- Threading IS ported (scheduler.c/parallel_for.c + the solver's atomic
+  block-claiming stage machinery, sync primitives in sync.rs): set
+  WorldDef.worker_count > 1. Results are bit-identical at any worker count
+  (the determinism test asserts the same hash at 1/2/4 workers). External
+  task-system callbacks (enqueueTask/finishTask) are not ported — built-in
+  scheduler only. Pre-solve/custom-filter callbacks force the affected pass
+  to run serially (Box<dyn FnMut> is not Sync)
 - The global world registry: `World` is an owned struct, every API function
   takes `world` explicitly (`b3Body_GetPosition(id)` →
   `body_get_position(&world, id)`)

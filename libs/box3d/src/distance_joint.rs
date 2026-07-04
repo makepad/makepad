@@ -18,7 +18,7 @@ use crate::math_functions::{
     normalize, rotate_vector, sub, sub_pos, transform_world_point, Vec3,
 };
 use crate::physics_world::{World, AWAKE_SET};
-use crate::solver::{make_soft, StepContext};
+use crate::solver::{make_soft, StateAccess, StepContext};
 use crate::types::JointType;
 
 #[inline]
@@ -287,7 +287,7 @@ pub fn prepare_distance_joint(base: &mut JointSim, world: &World, context: &Step
     }
 }
 
-pub fn warm_start_distance_joint(base: &mut JointSim, context: &mut StepContext) {
+pub fn warm_start_distance_joint(base: &mut JointSim, states: &StateAccess, _context: &StepContext) {
     b3_assert!(base.joint_type == JointType::Distance);
 
     let m_a = base.inv_mass_a;
@@ -301,12 +301,12 @@ pub fn warm_start_distance_joint(base: &mut JointSim, context: &mut StepContext)
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let r_a = rotate_vector(state_a.delta_rotation, joint.anchor_a);
@@ -330,14 +330,14 @@ pub fn warm_start_distance_joint(base: &mut JointSim, context: &mut StepContext)
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }
 
-pub fn solve_distance_joint(base: &mut JointSim, context: &mut StepContext, use_bias: bool) {
+pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: &StepContext, use_bias: bool) {
     b3_assert!(base.joint_type == JointType::Distance);
 
     let m_a = base.inv_mass_a;
@@ -352,12 +352,12 @@ pub fn solve_distance_joint(base: &mut JointSim, context: &mut StepContext, use_
     let mut state_a = if joint.index_a == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_a as usize]
+        states.get(joint.index_a as usize)
     };
     let mut state_b = if joint.index_b == NULL_INDEX {
         IDENTITY_BODY_STATE
     } else {
-        context.states[joint.index_b as usize]
+        states.get(joint.index_b as usize)
     };
 
     let mut v_a = state_a.linear_velocity;
@@ -519,9 +519,9 @@ pub fn solve_distance_joint(base: &mut JointSim, context: &mut StepContext, use_
     }
 
     if joint.index_a != NULL_INDEX {
-        context.states[joint.index_a as usize] = state_a;
+        states.set(joint.index_a as usize, state_a);
     }
     if joint.index_b != NULL_INDEX {
-        context.states[joint.index_b as usize] = state_b;
+        states.set(joint.index_b as usize, state_b);
     }
 }
