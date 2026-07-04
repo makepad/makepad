@@ -298,3 +298,19 @@ fn math_test() {
         ensure_small!(rel_ab.p.z - t_b.p.z, 1.0e-5);
     }
 }
+
+// Port of the BOX3D_DOUBLE_PRECISION block in test_math.c: far from the origin the
+// double layer keeps the relative result accurate where pure float would quantize.
+// Two poses one meter apart at x = 1e8.
+#[cfg(feature = "double-precision")]
+#[test]
+fn math_double_precision_relative_transform() {
+    use makepad_box3d::math_functions::{inv_mul_world_transforms, offset_pos, Pos, WorldTransform};
+    use makepad_box3d::ensure;
+
+    let base = Pos { x: 1.0e8, y: 0.0, z: 0.0 };
+    let w_a = WorldTransform { p: base, q: Quat::IDENTITY };
+    let w_b = WorldTransform { p: offset_pos(base, vec3(1.0, 0.0, 0.0)), q: Quat::IDENTITY };
+    let rel = inv_mul_world_transforms(w_a, w_b);
+    ensure!(rel.p.x == 1.0 && rel.p.y == 0.0 && rel.p.z == 0.0);
+}

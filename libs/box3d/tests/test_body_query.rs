@@ -25,7 +25,7 @@ fn create_query_world() -> (World, makepad_box3d::id::BodyId) {
 }
 
 fn identity_at(x: f32, y: f32, z: f32) -> WorldTransform {
-    Transform { p: vec3(x, y, z), q: Quat::IDENTITY }
+    WorldTransform { p: pos(x, y, z), q: Quat::IDENTITY }
 }
 
 // CastRay ----------------------------------------------------------------------------------
@@ -43,7 +43,7 @@ fn cast_ray_hits_sphere() {
     let result = body_cast_ray(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         vec3(10.0, 0.0, 0.0),
         default_query_filter(),
         1.0,
@@ -78,7 +78,7 @@ fn cast_ray_miss() {
     let result = body_cast_ray(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         vec3(0.0, 10.0, 0.0),
         default_query_filter(),
         1.0,
@@ -105,7 +105,7 @@ fn cast_ray_closest_shape() {
     let result = body_cast_ray(
         &world,
         body_id,
-        vec3(-5.0, 0.0, 0.0),
+        pos(-5.0, 0.0, 0.0),
         vec3(10.0, 0.0, 0.0),
         default_query_filter(),
         1.0,
@@ -129,14 +129,14 @@ fn cast_ray_rotated_body() {
     let shape_def = default_shape_def();
     makepad_box3d::shape::create_sphere_shape(&mut world, body_id, &shape_def, &sphere);
 
-    let body_transform = Transform {
-        p: vec3(0.0, 0.0, 0.0),
+    let body_transform = WorldTransform {
+        p: pos(0.0, 0.0, 0.0),
         q: make_quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.5 * PI),
     };
     let result = body_cast_ray(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         vec3(-4.0, 0.0, 0.0),
         default_query_filter(),
         1.0,
@@ -163,8 +163,8 @@ fn cast_ray_far_from_origin() {
 
     // Same geometry as cast_ray_hits_sphere shifted far from the world origin. The relative
     // framing keeps the subtraction exact, so fraction and normal must be unchanged.
-    let origin = vec3(1.0e6, -2.0e6, 5.0e5);
-    let body_transform = Transform { p: offset_pos(origin, vec3(5.0, 0.0, 0.0)), q: Quat::IDENTITY };
+    let origin = pos(1.0e6, -2.0e6, 5.0e5);
+    let body_transform = WorldTransform { p: offset_pos(origin, vec3(5.0, 0.0, 0.0)), q: Quat::IDENTITY };
     let result = body_cast_ray(
         &world,
         body_id,
@@ -201,7 +201,7 @@ fn cast_shape_hits_box() {
     let result = body_cast_shape(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &proxy,
         vec3(10.0, 0.0, 0.0),
         default_query_filter(),
@@ -237,7 +237,7 @@ fn cast_shape_miss() {
     let result = body_cast_shape(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &proxy,
         vec3(0.0, 10.0, 0.0),
         default_query_filter(),
@@ -262,14 +262,14 @@ fn cast_shape_rotated_body() {
 
     let point = [vec3(0.0, 0.0, 0.0)];
     let proxy = ShapeProxy { points: &point, radius: 0.5 };
-    let body_transform = Transform {
-        p: vec3(0.0, 0.0, 0.0),
+    let body_transform = WorldTransform {
+        p: pos(0.0, 0.0, 0.0),
         q: make_quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.5 * PI),
     };
     let result = body_cast_shape(
         &world,
         body_id,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &proxy,
         vec3(-4.0, 0.0, 0.0),
         default_query_filter(),
@@ -298,8 +298,8 @@ fn cast_shape_far_from_origin() {
 
     let point = [vec3(0.0, 0.0, 0.0)];
     let proxy = ShapeProxy { points: &point, radius: 0.5 };
-    let origin = vec3(1.0e6, -2.0e6, 5.0e5);
-    let body_transform = Transform { p: offset_pos(origin, vec3(5.0, 0.0, 0.0)), q: Quat::IDENTITY };
+    let origin = pos(1.0e6, -2.0e6, 5.0e5);
+    let body_transform = WorldTransform { p: offset_pos(origin, vec3(5.0, 0.0, 0.0)), q: Quat::IDENTITY };
     let result = body_cast_shape(
         &world,
         body_id,
@@ -333,7 +333,7 @@ fn overlap_true() {
     let point = [vec3(0.0, 0.0, 0.0)];
     let proxy = ShapeProxy { points: &point, radius: 0.5 };
     let body_transform = identity_at(5.0, 0.0, 0.0);
-    let overlaps = body_overlap_shape(&world, body_id, vec3(5.0, 0.0, 0.0), &proxy, default_query_filter(), body_transform);
+    let overlaps = body_overlap_shape(&world, body_id, pos(5.0, 0.0, 0.0), &proxy, default_query_filter(), body_transform);
 
     ensure!(overlaps);
 
@@ -351,7 +351,7 @@ fn overlap_false() {
     let point = [vec3(0.0, 0.0, 0.0)];
     let proxy = ShapeProxy { points: &point, radius: 0.5 };
     let body_transform = identity_at(5.0, 0.0, 0.0);
-    let overlaps = body_overlap_shape(&world, body_id, vec3(20.0, 0.0, 0.0), &proxy, default_query_filter(), body_transform);
+    let overlaps = body_overlap_shape(&world, body_id, pos(20.0, 0.0, 0.0), &proxy, default_query_filter(), body_transform);
 
     ensure!(overlaps == false);
 
@@ -369,7 +369,7 @@ fn overlap_respects_body_transform() {
     // Fixed proxy and origin: only the supplied transform decides the overlap.
     let point = [vec3(0.0, 0.0, 0.0)];
     let proxy = ShapeProxy { points: &point, radius: 0.5 };
-    let origin = vec3(0.0, 0.0, 0.0);
+    let origin = pos(0.0, 0.0, 0.0);
 
     ensure!(body_overlap_shape(&world, body_id, origin, &proxy, default_query_filter(), identity_at(0.0, 0.0, 0.0)));
     ensure!(
@@ -394,7 +394,7 @@ fn overlap_filter() {
     // Geometry overlaps, but a zero mask rejects every category.
     let mut filter = default_query_filter();
     filter.mask_bits = 0;
-    let overlaps = body_overlap_shape(&world, body_id, vec3(0.0, 0.0, 0.0), &proxy, filter, body_transform);
+    let overlaps = body_overlap_shape(&world, body_id, pos(0.0, 0.0, 0.0), &proxy, filter, body_transform);
 
     ensure!(overlaps == false);
 
@@ -419,7 +419,7 @@ fn mover_touches_box() {
         &world,
         body_id,
         &mut planes,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &mover,
         default_query_filter(),
         body_transform,
@@ -449,7 +449,7 @@ fn mover_separated() {
         &world,
         body_id,
         &mut planes,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &mover,
         default_query_filter(),
         body_transform,
@@ -472,15 +472,15 @@ fn mover_rotated_body() {
     // world +Z face, so the returned normal must come back rotated into world space.
     let mover = Capsule { center1: vec3(-0.3, 0.0, 0.6), center2: vec3(0.3, 0.0, 0.6), radius: 0.2 };
     let mut planes = [BodyPlaneResult::default(); 4];
-    let body_transform = Transform {
-        p: vec3(0.0, 0.0, 0.0),
+    let body_transform = WorldTransform {
+        p: pos(0.0, 0.0, 0.0),
         q: make_quat_from_axis_angle(vec3(1.0, 0.0, 0.0), 0.5 * PI),
     };
     let count = body_collide_mover(
         &world,
         body_id,
         &mut planes,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &mover,
         default_query_filter(),
         body_transform,
@@ -514,7 +514,7 @@ fn mover_capacity() {
         &world,
         body_id,
         &mut planes[..1],
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &mover,
         default_query_filter(),
         body_transform,
@@ -525,7 +525,7 @@ fn mover_capacity() {
         &world,
         body_id,
         &mut planes,
-        vec3(0.0, 0.0, 0.0),
+        pos(0.0, 0.0, 0.0),
         &mover,
         default_query_filter(),
         body_transform,

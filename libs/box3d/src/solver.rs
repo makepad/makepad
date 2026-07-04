@@ -253,7 +253,7 @@ const SIMD_WIDTH: i32 = 4;
 fn zero_body_move_event() -> BodyMoveEvent {
     BodyMoveEvent {
         user_data: 0,
-        transform: Transform::IDENTITY,
+        transform: crate::math_functions::WORLD_TRANSFORM_IDENTITY,
         body_id: crate::id::NULL_BODY_ID,
         fell_asleep: false,
     }
@@ -1839,7 +1839,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                         shape_id_a: ShapeId::default(),
                         shape_id_b: ShapeId::default(),
                         contact_id: ContactId::default(),
-                        point: Vec3::ZERO,
+                        point: crate::math_functions::POS_ZERO,
                         normal: Vec3::ZERO,
                         approach_speed: threshold,
                         user_material_id_a: 0,

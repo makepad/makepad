@@ -59,10 +59,47 @@ pub struct Transform {
 }
 
 /// In single precision mode these types are the same.
+#[cfg(not(feature = "double-precision"))]
 pub type Pos = Vec3;
 
 /// In single precision mode these types are the same.
+#[cfg(not(feature = "double-precision"))]
 pub type WorldTransform = Transform;
+
+/// A world position. Double precision in large world mode so coordinates stay
+/// accurate far from the origin.
+#[cfg(feature = "double-precision")]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Pos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// A world transform with double precision translation and float quaternion rotation.
+/// Rotation is frame local and never needs the extra range, the same split as Jolt's
+/// DMat44.
+#[cfg(feature = "double-precision")]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct WorldTransform {
+    pub p: Pos,
+    pub q: Quat,
+}
+
+/// (b3Pos){x, y, z} literal helper. C struct literals compile in either
+/// precision mode; this is the port's equivalent.
+#[cfg(not(feature = "double-precision"))]
+#[inline(always)]
+pub const fn pos(x: f32, y: f32, z: f32) -> Pos {
+    Pos { x, y, z }
+}
+
+/// (b3Pos){x, y, z} literal helper (double precision mode).
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn pos(x: f32, y: f32, z: f32) -> Pos {
+    Pos { x: x as f64, y: y as f64, z: z as f64 }
+}
 
 /// A 3x3 matrix (columns).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -127,8 +164,16 @@ impl Matrix3 {
 }
 
 // Valid in both modes.
+#[cfg(not(feature = "double-precision"))]
 pub const POS_ZERO: Pos = Vec3::ZERO;
+#[cfg(not(feature = "double-precision"))]
 pub const WORLD_TRANSFORM_IDENTITY: WorldTransform = Transform::IDENTITY;
+
+#[cfg(feature = "double-precision")]
+pub const POS_ZERO: Pos = Pos { x: 0.0, y: 0.0, z: 0.0 };
+#[cfg(feature = "double-precision")]
+pub const WORLD_TRANSFORM_IDENTITY: WorldTransform =
+    WorldTransform { p: POS_ZERO, q: Quat::IDENTITY };
 
 /// @return the minimum of two integers
 #[inline(always)]
@@ -783,46 +828,109 @@ pub fn inv_transform_point(t: Transform, v: Vec3) -> Vec3 {
     inv_rotate_vector(t.q, sub(v, t.p))
 }
 
-// World position boundary. In single precision mode these are mostly no-ops.
+// World position boundary. These cross between the double precision world space at the
+// public boundary and the float interior. In single precision mode these are mostly no-ops.
 
 /// Convert a vector to a world position.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn to_pos(v: Vec3) -> Pos {
     v
 }
 
+/// Convert a vector to a world position.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn to_pos(v: Vec3) -> Pos {
+    Pos { x: v.x as f64, y: v.y as f64, z: v.z as f64 }
+}
+
 /// Lossy conversion of a world position to a float vector.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn to_vec3(p: Pos) -> Vec3 {
     p
 }
 
+/// Lossy conversion of a world position to a float vector.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn to_vec3(p: Pos) -> Vec3 {
+    vec3(p.x as f32, p.y as f32, p.z as f32)
+}
+
 /// Narrow a world coordinate to float, rounding toward negative infinity.
 /// With large world mode off this is a plain conversion.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn round_down_float(x: f32) -> f32 {
     x
 }
 
+/// Narrow a world coordinate to float, rounding toward negative infinity. Use with
+/// round_up_float to build a conservative float box that always contains the double bounds,
+/// where plain rounding far from the origin could clip. next_down is an exact IEEE operation
+/// (C: nextafterf), so this is cross-platform deterministic.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn round_down_float(x: f64) -> f32 {
+    let f = x as f32;
+    if (f as f64) > x {
+        f.next_down()
+    } else {
+        f
+    }
+}
+
 /// Narrow a world coordinate to float, rounding toward positive infinity.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn round_up_float(x: f32) -> f32 {
     x
 }
 
+/// Narrow a world coordinate to float, rounding toward positive infinity.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn round_up_float(x: f64) -> f32 {
+    let f = x as f32;
+    if (f as f64) < x {
+        f.next_up()
+    } else {
+        f
+    }
+}
+
 /// a - b, demoted to float. The primary precision boundary operation.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn sub_pos(a: Pos, b: Pos) -> Vec3 {
     vec3(a.x - b.x, a.y - b.y, a.z - b.z)
 }
 
+/// a - b, demoted to float. The primary precision boundary operation.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn sub_pos(a: Pos, b: Pos) -> Vec3 {
+    vec3((a.x - b.x) as f32, (a.y - b.y) as f32, (a.z - b.z) as f32)
+}
+
 /// p + d
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn offset_pos(p: Pos, d: Vec3) -> Pos {
     vec3(p.x + d.x, p.y + d.y, p.z + d.z)
 }
 
+/// p + d
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn offset_pos(p: Pos, d: Vec3) -> Pos {
+    Pos { x: p.x + d.x as f64, y: p.y + d.y as f64, z: p.z + d.z as f64 }
+}
+
 /// World position interpolation for sweeps and sampling.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
     Vec3 {
@@ -832,21 +940,52 @@ pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
     }
 }
 
+/// World position interpolation for sweeps and sampling.
+/// C: the float blend factors promote to double per component.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
+    Pos {
+        x: ((1.0 - t) as f64) * a.x + (t as f64) * b.x,
+        y: ((1.0 - t) as f64) * a.y + (t as f64) * b.y,
+        z: ((1.0 - t) as f64) * a.z + (t as f64) * b.z,
+    }
+}
+
 /// Transform a local point to a world position.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn transform_world_point(t: WorldTransform, p: Vec3) -> Pos {
     let r = rotate_vector(t.q, p);
     vec3(t.p.x + r.x, t.p.y + r.y, t.p.z + r.z)
 }
 
+/// Transform a local point to a world position. Rotation in float, translation in double.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn transform_world_point(t: WorldTransform, p: Vec3) -> Pos {
+    let r = rotate_vector(t.q, p);
+    Pos { x: t.p.x + r.x as f64, y: t.p.y + r.y as f64, z: t.p.z + r.z as f64 }
+}
+
 /// Transform a world position to a local point.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn inv_transform_world_point(t: WorldTransform, p: Pos) -> Vec3 {
     let d = vec3(p.x - t.p.x, p.y - t.p.y, p.z - t.p.z);
     inv_rotate_vector(t.q, d)
 }
 
+/// Transform a world position to a local point. One double subtraction, then float.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn inv_transform_world_point(t: WorldTransform, p: Pos) -> Vec3 {
+    let d = vec3((p.x - t.p.x) as f32, (p.y - t.p.y) as f32, (p.z - t.p.z) as f32);
+    inv_rotate_vector(t.q, d)
+}
+
 /// Relative transform of frame B in frame A. The narrow phase boundary.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn inv_mul_world_transforms(a: WorldTransform, b: WorldTransform) -> Transform {
     let q = inv_mul_quat(a.q, b.q);
@@ -854,7 +993,17 @@ pub fn inv_mul_world_transforms(a: WorldTransform, b: WorldTransform) -> Transfo
     Transform { p: inv_rotate_vector(a.q, d), q }
 }
 
+/// Relative transform of frame B in frame A. The narrow phase boundary.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn inv_mul_world_transforms(a: WorldTransform, b: WorldTransform) -> Transform {
+    let q = inv_mul_quat(a.q, b.q);
+    let d = vec3((b.p.x - a.p.x) as f32, (b.p.y - a.p.y) as f32, (b.p.z - a.p.z) as f32);
+    Transform { p: inv_rotate_vector(a.q, d), q }
+}
+
 /// Compose a world transform with a local transform.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn mul_world_transforms(a: WorldTransform, b: Transform) -> WorldTransform {
     let q = mul_quat(a.q, b.q);
@@ -862,7 +1011,20 @@ pub fn mul_world_transforms(a: WorldTransform, b: Transform) -> WorldTransform {
     Transform { p: vec3(a.p.x + r.x, a.p.y + r.y, a.p.z + r.z), q }
 }
 
+/// Compose a world transform with a local transform.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn mul_world_transforms(a: WorldTransform, b: Transform) -> WorldTransform {
+    let q = mul_quat(a.q, b.q);
+    let r = rotate_vector(a.q, b.p);
+    WorldTransform {
+        p: Pos { x: a.p.x + r.x as f64, y: a.p.y + r.y as f64, z: a.p.z + r.z as f64 },
+        q,
+    }
+}
+
 /// Shift a world transform into the frame of a base position.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn to_relative_transform(t: WorldTransform, base: Pos) -> Transform {
     Transform {
@@ -871,13 +1033,36 @@ pub fn to_relative_transform(t: WorldTransform, base: Pos) -> Transform {
     }
 }
 
+/// Shift a world transform into the frame of a base position.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn to_relative_transform(t: WorldTransform, base: Pos) -> Transform {
+    Transform {
+        p: vec3(
+            (t.p.x - base.x) as f32,
+            (t.p.y - base.y) as f32,
+            (t.p.z - base.z) as f32,
+        ),
+        q: t.q,
+    }
+}
+
 /// Promote a float transform to a world transform. Lossless.
+#[cfg(not(feature = "double-precision"))]
 #[inline(always)]
 pub fn make_world_transform(t: Transform) -> WorldTransform {
     t
 }
 
+/// Promote a float transform to a world transform. Lossless.
+#[cfg(feature = "double-precision")]
+#[inline(always)]
+pub fn make_world_transform(t: Transform) -> WorldTransform {
+    WorldTransform { p: to_pos(t.p), q: t.q }
+}
+
 /// Translate a local AABB by a world origin.
+#[cfg(not(feature = "double-precision"))]
 #[inline]
 pub fn offset_aabb(local_box: AABB, origin: Pos) -> AABB {
     AABB {
@@ -890,6 +1075,26 @@ pub fn offset_aabb(local_box: AABB, origin: Pos) -> AABB {
             x: origin.x + local_box.upper_bound.x,
             y: origin.y + local_box.upper_bound.y,
             z: origin.z + local_box.upper_bound.z,
+        },
+    }
+}
+
+/// Translate a local AABB by a world origin, rounding outward so the float box always
+/// contains the double box. Far from the origin a plain conversion could clip a shape
+/// out of its own box.
+#[cfg(feature = "double-precision")]
+#[inline]
+pub fn offset_aabb(local_box: AABB, origin: Pos) -> AABB {
+    AABB {
+        lower_bound: Vec3 {
+            x: round_down_float(origin.x + local_box.lower_bound.x as f64),
+            y: round_down_float(origin.y + local_box.lower_bound.y as f64),
+            z: round_down_float(origin.z + local_box.lower_bound.z as f64),
+        },
+        upper_bound: Vec3 {
+            x: round_up_float(origin.x + local_box.upper_bound.x as f64),
+            y: round_up_float(origin.y + local_box.upper_bound.y as f64),
+            z: round_up_float(origin.z + local_box.upper_bound.z as f64),
         },
     }
 }
@@ -1502,8 +1707,23 @@ pub fn is_valid_plane(a: Plane) -> bool {
 }
 
 /// Is this a valid world position? Not NaN or infinity.
+#[cfg(not(feature = "double-precision"))]
 pub fn is_valid_position(p: Pos) -> bool {
     is_valid_vec3(p)
+}
+
+/// Is this a valid world position? Not NaN or infinity.
+#[cfg(feature = "double-precision")]
+pub fn is_valid_position(p: Pos) -> bool {
+    if p.x.is_nan() || p.y.is_nan() || p.z.is_nan() {
+        return false;
+    }
+
+    if p.x.is_infinite() || p.y.is_infinite() || p.z.is_infinite() {
+        return false;
+    }
+
+    true
 }
 
 /// Is this a valid world transform? Not NaN or infinity. Rotation is normalized.

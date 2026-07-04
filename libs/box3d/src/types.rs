@@ -209,7 +209,7 @@ pub struct BodyDef {
 pub fn default_body_def() -> BodyDef {
     BodyDef {
         body_type: BodyType::Static,
-        position: Vec3::ZERO,
+        position: crate::math_functions::POS_ZERO,
         rotation: Quat::IDENTITY,
         linear_velocity: Vec3::ZERO,
         angular_velocity: Vec3::ZERO,
@@ -721,7 +721,7 @@ pub struct ExplosionDef {
 pub fn default_explosion_def() -> ExplosionDef {
     ExplosionDef {
         mask_bits: DEFAULT_MASK_BITS,
-        position: Vec3::ZERO,
+        position: crate::math_functions::POS_ZERO,
         radius: 0.0,
         falloff: 0.0,
         impulse_per_area: 0.0,
@@ -1015,7 +1015,32 @@ impl Default for CastOutput {
 }
 
 /// Same type in single precision.
+#[cfg(not(feature = "double-precision"))]
 pub type WorldCastOutput = CastOutput;
+
+/// Ray cast or shape-cast output in world space. The hit point is a world position so the
+/// result stays precise far from the world origin. Mirrors CastOutput with a double
+/// precision point.
+#[cfg(feature = "double-precision")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WorldCastOutput {
+    /// The surface normal at the hit point.
+    pub normal: Vec3,
+    /// The surface hit point in world space.
+    pub point: Pos,
+    /// The fraction of the input translation at collision.
+    pub fraction: f32,
+    /// The number of iterations used.
+    pub iterations: i32,
+    /// The index of the mesh or height field triangle hit.
+    pub triangle_index: i32,
+    /// The index of the compound child shape.
+    pub child_index: i32,
+    /// The material index. May be -1 for null.
+    pub material_index: i32,
+    /// Did the cast hit?
+    pub hit: bool,
+}
 
 /// Body cast result for ray and shape casts.
 #[derive(Clone, Copy, Debug, Default)]
