@@ -110,3 +110,72 @@ pub fn random_quat() -> crate::math_functions::Quat {
         s: sqrt_u1 * u3.cos(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Toy external task systems for exercising the WorldDef task hooks
+// (C: b3WorldDef enqueueTask/finishTask/userTaskContext). Test scaffolding.
+// ---------------------------------------------------------------------------
+
+/// Send wrapper for the raw task context crossing into a spawned thread.
+/// SAFETY (of use): the Box3D task contract guarantees the pointee outlives
+/// the finish call, and the task callback is what synchronizes access.
+struct SendTaskPtr(*mut ());
+unsafe impl Send for SendTaskPtr {}
+
+/// EnqueueTaskCallback that runs every Box3D task on a freshly spawned
+/// std::thread. finish joins it. Deliberately naive: it exists to prove the
+/// external hook contract, not to be fast.
+///
+/// # Safety
+/// Only pass to WorldDef::enqueue_task paired with [`thread_per_task_finish`].
+pub unsafe fn thread_per_task_enqueue(
+    task: crate::scheduler::TaskCallback,
+    task_context: *mut (),
+    _user_context: *mut (),
+    _name: &str,
+) -> *mut () {
+    let ptr = SendTaskPtr(task_context);
+    let handle = std::thread::spawn(move || {
+        let ptr = ptr;
+        // SAFETY: forwarded Box3D task contract (context valid until finish).
+        unsafe { task(ptr.0) };
+    });
+    Box::into_raw(Box::new(handle)) as *mut ()
+}
+
+/// FinishTaskCallback matching [`thread_per_task_enqueue`]: joins the thread.
+///
+/// # Safety
+/// `user_task` must be a pointer previously returned by
+/// [`thread_per_task_enqueue`]; called at most once per task.
+pub unsafe fn thread_per_task_finish(user_task: *mut (), _user_context: *mut ()) {
+    // SAFETY: round-trips the Box::into_raw above exactly once.
+    let handle = unsafe { Box::from_raw(user_task as *mut std::thread::JoinHandle<()>) };
+    handle.join().expect("box3d external task panicked");
+}
+
+/// EnqueueTaskCallback that executes the task inline and returns null —
+/// the C contract for "executed serially within the callback" (types.h);
+/// Box3D must then never call finish for it.
+///
+/// # Safety
+/// Only pass to WorldDef::enqueue_task (pair with [`inline_task_finish`]).
+pub unsafe fn inline_task_enqueue(
+    task: crate::scheduler::TaskCallback,
+    task_context: *mut (),
+    _user_context: *mut (),
+    _name: &str,
+) -> *mut () {
+    // SAFETY: forwarded Box3D task contract; inline execution.
+    unsafe { task(task_context) };
+    std::ptr::null_mut()
+}
+
+/// FinishTaskCallback for [`inline_task_enqueue`]: must never be called,
+/// because every enqueue returns null.
+///
+/// # Safety
+/// Trivially safe; panics to flag a contract violation.
+pub unsafe fn inline_task_finish(_user_task: *mut (), _user_context: *mut ()) {
+    panic!("finish called for a task that ran inline (null user task)");
+}

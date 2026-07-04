@@ -32,6 +32,7 @@ workspace.members = [
     "examples/move_after_draw",
     "examples/xr",
     "examples/cad",
+    "examples/box3d",
     "examples/hello_world",
     "libs/box3d",
     "libs/gif",

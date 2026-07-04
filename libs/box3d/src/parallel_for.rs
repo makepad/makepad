@@ -15,10 +15,8 @@
 // single-threaded behavior (and its float determinism) is unchanged.
 
 use crate::b3_assert;
-use crate::constants::{MAX_TASKS, MAX_WORKERS};
-use crate::scheduler::{
-    scheduler_enqueue_task, scheduler_finish_task, scheduler_task_count, Scheduler, TaskCallback,
-};
+use crate::constants::MAX_WORKERS;
+use crate::scheduler::{TaskCallback, TaskHandle, TaskSystem};
 use crate::sync::AtomicIndex;
 
 /// C: b3ParallelForCallback(startIndex, endIndex, workerIndex, context).
@@ -74,18 +72,18 @@ unsafe fn parallel_for_trampoline(task_context: *mut ()) {
 }
 
 /// C: b3ParallelFor(world, callback, itemCount, minRange, context, name).
-/// The port passes the scheduler and worker count instead of the world so
+/// The port passes the task system and worker count instead of the world so
 /// tasks may reference world data through `context` without aliasing.
 ///
 /// # Safety
-/// `callback` invocations may run concurrently on scheduler worker threads
+/// `callback` invocations may run concurrently on task-system threads
 /// with distinct (start, end) ranges and distinct worker_index values; the
 /// callback must only touch data that is safe under that partitioning
 /// (disjoint per-index element access, per-worker_index state, atomics).
 /// `context` must stay valid until this function returns (it does not return
 /// until all work completes).
 pub unsafe fn parallel_for(
-    scheduler: Option<&Scheduler>,
+    task_system: &TaskSystem,
     worker_count: i32,
     callback: ParallelForCallback,
     item_count: i32,
@@ -101,14 +99,12 @@ pub unsafe fn parallel_for(
     b3_assert!(0 < worker_count && worker_count <= MAX_WORKERS as i32);
 
     // Serial fast path: identical to the pre-threading port (a single
-    // whole-range invocation on worker 0).
-    let scheduler = match scheduler {
-        Some(scheduler) if worker_count > 1 => scheduler,
-        _ => {
-            unsafe { callback(0, item_count, 0, context) };
-            return;
-        }
-    };
+    // whole-range invocation on worker 0). C reaches the same result through
+    // b3DefaultAddTaskFcn running the trampoline inline.
+    if worker_count <= 1 || !task_system.is_parallel() {
+        unsafe { callback(0, item_count, 0, context) };
+        return;
+    }
 
     // Target multiple blocks per worker to reduce thread stalls.
     // Block size grows once items exceed max_block_count * min_range
@@ -145,32 +141,24 @@ pub unsafe fn parallel_for(
         tasks.push(ParallelForTask { shared: &shared as *const ParallelForShared, worker_index: i });
     }
 
-    // C: handles[i] == NULL marks tasks that ran inline because the task ring
-    // was full (world->taskCount < B3_MAX_TASKS budget).
-    let mut handles: [Option<i32>; MAX_WORKERS] = [None; MAX_WORKERS];
+    // C: handles[i] == NULL marks tasks that ran inline (task ring budget
+    // exhausted, or an external system that executed synchronously). The
+    // budget check and inline fallback live inside TaskSystem::enqueue.
+    let mut handles: [TaskHandle; MAX_WORKERS] = [TaskHandle::Inline; MAX_WORKERS];
     for i in 0..task_count as usize {
-        if scheduler_task_count(scheduler) < MAX_TASKS as i32 {
-            // SAFETY: `tasks` and `shared` outlive the finish loop below, and
-            // the trampoline honors the block partitioning contract.
-            let slot = unsafe {
-                scheduler_enqueue_task(
-                    scheduler,
-                    parallel_for_trampoline as TaskCallback,
-                    &tasks[i] as *const ParallelForTask as *mut (),
-                    name,
-                )
-            };
-            handles[i] = Some(slot);
-        } else {
-            handles[i] = None;
-            unsafe { parallel_for_trampoline(&tasks[i] as *const ParallelForTask as *mut ()) };
-        }
+        // SAFETY: `tasks` and `shared` outlive the finish loop below, and
+        // the trampoline honors the block partitioning contract.
+        handles[i] = unsafe {
+            task_system.enqueue(
+                parallel_for_trampoline as TaskCallback,
+                &tasks[i] as *const ParallelForTask as *mut (),
+                name,
+            )
+        };
     }
 
     for handle in handles.iter().take(task_count as usize) {
-        if let Some(slot) = *handle {
-            scheduler_finish_task(scheduler, slot);
-        }
+        task_system.finish(*handle);
     }
 }
 
@@ -186,14 +174,13 @@ pub fn parallel_for_serial(callback: &mut dyn FnMut(i32, i32, i32), item_count: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{create_scheduler, reset_scheduler};
     use crate::sync::SyncSlice;
 
     // 4 workers claim blocks over 10_000 items; every slot must be touched
     // exactly once (block disjointness), independent of execution order.
     #[test]
     fn parallel_for_touches_each_item_once() {
-        let scheduler = create_scheduler(4);
+        let task_system = TaskSystem::internal(4);
 
         struct Ctx<'a> {
             view: SyncSlice<'a, u32>,
@@ -209,7 +196,7 @@ mod tests {
         }
 
         for round in 0..8 {
-            reset_scheduler(&scheduler);
+            task_system.reset();
 
             let mut counts = vec![0u32; 10_000];
             let item_count = counts.len() as i32;
@@ -218,7 +205,7 @@ mod tests {
                 // SAFETY: ctx outlives the call; body honors disjoint blocks.
                 unsafe {
                     parallel_for(
-                        Some(&scheduler),
+                        &task_system,
                         4,
                         body,
                         item_count,
@@ -248,7 +235,15 @@ mod tests {
 
         let mut calls: Vec<(i32, i32, i32)> = Vec::new();
         unsafe {
-            parallel_for(None, 1, body, 100, 8, &mut calls as *mut _ as *mut (), "test");
+            parallel_for(
+                &TaskSystem::serial(),
+                1,
+                body,
+                100,
+                8,
+                &mut calls as *mut _ as *mut (),
+                "test",
+            );
         }
         assert_eq!(calls, vec![(0, 100, 0)]);
     }

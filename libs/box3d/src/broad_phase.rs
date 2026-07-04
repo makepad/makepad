@@ -104,9 +104,8 @@ pub(crate) unsafe fn tree_rebuild_trampoline(context: *mut ()) {
 /// queries the dynamic/kinematic trees (the solve's continuous collision, or
 /// sensors).
 pub fn finish_tree_task(world: &mut World) {
-    if let Some((slot, mut job)) = world.tree_rebuild_task.take() {
-        let scheduler = world.scheduler.as_ref().expect("tree task without scheduler");
-        crate::scheduler::scheduler_finish_task(scheduler, slot);
+    if let Some((handle, mut job)) = world.tree_rebuild_task.take() {
+        world.task_system.finish(handle);
         world.broad_phase.trees[BodyType::Dynamic as usize] = std::mem::take(&mut job.dynamic_tree);
         world.broad_phase.trees[BodyType::Kinematic as usize] = std::mem::take(&mut job.kinematic_tree);
     }
@@ -605,7 +604,7 @@ pub fn update_broad_phase_pairs(world: &mut World) {
         // the context outlives parallel_for (which blocks).
         unsafe {
             crate::parallel_for::parallel_for(
-                find_ctx.world.scheduler.as_ref(),
+                &find_ctx.world.task_system,
                 effective_workers,
                 find_pairs_trampoline,
                 move_count,
@@ -625,27 +624,24 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     // world so the task owns them; world_step restores them via
     // finish_tree_task before the solve (C keeps the window open until the
     // solve's continuous pass finishes it).
-    let mut enqueued_tree_task = false;
-    if let Some(scheduler) = world.scheduler.as_ref() {
-        if world.worker_count > 1
-            && crate::scheduler::scheduler_task_count(scheduler) < crate::constants::MAX_TASKS as i32
-        {
-            b3_assert!(world.tree_rebuild_task.is_none());
-            let mut job = Box::new(TreeRebuildJob {
-                dynamic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Dynamic as usize]),
-                kinematic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Kinematic as usize]),
-            });
-            let job_ptr = &mut *job as *mut TreeRebuildJob as *mut ();
-            // SAFETY: the boxed job is stored on the world and outlives the
-            // task; finish_tree_task joins before the trees are used again.
-            let slot = unsafe {
-                crate::scheduler::scheduler_enqueue_task(scheduler, tree_rebuild_trampoline, job_ptr, "rebuild tree")
-            };
-            world.tree_rebuild_task = Some((slot, job));
-            enqueued_tree_task = true;
-        }
-    }
-    if !enqueued_tree_task {
+    // (C gates on world->taskCount < B3_MAX_TASKS; TaskSystem::enqueue
+    // centralizes the budget and runs the task inline when exhausted, which is
+    // still correct here: the job completes synchronously and finish_tree_task
+    // restores the trees.)
+    if world.worker_count > 1 && world.task_system.is_parallel() {
+        b3_assert!(world.tree_rebuild_task.is_none());
+        let mut job = Box::new(TreeRebuildJob {
+            dynamic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Dynamic as usize]),
+            kinematic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Kinematic as usize]),
+        });
+        let job_ptr = &mut *job as *mut TreeRebuildJob as *mut ();
+        // SAFETY: the boxed job is stored on the world and outlives the
+        // task; finish_tree_task joins before the trees are used again.
+        let handle = unsafe {
+            world.task_system.enqueue(tree_rebuild_trampoline, job_ptr, "rebuild tree")
+        };
+        world.tree_rebuild_task = Some((handle, job));
+    } else {
         // Serial fallback, exactly the C else-branch.
         dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Dynamic as usize], false);
         dynamic_tree_rebuild(&mut world.broad_phase.trees[BodyType::Kinematic as usize], false);
