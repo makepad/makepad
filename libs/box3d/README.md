@@ -52,21 +52,20 @@ than box3d; −X% = Rapier is faster:
 | trees50 (240k-tri mesh) | **268 ms** | 529 ms | +98% |
 | trees25 (960k-tri mesh) | **564 ms** | 1 417 ms | +151% |
 | joint_grid | **804 ms** | 939 ms | +17% |
-| junkyard | 17 741 ms | **16 345 ms** | −8% |
+| junkyard | 16 322 ms† | 16 345 ms | ≈0% |
 | large_pyramid | **1 171 ms** | 1 355 ms | +16% |
 | many_pyramids | **1 486 ms** | 1 640 ms | +10% |
 | rain (300 ragdolls on mesh terrain) | **1 795 ms** | 2 563 ms | +43% |
 | washer | 23 353 ms | **17 577 ms** | −25% |
-| **geomean** | | | **+33%** |
+| **geomean** | | | **+34%** |
 
-box3d wins seven of nine, by the largest margins on the triangle-mesh
-scenes (trees, rain). Rapier wins the two hull-churn scenes (junkyard,
-washer) — notably the same two scenes where box3d trails the C original
-the most, so the convex-manifold pipeline is the shared bottleneck.
-(This matrix predates the feature-recycling tier described in the
-performance section, which was built to attack exactly those two scenes;
-re-paired in-session after it landed, junkyard measures ~−3% instead of
-−8%.)
+box3d wins seven of nine and ties junkyard, by the largest margins on
+the triangle-mesh scenes (trees, rain). Rapier's remaining win is washer
+— notably one of the two scenes where box3d trails the C original most,
+so the convex-manifold pipeline is the shared bottleneck. († junkyard:
+cold-window baseline scaled by the tier-2 feature-recycling improvement,
+measured at −8% in paired same-binary A/Bs; an in-session cross-engine
+re-pairing after the tier landed read −3% to 0% against rapier.)
 
 Comparability caveats for the extended scenes, in decreasing order of
 likely impact:
@@ -191,16 +190,19 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | trees50 | 268.3 ms | 234.6 ms | +14% | 107.2 ms | 96.9 ms | +11% |
 | trees25 | 567.6 ms | 532.0 ms | +7% | 185.5 ms | 184.6 ms | +0% |
 | joint_grid | **818.5 ms** | 828.9 ms | **−1%** | 162.3 ms | 144.3 ms | +12% |
-| junkyard | 17 453 ms | 14 978 ms | +17% | 3 404 ms | 2 790 ms | +22% |
+| junkyard | 16 057 ms† | 14 978 ms | +7% | 3 132 ms† | 2 790 ms | +12% |
 | large_pyramid | **1 140 ms** | 1 231 ms | **−7%** | 274.3 ms | 254.4 ms | +8% |
 | many_pyramids | 1 574 ms | 1 525 ms | +3% | **309.5 ms** | 341.5 ms | **−9%** |
 | rain | 1 882 ms | 1 670 ms | +13% | 486.2 ms | 415.3 ms | +17% |
 | washer | 24 355 ms | 21 825 ms | +12% | 4 886 ms | 4 279 ms | +14% |
-| **geomean** | | | **+7%** | | | **+9%** |
+| **geomean** | | | **+6%** | | | **+8%** |
 
-All cells are same-session paired runs of the current tree (all
-optimization rounds applied; the trees rows were re-paired with extra
-repeats after a noisy first pass). Per-scene numbers move ±5-10% between
+All cells are same-session paired runs (all optimization rounds
+applied; the trees rows were re-paired with extra repeats after a noisy
+first pass). † junkyard cells: cold-window baseline scaled by the tier-2
+feature-recycling improvement, which was measured as −8% in paired
+same-binary A/Bs (the flag toggle isolates it from thermal drift); a
+direct cold-window rerun will replace the derived cells. Per-scene numbers move ±5-10% between
 sessions with machine thermal state — read the geomeans and the
 within-row ratios, not single cells. The upstream `large_world` scenario
 is omitted: its 500 steps complete in ~7 ms total (~15 µs of simulation
