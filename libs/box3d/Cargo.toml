@@ -10,5 +10,13 @@ description = "Rust port of Box3D by Erin Catto (https://github.com/erincatto/bo
 disable-simd = []
 # C: BOX3D_DOUBLE_PRECISION — large world mode. World positions in f64.
 double-precision = []
+# Elide bounds checks on hull-topology indexing in the SAT hot loops
+# (convex_manifold.rs). The indices come from the hull's own connectivity
+# (edge.origin/edge.face/twin, support results), validated when the hull is
+# built and immutable afterwards (Arc<HullData>); debug builds still check
+# via debug_assert, so the full test suite exercises the contract. This is
+# the port's only opt-in unsafe: it matches C's (checkless) indexing on the
+# hull-heavy scenes (junkyard/washer). Off by default.
+unchecked-hulls = []
 
 [dependencies]
