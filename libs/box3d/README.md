@@ -5,8 +5,8 @@ A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 
 **Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
 0.32.0 with `simd-stable` vendored in this repo): the default build of this
-crate is **faster than Rapier on all three scenes, and faster than or at
-parity with the C original** — while additionally keeping bit-exact
+crate is **faster than Rapier and faster than the C original on all three
+scenes** — while additionally keeping bit-exact
 cross-architecture determinism (upstream Rapier makes `simd-stable` and
 `enhanced-determinism` mutually exclusive, so its SIMD speed and its
 determinism mode cannot be combined) and using zero external crates.
@@ -20,9 +20,9 @@ without it. Reproduce with `libs/rapier/crates/bench`:
 
 | scene | box3d (default build) | box3d no-PGO | box3d C `-O3` | rapier |
 |---|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 127 ms** | 1 271 ms (+13%) | 1 197 ms (+6%) | 1 358 ms (+20%) |
-| many_pyramids (10 781 bodies, 99 steps) | **1 487 ms** | 1 604 ms (+8%) | 1 530 ms (+3%) | 1 612 ms (+8%) |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | **817 ms** | 858 ms (+5%) | 801 ms (−2%) | 940 ms (+15%) |
+| large_pyramid (4 096 bodies, 199 steps) | **1 118 ms** | 1 270 ms (+14%) | 1 195 ms (+7%) | 1 392 ms (+24%) |
+| many_pyramids (10 781 bodies, 99 steps) | **1 436 ms** | 1 688 ms (+18%) | 1 522 ms (+6%) | 1 658 ms (+16%) |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | **805 ms** | 879 ms (+9%) | 849 ms (+5%) | 938 ms (+17%) |
 
 (+X% = that build takes X% longer than the default box3d build; −X% =
 that build is X% faster.)
@@ -115,19 +115,19 @@ within one matrix, not absolute ms across sessions). Rust = the default
 
 | scenario | Rust w=1 | C w=1 | Δ | Rust w=8 | C w=8 | Δ |
 |---|---|---|---|---|---|---|
-| trees100 | 172.8 ms | 160.0 ms | +8% | 96.1 ms | 81.8 ms | +17% |
-| trees50 | 270.6 ms | 243.5 ms | +11% | 130.0 ms | 97.3 ms | +34% |
-| trees25 | 569.1 ms | 522.9 ms | +9% | 219.5 ms | 183.2 ms | +20% |
-| joint_grid | 816.9 ms | 800.6 ms | +2% | 198.5 ms | 146.3 ms | +36% |
-| junkyard | 16 643 ms | 13 813 ms | +20% | 3 416 ms | 2 885 ms | +18% |
-| large_pyramid | **1 127 ms** | 1 197 ms | **−6%** | 291.1 ms | 252.1 ms | +15% |
-| many_pyramids | **1 487 ms** | 1 530 ms | **−3%** | 334.2 ms | 299.2 ms | +12% |
-| rain | 1 775 ms | 1 609 ms | +10% | 603.5 ms | 424.0 ms | +42% |
-| washer | 22 866 ms | 19 339 ms | +18% | 5 392 ms | 4 317 ms | +25% |
-| large_world | 7.5 ms | 7.1 ms | +4% | 12.1 ms | 7.3 ms | +66% |
-| **geomean** | | | **+7%** | | | **+28%** |
+| trees100 | 166.1 ms | 155.6 ms | +7% | 82.6 ms | 71.7 ms | +15% |
+| trees50 | 257.9 ms | 233.0 ms | +11% | 106.2 ms | 96.6 ms | +10% |
+| trees25 | 550.7 ms | 528.2 ms | +4% | **180.7 ms** | 180.9 ms | **−0%** |
+| joint_grid | **804.9 ms** | 848.6 ms | **−5%** | 158.9 ms | 142.9 ms | +11% |
+| junkyard | 16 234 ms | 13 186 ms | +23% | 3 209 ms | 2 798 ms | +15% |
+| large_pyramid | **1 118 ms** | 1 195 ms | **−6%** | 250.6 ms | 249.6 ms | +0% |
+| many_pyramids | **1 436 ms** | 1 522 ms | **−6%** | 282.8 ms | 281.1 ms | +1% |
+| rain | 1 761 ms | 1 620 ms | +9% | 424.9 ms | 394.7 ms | +8% |
+| washer | 21 861 ms | 19 393 ms | +13% | 4 519 ms | 4 284 ms | +5% |
+| large_world | 7.3 ms | 7.1 ms | +3% | 10.5 ms | 7.1 ms | +48% |
+| **geomean** | | | **+5%** | | | **+11%** |
 
-Rust at 8 workers beats single-threaded C by 2.6–5.5× on heavy scenes.
+Rust at 8 workers beats single-threaded C by 2.8–5.4× on heavy scenes.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -162,7 +162,14 @@ solve bodies; writing just the two velocity vectors like C closed
 joint_grid from −11% to parity. (The identical narrow-write was measured
 NEUTRAL for contact scatter, where the state is only live ~40
 instructions — same pattern, opposite economics; both verdicts held in
-paired A/B.)
+paired A/B.) Fifth round — the big multithreading fix: a sweep of every
+C b3ParallelFor/enqueue site found the finalize-bodies pass (transforms,
+AABBs, sleep accounting, continuous/TOI) and the bullet pass had been
+left SERIAL when threading was ported. Parallelizing both (FinalizeCtx
+mirroring the collide pass's SyncSlice pattern; bullet array filled via
+an atomic cursor like C) collapsed the 8-worker geomean from +28% to
++11% — rain went +42% → +8%, large_pyramid/many_pyramids/trees25 to
+parity. Hash bit-identical throughout.
 
 **PGO — on by default:** profile-guided optimization gives another 11–19%
 over the plain fat-LTO build (paired same-machine runs: large_pyramid
@@ -190,8 +197,11 @@ aliasing info across the collide-task body; a twin-pair (`chunks_exact`)
 restructure of the edge SAT was tried and REVERTED — it won ~5% on
 junkyard's big compound hulls but cost box-box scenes 4-8% (large_pyramid
 parity matters more, and the C-shaped loop keeps the 1:1 source mapping).
-At 8 workers rain (+42%), joint_grid (+36%) and large_world (+66% of
-12 ms) mark the parallel frontier. Also tried and dropped (below the
+At 8 workers the residue is junkyard/trees100 (+15%, tracking their
+serial gaps), joint_grid (+11% — plausibly the split-island task that C
+enqueues concurrently with the collide pass, the one serial-vs-C
+difference left from the parallelism sweep; solver.rs:2036), and
+large_world (+48% of 10.5 ms — fixed per-step overhead). Also tried and dropped (below the
 noise floor or negative in paired A/B): cache-line padding of the
 stage-sync atomics, narrow velocity-only writes in contact scatter (state
 only live ~40 instructions there — see the joint-solver counterexample
