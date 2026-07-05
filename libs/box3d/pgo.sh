@@ -26,7 +26,7 @@ CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 cargo build --release -p makepad-box3d --example benchmark --target-dir $PGO/train
 
 echo "== 2/3 training (one pass over the benchmark scenes) =="
-for b in 0 3 4 5 6 7 9; do
+for b in 0 1 2 3 4 5 6 7 8 9; do
     $PGO/train/release/examples/benchmark -b=$b -r=1 -w=1 > /dev/null
 done
 $PGO/train/release/examples/benchmark -b=5 -r=1 -w=8 > /dev/null
