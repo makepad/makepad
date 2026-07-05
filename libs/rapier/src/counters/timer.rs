@@ -1,16 +1,13 @@
 use std::{
     fmt::{Display, Error, Formatter},
     time::Duration,
+    time::Instant,
 };
 
-#[cfg(feature = "profiler")]
-use web_time::Instant;
-
-/// A timer.
+/// A timer.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Timer {
     time: Duration,
-    #[cfg(feature = "profiler")]
     start: Option<Instant>,
 }
 
@@ -19,7 +16,6 @@ impl Timer {
     pub fn new() -> Self {
         Timer {
             time: Duration::from_secs(0),
-            #[cfg(feature = "profiler")]
             start: None,
         }
     }
@@ -31,30 +27,21 @@ impl Timer {
 
     /// Start the timer.
     pub fn start(&mut self) {
-        #[cfg(feature = "profiler")]
-        {
-            self.time = Duration::from_secs(0);
-            self.start = Some(Instant::now());
-        }
+        self.time = Duration::from_secs(0);
+        self.start = Some(Instant::now());
     }
 
     /// Pause the timer.
     pub fn pause(&mut self) {
-        #[cfg(feature = "profiler")]
-        {
-            if let Some(start) = self.start {
-                self.time += Instant::now().duration_since(start);
-            }
-            self.start = None;
+        if let Some(start) = self.start {
+            self.time += Instant::now().duration_since(start);
         }
+        self.start = None;
     }
 
     /// Resume the timer.
     pub fn resume(&mut self) {
-        #[cfg(feature = "profiler")]
-        {
-            self.start = Some(Instant::now());
-        }
+        self.start = Some(Instant::now());
     }
 
     /// The measured time between the last `.start()` and `.pause()` calls.
