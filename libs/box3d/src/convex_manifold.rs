@@ -14,7 +14,7 @@ use crate::manifold::{
     MAX_CLIP_POINTS,
 };
 use crate::math_functions::{
-    abs_float, add, cross, distance as vec_distance, dot, get_length_and_normalize, invert_transform,
+    abs_float, add, cross, distance as vec_distance, distance_squared, dot, get_length_and_normalize, inv_mul_quat, invert_transform,
     inv_rotate_vector, inv_transform_point, length_squared, lerp, line_distance,
     make_matrix_from_quat, max_float, min_float, min_int, mul_add, mul_mv, mul_sub, mul_sv, neg,
     normalize, point_to_segment_distance, rotate_vector, segment_distance, sub, transform_point,
@@ -1560,5 +1560,232 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
             *manifold = edge_manifold;
             manifold.points = points;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PORT EXTENSION — feature recycling (not in upstream C).
+//
+// Upstream's SAT cache only accepts a cached-feature rebuild when the new
+// separation is within linear_slop of the cached one, which rejects almost
+// every contact in scenes with sustained relative motion (junkyard/washer).
+// This tier accepts the cached winning feature under explicit drift and
+// refresh bounds instead, and adds a separated-pair early-out.
+//
+// Soundness notes:
+// - A cached axis is always a valid separation WITNESS: if the separation it
+//   reports along itself is >= the speculative distance, the hulls genuinely
+//   do not touch (any axis proves at least its own separation). A stale axis
+//   can only UNDERSTATE the achievable separation, which conservatively
+//   falls through to the full SAT. This holds for edge axes even when the
+//   Gauss-map arcs no longer intersect (the cross product is still just an
+//   axis), so the separated early-out deliberately skips is_minkowski.
+// - For a TOUCHING rebuild the cached feature must still be a plausible
+//   supporting feature; staleness is bounded by the relative-pose drift gate
+//   and the periodic forced refresh, and any degenerate rebuild falls
+//   through to the full SAT the same step.
+// - Results stay a pure function of world state: determinism guarantees
+//   (run-to-run, worker count, architecture) are unaffected; contact normals
+//   may lag the exact SAT by at most the drift bound for at most
+//   FEATURE_RECYCLE_REFRESH_STEPS steps.
+// ---------------------------------------------------------------------------
+
+/// Force a full SAT after this many consecutive feature-recycled steps.
+pub const FEATURE_RECYCLE_REFRESH_STEPS: u16 = 8;
+
+/// Linear drift bound as a multiple of the contact recycle distance.
+const FEATURE_RECYCLE_DRIFT_FACTOR: f32 = 4.0;
+
+/// Angular drift bound on the relative rotation since the last full SAT:
+/// |sin(theta/2)|^2; 0.0016 ~= 4.6 degrees.
+const FEATURE_RECYCLE_MAX_SIN_HALF_SQ: f32 = 0.0016;
+
+/// Tier-2 narrow phase: serve the contact from the cached winning SAT
+/// feature when the relative pose has drifted only moderately since the
+/// last full SAT. Returns 1 (separated early-out), 2 (touching rebuild), or
+/// 0 (not handled — the caller must run `collide_hulls`).
+/// `was_touching` = the contact had manifold points after the previous
+/// step; `recycle_distance` = World::contact_recycle_distance.
+pub fn collide_hulls_feature_recycled(
+    manifold: &mut LocalManifold,
+    capacity: i32,
+    hull_a: &HullData,
+    hull_b: &HullData,
+    transform_b_to_a: Transform,
+    cache: &mut SATCache,
+    recycle_distance: f32,
+    was_touching: bool,
+) -> u8 {
+    if capacity < 4 {
+        return 0;
+    }
+    if cache.steps_since_sat >= FEATURE_RECYCLE_REFRESH_STEPS {
+        return 0;
+    }
+
+    // Drift bounds against the pose captured at the last full SAT.
+    let max_linear = FEATURE_RECYCLE_DRIFT_FACTOR * recycle_distance;
+    if distance_squared(transform_b_to_a.p, cache.sat_pose.p) > max_linear * max_linear {
+        return 0;
+    }
+    let qr = inv_mul_quat(cache.sat_pose.q, transform_b_to_a.q);
+    if length_squared(qr.v) > FEATURE_RECYCLE_MAX_SIN_HALF_SQ {
+        return 0;
+    }
+
+    let speculative_distance = speculative_distance();
+
+    match cache.type_ {
+        T_FACE_AXIS_A => {
+            b3_assert!((cache.index_a as i32) < hull_a.face_count());
+            let plane = *hull_at(&hull_a.planes, cache.index_a as usize);
+            let search_direction_in_b = neg(inv_rotate_vector(transform_b_to_a.q, plane.normal));
+            let vertex_index = crate::hull::find_hull_support_vertex(hull_b, search_direction_in_b);
+            let support = transform_point(transform_b_to_a, *hull_at(&hull_b.points, vertex_index as usize));
+            let separation = plane_separation(plane, support);
+
+            if separation >= speculative_distance {
+                // Separated along the cached witness axis (see soundness
+                // notes). If the contact WAS touching, its state changed
+                // this step — get the authoritative answer instead.
+                if was_touching {
+                    return 0;
+                }
+                manifold.points.clear();
+                cache.separation = separation;
+                cache.index_b = vertex_index as u8;
+                cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+                return 1;
+            }
+            if !was_touching {
+                // Approaching contact: authoritative SAT this step.
+                return 0;
+            }
+
+            let face_query = FaceQuery {
+                separation: 0.0,
+                face_index: cache.index_a as i32,
+                vertex_index,
+            };
+            let mut local_cache = SATCache::default();
+            let touching =
+                build_face_a_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+            if !touching {
+                // Degenerate rebuild — full SAT this step.
+                return 0;
+            }
+            cache.separation = local_cache.separation;
+            cache.index_a = local_cache.index_a;
+            cache.index_b = local_cache.index_b;
+            cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+            2
+        }
+
+        T_FACE_AXIS_B => {
+            b3_assert!((cache.index_b as i32) < hull_b.face_count());
+            let plane = *hull_at(&hull_b.planes, cache.index_b as usize);
+            let search_direction_in_a = neg(rotate_vector(transform_b_to_a.q, plane.normal));
+            let vertex_index = crate::hull::find_hull_support_vertex(hull_a, search_direction_in_a);
+            let support = inv_transform_point(transform_b_to_a, *hull_at(&hull_a.points, vertex_index as usize));
+            let separation = plane_separation(plane, support);
+
+            if separation >= speculative_distance {
+                if was_touching {
+                    return 0;
+                }
+                manifold.points.clear();
+                cache.separation = separation;
+                cache.index_a = vertex_index as u8;
+                cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+                return 1;
+            }
+            if !was_touching {
+                return 0;
+            }
+
+            let face_query = FaceQuery {
+                separation: 0.0,
+                face_index: cache.index_b as i32,
+                vertex_index,
+            };
+            let mut local_cache = SATCache::default();
+            let touching =
+                build_face_b_contact(manifold, capacity, hull_a, hull_b, transform_b_to_a, face_query, &mut local_cache);
+            if !touching {
+                return 0;
+            }
+            cache.separation = local_cache.separation;
+            cache.index_a = local_cache.index_a;
+            cache.index_b = local_cache.index_b;
+            cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+            2
+        }
+
+        T_EDGE_PAIR_AXIS => {
+            let index1 = cache.index_a as i32;
+            b3_assert!(index1 + 1 < hull_a.edge_count());
+            let edge1 = *hull_at(&hull_a.edges, index1 as usize);
+            let twin1 = *hull_at(&hull_a.edges, index1 as usize + 1);
+            b3_assert!(edge1.twin as i32 == index1 + 1 && twin1.twin as i32 == index1);
+
+            let p1 = *hull_at(&hull_a.points, edge1.origin as usize);
+            let q1 = *hull_at(&hull_a.points, twin1.origin as usize);
+            let e1 = sub(q1, p1);
+
+            let index2 = cache.index_b as i32;
+            b3_assert!(index2 + 1 < hull_b.edge_count());
+            let edge2 = *hull_at(&hull_b.edges, index2 as usize);
+            let twin2 = *hull_at(&hull_b.edges, index2 as usize + 1);
+            b3_assert!(edge2.twin as i32 == index2 + 1 && twin2.twin as i32 == index2);
+
+            let p2 = transform_point(transform_b_to_a, *hull_at(&hull_b.points, edge2.origin as usize));
+            let q2 = transform_point(transform_b_to_a, *hull_at(&hull_b.points, twin2.origin as usize));
+            let e2 = sub(q2, p2);
+
+            let c1 = hull_a.center;
+            let c2 = transform_point(transform_b_to_a, hull_b.center);
+            let separation = edge_edge_separation(p1, e1, c1, p2, e2, c2);
+
+            if separation >= speculative_distance {
+                // Witness separation is valid without the Minkowski test
+                // (see soundness notes above).
+                if was_touching {
+                    return 0;
+                }
+                manifold.points.clear();
+                cache.separation = separation;
+                cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+                return 1;
+            }
+            if !was_touching {
+                return 0;
+            }
+
+            // A touching edge rebuild needs the pair to still be a
+            // supporting (Minkowski) feature.
+            let u1 = hull_at(&hull_a.planes, edge1.face as usize).normal;
+            let v1 = hull_at(&hull_a.planes, twin1.face as usize).normal;
+            let u2 = rotate_vector(transform_b_to_a.q, hull_at(&hull_b.planes, edge2.face as usize).normal);
+            let v2 = rotate_vector(transform_b_to_a.q, hull_at(&hull_b.planes, twin2.face as usize).normal);
+            if !is_minkowski_face(u1, v1, e1, neg(u2), neg(v2), e2) {
+                return 0;
+            }
+
+            let edge_query = EdgeQuery {
+                index_a: index1,
+                index_b: index2,
+                separation: 0.0,
+            };
+            let mut local_cache = SATCache::default();
+            let touching = build_edge_contact(manifold, hull_a, hull_b, transform_b_to_a, edge_query, &mut local_cache);
+            if !touching {
+                return 0;
+            }
+            cache.separation = local_cache.separation;
+            cache.steps_since_sat = cache.steps_since_sat.saturating_add(1);
+            2
+        }
+
+        _ => 0,
     }
 }

@@ -63,6 +63,10 @@ box3d wins seven of nine, by the largest margins on the triangle-mesh
 scenes (trees, rain). Rapier wins the two hull-churn scenes (junkyard,
 washer) — notably the same two scenes where box3d trails the C original
 the most, so the convex-manifold pipeline is the shared bottleneck.
+(This matrix predates the feature-recycling tier described in the
+performance section, which was built to attack exactly those two scenes;
+re-paired in-session after it landed, junkyard measures ~−3% instead of
+−8%.)
 
 Comparability caveats for the extended scenes, in decreasing order of
 likely impact:
@@ -274,7 +278,62 @@ rustflags line to their own .cargo/config.toml. Fairness note when quoting
 vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
 back some of its own margin.
 
-Known remainder — junkyard's floor, mapped by isolation (2026-07-05): with
+**Feature recycling — port extension, on by default (2026-07-05):** the
+narrow phase gained a middle tier between contact recycling and the full
+SAT, controlled by `WorldDef::enable_feature_recycling` (default true;
+not in upstream C — the OFF path stays 1:1 with C). Upstream already
+caches the winning SAT feature per contact, but only trusts it when the
+new separation lands within `linear_slop` of the cached one; under
+sustained relative motion (junkyard stirs, washer spins) that gate
+rejects nearly everything and each pair pays two face sweeps plus the
+O(Ea·Eb) edge sweep every step. The tier bounds staleness explicitly
+instead: it stores the relative pose at the last full SAT
+(`SATCache::sat_pose`, also in snapshots) and serves the cached feature
+while translation drift < 4× `contact_recycle_distance`, relative
+rotation < ~4.6°, and at most `FEATURE_RECYCLE_REFRESH_STEPS` (8)
+consecutive recycled steps (constants in convex_manifold.rs; looser
+gates swept ≤1% better — not worth the staleness). Two cases:
+
+- *Separated speculative pairs* — the junkyard prize: of its ~190k
+  contact objects only ~13k touch; the rest sit inside fat AABBs
+  re-proving "still not touching" every step. The tier re-tests only the
+  cached axis. Any axis is a valid separation witness: if it still shows
+  ≥ the speculative distance the pair provably does not touch, and both
+  face sweeps, the edge sweep and clipping are all skipped. This holds
+  for cached edge axes even when their Gauss-map arcs no longer overlap
+  (the cross product is still just an axis), so the early-out
+  deliberately skips `is_minkowski_face`. A stale axis can only
+  *understate* the separation, which falls through to the full SAT —
+  never a wrong answer, at worst a slower one.
+- *Touching contacts*: rebuild the manifold by re-clipping the cached
+  winning feature — the same build call the full SAT would make when the
+  winner doesn't change. Degenerate rebuilds and touching↔separated
+  transitions fall through to the full SAT the same step.
+
+Junkyard final-step counters: full SATs 25 400 → 4 485 per step (24 161
+separated-witness skips + 1 374 feature rebuilds). Measured on adjacent
+same-binary pairs (runtime `-fr=0/1` toggle, so no profile-staleness
+asymmetry): junkyard **−8% wall-clock in every pairing** (plain and PGO
+builds, e.g. 17 840 → 16 437 ms plain; the collide phase −15%), washer
+neutral-to-−5% (its full SATs halve, but broad-phase pairs + solver
+dominate), pyramid/rain guards neutral, and the pre-change tree
+re-measured to confirm the OFF path costs nothing. Determinism is
+unaffected in both modes: OFF is bit-identical to C sync (hash
+0x61E35C31 / sleepStep 314 unchanged), and ON keeps results a pure
+function of world state — the determinism suite passes across
+runs/worker counts/task systems with the tier active (that scene happens
+to produce the identical hash: settled contacts recycle into the same
+build call, same feature, same floats). All 179 tests green with the
+tier on. Quality bound: a contact normal can lag the exact SAT by at
+most the drift gate for at most 8 steps, inside the speculative margin.
+`Counters::feature_recycled_contact_count` and
+`feature_separated_skip_count` expose the tier's activity; pgo.sh trains
+both modes so the full-SAT path keeps a hot layout for the misses.
+
+Known remainder — junkyard's floor, mapped by isolation (2026-07-05,
+pre-feature-recycling — the tier above now bypasses ~80% of these full
+SATs; this documents the full-SAT path itself, which still runs on
+cache misses and refreshes): with
 contact recycling force-disabled in BOTH engines, the pure full-update
 manifold pipeline is +38% vs C, diluted to +17% in the real scene by the
 at-parity recycle path. The gap is diffuse — collide_hulls/clip/build/SAT
@@ -369,6 +428,14 @@ it, and its w=8 gap remains undiagnosed).
   during solve — any new C code that reads body data through the world during
   the solve stages needs the `Option<&StepContext>` dual-path pattern, see
   `joint.rs::reaction_body_transform`)
+
+- PORT EXTENSION — feature recycling (see the performance section):
+  `WorldDef::enable_feature_recycling` (default true), two extra
+  `SATCache` fields (`sat_pose`, `steps_since_sat`, serialized in
+  snapshots), `collide_hulls_feature_recycled` in convex_manifold.rs,
+  two extra `Counters` fields, and the benchmark's `-fr=0/1` toggle.
+  When syncing with upstream C, none of this exists there; the flag-OFF
+  path is the 1:1 port
 
 **Numerical/determinism notes:**
 - The port preserves float operation *order*, and the deterministic

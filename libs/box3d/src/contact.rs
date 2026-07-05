@@ -711,7 +711,6 @@ fn compute_convex_manifold(
     shape_b: &Shape,
     xf_b: WorldTransform,
 ) -> bool {
-    let _ = world;
     let type_a = shape_a.shape_type();
     let type_b = shape_b.shape_type();
 
@@ -790,16 +789,45 @@ fn compute_convex_manifold(
             );
         } else {
             b3_assert!(type_b == ShapeType::Hull);
-            crate::convex_manifold::collide_hulls(
-                &mut geom_manifold,
-                point_capacity,
-                shape_a.as_hull(),
-                shape_b.as_hull(),
-                transform_b_to_a,
-                &mut cache.sat_cache,
-            );
-            task_context.sat_call_count += 1;
-            task_context.sat_cache_hit_count += cache.sat_cache.hit as i32;
+            // PORT EXTENSION — feature-recycling tier (not in upstream C):
+            // serve the contact from the cached winning SAT feature under
+            // drift/refresh bounds; 0 means fall through to the full SAT.
+            let mut handled = 0u8;
+            if world.enable_feature_recycling {
+                let was_touching = contact.manifold_count() > 0;
+                handled = crate::convex_manifold::collide_hulls_feature_recycled(
+                    &mut geom_manifold,
+                    point_capacity,
+                    shape_a.as_hull(),
+                    shape_b.as_hull(),
+                    transform_b_to_a,
+                    &mut cache.sat_cache,
+                    world.contact_recycle_distance,
+                    was_touching,
+                );
+                match handled {
+                    1 => task_context.feature_separated_skip_count += 1,
+                    2 => task_context.feature_recycled_contact_count += 1,
+                    _ => {}
+                }
+            }
+            if handled == 0 {
+                crate::convex_manifold::collide_hulls(
+                    &mut geom_manifold,
+                    point_capacity,
+                    shape_a.as_hull(),
+                    shape_b.as_hull(),
+                    transform_b_to_a,
+                    &mut cache.sat_cache,
+                );
+                task_context.sat_call_count += 1;
+                task_context.sat_cache_hit_count += cache.sat_cache.hit as i32;
+                if world.enable_feature_recycling {
+                    // New drift reference for the tier above.
+                    cache.sat_cache.sat_pose = transform_b_to_a;
+                    cache.sat_cache.steps_since_sat = 0;
+                }
+            }
         }
     }
 
