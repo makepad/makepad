@@ -20,9 +20,12 @@ the same code without it. Reproduce with `libs/rapier/crates/bench`:
 
 | scene | box3d (default build) | box3d no-PGO | box3d C `-O3` | rapier |
 |---|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 118 ms** | 1 311 ms | 1 228 ms | 1 451 ms |
-| many_pyramids (10 781 bodies, 99 steps) | **1 510 ms** | 1 696 ms | 1 538 ms | 1 690 ms |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | 912 ms | 932 ms | **816 ms** | 914 ms |
+| large_pyramid (4 096 bodies, 199 steps) | **1 118 ms** | 1 311 ms (+17%) | 1 228 ms (+10%) | 1 451 ms (+30%) |
+| many_pyramids (10 781 bodies, 99 steps) | **1 510 ms** | 1 696 ms (+12%) | 1 538 ms (+2%) | 1 690 ms (+12%) |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | 912 ms | 932 ms (+2%) | **816 ms (−11%)** | 914 ms (+0%) |
+
+(+X% = that build takes X% longer than the default box3d build; −X% =
+that build is X% faster.)
 
 Notes: both engines use 4-wide SIMD contact solving; Rapier's
 `enhanced-determinism` feature separately measured free on these scenes
