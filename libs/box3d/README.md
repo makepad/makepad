@@ -140,10 +140,10 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | **geomean** | | | **+5%** | | | **+11%** |
 
 Rust at 8 workers beats single-threaded C by 2.8–5.4× on heavy scenes.
-The junkyard row predates the sixth-round boundary fix, which measured a
-further −3.6% there (paired adjacent-run A/B with a retrained profile;
-absolute cells are from one cold-window session and are not restated
-piecemeal — rerun the matrix to refresh them together).
+The junkyard row predates the sixth-round boundary fix: a post-fix
+same-session verification puts junkyard at ~+17% w=1 (hot-window run —
+absolute cells above are from one cold session and will be refreshed
+together in the next cold-session matrix).
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
