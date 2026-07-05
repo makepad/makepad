@@ -137,6 +137,10 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | **geomean** | | | **+5%** | | | **+11%** |
 
 Rust at 8 workers beats single-threaded C by 2.8–5.4× on heavy scenes.
+The junkyard and washer rows additionally gain ~3.6% / ~2% with the opt-in
+`unchecked-hulls` feature (paired adjacent-run A/B with a retrained
+profile; see Cargo features above) — absolute cells above are the default
+build.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -226,26 +230,6 @@ where each item is heavy, so serializing them starves real parallelism;
 joint_grid turned out to have few FAT stages — grid coloring yields ~2-4
 colors of thousands of joints — so the thin-stage theory was wrong for
 it, and its w=8 gap remains undiagnosed).
-
-**Evaluated: Rust's algebraic float ops** (`f32::algebraic_add`/`mul`/…,
-recently stabilized on nightly — per-operation fast-math-style freedom for
-the optimizer to reassociate, contract, and vectorize; NaN propagation is
-retained, the freedoms are reassociation/contraction-class). Verdict:
-**incompatible with this port's determinism contract as a default** — the
-whole point of the algebraic ops is that the compiler MAY transform the
-arithmetic, so results become a function of compiler version, target ISA,
-and surrounding-code optimizer decisions. That breaks bit-exact
-cross-architecture equality (NEON and SSE2 builds would auto-vectorize
-differently) and hash-stable snapshots/replays across builds — the port's
-core guarantees, asserted by the test suite. The expected upside is also
-modest here: the hot scalar math is already hand-contracted with `mul_add`
-(the deterministic subset of what algebraic ops would do), and the contact
-solver is explicit SIMD which the optimizer can't improve by reassociation.
-Could be revisited as an opt-in feature (like `unchecked-hulls`) for users
-who need neither cross-build replay nor cross-arch determinism, but the
-projected win (auto-vectorization of the remaining scalar tails) is low
-single digits and it forfeits the property that most distinguishes this
-engine — not planned.
 
 ## Intentional differences from C (keep these in mind when diffing)
 
@@ -342,3 +326,25 @@ at 1 and 4). `test_determinism.rs` asserts run-to-run equality instead of the
 C `EXPECTED_HASH` constant. `tests/test_smoke.rs`, `tests/test_simd.rs`,
 `tests/test_snapshot.rs` and `tests/test_recording_capture.rs` are
 port-specific (not from C).
+
+## Evaluated ideas
+
+**Evaluated: Rust's algebraic float ops** (`f32::algebraic_add`/`mul`/…,
+recently stabilized on nightly — per-operation fast-math-style freedom for
+the optimizer to reassociate, contract, and vectorize; NaN propagation is
+retained, the freedoms are reassociation/contraction-class). Verdict:
+**incompatible with this port's determinism contract as a default** — the
+whole point of the algebraic ops is that the compiler MAY transform the
+arithmetic, so results become a function of compiler version, target ISA,
+and surrounding-code optimizer decisions. That breaks bit-exact
+cross-architecture equality (NEON and SSE2 builds would auto-vectorize
+differently) and hash-stable snapshots/replays across builds — the port's
+core guarantees, asserted by the test suite. The expected upside is also
+modest here: the hot scalar math is already hand-contracted with `mul_add`
+(the deterministic subset of what algebraic ops would do), and the contact
+solver is explicit SIMD which the optimizer can't improve by reassociation.
+Could be revisited as an opt-in feature (like `unchecked-hulls`) for users
+who need neither cross-build replay nor cross-arch determinism, but the
+projected win (auto-vectorization of the remaining scalar tails) is low
+single digits and it forfeits the property that most distinguishes this
+engine — not planned.
