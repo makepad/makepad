@@ -6,7 +6,8 @@ A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 **Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
 0.32.0 with `simd-stable` vendored in this repo): the default build of this
 crate is **faster than Rapier and faster than the C original on all three
-scenes** — while additionally keeping bit-exact
+headline scenes** (and faster than Rapier on seven of the nine benchmark
+scenes, +33% geomean — full matrix below) — while additionally keeping bit-exact
 cross-architecture determinism (upstream Rapier makes `simd-stable` and
 `enhanced-determinism` mutually exclusive, so its SIMD speed and its
 determinism mode cannot be combined) and using zero external crates.
@@ -34,6 +35,61 @@ comparably (no solver-quality cliff either way). The C reference is not
 profile-guided — PGO-ing it would claw back some margin; against plain
 (non-PGO) box3d, C leads by ~1.13× geomean across the full 10-scene suite
 (see below).
+
+### Full nine-scene matrix vs Rapier (single-threaded)
+
+The same comparison extended to every scene in the benchmark suite
+(`libs/rapier/crates/bench` mirrors all nine box3d scenes with identical
+geometry, densities, filters and body/collider/joint counts — counts
+verified equal on every scene). Same protocol as above, measured
+2026-07-05 as same-session interleaved pairs, box3d default (PGO) build,
+min of 4 runs (min of 2 on junkyard/washer). +X% = Rapier takes X% longer
+than box3d; −X% = Rapier is faster:
+
+| scene | box3d | rapier | Δ |
+|---|---|---|---|
+| trees100 (50 log stacks on a 60k-tri mesh) | **175 ms** | 302 ms | +72% |
+| trees50 (240k-tri mesh) | **268 ms** | 529 ms | +98% |
+| trees25 (960k-tri mesh) | **564 ms** | 1 417 ms | +151% |
+| joint_grid | **804 ms** | 939 ms | +17% |
+| junkyard | 17 741 ms | **16 345 ms** | −8% |
+| large_pyramid | **1 171 ms** | 1 355 ms | +16% |
+| many_pyramids | **1 486 ms** | 1 640 ms | +10% |
+| rain (300 ragdolls on mesh terrain) | **1 795 ms** | 2 563 ms | +43% |
+| washer | 23 353 ms | **17 577 ms** | −25% |
+| **geomean** | | | **+33%** |
+
+box3d wins seven of nine, by the largest margins on the triangle-mesh
+scenes (trees, rain). Rapier wins the two hull-churn scenes (junkyard,
+washer) — notably the same two scenes where box3d trails the C original
+the most, so the convex-manifold pipeline is the shared bottleneck.
+
+Comparability caveats for the extended scenes, in decreasing order of
+likely impact:
+
+- junkyard, washer, trees and rain run with sleeping enabled (as the
+  box3d scenes specify), and the engines' sleep heuristics differ — on
+  scenes dominated by piles at rest (junkyard, washer) part of the gap
+  in either direction is "who sleeps more", not raw solver speed.
+- box3d's `rolling_resistance` (trees logs 0.05, ragdoll capsules 0.2)
+  has no Rapier equivalent and is omitted there.
+- rain's ragdoll joints: box3d cone+twist spherical limits and joint
+  springs map to Rapier per-axis angular limits and friction motors
+  (springs omitted); joint counts and locked degrees of freedom match.
+- box3d combines friction as `sqrt(a*b)`, Rapier as the average —
+  identical on equal-friction pairs (every scene except trees' 0.9-on-0.6
+  contacts: 0.735 vs 0.75).
+
+Running junkyard/washer at all required fixing an index-out-of-bounds
+panic in the vendored Rapier's `simd-stable` constraint grouping
+(`src/dynamics/solver/interaction_groups.rs`): bodies in a different
+island than the interaction being grouped (kinematic drivers, or dynamic
+bodies mid island-merge) were indexed into the wrong island's conflict
+masks. The fix exempts out-of-island bodies from conflict tracking,
+matching the solver's existing treatment of them (bounds-checked gathers,
+dropped scatters); it does not change what gets SIMD-grouped otherwise,
+and the three original scenes reproduced their previous timings after the
+fix.
 
 ## Ported revision
 
