@@ -260,7 +260,7 @@ pub fn make_soft(hertz: f32, zeta: f32, h: f32) -> Softness {
     }
 
     let omega = 2.0 * PI * hertz;
-    let a1 = 2.0 * zeta + h * omega;
+    let a1 = h.mul_add(omega, 2.0 * zeta);
     let a2 = h * omega * a1;
     let a3 = 1.0 / (1.0 + a2);
 
