@@ -97,6 +97,15 @@ To pull in upstream changes:
   ops; `V32` stays scalar on ARM exactly like C). All three paths are
   bit-identical: the determinism ragdoll hash matches across NEON, SSE2 and
   scalar (`tests/test_simd.rs` asserts per-op bit equality).
+- `unchecked-hulls` — opt-in, off by default: elides bounds checks on
+  hull-topology indexing in the SAT hot loops (the port's only opt-in
+  unsafe). The indices come from the hull's own connectivity, validated at
+  construction and immutable afterwards; debug builds always check, so the
+  full test suite exercises the contract (179 tests green, determinism hash
+  unchanged). Measured paired with retrained PGO: junkyard −3.6%, washer
+  −2%, nothing elsewhere — most of the hull-scene residue is NOT the checks
+  (they're well-predicted branches); it's load scheduling the checked form
+  constrains. Enable only if hull-heavy scenes dominate your workload.
 - `double-precision` — C `BOX3D_DOUBLE_PRECISION` (large world mode): `Pos`
   becomes `{f64, f64, f64}` and `WorldTransform` gets a double translation
   with a float quaternion. All crossings go through the boundary functions in
@@ -217,6 +226,26 @@ where each item is heavy, so serializing them starves real parallelism;
 joint_grid turned out to have few FAT stages — grid coloring yields ~2-4
 colors of thousands of joints — so the thin-stage theory was wrong for
 it, and its w=8 gap remains undiagnosed).
+
+**Evaluated: Rust's algebraic float ops** (`f32::algebraic_add`/`mul`/…,
+recently stabilized on nightly — per-operation fast-math-style freedom for
+the optimizer to reassociate, contract, and vectorize; NaN propagation is
+retained, the freedoms are reassociation/contraction-class). Verdict:
+**incompatible with this port's determinism contract as a default** — the
+whole point of the algebraic ops is that the compiler MAY transform the
+arithmetic, so results become a function of compiler version, target ISA,
+and surrounding-code optimizer decisions. That breaks bit-exact
+cross-architecture equality (NEON and SSE2 builds would auto-vectorize
+differently) and hash-stable snapshots/replays across builds — the port's
+core guarantees, asserted by the test suite. The expected upside is also
+modest here: the hot scalar math is already hand-contracted with `mul_add`
+(the deterministic subset of what algebraic ops would do), and the contact
+solver is explicit SIMD which the optimizer can't improve by reassociation.
+Could be revisited as an opt-in feature (like `unchecked-hulls`) for users
+who need neither cross-build replay nor cross-arch determinism, but the
+projected win (auto-vectorization of the remaining scalar tails) is low
+single digits and it forfeits the property that most distinguishes this
+engine — not planned.
 
 ## Intentional differences from C (keep these in mind when diffing)
 

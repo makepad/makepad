@@ -162,6 +162,30 @@ fn query_face_direction_hull_and_capsule(hull: &HullData, capsule: &Capsule, cap
     }
 }
 
+/// Hull-topology indexing for the SAT hot loops. Indices come from the
+/// hull's own connectivity (edge.origin / edge.face / twin, and support
+/// results), which is validated at construction (see hull.rs
+/// is_valid_hull_impl and the create_hull asserts) and immutable afterwards
+/// (Arc<HullData>). With the `unchecked-hulls` feature the release-build
+/// bounds checks are elided — C's indexing is checkless here, and these
+/// data-dependent checks are the measured residue on hull-heavy scenes.
+/// Debug builds always verify, so every `cargo test` run exercises the
+/// contract. Without the feature this is ordinary checked indexing.
+#[inline(always)]
+fn hull_at<T>(slice: &[T], i: usize) -> &T {
+    #[cfg(feature = "unchecked-hulls")]
+    {
+        debug_assert!(i < slice.len());
+        // SAFETY: hull topology invariants, validated at construction (see
+        // doc comment above); debug builds assert.
+        unsafe { slice.get_unchecked(i) }
+    }
+    #[cfg(not(feature = "unchecked-hulls"))]
+    {
+        &slice[i]
+    }
+}
+
 fn query_face_directions(hull_a: &HullData, hull_b: &HullData, relative_transform: Transform) -> FaceQuery {
     // We perform all computations in local space of the second hull
     let transform = invert_transform(relative_transform);
@@ -173,10 +197,10 @@ fn query_face_directions(hull_a: &HullData, hull_b: &HullData, relative_transfor
     let mut max_face_separation = -f32::MAX;
 
     for face_index in 0..hull_a.face_count() {
-        let plane = transform_plane(transform, planes_a[face_index as usize]);
+        let plane = transform_plane(transform, *hull_at(planes_a, face_index as usize));
 
         let vertex_index = crate::hull::find_hull_support_vertex(hull_b, neg(plane.normal));
-        let support = points_b[vertex_index as usize];
+        let support = *hull_at(points_b, vertex_index as usize);
         let separation = plane_separation(plane, support);
         if separation > max_face_separation {
             max_face_index = face_index;
@@ -209,16 +233,16 @@ fn query_edge_direction_hull_and_capsule(hull: &HullData, capsule: &Capsule, cap
 
     let mut index: i32 = 0;
     while index < hull.edge_count() {
-        let edge = edges[index as usize];
-        let twin = edges[index as usize + 1];
+        let edge = *hull_at(edges, index as usize);
+        let twin = *hull_at(edges, index as usize + 1);
         b3_assert!(edge.twin as i32 == index + 1 && twin.twin as i32 == index);
 
-        let p2 = points[edge.origin as usize];
-        let q2 = points[twin.origin as usize];
+        let p2 = *hull_at(points, edge.origin as usize);
+        let q2 = *hull_at(points, twin.origin as usize);
         let e2 = sub(q2, p2);
 
-        let u2 = planes[edge.face as usize].normal;
-        let v2 = planes[twin.face as usize].normal;
+        let u2 = hull_at(planes, edge.face as usize).normal;
+        let v2 = hull_at(planes, twin.face as usize).normal;
 
         if is_minkowski_face_isolated(u2, v2, e1) {
             // We can pass any point on the edge and choose
@@ -265,27 +289,27 @@ fn query_edge_directions(hull_a: &HullData, hull_b: &HullData, transform_b_to_a:
     // Arranged to minimize transform operations
     let mut index_b: i32 = 0;
     while index_b < hull_b.edge_count() {
-        let edge_b = edges_b[index_b as usize];
-        let twin_b = edges_b[index_b as usize + 1];
+        let edge_b = *hull_at(edges_b, index_b as usize);
+        let twin_b = *hull_at(edges_b, index_b as usize + 1);
         b3_assert!(edge_b.twin as i32 == index_b + 1 && twin_b.twin as i32 == index_b);
 
-        let mut q_b = points_b[twin_b.origin as usize];
-        let e_b = mul_mv(matrix, sub(q_b, points_b[edge_b.origin as usize]));
+        let mut q_b = *hull_at(points_b, twin_b.origin as usize);
+        let e_b = mul_mv(matrix, sub(q_b, *hull_at(points_b, edge_b.origin as usize)));
         q_b = add(mul_mv(matrix, q_b), transform_b_to_a.p);
 
-        let u_b = mul_mv(matrix, planes_b[edge_b.face as usize].normal);
-        let v_b = mul_mv(matrix, planes_b[twin_b.face as usize].normal);
+        let u_b = mul_mv(matrix, hull_at(planes_b, edge_b.face as usize).normal);
+        let v_b = mul_mv(matrix, hull_at(planes_b, twin_b.face as usize).normal);
 
         let mut index_a: i32 = 0;
         while index_a < hull_a.edge_count() {
-            let edge_a = edges_a[index_a as usize];
-            let twin_a = edges_a[index_a as usize + 1];
+            let edge_a = *hull_at(edges_a, index_a as usize);
+            let twin_a = *hull_at(edges_a, index_a as usize + 1);
             b3_assert!(edge_a.twin as i32 == index_a + 1 && twin_a.twin as i32 == index_a);
 
-            let q_a = points_a[twin_a.origin as usize];
-            let e_a = sub(q_a, points_a[edge_a.origin as usize]);
-            let u_a = planes_a[edge_a.face as usize].normal;
-            let v_a = planes_a[twin_a.face as usize].normal;
+            let q_a = *hull_at(points_a, twin_a.origin as usize);
+            let e_a = sub(q_a, *hull_at(points_a, edge_a.origin as usize));
+            let u_a = hull_at(planes_a, edge_a.face as usize).normal;
+            let v_a = hull_at(planes_a, twin_a.face as usize).normal;
 
             let is_minkowski;
             {
