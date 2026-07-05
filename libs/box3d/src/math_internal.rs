@@ -294,7 +294,8 @@ pub fn mul_mm2(m1: Matrix2, m2: Matrix2) -> Matrix2 {
 
 #[inline(always)]
 pub fn det2(m: Matrix2) -> f32 {
-    m.cx.x * m.cy.y - m.cx.y * m.cy.x
+    // FP contraction: matches C built with -ffp-contract=on (clang default).
+    m.cx.x.mul_add(m.cy.y, -(m.cx.y * m.cy.x))
 }
 
 #[inline]
@@ -338,10 +339,11 @@ pub fn blend3(s: f32, a: Vec3, t: f32, b: Vec3, u: f32, c: Vec3) -> Vec3 {
 
 #[inline(always)]
 pub fn modified_cross(a: Vec3, b: Vec3) -> Vec3 {
+    // FP contraction: matches C built with -ffp-contract=on (clang default).
     Vec3 {
-        x: a.y * b.z + a.z * b.y,
-        y: a.z * b.x + a.x * b.z,
-        z: a.x * b.y + a.y * b.x,
+        x: a.y.mul_add(b.z, a.z * b.y),
+        y: a.z.mul_add(b.x, a.x * b.z),
+        z: a.x.mul_add(b.y, a.y * b.x),
     }
 }
 

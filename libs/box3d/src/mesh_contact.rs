@@ -440,14 +440,16 @@ fn cull_points(points: &mut [Point2D]) -> i32 {
     4
 }
 
-fn reduce_cluster(points: &mut Vec<LocalManifoldPoint>, normal: Vec3) {
+fn reduce_cluster(points: &mut Vec<LocalManifoldPoint>, pts: &mut Vec<Point2D>, normal: Vec3) {
     let target_count = 1;
     let count1 = points.len() as i32;
     if count1 <= target_count {
         return;
     }
 
-    let mut pts: Vec<Point2D> = Vec::with_capacity(count1 as usize);
+    // Caller-provided scratch (C: arena block); clear keeps its capacity.
+    pts.clear();
+    pts.reserve(count1 as usize);
     let u = perp(normal);
     let v = cross(normal, u);
     let origin = points[0].point;
@@ -461,7 +463,7 @@ fn reduce_cluster(points: &mut Vec<LocalManifoldPoint>, normal: Vec3) {
         });
     }
 
-    let count2 = cull_points(&mut pts);
+    let count2 = cull_points(pts);
     b3_assert!(count2 <= MAX_MANIFOLD_POINTS as i32);
 
     let mut final_points = [LocalManifoldPoint::default(); MAX_MANIFOLD_POINTS];
@@ -477,11 +479,42 @@ fn reduce_cluster(points: &mut Vec<LocalManifoldPoint>, normal: Vec3) {
     points.truncate(count2 as usize);
 }
 
+#[derive(Clone, Debug)]
 struct Cluster {
     manifold_normal: Vec3,
     triangle_normal: Vec3,
     points: Vec<LocalManifoldPoint>,
     point_capacity: i32,
+}
+
+/// Per-worker scratch for the mesh collide path — the port's equivalent of
+/// C's arena allocations in b3ComputeMeshManifolds (b3Bump'd manifold/pointer
+/// buffers that cost nothing per call). Every buffer keeps its capacity
+/// across contacts, so steady-state mesh collide performs no heap allocation.
+///
+/// The element-carrying buffers (`manifold_buffer`, `clusters`) are reused
+/// length-tracked: they are never `clear()`ed (that would drop the elements
+/// and free each element's inner `points` Vec); instead the caller tracks an
+/// in-use prefix length and resets slots field-by-field, clearing the inner
+/// point Vecs (which keeps THEIR capacity). Lives on the per-worker
+/// TaskContext, so access is data-race-free by construction.
+#[derive(Clone, Debug, Default)]
+pub struct MeshCollideScratch {
+    /// Slot-reused local manifolds; in-use prefix length is call-local.
+    manifold_buffer: Vec<LocalManifold>,
+    /// Indices into manifold_buffer (C: b3LocalManifold** pointer arrays).
+    accepted_manifolds: Vec<usize>,
+    tentative_manifolds: Vec<usize>,
+    tentative_triangles: Vec<TentativeTriangle>,
+    /// Slot-reused clusters; in-use prefix length is call-local.
+    clusters: Vec<Cluster>,
+    cluster_memberships: Vec<i32>,
+    /// reduce_cluster's 2D projection buffer.
+    reduce_pts: Vec<Point2D>,
+    /// Copy of the contact's previous manifolds for impulse matching
+    /// (C copies them to the arena).
+    old_manifolds: Vec<Manifold>,
+    consumed: Vec<bool>,
 }
 
 /// C: b3ComputeMeshManifolds. The contact's MeshContact is moved out of the
@@ -499,11 +532,16 @@ pub fn compute_mesh_manifolds(
     is_fast: bool,
 ) -> bool {
     let mut mesh_contact = std::mem::take(&mut contact.mesh_contact);
+    // Take the per-worker scratch out of the task context for the duration so
+    // borrows don't overlap (same pattern as geom_manifold_scratch); the
+    // single exit here puts it back on every path out of the inner function.
+    let mut scratch = std::mem::take(&mut task_context.mesh_scratch);
     let touching = compute_mesh_manifolds_inner(
         world,
         task_context,
         contact,
         &mut mesh_contact,
+        &mut scratch,
         shape_a,
         material_map,
         xf_a,
@@ -511,6 +549,7 @@ pub fn compute_mesh_manifolds(
         xf_b,
         is_fast,
     );
+    task_context.mesh_scratch = scratch;
     contact.mesh_contact = mesh_contact;
     touching
 }
@@ -521,6 +560,7 @@ fn compute_mesh_manifolds_inner(
     task_context: &mut crate::physics_world::TaskContext,
     contact: &mut Contact,
     mesh_contact: &mut MeshContact,
+    scratch: &mut MeshCollideScratch,
     shape_a: &Shape,
     material_map: Option<&[i32]>,
     xf_a: WorldTransform,
@@ -536,9 +576,14 @@ fn compute_mesh_manifolds_inner(
     let triangle_count = mesh_contact.triangle_cache.len() as i32;
 
     // Indices into manifold_buffer (C: b3LocalManifold** pointer arrays).
-    let mut accepted_manifolds: Vec<usize> = Vec::with_capacity(triangle_count as usize);
-    let mut tentative_manifolds: Vec<usize> = Vec::with_capacity(triangle_count as usize);
-    let mut tentative_triangles: Vec<TentativeTriangle> = Vec::with_capacity(triangle_count as usize);
+    // clear() keeps the capacity from previous contacts; reserve is a no-op
+    // once the high-water mark is reached.
+    scratch.accepted_manifolds.clear();
+    scratch.accepted_manifolds.reserve(triangle_count as usize);
+    scratch.tentative_manifolds.clear();
+    scratch.tentative_manifolds.reserve(triangle_count as usize);
+    scratch.tentative_triangles.clear();
+    scratch.tentative_triangles.reserve(triangle_count as usize);
 
     let mut found_edges = FoundEdges { keys: [0; MAX_EDGE_COUNT], count: 0 };
     let mut found_vertices = FoundVertices { keys: [0; MAX_VERTEX_COUNT], count: 0 };
@@ -559,7 +604,10 @@ fn compute_mesh_manifolds_inner(
     let point_buffer_capacity = MAX_POINTS_PER_TRIANGLE * triangle_count;
     let mut total_point_count = 0i32;
 
-    let mut manifold_buffer: Vec<LocalManifold> = Vec::with_capacity(triangle_count as usize);
+    // Slot-reused manifold buffer: manifold_count tracks the in-use prefix of
+    // scratch.manifold_buffer; slots past it keep their point-Vec capacity
+    // from earlier contacts.
+    let mut manifold_count = 0usize;
 
     for index in 0..triangle_count {
         if total_point_count + 3 >= point_buffer_capacity {
@@ -589,14 +637,28 @@ fn compute_mesh_manifolds_inner(
         // Copy the cache out (C uses a pointer into the triangle cache array).
         let mut cache = mesh_contact.triangle_cache[index as usize].cache;
         let point_capacity = point_buffer_capacity - total_point_count;
-        let mut manifold = LocalManifold::default();
+        // Acquire the next scratch slot and reset it to the
+        // LocalManifold::default() state (points.clear() keeps its capacity —
+        // that is the per-triangle allocation this replaces).
+        if manifold_count == scratch.manifold_buffer.len() {
+            scratch.manifold_buffer.push(LocalManifold::default());
+        }
+        let manifold = &mut scratch.manifold_buffer[manifold_count];
+        manifold.points.clear();
+        manifold.normal = Vec3::ZERO;
+        manifold.triangle_normal = Vec3::ZERO;
+        manifold.triangle_index = 0;
+        manifold.i1 = 0;
+        manifold.i2 = 0;
+        manifold.i3 = 0;
+        manifold.squared_distance = 0.0;
         manifold.triangle_flags = triangle.flags;
         manifold.feature = TriangleFeature::None;
 
         match shape_b.shape_type() {
             ShapeType::Capsule => {
                 crate::triangle_manifold::collide_capsule_and_triangle(
-                    &mut manifold,
+                    manifold,
                     point_capacity,
                     shape_b.as_capsule(),
                     &vertices,
@@ -612,7 +674,7 @@ fn compute_mesh_manifolds_inner(
                 }
 
                 crate::triangle_manifold::collide_hull_and_triangle(
-                    &mut manifold,
+                    manifold,
                     point_capacity,
                     shape_b.as_hull(),
                     vertices[0],
@@ -627,7 +689,7 @@ fn compute_mesh_manifolds_inner(
 
             ShapeType::Sphere => {
                 crate::triangle_manifold::collide_sphere_and_triangle(
-                    &mut manifold,
+                    manifold,
                     point_capacity,
                     shape_b.as_sphere(),
                     &vertices,
@@ -655,7 +717,7 @@ fn compute_mesh_manifolds_inner(
             manifold.i2 = triangle.i2;
             manifold.i3 = triangle.i3;
 
-            let manifold_slot = manifold_buffer.len();
+            let manifold_slot = manifold_count;
 
             if manifold.feature == TriangleFeature::TriangleFace || FORCE_GHOST_COLLISIONS {
                 let _ = add_edge(&mut found_edges, manifold.i1, manifold.i2);
@@ -665,7 +727,7 @@ fn compute_mesh_manifolds_inner(
                 let _ = add_vertex(&mut found_vertices, manifold.i2);
                 let _ = add_vertex(&mut found_vertices, manifold.i3);
 
-                accepted_manifolds.push(manifold_slot);
+                scratch.accepted_manifolds.push(manifold_slot);
             } else if manifold.feature == TriangleFeature::HullFace {
                 let cos_normal_angle = dot(manifold.triangle_normal, manifold.normal);
                 if cos_normal_angle > 0.5 {
@@ -676,7 +738,7 @@ fn compute_mesh_manifolds_inner(
                     let _ = add_vertex(&mut found_vertices, manifold.i2);
                     let _ = add_vertex(&mut found_vertices, manifold.i3);
 
-                    accepted_manifolds.push(manifold_slot);
+                    scratch.accepted_manifolds.push(manifold_slot);
                 } else {
                     let mut min_separation = manifold.points[0].separation;
                     for i in 1..manifold_point_count {
@@ -691,40 +753,40 @@ fn compute_mesh_manifolds_inner(
                         let _ = add_vertex(&mut found_vertices, manifold.i1);
                         let _ = add_vertex(&mut found_vertices, manifold.i2);
                         let _ = add_vertex(&mut found_vertices, manifold.i3);
-                        accepted_manifolds.push(manifold_slot);
+                        scratch.accepted_manifolds.push(manifold_slot);
                     } else {
-                        tentative_triangles.push(TentativeTriangle {
+                        scratch.tentative_triangles.push(TentativeTriangle {
                             squared_distance: manifold.squared_distance,
-                            index: tentative_manifolds.len() as i32,
+                            index: scratch.tentative_manifolds.len() as i32,
                         });
-                        tentative_manifolds.push(manifold_slot);
+                        scratch.tentative_manifolds.push(manifold_slot);
                     }
                 }
             } else {
-                tentative_triangles.push(TentativeTriangle {
+                scratch.tentative_triangles.push(TentativeTriangle {
                     squared_distance: manifold.squared_distance,
-                    index: tentative_manifolds.len() as i32,
+                    index: scratch.tentative_manifolds.len() as i32,
                 });
-                tentative_manifolds.push(manifold_slot);
+                scratch.tentative_manifolds.push(manifold_slot);
             }
 
-            manifold_buffer.push(manifold);
+            manifold_count += 1;
         }
     }
 
-    b3_assert!(accepted_manifolds.len() as i32 <= triangle_count);
-    b3_assert!(tentative_manifolds.len() as i32 <= triangle_count);
-    b3_assert!(tentative_triangles.len() as i32 <= triangle_count);
+    b3_assert!(scratch.accepted_manifolds.len() as i32 <= triangle_count);
+    b3_assert!(scratch.tentative_manifolds.len() as i32 <= triangle_count);
+    b3_assert!(scratch.tentative_triangles.len() as i32 <= triangle_count);
 
     if shape_b.shape_type() == ShapeType::Sphere {
         // Sort triangles so the closest triangles are processed first
         // (C: QSORT from qsort.h with strict < on squaredDistance)
-        tentative_triangles.sort_unstable_by(|a, b| a.squared_distance.total_cmp(&b.squared_distance));
+        scratch.tentative_triangles.sort_unstable_by(|a, b| a.squared_distance.total_cmp(&b.squared_distance));
 
         // Add tentative manifolds in sorted order. Avoid adding manifolds that generate ghost collisions.
-        for i in 0..tentative_triangles.len() {
-            let m_slot = tentative_manifolds[tentative_triangles[i].index as usize];
-            let m = &manifold_buffer[m_slot];
+        for i in 0..scratch.tentative_triangles.len() {
+            let m_slot = scratch.tentative_manifolds[scratch.tentative_triangles[i].index as usize];
+            let m = &scratch.manifold_buffer[m_slot];
 
             let added_edge1 = add_edge(&mut found_edges, m.i1, m.i2);
             let added_edge2 = add_edge(&mut found_edges, m.i2, m.i3);
@@ -766,16 +828,16 @@ fn compute_mesh_manifolds_inner(
             }
 
             if should_collide {
-                accepted_manifolds.push(m_slot);
+                scratch.accepted_manifolds.push(m_slot);
             }
         }
     } else {
         // Problem: hull can tunnel if time of impact is at concave edge
         // Example: flat box sliding down a ramp to a flat bottom
         // Solution: only ignore flat edges
-        for i in 0..tentative_manifolds.len() {
-            let m_slot = tentative_manifolds[i];
-            let m = &manifold_buffer[m_slot];
+        for i in 0..scratch.tentative_manifolds.len() {
+            let m_slot = scratch.tentative_manifolds[i];
+            let m = &scratch.manifold_buffer[m_slot];
             let triangle_flags = m.triangle_flags;
 
             if (triangle_flags & ALL_FLAT_EDGES) == ALL_FLAT_EDGES {
@@ -794,31 +856,34 @@ fn compute_mesh_manifolds_inner(
                 continue;
             }
 
-            accepted_manifolds.push(m_slot);
+            scratch.accepted_manifolds.push(m_slot);
         }
     }
 
-    b3_assert!(accepted_manifolds.len() as i32 <= triangle_count);
+    b3_assert!(scratch.accepted_manifolds.len() as i32 <= triangle_count);
 
-    if accepted_manifolds.is_empty() {
+    if scratch.accepted_manifolds.is_empty() {
         if contact.manifold_count() > 0 {
             contact.manifolds = Vec::new();
         }
         return false;
     }
 
-    let accepted_manifold_count = accepted_manifolds.len();
-    let mut clusters: Vec<Cluster> = Vec::with_capacity(accepted_manifold_count);
-    let mut cluster_memberships: Vec<i32> = vec![NULL_INDEX; accepted_manifold_count];
+    let accepted_manifold_count = scratch.accepted_manifolds.len();
+    // Slot-reused clusters: cluster_len tracks the in-use prefix of
+    // scratch.clusters; slots past it keep their point-Vec capacity.
+    let mut cluster_len = 0usize;
+    scratch.cluster_memberships.clear();
+    scratch.cluster_memberships.resize(accepted_manifold_count, NULL_INDEX);
 
     // Cluster tolerance is tighter than the warm starting manifold matching tolerance. These
     // serve different purposes.
     let cluster_threshold = 0.996;
     let mut cluster_point_count = 0i32;
     for i in 0..accepted_manifold_count {
-        cluster_memberships[i] = NULL_INDEX;
+        scratch.cluster_memberships[i] = NULL_INDEX;
 
-        let manifold = &manifold_buffer[accepted_manifolds[i]];
+        let manifold = &scratch.manifold_buffer[scratch.accepted_manifolds[i]];
         cluster_point_count += manifold.point_count();
 
         // Cluster based on the triangle normal and contact normal.
@@ -830,13 +895,13 @@ fn compute_mesh_manifolds_inner(
         let manifold_normal = manifold.normal;
         let triangle_normal = manifold.triangle_normal;
         let mut cluster_index = NULL_INDEX;
-        for j in 0..clusters.len() {
+        for j in 0..cluster_len {
             if !allow_clustering {
                 break;
             }
 
-            let cos_manifold_angle = dot(clusters[j].manifold_normal, manifold_normal);
-            let cos_triangle_angle = dot(clusters[j].triangle_normal, triangle_normal);
+            let cos_manifold_angle = dot(scratch.clusters[j].manifold_normal, manifold_normal);
+            let cos_triangle_angle = dot(scratch.clusters[j].triangle_normal, triangle_normal);
             if cos_manifold_angle <= cluster_threshold || cos_triangle_angle <= cluster_threshold {
                 continue;
             }
@@ -847,16 +912,27 @@ fn compute_mesh_manifolds_inner(
         }
 
         if cluster_index != NULL_INDEX {
-            cluster_memberships[i] = cluster_index;
-            clusters[cluster_index as usize].point_capacity += manifold.point_count();
+            scratch.cluster_memberships[i] = cluster_index;
+            scratch.clusters[cluster_index as usize].point_capacity += manifold.point_count();
         } else {
-            cluster_memberships[i] = clusters.len() as i32;
-            clusters.push(Cluster {
-                manifold_normal,
-                triangle_normal,
-                points: Vec::new(),
-                point_capacity: manifold.point_count(),
-            });
+            scratch.cluster_memberships[i] = cluster_len as i32;
+            // Acquire the next cluster slot; reuse keeps the points Vec's
+            // capacity from earlier contacts.
+            if cluster_len == scratch.clusters.len() {
+                scratch.clusters.push(Cluster {
+                    manifold_normal,
+                    triangle_normal,
+                    points: Vec::new(),
+                    point_capacity: manifold.point_count(),
+                });
+            } else {
+                let c = &mut scratch.clusters[cluster_len];
+                c.manifold_normal = manifold_normal;
+                c.triangle_normal = triangle_normal;
+                c.points.clear();
+                c.point_capacity = manifold.point_count();
+            }
+            cluster_len += 1;
         }
     }
 
@@ -864,22 +940,24 @@ fn compute_mesh_manifolds_inner(
         return false;
     }
 
-    // Setup clusters
-    for cluster in clusters.iter_mut() {
-        cluster.points = Vec::with_capacity(cluster.point_capacity as usize);
+    // Setup clusters (points were cleared at slot acquire; reserve keeps the
+    // high-water capacity, C used a fresh arena block here)
+    for cluster in &mut scratch.clusters[..cluster_len] {
+        cluster.points.clear();
+        cluster.points.reserve(cluster.point_capacity as usize);
     }
 
     // Populate clusters
     for i in 0..accepted_manifold_count {
-        let cluster_index = cluster_memberships[i];
+        let cluster_index = scratch.cluster_memberships[i];
         if cluster_index == NULL_INDEX {
             continue;
         }
 
-        b3_assert!(0 <= cluster_index && (cluster_index as usize) < clusters.len());
+        b3_assert!(0 <= cluster_index && (cluster_index as usize) < cluster_len);
 
-        let am = &manifold_buffer[accepted_manifolds[i]];
-        let cm = &mut clusters[cluster_index as usize];
+        let am = &scratch.manifold_buffer[scratch.accepted_manifolds[i]];
+        let cm = &mut scratch.clusters[cluster_index as usize];
         for j in 0..am.point_count() {
             b3_assert!((cm.points.len() as i32) < cm.point_capacity);
             let ap = &am.points[j as usize];
@@ -894,34 +972,38 @@ fn compute_mesh_manifolds_inner(
     }
 
     // Simplify clusters
-    for cm in clusters.iter_mut() {
+    for cm in &mut scratch.clusters[..cluster_len] {
         b3_assert!(cm.points.len() as i32 == cm.point_capacity);
         let triangle_normal = cm.triangle_normal;
-        reduce_cluster(&mut cm.points, triangle_normal);
+        reduce_cluster(&mut cm.points, &mut scratch.reduce_pts, triangle_normal);
     }
 
-    let cluster_count = clusters.len();
+    let cluster_count = cluster_len;
 
-    // Make a temporary copy of previous manifolds
-    let mut old_manifolds = contact.manifolds.clone();
-    let old_manifold_count = old_manifolds.len();
+    // Make a temporary copy of previous manifolds (C copies them to the arena)
+    scratch.old_manifolds.clear();
+    scratch.old_manifolds.extend_from_slice(&contact.manifolds);
+    let old_manifold_count = scratch.old_manifolds.len();
 
-    // Resize manifolds if needed. C frees + reallocates zeroed when the count
-    // changed and memsets otherwise; both yield zeroed manifolds of cluster_count.
-    let mut new_manifolds = vec![Manifold::default(); cluster_count];
+    // Rebuild contact.manifolds in place (C frees + reallocates zeroed when
+    // the count changed and memsets otherwise; the Vec keeps its capacity, so
+    // this only allocates when a contact grows past its own high-water mark).
+    contact.manifolds.clear();
+    contact.manifolds.resize_with(cluster_count, Manifold::default);
 
-    let mut consumed = vec![false; old_manifold_count];
+    scratch.consumed.clear();
+    scratch.consumed.resize(old_manifold_count, false);
 
     let matrix_b = make_matrix_from_quat(xf_b.q);
     let offset_a = sub_pos(xf_b.p, xf_a.p);
 
     let normal_match_tolerance = 0.995;
     for i in 0..cluster_count {
-        let cm = &clusters[i];
+        let cm = &scratch.clusters[i];
         let point_count = cm.points.len() as i32;
         b3_assert!(0 < point_count && point_count <= MAX_MANIFOLD_POINTS as i32);
 
-        let manifold = &mut new_manifolds[i];
+        let manifold = &mut contact.manifolds[i];
         manifold.point_count = point_count;
         manifold.normal = mul_mv(matrix_b, cm.manifold_normal);
 
@@ -930,11 +1012,11 @@ fn compute_mesh_manifolds_inner(
         let mut best_index = NULL_INDEX;
 
         for j in 0..old_manifold_count {
-            if consumed[j] {
+            if scratch.consumed[j] {
                 continue;
             }
 
-            let d = dot(old_manifolds[j].normal, cluster_normal);
+            let d = dot(scratch.old_manifolds[j].normal, cluster_normal);
             if d > best_dot {
                 best_index = j as i32;
                 best_dot = d;
@@ -942,11 +1024,11 @@ fn compute_mesh_manifolds_inner(
         }
 
         let matched_manifold = if best_index != NULL_INDEX {
-            let matched = &old_manifolds[best_index as usize];
+            let matched = &scratch.old_manifolds[best_index as usize];
             manifold.friction_impulse = matched.friction_impulse;
             manifold.rolling_impulse = matched.rolling_impulse;
             manifold.twist_impulse = matched.twist_impulse;
-            consumed[best_index as usize] = true;
+            scratch.consumed[best_index as usize] = true;
             Some(best_index as usize)
         } else {
             None
@@ -965,7 +1047,7 @@ fn compute_mesh_manifolds_inner(
 
             // Preserve normal impulse if possible
             if let Some(matched_index) = matched_manifold {
-                let matched = &mut old_manifolds[matched_index];
+                let matched = &mut scratch.old_manifolds[matched_index];
                 let old_point_count = matched.point_count;
                 for k in 0..old_point_count {
                     let old_pt = &mut matched.points[k as usize];
@@ -983,8 +1065,7 @@ fn compute_mesh_manifolds_inner(
         }
     }
 
-    // Store the new manifolds (C wrote into contact->manifolds in place).
-    contact.manifolds = new_manifolds;
+    // contact.manifolds was rebuilt in place above (like C).
 
     let materials_a = get_shape_materials(shape_a);
     let material_b = get_shape_materials(shape_b)[0];
