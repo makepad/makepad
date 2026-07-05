@@ -127,9 +127,9 @@ within one matrix, not absolute ms across sessions). Rust = the default
 
 | scenario | Rust w=1 | C w=1 | Δ | Rust w=8 | C w=8 | Δ |
 |---|---|---|---|---|---|---|
-| trees100 | 184.3 ms | 163.1 ms | +13% | 82.0 ms | 80.0 ms | +3% |
-| trees50 | 289.8 ms | 238.5 ms | +22% | 108.3 ms | 106.6 ms | +2% |
-| trees25 | 577.9 ms | 553.8 ms | +4% | 187.5 ms | 185.2 ms | +1% |
+| trees100 | 173.9 ms | 155.8 ms | +12% | 80.8 ms | 72.4 ms | +12% |
+| trees50 | 268.3 ms | 234.6 ms | +14% | 107.2 ms | 96.9 ms | +11% |
+| trees25 | 567.6 ms | 532.0 ms | +7% | 185.5 ms | 184.6 ms | +0% |
 | joint_grid | **818.5 ms** | 828.9 ms | **−1%** | 162.3 ms | 144.3 ms | +12% |
 | junkyard | 17 453 ms | 14 978 ms | +17% | 3 404 ms | 2 790 ms | +22% |
 | large_pyramid | **1 140 ms** | 1 231 ms | **−7%** | 274.3 ms | 254.4 ms | +8% |
@@ -137,12 +137,12 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | rain | 1 882 ms | 1 670 ms | +13% | 486.2 ms | 415.3 ms | +17% |
 | washer | 24 355 ms | 21 825 ms | +12% | 4 886 ms | 4 279 ms | +14% |
 | large_world | **7.4 ms** | 7.5 ms | **−1%** | 12.5 ms | 7.1 ms | +76% |
-| **geomean** | | | **+7%** | | | **+13%** |
+| **geomean** | | | **+7%** | | | **+15%** |
 
-Rust at 8 workers beats single-threaded C by 2.7–5.1× on heavy scenes.
-Both columns are one same-session run of the current tree (all
-optimization rounds applied); per-scene numbers move ±5-10% between
-sessions with machine thermal state, so read the geomeans and the
+All cells are same-session paired runs of the current tree (all
+optimization rounds applied; the trees rows were re-paired with extra
+repeats after a noisy first pass). Per-scene numbers move ±5-10% between
+sessions with machine thermal state — read the geomeans and the
 within-row ratios, not single cells.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
