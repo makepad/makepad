@@ -1,0 +1,13 @@
+# Workspace-wide rustc flags.
+#
+# profile-use: profile-guided optimization data for makepad-box3d
+# (libs/box3d/box3d.profdata, trained by libs/box3d/pgo.sh on the upstream
+# benchmark scenes; 11-19% faster physics in release builds). The profile is
+# keyed by function hash: crates and functions not covered by it silently
+# keep the default optimization heuristics, so this is a no-op for the rest
+# of the workspace, and it never changes computed results (bit-identical
+# determinism hash). If rustc ever reports an incompatible profile format
+# after a toolchain upgrade, retrain with libs/box3d/pgo.sh and copy
+# /tmp/box3d-pgo/merged.profdata over libs/box3d/box3d.profdata.
+[build]
+rustflags = ["-Cprofile-use=libs/box3d/box3d.profdata"]
