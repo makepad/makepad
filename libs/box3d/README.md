@@ -127,23 +127,23 @@ within one matrix, not absolute ms across sessions). Rust = the default
 
 | scenario | Rust w=1 | C w=1 | Δ | Rust w=8 | C w=8 | Δ |
 |---|---|---|---|---|---|---|
-| trees100 | 166.1 ms | 155.6 ms | +7% | 82.6 ms | 71.7 ms | +15% |
-| trees50 | 257.9 ms | 233.0 ms | +11% | 106.2 ms | 96.6 ms | +10% |
-| trees25 | 550.7 ms | 528.2 ms | +4% | **180.7 ms** | 180.9 ms | **−0%** |
-| joint_grid | **804.9 ms** | 848.6 ms | **−5%** | 158.9 ms | 142.9 ms | +11% |
-| junkyard | 16 234 ms | 13 186 ms | +23% | 3 209 ms | 2 798 ms | +15% |
-| large_pyramid | **1 118 ms** | 1 195 ms | **−6%** | 250.6 ms | 249.6 ms | +0% |
-| many_pyramids | **1 436 ms** | 1 522 ms | **−6%** | 282.8 ms | 281.1 ms | +1% |
-| rain | 1 761 ms | 1 620 ms | +9% | 424.9 ms | 394.7 ms | +8% |
-| washer | 21 861 ms | 19 393 ms | +13% | 4 519 ms | 4 284 ms | +5% |
-| large_world | 7.3 ms | 7.1 ms | +3% | 10.5 ms | 7.1 ms | +48% |
-| **geomean** | | | **+5%** | | | **+11%** |
+| trees100 | 184.3 ms | 163.1 ms | +13% | 82.0 ms | 80.0 ms | +3% |
+| trees50 | 289.8 ms | 238.5 ms | +22% | 108.3 ms | 106.6 ms | +2% |
+| trees25 | 577.9 ms | 553.8 ms | +4% | 187.5 ms | 185.2 ms | +1% |
+| joint_grid | **818.5 ms** | 828.9 ms | **−1%** | 162.3 ms | 144.3 ms | +12% |
+| junkyard | 17 453 ms | 14 978 ms | +17% | 3 404 ms | 2 790 ms | +22% |
+| large_pyramid | **1 140 ms** | 1 231 ms | **−7%** | 274.3 ms | 254.4 ms | +8% |
+| many_pyramids | 1 574 ms | 1 525 ms | +3% | **309.5 ms** | 341.5 ms | **−9%** |
+| rain | 1 882 ms | 1 670 ms | +13% | 486.2 ms | 415.3 ms | +17% |
+| washer | 24 355 ms | 21 825 ms | +12% | 4 886 ms | 4 279 ms | +14% |
+| large_world | **7.4 ms** | 7.5 ms | **−1%** | 12.5 ms | 7.1 ms | +76% |
+| **geomean** | | | **+7%** | | | **+13%** |
 
-Rust at 8 workers beats single-threaded C by 2.8–5.4× on heavy scenes.
-The junkyard row predates the sixth-round boundary fix: a post-fix
-same-session verification puts junkyard at ~+17% w=1 (hot-window run —
-absolute cells above are from one cold session and will be refreshed
-together in the next cold-session matrix).
+Rust at 8 workers beats single-threaded C by 2.7–5.1× on heavy scenes.
+Both columns are one same-session run of the current tree (all
+optimization rounds applied); per-scene numbers move ±5-10% between
+sessions with machine thermal state, so read the geomeans and the
+within-row ratios, not single cells.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
