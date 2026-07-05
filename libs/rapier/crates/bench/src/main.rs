@@ -895,6 +895,7 @@ fn main() {
     let mut run_count = 4;
     let mut single: i32 = -1;
     let mut probe = false;
+    let mut stages = false;
     let mut steps_override: i32 = -1;
     for arg in std::env::args().skip(1) {
         if let Some(v) = arg.strip_prefix("-b=") {
@@ -903,6 +904,8 @@ fn main() {
             run_count = v.parse().unwrap_or(4);
         } else if arg == "--probe" {
             probe = true;
+        } else if arg == "--stages" {
+            stages = true;
         } else if let Some(v) = arg.strip_prefix("-s=") {
             steps_override = v.parse().unwrap_or(-1);
         }
@@ -971,6 +974,47 @@ fn main() {
                 "steady-state({}) avg: pairs={} active_pairs={} points={} touching_points={} sleeping={}/{}",
                 name, avg(0), avg(1), avg(2), avg(3), avg(4), avg(5)
             );
+            continue;
+        }
+
+        if stages {
+            // Per-phase timing mode. The pipeline's counters are enabled by
+            // default (reset each step), so accumulate the per-step stage
+            // timers ourselves. Timer now uses std::time::Instant (see
+            // src/counters/timer.rs) so the measurements are live. Untimed
+            // warm-up step matches the box3d protocol.
+            let steps = if steps_override > 0 { steps_override } else { *step_count };
+            let mut scene = make();
+            let mut w = World::new();
+            scene.create(&mut w);
+            w.pipeline.counters.enable();
+            scene.step_scene(&mut w, 0);
+            w.step();
+            let (mut broad, mut narrow, mut island, mut solver, mut update, mut cd, mut total) =
+                (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            let t0 = Instant::now();
+            for step_index in 1..steps {
+                scene.step_scene(&mut w, step_index);
+                w.step();
+                let c = &w.pipeline.counters;
+                broad += c.broad_phase_time_ms();
+                narrow += c.narrow_phase_time_ms();
+                island += c.island_construction_time_ms();
+                solver += c.solver_time_ms();
+                update += c.update_time_ms();
+                cd += c.collision_detection_time_ms();
+            }
+            total = t0.elapsed().as_secs_f64() * 1000.0;
+            let pct = |x: f64| 100.0 * x / total;
+            println!("stages({}) over {} timed steps, wall {:.0} ms:", name, steps - 1, total);
+            println!("  broad_phase       {:>9.0} ms  {:>4.0}%", broad, pct(broad));
+            println!("  narrow_phase      {:>9.0} ms  {:>4.0}%", narrow, pct(narrow));
+            println!("  (collision total) {:>9.0} ms  {:>4.0}%", cd, pct(cd));
+            println!("  island_construct  {:>9.0} ms  {:>4.0}%", island, pct(island));
+            println!("  solver            {:>9.0} ms  {:>4.0}%", solver, pct(solver));
+            println!("  body_update       {:>9.0} ms  {:>4.0}%", update, pct(update));
+            let acct = broad + narrow + island + solver + update;
+            println!("  accounted         {:>9.0} ms  {:>4.0}%  (rest = overhead/CCD/events)", acct, pct(acct));
             continue;
         }
 
