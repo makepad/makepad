@@ -61,9 +61,9 @@ pub struct BroadPhase {
     /// pointers. Not serialized by snapshots.
     pub move_results: Vec<MoveResult>,
 
-    /// Reusable per-worker tree-query hit buffers for update_broad_phase_pairs
-    /// (the C code filters inside the tree callback and needs no buffer; the
-    /// port collects hits first and reuses these across steps). Sized to the
+    /// Reusable per-worker scratch for update_broad_phase_pairs. The pair
+    /// filtering now runs inline in the tree-query callback (like C), so only
+    /// the rare compound inner query needs a buffer (child_hits). Sized to the
     /// world worker count on first use. Same transient semantics as
     /// move_results. Not serialized by snapshots.
     pub(crate) pair_scratch: Vec<PairScratch>,
@@ -72,10 +72,9 @@ pub struct BroadPhase {
     pub pair_set: crate::table::HashSet,
 }
 
-/// Per-worker scratch for the pair query pass.
+/// Per-worker scratch for the pair query pass (compound inner-query hits only).
 #[derive(Debug, Default)]
 pub(crate) struct PairScratch {
-    pub(crate) hits: Vec<(i32, u64)>,
     pub(crate) child_hits: Vec<u64>,
 }
 
@@ -351,10 +350,15 @@ fn try_add_pair(
     });
 }
 
-// One tree query of the C b3FindPairsTask. The C code filters inside the tree
-// query callback; the port collects the raw hits first (same discovery order),
-// then filters, so the tree borrow does not overlap the world reads. Compound
-// shapes expand at their discovery position, matching the C recursion.
+// One tree query of the C b3FindPairsTask. Mirrors C's b3PairQueryCallback:
+// the pair filtering (try_add_pair) runs INLINE inside the tree-query callback
+// in discovery order, exactly like C, instead of materializing every hit into
+// a Vec and re-iterating (that intermediate store+reload was the hottest cost
+// on broad-phase-bound scenes like washer — query_tree_for_pairs dominates the
+// profile there). `child_hits` stays as scratch only for the rare compound
+// inner query (its callback just collects child indices, then try_add_pair
+// runs on them in place — same interleaved order as C's recursion). Non-
+// compound scenes never touch child_hits.
 #[allow(clippy::too_many_arguments)]
 fn query_tree_for_pairs(
     world: &World,
@@ -366,84 +370,76 @@ fn query_tree_for_pairs(
     query_tree_type: BodyType,
     query_proxy_key: i32,
     query_shape_index: i32,
-    hits: &mut Vec<(i32, u64)>,
     child_hits: &mut Vec<u64>,
 ) {
     let require_all_bits = false;
 
-    hits.clear();
     dynamic_tree_query(
         &world.broad_phase.trees[query_tree_type as usize],
         fat_aabb,
         DEFAULT_MASK_BITS,
         require_all_bits,
-        &mut |pid, user_data| {
-            hits.push((pid, user_data));
+        &mut |proxy_id, user_data| {
+            // Outer query: userData is a shape index.
+            let shape_index = user_data as i32;
+
+            // A proxy cannot form a pair with itself.
+            if shape_index == query_shape_index {
+                return true;
+            }
+
+            let shape = &world.shapes[shape_index as usize];
+            if let ShapeGeometry::Compound(compound) = &shape.geom {
+                // Query bounds are float world space, so the demoted transform is the matching float frame
+                let compound_transform =
+                    to_relative_transform(crate::body::get_body_transform(world, shape.body_id), POS_ZERO);
+                let local_aabb = aabb_transform(invert_transform(compound_transform), fat_aabb);
+
+                // recurse: inner query into the compound. userData is the compound
+                // child index, not a shape index.
+                let compound = compound.clone();
+                child_hits.clear();
+                dynamic_tree_query(&compound.tree, local_aabb, DEFAULT_MASK_BITS, require_all_bits, &mut |_child_proxy,
+                                                                                                          child_user_data| {
+                    child_hits.push(child_user_data);
+                    true
+                });
+
+                for k2 in 0..child_hits.len() {
+                    let child_user_data = child_hits[k2];
+                    try_add_pair(
+                        world,
+                        custom_filter,
+                        result,
+                        pair_count,
+                        pair_capacity,
+                        shape_index,
+                        proxy_id,
+                        child_user_data as i32,
+                        query_tree_type,
+                        query_proxy_key,
+                        query_shape_index,
+                    );
+                }
+                return true;
+            }
+
+            try_add_pair(
+                world,
+                custom_filter,
+                result,
+                pair_count,
+                pair_capacity,
+                shape_index,
+                proxy_id,
+                0,
+                query_tree_type,
+                query_proxy_key,
+                query_shape_index,
+            );
             true
         },
     );
-
-    for k in 0..hits.len() {
-        let (proxy_id, user_data) = hits[k];
-
-        // Outer query: userData is a shape index.
-        let shape_index = user_data as i32;
-
-        // A proxy cannot form a pair with itself.
-        if shape_index == query_shape_index {
-            continue;
-        }
-
-        let shape = &world.shapes[shape_index as usize];
-        if let ShapeGeometry::Compound(compound) = &shape.geom {
-            // Query bounds are float world space, so the demoted transform is the matching float frame
-            let compound_transform =
-                to_relative_transform(crate::body::get_body_transform(world, shape.body_id), POS_ZERO);
-            let local_aabb = aabb_transform(invert_transform(compound_transform), fat_aabb);
-
-            // recurse: inner query into the compound. userData is the compound
-            // child index, not a shape index.
-            let compound = compound.clone();
-            child_hits.clear();
-            dynamic_tree_query(&compound.tree, local_aabb, DEFAULT_MASK_BITS, require_all_bits, &mut |_child_proxy,
-                                                                                                      child_user_data| {
-                child_hits.push(child_user_data);
-                true
-            });
-
-            for k2 in 0..child_hits.len() {
-                let child_user_data = child_hits[k2];
-                try_add_pair(
-                    world,
-                    custom_filter,
-                    result,
-                    pair_count,
-                    pair_capacity,
-                    shape_index,
-                    proxy_id,
-                    child_user_data as i32,
-                    query_tree_type,
-                    query_proxy_key,
-                    query_shape_index,
-                );
-            }
-            continue;
-        }
-
-        try_add_pair(
-            world,
-            custom_filter,
-            result,
-            pair_count,
-            pair_capacity,
-            shape_index,
-            proxy_id,
-            0,
-            query_tree_type,
-            query_proxy_key,
-            query_shape_index,
-        );
-    }
 }
 
 /// Shared context for the parallel pair-finding pass. Each moved-proxy index
@@ -513,7 +509,6 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
                 BodyType::Kinematic,
                 query_proxy_key,
                 query_shape_index,
-                &mut scratch.hits,
                 &mut scratch.child_hits,
             );
             query_tree_for_pairs(
@@ -526,7 +521,6 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
                 BodyType::Static,
                 query_proxy_key,
                 query_shape_index,
-                &mut scratch.hits,
                 &mut scratch.child_hits,
             );
         }
@@ -542,7 +536,6 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
             BodyType::Dynamic,
             query_proxy_key,
             query_shape_index,
-            &mut scratch.hits,
             &mut scratch.child_hits,
         );
     }
