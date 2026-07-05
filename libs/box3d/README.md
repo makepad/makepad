@@ -3,6 +3,30 @@
 A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 (MIT). No external crates, std only.
 
+**~2× faster than Rapier single-threaded** (the other Rust 3D physics
+engine), measured 2026-07-05 against the rapier3d 0.32.0 vendored in this
+repo — identical scenes, geometry, materials, dt=1/60, and matched solver
+budget (4 substeps vs 4 solver iterations, both TGS-soft-family), one
+untimed warm-up step then min-of-4 timed runs, interleaved on the same
+machine (Apple Silicon, release + fat LTO). Reproduce with
+`libs/rapier/crates/bench`:
+
+| scene | box3d | rapier 0.32 | ratio |
+|---|---|---|---|
+| large_pyramid (4 096 bodies, 199 steps) | 1 576 ms | 3 506 ms | 2.23× |
+| many_pyramids (10 781 bodies, 99 steps) | 2 412 ms | 4 154 ms | 1.82× |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | 961 ms | 1 787 ms | 1.88× |
+
+Fairness notes: the vendored Rapier build cannot enable its SIMD feature
+(the `wide` dependency is stripped), while box3d uses its 4-wide NEON/SSE2
+contact solver — upstream Rapier with `simd-stable` would narrow (not
+close) the contact-heavy gaps. Rapier's `enhanced-determinism` feature was
+measured to cost nothing on these scenes (fast-math build: 3 514 / 4 400 /
+1 805 ms), so it is not the reason for the difference. Both engines settle
+the scenes comparably (no solver-quality cliff either way). box3d is also
+within ~1.15× of the original C Box3D compiled `clang -O3` — see the
+performance section below.
+
 ## Ported revision
 
 | | |

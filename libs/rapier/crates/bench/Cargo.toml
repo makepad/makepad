@@ -1,0 +1,19 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+# Fast-math build by default; `--features det` re-enables the vendored
+# default `enhanced-determinism` (simba libm_force) for the determinism
+# column of the comparison.
+rapier3d = { path = "../rapier3d", default-features = false, features = ["dim3", "f32"] }
+
+[features]
+default = []
+det = ["rapier3d/enhanced-determinism"]
