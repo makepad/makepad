@@ -19,9 +19,9 @@ Silicon, release + fat LTO). Reproduce with `libs/rapier/crates/bench`:
 
 | scene | box3d | rapier simd-stable | rapier no-SIMD | box3d vs simd |
 |---|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 579 ms** | 1 638 ms | 3 580 ms | box3d +4% |
-| many_pyramids (10 781 bodies, 99 steps) | 2 389 ms | **1 970 ms** | 4 404 ms | rapier +21% |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | **957 ms** | 1 008 ms | 1 820 ms | box3d +5% |
+| large_pyramid (4 096 bodies, 199 steps) | **1 391 ms** | 1 615 ms | 3 580 ms | box3d +16% |
+| many_pyramids (10 781 bodies, 99 steps) | 2 016 ms | **1 926 ms** | 4 404 ms | rapier +5% |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | **947 ms** | 976 ms | 1 820 ms | box3d +3% |
 
 Notes: restoring SIMD bought Rapier 1.8–2.2× (both engines then use 4-wide
 contact solving); its `enhanced-determinism` feature separately measured
@@ -105,10 +105,11 @@ C compiled `clang -O3`, upstream benchmark scenarios (`examples/benchmark.rs`,
 `-w=<workers>`; min of 4 runs at w=1, min of 2 at w=8, back-to-back on the
 same machine — thermal drift on this hardware is ±5-10%, so compare ratios
 within one matrix, not absolute ms across sessions). Single worker: Rust is
-1.03–1.28× slower (**geomean ≈ 1.15×**; large_pyramid at parity, 1365 vs
-1319 ms). At 8 workers the geomean is ≈ **1.35×** (junkyard 3877 vs 3062 ms,
-washer 6023 vs 4813 ms, large_pyramid 355 vs 286 ms). Rust at 8 workers
-beats single-threaded C by 2.6–5.0× on heavy scenes.
+1.04–1.24× slower (**geomean ≈ 1.12×**; many_pyramids 2071 vs 1949 ms,
+large_pyramid 1501 vs 1392 ms, junkyard the largest residue at 1.24×). At 8
+workers the geomean is ≈ **1.30×** (junkyard 3946 vs 3010 ms, washer 6069
+vs 4712 ms, large_pyramid 341 vs 279 ms). Rust at 8 workers beats
+single-threaded C by 2.7–5.3× on heavy scenes.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -129,17 +130,22 @@ change, measured at −6% serial). Second round: joint prepare functions read
 BodySim through references instead of deref-copying 220 bytes twice per
 joint per step; FMA contraction extended to the joint solvers (32 sites);
 scheduler workers spin ~tens of µs before committing to a kernel sleep
-(large_world w=8 went 24 → 11.5 ms; joint_grid w=8 1.58× → 1.49×).
+(large_world w=8 went 24 → 11.5 ms; joint_grid w=8 1.58× → 1.49×). Third
+round (disassembly-driven): `#[inline(never)]` on update_contact and the
+four convex stage functions (C compiles them standalone; LLVM had merged
+them into one 13.6 KB body paying constant register-spill traffic), and
+the `Manifolds` inline-when-single store (see representation changes below)
+— together many_pyramids went 1.28× → 1.06× vs C.
 
 Known remainder (verified by A/B, not worth their complexity in safe code):
-junkyard/many_pyramids hold the largest serial residue (1.25–1.28×) —
-diffuse bounds checks on data-dependent hull indices and the absence of
-`restrict`-grade aliasing info across the collide-task body; a twin-pair
-(`chunks_exact`) restructure of the edge SAT was tried and REVERTED — it
-won ~5% on junkyard's big compound hulls but cost box-box scenes 4-8%
-(large_pyramid parity matters more, and the C-shaped loop keeps the 1:1
-source mapping). `large_world` at 8 workers still pays ~1.6× C on fixed
-per-step overhead (11.5 vs 7.4 ms total across 500 steps).
+junkyard holds the largest serial residue (1.24×) — diffuse bounds checks
+on data-dependent hull indices and the absence of `restrict`-grade aliasing
+info across the collide-task body; a twin-pair (`chunks_exact`) restructure
+of the edge SAT was tried and REVERTED — it won ~5% on junkyard's big
+compound hulls but cost box-box scenes 4-8% (large_pyramid parity matters
+more, and the C-shaped loop keeps the 1:1 source mapping). At 8 workers
+joint_grid (1.45×) and `large_world` (fixed per-step overhead, 11.5 vs
+7.6 ms total across 500 steps) mark the parallel frontier.
 
 ## Intentional differences from C (keep these in mind when diffing)
 
@@ -180,6 +186,13 @@ per-step overhead (11.5 vs 7.4 ms total across 500 steps).
   Arc drop. The world hull database keeps C's explicit per-shape refcount
 - C unions → both-fields structs (`ContactCache`, contact convex/mesh) or
   enums (`ShapeGeometry`, `JointUnion`, `ChildShapeGeom`)
+- C's `b3Manifold* manifolds` (block allocator) → the `Manifolds` enum in
+  contact.rs: `None / One(Manifold) / Many(Vec<Manifold>)`, deref-as-slice.
+  Convex contacts (always 0/1 manifolds) keep theirs inline in the Contact —
+  the Rust equivalent of C's arena locality; disassembly showed the per-
+  contact heap chase was the main stall in collide/prepare/store (many
+  small islands: −15% on many_pyramids). `Contact` is `#[repr(C)]` with
+  `manifolds` last so the hot header fields stay on the leading cache lines
 - Solver pointers → indices: per-color constraint pointers became
   (start, count) ranges into StepContext-owned arrays; see the layout contract
   at the top of `contact_solver.rs` and the StepContext redesign note at the

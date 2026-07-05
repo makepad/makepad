@@ -864,7 +864,7 @@ fn compute_mesh_manifolds_inner(
 
     if scratch.accepted_manifolds.is_empty() {
         if contact.manifold_count() > 0 {
-            contact.manifolds = Vec::new();
+            contact.manifolds = crate::contact::Manifolds::None;
         }
         return false;
     }
@@ -988,8 +988,7 @@ fn compute_mesh_manifolds_inner(
     // Rebuild contact.manifolds in place (C frees + reallocates zeroed when
     // the count changed and memsets otherwise; the Vec keeps its capacity, so
     // this only allocates when a contact grows past its own high-water mark).
-    contact.manifolds.clear();
-    contact.manifolds.resize_with(cluster_count, Manifold::default);
+    contact.manifolds.set_count(cluster_count as i32);
 
     scratch.consumed.clear();
     scratch.consumed.resize(old_manifold_count, false);

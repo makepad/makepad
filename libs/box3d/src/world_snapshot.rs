@@ -1368,9 +1368,9 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         }
 
         if is_live && manifold_count > 0 {
-            c.manifolds.reserve(manifold_count as usize);
-            for _ in 0..manifold_count {
-                c.manifolds.push(des_manifold(r));
+            c.manifolds = crate::contact::Manifolds::with_count(manifold_count);
+            for m in c.manifolds.iter_mut() {
+                *m = des_manifold(r);
             }
         }
 
