@@ -101,19 +101,19 @@ fn clip_segment_to_hull_face(segment: &mut [ClipVertex; 2], hull: &HullData, ref
     let edges = &hull.edges;
     let points = &hull.points;
 
-    let ref_plane = planes[ref_face as usize];
+    let ref_plane = *hull_at(planes, ref_face as usize);
 
-    let face = faces[ref_face as usize];
+    let face = *hull_at(faces, ref_face as usize);
 
     let mut edge_index = face.edge as i32;
 
     loop {
-        let edge = edges[edge_index as usize];
+        let edge = *hull_at(edges, edge_index as usize);
         let next_edge_index = edge.next as i32;
-        let next = edges[next_edge_index as usize];
+        let next = *hull_at(edges, next_edge_index as usize);
 
-        let vertex1 = points[edge.origin as usize];
-        let vertex2 = points[next.origin as usize];
+        let vertex1 = *hull_at(points, edge.origin as usize);
+        let vertex2 = *hull_at(points, next.origin as usize);
         let tangent = normalize(sub(vertex2, vertex1));
         let binormal = cross(tangent, ref_plane.normal);
 
@@ -172,7 +172,7 @@ fn query_face_direction_hull_and_capsule(hull: &HullData, capsule: &Capsule, cap
 /// Debug builds always verify, so every `cargo test` run exercises the
 /// contract. Without the feature this is ordinary checked indexing.
 #[inline(always)]
-fn hull_at<T>(slice: &[T], i: usize) -> &T {
+pub(crate) fn hull_at<T>(slice: &[T], i: usize) -> &T {
     #[cfg(feature = "unchecked-hulls")]
     {
         debug_assert!(i < slice.len());
@@ -186,6 +186,8 @@ fn hull_at<T>(slice: &[T], i: usize) -> &T {
     }
 }
 
+// Standalone like C (see the note on collide_hulls).
+#[inline(never)]
 fn query_face_directions(hull_a: &HullData, hull_b: &HullData, relative_transform: Transform) -> FaceQuery {
     // We perform all computations in local space of the second hull
     let transform = invert_transform(relative_transform);
@@ -1071,22 +1073,22 @@ fn build_polygon(out: &mut [ClipVertex], transform: Transform, hull: &HullData, 
     let edges = &hull.edges;
     let points = &hull.points;
 
-    let face = faces[inc_face as usize];
+    let face = *hull_at(faces, inc_face as usize);
     let mut edge_index = face.edge as i32;
-    b3_assert!(edges[edge_index as usize].face as i32 == inc_face);
+    b3_assert!(hull_at(edges, edge_index as usize).face as i32 == inc_face);
 
     let mut out_count: i32 = 0;
 
     let matrix = make_matrix_from_quat(transform.q);
 
     loop {
-        let edge = edges[edge_index as usize];
+        let edge = *hull_at(edges, edge_index as usize);
 
         let next_edge_index = edge.next as i32;
-        let next = edges[next_edge_index as usize];
+        let next = *hull_at(edges, next_edge_index as usize);
 
         let mut vertex = ClipVertex::default();
-        vertex.position = add(mul_mv(matrix, points[next.origin as usize]), transform.p);
+        vertex.position = add(mul_mv(matrix, *hull_at(points, next.origin as usize)), transform.p);
         vertex.separation = plane_separation(ref_plane, vertex.position);
         vertex.pair = make_feature_pair(FeatureOwner::ShapeB, edge_index, FeatureOwner::ShapeB, next_edge_index);
 
@@ -1113,7 +1115,7 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
 
     // Reference face
     let ref_face = query.face_index;
-    let ref_plane = planes_a[ref_face as usize];
+    let ref_plane = *hull_at(planes_a, ref_face as usize);
 
     // Find incident face
     let ref_normal_in_b = inv_rotate_vector(transform_b_to_a.q, ref_plane.normal);
@@ -1128,15 +1130,15 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
     let mut input: &mut [ClipVertex] = &mut buffer1;
     let mut output: &mut [ClipVertex] = &mut buffer2;
 
-    let face = faces_a[ref_face as usize];
+    let face = *hull_at(faces_a, ref_face as usize);
     let mut edge_index = face.edge as i32;
 
     loop {
-        let edge = edges_a[edge_index as usize];
+        let edge = *hull_at(edges_a, edge_index as usize);
         let next_edge_index = edge.next as i32;
-        let next = edges_a[next_edge_index as usize];
-        let vertex1 = points_a[edge.origin as usize];
-        let vertex2 = points_a[next.origin as usize];
+        let next = *hull_at(edges_a, next_edge_index as usize);
+        let vertex1 = *hull_at(points_a, edge.origin as usize);
+        let vertex2 = *hull_at(points_a, next.origin as usize);
         let tangent = normalize(sub(vertex2, vertex1));
         let binormal = cross(tangent, ref_plane.normal);
 
@@ -1291,6 +1293,11 @@ fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &
 }
 
 /// Collide two hulls.
+// Standalone like C (b3CollideHulls / b3QueryFaceDirections / the compute
+// fns are separate symbols): LLVM+PGO merged the whole manifold pipeline
+// into 2-3k-instruction bodies paying spills and I-cache pressure — the
+// measured cost concentration on low-recycle scenes (junkyard/washer).
+#[inline(never)]
 pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, cache: &mut SATCache) {
     manifold.points.clear();
 
