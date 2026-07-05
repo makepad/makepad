@@ -334,6 +334,23 @@ impl<'a> StateAccess<'a> {
             *self.slice.get_mut(i) = state;
         }
     }
+
+    /// Write only the velocity fields at `i` — C's joint solvers store the
+    /// two vectors in place. In the ~1000-instruction joint solve bodies the
+    /// full 56-byte round trip forces the untouched delta/flags fields to
+    /// stay live across the whole body and be re-stored (disassembly: +110
+    /// loads/+54 stores per joint vs C, the entirety of the joint_grid gap).
+    /// Same exclusive-access contract as `set`; the caller must not hold any
+    /// borrow of `i` across this call.
+    #[inline]
+    pub fn set_velocities(&self, i: usize, v: crate::math_functions::Vec3, w: crate::math_functions::Vec3) {
+        // SAFETY: see set(); the &mut is created and dropped inside this call.
+        unsafe {
+            let state = self.slice.get_mut(i);
+            state.linear_velocity = v;
+            state.angular_velocity = w;
+        }
+    }
 }
 
 /// Solve-stage profile accumulators written only by the orchestrator

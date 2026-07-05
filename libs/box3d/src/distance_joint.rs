@@ -350,42 +350,44 @@ pub fn warm_start_distance_joint(base: &mut JointSim, states: &StateAccess, _con
     let joint = distance_joint_mut(base);
 
     // dummy state for static bodies
-    let mut state_a = if joint.index_a == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_a as usize)
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if joint.index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
-    let mut state_b = if joint.index_b == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_b as usize)
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if joint.index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
 
-    let r_a = rotate_vector(state_a.delta_rotation, joint.anchor_a);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.anchor_b);
+    let r_a = rotate_vector(dq_a, joint.anchor_a);
+    let r_b = rotate_vector(dq_b, joint.anchor_b);
 
-    let ds = add(sub(state_b.delta_position, state_a.delta_position), sub(r_b, r_a));
+    let ds = add(sub(dp_b, dp_a), sub(r_b, r_a));
     let separation = add(joint.delta_center, ds);
     let axis = normalize(separation);
 
     let axial_impulse = joint.impulse + joint.lower_impulse - joint.upper_impulse + joint.motor_impulse;
     let p = mul_sv(axial_impulse, axis);
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = mul_sub(state_a.linear_velocity, m_a, p);
-        state_a.angular_velocity = sub(state_a.angular_velocity, mul_mv(i_a, cross(r_a, p)));
+    if flags_a & DYNAMIC_FLAG != 0 {
+        v_a = mul_sub(v_a, m_a, p);
+        w_a = sub(w_a, mul_mv(i_a, cross(r_a, p)));
     }
 
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = mul_add(state_b.linear_velocity, m_b, p);
-        state_b.angular_velocity = add(state_b.angular_velocity, mul_mv(i_b, cross(r_b, p)));
+    if flags_b & DYNAMIC_FLAG != 0 {
+        v_b = mul_add(v_b, m_b, p);
+        w_b = add(w_b, mul_mv(i_b, cross(r_b, p)));
     }
 
-    if joint.index_a != NULL_INDEX {
-        states.set(joint.index_a as usize, state_a);
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if joint.index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_a as usize, v_a, w_a);
     }
-    if joint.index_b != NULL_INDEX {
-        states.set(joint.index_b as usize, state_b);
+    if joint.index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_b as usize, v_b, w_b);
     }
 }
 
@@ -401,28 +403,23 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
     let joint = distance_joint_mut(base);
 
     // dummy state for static bodies
-    let mut state_a = if joint.index_a == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_a as usize)
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if joint.index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
-    let mut state_b = if joint.index_b == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_b as usize)
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if joint.index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
-
-    let mut v_a = state_a.linear_velocity;
-    let mut w_a = state_a.angular_velocity;
-    let mut v_b = state_b.linear_velocity;
-    let mut w_b = state_b.angular_velocity;
 
     // current anchors
-    let r_a = rotate_vector(state_a.delta_rotation, joint.anchor_a);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.anchor_b);
+    let r_a = rotate_vector(dq_a, joint.anchor_a);
+    let r_b = rotate_vector(dq_b, joint.anchor_b);
 
     // current separation
-    let ds = add(sub(state_b.delta_position, state_a.delta_position), sub(r_b, r_a));
+    let ds = add(sub(dp_b, dp_a), sub(r_b, r_a));
     let separation = add(joint.delta_center, ds);
 
     let length = length(separation);
@@ -560,20 +557,12 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
         w_b = add(w_b, mul_mv(i_b, cross(r_b, p)));
     }
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = v_a;
-        state_a.angular_velocity = w_a;
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if joint.index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_a as usize, v_a, w_a);
     }
-
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = v_b;
-        state_b.angular_velocity = w_b;
-    }
-
-    if joint.index_a != NULL_INDEX {
-        states.set(joint.index_a as usize, state_a);
-    }
-    if joint.index_b != NULL_INDEX {
-        states.set(joint.index_b as usize, state_b);
+    if joint.index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_b as usize, v_b, w_b);
     }
 }

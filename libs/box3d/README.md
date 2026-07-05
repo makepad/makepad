@@ -5,24 +5,24 @@ A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 
 **Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
 0.32.0 with `simd-stable` vendored in this repo): the default build of this
-crate is **faster than or equal to Rapier on all three scenes, and faster
-than the C original on two of three** — while additionally keeping
-bit-exact cross-architecture determinism (upstream Rapier makes
-`simd-stable` and `enhanced-determinism` mutually exclusive, so its SIMD
-speed and its determinism mode cannot be combined) and using zero external
-crates. Measured 2026-07-05: identical scenes, geometry, materials,
-dt=1/60, matched solver budget (4 substeps vs 4 solver iterations, both
+crate is **faster than Rapier on all three scenes, and faster than or at
+parity with the C original** — while additionally keeping bit-exact
+cross-architecture determinism (upstream Rapier makes `simd-stable` and
+`enhanced-determinism` mutually exclusive, so its SIMD speed and its
+determinism mode cannot be combined) and using zero external crates.
+Measured 2026-07-05: identical scenes, geometry, materials, dt=1/60,
+matched solver budget (4 substeps vs 4 solver iterations, both
 TGS-soft-family), one untimed warm-up step then min-of-4 timed runs, all
-four builds interleaved per scene single-threaded on the same machine
-(Apple Silicon, release + fat LTO). The box3d default build includes the
-checked-in PGO profile (see the performance section); the plain column is
-the same code without it. Reproduce with `libs/rapier/crates/bench`:
+builds same-session single-threaded on the same machine (Apple Silicon,
+release + fat LTO). The box3d default build includes the checked-in PGO
+profile (see the performance section); the plain column is the same code
+without it. Reproduce with `libs/rapier/crates/bench`:
 
 | scene | box3d (default build) | box3d no-PGO | box3d C `-O3` | rapier |
 |---|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 118 ms** | 1 311 ms (+17%) | 1 228 ms (+10%) | 1 451 ms (+30%) |
-| many_pyramids (10 781 bodies, 99 steps) | **1 510 ms** | 1 696 ms (+12%) | 1 538 ms (+2%) | 1 690 ms (+12%) |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | 912 ms | 932 ms (+2%) | **816 ms (−11%)** | 914 ms (+0%) |
+| large_pyramid (4 096 bodies, 199 steps) | **1 127 ms** | 1 271 ms (+13%) | 1 197 ms (+6%) | 1 358 ms (+20%) |
+| many_pyramids (10 781 bodies, 99 steps) | **1 487 ms** | 1 604 ms (+8%) | 1 530 ms (+3%) | 1 612 ms (+8%) |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | **817 ms** | 858 ms (+5%) | 801 ms (−2%) | 940 ms (+15%) |
 
 (+X% = that build takes X% longer than the default box3d build; −X% =
 that build is X% faster.)
@@ -32,7 +32,7 @@ Notes: both engines use 4-wide SIMD contact solving; Rapier's
 (no transcendentals in box stacking). Both engines settle the scenes
 comparably (no solver-quality cliff either way). The C reference is not
 profile-guided — PGO-ing it would claw back some margin; against plain
-(non-PGO) box3d, C leads by ~1.12× geomean across the full 10-scene suite
+(non-PGO) box3d, C leads by ~1.13× geomean across the full 10-scene suite
 (see below).
 
 ## Ported revision
@@ -109,12 +109,25 @@ To pull in upstream changes:
 C compiled `clang -O3`, upstream benchmark scenarios (`examples/benchmark.rs`,
 `-w=<workers>`; min of 4 runs at w=1, min of 2 at w=8, back-to-back on the
 same machine — thermal drift on this hardware is ±5-10%, so compare ratios
-within one matrix, not absolute ms across sessions). Single worker: Rust is
-1.04–1.24× slower (**geomean ≈ 1.12×**; many_pyramids 2071 vs 1949 ms,
-large_pyramid 1501 vs 1392 ms, junkyard the largest residue at 1.24×). At 8
-workers the geomean is ≈ **1.30×** (junkyard 3946 vs 3010 ms, washer 6069
-vs 4712 ms, large_pyramid 341 vs 279 ms). Rust at 8 workers beats
-single-threaded C by 2.7–5.3× on heavy scenes.
+within one matrix, not absolute ms across sessions). Rust = the default
+(PGO) build. Full matrix, all 10 scenes (+X% = Rust takes X% longer than C;
+−X% = Rust is faster):
+
+| scenario | Rust w=1 | C w=1 | Δ | Rust w=8 | C w=8 | Δ |
+|---|---|---|---|---|---|---|
+| trees100 | 172.8 ms | 160.0 ms | +8% | 96.1 ms | 81.8 ms | +17% |
+| trees50 | 270.6 ms | 243.5 ms | +11% | 130.0 ms | 97.3 ms | +34% |
+| trees25 | 569.1 ms | 522.9 ms | +9% | 219.5 ms | 183.2 ms | +20% |
+| joint_grid | 816.9 ms | 800.6 ms | +2% | 198.5 ms | 146.3 ms | +36% |
+| junkyard | 16 643 ms | 13 813 ms | +20% | 3 416 ms | 2 885 ms | +18% |
+| large_pyramid | **1 127 ms** | 1 197 ms | **−6%** | 291.1 ms | 252.1 ms | +15% |
+| many_pyramids | **1 487 ms** | 1 530 ms | **−3%** | 334.2 ms | 299.2 ms | +12% |
+| rain | 1 775 ms | 1 609 ms | +10% | 603.5 ms | 424.0 ms | +42% |
+| washer | 22 866 ms | 19 339 ms | +18% | 5 392 ms | 4 317 ms | +25% |
+| large_world | 7.5 ms | 7.1 ms | +4% | 12.1 ms | 7.3 ms | +66% |
+| **geomean** | | | **+7%** | | | **+28%** |
+
+Rust at 8 workers beats single-threaded C by 2.6–5.5× on heavy scenes.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -140,7 +153,16 @@ round (disassembly-driven): `#[inline(never)]` on update_contact and the
 four convex stage functions (C compiles them standalone; LLVM had merged
 them into one 13.6 KB body paying constant register-spill traffic), and
 the `Manifolds` inline-when-single store (see representation changes below)
-— together many_pyramids went 1.28× → 1.06× vs C.
+— together many_pyramids went 1.28× → 1.06× vs C. Fourth round: narrow
+velocity write-back in all 16 joint warm-start/solve functions
+(`StateAccess::set_velocities`) — an instruction census showed arithmetic
+at exact FMA parity with C but +110 loads/+54 stores per joint from
+round-tripping the whole 56-byte BodyState across the ~1000-instruction
+solve bodies; writing just the two velocity vectors like C closed
+joint_grid from −11% to parity. (The identical narrow-write was measured
+NEUTRAL for contact scatter, where the state is only live ~40
+instructions — same pattern, opposite economics; both verdicts held in
+paired A/B.)
 
 **PGO — on by default:** profile-guided optimization gives another 11–19%
 over the plain fat-LTO build (paired same-machine runs: large_pyramid
@@ -162,17 +184,22 @@ vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
 back some of its own margin.
 
 Known remainder (verified by A/B, not worth their complexity in safe code):
-junkyard holds the largest serial residue (1.24×) — diffuse bounds checks
-on data-dependent hull indices and the absence of `restrict`-grade aliasing
-info across the collide-task body; a twin-pair (`chunks_exact`) restructure
-of the edge SAT was tried and REVERTED — it won ~5% on junkyard's big
-compound hulls but cost box-box scenes 4-8% (large_pyramid parity matters
-more, and the C-shaped loop keeps the 1:1 source mapping). At 8 workers
-joint_grid (1.45×) and `large_world` (fixed per-step overhead, 11.5 vs
-7.6 ms total across 500 steps) mark the parallel frontier. Also tried and
-dropped (below the noise floor in paired A/B): cache-line padding of the
-stage-sync atomics, and narrow velocity-only state writes in scatter (wide
-cores handle the full 56-byte contiguous store as cheaply).
+junkyard/washer hold the largest serial residue (+18-20%) — diffuse bounds
+checks on data-dependent hull indices and the absence of `restrict`-grade
+aliasing info across the collide-task body; a twin-pair (`chunks_exact`)
+restructure of the edge SAT was tried and REVERTED — it won ~5% on
+junkyard's big compound hulls but cost box-box scenes 4-8% (large_pyramid
+parity matters more, and the C-shaped loop keeps the 1:1 source mapping).
+At 8 workers the thin-stage scenes (rain +42%, joint_grid +36%,
+large_world +66% of 12 ms) mark the parallel frontier — per-stage sync
+overhead on stages with little work. Also tried and dropped (below the
+noise floor or negative in paired A/B): cache-line padding of the
+stage-sync atomics, narrow velocity-only writes in contact scatter (state
+only live ~40 instructions there — see the joint-solver counterexample
+above), 64-byte BodyState alignment (cache footprint cost more than
+line-straddling saved), and two-row software pipelining of the wide solve
+(real +2-4% in plain builds, but PGO's layout already extracts the same
+ILP — redundant in the default build).
 
 ## Intentional differences from C (keep these in mind when diffing)
 
