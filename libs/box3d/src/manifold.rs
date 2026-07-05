@@ -2,6 +2,7 @@
 // Dirk Gregorius contributed portions of the original C code.
 
 use crate::b3_assert;
+use crate::convex_manifold::hull_at;
 use crate::b3_validate;
 use crate::math_functions::{
     abs_float, cross, dot, length, length_squared, mul_add, mul_sv, neg, normalize, sub, Plane, Vec3,
@@ -116,16 +117,16 @@ pub fn find_incident_face(hull: &HullData, ref_normal: Vec3, vertex_index: i32) 
     let mut min_edge_index = -1;
     let mut min_edge_projection = f32::MAX;
 
-    let vertex = vertices[vertex_index as usize];
+    let vertex = *hull_at(vertices, vertex_index as usize);
 
     let mut edge_index = vertex.edge as i32;
-    let mut edge = edges[edge_index as usize];
-    let edge_origin = points[edge.origin as usize];
+    let mut edge = *hull_at(edges, edge_index as usize);
+    let edge_origin = *hull_at(points, edge.origin as usize);
     b3_assert!(edge.origin as i32 == vertex_index);
 
     loop {
-        let twin = edges[edge.twin as usize];
-        let twin_origin = points[twin.origin as usize];
+        let twin = *hull_at(edges, edge.twin as usize);
+        let twin_origin = *hull_at(points, twin.origin as usize);
 
         let axis = normalize(sub(twin_origin, edge_origin));
         let edge_projection = abs_float(dot(axis, ref_normal));
@@ -135,7 +136,7 @@ pub fn find_incident_face(hull: &HullData, ref_normal: Vec3, vertex_index: i32) 
         }
 
         edge_index = twin.next as i32;
-        edge = edges[edge_index as usize];
+        edge = *hull_at(edges, edge_index as usize);
         b3_assert!(edge.origin as i32 == vertex_index);
 
         if edge_index == vertex.edge as i32 {
@@ -144,13 +145,13 @@ pub fn find_incident_face(hull: &HullData, ref_normal: Vec3, vertex_index: i32) 
     }
     b3_assert!(min_edge_index >= 0);
 
-    let min_edge = edges[min_edge_index as usize];
+    let min_edge = *hull_at(edges, min_edge_index as usize);
     let min_face_index1 = min_edge.face as i32;
-    let min_plane1 = planes[min_face_index1 as usize];
+    let min_plane1 = *hull_at(planes, min_face_index1 as usize);
 
-    let min_twin = edges[min_edge.twin as usize];
+    let min_twin = *hull_at(edges, min_edge.twin as usize);
     let min_face_index2 = min_twin.face as i32;
-    let min_plane2 = planes[min_face_index2 as usize];
+    let min_plane2 = *hull_at(planes, min_face_index2 as usize);
 
     if dot(min_plane1.normal, ref_normal) < dot(min_plane2.normal, ref_normal) {
         min_face_index1

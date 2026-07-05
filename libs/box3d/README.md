@@ -98,14 +98,17 @@ To pull in upstream changes:
   bit-identical: the determinism ragdoll hash matches across NEON, SSE2 and
   scalar (`tests/test_simd.rs` asserts per-op bit equality).
 - `unchecked-hulls` — opt-in, off by default: elides bounds checks on
-  hull-topology indexing in the SAT hot loops (the port's only opt-in
-  unsafe). The indices come from the hull's own connectivity, validated at
-  construction and immutable afterwards; debug builds always check, so the
-  full test suite exercises the contract (179 tests green, determinism hash
-  unchanged). Measured paired with retrained PGO: junkyard −3.6%, washer
-  −2%, nothing elsewhere — most of the hull-scene residue is NOT the checks
-  (they're well-predicted branches); it's load scheduling the checked form
-  constrains. Enable only if hull-heavy scenes dominate your workload.
+  hull-topology indexing across the SAT and manifold-pipeline functions
+  (the port's only opt-in unsafe). The indices come from the hull's own
+  connectivity, validated at construction and immutable afterwards; debug
+  builds always check, so the full test suite exercises the contract (179
+  tests green, determinism hash unchanged). HONEST STATUS: after the
+  sixth-round function-boundary restoration (see performance section) this
+  feature measures NEUTRAL (±1% paired) — its earlier −3.6% junkyard win
+  turned out to be I-cache/register-pressure relief that `#[inline(never)]`
+  now provides safely. The checks themselves are confirmed nearly free
+  (well-predicted branches). Retained as a documented experiment; removing
+  it is trivial if it ever gets in the way.
 - `double-precision` — C `BOX3D_DOUBLE_PRECISION` (large world mode): `Pos`
   becomes `{f64, f64, f64}` and `WorldTransform` gets a double translation
   with a float quaternion. All crossings go through the boundary functions in
@@ -137,10 +140,10 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | **geomean** | | | **+5%** | | | **+11%** |
 
 Rust at 8 workers beats single-threaded C by 2.8–5.4× on heavy scenes.
-The junkyard and washer rows additionally gain ~3.6% / ~2% with the opt-in
-`unchecked-hulls` feature (paired adjacent-run A/B with a retrained
-profile; see Cargo features above) — absolute cells above are the default
-build.
+The junkyard row predates the sixth-round boundary fix, which measured a
+further −3.6% there (paired adjacent-run A/B with a retrained profile;
+absolute cells are from one cold-window session and are not restated
+piecemeal — rerun the matrix to refresh them together).
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -182,7 +185,16 @@ left SERIAL when threading was ported. Parallelizing both (FinalizeCtx
 mirroring the collide pass's SyncSlice pattern; bullet array filled via
 an atomic cursor like C) collapsed the 8-worker geomean from +28% to
 +11% — rain went +42% → +8%, large_pyramid/many_pyramids/trees25 to
-parity. Hash bit-identical throughout.
+parity. Hash bit-identical throughout. Sixth round (junkyard's manifold
+pipeline): disassembly showed LLVM+PGO had merged C's tight 500-700
+instruction narrow-phase functions into 2-3k-instruction bodies
+(update_contact 5.5× C's size, collide_hulls without even a symbol) —
+`#[inline(never)]` on collide_hulls / compute_convex_manifold /
+query_face_directions restored C's code layout for −3.6% on junkyard
+(paired, retrained profile; washer neutral). The same analysis found the
+edge SAT is now FASTER than C, and that removing the remaining bounds
+checks adds nothing once the boundaries are restored — the safe fix
+superseded the unsafe one (see the unchecked-hulls note).
 
 **PGO — on by default:** profile-guided optimization gives another 11–19%
 over the plain fat-LTO build (paired same-machine runs: large_pyramid
