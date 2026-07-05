@@ -700,6 +700,8 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     }
 }
 
+// Standalone like C (see the note on collide_hulls).
+#[inline(never)]
 fn compute_convex_manifold(
     world: &World,
     task_context: &mut crate::physics_world::TaskContext,
