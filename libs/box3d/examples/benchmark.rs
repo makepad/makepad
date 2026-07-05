@@ -1319,6 +1319,7 @@ fn main() {
     let mut single_benchmark = -1;
     let mut enable_continuous = true;
     let mut worker_count: u32 = 1;
+    let mut feature_recycling: Option<bool> = None;
 
     for arg in std::env::args().skip(1) {
         if let Some(v) = arg.strip_prefix("-b=") {
@@ -1330,6 +1331,10 @@ fn main() {
             println!("Continuous disabled");
         } else if let Some(v) = arg.strip_prefix("-w=") {
             worker_count = v.parse().unwrap_or(1);
+        } else if let Some(v) = arg.strip_prefix("-fr=") {
+            // PORT EXTENSION: force the feature-recycling tier on (1) or
+            // off (0); default follows default_world_def().
+            feature_recycling = Some(v.parse::<i32>().unwrap_or(0) != 0);
         } else if arg.starts_with("-t=") || arg == "-s" {
             println!("note: {} ignored (no thread sweep, no step-time files)", arg);
         } else if arg == "-h" {
@@ -1368,6 +1373,9 @@ fn main() {
             let mut world_def = default_world_def();
             world_def.enable_continuous = enable_continuous;
             world_def.worker_count = worker_count;
+            if let Some(fr) = feature_recycling {
+                world_def.enable_feature_recycling = fr;
+            }
 
             let mut scenario = (benchmark.make)();
             scenario.capacity(&mut world_def.capacity);
@@ -1417,8 +1425,17 @@ fn main() {
         }
 
         println!(
-            "body {} / shape {} / contact {} / joint {} / stack {}\n",
+            "body {} / shape {} / contact {} / joint {} / stack {}",
             counters.body_count, counters.shape_count, counters.contact_count, counters.joint_count, counters.stack_used
+        );
+        // PORT EXTENSION: feature-recycling tier activity (final step).
+        println!(
+            "sat {} / satHit {} / recycled {} / featRecycled {} / featSepSkip {}\n",
+            counters.sat_call_count,
+            counters.sat_cache_hit_count,
+            counters.recycled_contact_count,
+            counters.feature_recycled_contact_count,
+            counters.feature_separated_skip_count
         );
 
         let mut sums = [0.0f32; 7];

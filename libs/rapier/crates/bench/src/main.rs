@@ -894,11 +894,17 @@ fn main() {
 
     let mut run_count = 4;
     let mut single: i32 = -1;
+    let mut probe = false;
+    let mut steps_override: i32 = -1;
     for arg in std::env::args().skip(1) {
         if let Some(v) = arg.strip_prefix("-b=") {
             single = v.parse().unwrap_or(-1);
         } else if let Some(v) = arg.strip_prefix("-r=") {
             run_count = v.parse().unwrap_or(4);
+        } else if arg == "--probe" {
+            probe = true;
+        } else if let Some(v) = arg.strip_prefix("-s=") {
+            steps_override = v.parse().unwrap_or(-1);
         }
     }
 
@@ -911,6 +917,62 @@ fn main() {
             continue;
         }
         println!("benchmark: {}, steps = {}", name, step_count);
+
+        if probe {
+            // Workload-statistics mode: one run, no timing. Counts per 10th
+            // step: narrow-phase pairs (total / with active contact), manifold
+            // points (total / touching dist<=0), sleeping bodies.
+            let steps = if steps_override > 0 { steps_override } else { *step_count };
+            let mut scene = make();
+            let mut w = World::new();
+            scene.create(&mut w);
+            let mut tail: Vec<[i64; 6]> = Vec::new();
+            for step_index in 0..steps {
+                scene.step_scene(&mut w, step_index);
+                w.step();
+                if step_index % 10 == 9 {
+                    let mut pairs = 0i64;
+                    let mut active_pairs = 0i64;
+                    let mut points = 0i64;
+                    let mut touching_points = 0i64;
+                    for pair in w.narrow_phase.contact_pairs() {
+                        pairs += 1;
+                        if pair.has_any_active_contact() {
+                            active_pairs += 1;
+                        }
+                        for m in &pair.manifolds {
+                            points += m.points.len() as i64;
+                            touching_points += m.points.iter().filter(|p| p.dist <= 0.0).count() as i64;
+                        }
+                    }
+                    let mut sleeping = 0i64;
+                    let mut total = 0i64;
+                    for (_, b) in w.bodies.iter() {
+                        total += 1;
+                        if b.is_sleeping() {
+                            sleeping += 1;
+                        }
+                    }
+                    tail.push([pairs, active_pairs, points, touching_points, sleeping, total]);
+                }
+                if (step_index + 1) % 100 == 0 {
+                    let l = tail.last().unwrap();
+                    println!(
+                        "checkpoint step={} pairs={} active_pairs={} points={} touching_points={} sleeping={}/{}",
+                        step_index + 1, l[0], l[1], l[2], l[3], l[4], l[5]
+                    );
+                }
+            }
+            let half = tail.len() / 2;
+            let t = &tail[half..];
+            let n = t.len() as i64;
+            let avg = |i: usize| t.iter().map(|s| s[i]).sum::<i64>() / n;
+            println!(
+                "steady-state({}) avg: pairs={} active_pairs={} points={} touching_points={} sleeping={}/{}",
+                name, avg(0), avg(1), avg(2), avg(3), avg(4), avg(5)
+            );
+            continue;
+        }
 
         let mut min_ms = f64::MAX;
         let mut counts = (0, 0, 0, 0.0, 0.0);

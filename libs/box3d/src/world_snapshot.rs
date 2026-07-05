@@ -1225,6 +1225,9 @@ fn ser_contact_cache(buf: &mut RecBuffer, c: &ContactCache) {
     buf.w_u8(c.sat_cache.index_a);
     buf.w_u8(c.sat_cache.index_b);
     buf.w_u8(c.sat_cache.hit);
+    // PORT EXTENSION: feature-recycling bookkeeping (sat_pose, steps).
+    buf.w_transform(c.sat_cache.sat_pose);
+    buf.w_u16(c.sat_cache.steps_since_sat);
     buf.w_f32(c.simplex_cache.metric);
     buf.w_u16(c.simplex_cache.count);
     buf.append(&c.simplex_cache.index_a);
@@ -1239,6 +1242,8 @@ fn des_contact_cache(r: &mut RecCursor) -> ContactCache {
             index_a: r.r_u8(),
             index_b: r.r_u8(),
             hit: r.r_u8(),
+            sat_pose: r.r_transform(),
+            steps_since_sat: r.r_u16(),
         },
         simplex_cache: SimplexCache {
             metric: r.r_f32(),
