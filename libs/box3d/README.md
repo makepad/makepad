@@ -4,30 +4,33 @@ A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 (MIT). No external crates, std only.
 
 **Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
-0.32.0 with `simd-stable` vendored in this repo): at matched settings,
-box3d and Rapier are **within a few percent of each other overall** —
-box3d ahead on two of three scenes, Rapier ahead on one — while box3d
-additionally keeps bit-exact cross-architecture determinism (upstream
-Rapier makes `simd-stable` and `enhanced-determinism` mutually exclusive,
-so its SIMD speed and its determinism mode cannot be combined) and uses
-zero external crates. Measured 2026-07-05: identical scenes, geometry,
-materials, dt=1/60, matched solver budget (4 substeps vs 4 solver
-iterations, both TGS-soft-family), one untimed warm-up step then min-of-4
-timed runs, interleaved single-threaded on the same machine (Apple
-Silicon, release + fat LTO). Reproduce with `libs/rapier/crates/bench`:
+0.32.0 with `simd-stable` vendored in this repo): the default build of this
+crate is **faster than or equal to Rapier on all three scenes, and faster
+than the C original on two of three** — while additionally keeping
+bit-exact cross-architecture determinism (upstream Rapier makes
+`simd-stable` and `enhanced-determinism` mutually exclusive, so its SIMD
+speed and its determinism mode cannot be combined) and using zero external
+crates. Measured 2026-07-05: identical scenes, geometry, materials,
+dt=1/60, matched solver budget (4 substeps vs 4 solver iterations, both
+TGS-soft-family), one untimed warm-up step then min-of-4 timed runs, all
+four builds interleaved per scene single-threaded on the same machine
+(Apple Silicon, release + fat LTO). The box3d default build includes the
+checked-in PGO profile (see the performance section); the plain column is
+the same code without it. Reproduce with `libs/rapier/crates/bench`:
 
-| scene | box3d (this crate) | box3d C `-O3` | rapier | rust box3d vs rapier |
+| scene | box3d (default build) | box3d no-PGO | box3d C `-O3` | rapier |
 |---|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 391 ms** | 1 392 ms | 1 615 ms | box3d +16% |
-| many_pyramids (10 781 bodies, 99 steps) | 2 016 ms | **1 949 ms** | 1 926 ms | rapier +5% |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | 947 ms | **848 ms** | 976 ms | box3d +3% |
+| large_pyramid (4 096 bodies, 199 steps) | **1 118 ms** | 1 311 ms | 1 228 ms | 1 451 ms |
+| many_pyramids (10 781 bodies, 99 steps) | **1 510 ms** | 1 696 ms | 1 538 ms | 1 690 ms |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | 912 ms | 932 ms | **816 ms** | 914 ms |
 
 Notes: both engines use 4-wide SIMD contact solving; Rapier's
 `enhanced-determinism` feature separately measured free on these scenes
 (no transcendentals in box stacking). Both engines settle the scenes
-comparably (no solver-quality cliff either way). box3d is also within
-~1.12× of the original C Box3D compiled `clang -O3` — see the performance
-section below.
+comparably (no solver-quality cliff either way). The C reference is not
+profile-guided — PGO-ing it would claw back some margin; against plain
+(non-PGO) box3d, C leads by ~1.12× geomean across the full 10-scene suite
+(see below).
 
 ## Ported revision
 
@@ -136,14 +139,24 @@ them into one 13.6 KB body paying constant register-spill traffic), and
 the `Manifolds` inline-when-single store (see representation changes below)
 — together many_pyramids went 1.28× → 1.06× vs C.
 
-**PGO (`pgo.sh`):** a profile-guided build of the benchmark is another
-11–19% faster than the plain fat-LTO build (paired same-machine runs:
-large_pyramid 1177 vs 1457 ms — 15% FASTER than the non-PGO C build —
-junkyard −14%, many_pyramids −11%), with the determinism hash bit-identical
-(PGO changes layout/inlining, never arithmetic). Fairness note when quoting
+**PGO — on by default:** profile-guided optimization gives another 11–19%
+over the plain fat-LTO build (paired same-machine runs: large_pyramid
+−15%, junkyard −14%, many_pyramids −11%), with the determinism hash
+bit-identical (PGO changes layout/inlining, never arithmetic). The trained
+profile is checked in at `libs/box3d/box3d.profdata` and applied
+automatically to every workspace build by `.cargo/config.toml`
+(`-Cprofile-use=…`) — `cargo build --release` on any example just gets it.
+The profile is target-independent (an x86_64 cross-build with the
+ARM-trained profile compiles clean — counters are IR-level, keyed by
+source function hashes); functions without profile data, or whose source
+has changed, silently fall back to normal heuristics, so a stale profile
+degrades gracefully — retrain with `libs/box3d/pgo.sh` (copies to
+/tmp/box3d-pgo/merged.profdata; cp over box3d.profdata) when the hot code
+or the toolchain major-version changes. Projects using this crate OUTSIDE
+the makepad workspace don't inherit the config — they add the same
+rustflags line to their own .cargo/config.toml. Fairness note when quoting
 vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
-back some of its own margin. The script trains on one pass of the
-benchmark scenes; retrain when workloads change substantially.
+back some of its own margin.
 
 Known remainder (verified by A/B, not worth their complexity in safe code):
 junkyard holds the largest serial residue (1.24×) — diffuse bounds checks
