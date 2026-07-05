@@ -26,7 +26,7 @@ dim3 = []
 f32 = []
 f64 = []
 parallel = []
-simd-stable = ["simd-is-enabled"]
+simd-stable = ["parry3d/simd-stable", "simba/wide", "simd-is-enabled"]
 simd-nightly = [
     "simd-is-enabled",
 ]
@@ -58,3 +58,4 @@ parry3d = { version = "0.26.0", default-features = false, features = ["alloc", "
 simba = { version = "0.9.1", path = "../../vendor/simba" }
 bitflags = { version = "2", path = "../../../../libs/bitflags" }
 static_assertions = { version = "1", path = "../../vendor/static_assertions" }
+wide = { version = "0.7.1", path = "../../vendor/wide" }

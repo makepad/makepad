@@ -217,6 +217,7 @@ fn main() {
 
     let det = cfg!(feature = "det");
     println!("rapier3d 0.32 benchmark (single thread, enhanced-determinism: {})", det);
+    println!("parry SIMD_WIDTH: {}", rapier3d::parry::math::SIMD_WIDTH);
 
     for (index, (name, create, step_count)) in scenes.iter().enumerate() {
         if single >= 0 && index as i32 != single {

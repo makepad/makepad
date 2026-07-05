@@ -66,6 +66,7 @@ simd-nightly = [
     "simd-is-enabled",
 ]
 simd-stable = [
+    "simba/wide",
     "simd-is-enabled",
 ]
 spade = []
