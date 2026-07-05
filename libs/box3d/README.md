@@ -215,7 +215,21 @@ rustflags line to their own .cargo/config.toml. Fairness note when quoting
 vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
 back some of its own margin.
 
-Known remainder (verified by A/B, not worth their complexity in safe code):
+Known remainder — junkyard's floor, mapped by isolation (2026-07-05): with
+contact recycling force-disabled in BOTH engines, the pure full-update
+manifold pipeline is +38% vs C, diluted to +17% in the real scene by the
+at-parity recycle path. The gap is diffuse — collide_hulls/clip/build/SAT
+each at 1.3-1.5×, no concentrated mechanism left. Every concentrated
+hypothesis has been implemented and measured at ~zero: bounds checks
+(unchecked-hulls: neutral), Vec-push bookkeeping (a staging rewrite cut
+build_face_a_contact from 1661 to 814 instructions — wall-clock NEUTRAL;
+the bloat was cold-placed code), mega-inlining beyond the three restored
+boundaries, and the recycle math itself. Also learned: `sample`'s
+nearest-symbol attribution is unreliable on PGO binaries (hot/cold
+splitting) — only wall-clock isolation counts. Going below ~+17% would
+take per-function basic-block micro-diffs (hours each, low confidence) or
+policy changes. (Verified by A/B, not worth their complexity in safe
+code:)
 junkyard/washer hold the largest serial residue (+18-20%) — diffuse bounds
 checks on data-dependent hull indices and the absence of `restrict`-grade
 aliasing info across the collide-task body; a twin-pair (`chunks_exact`)
