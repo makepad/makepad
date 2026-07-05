@@ -24,6 +24,8 @@ pub use orthonormal_basis::OrthonormalBasis;
 pub use pos_ops::PoseOps;
 pub use rotation_ops::RotationOps;
 pub use scalar_type::ScalarType;
+#[cfg(all(feature = "dim3", feature = "simd-is-enabled"))]
+pub(crate) use scalar_type::{pose_to_na, vector_to_na};
 pub use simd_real_copy::SimdRealCopy;
 pub use simd_select::SimdSelect;
 

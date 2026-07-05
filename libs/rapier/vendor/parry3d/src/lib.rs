@@ -33,8 +33,6 @@ std::compile_error!("The `simd-is-enabled` feature should not be enabled explici
 std::compile_error!(
     "SIMD cannot be enabled when the `enhanced-determinism` feature is also enabled."
 );
-#[cfg(any(feature = "simd-stable", feature = "simd-nightly"))]
-std::compile_error!("The stripped deterministic build does not support SIMD features.");
 #[cfg(feature = "spade")]
 std::compile_error!("The stripped deterministic build does not support the `spade` feature.");
 

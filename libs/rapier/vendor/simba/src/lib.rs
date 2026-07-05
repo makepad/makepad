@@ -36,9 +36,6 @@ However, the SIMD traits won't be implemented for any SIMD types. Therefore it i
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(feature = "portable_simd", feature(portable_simd))]
 
-#[cfg(feature = "wide")]
-compile_error!("The stripped deterministic build does not support simba's `wide` feature.");
-
 #[cfg(not(feature = "std"))]
 extern crate core as std;
 extern crate num_traits as num;

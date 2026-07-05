@@ -3,29 +3,32 @@
 A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 (MIT). No external crates, std only.
 
-**~2× faster than Rapier single-threaded** (the other Rust 3D physics
-engine), measured 2026-07-05 against the rapier3d 0.32.0 vendored in this
-repo — identical scenes, geometry, materials, dt=1/60, and matched solver
-budget (4 substeps vs 4 solver iterations, both TGS-soft-family), one
-untimed warm-up step then min-of-4 timed runs, interleaved on the same
-machine (Apple Silicon, release + fat LTO). Reproduce with
-`libs/rapier/crates/bench`:
+**Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
+0.32.0 vendored in this repo, `wide`/`safe_arch` re-vendored so its
+`simd-stable` feature works): at matched settings, box3d and SIMD-enabled
+Rapier are **within a few percent of each other overall** — box3d ahead on
+two of three scenes, Rapier ahead on one — while box3d additionally keeps
+bit-exact cross-architecture determinism (upstream Rapier makes
+`simd-stable` and `enhanced-determinism` mutually exclusive, so its SIMD
+speed and its determinism mode cannot be combined) and uses zero external
+crates. Without SIMD, Rapier is ~2× slower. Measured 2026-07-05: identical
+scenes, geometry, materials, dt=1/60, matched solver budget (4 substeps vs
+4 solver iterations, both TGS-soft-family), one untimed warm-up step then
+min-of-4 timed runs, interleaved single-threaded on the same machine (Apple
+Silicon, release + fat LTO). Reproduce with `libs/rapier/crates/bench`:
 
-| scene | box3d | rapier 0.32 | ratio |
-|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | 1 576 ms | 3 506 ms | 2.23× |
-| many_pyramids (10 781 bodies, 99 steps) | 2 412 ms | 4 154 ms | 1.82× |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | 961 ms | 1 787 ms | 1.88× |
+| scene | box3d | rapier simd-stable | rapier no-SIMD | box3d vs simd |
+|---|---|---|---|---|
+| large_pyramid (4 096 bodies, 199 steps) | **1 579 ms** | 1 638 ms | 3 580 ms | box3d +4% |
+| many_pyramids (10 781 bodies, 99 steps) | 2 389 ms | **1 970 ms** | 4 404 ms | rapier +21% |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | **957 ms** | 1 008 ms | 1 820 ms | box3d +5% |
 
-Fairness notes: the vendored Rapier build cannot enable its SIMD feature
-(the `wide` dependency is stripped), while box3d uses its 4-wide NEON/SSE2
-contact solver — upstream Rapier with `simd-stable` would narrow (not
-close) the contact-heavy gaps. Rapier's `enhanced-determinism` feature was
-measured to cost nothing on these scenes (fast-math build: 3 514 / 4 400 /
-1 805 ms), so it is not the reason for the difference. Both engines settle
-the scenes comparably (no solver-quality cliff either way). box3d is also
-within ~1.15× of the original C Box3D compiled `clang -O3` — see the
-performance section below.
+Notes: restoring SIMD bought Rapier 1.8–2.2× (both engines then use 4-wide
+contact solving); its `enhanced-determinism` feature separately measured
+free on these scenes (no transcendentals in box stacking). Both engines
+settle the scenes identically to their non-SIMD runs (no solver-quality
+cliff either way). box3d is also within ~1.15× of the original C Box3D
+compiled `clang -O3` — see the performance section below.
 
 ## Ported revision
 

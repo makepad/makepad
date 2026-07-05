@@ -17,3 +17,4 @@ rapier3d = { path = "../rapier3d", default-features = false, features = ["dim3",
 [features]
 default = []
 det = ["rapier3d/enhanced-determinism"]
+simd = ["rapier3d/simd-stable"]

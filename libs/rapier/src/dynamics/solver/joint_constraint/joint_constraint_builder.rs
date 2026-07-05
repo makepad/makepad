@@ -141,15 +141,15 @@ impl JointConstraintBuilderSimd {
         }];
 
         let local_frame1 = array![|ii| if body1[ii] != u32::MAX {
-            (joint[ii].data.local_frame1).into()
+            crate::utils::pose_to_na(joint[ii].data.local_frame1)
         } else {
-            (rb1[ii].pos.position * joint[ii].data.local_frame1).into()
+            crate::utils::pose_to_na(rb1[ii].pos.position * joint[ii].data.local_frame1)
         }]
         .into();
         let local_frame2 = array![|ii| if body2[ii] != u32::MAX {
-            (joint[ii].data.local_frame2).into()
+            crate::utils::pose_to_na(joint[ii].data.local_frame2)
         } else {
-            (rb2[ii].pos.position * joint[ii].data.local_frame2).into()
+            crate::utils::pose_to_na(rb2[ii].pos.position * joint[ii].data.local_frame2)
         }]
         .into();
 
