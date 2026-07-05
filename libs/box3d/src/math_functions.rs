@@ -263,7 +263,8 @@ pub fn clamp_float(a: f32, lower: f32, upper: f32) -> f32 {
 /// Interpolate a scalar.
 #[inline(always)]
 pub fn lerp_float(a: f32, b: f32, alpha: f32) -> f32 {
-    (1.0 - alpha) * a + alpha * b
+    // FP contraction: matches C built with -ffp-contract=on (clang default).
+    (1.0 - alpha).mul_add(a, alpha * b)
 }
 
 /// Compute an approximate arctangent in the range [-pi, pi]
@@ -409,7 +410,8 @@ pub fn neg(a: Vec3) -> Vec3 {
 /// Vector dot product.
 #[inline(always)]
 pub fn dot(a: Vec3, b: Vec3) -> f32 {
-    a.x * b.x + a.y * b.y + a.z * b.z
+    // FP contraction: left-to-right sum, later terms fused (C -ffp-contract=on).
+    a.z.mul_add(b.z, a.y.mul_add(b.y, a.x * b.x))
 }
 
 /// Vector length.
@@ -421,7 +423,7 @@ pub fn length(v: Vec3) -> f32 {
 /// Vector length squared.
 #[inline(always)]
 pub fn length_squared(a: Vec3) -> f32 {
-    a.x * a.x + a.y * a.y + a.z * a.z
+    a.z.mul_add(a.z, a.y.mul_add(a.y, a.x * a.x))
 }
 
 /// Distance between two points.
@@ -435,13 +437,13 @@ pub fn distance(a: Vec3, b: Vec3) -> f32 {
 #[inline(always)]
 pub fn distance_squared(a: Vec3, b: Vec3) -> f32 {
     let dv = vec3(b.x - a.x, b.y - a.y, b.z - a.z);
-    dv.x * dv.x + dv.y * dv.y + dv.z * dv.z
+    dv.z.mul_add(dv.z, dv.y.mul_add(dv.y, dv.x * dv.x))
 }
 
 /// Normalize a vector. Returns a zero vector if the input vector is very small.
 #[inline]
 pub fn normalize(a: Vec3) -> Vec3 {
-    let length_squared = a.x * a.x + a.y * a.y + a.z * a.z;
+    let length_squared = a.z.mul_add(a.z, a.y.mul_add(a.y, a.x * a.x));
 
     if length_squared > 1000.0 * f32::MIN_POSITIVE {
         let s = 1.0 / length_squared.sqrt();
@@ -487,13 +489,13 @@ pub fn is_normalized(a: Vec3) -> bool {
 /// a + s * b
 #[inline(always)]
 pub fn mul_add(a: Vec3, s: f32, b: Vec3) -> Vec3 {
-    vec3(a.x + s * b.x, a.y + s * b.y, a.z + s * b.z)
+    vec3(s.mul_add(b.x, a.x), s.mul_add(b.y, a.y), s.mul_add(b.z, a.z))
 }
 
 /// a - s * b
 #[inline(always)]
 pub fn mul_sub(a: Vec3, s: f32, b: Vec3) -> Vec3 {
-    vec3(a.x - s * b.x, a.y - s * b.y, a.z - s * b.z)
+    vec3((-s).mul_add(b.x, a.x), (-s).mul_add(b.y, a.y), (-s).mul_add(b.z, a.z))
 }
 
 /// s * a
@@ -506,9 +508,9 @@ pub fn mul_sv(s: f32, a: Vec3) -> Vec3 {
 #[inline(always)]
 pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
     Vec3 {
-        x: a.y * b.z - a.z * b.y,
-        y: a.z * b.x - a.x * b.z,
-        z: a.x * b.y - a.y * b.x,
+        x: a.y.mul_add(b.z, -(a.z * b.y)),
+        y: a.z.mul_add(b.x, -(a.x * b.z)),
+        z: a.x.mul_add(b.y, -(a.y * b.x)),
     }
 }
 
@@ -518,9 +520,9 @@ pub fn lerp(a: Vec3, b: Vec3, alpha: f32) -> Vec3 {
     b3_assert!(0.0 <= alpha && alpha <= 1.0);
 
     Vec3 {
-        x: (1.0 - alpha) * a.x + alpha * b.x,
-        y: (1.0 - alpha) * a.y + alpha * b.y,
-        z: (1.0 - alpha) * a.z + alpha * b.z,
+        x: (1.0 - alpha).mul_add(a.x, alpha * b.x),
+        y: (1.0 - alpha).mul_add(a.y, alpha * b.y),
+        z: (1.0 - alpha).mul_add(a.z, alpha * b.z),
     }
 }
 
@@ -528,9 +530,9 @@ pub fn lerp(a: Vec3, b: Vec3, alpha: f32) -> Vec3 {
 #[inline(always)]
 pub fn blend2(s: f32, a: Vec3, t: f32, b: Vec3) -> Vec3 {
     Vec3 {
-        x: s * a.x + t * b.x,
-        y: s * a.y + t * b.y,
-        z: s * a.z + t * b.z,
+        x: s.mul_add(a.x, t * b.x),
+        y: s.mul_add(a.y, t * b.y),
+        z: s.mul_add(a.z, t * b.z),
     }
 }
 
@@ -611,7 +613,7 @@ pub fn inv_rotate_vector(q: Quat, v: Vec3) -> Vec3 {
 /// Compute dot product of two quaternions. Useful for polarity tests.
 #[inline(always)]
 pub fn dot_quat(a: Quat, b: Quat) -> f32 {
-    a.v.x * b.v.x + a.v.y * b.v.y + a.v.z * b.v.z + a.s * b.s
+    a.s.mul_add(b.s, a.v.z.mul_add(b.v.z, a.v.y.mul_add(b.v.y, a.v.x * b.v.x)))
 }
 
 /// Multiply two quaternions.
@@ -620,7 +622,7 @@ pub fn mul_quat(q1: Quat, q2: Quat) -> Quat {
     let t1 = cross(q1.v, q2.v);
     let t2 = mul_add(t1, q1.s, q2.v);
     let t3 = mul_add(t2, q2.s, q1.v);
-    Quat { v: t3, s: q1.s * q2.s - dot(q1.v, q2.v) }
+    Quat { v: t3, s: q1.s.mul_add(q2.s, -dot(q1.v, q2.v)) }
 }
 
 /// Compute a relative quaternion: inv(q1) * q2
@@ -629,7 +631,7 @@ pub fn inv_mul_quat(q1: Quat, q2: Quat) -> Quat {
     let t1 = cross(q2.v, q1.v);
     let t2 = mul_add(t1, q1.s, q2.v);
     let t3 = mul_sub(t2, q2.s, q1.v);
-    Quat { v: t3, s: q1.s * q2.s + dot(q1.v, q2.v) }
+    Quat { v: t3, s: q1.s.mul_add(q2.s, dot(q1.v, q2.v)) }
 }
 
 /// Quaternion conjugate (cheap inverse).
@@ -934,9 +936,9 @@ pub fn offset_pos(p: Pos, d: Vec3) -> Pos {
 #[inline(always)]
 pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
     Vec3 {
-        x: (1.0 - t) * a.x + t * b.x,
-        y: (1.0 - t) * a.y + t * b.y,
-        z: (1.0 - t) * a.z + t * b.z,
+        x: (1.0 - t).mul_add(a.x, t * b.x),
+        y: (1.0 - t).mul_add(a.y, t * b.y),
+        z: (1.0 - t).mul_add(a.z, t * b.z),
     }
 }
 
@@ -946,9 +948,9 @@ pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
 #[inline(always)]
 pub fn lerp_position(a: Pos, b: Pos, t: f32) -> Pos {
     Pos {
-        x: ((1.0 - t) as f64) * a.x + (t as f64) * b.x,
-        y: ((1.0 - t) as f64) * a.y + (t as f64) * b.y,
-        z: ((1.0 - t) as f64) * a.z + (t as f64) * b.z,
+        x: (((1.0 - t) as f64)).mul_add(a.x, (t as f64) * b.x),
+        y: (((1.0 - t) as f64)).mul_add(a.y, (t as f64) * b.y),
+        z: (((1.0 - t) as f64)).mul_add(a.z, (t as f64) * b.z),
     }
 }
 
@@ -1109,9 +1111,9 @@ pub fn det(m: Matrix3) -> f32 {
 #[inline(always)]
 pub fn mul_mv(m: Matrix3, a: Vec3) -> Vec3 {
     Vec3 {
-        x: m.cx.x * a.x + m.cy.x * a.y + m.cz.x * a.z,
-        y: m.cx.y * a.x + m.cy.y * a.y + m.cz.y * a.z,
-        z: m.cx.z * a.x + m.cy.z * a.y + m.cz.z * a.z,
+        x: m.cz.x.mul_add(a.z, m.cy.x.mul_add(a.y, m.cx.x * a.x)),
+        y: m.cz.y.mul_add(a.z, m.cy.y.mul_add(a.y, m.cx.y * a.x)),
+        z: m.cz.z.mul_add(a.z, m.cy.z.mul_add(a.y, m.cx.z * a.x)),
     }
 }
 
@@ -1252,9 +1254,9 @@ pub fn make_matrix_from_quat(q: Quat) -> Matrix3 {
     let zw = q.v.z * q.s;
 
     Matrix3 {
-        cx: vec3(1.0 - 2.0 * (yy + zz), 2.0 * (xy + zw), 2.0 * (xz - yw)),
-        cy: vec3(2.0 * (xy - zw), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + xw)),
-        cz: vec3(2.0 * (xz + yw), 2.0 * (yz - xw), 1.0 - 2.0 * (xx + yy)),
+        cx: vec3((-2.0f32).mul_add(yy + zz, 1.0), 2.0 * (xy + zw), 2.0 * (xz - yw)),
+        cy: vec3(2.0 * (xy - zw), (-2.0f32).mul_add(xx + zz, 1.0), 2.0 * (yz + xw)),
+        cz: vec3(2.0 * (xz + yw), 2.0 * (yz - xw), (-2.0f32).mul_add(xx + yy, 1.0)),
     }
 }
 

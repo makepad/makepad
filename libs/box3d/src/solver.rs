@@ -313,6 +313,18 @@ impl<'a> StateAccess<'a> {
         unsafe { *self.slice.get_ref(i) }
     }
 
+    /// Borrow the state at `i`. Same contract as `get` (no concurrent writer
+    /// for the lifetime of the reference — in the solver, for the duration of
+    /// the current stage). Used by the gather path so the four lane states
+    /// stay behind references instead of being copied out whole (the copies
+    /// spill ~20 registers in the zip loop).
+    #[inline]
+    pub fn get_ref(&self, i: usize) -> &crate::body::BodyState {
+        // SAFETY: see get(); the returned borrow is tied to &self, and the
+        // stage structure guarantees no writer for the stage's duration.
+        unsafe { self.slice.get_ref(i) }
+    }
+
     /// Write the state at `i`. Caller guarantees exclusive access to `i` for
     /// the current stage (see struct docs).
     #[inline]
@@ -467,8 +479,8 @@ fn integrate_velocities_task(block: SolverBlock, shared: &SolverShared) {
         // Solution: v(t) = v0 * exp(-c * t)
         // Pade approximation:
         // v2 = v1 * 1 / (1 + c * dt)
-        let linear_damping = 1.0 / (1.0 + h * sim.linear_damping);
-        let angular_damping = 1.0 / (1.0 + h * sim.angular_damping);
+        let linear_damping = 1.0 / h.mul_add(sim.linear_damping, 1.0);
+        let angular_damping = 1.0 / h.mul_add(sim.angular_damping, 1.0);
 
         // Gravity scale will be zero for kinematic bodies
         let gravity_scale = if sim.inv_mass > 0.0 { sim.gravity_scale } else { 0.0 };
@@ -509,35 +521,35 @@ fn integrate_velocities_task(block: SolverBlock, shared: &SolverShared) {
                 let w3 = omega2.z;
 
                 // Iw = I * omega2 (shared between residual and Jacobian)
-                let iw1 = i00 * w1 + i01 * w2 + i02 * w3;
-                let iw2 = i01 * w1 + i11 * w2 + i12 * w3;
-                let iw3 = i02 * w1 + i12 * w2 + i22 * w3;
+                let iw1 = i02.mul_add(w3, i01.mul_add(w2, i00 * w1));
+                let iw2 = i12.mul_add(w3, i11.mul_add(w2, i01 * w1));
+                let iw3 = i22.mul_add(w3, i12.mul_add(w2, i02 * w1));
 
                 // Residual: b = I*(omega2 - omega1) + h * (omega2 x I*omega2)
                 let dw = sub(omega2, omega1);
                 let b = vec3(
-                    i00 * dw.x + i01 * dw.y + i02 * dw.z + h * (w2 * iw3 - w3 * iw2),
-                    i01 * dw.x + i11 * dw.y + i12 * dw.z + h * (w3 * iw1 - w1 * iw3),
-                    i02 * dw.x + i12 * dw.y + i22 * dw.z + h * (w1 * iw2 - w2 * iw1),
+                    h.mul_add(w2.mul_add(iw3, -(w3 * iw2)), i02.mul_add(dw.z, i01.mul_add(dw.y, i00 * dw.x))),
+                    h.mul_add(w3.mul_add(iw1, -(w1 * iw3)), i12.mul_add(dw.z, i11.mul_add(dw.y, i01 * dw.x))),
+                    h.mul_add(w1.mul_add(iw2, -(w2 * iw1)), i22.mul_add(dw.z, i12.mul_add(dw.y, i02 * dw.x))),
                 );
 
                 // Jacobian J = I + h * (skew(omega2) * I - skew(I*omega2))
                 // Jacobian derived by Erin Catto, Ph.D. Do not attempt to do this without a Ph.D.
                 let j = Matrix3 {
                     cx: vec3(
-                        i00 + h * (w2 * i02 - w3 * i01),
-                        i01 + h * (w3 * i00 - w1 * i02 - iw3),
-                        i02 + h * (w1 * i01 - w2 * i00 + iw2),
+                        h.mul_add(w2.mul_add(i02, -(w3 * i01)), i00),
+                        h.mul_add(w3.mul_add(i00, -(w1 * i02)) - iw3, i01),
+                        h.mul_add(w1.mul_add(i01, -(w2 * i00)) + iw2, i02),
                     ),
                     cy: vec3(
-                        i01 + h * (w2 * i12 - w3 * i11 + iw3),
-                        i11 + h * (w3 * i01 - w1 * i12),
-                        i12 + h * (w1 * i11 - w2 * i01 - iw1),
+                        h.mul_add(w2.mul_add(i12, -(w3 * i11)) + iw3, i01),
+                        h.mul_add(w3.mul_add(i01, -(w1 * i12)), i11),
+                        h.mul_add(w1.mul_add(i11, -(w2 * i01)) - iw1, i12),
                     ),
                     cz: vec3(
-                        i02 + h * (w2 * i22 - w3 * i12 - iw2),
-                        i12 + h * (w3 * i02 - w1 * i22 + iw1),
-                        i22 + h * (w1 * i12 - w2 * i02),
+                        h.mul_add(w2.mul_add(i22, -(w3 * i12)) - iw2, i02),
+                        h.mul_add(w3.mul_add(i02, -(w1 * i22)) + iw1, i12),
+                        h.mul_add(w1.mul_add(i12, -(w2 * i02)), i22),
                     ),
                 };
 

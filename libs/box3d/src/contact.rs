@@ -175,7 +175,7 @@ use crate::math_functions::{
 use crate::physics_world::{World, AWAKE_SET, DISABLED_SET, STATIC_SET};
 use crate::shape::{get_shape_materials, Shape, ShapeGeometry};
 use crate::types::{
-    BodyType, ContactData, ContactEndTouchEvent, LocalManifold, ManifoldPoint, ShapeType,
+    BodyType, ContactData, ContactEndTouchEvent, ManifoldPoint, ShapeType,
 };
 
 pub(crate) fn get_contact_full_id(world: &World, contact_id: ContactId) -> i32 {
@@ -620,8 +620,22 @@ fn compute_convex_manifold(
 
     let point_capacity = 32;
 
-    let mut geom_manifold = LocalManifold::default();
-    geom_manifold.points = Vec::with_capacity(point_capacity as usize);
+    // C builds the local manifold in a caller-provided stack buffer. The port
+    // reuses the per-worker scratch (taken out of the task context for the
+    // duration so borrows don't overlap) — the point Vec keeps its capacity
+    // across contacts, so this allocates only on the first use per worker.
+    let mut geom_manifold = std::mem::take(&mut task_context.geom_manifold_scratch);
+    geom_manifold.points.clear();
+    geom_manifold.points.reserve(point_capacity as usize);
+    geom_manifold.normal = Vec3::ZERO;
+    geom_manifold.triangle_normal = Vec3::ZERO;
+    geom_manifold.triangle_index = 0;
+    geom_manifold.i1 = 0;
+    geom_manifold.i2 = 0;
+    geom_manifold.i3 = 0;
+    geom_manifold.squared_distance = 0.0;
+    geom_manifold.feature = Default::default();
+    geom_manifold.triangle_flags = 0;
 
     let transform_b_to_a = inv_mul_world_transforms(xf_a, xf_b);
 
@@ -697,6 +711,7 @@ fn compute_convex_manifold(
             contact.manifolds = Vec::new();
         }
 
+        task_context.geom_manifold_scratch = geom_manifold;
         return false;
     }
 
@@ -755,6 +770,7 @@ fn compute_convex_manifold(
         }
     }
 
+    task_context.geom_manifold_scratch = geom_manifold;
     true
 }
 
@@ -882,10 +898,11 @@ pub fn update_contact(
 ) -> bool {
     let touching;
 
-    // The C code builds temporary child shapes by memcpy'ing the compound shape;
-    // the Rust port clones the shapes (cheap: Arc bumps + empty Vecs).
-    let shape_a = world.shapes[shape_id_a as usize].clone();
-    let shape_b = world.shapes[shape_id_b as usize].clone();
+    // By reference — cloning here deep-copied both shapes (materials Vec +
+    // geometry, including whole compound child trees) per contact update, and
+    // the Arc refcount traffic contended across workers.
+    let shape_a = &world.shapes[shape_id_a as usize];
+    let shape_b = &world.shapes[shape_id_b as usize];
 
     b3_assert!(shape_b.shape_type() != ShapeType::Compound);
 
@@ -893,8 +910,13 @@ pub fn update_contact(
         let child_index = contact.child_index;
         let child = crate::compound::get_compound_child(shape_a.as_compound(), child_index);
 
-        // Temporary child shape to match existing function signatures
-        let mut child_shape_a = shape_a.clone();
+        // Temporary child shape to match existing function signatures.
+        // C stack-copies the compound shape; the port reuses the per-worker
+        // scratch (materials capacity survives) and never clones the compound
+        // geometry the arms below immediately replace. Taken out of the task
+        // context so the borrows below don't overlap.
+        let mut child_shape_a = std::mem::take(&mut task_context.child_shape_scratch);
+        child_shape_a.copy_non_geom_from(shape_a);
 
         match &child.geom {
             crate::types::ChildShapeGeom::Capsule(capsule) => {
@@ -903,11 +925,11 @@ pub fn update_contact(
                     // Flip
                     let flip = true;
                     touching =
-                        update_convex_contact(world, task_context, contact, pre_solve, &shape_b, xf_b, &child_shape_a, xf_a, flip);
+                        update_convex_contact(world, task_context, contact, pre_solve, shape_b, xf_b, &child_shape_a, xf_a, flip);
                 } else {
                     let flip = false;
                     touching =
-                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, &shape_b, xf_b, flip);
+                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, shape_b, xf_b, flip);
                 }
             }
             crate::types::ChildShapeGeom::Hull(hull) => {
@@ -915,7 +937,7 @@ pub fn update_contact(
                 let xf_child = mul_world_transforms(xf_a, child.transform);
                 let flip = false;
                 touching =
-                    update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_child, &shape_b, xf_b, flip);
+                    update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_child, shape_b, xf_b, flip);
             }
             crate::types::ChildShapeGeom::Mesh(mesh) => {
                 child_shape_a.geom = ShapeGeometry::Mesh(mesh.clone());
@@ -928,7 +950,7 @@ pub fn update_contact(
                     &child_shape_a,
                     Some(&child.material_indices),
                     xf_child,
-                    &shape_b,
+                    shape_b,
                     xf_b,
                     is_fast,
                 );
@@ -949,11 +971,11 @@ pub fn update_contact(
                     // Flip
                     let flip = true;
                     touching =
-                        update_convex_contact(world, task_context, contact, pre_solve, &shape_b, xf_b, &child_shape_a, xf_a, flip);
+                        update_convex_contact(world, task_context, contact, pre_solve, shape_b, xf_b, &child_shape_a, xf_a, flip);
                 } else {
                     let flip = false;
                     touching =
-                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, &shape_b, xf_b, flip);
+                        update_convex_contact(world, task_context, contact, pre_solve, &child_shape_a, xf_a, shape_b, xf_b, flip);
                 }
             }
         }
@@ -968,6 +990,11 @@ pub fn update_contact(
                 mp.anchor_a = add(mp.anchor_a, offset);
             }
         }
+
+        // Return the scratch; reset geom so no Arc to child geometry outlives
+        // this update (materials keeps its capacity for the next contact).
+        child_shape_a.geom = ShapeGeometry::default();
+        task_context.child_shape_scratch = child_shape_a;
     } else if shape_a.shape_type() == ShapeType::Mesh || shape_a.shape_type() == ShapeType::Height {
         // Does this contact touch a mesh or height-field?
 
@@ -976,10 +1003,10 @@ pub fn update_contact(
             world,
             task_context,
             contact,
-            &shape_a,
+            shape_a,
             None,
             xf_a,
-            &shape_b,
+            shape_b,
             xf_b,
             is_fast,
         );
@@ -994,7 +1021,7 @@ pub fn update_contact(
     } else {
         // Convex-vs-convex
         let flip = false;
-        touching = update_convex_contact(world, task_context, contact, pre_solve, &shape_a, xf_a, &shape_b, xf_b, flip);
+        touching = update_convex_contact(world, task_context, contact, pre_solve, shape_a, xf_a, shape_b, xf_b, flip);
     }
 
     if touching {

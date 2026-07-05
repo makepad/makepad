@@ -72,16 +72,37 @@ To pull in upstream changes:
   test halves (6 extra tests). Snapshot images record the precision mode and
   reject cross-mode loads.
 
-## Performance vs C (Apple Silicon, release + fat LTO, 2026-07-04)
+## Performance vs C (Apple Silicon, release + fat LTO, 2026-07-05)
 
 C compiled `clang -O3`, upstream benchmark scenarios (`examples/benchmark.rs`,
-`-w=<workers>`). Single worker: Rust is 1.04–1.56× slower (geomean ≈ 1.3×);
-the residual gap sits in collide/constraints codegen (bounds checks, no
-`restrict` aliasing). At 8 workers Rust scales 3.4–5.7× over its own serial
-times (large_pyramid 1676→366 ms, washer 30.6→8.7 s, junkyard 25.2→6.7 s) and
-lands 1.2–2.3× behind C at 8 workers (geomean ≈ 1.6× — parallel scaling
-efficiency is the current tuning frontier). Rust at 8 workers beats
-single-threaded C by 2.4–4.8× on heavy scenes.
+`-w=<workers>`; min of 4 runs at w=1, min of 2 at w=8, back-to-back on the
+same machine). Single worker: Rust is 1.01–1.28× slower (**geomean ≈ 1.13×**;
+large_pyramid is at parity, 1387 vs 1373 ms). At 8 workers the geomean is
+≈ 1.47× (range 1.18–1.58 on real scenes; junkyard 3979 vs 2994 ms, washer
+6153 vs 4578 ms). Rust at 8 workers beats single-threaded C by 2.6–5.1× on
+heavy scenes.
+
+What got it there (2026-07-04/05 optimization pass, all safe Rust unless
+noted): `f32::mul_add` contraction of hot scalar math (the C build's
+`-ffp-contract=on` equivalent — the single biggest serial lever, see the
+determinism notes below); direct lane load/store for the wide `FloatW`
+get/set (C writes lanes as plain float stores; the old path spilled the
+vector through the stack); reference-based `gather_bodies` (kills a
+20-register spill); per-worker capacity-preserving scratch for the convex
+AND mesh collide paths (the C-arena equivalent — the mesh path allocated per
+triangle, which also serialized the 8-worker collide pass on allocator
+locks); per-contact `Shape` clones replaced with borrows (deep geometry
+clones + cross-worker Arc refcount traffic — this was most of the old
+junkyard 8-worker blowup); a two-level atomic-fast-path scheduler semaphore
+(C uses `dispatch_semaphore_t` on macOS; the old Mutex+Condvar locked on
+every enqueue); unchecked indexing inside the two already-`unsafe`
+`SyncSlice` accessors (debug_assert-guarded — the only unsafe-touching
+change, measured at −6% serial).
+
+Known remainder: `large_world` at 8 workers pays ~3× C's per-step parallel
+overhead on a near-empty scene (24 vs 7.5 ms total — fixed stage-sync cost;
+C's spinner has the same structure, cost TBD); junkyard/many_pyramids hold
+the largest serial residue (1.23–1.28×, mesh/compound narrow phase codegen).
 
 ## Intentional differences from C (keep these in mind when diffing)
 
@@ -126,16 +147,27 @@ single-threaded C by 2.4–4.8× on heavy scenes.
   `joint.rs::reaction_body_transform`)
 
 **Numerical/determinism notes:**
-- The port preserves float operation order, and the deterministic
-  `b3Atan2`/`b3ComputeCosSin` are digit-for-digit. The simulation is
-  self-deterministic AND cross-architecture deterministic: the ragdoll
-  determinism hash is identical on NEON, SSE2 (Rosetta-verified) and scalar
-  builds (sleep step 269 matches the C float build exactly). It is NOT
-  bit-identical to C builds: `remainderf` is implemented via f64
-  (`math_functions.rs::remainder_f32`), and geometry content hashes are
-  computed over a canonical little-endian serialization instead of raw struct
-  bytes, so hash VALUES differ from C. The two precision modes hash
-  differently, like C's per-mode EXPECTED_HASH
+- The port preserves float operation *order*, and the deterministic
+  `b3Atan2`/`b3ComputeCosSin` are digit-for-digit. Scalar `a*b + c` chains in
+  the hot math (`math_functions.rs` helpers, solver integration, contact
+  solver scalar paths) use `f32::mul_add` — the port's equivalent of the
+  `-ffp-contract=on` fusing clang applies to the C build. `mul_add` is IEEE
+  correctly rounded on every target (hardware FMA on aarch64/x86-64+FMA3,
+  soft-float fallback computes the identical value), so determinism is
+  unaffected; only last-bit rounding differs from an uncontracted build. The
+  wide NEON/SSE2 contact-solver ops are NOT contracted, exactly like C's
+  intrinsics. When syncing new C code, contract the same way: first product
+  plain, later terms of a sum fused left-to-right
+  (`z1.mul_add(z2, y1.mul_add(y2, x1*x2))`)
+- The simulation is self-deterministic AND cross-architecture deterministic:
+  the ragdoll determinism hash is identical on NEON, SSE2 and scalar builds,
+  across worker counts 1/2/4, and under the external task system. It is NOT
+  bit-identical to C builds: contraction choices differ from clang's,
+  `remainderf` is implemented via f64 (`math_functions.rs::remainder_f32`),
+  and geometry content hashes are computed over a canonical little-endian
+  serialization instead of raw struct bytes, so hash VALUES (and the exact
+  sleep step of the ragdoll scenario) differ from C. The two precision modes
+  hash differently, like C's per-mode EXPECTED_HASH
 - `qsort.h` call sites use `sort_unstable_by`; ordering of exactly-equal keys
   may differ from C (self-consistent)
 - Upstream quirks preserved on purpose (flagged with comments, don't "fix"

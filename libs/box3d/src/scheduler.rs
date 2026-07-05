@@ -56,31 +56,57 @@ impl Default for SchedulerTask {
     }
 }
 
-// C: b3Semaphore via Mutex + Condvar.
+// C: b3Semaphore. On macOS C uses dispatch_semaphore_t, whose signal/wait
+// are lock-free atomics unless a thread actually has to sleep. A plain
+// Mutex+Condvar semaphore takes the lock on EVERY enqueue signal, which shows
+// up on scenes with many tiny parallel-for invocations (large_world at 8
+// workers). This is the classic two-level ("benaphore") semaphore: `count`
+// is the logical permit counter (negative = sleeper debt) maintained with
+// atomics; the mutex/condvar pair is only touched when a waiter must sleep
+// or a signal must wake one. Safe Rust throughout.
 struct Semaphore {
-    count: Mutex<i32>,
+    /// Logical permit count; negative values count threads in (or entering)
+    /// the sleep path.
+    count: std::sync::atomic::AtomicI32,
+    /// Pending wakeups for sleepers (consumed exactly once per slow wait).
+    wakeups: Mutex<i32>,
     cond: Condvar,
 }
 
 impl Semaphore {
     fn new(init_count: i32) -> Semaphore {
-        Semaphore { count: Mutex::new(init_count), cond: Condvar::new() }
+        Semaphore {
+            count: std::sync::atomic::AtomicI32::new(init_count),
+            wakeups: Mutex::new(0),
+            cond: Condvar::new(),
+        }
     }
 
     /// C: b3WaitSemaphore
     fn wait(&self) {
-        let mut count = self.count.lock().unwrap();
-        while *count == 0 {
-            count = self.cond.wait(count).unwrap();
+        // Fast path: a permit was available — consume it without locking.
+        if self.count.fetch_sub(1, std::sync::atomic::Ordering::Acquire) > 0 {
+            return;
         }
-        *count -= 1;
+        // Slow path: we owe a sleep; consume exactly one wakeup token.
+        let mut wakeups = self.wakeups.lock().unwrap();
+        while *wakeups == 0 {
+            wakeups = self.cond.wait(wakeups).unwrap();
+        }
+        *wakeups -= 1;
     }
 
     /// C: b3SignalSemaphore
     fn signal(&self) {
-        let mut count = self.count.lock().unwrap();
-        *count += 1;
-        drop(count);
+        // Fast path: no sleeper (old count >= 0) — a pure atomic increment.
+        if self.count.fetch_add(1, std::sync::atomic::Ordering::Release) >= 0 {
+            return;
+        }
+        // Slow path: at least one thread is in (or entering) the sleep path;
+        // post one wakeup token for it.
+        let mut wakeups = self.wakeups.lock().unwrap();
+        *wakeups += 1;
+        drop(wakeups);
         self.cond.notify_one();
     }
 }
