@@ -190,16 +190,23 @@ aliasing info across the collide-task body; a twin-pair (`chunks_exact`)
 restructure of the edge SAT was tried and REVERTED — it won ~5% on
 junkyard's big compound hulls but cost box-box scenes 4-8% (large_pyramid
 parity matters more, and the C-shaped loop keeps the 1:1 source mapping).
-At 8 workers the thin-stage scenes (rain +42%, joint_grid +36%,
-large_world +66% of 12 ms) mark the parallel frontier — per-stage sync
-overhead on stages with little work. Also tried and dropped (below the
+At 8 workers rain (+42%), joint_grid (+36%) and large_world (+66% of
+12 ms) mark the parallel frontier. Also tried and dropped (below the
 noise floor or negative in paired A/B): cache-line padding of the
 stage-sync atomics, narrow velocity-only writes in contact scatter (state
 only live ~40 instructions there — see the joint-solver counterexample
 above), 64-byte BodyState alignment (cache footprint cost more than
-line-straddling saved), and two-row software pipelining of the wide solve
+line-straddling saved), two-row software pipelining of the wide solve
 (real +2-4% in plain builds, but PGO's layout already extracts the same
-ILP — redundant in the default build).
+ILP — redundant in the default build), and a main-only fast path for
+small solver stages (generalizing C's single-block shortcut; swept item
+cutoffs 32/64/256 — only the near-empty large_world benefited (−8% of
+~11 ms) while rain regressed at every cutoff because stage item counts
+aren't uniform cost: its small-count stages are mesh-contact stages
+where each item is heavy, so serializing them starves real parallelism;
+joint_grid turned out to have few FAT stages — grid coloring yields ~2-4
+colors of thousands of joints — so the thin-stage theory was wrong for
+it, and its w=8 gap remains undiagnosed).
 
 ## Intentional differences from C (keep these in mind when diffing)
 
