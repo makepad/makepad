@@ -255,8 +255,15 @@ impl InteractionGroups {
             let rb1 = &bodies[interaction.body1];
             let rb2 = &bodies[interaction.body2];
 
-            let is_fixed1 = !rb1.is_dynamic_or_kinematic();
-            let is_fixed2 = !rb2.is_dynamic_or_kinematic();
+            // A body can belong to a different island than this interaction
+            // (kinematic bodies, or dynamic bodies during a lazy island
+            // merge/split). Its island-local active_set_id must not index
+            // this island's body_masks. The solver already treats such
+            // bodies as inert boundaries (bounds-checked gathers, dropped
+            // scatters), so exempting them from conflict tracking — exactly
+            // like fixed bodies — matches the solve semantics.
+            let is_fixed1 = !rb1.is_dynamic_or_kinematic() || rb1.ids.active_island_id != island_id;
+            let is_fixed2 = !rb2.is_dynamic_or_kinematic() || rb2.ids.active_island_id != island_id;
 
             if is_fixed1 && is_fixed2 {
                 continue;
@@ -271,8 +278,8 @@ impl InteractionGroups {
             let ijoint = interaction.data.locked_axes.bits() as usize;
             let i1 = rb1.ids.active_set_id;
             let i2 = rb2.ids.active_set_id;
-            let conflicts = self.body_masks.get(i1).copied().unwrap_or_default()
-                | self.body_masks.get(i2).copied().unwrap_or_default()
+            let conflicts = (if !is_fixed1 { self.body_masks.get(i1).copied().unwrap_or_default() } else { 0 })
+                | (if !is_fixed2 { self.body_masks.get(i2).copied().unwrap_or_default() } else { 0 })
                 | joint_type_conflicts[ijoint];
             let conflictfree_targets = !(conflicts & occupied_mask); // The & is because we consider empty buckets as free of conflicts.
             let conflictfree_occupied_targets = conflictfree_targets & occupied_mask;
@@ -411,21 +418,29 @@ impl InteractionGroups {
                     continue;
                 }
 
-                let (status1, active_set_id1) = if let Some(rb1) = interaction.data.rigid_body1 {
+                let (status1, active_set_id1, in_island1) = if let Some(rb1) = interaction.data.rigid_body1 {
                     let rb1 = &bodies[rb1];
-                    (rb1.body_type, rb1.ids.active_set_id as u32)
+                    (rb1.body_type, rb1.ids.active_set_id as u32, rb1.ids.active_island_id == island_id)
                 } else {
-                    (RigidBodyType::Fixed, u32::MAX)
+                    (RigidBodyType::Fixed, u32::MAX, false)
                 };
-                let (status2, active_set_id2) = if let Some(rb2) = interaction.data.rigid_body2 {
+                let (status2, active_set_id2, in_island2) = if let Some(rb2) = interaction.data.rigid_body2 {
                     let rb2 = &bodies[rb2];
-                    (rb2.body_type, rb2.ids.active_set_id as u32)
+                    (rb2.body_type, rb2.ids.active_set_id as u32, rb2.ids.active_island_id == island_id)
                 } else {
-                    (RigidBodyType::Fixed, u32::MAX)
+                    (RigidBodyType::Fixed, u32::MAX, false)
                 };
 
-                let is_fixed1 = !status1.is_dynamic_or_kinematic();
-                let is_fixed2 = !status2.is_dynamic_or_kinematic();
+                // A body can belong to a different island than this
+                // interaction (kinematic bodies, or dynamic bodies during a
+                // lazy island merge/split). Its island-local active_set_id
+                // must not index this island's body_masks. The solver already
+                // treats such bodies as inert boundaries (bounds-checked
+                // gathers, dropped scatters), so exempting them from conflict
+                // tracking — exactly like fixed bodies — matches the solve
+                // semantics.
+                let is_fixed1 = !status1.is_dynamic_or_kinematic() || !in_island1;
+                let is_fixed2 = !status2.is_dynamic_or_kinematic() || !in_island2;
 
                 // TODO: don't generate interactions between fixed bodies in the first place.
                 if is_fixed1 && is_fixed2 {
