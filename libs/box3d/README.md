@@ -16,11 +16,11 @@ iterations, both TGS-soft-family), one untimed warm-up step then min-of-4
 timed runs, interleaved single-threaded on the same machine (Apple
 Silicon, release + fat LTO). Reproduce with `libs/rapier/crates/bench`:
 
-| scene | box3d | rapier | |
-|---|---|---|---|
-| large_pyramid (4 096 bodies, 199 steps) | **1 391 ms** | 1 615 ms | box3d +16% |
-| many_pyramids (10 781 bodies, 99 steps) | 2 016 ms | **1 926 ms** | rapier +5% |
-| joint_grid (10k bodies, 19.8k joints, 99 steps) | **947 ms** | 976 ms | box3d +3% |
+| scene | box3d (this crate) | box3d C `-O3` | rapier | rust box3d vs rapier |
+|---|---|---|---|---|
+| large_pyramid (4 096 bodies, 199 steps) | **1 391 ms** | 1 392 ms | 1 615 ms | box3d +16% |
+| many_pyramids (10 781 bodies, 99 steps) | 2 016 ms | **1 949 ms** | 1 926 ms | rapier +5% |
+| joint_grid (10k bodies, 19.8k joints, 99 steps) | 947 ms | **848 ms** | 976 ms | box3d +3% |
 
 Notes: both engines use 4-wide SIMD contact solving; Rapier's
 `enhanced-determinism` feature separately measured free on these scenes
