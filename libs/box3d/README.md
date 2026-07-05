@@ -76,11 +76,12 @@ To pull in upstream changes:
 
 C compiled `clang -O3`, upstream benchmark scenarios (`examples/benchmark.rs`,
 `-w=<workers>`; min of 4 runs at w=1, min of 2 at w=8, back-to-back on the
-same machine). Single worker: Rust is 1.01–1.28× slower (**geomean ≈ 1.13×**;
-large_pyramid is at parity, 1387 vs 1373 ms). At 8 workers the geomean is
-≈ 1.47× (range 1.18–1.58 on real scenes; junkyard 3979 vs 2994 ms, washer
-6153 vs 4578 ms). Rust at 8 workers beats single-threaded C by 2.6–5.1× on
-heavy scenes.
+same machine — thermal drift on this hardware is ±5-10%, so compare ratios
+within one matrix, not absolute ms across sessions). Single worker: Rust is
+1.03–1.28× slower (**geomean ≈ 1.15×**; large_pyramid at parity, 1365 vs
+1319 ms). At 8 workers the geomean is ≈ **1.35×** (junkyard 3877 vs 3062 ms,
+washer 6023 vs 4813 ms, large_pyramid 355 vs 286 ms). Rust at 8 workers
+beats single-threaded C by 2.6–5.0× on heavy scenes.
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
@@ -97,12 +98,21 @@ junkyard 8-worker blowup); a two-level atomic-fast-path scheduler semaphore
 (C uses `dispatch_semaphore_t` on macOS; the old Mutex+Condvar locked on
 every enqueue); unchecked indexing inside the two already-`unsafe`
 `SyncSlice` accessors (debug_assert-guarded — the only unsafe-touching
-change, measured at −6% serial).
+change, measured at −6% serial). Second round: joint prepare functions read
+BodySim through references instead of deref-copying 220 bytes twice per
+joint per step; FMA contraction extended to the joint solvers (32 sites);
+scheduler workers spin ~tens of µs before committing to a kernel sleep
+(large_world w=8 went 24 → 11.5 ms; joint_grid w=8 1.58× → 1.49×).
 
-Known remainder: `large_world` at 8 workers pays ~3× C's per-step parallel
-overhead on a near-empty scene (24 vs 7.5 ms total — fixed stage-sync cost;
-C's spinner has the same structure, cost TBD); junkyard/many_pyramids hold
-the largest serial residue (1.23–1.28×, mesh/compound narrow phase codegen).
+Known remainder (verified by A/B, not worth their complexity in safe code):
+junkyard/many_pyramids hold the largest serial residue (1.25–1.28×) —
+diffuse bounds checks on data-dependent hull indices and the absence of
+`restrict`-grade aliasing info across the collide-task body; a twin-pair
+(`chunks_exact`) restructure of the edge SAT was tried and REVERTED — it
+won ~5% on junkyard's big compound hulls but cost box-box scenes 4-8%
+(large_pyramid parity matters more, and the C-shaped loop keeps the 1:1
+source mapping). `large_world` at 8 workers still pays ~1.6× C on fixed
+per-step overhead (11.5 vs 7.4 ms total across 500 steps).
 
 ## Intentional differences from C (keep these in mind when diffing)
 
@@ -121,9 +131,14 @@ the largest serial residue (1.23–1.28×, mesh/compound narrow phase codegen).
   block-claiming stage machinery, sync primitives in sync.rs): set
   WorldDef.worker_count > 1. Results are bit-identical at any worker count
   (the determinism test asserts the same hash at 1/2/4 workers). External
-  task-system callbacks (enqueueTask/finishTask) are not ported — built-in
-  scheduler only. Pre-solve/custom-filter callbacks force the affected pass
-  to run serially (Box<dyn FnMut> is not Sync)
+  task-system callbacks (enqueue_task/finish_task on WorldDef) ARE ported.
+  Pre-solve/custom-filter callbacks force the affected pass to run serially
+  (Box<dyn FnMut> is not Sync). Two intentional scheduler deviations from
+  the C source: the semaphore is a two-level atomic-fast-path design (C
+  relies on dispatch_semaphore on macOS), and workers spin ~tens of µs
+  before committing to a kernel sleep (C sleeps immediately; the spin
+  removes a per-step wake on the critical path — scheduling only, results
+  unaffected)
 - The global world registry: `World` is an owned struct, every API function
   takes `world` explicitly (`b3Body_GetPosition(id)` →
   `body_get_position(&world, id)`)

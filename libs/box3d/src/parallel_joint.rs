@@ -119,8 +119,8 @@ pub fn prepare_parallel_joint(base: &mut JointSim, world: &World, context: &Step
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     base.inv_mass_a = body_sim_a.inv_mass;
     base.inv_mass_b = body_sim_b.inv_mass;
@@ -272,8 +272,8 @@ pub fn solve_parallel_joint(base: &mut JointSim, states: &StateAccess, context: 
         let cdot_plus_bias = vec2(cdot.x + bias.x, cdot.y + bias.y);
         let sol = solve2(k, cdot_plus_bias);
         let mut delta_impulse = vec2(
-            -mass_scale * sol.x - impulse_scale * old_impulse.x,
-            -mass_scale * sol.y - impulse_scale * old_impulse.y,
+            (-impulse_scale).mul_add(old_impulse.x, -mass_scale * sol.x),
+            (-impulse_scale).mul_add(old_impulse.y, -mass_scale * sol.y),
         );
         joint.perp_impulse = vec2(old_impulse.x + delta_impulse.x, old_impulse.y + delta_impulse.y);
         if length_squared2(joint.perp_impulse) > max_impulse * max_impulse {

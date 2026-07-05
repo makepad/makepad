@@ -327,8 +327,8 @@ pub fn prepare_spherical_joint(base: &mut JointSim, world: &World, context: &Ste
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     base.inv_mass_a = body_sim_a.inv_mass;
     base.inv_mass_b = body_sim_b.inv_mass;
@@ -373,7 +373,7 @@ pub fn prepare_spherical_joint(base: &mut JointSim, world: &World, context: &Ste
     if joint.enable_twist_limit {
         let rel_q = inv_mul_quat(joint.frame_a.q, joint.frame_b.q);
         let tan_theta_over_2 =
-            ((rel_q.v.x * rel_q.v.x + rel_q.v.y * rel_q.v.y) / (rel_q.v.z * rel_q.v.z + rel_q.s * rel_q.s)).sqrt();
+            (rel_q.v.y.mul_add(rel_q.v.y, rel_q.v.x * rel_q.v.x) / rel_q.s.mul_add(rel_q.s, rel_q.v.z * rel_q.v.z)).sqrt();
 
         // todo verify this Jacobian using a finite difference, unit test?
         let swing_axis = normalize(cross(cone_axis, twist_axis));
@@ -550,7 +550,7 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
 
             let cdot = dot(sub(w_b, w_a), twist_jacobian);
             let old_impulse = joint.lower_twist_impulse;
-            let mut delta_impulse = -mass_scale * joint.twist_mass * (cdot + bias) - impulse_scale * old_impulse;
+            let mut delta_impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.twist_mass * (cdot + bias));
             joint.lower_twist_impulse = max_float(old_impulse + delta_impulse, 0.0);
             delta_impulse = joint.lower_twist_impulse - old_impulse;
 
@@ -576,7 +576,7 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
             // sign flipped on Cdot
             let cdot = dot(sub(w_a, w_b), twist_jacobian);
             let old_impulse = joint.upper_twist_impulse;
-            let mut delta_impulse = -mass_scale * joint.twist_mass * (cdot + bias) - impulse_scale * old_impulse;
+            let mut delta_impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.twist_mass * (cdot + bias));
             joint.upper_twist_impulse = max_float(old_impulse + delta_impulse, 0.0);
             delta_impulse = joint.upper_twist_impulse - old_impulse;
 
@@ -609,7 +609,7 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
         // sign flipped on Cdot
         let cdot = dot(sub(w_a, w_b), swing_axis);
         let old_impulse = joint.swing_impulse;
-        let mut delta_impulse = -mass_scale * joint.swing_mass * (cdot + bias) - impulse_scale * old_impulse;
+        let mut delta_impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.swing_mass * (cdot + bias));
         joint.swing_impulse = max_float(old_impulse + delta_impulse, 0.0);
         delta_impulse = joint.swing_impulse - old_impulse;
 

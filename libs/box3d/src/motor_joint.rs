@@ -226,8 +226,8 @@ pub fn prepare_motor_joint(base: &mut JointSim, world: &World, context: &StepCon
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     base.inv_mass_a = body_sim_a.inv_mass;
     base.inv_mass_b = body_sim_b.inv_mass;
