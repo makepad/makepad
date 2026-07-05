@@ -278,34 +278,35 @@ pub fn warm_start_motor_joint(base: &mut JointSim, states: &StateAccess, _contex
     let joint = motor_joint_mut(base);
 
     // dummy state for static bodies
-    let mut state_a = if joint.index_a == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_a as usize)
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a) = {
+        let s = if joint.index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation)
     };
-    let mut state_b = if joint.index_b == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_b as usize)
+    let (mut v_b, mut w_b, dq_b) = {
+        let s = if joint.index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation)
     };
 
-    let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+    let r_a = rotate_vector(dq_a, joint.frame_a.p);
+    let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
     let linear_impulse = add(joint.linear_velocity_impulse, joint.linear_spring_impulse);
     let angular_impulse = add(joint.angular_velocity_impulse, joint.angular_spring_impulse);
 
     // C writes unconditionally here (no dynamicFlag guard)
-    state_a.linear_velocity = mul_sub(state_a.linear_velocity, m_a, linear_impulse);
-    state_a.angular_velocity = sub(state_a.angular_velocity, mul_mv(i_a, add(cross(r_a, linear_impulse), angular_impulse)));
-    state_b.linear_velocity = mul_add(state_b.linear_velocity, m_b, linear_impulse);
-    state_b.angular_velocity = add(state_b.angular_velocity, mul_mv(i_b, add(cross(r_b, linear_impulse), angular_impulse)));
+    v_a = mul_sub(v_a, m_a, linear_impulse);
+    w_a = sub(w_a, mul_mv(i_a, add(cross(r_a, linear_impulse), angular_impulse)));
+    v_b = mul_add(v_b, m_b, linear_impulse);
+    w_b = add(w_b, mul_mv(i_b, add(cross(r_b, linear_impulse), angular_impulse)));
 
+    // C writes unconditionally here (no dynamicFlag guard).
     if joint.index_a != NULL_INDEX {
-        states.set(joint.index_a as usize, state_a);
+        states.set_velocities(joint.index_a as usize, v_a, w_a);
     }
     if joint.index_b != NULL_INDEX {
-        states.set(joint.index_b as usize, state_b);
+        states.set_velocities(joint.index_b as usize, v_b, w_b);
     }
 }
 
@@ -320,24 +321,19 @@ pub fn solve_motor_joint(base: &mut JointSim, states: &StateAccess, context: &St
     let joint = motor_joint_mut(base);
 
     // dummy state for static bodies
-    let mut state_a = if joint.index_a == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_a as usize)
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if joint.index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
-    let mut state_b = if joint.index_b == NULL_INDEX {
-        IDENTITY_BODY_STATE
-    } else {
-        states.get(joint.index_b as usize)
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if joint.index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(joint.index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
     };
 
-    let mut v_a = state_a.linear_velocity;
-    let mut w_a = state_a.angular_velocity;
-    let mut v_b = state_b.linear_velocity;
-    let mut w_b = state_b.angular_velocity;
-
-    let quat_a = mul_quat(state_a.delta_rotation, joint.frame_a.q);
-    let mut quat_b = mul_quat(state_b.delta_rotation, joint.frame_b.q);
+    let quat_a = mul_quat(dq_a, joint.frame_a.q);
+    let mut quat_b = mul_quat(dq_b, joint.frame_b.q);
 
     if dot_quat(quat_a, quat_b) < 0.0 {
         // this keeps the rotation angle in the range [-pi, pi]
@@ -392,13 +388,13 @@ pub fn solve_motor_joint(base: &mut JointSim, states: &StateAccess, context: &St
         w_b = add(w_b, mul_mv(i_b, impulse));
     }
 
-    let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+    let r_a = rotate_vector(dq_a, joint.frame_a.p);
+    let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
     // linear spring
     if joint.max_spring_force > 0.0 && joint.linear_hertz > 0.0 {
-        let dc_a = state_a.delta_position;
-        let dc_b = state_b.delta_position;
+        let dc_a = dp_a;
+        let dc_b = dp_b;
         let c = add(add(sub(dc_b, dc_a), sub(r_b, r_a)), joint.delta_center);
 
         let bias = mul_sv(joint.linear_spring.bias_rate, c);
@@ -469,20 +465,12 @@ pub fn solve_motor_joint(base: &mut JointSim, states: &StateAccess, context: &St
         w_b = add(w_b, mul_mv(i_b, cross(r_b, impulse)));
     }
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = v_a;
-        state_a.angular_velocity = w_a;
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if joint.index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_a as usize, v_a, w_a);
     }
-
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = v_b;
-        state_b.angular_velocity = w_b;
-    }
-
-    if joint.index_a != NULL_INDEX {
-        states.set(joint.index_a as usize, state_a);
-    }
-    if joint.index_b != NULL_INDEX {
-        states.set(joint.index_b as usize, state_b);
+    if joint.index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(joint.index_b as usize, v_b, w_b);
     }
 }
