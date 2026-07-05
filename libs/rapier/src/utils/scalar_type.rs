@@ -106,6 +106,30 @@ pub trait ScalarType:
     type Rotation: RotationOps<Self>;
 }
 
+/// Conversions from the glamx-based scalar math types into the nalgebra
+/// types used by the AoSoA SIMD lanes. Upstream rapier gets these From impls
+/// from glamx's `nalgebra` feature; the vendored build defines them locally
+/// so the stripped nalgebra stays free of the glam bridge. Semantics mirror
+/// nalgebra/src/third_party/glam (quaternions via new_normalize).
+#[cfg(all(feature = "dim3", feature = "simd-is-enabled"))]
+pub(crate) fn vector_to_na(v: Vector) -> na::Vector3<Real> {
+    na::Vector3::new(v.x, v.y, v.z)
+}
+
+/// See [`vector_to_na`].
+#[cfg(all(feature = "dim3", feature = "simd-is-enabled"))]
+pub(crate) fn pose_to_na(p: Pose) -> na::Isometry3<Real> {
+    na::Isometry3 {
+        translation: na::Translation3::new(p.translation.x, p.translation.y, p.translation.z),
+        rotation: na::UnitQuaternion::new_normalize(na::Quaternion::new(
+            p.rotation.w,
+            p.rotation.x,
+            p.rotation.y,
+            p.rotation.z,
+        )),
+    }
+}
+
 impl ScalarType for Real {
     type Pose = Pose;
     type Vector = Vector;

@@ -37,7 +37,7 @@ rkyv = ["rkyv-serialize"]
 rkyv-serialize = []
 serde_serialize = []
 std = []
-wide = []
+wide = ["dep:wide", "wide/std"]
 
 [lib]
 name = "simba"
@@ -47,6 +47,11 @@ path = "src/lib.rs"
 version = "0.5"
 default-features = false
 path = "../approx"
+[dependencies.wide]
+version = "0.7"
+optional = true
+default-features = false
+path = "../wide"
 [dependencies.libm_force]
 version = "0.2"
 optional = true
