@@ -6,7 +6,7 @@
 // lowerSuspensionLimit (not lowerSuspensionImpulse) in the impulse sum.
 
 use crate::b3_assert;
-use crate::body::{BodyState, DYNAMIC_FLAG, IDENTITY_BODY_STATE};
+use crate::body::{DYNAMIC_FLAG, IDENTITY_BODY_STATE};
 use crate::core::NULL_INDEX;
 use crate::id::JointId;
 use crate::joint::{JointSim, JointUnion};
@@ -508,18 +508,24 @@ pub fn warm_start_wheel_joint(base: &mut JointSim, states: &StateAccess, _contex
     // dummy state for static bodies
     let index_a = joint.index_a;
     let index_b = joint.index_b;
-    let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
-    let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
 
-    let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+    let r_a = rotate_vector(dq_a, joint.frame_a.p);
+    let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
-    let d = add(add(sub(state_b.delta_position, state_a.delta_position), joint.delta_center), sub(r_b, r_a));
+    let d = add(add(sub(dp_b, dp_a), joint.delta_center), sub(r_b, r_a));
 
-    let quat_a = mul_quat(state_a.delta_rotation, joint.frame_a.q);
-    let mut quat_b = mul_quat(state_b.delta_rotation, joint.frame_b.q);
+    let quat_a = mul_quat(dq_a, joint.frame_a.q);
+    let mut quat_b = mul_quat(dq_b, joint.frame_b.q);
     if dot_quat(quat_a, quat_b) < 0.0 {
         // this keeps the rotation angle in the range [-pi, pi]
         quat_b = negate_quat(quat_b);
@@ -573,21 +579,23 @@ pub fn warm_start_wheel_joint(base: &mut JointSim, states: &StateAccess, _contex
         );
     }
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = mul_sub(state_a.linear_velocity, m_a, linear_impulse);
-        state_a.angular_velocity = sub(state_a.angular_velocity, mul_mv(i_a, add(angular_impulse_a, angular_impulse)));
+    if flags_a & DYNAMIC_FLAG != 0 {
+        v_a = mul_sub(v_a, m_a, linear_impulse);
+        w_a = sub(w_a, mul_mv(i_a, add(angular_impulse_a, angular_impulse)));
     }
 
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = mul_add(state_b.linear_velocity, m_b, linear_impulse);
-        state_b.angular_velocity = add(state_b.angular_velocity, mul_mv(i_b, add(angular_impulse_b, angular_impulse)));
+    if flags_b & DYNAMIC_FLAG != 0 {
+        v_b = mul_add(v_b, m_b, linear_impulse);
+        w_b = add(w_b, mul_mv(i_b, add(angular_impulse_b, angular_impulse)));
     }
 
-    if index_a != NULL_INDEX {
-        states.set(index_a as usize, state_a);
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_a as usize, v_a, w_a);
     }
-    if index_b != NULL_INDEX {
-        states.set(index_b as usize, state_b);
+    if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_b as usize, v_b, w_b);
     }
 }
 
@@ -606,22 +614,23 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
     // dummy state for static bodies
     let index_a = joint.index_a;
     let index_b = joint.index_b;
-    let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
-    let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
-
-    let mut v_a = state_a.linear_velocity;
-    let mut w_a = state_a.angular_velocity;
-    let mut v_b = state_b.linear_velocity;
-    let mut w_b = state_b.angular_velocity;
+    // Field copies through short-lived borrows + a velocities-only
+    // write-back (see spherical_joint.rs / StateAccess::set_velocities).
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
 
     // current anchors
-    let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+    let r_a = rotate_vector(dq_a, joint.frame_a.p);
+    let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
-    let quat_a = mul_quat(state_a.delta_rotation, joint.frame_a.q);
-    let mut quat_b = mul_quat(state_b.delta_rotation, joint.frame_b.q);
+    let quat_a = mul_quat(dq_a, joint.frame_a.q);
+    let mut quat_b = mul_quat(dq_b, joint.frame_b.q);
 
     if dot_quat(quat_a, quat_b) < 0.0 {
         // this keeps the rotation angle in the range [-pi, pi]
@@ -632,7 +641,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
     let matrix_a = make_matrix_from_quat(quat_a);
     let matrix_b = make_matrix_from_quat(quat_b);
 
-    let d = add(add(sub(state_b.delta_position, state_a.delta_position), joint.delta_center), sub(r_b, r_a));
+    let d = add(add(sub(dp_b, dp_a), joint.delta_center), sub(r_b, r_a));
     let s_ax = cross(add(d, r_a), matrix_a.cx);
     let s_bx = cross(r_b, matrix_a.cx);
     let s_ay = cross(add(d, r_a), matrix_a.cy);
@@ -950,20 +959,12 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
         w_b = add(w_b, mul_mv(i_b, blend2(delta_impulse.x, s_by, delta_impulse.y, s_bz)));
     }
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = v_a;
-        state_a.angular_velocity = w_a;
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_a as usize, v_a, w_a);
     }
-
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = v_b;
-        state_b.angular_velocity = w_b;
-    }
-
-    if index_a != NULL_INDEX {
-        states.set(index_a as usize, state_a);
-    }
-    if index_b != NULL_INDEX {
-        states.set(index_b as usize, state_b);
+    if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_b as usize, v_b, w_b);
     }
 }

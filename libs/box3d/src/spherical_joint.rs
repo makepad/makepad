@@ -17,7 +17,7 @@
 // Deviations: recording hooks (B3_REC) and b3DrawSphericalJoint are not ported.
 
 use crate::b3_assert;
-use crate::body::{BodyState, DYNAMIC_FLAG, IDENTITY_BODY_STATE};
+use crate::body::{DYNAMIC_FLAG, IDENTITY_BODY_STATE};
 use crate::core::NULL_INDEX;
 use crate::id::JointId;
 use crate::joint::{JointSim, JointUnion};
@@ -413,20 +413,23 @@ pub fn warm_start_spherical_joint(base: &mut JointSim, states: &StateAccess, _co
     let joint = get_spherical(base);
 
     // dummy state for static bodies
+    // Field copies through short-lived borrows + a velocities-only write-back
+    // (C reads in place and stores only the two velocity vectors; the full
+    // 56-byte round trip kept the untouched fields live across the whole
+    // function — see StateAccess::set_velocities).
     let index_a = joint.index_a;
     let index_b = joint.index_b;
-    let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
-    let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
+    let (mut v_a, mut w_a, dq_a, flags_a) = {
+        let s = if index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.flags)
+    };
+    let (mut v_b, mut w_b, dq_b, flags_b) = {
+        let s = if index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.flags)
+    };
 
-    let mut v_a = state_a.linear_velocity;
-    let mut w_a = state_a.angular_velocity;
-    let mut v_b = state_b.linear_velocity;
-    let mut w_b = state_b.angular_velocity;
-
-    let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-    let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+    let r_a = rotate_vector(dq_a, joint.frame_a.p);
+    let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
     let mut angular_impulse = add(joint.spring_impulse, joint.motor_impulse);
     angular_impulse = mul_sub(angular_impulse, joint.swing_impulse, joint.swing_axis);
@@ -438,21 +441,13 @@ pub fn warm_start_spherical_joint(base: &mut JointSim, states: &StateAccess, _co
     v_b = mul_add(v_b, m_b, joint.linear_impulse);
     w_b = add(w_b, mul_mv(i_b, add(cross(r_b, joint.linear_impulse), angular_impulse)));
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = v_a;
-        state_a.angular_velocity = w_a;
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_a as usize, v_a, w_a);
     }
-
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = v_b;
-        state_b.angular_velocity = w_b;
-    }
-
-    if index_a != NULL_INDEX {
-        states.set(index_a as usize, state_a);
-    }
-    if index_b != NULL_INDEX {
-        states.set(index_b as usize, state_b);
+    if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_b as usize, v_b, w_b);
     }
 }
 
@@ -469,20 +464,21 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
     let joint = get_spherical(base);
 
     // dummy state for static bodies
+    // Field copies through short-lived borrows + a velocities-only write-back
+    // (see warm_start_spherical_joint / StateAccess::set_velocities).
     let index_a = joint.index_a;
     let index_b = joint.index_b;
-    let mut state_a: BodyState =
-        if index_a == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_a as usize) };
-    let mut state_b: BodyState =
-        if index_b == NULL_INDEX { IDENTITY_BODY_STATE } else { states.get(index_b as usize) };
+    let (mut v_a, mut w_a, dq_a, dp_a, flags_a) = {
+        let s = if index_a == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_a as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
+    let (mut v_b, mut w_b, dq_b, dp_b, flags_b) = {
+        let s = if index_b == NULL_INDEX { &IDENTITY_BODY_STATE } else { states.get_ref(index_b as usize) };
+        (s.linear_velocity, s.angular_velocity, s.delta_rotation, s.delta_position, s.flags)
+    };
 
-    let mut v_a = state_a.linear_velocity;
-    let mut w_a = state_a.angular_velocity;
-    let mut v_b = state_b.linear_velocity;
-    let mut w_b = state_b.angular_velocity;
-
-    let quat_a = mul_quat(state_a.delta_rotation, joint.frame_a.q);
-    let quat_b = mul_quat(state_b.delta_rotation, joint.frame_b.q);
+    let quat_a = mul_quat(dq_a, joint.frame_a.q);
+    let quat_b = mul_quat(dq_b, joint.frame_b.q);
 
     let rel_q = inv_mul_quat(quat_a, quat_b);
 
@@ -620,8 +616,8 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
 
     // Solve point-to-point constraint
     {
-        let r_a = rotate_vector(state_a.delta_rotation, joint.frame_a.p);
-        let r_b = rotate_vector(state_b.delta_rotation, joint.frame_b.p);
+        let r_a = rotate_vector(dq_a, joint.frame_a.p);
+        let r_b = rotate_vector(dq_b, joint.frame_b.p);
 
         let cdot = sub(sub(add(v_b, cross(w_b, r_b)), v_a), cross(w_a, r_a));
 
@@ -629,8 +625,8 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
         let mut mass_scale = 1.0;
         let mut impulse_scale = 0.0;
         if use_bias {
-            let dc_a = state_a.delta_position;
-            let dc_b = state_b.delta_position;
+            let dc_a = dp_a;
+            let dc_b = dp_b;
 
             let mut separation = add(sub(dc_b, dc_a), sub(r_b, r_a));
             separation = add(separation, joint.delta_center);
@@ -661,20 +657,12 @@ pub fn solve_spherical_joint(base: &mut JointSim, states: &StateAccess, context:
         w_b = add(w_b, mul_mv(i_b, cross(r_b, impulse)));
     }
 
-    if state_a.flags & DYNAMIC_FLAG != 0 {
-        state_a.linear_velocity = v_a;
-        state_a.angular_velocity = w_a;
+    // C stores unconditionally through the state pointer for dynamic bodies;
+    // the non-dynamic write in the old code was a byte-identical no-op.
+    if index_a != NULL_INDEX && (flags_a & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_a as usize, v_a, w_a);
     }
-
-    if state_b.flags & DYNAMIC_FLAG != 0 {
-        state_b.linear_velocity = v_b;
-        state_b.angular_velocity = w_b;
-    }
-
-    if index_a != NULL_INDEX {
-        states.set(index_a as usize, state_a);
-    }
-    if index_b != NULL_INDEX {
-        states.set(index_b as usize, state_b);
+    if index_b != NULL_INDEX && (flags_b & DYNAMIC_FLAG != 0) {
+        states.set_velocities(index_b as usize, v_b, w_b);
     }
 }
