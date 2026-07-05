@@ -136,6 +136,15 @@ them into one 13.6 KB body paying constant register-spill traffic), and
 the `Manifolds` inline-when-single store (see representation changes below)
 — together many_pyramids went 1.28× → 1.06× vs C.
 
+**PGO (`pgo.sh`):** a profile-guided build of the benchmark is another
+11–19% faster than the plain fat-LTO build (paired same-machine runs:
+large_pyramid 1177 vs 1457 ms — 15% FASTER than the non-PGO C build —
+junkyard −14%, many_pyramids −11%), with the determinism hash bit-identical
+(PGO changes layout/inlining, never arithmetic). Fairness note when quoting
+vs-C numbers: the C reference is not profile-guided; PGO-ing C would claw
+back some of its own margin. The script trains on one pass of the
+benchmark scenes; retrain when workloads change substantially.
+
 Known remainder (verified by A/B, not worth their complexity in safe code):
 junkyard holds the largest serial residue (1.24×) — diffuse bounds checks
 on data-dependent hull indices and the absence of `restrict`-grade aliasing
@@ -144,7 +153,10 @@ of the edge SAT was tried and REVERTED — it won ~5% on junkyard's big
 compound hulls but cost box-box scenes 4-8% (large_pyramid parity matters
 more, and the C-shaped loop keeps the 1:1 source mapping). At 8 workers
 joint_grid (1.45×) and `large_world` (fixed per-step overhead, 11.5 vs
-7.6 ms total across 500 steps) mark the parallel frontier.
+7.6 ms total across 500 steps) mark the parallel frontier. Also tried and
+dropped (below the noise floor in paired A/B): cache-line padding of the
+stage-sync atomics, and narrow velocity-only state writes in scatter (wide
+cores handle the full 56-byte contiguous store as cheaply).
 
 ## Intentional differences from C (keep these in mind when diffing)
 
