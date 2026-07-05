@@ -61,6 +61,37 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// Copy every field except `geom` from `src`, reusing this shape's
+    /// heap buffers (`materials` keeps its capacity via clone_from). Used by
+    /// the compound collide path to build the temporary child shape the way C
+    /// stack-copies it — without deep-cloning the compound geometry that the
+    /// caller immediately replaces.
+    pub fn copy_non_geom_from(&mut self, src: &Shape) {
+        self.id = src.id;
+        self.body_id = src.body_id;
+        self.prev_shape_id = src.prev_shape_id;
+        self.next_shape_id = src.next_shape_id;
+        self.sensor_index = src.sensor_index;
+        self.proxy_key = src.proxy_key;
+        self.density = src.density;
+        self.explosion_scale = src.explosion_scale;
+        self.aabb_margin = src.aabb_margin;
+        self.aabb = src.aabb;
+        self.fat_aabb = src.fat_aabb;
+        self.local_centroid = src.local_centroid;
+        self.material = src.material;
+        self.materials.clone_from(&src.materials);
+        self.filter = src.filter;
+        self.user_data = src.user_data;
+        self.generation = src.generation;
+        self.enable_sensor_events = src.enable_sensor_events;
+        self.enable_contact_events = src.enable_contact_events;
+        self.enable_custom_filtering = src.enable_custom_filtering;
+        self.enable_hit_events = src.enable_hit_events;
+        self.enable_pre_solve_events = src.enable_pre_solve_events;
+        self.enlarged_aabb = src.enlarged_aabb;
+    }
+
     /// The C `shape->type` field (the union tag).
     #[inline]
     pub fn shape_type(&self) -> ShapeType {

@@ -85,21 +85,26 @@ impl<'a, T> SyncSlice<'a, T> {
 
     /// # Safety
     /// See the struct-level contract: `i` must not be accessed by any other
-    /// thread for as long as the returned reference lives.
+    /// thread for as long as the returned reference lives, and `i < len()`.
+    /// Unchecked indexing: these accessors sit in the innermost solver loops
+    /// (gather/scatter per constraint row per stage) where a bounds check per
+    /// lane is measurable; debug builds still verify via debug_assert.
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut(&self, i: usize) -> &mut T {
-        &mut *self.slice[i].get()
+        debug_assert!(i < self.slice.len());
+        unsafe { &mut *self.slice.get_unchecked(i).get() }
     }
 
     /// Read-only access under the same disjointness contract as `get_mut`
     /// (no other thread may mutate `i` while the reference lives).
     ///
     /// # Safety
-    /// See the struct-level contract.
+    /// See the struct-level contract; `i < len()`.
     #[inline]
     pub unsafe fn get_ref(&self, i: usize) -> &T {
-        &*self.slice[i].get()
+        debug_assert!(i < self.slice.len());
+        unsafe { &*self.slice.get_unchecked(i).get() }
     }
 }
 

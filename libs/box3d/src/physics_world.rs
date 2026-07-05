@@ -109,6 +109,22 @@ pub struct TaskContext {
     /// Applied serially after the parallel-for in worker order; slot-disjoint,
     /// so the values are order independent.
     pub mesh_spec_updates: Vec<(i32, i32, u16)>,
+
+    /// Scratch local manifold for the convex collide path. C builds the local
+    /// manifold in a caller-provided stack buffer; the port reuses this
+    /// per-worker scratch so the point Vec keeps its capacity across contacts
+    /// (no per-contact allocation).
+    pub geom_manifold_scratch: crate::types::LocalManifold,
+
+    /// Scratch buffers for the mesh collide path (C: arena allocations in
+    /// b3ComputeMeshManifolds). Capacity-preserving reuse across contacts;
+    /// see MeshCollideScratch.
+    pub mesh_scratch: crate::mesh_contact::MeshCollideScratch,
+
+    /// Scratch shape for the compound collide path's temporary child shape
+    /// (C stack-copies the compound b3Shape; the port reuses this so the
+    /// materials Vec keeps its capacity and no geometry is deep-cloned).
+    pub child_shape_scratch: crate::shape::Shape,
 }
 
 /// The world struct manages all physics entities and dynamic simulation.
@@ -637,8 +653,10 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         }
 
         // There can be non-touching contacts between awake bodies and sleeping bodies.
-        let body_sim_a = world.solver_sets[set_index_a as usize].body_sims[local_index_a as usize];
-        let body_sim_b = world.solver_sets[set_index_b as usize].body_sims[local_index_b as usize];
+        // By reference: BodySim is 220 bytes; C reads through a pointer here and
+        // copying it per contact per step dominates the collide task.
+        let body_sim_a = &world.solver_sets[set_index_a as usize].body_sims[local_index_a as usize];
+        let body_sim_b = &world.solver_sets[set_index_b as usize].body_sims[local_index_b as usize];
 
         let transform_a = body_sim_a.transform;
         let transform_b = body_sim_b.transform;
@@ -699,9 +717,10 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
                         let normal = manifold.normal;
 
                         let point_count = manifold.point_count;
-                        for point_index in 0..point_count {
+                        // Slice loop: one bounds check for the range instead of
+                        // one per point (the check also blocked load scheduling).
+                        for mp in &mut manifold.points[..point_count as usize] {
                             // Keep anchors but update separation, same as sub-stepping. This eliminates jitter.
-                            let mp = &mut manifold.points[point_index as usize];
                             let r_a = mul_mv(matrix_a, mp.anchor_a);
                             let r_b = mul_mv(matrix_b, mp.anchor_b);
                             let dp = add(dc, sub(r_b, r_a));

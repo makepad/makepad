@@ -78,6 +78,16 @@ so stored index is `index + 1`).
 ## Float determinism
 
 - Never reorder float expressions; keep temporaries and parenthesization.
+- Scalar `a*b + c` shapes in hot paths are contracted with `f32::mul_add`
+  (`f64::mul_add` for the double-precision twins) — the port's equivalent of
+  clang's default `-ffp-contract=on` on the C build. Canonical patterns:
+  `a*b + c` → `a.mul_add(b, c)`; `a*b + c*d` → `a.mul_add(b, c*d)` (one fma
+  per add); sum chains fuse left-to-right with the FIRST product plain:
+  `x1*x2 + y1*y2 + z1*z2` → `z1.mul_add(z2, y1.mul_add(y2, x1*x2))`.
+  `mul_add` is IEEE correctly rounded on every target, so this preserves all
+  determinism properties. Do NOT contract: the wide NEON/SSE2 ops in
+  contact_solver.rs (C's intrinsics aren't contracted either), the
+  deterministic `atan2`/`compute_cos_sin`, or any hashing/serialization code.
 - `b3Atan2` / `b3ComputeCosSin` are hand-written approximations — port digit
   for digit.
 - `remainderf` has no stable Rust equivalent; `unwind_angle` implements IEEE

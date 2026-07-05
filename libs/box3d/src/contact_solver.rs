@@ -520,7 +520,8 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
                 let vn = dot(sub(vr_b, vr_a), normal);
 
                 // incremental normal impulse
-                let mut delta_impulse = -cp.normal_mass * (mass_scale * vn + velocity_bias) - impulse_scale * cp.normal_impulse;
+                let mut delta_impulse =
+                    (-cp.normal_mass).mul_add(mass_scale.mul_add(vn, velocity_bias), -(impulse_scale * cp.normal_impulse));
 
                 // clamp the accumulated impulse
                 let new_impulse = max_float(cp.normal_impulse + delta_impulse, 0.0);
@@ -702,7 +703,7 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
                 let vn = dot(sub(vr_b, vr_a), normal);
 
                 // compute normal impulse
-                let mut impulse = -cp.normal_mass * (vn + restitution * cp.relative_velocity);
+                let mut impulse = -cp.normal_mass * restitution.mul_add(cp.relative_velocity, vn);
 
                 // clamp the accumulated impulse
                 let new_impulse = max_float(cp.normal_impulse + impulse, 0.0);
@@ -872,6 +873,13 @@ mod wide {
     #[derive(Clone, Copy, Debug)]
     pub struct FloatW(pub(crate) float32x4_t);
 
+    // Layout guarantee for the direct lane accessors below: the wide register
+    // type must be exactly four packed f32 lanes, at least f32-aligned.
+    const LANE_LAYOUT: () = {
+        assert!(core::mem::size_of::<FloatW>() == 4 * core::mem::size_of::<f32>());
+        assert!(core::mem::align_of::<FloatW>() >= core::mem::align_of::<f32>());
+    };
+
     impl Default for FloatW {
         fn default() -> Self {
             zero_w()
@@ -881,19 +889,20 @@ mod wide {
     impl FloatW {
         /// C: ((float*)&w)[lane]
         #[inline(always)]
-        pub fn get(self, lane: usize) -> f32 {
-            let mut f = [0.0f32; 4];
-            unsafe { vst1q_f32(f.as_mut_ptr(), self.0) };
-            f[lane]
+        pub fn get(&self, lane: usize) -> f32 {
+            debug_assert!(lane < 4);
+            // C: ((const float*)&w)[lane] — float32x4_t has the layout of
+            // [f32; 4] (checked by LANE_LAYOUT below); a single scalar load
+            // instead of spilling the whole vector through the stack.
+            unsafe { *(self as *const FloatW as *const f32).add(lane) }
         }
 
         /// C: ((float*)&w)[lane] = value
         #[inline(always)]
         pub fn set(&mut self, lane: usize, value: f32) {
-            let mut f = [0.0f32; 4];
-            unsafe { vst1q_f32(f.as_mut_ptr(), self.0) };
-            f[lane] = value;
-            self.0 = unsafe { vld1q_f32(f.as_ptr()) };
+            debug_assert!(lane < 4);
+            // C: ((float*)&w)[lane] = value — a single scalar store.
+            unsafe { *(self as *mut FloatW as *mut f32).add(lane) = value }
         }
     }
 
@@ -1026,6 +1035,13 @@ mod wide {
     #[derive(Clone, Copy, Debug)]
     pub struct FloatW(pub(crate) __m128);
 
+    // Layout guarantee for the direct lane accessors below: the wide register
+    // type must be exactly four packed f32 lanes, at least f32-aligned.
+    const LANE_LAYOUT: () = {
+        assert!(core::mem::size_of::<FloatW>() == 4 * core::mem::size_of::<f32>());
+        assert!(core::mem::align_of::<FloatW>() >= core::mem::align_of::<f32>());
+    };
+
     impl Default for FloatW {
         fn default() -> Self {
             zero_w()
@@ -1035,19 +1051,19 @@ mod wide {
     impl FloatW {
         /// C: ((float*)&w)[lane]
         #[inline(always)]
-        pub fn get(self, lane: usize) -> f32 {
-            let mut f = [0.0f32; 4];
-            unsafe { _mm_storeu_ps(f.as_mut_ptr(), self.0) };
-            f[lane]
+        pub fn get(&self, lane: usize) -> f32 {
+            debug_assert!(lane < 4);
+            // C: ((const float*)&w)[lane] — __m128 has the layout of [f32; 4]
+            // (checked by LANE_LAYOUT below); a single scalar load.
+            unsafe { *(self as *const FloatW as *const f32).add(lane) }
         }
 
         /// C: ((float*)&w)[lane] = value
         #[inline(always)]
         pub fn set(&mut self, lane: usize, value: f32) {
-            let mut f = [0.0f32; 4];
-            unsafe { _mm_storeu_ps(f.as_mut_ptr(), self.0) };
-            f[lane] = value;
-            self.0 = unsafe { _mm_loadu_ps(f.as_ptr()) };
+            debug_assert!(lane < 4);
+            // C: ((float*)&w)[lane] = value — a single scalar store.
+            unsafe { *(self as *mut FloatW as *mut f32).add(lane) = value }
         }
     }
 
@@ -1600,14 +1616,18 @@ struct BodyStateW {
 fn gather_bodies(states: &crate::solver::StateAccess, indices: &[i32; SIMD_WIDTH]) -> BodyStateW {
     // C SIMD path: b3BodyState dummy = {0}; dummy.deltaRotation.s = 1.0f;
     // which is exactly the identity body state.
-    let identity = IDENTITY_BODY_STATE;
+    let identity = &IDENTITY_BODY_STATE;
 
     // Indices are 0 for null
     // (graph coloring: no other worker touches these body indices this stage)
-    let s1 = if indices[0] == 0 { identity } else { states.get((indices[0] - 1) as usize) };
-    let s2 = if indices[1] == 0 { identity } else { states.get((indices[1] - 1) as usize) };
-    let s3 = if indices[2] == 0 { identity } else { states.get((indices[2] - 1) as usize) };
-    let s4 = if indices[3] == 0 { identity } else { states.get((indices[3] - 1) as usize) };
+    // By reference, not by value: copying the four 56-byte states makes LLVM
+    // materialize all 56 scalars up front and spill ~20 registers in the zip
+    // phase; references keep the live set at 4 pointers and let each set_w
+    // load its lanes straight from memory, matching C's codegen.
+    let s1 = if indices[0] == 0 { identity } else { states.get_ref((indices[0] - 1) as usize) };
+    let s2 = if indices[1] == 0 { identity } else { states.get_ref((indices[1] - 1) as usize) };
+    let s3 = if indices[2] == 0 { identity } else { states.get_ref((indices[2] - 1) as usize) };
+    let s4 = if indices[3] == 0 { identity } else { states.get_ref((indices[3] - 1) as usize) };
 
     let mut simd_body = BodyStateW::default();
     simd_body.v.x = set_w(s1.linear_velocity.x, s2.linear_velocity.x, s3.linear_velocity.x, s4.linear_velocity.x);
