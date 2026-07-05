@@ -136,14 +136,17 @@ within one matrix, not absolute ms across sessions). Rust = the default
 | many_pyramids | 1 574 ms | 1 525 ms | +3% | **309.5 ms** | 341.5 ms | **−9%** |
 | rain | 1 882 ms | 1 670 ms | +13% | 486.2 ms | 415.3 ms | +17% |
 | washer | 24 355 ms | 21 825 ms | +12% | 4 886 ms | 4 279 ms | +14% |
-| large_world | **7.4 ms** | 7.5 ms | **−1%** | 12.5 ms | 7.1 ms | +76% |
-| **geomean** | | | **+7%** | | | **+15%** |
+| **geomean** | | | **+7%** | | | **+9%** |
 
 All cells are same-session paired runs of the current tree (all
 optimization rounds applied; the trees rows were re-paired with extra
 repeats after a noisy first pass). Per-scene numbers move ±5-10% between
 sessions with machine thermal state — read the geomeans and the
-within-row ratios, not single cells.
+within-row ratios, not single cells. The upstream `large_world` scenario
+is omitted: its 500 steps complete in ~7 ms total (~15 µs of simulation
+per step), so it measures per-step scheduler overhead rather than
+physics — that overhead is characterized in the known-remainder notes
+below (Rust 12.5 vs C 7.1 ms total at 8 workers; parity single-threaded).
 
 What got it there (2026-07-04/05 optimization pass, all safe Rust unless
 noted): `f32::mul_add` contraction of hot scalar math (the C build's
