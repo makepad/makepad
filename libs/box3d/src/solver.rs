@@ -424,7 +424,7 @@ use crate::b3_assert;
 use crate::b3_validate;
 use crate::bitset::{get_bit, in_place_union, set_bit, set_bit_count_and_clear};
 use crate::body::{
-    make_relative_sweep, should_bodies_collide, BodySim, ALLOW_FAST_ROTATION, BODY_TRANSIENT_FLAGS,
+    make_relative_sweep, BodySim, BodyState, ALLOW_FAST_ROTATION, BODY_TRANSIENT_FLAGS,
     ENABLE_SLEEP, ENLARGE_BOUNDS, HAD_TIME_OF_IMPACT, IS_BULLET, IS_FAST, IS_SPEED_CAPPED,
     LOCK_ANGULAR_X, LOCK_ANGULAR_Y, LOCK_ANGULAR_Z, LOCK_LINEAR_X, LOCK_LINEAR_Y, LOCK_LINEAR_Z,
 };
@@ -713,8 +713,112 @@ fn solve_joints_task(block: SolverBlock, shared: &SolverShared, use_bias: bool, 
 // Continuous collision of dynamic versus static (and versus everything for bullets).
 // C: b3SolveContinuous(world, bodySimIndex, taskContext). The fast body sim lives in
 // context.sims during the solve; it is copied to a local and written back at the end.
-fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index: i32, worker_index: i32) {
-    let mut fast_body_sim = context.sims[body_sim_index as usize];
+/// Shared context for the parallel finalize-bodies pass and the bullet pass
+/// (C: b3FinalizeBodiesTask / b3BulletBodyTask run under b3ParallelFor).
+///
+/// The world reference has bodies, shapes, body move events, task contexts,
+/// the awake sims/states and the bullet array taken out for the duration.
+/// Disjointness invariants (same style as CollideCtx):
+/// - every awake sim index maps to exactly one body, and every shape belongs
+///   to exactly one body, so per-sim mutation of bodies/shapes/sims/states/
+///   move_events is index-disjoint across parallel_for blocks;
+/// - foreign body/shape/sim reads from the continuous-collision query only
+///   touch static bodies during the finalize pass (asserted in the callback)
+///   and only non-bullet dynamic state that is stable during the bullet pass
+///   (which runs after the finalize barrier);
+/// - task_contexts are per-worker (worker_index is exclusive per task);
+/// - the bullet array is filled through an atomic cursor (C mirrors this with
+///   b3AtomicFetchAddInt); TOI sweep order does not affect results;
+/// - the user callbacks are Box<dyn FnMut> (not Sync): when either is
+///   installed the pass falls back to a single worker, like the collide pass.
+struct FinalizeCtx<'a> {
+    world: &'a World,
+    bodies: crate::sync::SyncSlice<'a, crate::body::Body>,
+    shapes: crate::sync::SyncSlice<'a, crate::shape::Shape>,
+    sims: crate::sync::SyncSlice<'a, BodySim>,
+    states: crate::sync::SyncSlice<'a, BodyState>,
+    move_events: crate::sync::SyncSlice<'a, BodyMoveEvent>,
+    task_contexts: crate::sync::SyncSlice<'a, crate::physics_world::TaskContext>,
+    bullet_bodies: crate::sync::SyncSlice<'a, i32>,
+    bullet_count: &'a crate::sync::AtomicIndex,
+    pre_solve: crate::sync::SyncPtr<Option<Box<crate::types::PreSolveFcn>>>,
+    custom_filter: crate::sync::SyncPtr<Option<Box<crate::types::CustomFilterFcn>>>,
+    use_callbacks: bool,
+    enable_sleep: bool,
+    enable_continuous: bool,
+    dt: f32,
+    inv_dt: f32,
+    world_id: u16,
+}
+
+/// C: b3ShouldBodiesCollide reading through the taken-out body array. The
+/// joints array is read-only for the whole pass.
+fn should_bodies_collide_ctx(ctx: &FinalizeCtx, body_id_a: i32, body_id_b: i32) -> bool {
+    // SAFETY: reads only; body A is owned by this worker's range and body B
+    // is static during finalize / stable during the bullet pass (see struct
+    // invariants).
+    let body_a = unsafe { ctx.bodies.get_ref(body_id_a as usize) };
+    let body_b = unsafe { ctx.bodies.get_ref(body_id_b as usize) };
+
+    if body_a.body_type != BodyType::Dynamic && body_b.body_type != BodyType::Dynamic {
+        return false;
+    }
+
+    // Walk the smaller joint list looking for a joint connecting to the
+    // other body (identical to body.rs::should_bodies_collide).
+    let mut joint_key;
+    let other_body_id;
+    if body_a.joint_count < body_b.joint_count {
+        joint_key = body_a.head_joint_key;
+        other_body_id = body_b.id;
+    } else {
+        joint_key = body_b.head_joint_key;
+        other_body_id = body_a.id;
+    }
+
+    while joint_key != NULL_INDEX {
+        let joint_id = joint_key >> 1;
+        let edge_index = joint_key & 1;
+        let other_edge_index = edge_index ^ 1;
+
+        let joint = &ctx.world.joints[joint_id as usize];
+        if !joint.collide_connected && joint.edges[other_edge_index as usize].body_id == other_body_id {
+            return false;
+        }
+
+        joint_key = joint.edges[edge_index as usize].next_key;
+    }
+
+    true
+}
+
+// C: b3FinalizeBodiesTask trampoline for parallel_for.
+unsafe fn finalize_bodies_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
+    // SAFETY: the FinalizeCtx lives on the solve() stack frame, which blocks
+    // in parallel_for until every block completes.
+    let ctx = unsafe { &*(context as *const FinalizeCtx) };
+    finalize_bodies_range(ctx, start_index, end_index, worker_index);
+}
+
+// C: b3BulletBodyTask trampoline for parallel_for.
+unsafe fn bullet_bodies_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
+    // SAFETY: see finalize_bodies_trampoline.
+    let ctx = unsafe { &*(context as *const FinalizeCtx) };
+    for i in start_index..end_index {
+        // SAFETY: the bullet array prefix [0, bullet_count) is fully written
+        // before the bullet pass starts (finalize barrier), read-only here.
+        let sim_index = unsafe { *ctx.bullet_bodies.get_ref(i as usize) };
+        solve_continuous(ctx, sim_index, worker_index);
+    }
+}
+
+fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
+    // SAFETY (all ctx accessors in this function): body_sim_index is owned by
+    // this worker (parallel_for block partitioning / bullet-array slot), its
+    // body and shapes belong to it exclusively, foreign reads only touch
+    // static or phase-stable data, and task_contexts[worker_index] is
+    // exclusive per task. See the FinalizeCtx invariants.
+    let mut fast_body_sim = unsafe { *ctx.sims.get_ref(body_sim_index as usize) };
     b3_assert!(fast_body_sim.flags & IS_FAST != 0);
 
     // Re-center the sweep on the fast body so the TOI and the swept query stay in float precision
@@ -746,17 +850,23 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
 
     let is_bullet = (fast_body_sim.flags & IS_BULLET) != 0;
 
-    // The callbacks may run while the world is otherwise shared-borrowed.
-    let mut pre_solve_fcn = world.pre_solve_fcn.take();
-    let mut custom_filter_fcn = world.custom_filter_fcn.take();
+    // The user callbacks are Box<dyn FnMut> (not Sync). use_callbacks forces
+    // the pass to a single worker, so the SyncPtr access is exclusive; in the
+    // parallel case both slots are None and are never touched.
+    let (mut pre_solve_fcn, mut custom_filter_fcn) = if ctx.use_callbacks {
+        // SAFETY: single-worker fallback — exclusive access for the pass.
+        unsafe { ((*ctx.pre_solve.0).as_mut(), (*ctx.custom_filter.0).as_mut()) }
+    } else {
+        (None, None)
+    };
 
-    let mut shape_id = world.bodies[fast_body_id as usize].head_shape_id;
+    let mut shape_id = unsafe { ctx.bodies.get_ref(fast_body_id as usize) }.head_shape_id;
     while shape_id != NULL_INDEX {
         let fast_shape_id = shape_id;
 
         // Update the shape AABB first (C mutates fastShape->aabb before the queries).
         let (next_shape_id, box1, box2, fast_shape_type, fast_sensor_index) = {
-            let shape = &world.shapes[fast_shape_id as usize];
+            let shape = unsafe { ctx.shapes.get_ref(fast_shape_id as usize) };
             let box1 = shape.aabb;
             // xf2 is relative to the base, so translate the box back to world space, rounding outward
             let box2 = offset_aabb(compute_shape_aabb(shape, xf2), base);
@@ -764,7 +874,7 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
         };
 
         // Store this to avoid double computation in the case there is no impact event
-        world.shapes[fast_shape_id as usize].aabb = box2;
+        unsafe { ctx.shapes.get_mut(fast_shape_id as usize) }.aabb = box2;
 
         shape_id = next_shape_id;
 
@@ -785,13 +895,13 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
         // This is called from dynamic_tree_query for continuous collision
         // (C: b3ContinuousQueryCallback)
         {
-            let world_ref: &World = world;
-            let sims: &[BodySim] = &context.sims;
-
             let mut callback = |_proxy_id: i32, user_data: u64| -> bool {
                 let hit_shape_id = user_data as i32;
 
-                let fast_shape = &world_ref.shapes[fast_shape_id as usize];
+                // SAFETY: foreign shape/body/sim reads — static during the
+                // finalize pass (asserted below), stable during the bullet
+                // pass (runs after the finalize barrier).
+                let fast_shape = unsafe { ctx.shapes.get_ref(fast_shape_id as usize) };
                 b3_assert!(fast_shape.sensor_index == NULL_INDEX);
 
                 // Skip same shape
@@ -799,7 +909,7 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
                     return true;
                 }
 
-                let shape = &world_ref.shapes[hit_shape_id as usize];
+                let shape = unsafe { ctx.shapes.get_ref(hit_shape_id as usize) };
 
                 // Skip same body
                 if shape.body_id == fast_shape.body_id {
@@ -818,12 +928,12 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
                     return true;
                 }
 
-                let body = &world_ref.bodies[shape.body_id as usize];
+                let body = unsafe { ctx.bodies.get_ref(shape.body_id as usize) };
 
                 let body_sim = if body.set_index == AWAKE_SET {
-                    &sims[body.local_index as usize]
+                    unsafe { ctx.sims.get_ref(body.local_index as usize) }
                 } else {
-                    &world_ref.solver_sets[body.set_index as usize].body_sims[body.local_index as usize]
+                    &ctx.world.solver_sets[body.set_index as usize].body_sims[body.local_index as usize]
                 };
                 b3_assert!(body.body_type == BodyType::Static || (fast_body_sim.flags & IS_BULLET != 0));
 
@@ -833,7 +943,7 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
                 }
 
                 // Skip filtered bodies
-                let can_collide = should_bodies_collide(world_ref, fast_body_id, shape.body_id);
+                let can_collide = should_bodies_collide_ctx(ctx, fast_body_id, shape.body_id);
                 if !can_collide {
                     return true;
                 }
@@ -843,12 +953,12 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
                     if let Some(custom_filter) = custom_filter_fcn.as_mut() {
                         let id_a = ShapeId {
                             index1: shape.id + 1,
-                            world0: world_ref.world_id,
+                            world0: ctx.world_id,
                             generation: shape.generation,
                         };
                         let id_b = ShapeId {
                             index1: fast_shape.id + 1,
-                            world0: world_ref.world_id,
+                            world0: ctx.world_id,
                             generation: fast_shape.generation,
                         };
                         let can_collide = custom_filter(id_a, id_b);
@@ -881,12 +991,12 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
                         if let Some(pre_solve) = pre_solve_fcn.as_mut() {
                             let shape_id_a = ShapeId {
                                 index1: shape.id + 1,
-                                world0: world_ref.world_id,
+                                world0: ctx.world_id,
                                 generation: shape.generation,
                             };
                             let shape_id_b = ShapeId {
                                 index1: fast_shape.id + 1,
-                                world0: world_ref.world_id,
+                                world0: ctx.world_id,
                                 generation: fast_shape.generation,
                             };
                             let point = offset_pos(base, output.point);
@@ -908,7 +1018,7 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
             };
 
             crate::dynamic_tree::dynamic_tree_query(
-                &world_ref.broad_phase.trees[BodyType::Static as usize],
+                &ctx.world.broad_phase.trees[BodyType::Static as usize],
                 swept_box,
                 DEFAULT_MASK_BITS,
                 false,
@@ -917,14 +1027,14 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
 
             if is_bullet {
                 crate::dynamic_tree::dynamic_tree_query(
-                    &world_ref.broad_phase.trees[BodyType::Kinematic as usize],
+                    &ctx.world.broad_phase.trees[BodyType::Kinematic as usize],
                     swept_box,
                     DEFAULT_MASK_BITS,
                     false,
                     &mut callback,
                 );
                 crate::dynamic_tree::dynamic_tree_query(
-                    &world_ref.broad_phase.trees[BodyType::Dynamic as usize],
+                    &ctx.world.broad_phase.trees[BodyType::Dynamic as usize],
                     swept_box,
                     DEFAULT_MASK_BITS,
                     false,
@@ -933,9 +1043,6 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
             }
         }
     }
-
-    world.pre_solve_fcn = pre_solve_fcn;
-    world.custom_filter_fcn = custom_filter_fcn;
 
     let speculative_scalar = speculative_distance();
 
@@ -955,17 +1062,18 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
         fast_body_sim.center0 = center;
 
         // The move event was written before CCD, so correct it with the impact pose
-        world.body_move_events[body_sim_index as usize].transform = fast_body_sim.transform;
+        unsafe { ctx.move_events.get_mut(body_sim_index as usize) }.transform = fast_body_sim.transform;
 
         // Prepare AABBs for broad-phase.
         // Even though a body is fast, it may not move much. So the AABB may not need enlargement.
 
-        let mut shape_id = world.bodies[fast_body_id as usize].head_shape_id;
+        let mut shape_id = unsafe { ctx.bodies.get_ref(fast_body_id as usize) }.head_shape_id;
         while shape_id != NULL_INDEX {
             // Must recompute aabb at the interpolated transform
-            let aabb = compute_fat_shape_aabb(&world.shapes[shape_id as usize], transform, speculative_scalar);
+            let aabb =
+                compute_fat_shape_aabb(unsafe { ctx.shapes.get_ref(shape_id as usize) }, transform, speculative_scalar);
 
-            let shape = &mut world.shapes[shape_id as usize];
+            let shape = unsafe { ctx.shapes.get_mut(shape_id as usize) };
             shape.aabb = aabb;
 
             if !aabb_contains(shape.fat_aabb, aabb) {
@@ -990,9 +1098,9 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
         fast_body_sim.center0 = fast_body_sim.center;
 
         // Prepare AABBs for broad-phase
-        let mut shape_id = world.bodies[fast_body_id as usize].head_shape_id;
+        let mut shape_id = unsafe { ctx.bodies.get_ref(fast_body_id as usize) }.head_shape_id;
         while shape_id != NULL_INDEX {
-            let shape = &mut world.shapes[shape_id as usize];
+            let shape = unsafe { ctx.shapes.get_mut(shape_id as usize) };
 
             // shape.aabb is still valid from above
 
@@ -1016,37 +1124,43 @@ fn solve_continuous(world: &mut World, context: &mut StepContext, body_sim_index
     for i in 0..sensor_count {
         // Skip any sensor hits that occurred after a solid hit
         if sensor_fractions[i] < ctx_fraction {
-            world.task_contexts[worker_index as usize].sensor_hits.push(sensor_hits[i]);
+            // SAFETY: worker_index is exclusive per task.
+            unsafe { ctx.task_contexts.get_mut(worker_index as usize) }.sensor_hits.push(sensor_hits[i]);
         }
     }
 
     {
-        let task_context = &mut world.task_contexts[worker_index as usize];
+        // SAFETY: worker_index is exclusive per task.
+        let task_context = unsafe { ctx.task_contexts.get_mut(worker_index as usize) };
         task_context.distance_iterations = crate::math_functions::max_int(task_context.distance_iterations, distance_iterations);
         task_context.push_back_iterations = crate::math_functions::max_int(task_context.push_back_iterations, push_back_iterations);
         task_context.root_iterations = crate::math_functions::max_int(task_context.root_iterations, root_iterations);
     }
 
-    context.sims[body_sim_index as usize] = fast_body_sim;
+    // SAFETY: this worker owns body_sim_index for the pass.
+    unsafe { *ctx.sims.get_mut(body_sim_index as usize) = fast_body_sim };
 }
 
-// Implements b3ParallelForCallback (serial: one call over the whole range).
-fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, world: &mut World, context: &mut StepContext) {
-    b3_assert!(end_index as usize <= world.body_move_events.len());
-
-    let enable_sleep = world.enable_sleep;
-    let enable_continuous = world.enable_continuous;
-    let time_step = context.dt;
-    let inv_time_step = context.inv_dt;
-    let world_id = world.world_id;
+// C: b3FinalizeBodiesTask — runs under parallel_for; each block owns a
+// disjoint range of awake sim indices (and therefore of bodies and their
+// shapes). See the FinalizeCtx invariants for the full disjointness argument.
+fn finalize_bodies_range(ctx: &FinalizeCtx, start_index: i32, end_index: i32, worker_index: i32) {
+    let enable_sleep = ctx.enable_sleep;
+    let enable_continuous = ctx.enable_continuous;
+    let time_step = ctx.dt;
+    let inv_time_step = ctx.inv_dt;
+    let world_id = ctx.world_id;
 
     let speculative_scalar = speculative_distance();
 
     for sim_index in start_index..end_index {
         // C uses pointers into the state/sim arrays; the port copies the PODs out
         // and writes them back (also around solve_continuous, which mutates the sim).
-        let mut state = context.states[sim_index as usize];
-        let mut sim = context.sims[sim_index as usize];
+        // SAFETY (all ctx accessors in this loop): sim_index is exclusive to this
+        // block; body_id and the body's shape list are owned by sim_index;
+        // worker_index is exclusive per task; island fields are read-only.
+        let mut state = unsafe { *ctx.states.get_ref(sim_index as usize) };
+        let mut sim = unsafe { *ctx.sims.get_ref(sim_index as usize) };
 
         let v = state.linear_velocity;
         let w = state.angular_velocity;
@@ -1054,7 +1168,7 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
         let local_delta_rotation = inv_rotate_vector(sim.transform.q, state.delta_rotation.v);
 
         if !is_valid_vec3(v) || !is_valid_vec3(w) {
-            crate::core::log(&format!("unstable: {}", world.bodies[sim.body_id as usize].name));
+            crate::core::log(&format!("unstable: {}", unsafe { ctx.bodies.get_ref(sim.body_id as usize) }.name));
         }
 
         b3_assert!(is_valid_vec3(v));
@@ -1085,14 +1199,15 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
 
         // cache miss here, however I need the shape list below
         let body_id = sim.body_id;
-        world.bodies[body_id as usize].body_move_index = sim_index;
-        world.body_move_events[sim_index as usize] = BodyMoveEvent {
-            user_data: world.bodies[body_id as usize].user_data,
+        let body = unsafe { ctx.bodies.get_mut(body_id as usize) };
+        body.body_move_index = sim_index;
+        *unsafe { ctx.move_events.get_mut(sim_index as usize) } = BodyMoveEvent {
+            user_data: body.user_data,
             transform: sim.transform,
             body_id: BodyId {
                 index1: body_id + 1,
                 world0: world_id,
-                generation: world.bodies[body_id as usize].generation,
+                generation: body.generation,
             },
             fell_asleep: false,
         };
@@ -1101,22 +1216,19 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
         sim.force = Vec3::ZERO;
         sim.torque = Vec3::ZERO;
 
-        {
-            let body = &mut world.bodies[body_id as usize];
-            body.flags &= !BODY_TRANSIENT_FLAGS;
-            body.flags |= sim.flags & (IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT);
-            body.flags |= state.flags & (IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT);
-        }
+        body.flags &= !BODY_TRANSIENT_FLAGS;
+        body.flags |= sim.flags & (IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT);
+        body.flags |= state.flags & (IS_SPEED_CAPPED | HAD_TIME_OF_IMPACT);
         sim.flags &= !BODY_TRANSIENT_FLAGS;
         state.flags &= !BODY_TRANSIENT_FLAGS;
 
-        let body_flags = world.bodies[body_id as usize].flags;
-        let body_type = world.bodies[body_id as usize].body_type;
-        let sleep_threshold = world.bodies[body_id as usize].sleep_threshold;
+        let body_flags = body.flags;
+        let body_type = body.body_type;
+        let sleep_threshold = body.sleep_threshold;
 
         if !enable_sleep || (body_flags & ENABLE_SLEEP) == 0 || sleep_velocity > sleep_threshold {
             // Body is not sleepy
-            world.bodies[body_id as usize].sleep_time = 0.0;
+            body.sleep_time = 0.0;
 
             let safety_factor = 0.5;
             let max_motion = max_float(max_delta_position, max_velocity * time_step);
@@ -1127,15 +1239,19 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
                 // Store in fast array for the continuous collision stage
                 // This is deterministic because the order of TOI sweeps doesn't matter
                 if sim.flags & IS_BULLET != 0 {
-                    context.bullet_bodies.push(sim_index);
+                    // C: bulletIndex = b3AtomicFetchAddInt(&bulletBodyCount, 1).
+                    // The bullet array order is scheduling-dependent, like C;
+                    // TOI sweeps and proxy enlargement are order-independent.
+                    let bullet_index = ctx.bullet_count.fetch_add(1);
+                    unsafe { *ctx.bullet_bodies.get_mut(bullet_index as usize) = sim_index };
                 } else {
                     // solve_continuous reads and mutates the sim through the context,
                     // so write the locals back first and re-read after.
-                    context.sims[sim_index as usize] = sim;
-                    context.states[sim_index as usize] = state;
-                    solve_continuous(world, context, sim_index, worker_index);
-                    sim = context.sims[sim_index as usize];
-                    state = context.states[sim_index as usize];
+                    unsafe { *ctx.sims.get_mut(sim_index as usize) = sim };
+                    unsafe { *ctx.states.get_mut(sim_index as usize) = state };
+                    solve_continuous(ctx, sim_index, worker_index);
+                    sim = unsafe { *ctx.sims.get_ref(sim_index as usize) };
+                    state = unsafe { *ctx.states.get_ref(sim_index as usize) };
                 }
             } else {
                 // Body is safe to advance
@@ -1146,7 +1262,8 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
             // Body is safe to advance and is falling asleep
             sim.center0 = sim.center;
             sim.rotation0 = sim.transform.q;
-            world.bodies[body_id as usize].sleep_time += time_step;
+            // SAFETY: this block owns body_id (one body per sim index).
+            unsafe { ctx.bodies.get_mut(body_id as usize) }.sleep_time += time_step;
         }
 
         // Update world space inverse inertia tensor.
@@ -1154,21 +1271,25 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
         sim.inv_inertia_world = mul_mm(mul_mm(rotation_matrix, sim.inv_inertia_local), transpose(rotation_matrix));
 
         // Any single body in an island can keep it awake
-        let island_id = world.bodies[body_id as usize].island_id;
-        let sleep_time = world.bodies[body_id as usize].sleep_time;
-        let island_local_index = world.islands[island_id as usize].local_index;
-        let island_constraint_remove_count = world.islands[island_id as usize].constraint_remove_count;
+        let (island_id, sleep_time) = {
+            let body = unsafe { ctx.bodies.get_ref(body_id as usize) };
+            (body.island_id, body.sleep_time)
+        };
+        let island_local_index = ctx.world.islands[island_id as usize].local_index;
+        let island_constraint_remove_count = ctx.world.islands[island_id as usize].constraint_remove_count;
         if sleep_time < TIME_TO_SLEEP {
             // keep island awake
+            // SAFETY: worker_index is exclusive per task.
             set_bit(
-                &mut world.task_contexts[worker_index as usize].awake_island_bit_set,
+                &mut unsafe { ctx.task_contexts.get_mut(worker_index as usize) }.awake_island_bit_set,
                 island_local_index as u32,
             );
         } else if island_constraint_remove_count > 0 {
             // Body wants to sleep but its island needs splitting first. Track the sleepiest candidate.
             // Break sleep time ties using the island id to ensure determinism. The cross worker reduction
             // breaks ties the same way.
-            let task_context = &mut world.task_contexts[worker_index as usize];
+            // SAFETY: worker_index is exclusive per task.
+            let task_context = unsafe { ctx.task_contexts.get_mut(worker_index as usize) };
             if sleep_time > task_context.split_sleep_time
                 || (sleep_time == task_context.split_sleep_time && island_id > task_context.split_island_id)
             {
@@ -1181,7 +1302,7 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
         // Update shapes AABBs
         let transform = sim.transform;
         let is_fast = (sim.flags & IS_FAST) != 0;
-        let mut shape_id = world.bodies[body_id as usize].head_shape_id;
+        let mut shape_id = unsafe { ctx.bodies.get_ref(body_id as usize) }.head_shape_id;
         while shape_id != NULL_INDEX {
             if is_fast {
                 // For fast non-bullet bodies the AABB has already been updated in solve_continuous
@@ -1190,15 +1311,17 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
                 // Add to enlarged shapes regardless of AABB changes.
                 // Bit-set to keep the move array sorted
                 set_bit(
-                    &mut world.task_contexts[worker_index as usize].enlarged_sim_bit_set,
+                    &mut unsafe { ctx.task_contexts.get_mut(worker_index as usize) }.enlarged_sim_bit_set,
                     sim_index as u32,
                 );
 
-                shape_id = world.shapes[shape_id as usize].next_shape_id;
+                shape_id = unsafe { ctx.shapes.get_ref(shape_id as usize) }.next_shape_id;
             } else {
-                let aabb = compute_fat_shape_aabb(&world.shapes[shape_id as usize], transform, speculative_scalar);
+                let aabb =
+                    compute_fat_shape_aabb(unsafe { ctx.shapes.get_ref(shape_id as usize) }, transform, speculative_scalar);
 
-                let shape = &mut world.shapes[shape_id as usize];
+                // SAFETY: the shape belongs to this block's body.
+                let shape = unsafe { ctx.shapes.get_mut(shape_id as usize) };
                 shape.aabb = aabb;
 
                 b3_assert!(!shape.enlarged_aabb);
@@ -1215,7 +1338,7 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
 
                     // Bit-set to keep the move array sorted
                     set_bit(
-                        &mut world.task_contexts[worker_index as usize].enlarged_sim_bit_set,
+                        &mut unsafe { ctx.task_contexts.get_mut(worker_index as usize) }.enlarged_sim_bit_set,
                         sim_index as u32,
                     );
                 }
@@ -1224,8 +1347,8 @@ fn finalize_bodies_task(start_index: i32, end_index: i32, worker_index: i32, wor
             }
         }
 
-        context.sims[sim_index as usize] = sim;
-        context.states[sim_index as usize] = state;
+        unsafe { *ctx.sims.get_mut(sim_index as usize) = sim };
+        unsafe { *ctx.states.get_mut(sim_index as usize) = state };
     }
 }
 
@@ -2292,8 +2415,88 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
         }
 
         // Finalize bodies. Must happen after the constraint solver and after island splitting.
-        // (C: b3ParallelFor with min block 16; block partitioning does not affect results.)
-        finalize_bodies_task(0, awake_body_count, 0, world, step_context);
+        // C: b3ParallelFor(world, &b3FinalizeBodiesTask, awakeBodyCount, 16, stepContext, "ccd").
+        // Bodies, shapes, move events, task contexts and the awake sims/states are
+        // taken out of the world so the workers share a read-only &World; per-sim
+        // and per-worker mutation goes through SyncSlice (see the FinalizeCtx
+        // invariants). A world with a pre-solve or custom-filter callback falls
+        // back to a single worker, like the collide pass (Box<dyn FnMut> is not
+        // Sync; C requires the callbacks to be thread-safe instead).
+        {
+            b3_assert!(awake_body_count as usize <= world.body_move_events.len());
+
+            let enable_sleep = world.enable_sleep;
+            let enable_continuous = world.enable_continuous;
+            let world_id = world.world_id;
+
+            let mut bodies = std::mem::take(&mut world.bodies);
+            let mut shapes = std::mem::take(&mut world.shapes);
+            let mut move_events = std::mem::take(&mut world.body_move_events);
+            let mut task_contexts = std::mem::take(&mut world.task_contexts);
+            let mut sims = std::mem::take(&mut step_context.sims);
+            let mut states = std::mem::take(&mut step_context.states);
+            let mut pre_solve = world.pre_solve_fcn.take();
+            let mut custom_filter = world.custom_filter_fcn.take();
+
+            // C sizes the bullet array to the awake body count and fills it
+            // through an atomic cursor (b3StackAlloc + b3AtomicFetchAddInt).
+            let mut bullet_bodies = std::mem::take(&mut step_context.bullet_bodies);
+            bullet_bodies.clear();
+            bullet_bodies.resize(awake_body_count as usize, 0);
+            let bullet_count = crate::sync::AtomicIndex::new(0);
+
+            let use_callbacks = pre_solve.is_some() || custom_filter.is_some();
+            let effective_workers = if use_callbacks { 1 } else { world.worker_count };
+
+            {
+                let ctx = FinalizeCtx {
+                    world: &*world,
+                    bodies: crate::sync::SyncSlice::new(&mut bodies),
+                    shapes: crate::sync::SyncSlice::new(&mut shapes),
+                    sims: crate::sync::SyncSlice::new(&mut sims),
+                    states: crate::sync::SyncSlice::new(&mut states),
+                    move_events: crate::sync::SyncSlice::new(&mut move_events),
+                    task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
+                    bullet_bodies: crate::sync::SyncSlice::new(&mut bullet_bodies),
+                    bullet_count: &bullet_count,
+                    pre_solve: crate::sync::SyncPtr::new(&mut pre_solve),
+                    custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
+                    use_callbacks,
+                    enable_sleep,
+                    enable_continuous,
+                    dt: step_context.dt,
+                    inv_dt: step_context.inv_dt,
+                    world_id,
+                };
+
+                // SAFETY: the trampoline partitions [0, awake_body_count) into
+                // disjoint ranges (parallel_for contract); the ctx and the taken
+                // arrays outlive parallel_for, which blocks until all blocks
+                // complete.
+                unsafe {
+                    crate::parallel_for::parallel_for(
+                        &ctx.world.task_system,
+                        effective_workers,
+                        finalize_bodies_trampoline,
+                        awake_body_count,
+                        16,
+                        &ctx as *const FinalizeCtx as *mut (),
+                        "ccd",
+                    );
+                }
+            }
+
+            bullet_bodies.truncate(bullet_count.load() as usize);
+            step_context.bullet_bodies = bullet_bodies;
+            world.bodies = bodies;
+            world.shapes = shapes;
+            world.body_move_events = move_events;
+            world.task_contexts = task_contexts;
+            world.pre_solve_fcn = pre_solve;
+            world.custom_filter_fcn = custom_filter;
+            step_context.sims = sims;
+            step_context.states = states;
+        }
 
         // C frees the arena allocations here (blocks, stages, constraints). The stages
         // were consumed by solver_task_main; the constraint arrays are cleared at the
@@ -2545,10 +2748,74 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
 
         // Fast bullet bodies
         // Note: a bullet body may be moving slow
-        // (C: b3ParallelFor over the bullet array; serial here.)
-        for i in 0..bullet_body_count {
-            let sim_index = step_context.bullet_bodies[i as usize];
-            solve_continuous(world, step_context, sim_index, 0);
+        // C: b3ParallelFor(world, &b3BulletBodyTask, bulletBodyCount, 8, stepContext, "bullets").
+        // Same take/SyncSlice arrangement as the finalize pass; bullet TOI
+        // sweeps only read foreign dynamic state, which is stable here because
+        // the finalize pass has completed (barrier).
+        {
+            let enable_sleep = world.enable_sleep;
+            let enable_continuous = world.enable_continuous;
+            let world_id = world.world_id;
+
+            let mut bodies = std::mem::take(&mut world.bodies);
+            let mut shapes = std::mem::take(&mut world.shapes);
+            let mut move_events = std::mem::take(&mut world.body_move_events);
+            let mut task_contexts = std::mem::take(&mut world.task_contexts);
+            let mut sims = std::mem::take(&mut step_context.sims);
+            let mut states = std::mem::take(&mut step_context.states);
+            let mut pre_solve = world.pre_solve_fcn.take();
+            let mut custom_filter = world.custom_filter_fcn.take();
+            let mut bullet_bodies = std::mem::take(&mut step_context.bullet_bodies);
+            let bullet_count = crate::sync::AtomicIndex::new(bullet_body_count);
+
+            let use_callbacks = pre_solve.is_some() || custom_filter.is_some();
+            let effective_workers = if use_callbacks { 1 } else { world.worker_count };
+
+            {
+                let ctx = FinalizeCtx {
+                    world: &*world,
+                    bodies: crate::sync::SyncSlice::new(&mut bodies),
+                    shapes: crate::sync::SyncSlice::new(&mut shapes),
+                    sims: crate::sync::SyncSlice::new(&mut sims),
+                    states: crate::sync::SyncSlice::new(&mut states),
+                    move_events: crate::sync::SyncSlice::new(&mut move_events),
+                    task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
+                    bullet_bodies: crate::sync::SyncSlice::new(&mut bullet_bodies),
+                    bullet_count: &bullet_count,
+                    pre_solve: crate::sync::SyncPtr::new(&mut pre_solve),
+                    custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
+                    use_callbacks,
+                    enable_sleep,
+                    enable_continuous,
+                    dt: step_context.dt,
+                    inv_dt: step_context.inv_dt,
+                    world_id,
+                };
+
+                // SAFETY: disjoint bullet-array ranges per block; each bullet slot
+                // holds a distinct sim index (written once by the finalize pass).
+                unsafe {
+                    crate::parallel_for::parallel_for(
+                        &ctx.world.task_system,
+                        effective_workers,
+                        bullet_bodies_trampoline,
+                        bullet_body_count,
+                        8,
+                        &ctx as *const FinalizeCtx as *mut (),
+                        "bullets",
+                    );
+                }
+            }
+
+            step_context.bullet_bodies = bullet_bodies;
+            world.bodies = bodies;
+            world.shapes = shapes;
+            world.body_move_events = move_events;
+            world.task_contexts = task_contexts;
+            world.pre_solve_fcn = pre_solve;
+            world.custom_filter_fcn = custom_filter;
+            step_context.sims = sims;
+            step_context.states = states;
         }
 
         // Serially enlarge broad-phase proxies for bullet shapes.
