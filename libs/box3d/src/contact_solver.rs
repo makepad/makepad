@@ -1723,6 +1723,12 @@ fn scatter_bodies(states: &crate::solver::StateAccess, indices: &[i32; SIMD_WIDT
 }
 
 // Prepare convex contact constraints
+// Standalone like C (b3UpdateContact / the b3*_Convex stage functions are
+// separate symbols): inlining these into the solver dispatch/collide loop
+// makes LLVM allocate registers across the merged body and the inner loops
+// pay constant spill traffic. inline(never) restores per-function register
+// allocation and the C code layout.
+#[inline(never)]
 pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
     let world = shared.world;
     let ctx = shared.context;
@@ -2004,6 +2010,8 @@ pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
     }
 }
 
+// Standalone like C (see the note on update_contact / the convex stage fns).
+#[inline(never)]
 pub fn warm_start_contacts_convex(block: SolverBlock, shared: &SolverShared) {
     let world = shared.world;
     let wide_start = world.constraint_graph.colors[block.color_index as usize].wide_constraint_start;
@@ -2265,6 +2273,8 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
     }
 }
 
+// Standalone like C (see the note on update_contact / the convex stage fns).
+#[inline(never)]
 pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
     let world = shared.world;
     let wide_start = world.constraint_graph.colors[block.color_index as usize].wide_constraint_start;
@@ -2333,6 +2343,8 @@ pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
 }
 
 // Store impulses by contact constraint
+// Standalone like C (see the note on update_contact / the convex stage fns).
+#[inline(never)]
 pub fn store_impulses_convex(block: SolverBlock, shared: &SolverShared, worker_index: i32) {
     let world = shared.world;
     let ctx = shared.context;

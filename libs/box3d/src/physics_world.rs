@@ -287,8 +287,8 @@ impl std::fmt::Debug for World {
 
 /// The C b3AllocateManifolds/b3FreeManifolds block allocation becomes a plain Vec.
 #[inline]
-pub fn allocate_manifolds(count: i32) -> Vec<crate::types::Manifold> {
-    vec![crate::types::Manifold::default(); count as usize]
+pub fn allocate_manifolds(count: i32) -> crate::contact::Manifolds {
+    crate::contact::Manifolds::with_count(count)
 }
 
 // ---------------------------------------------------------------------------

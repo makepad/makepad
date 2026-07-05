@@ -66,9 +66,105 @@ pub struct ConvexContact {
     pub cache: ContactCache,
 }
 
+/// Manifold storage for a contact. Convex contacts have exactly 0 or 1
+/// manifold — stored inline so the hot paths (collide recycle, prepare,
+/// store impulses) reach it without a heap dereference. Mesh contacts with
+/// two or more manifolds spill to a Vec. This deviates from C's
+/// `b3Manifold*` block allocation on purpose: the inline single manifold is
+/// the Rust equivalent of C's arena locality (see the README's intentional
+/// differences). Invariant: `Many` never holds fewer than two manifolds.
+///
+/// Derefs to `[Manifold]`, so indexing, `len`, `is_empty`, `iter`,
+/// `iter_mut` and slice coercion all behave like the previous
+/// `Vec<Manifold>` field.
+#[derive(Clone, Debug, Default)]
+pub enum Manifolds {
+    #[default]
+    None,
+    One(Manifold),
+    Many(Vec<Manifold>),
+}
+
+impl Manifolds {
+    /// Replacement for the C b3AllocateManifolds: `count` default-initialized
+    /// (zeroed) manifolds.
+    pub fn with_count(count: i32) -> Manifolds {
+        debug_assert!(count >= 0);
+        match count {
+            0 => Manifolds::None,
+            1 => Manifolds::One(Manifold::default()),
+            n => Manifolds::Many(vec![Manifold::default(); n as usize]),
+        }
+    }
+
+    /// In-place equivalent of `*self = Manifolds::with_count(count)` that
+    /// reuses the `Many` buffer when both the old and new counts need one
+    /// (the mesh path rebuilds per update; C frees + reallocates zeroed).
+    pub fn set_count(&mut self, count: i32) {
+        debug_assert!(count >= 0);
+        match (count, &mut *self) {
+            (n, Manifolds::Many(v)) if n >= 2 => {
+                v.clear();
+                v.resize_with(n as usize, Manifold::default);
+            }
+            (n, _) => *self = Manifolds::with_count(n),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Manifolds::None;
+    }
+}
+
+impl std::ops::Deref for Manifolds {
+    type Target = [Manifold];
+    #[inline]
+    fn deref(&self) -> &[Manifold] {
+        match self {
+            Manifolds::None => &[],
+            Manifolds::One(m) => std::slice::from_ref(m),
+            Manifolds::Many(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Manifolds {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Manifold] {
+        match self {
+            Manifolds::None => &mut [],
+            Manifolds::One(m) => std::slice::from_mut(m),
+            Manifolds::Many(v) => v,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Manifolds {
+    type Item = &'a Manifold;
+    type IntoIter = std::slice::Iter<'a, Manifold>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Manifolds {
+    type Item = &'a mut Manifold;
+    type IntoIter = std::slice::IterMut<'a, Manifold>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 /// Represents the persistent interaction between two shapes.
 /// The C union of {convexContact, meshContact} is stored as two fields;
 /// SIM_MESH_CONTACT in flags selects which one is active.
+// repr(C) with `manifolds` LAST: the enum is 272 bytes; letting the compiler
+// place it (or declaring it mid-struct) pushes the hot header and recycle
+// cache fields across extra cache lines for the passes that never touch the
+// manifold. Explicit layout keeps the first ~2 cache lines hot.
+#[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct Contact {
     /// index of simulation set stored in World. NULL_INDEX when slot is free.
@@ -102,9 +198,6 @@ pub struct Contact {
     /// Contact flags (consts above)
     pub flags: u32,
 
-    /// The C `b3Manifold* manifolds` block allocation.
-    pub manifolds: Vec<Manifold>,
-
     /// Cache for contact recycling.
     pub cached_rotation_a: Quat,
     pub cached_rotation_b: Quat,
@@ -124,6 +217,11 @@ pub struct Contact {
 
     /// Monotonically advanced when a contact is allocated in this slot.
     pub generation: u32,
+
+    /// The C `b3Manifold* manifolds` block allocation, inline when single
+    /// (see `Manifolds`). Kept as the last field on purpose — see the
+    /// repr(C) note above.
+    pub manifolds: Manifolds,
 }
 
 impl Contact {
@@ -487,7 +585,7 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     let pair_key = crate::table::shape_pair_key(shape_id_a, shape_id_b, child_index);
     crate::table::remove_key(&mut world.broad_phase.pair_set, pair_key);
 
-    world.contacts[contact_id as usize].manifolds = Vec::new();
+    world.contacts[contact_id as usize].manifolds = Manifolds::None;
 
     let body_id_a = edge_a.body_id;
     let body_id_b = edge_b.body_id;
@@ -708,7 +806,7 @@ fn compute_convex_manifold(
 
     if geom_manifold.point_count() == 0 {
         if contact.manifold_count() > 0 {
-            contact.manifolds = Vec::new();
+            contact.manifolds = Manifolds::None;
         }
 
         task_context.geom_manifold_scratch = geom_manifold;
@@ -719,7 +817,7 @@ fn compute_convex_manifold(
     let mut old_count = 0;
 
     if contact.manifold_count() == 0 {
-        contact.manifolds = crate::physics_world::allocate_manifolds(1);
+        contact.manifolds = Manifolds::with_count(1);
     } else {
         old_count = contact.manifolds[0].point_count;
         old_points[..old_count as usize].copy_from_slice(&contact.manifolds[0].points[..old_count as usize]);
@@ -865,7 +963,7 @@ fn update_convex_contact(
             *pre_solve_slot = Some(fcn);
             if !touching {
                 // disable contact
-                contact.manifolds = Vec::new();
+                contact.manifolds = Manifolds::None;
                 return false;
             }
         }
@@ -883,6 +981,12 @@ fn update_convex_contact(
 // Update the contact manifold and touching status.
 // Note: do not assume the shape AABBs are overlapping or are valid.
 #[allow(clippy::too_many_arguments)]
+// Standalone like C (b3UpdateContact / the b3*_Convex stage functions are
+// separate symbols): inlining these into the solver dispatch/collide loop
+// makes LLVM allocate registers across the merged body and the inner loops
+// pay constant spill traffic. inline(never) restores per-function register
+// allocation and the C code layout.
+#[inline(never)]
 pub fn update_contact(
     world: &World,
     task_context: &mut crate::physics_world::TaskContext,
