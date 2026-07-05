@@ -5,9 +5,10 @@ A pure-Rust port of [Box3D](https://github.com/erincatto/box3d) by Erin Catto
 
 **Benchmarked against Rapier** (the other Rust 3D physics engine; rapier3d
 0.32.0 with `simd-stable` vendored in this repo): the default build of this
-crate is **faster than Rapier and faster than the C original on all three
-headline scenes** (and faster than Rapier on seven of the nine benchmark
-scenes, +33% geomean — full matrix below) — while additionally keeping bit-exact
+crate is **faster than Rapier on eight of the nine benchmark scenes**
+(+33% geomean, losing only washer — full matrix below) and lands within
+~7% of the hand-tuned C original, ahead of it on the pyramid scenes —
+while additionally keeping bit-exact
 cross-architecture determinism (upstream Rapier makes `simd-stable` and
 `enhanced-determinism` mutually exclusive, so its SIMD speed and its
 determinism mode cannot be combined) and using zero external crates.
@@ -38,34 +39,40 @@ profile-guided — PGO-ing it would claw back some margin; against plain
 
 ### Full nine-scene matrix vs Rapier (single-threaded)
 
-The same comparison extended to every scene in the benchmark suite
-(`libs/rapier/crates/bench` mirrors all nine box3d scenes with identical
-geometry, densities, filters and body/collider/joint counts — counts
-verified equal on every scene). Same protocol as above, measured
-2026-07-05 as same-session interleaved pairs, box3d default (PGO) build,
-min of 4 runs (min of 2 on junkyard/washer). +X% = Rapier takes X% longer
-than box3d; −X% = Rapier is faster:
+The same comparison extended to every scene in the benchmark suite, with
+the original C Box3D added as a third column (`libs/rapier/crates/bench`
+mirrors all nine box3d scenes with identical geometry, densities, filters
+and body/collider/joint counts — counts verified equal on every scene).
+Single-threaded, measured 2026-07-06 as one same-window interleaved run
+(box3d Rust, box3d C `-O3`, and Rapier back-to-back per scene), box3d
+default (PGO) build, min of 4 runs (min of 2 on junkyard/washer).
+Percentages are relative to the box3d Rust column: −X% = that engine is
+X% faster, +X% = X% slower; the fastest engine per row is bold.
 
-| scene | box3d | rapier | Δ |
+| scene | box3d (Rust) | box3d (C `-O3`) | Rapier |
 |---|---|---|---|
-| trees100 (50 log stacks on a 60k-tri mesh) | **175 ms** | 302 ms | +72% |
-| trees50 (240k-tri mesh) | **268 ms** | 529 ms | +98% |
-| trees25 (960k-tri mesh) | **564 ms** | 1 417 ms | +151% |
-| joint_grid | **804 ms** | 939 ms | +17% |
-| junkyard | 16 322 ms† | 16 345 ms | ≈0% |
-| large_pyramid | **1 171 ms** | 1 355 ms | +16% |
-| many_pyramids | **1 486 ms** | 1 640 ms | +10% |
-| rain (300 ragdolls on mesh terrain) | **1 795 ms** | 2 563 ms | +43% |
-| washer | 23 353 ms | **17 577 ms** | −25% |
-| **geomean** | | | **+34%** |
+| trees100 (50 log stacks on a 60k-tri mesh) | 171 ms | **152 ms** (−11%) | 302 ms (+76%) |
+| trees50 (240k-tri mesh) | 264 ms | **231 ms** (−13%) | 516 ms (+95%) |
+| trees25 (960k-tri mesh) | 594 ms | **526 ms** (−11%) | 1 404 ms (+136%) |
+| joint_grid | 824 ms | **802 ms** (−3%) | 886 ms (+7%) |
+| junkyard | 15 495 ms | **13 148 ms** (−15%) | 16 265 ms (+5%) |
+| large_pyramid | **1 115 ms** | 1 189 ms (+7%) | 1 370 ms (+23%) |
+| many_pyramids | **1 481 ms** | 1 497 ms (+1%) | 1 616 ms (+9%) |
+| rain (300 ragdolls on mesh terrain) | 1 788 ms | **1 615 ms** (−10%) | 2 470 ms (+38%) |
+| washer | 21 742 ms | 20 661 ms (−5%) | **16 844 ms** (−23%) |
+| **geomean** | | **−7%** | **+33%** |
 
-box3d wins seven of nine and ties junkyard, by the largest margins on
-the triangle-mesh scenes (trees, rain). Rapier's remaining win is washer
-— notably one of the two scenes where box3d trails the C original most,
-so the convex-manifold pipeline is the shared bottleneck. († junkyard:
-cold-window baseline scaled by the tier-2 feature-recycling improvement,
-measured at −8% in paired same-binary A/Bs; an in-session cross-engine
-re-pairing after the tier landed read −3% to 0% against rapier.)
+**box3d Rust beats Rapier on eight of the nine scenes** — everything but
+washer — by the largest margins on the triangle-mesh scenes (trees +76
+to +136%, rain +38%); junkyard flipped to a box3d win (+5%) once tier-2
+feature recycling landed. Against the hand-tuned C original box3d Rust
+sits within ~7% overall: ahead on both pyramid scenes (where the tier-2
+recycling and FMA contraction pay off), a few percent behind on the rest,
+its worst being junkyard (+18% over C). Rapier's one win, washer, is its
+incremental-BVH broad phase (see the broad-phase notes in the performance
+section) — the scene where Box3D's whole lineage, Rust and C alike, pays
+for its motion-enlarged-AABB design (C too is ~4× Rapier's broad phase
+there).
 
 Comparability caveats for the extended scenes, in decreasing order of
 likely impact:
