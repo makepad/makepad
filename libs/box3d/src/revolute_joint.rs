@@ -300,8 +300,8 @@ pub fn prepare_revolute_joint(base: &mut JointSim, world: &World, context: &Step
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     base.inv_mass_a = body_sim_a.inv_mass;
     base.inv_mass_b = body_sim_b.inv_mass;
@@ -468,7 +468,7 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
         let impulse_scale = joint.spring_softness.impulse_scale;
         let cdot = dot(sub(w_b, w_a), joint.rotation_axis_z);
 
-        let delta_impulse = -mass_scale * joint.axial_mass * (cdot + bias) - impulse_scale * joint.spring_impulse;
+        let delta_impulse = (-impulse_scale).mul_add(joint.spring_impulse, -mass_scale * joint.axial_mass * (cdot + bias));
         joint.spring_impulse += delta_impulse;
 
         w_a = mul_sub(w_a, delta_impulse, mul_mv(i_a, joint.rotation_axis_z));
@@ -513,7 +513,7 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
 
             let cdot = dot(sub(w_b, w_a), axis);
             let old_impulse = joint.lower_impulse;
-            let mut delta_impulse = -mass_scale * joint.axial_mass * (cdot + bias) - impulse_scale * old_impulse;
+            let mut delta_impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.axial_mass * (cdot + bias));
             joint.lower_impulse = max_float(old_impulse + delta_impulse, 0.0);
             delta_impulse = joint.lower_impulse - old_impulse;
 
@@ -539,7 +539,7 @@ pub fn solve_revolute_joint(base: &mut JointSim, states: &StateAccess, context: 
             // sign flipped on Cdot
             let cdot = dot(sub(w_a, w_b), axis);
             let old_impulse = joint.upper_impulse;
-            let mut delta_impulse = -mass_scale * joint.axial_mass * (cdot + bias) - impulse_scale * old_impulse;
+            let mut delta_impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.axial_mass * (cdot + bias));
             joint.upper_impulse = max_float(old_impulse + delta_impulse, 0.0);
             delta_impulse = joint.upper_impulse - old_impulse;
 

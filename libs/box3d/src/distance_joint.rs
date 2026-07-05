@@ -291,8 +291,8 @@ pub fn prepare_distance_joint(base: &mut JointSim, world: &World, context: &Step
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     let m_a = body_sim_a.inv_mass;
     let i_a = body_sim_a.inv_inertia_world;
@@ -442,7 +442,7 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
 
             let m = joint.distance_softness.mass_scale * joint.axial_mass;
             let old_impulse = joint.impulse;
-            let mut impulse = -m * (cdot + bias) - joint.distance_softness.impulse_scale * old_impulse;
+            let mut impulse = (-joint.distance_softness.impulse_scale).mul_add(old_impulse, -m * (cdot + bias));
             let h = context.h;
             joint.impulse =
                 clamp_float(joint.impulse + impulse, joint.lower_spring_force * h, joint.upper_spring_force * h);
@@ -475,7 +475,7 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
                     impulse_coeff = constraint_softness.impulse_scale;
                 }
 
-                let mut impulse = -mass_coeff * joint.axial_mass * (cdot + bias) - impulse_coeff * joint.lower_impulse;
+                let mut impulse = (-impulse_coeff).mul_add(joint.lower_impulse, -mass_coeff * joint.axial_mass * (cdot + bias));
                 let new_impulse = max_float(0.0, joint.lower_impulse + impulse);
                 impulse = new_impulse - joint.lower_impulse;
                 joint.lower_impulse = new_impulse;
@@ -506,7 +506,7 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
                     impulse_scale = constraint_softness.impulse_scale;
                 }
 
-                let mut impulse = -mass_scale * joint.axial_mass * (cdot + bias) - impulse_scale * joint.upper_impulse;
+                let mut impulse = (-impulse_scale).mul_add(joint.upper_impulse, -mass_scale * joint.axial_mass * (cdot + bias));
                 let new_impulse = max_float(0.0, joint.upper_impulse + impulse);
                 impulse = new_impulse - joint.upper_impulse;
                 joint.upper_impulse = new_impulse;
@@ -550,7 +550,7 @@ pub fn solve_distance_joint(base: &mut JointSim, states: &StateAccess, context: 
             impulse_scale = constraint_softness.impulse_scale;
         }
 
-        let impulse = -mass_scale * joint.axial_mass * (cdot + bias) - impulse_scale * joint.impulse;
+        let impulse = (-impulse_scale).mul_add(joint.impulse, -mass_scale * joint.axial_mass * (cdot + bias));
         joint.impulse += impulse;
 
         let p = mul_sv(impulse, axis);

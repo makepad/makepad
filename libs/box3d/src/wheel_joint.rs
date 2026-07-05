@@ -409,8 +409,8 @@ pub fn prepare_wheel_joint(base: &mut JointSim, world: &World, context: &StepCon
     let local_index_a = body_a.local_index;
     let local_index_b = body_b.local_index;
 
-    let body_sim_a = *crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
-    let body_sim_b = *crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
+    let body_sim_a = crate::joint::get_solve_body_sim(world, context, body_a.set_index, local_index_a);
+    let body_sim_b = crate::joint::get_solve_body_sim(world, context, body_b.set_index, local_index_b);
 
     base.inv_mass_a = body_sim_a.inv_mass;
     base.inv_mass_b = body_sim_b.inv_mass;
@@ -474,7 +474,7 @@ pub fn prepare_wheel_joint(base: &mut JointSim, world: &World, context: &StepCon
         // Twist constraint around x-axis
         let cs = dot(matrix_b.cz, matrix_a.cz);
         let ss = -dot(matrix_b.cz, matrix_a.cy);
-        let mut den = cs * cs + ss * ss;
+        let mut den = ss.mul_add(ss, cs * cs);
         den = if den > 0.0 { 1.0 / den } else { 0.0 };
         let steering_axis = mul_sv(den, cross(matrix_b.cz, sub(mul_sv(-cs, matrix_a.cy), mul_sv(ss, matrix_a.cz))));
 
@@ -554,7 +554,7 @@ pub fn warm_start_wheel_joint(base: &mut JointSim, states: &StateAccess, _contex
         // Twist constraint around x-axis
         let cs = dot(matrix_b.cz, matrix_a.cz);
         let ss = -dot(matrix_b.cz, matrix_a.cy);
-        let mut den = cs * cs + ss * ss;
+        let mut den = ss.mul_add(ss, cs * cs);
         den = if den > 0.0 { 1.0 / den } else { 0.0 };
         let steering_axis = mul_sv(den, cross(matrix_b.cz, sub(mul_sv(-cs, matrix_a.cy), mul_sv(ss, matrix_a.cz))));
 
@@ -645,7 +645,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
     // Steering param ib = cz_b, ia = cz_a, ja = -cy_a
     let cs = dot(matrix_b.cz, matrix_a.cz);
     let ss = -dot(matrix_b.cz, matrix_a.cy);
-    let mut den = cs * cs + ss * ss;
+    let mut den = ss.mul_add(ss, cs * cs);
     den = if den > 0.0 { 1.0 / den } else { 0.0 };
     let steering_axis = mul_sv(den, cross(matrix_b.cz, sub(mul_sv(-cs, matrix_a.cy), mul_sv(ss, matrix_a.cz))));
 
@@ -672,7 +672,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
         let impulse_scale = joint.suspension_softness.impulse_scale;
 
         let cdot = dot(matrix_a.cx, sub(v_b, v_a)) + dot(s_bx, w_b) - dot(s_ax, w_a);
-        let impulse = -mass_scale * joint.suspension_mass * (cdot + bias) - impulse_scale * joint.suspension_spring_impulse;
+        let impulse = (-impulse_scale).mul_add(joint.suspension_spring_impulse, -mass_scale * joint.suspension_mass * (cdot + bias));
         joint.suspension_spring_impulse += impulse;
 
         let linear_impulse = mul_sv(impulse, matrix_a.cx);
@@ -698,7 +698,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
 
             let cdot = dot(steering_axis, sub(w_b, w_a));
             let old_impulse = joint.steering_spring_impulse;
-            let mut impulse = -mass_scale * joint.steering_mass * (cdot + bias) - impulse_scale * old_impulse;
+            let mut impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.steering_mass * (cdot + bias));
             let max_impulse = context.h * joint.max_steering_torque;
             joint.steering_spring_impulse = clamp_float(old_impulse + impulse, -max_impulse, max_impulse);
             impulse = joint.steering_spring_impulse - old_impulse;
@@ -726,7 +726,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
 
                 let cdot = dot(steering_axis, sub(w_b, w_a));
                 let old_impulse = joint.lower_steering_impulse;
-                let mut impulse = -mass_scale * joint.steering_mass * (cdot + bias) - impulse_scale * old_impulse;
+                let mut impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.steering_mass * (cdot + bias));
                 joint.lower_steering_impulse = max_float(old_impulse + impulse, 0.0);
                 impulse = joint.lower_steering_impulse - old_impulse;
 
@@ -756,7 +756,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
                 // sign flipped on cdot
                 let cdot = dot(steering_axis, sub(w_a, w_b));
                 let old_impulse = joint.upper_steering_impulse;
-                let mut impulse = -mass_scale * joint.steering_mass * (cdot + bias) - impulse_scale * old_impulse;
+                let mut impulse = (-impulse_scale).mul_add(old_impulse, -mass_scale * joint.steering_mass * (cdot + bias));
                 joint.upper_steering_impulse = max_float(old_impulse + impulse, 0.0);
                 impulse = joint.upper_steering_impulse - old_impulse;
 
@@ -785,7 +785,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
             }
 
             let cdot = dot(matrix_a.cx, sub(v_b, v_a)) + dot(s_bx, w_b) - dot(s_ax, w_a);
-            let mut impulse = -mass_scale * joint.suspension_mass * (cdot + bias) - impulse_scale * joint.lower_suspension_impulse;
+            let mut impulse = (-impulse_scale).mul_add(joint.lower_suspension_impulse, -mass_scale * joint.suspension_mass * (cdot + bias));
             let old_impulse = joint.lower_suspension_impulse;
             joint.lower_suspension_impulse = max_float(old_impulse + impulse, 0.0);
             impulse = joint.lower_suspension_impulse - old_impulse;
@@ -821,7 +821,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
 
             // sign flipped on cdot
             let cdot = dot(matrix_a.cx, sub(v_a, v_b)) + dot(s_ax, w_a) - dot(s_bx, w_b);
-            let mut impulse = -mass_scale * joint.suspension_mass * (cdot + bias) - impulse_scale * joint.upper_suspension_impulse;
+            let mut impulse = (-impulse_scale).mul_add(joint.upper_suspension_impulse, -mass_scale * joint.suspension_mass * (cdot + bias));
             let old_impulse = joint.upper_suspension_impulse;
             joint.upper_suspension_impulse = max_float(old_impulse + impulse, 0.0);
             impulse = joint.upper_suspension_impulse - old_impulse;
@@ -859,7 +859,7 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
             let k = dot(u, mul_mv(inv_inertia_sum, u));
             let perp_mass = if k > 0.0 { 1.0 / k } else { 0.0 };
 
-            let delta_impulse = -mass_scale * perp_mass * (cdot + bias) - impulse_scale * joint.angular_impulse.x;
+            let delta_impulse = (-impulse_scale).mul_add(joint.angular_impulse.x, -mass_scale * perp_mass * (cdot + bias));
             joint.angular_impulse.x += delta_impulse;
 
             w_a = mul_sub(w_a, delta_impulse, mul_mv(i_a, u));
@@ -895,8 +895,8 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
             let cdot_plus_bias = vec2(cdot.x + bias.x, cdot.y + bias.y);
             let sol = solve2(k, cdot_plus_bias);
             let delta_impulse = vec2(
-                -mass_scale * sol.x - impulse_scale * old_impulse.x,
-                -mass_scale * sol.y - impulse_scale * old_impulse.y,
+                (-impulse_scale).mul_add(old_impulse.x, -mass_scale * sol.x),
+                (-impulse_scale).mul_add(old_impulse.y, -mass_scale * sol.y),
             );
             joint.angular_impulse = vec2(old_impulse.x + delta_impulse.x, old_impulse.y + delta_impulse.y);
 
@@ -937,8 +937,8 @@ pub fn solve_wheel_joint(base: &mut JointSim, states: &StateAccess, context: &St
         let cdot_plus_bias = vec2(cdot.x + bias.x, cdot.y + bias.y);
         let sol = solve2(k, cdot_plus_bias);
         let delta_impulse = vec2(
-            -mass_scale * sol.x - impulse_scale * old_impulse.x,
-            -mass_scale * sol.y - impulse_scale * old_impulse.y,
+            (-impulse_scale).mul_add(old_impulse.x, -mass_scale * sol.x),
+            (-impulse_scale).mul_add(old_impulse.y, -mass_scale * sol.y),
         );
         joint.linear_impulse = vec2(old_impulse.x + delta_impulse.x, old_impulse.y + delta_impulse.y);
 

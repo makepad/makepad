@@ -82,9 +82,45 @@ impl Semaphore {
         }
     }
 
+    /// Try to consume a permit without ever going into debt (only succeeds
+    /// while the count is positive). Used by the spin phase of `wait` so a
+    /// spinning thread stays invisible to `signal`'s sleeper accounting.
+    fn try_acquire(&self) -> bool {
+        let mut c = self.count.load(std::sync::atomic::Ordering::Acquire);
+        while c > 0 {
+            match self.count.compare_exchange_weak(
+                c,
+                c - 1,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(v) => c = v,
+            }
+        }
+        false
+    }
+
     /// C: b3WaitSemaphore
     fn wait(&self) {
-        // Fast path: a permit was available — consume it without locking.
+        // Spin briefly before committing to a sleep. The solver enqueues a
+        // burst of tasks every step with short serial gaps in between; a
+        // worker that sleeps across each gap pays a kernel wake on every
+        // step (this dominated the 8-worker profile of small scenes as
+        // __psynch_cvwait). ~tens of microseconds of spin lets workers catch
+        // the next burst in userspace. Intentional deviation from the C
+        // scheduler (which sleeps immediately on a dispatch semaphore) —
+        // scheduling only, no effect on simulation results.
+        for _ in 0..2000 {
+            if self.try_acquire() {
+                return;
+            }
+            std::hint::spin_loop();
+            std::hint::spin_loop();
+        }
+
+        // Commit: a negative count registers this thread as a sleeper that
+        // `signal` must wake.
         if self.count.fetch_sub(1, std::sync::atomic::Ordering::Acquire) > 0 {
             return;
         }
