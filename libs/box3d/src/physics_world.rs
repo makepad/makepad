@@ -97,6 +97,14 @@ pub struct TaskContext {
     /// Number of contacts recycled this step (collide pass).
     pub recycled_contact_count: i32,
 
+    /// PORT EXTENSION: touching contacts served by the feature-recycling
+    /// tier this step.
+    pub feature_recycled_contact_count: i32,
+
+    /// PORT EXTENSION: separated pairs early-outed via the cached-axis
+    /// witness this step.
+    pub feature_separated_skip_count: i32,
+
     pub points: Vec<DebugPoint>,
     pub lines: Vec<DebugLine>,
 
@@ -264,6 +272,8 @@ pub struct World {
     pub enable_warm_starting: bool,
     pub enable_continuous: bool,
     pub enable_speculative: bool,
+    /// PORT EXTENSION: feature-recycling narrow-phase tier (see WorldDef).
+    pub enable_feature_recycling: bool,
     pub in_use: bool,
 
     /// Some while a recording session is active (C: world->recording). Hooks in
@@ -487,6 +497,7 @@ pub fn create_world(def: &WorldDef) -> World {
     world.enable_warm_starting = true;
     world.enable_continuous = def.enable_continuous;
     world.enable_speculative = true;
+    world.enable_feature_recycling = def.enable_feature_recycling;
     world.user_data = def.user_data;
 
     // C: worker count clamped to [1, B3_MAX_WORKERS]; the built-in scheduler
@@ -861,6 +872,8 @@ fn collide(world: &mut World, context: &mut StepContext) {
         task_context.sat_call_count = 0;
         task_context.sat_cache_hit_count = 0;
         task_context.recycled_contact_count = 0;
+        task_context.feature_recycled_contact_count = 0;
+        task_context.feature_separated_skip_count = 0;
         task_context.manifold_counts = [0; CONTACT_MANIFOLD_COUNT_BUCKETS];
         task_context.mesh_spec_updates.clear();
     }
@@ -1637,12 +1650,16 @@ pub fn world_get_counters(world: &World) -> Counters {
     s.awake_contact_count += world.solver_sets[AWAKE_SET as usize].contact_indices.len() as i32;
 
     s.recycled_contact_count = 0;
+    s.feature_recycled_contact_count = 0;
+    s.feature_separated_skip_count = 0;
     s.arena_capacity = 0;
     s.distance_iterations = 0;
     s.push_back_iterations = 0;
     s.root_iterations = 0;
     for i in 0..world.worker_count as usize {
         s.recycled_contact_count += world.task_contexts[i].recycled_contact_count;
+        s.feature_recycled_contact_count += world.task_contexts[i].feature_recycled_contact_count;
+        s.feature_separated_skip_count += world.task_contexts[i].feature_separated_skip_count;
 
         s.distance_iterations = max_int(s.distance_iterations, world.task_contexts[i].distance_iterations);
         s.push_back_iterations = max_int(s.push_back_iterations, world.task_contexts[i].push_back_iterations);

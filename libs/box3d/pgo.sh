@@ -30,6 +30,11 @@ for b in 0 1 2 3 4 5 6 7 8 9; do
     $PGO/train/release/examples/benchmark -b=$b -r=1 -w=1 > /dev/null
 done
 $PGO/train/release/examples/benchmark -b=5 -r=1 -w=8 > /dev/null
+# Train the narrow phase in both feature-recycling modes so the full-SAT
+# path keeps a hot layout (it still runs on cache misses/refreshes when
+# the tier is on, and -fr=0 stays a supported toggle).
+$PGO/train/release/examples/benchmark -b=4 -r=1 -w=1 -fr=0 > /dev/null
+$PGO/train/release/examples/benchmark -b=8 -r=1 -w=1 -fr=0 > /dev/null
 "$PROFDATA" merge -o $PGO/merged.profdata $PGO/data
 
 echo "== 3/3 building PGO-optimized benchmark =="

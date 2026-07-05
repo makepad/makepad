@@ -84,6 +84,15 @@ pub struct WorldDef {
     /// Enable continuous collision.
     pub enable_continuous: bool,
 
+    /// PORT EXTENSION (not in upstream C): enable the feature-recycling
+    /// narrow-phase tier — separated speculative pairs re-verify only their
+    /// cached separating axis, and touching hull contacts rebuild from the
+    /// cached winning feature under drift/refresh bounds, skipping the full
+    /// SAT. Contact results change within collision tolerances; determinism
+    /// guarantees are unaffected (results stay a pure function of world
+    /// state).
+    pub enable_feature_recycling: bool,
+
     /// Number of workers to use with the provided task system. This is clamped
     /// to the range [1, MAX_WORKERS]. Using a value above 1 turns on
     /// multithreading. If task callbacks are provided then Box3D will use the
@@ -132,6 +141,7 @@ pub fn default_world_def() -> WorldDef {
         restitution_callback: None,
         enable_sleep: true,
         enable_continuous: true,
+        enable_feature_recycling: true,
         worker_count: 0,
         enqueue_task: None,
         finish_task: None,
@@ -454,6 +464,15 @@ pub struct Counters {
 
     /// Number of contacts recycled in the most recent step.
     pub recycled_contact_count: i32,
+
+    /// PORT EXTENSION: touching contacts served by the feature-recycling
+    /// tier in the most recent step (manifold rebuilt from the cached
+    /// winning feature, full SAT skipped).
+    pub feature_recycled_contact_count: i32,
+
+    /// PORT EXTENSION: separated speculative pairs early-outed via the
+    /// cached-axis witness in the most recent step.
+    pub feature_separated_skip_count: i32,
 
     /// Maximum number of time of impact iterations.
     pub distance_iterations: i32,
@@ -2020,6 +2039,13 @@ pub struct SATCache {
 
     /// Was the cache re-used?
     pub hit: u8,
+
+    /// PORT EXTENSION (feature recycling — not in upstream C): the relative
+    /// transform (B to A) at the last full SAT, and full steps elapsed since.
+    /// Only read when `WorldDef::enable_feature_recycling` is set; see
+    /// convex_manifold.rs `collide_hulls_feature_recycled`.
+    pub sat_pose: crate::math_functions::Transform,
+    pub steps_since_sat: u16,
 }
 
 /// Contact points are always the result of two edges intersecting.
