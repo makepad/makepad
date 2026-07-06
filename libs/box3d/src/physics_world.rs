@@ -274,6 +274,8 @@ pub struct World {
     pub enable_speculative: bool,
     /// PORT EXTENSION: feature-recycling narrow-phase tier (see WorldDef).
     pub enable_feature_recycling: bool,
+    /// PORT EXTENSION: adaptive broad-phase maintenance (see WorldDef).
+    pub enable_broad_phase_hybrid: bool,
     pub in_use: bool,
 
     /// Some while a recording session is active (C: world->recording). Hooks in
@@ -498,6 +500,7 @@ pub fn create_world(def: &WorldDef) -> World {
     world.enable_continuous = def.enable_continuous;
     world.enable_speculative = true;
     world.enable_feature_recycling = def.enable_feature_recycling;
+    world.enable_broad_phase_hybrid = def.enable_broad_phase_hybrid;
     world.user_data = def.user_data;
 
     // C: worker count clamped to [1, B3_MAX_WORKERS]; the built-in scheduler
