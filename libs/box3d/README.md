@@ -73,12 +73,12 @@ incremental-BVH broad phase (see the broad-phase notes in the performance
 section) — the scene where Box3D's whole lineage, Rust and C alike, pays
 for its motion-enlarged-AABB design (C too is ~4× Rapier's broad phase
 there). The **opt-in `enable_broad_phase_hybrid` flag** (see the
-broad-phase-hybrid note below) closes most of that gap single-threaded:
-washer drops to ~17 700 ms (broad phase −51%), which **beats C** (20 661)
-and lands within ~5% of Rapier — turning washer into a near-tie and the
-overall single-threaded result into box3d-ahead-or-even on all nine
-scenes. It is off by default because it regresses multi-threaded runs
-(see the note).
+broad-phase-hybrid note below) narrows that gap single-threaded: it
+roughly halves washer's pair-finding stage (7.6k → 3.6k ms/1000 steps,
+−52%), cutting the washer total ~17% to ~19 000 ms. That **flips washer
+ahead of C** (20 661) and cuts Rapier's lead from ~23% to ~12% — still
+Rapier's scene, but no longer a rout. It is off by default because it
+regresses multi-threaded runs (see the note).
 
 Comparability caveats for the extended scenes, in decreasing order of
 likely impact:
@@ -406,23 +406,33 @@ regression; C pays the same cost.
 The opt-in hybrid adds a batch path (PORT EXTENSION — not in upstream C):
 above a churn threshold (`move_count*4 > proxy_count`) it replaces the
 per-proxy queries with three BVTT self/cross-traversals that share the
-upper-tree descent, plus an O(n) bottom-up refit instead of the median
-rebuild. It is **correct and deterministic** — a debug-only assertion
-that the batch candidate set equals the per-mover set runs in every test
-and never fires, and the result is worker-count-independent (canonical
-`(shape_a,shape_b,child)` sort; hash stable across workers, verified by a
-dedicated test). Single-threaded it cuts washer's broad phase −51%
-(washer total −19%, beating C). **Off by default because it regresses
-multi-threaded runs**: the batch materializes ~40-50k candidates/step and
-serially merges+sorts them — a floor the inline per-mover path avoids by
-filtering inside the query callback — so at 8 workers the parallel
-per-mover queries win (washer w8 +52% with the hybrid on). Parallelizing
-the traversal AND filter did not remove the floor (the serial gather is
-fundamental). It cannot be worker-count-gated (that would break
-cross-worker determinism). Enable it for single-threaded, churn-heavy
-embeddings; leave it off for multi-threaded. Only route to default-on
-would be an order-preserving parallel emission that avoids the global
-sort — larger effort, not attempted.
+upper-tree descent, plus an O(n) bottom-up refit (with a periodic full
+rebuild for balance) instead of the per-step median rebuild. It is
+**correct and deterministic** — a debug-only assertion that the batch
+candidate set equals the per-mover set runs in every test and never
+fires, and the candidates are canonically sorted by
+`(shape_a,shape_b,child)` so contact-creation order is fixed run-to-run
+and identical across worker counts (verified by a dedicated test).
+Single-threaded it roughly halves washer's pair-finding stage (7.6k →
+3.6k ms/1000 steps, −52%) for a ~17% total drop (~19 000 ms) — which
+beats C (20 661) and narrows Rapier's washer lead from ~23% to ~12%.
+
+The **batch traversal is single-threaded** — this is an opt-in
+accelerator for one-worker, churn-heavy embeddings, and the PGO training
+set exercises `-bp=1` so enabling it gets a hot layout. **Off by default
+because it regresses multi-threaded runs**: the per-mover path
+parallelizes cleanly (each moved proxy is an independent query, filtered
+inline in the query callback), whereas the shared BVTT descent is one
+serial walk, so at 8 workers the parallel per-mover queries win (washer w8
+~+54% with the hybrid on). It cannot be worker-count-gated (that would
+break cross-worker determinism), so it stays a manual flag: enable it for
+single-threaded, churn-heavy embeddings; leave it off otherwise. (An
+earlier revision parallelized the batch traversal and candidate filter
+across the task system to chase a default-on win; it still lost at w8 —
+the serial gather-and-sort of ~40–50k candidates/step is a floor the
+inline per-mover path never pays — so that machinery was removed as net
+complexity for no multi-threaded benefit, leaving the simpler
+single-threaded batch.)
 
 ## Intentional differences from C (keep these in mind when diffing)
 
