@@ -72,7 +72,13 @@ its worst being junkyard (+18% over C). Rapier's one win, washer, is its
 incremental-BVH broad phase (see the broad-phase notes in the performance
 section) — the scene where Box3D's whole lineage, Rust and C alike, pays
 for its motion-enlarged-AABB design (C too is ~4× Rapier's broad phase
-there).
+there). The **opt-in `enable_broad_phase_hybrid` flag** (see the
+broad-phase-hybrid note below) closes most of that gap single-threaded:
+washer drops to ~17 700 ms (broad phase −51%), which **beats C** (20 661)
+and lands within ~5% of Rapier — turning washer into a near-tie and the
+overall single-threaded result into box3d-ahead-or-even on all nine
+scenes. It is off by default because it regresses multi-threaded runs
+(see the note).
 
 Comparability caveats for the extended scenes, in decreasing order of
 likely impact:
@@ -383,6 +389,40 @@ where each item is heavy, so serializing them starves real parallelism;
 joint_grid turned out to have few FAT stages — grid coloring yields ~2-4
 colors of thousands of joints — so the thin-stage theory was wrong for
 it, and its w=8 gap remains undiagnosed).
+
+### Broad-phase hybrid — opt-in `WorldDef.enable_broad_phase_hybrid` (default off)
+
+washer (a rotating drum churning 8k dynamic cubes — every proxy moves
+every step) is the one scene where Rapier's incremental-BVH broad phase
+beats Box3D's whole lineage: box3d and C both spend ~34% of the step in
+the broad phase (~4-5× Rapier's). Box3D's design does per-moved-proxy
+work — each of ~8k proxies re-descends the Dynamic/Static/Kinematic trees
+from the root every step (~24k descents) — which is near-*free* when a
+scene settles (pyramids: ~2% of the step, proxies stay in their fat
+AABBs) but is the worst case under coherent motion. This is a deliberate
+design bet (optimize the settle-to-rest common case), not a Rust-port
+regression; C pays the same cost.
+
+The opt-in hybrid adds a batch path (PORT EXTENSION — not in upstream C):
+above a churn threshold (`move_count*4 > proxy_count`) it replaces the
+per-proxy queries with three BVTT self/cross-traversals that share the
+upper-tree descent, plus an O(n) bottom-up refit instead of the median
+rebuild. It is **correct and deterministic** — a debug-only assertion
+that the batch candidate set equals the per-mover set runs in every test
+and never fires, and the result is worker-count-independent (canonical
+`(shape_a,shape_b,child)` sort; hash stable across workers, verified by a
+dedicated test). Single-threaded it cuts washer's broad phase −51%
+(washer total −19%, beating C). **Off by default because it regresses
+multi-threaded runs**: the batch materializes ~40-50k candidates/step and
+serially merges+sorts them — a floor the inline per-mover path avoids by
+filtering inside the query callback — so at 8 workers the parallel
+per-mover queries win (washer w8 +52% with the hybrid on). Parallelizing
+the traversal AND filter did not remove the floor (the serial gather is
+fundamental). It cannot be worker-count-gated (that would break
+cross-worker determinism). Enable it for single-threaded, churn-heavy
+embeddings; leave it off for multi-threaded. Only route to default-on
+would be an order-preserving parallel emission that avoids the global
+sort — larger effort, not attempted.
 
 ## Intentional differences from C (keep these in mind when diffing)
 
