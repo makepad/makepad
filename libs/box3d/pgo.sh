@@ -35,6 +35,11 @@ $PGO/train/release/examples/benchmark -b=5 -r=1 -w=8 > /dev/null
 # the tier is on, and -fr=0 stays a supported toggle).
 $PGO/train/release/examples/benchmark -b=4 -r=1 -w=1 -fr=0 > /dev/null
 $PGO/train/release/examples/benchmark -b=8 -r=1 -w=1 -fr=0 > /dev/null
+# Train the opt-in broad-phase hybrid batch path (washer is the churn scene
+# that engages it) so enabling -bp=1 gets a hot layout instead of the cold
+# fallthrough it would get from an off-path-only profile. Neutral for the
+# default (-bp=0) path — PGO merges counts, the OFF branch stays hot.
+$PGO/train/release/examples/benchmark -b=8 -r=1 -w=1 -bp=1 > /dev/null
 "$PROFDATA" merge -o $PGO/merged.profdata $PGO/data
 
 echo "== 3/3 building PGO-optimized benchmark =="

@@ -77,29 +77,6 @@ pub struct BroadPhase {
     /// update_broad_phase_pairs. Not serialized by snapshots.
     pub(crate) batch_stack: Vec<(i32, i32, bool)>,
     pub(crate) batch_candidates: Vec<MovePair>,
-
-    /// PORT EXTENSION — not in upstream C. Parallel-batch scratch: the frontier
-    /// of independent subtree-pair work items (produced by expanding the three
-    /// BVTTs), the per-worker candidate output buffers, and the per-worker
-    /// traversal stacks. The final canonical sort of the merged candidates
-    /// makes the result independent of worker count / work distribution, so
-    /// the batch path is deterministic at any thread count. Transient; not
-    /// serialized.
-    pub(crate) batch_frontier: Vec<BatchWork>,
-    pub(crate) batch_worker_candidates: Vec<Vec<MovePair>>,
-    pub(crate) batch_worker_stacks: Vec<Vec<(i32, i32, bool)>>,
-}
-
-/// PORT EXTENSION — not in upstream C. One independent unit of batch-BVTT work:
-/// the subtree pair `(a, b, is_self)` to drain, tagged by which traversal it
-/// belongs to (`kind`: 0 = dynamic self, 1 = dynamic×static, 2 = dynamic×kinematic)
-/// so a worker knows which trees and which emit rule to apply.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct BatchWork {
-    pub a: i32,
-    pub b: i32,
-    pub is_self: bool,
-    pub kind: u8,
 }
 
 /// Per-worker scratch for the pair query pass (compound inner-query hits only).
@@ -166,9 +143,9 @@ use crate::bitset::{clear_bit, create_bit_set, destroy_bit_set, get_bit};
 use crate::container::array_remove_swap;
 use crate::core::NULL_INDEX;
 use crate::dynamic_tree::{
-    dynamic_tree_bvtt_drain, dynamic_tree_bvtt_expand, dynamic_tree_create, dynamic_tree_create_proxy,
-    dynamic_tree_destroy_proxy, dynamic_tree_enlarge_proxy, dynamic_tree_get_aabb, dynamic_tree_get_user_data,
-    dynamic_tree_move_proxy, dynamic_tree_query, dynamic_tree_rebuild, dynamic_tree_validate,
+    dynamic_tree_create, dynamic_tree_create_proxy, dynamic_tree_cross_pairs, dynamic_tree_destroy_proxy,
+    dynamic_tree_enlarge_proxy, dynamic_tree_get_aabb, dynamic_tree_get_user_data, dynamic_tree_move_proxy,
+    dynamic_tree_query, dynamic_tree_rebuild, dynamic_tree_self_pairs, dynamic_tree_validate,
     dynamic_tree_validate_no_enlarged, refit_and_clear_enlarged,
 };
 
@@ -662,9 +639,10 @@ fn emit_batch_candidate(
 }
 
 // PORT EXTENSION — not in upstream C. The three emit rules, one per BVTT
-// traversal, factored out of the (formerly serial) collector so both the
-// frontier-generation terminals and the parallel per-worker drains use the
-// identical (a,b,b_id) ordering — the order create_contact expects.
+// traversal. Each maps an overlapping leaf pair to the candidate MovePair(s)
+// in the (a=hit/non-mover, b=owner/mover) ordering create_contact expects,
+// mirroring the per-mover query path's ordering so the batch and per-mover
+// candidate SETs match (debug-asserted).
 
 // dynamic-vs-dynamic leaf pair: b = the mover (or the lower proxy key if both
 // moved), a = the other. Mirrors try_add_pair's both-moving dedup.
@@ -727,227 +705,41 @@ fn emit_dyn_kin(world: &World, out: &mut Vec<MovePair>, dyn_id: i32, kin_id: i32
     }
 }
 
-// PORT EXTENSION — not in upstream C. Context for the parallel batch drain:
-// each frontier work item is drained by one worker into its own candidate
-// buffer (no shared mutation), using its own traversal stack.
-struct BatchCtx<'a> {
-    world: &'a World,
-    frontier: &'a [BatchWork],
-    worker_out: &'a crate::sync::SyncSlice<'a, Vec<MovePair>>,
-    worker_stack: &'a crate::sync::SyncSlice<'a, Vec<(i32, i32, bool)>>,
-}
-
-unsafe fn batch_drain_trampoline(start_index: i32, end_index: i32, worker_index: i32, context: *mut ()) {
-    // SAFETY: the BatchCtx lives on the update_broad_phase_pairs stack frame,
-    // which blocks in parallel_for until every block completes.
-    let ctx = unsafe { &*(context as *const BatchCtx) };
-    batch_drain_task(ctx, start_index, end_index, worker_index);
-}
-
-fn batch_drain_task(ctx: &BatchCtx, start_index: i32, end_index: i32, worker_index: i32) {
-    let world = ctx.world;
-    let dyn_tree = &world.broad_phase.trees[BodyType::Dynamic as usize];
-    let stat_tree = &world.broad_phase.trees[BodyType::Static as usize];
-    let kin_tree = &world.broad_phase.trees[BodyType::Kinematic as usize];
-    // SAFETY: worker_index is exclusive to this task (parallel_for contract),
-    // so the per-worker output buffer and stack are unaliased.
-    let out = unsafe { ctx.worker_out.get_mut(worker_index as usize) };
-    let stack = unsafe { ctx.worker_stack.get_mut(worker_index as usize) };
-
-    for i in start_index..end_index {
-        let w = ctx.frontier[i as usize];
-        stack.clear();
-        stack.push((w.a, w.b, w.is_self));
-        match w.kind {
-            0 => dynamic_tree_bvtt_drain(dyn_tree, dyn_tree, stack, &mut |id1, id2| {
-                emit_dyn_self(world, out, id1, id2)
-            }),
-            1 => dynamic_tree_bvtt_drain(dyn_tree, stat_tree, stack, &mut |d, s| {
-                emit_dyn_static(world, out, d, s)
-            }),
-            _ => dynamic_tree_bvtt_drain(dyn_tree, kin_tree, stack, &mut |d, k| {
-                emit_dyn_kin(world, out, d, k)
-            }),
-        }
-    }
-}
-
-// PORT EXTENSION — not in upstream C. Parallel filter for the batch path. The
-// sorted candidate list is split into `chunk_count` contiguous chunks by
-// candidate INDEX (boundaries independent of which worker runs which chunk);
-// each chunk is filtered into its own MoveResult (`results[chunk]`). Because
-// the chunk boundaries are fixed and the chunk outputs are concatenated in
-// index order at create time, the contact-creation order is exactly the
-// serial sorted-filter order — worker-count-independent, so the hash is
-// unchanged. Only used when no custom filter is installed (Box<dyn FnMut> is
-// not Sync); a custom-filter world filters serially.
-struct BatchFilterCtx<'a> {
-    world: &'a World,
-    candidates: &'a [MovePair],
-    chunk_count: i32,
-    results: &'a crate::sync::SyncSlice<'a, MoveResult>,
-    pair_count: &'a crate::sync::AtomicIndex,
-    move_pair_capacity: i32,
-}
-
-unsafe fn batch_filter_trampoline(start_index: i32, end_index: i32, _worker_index: i32, context: *mut ()) {
-    // SAFETY: the BatchFilterCtx lives on the update_broad_phase_pairs stack
-    // frame, which blocks in parallel_for until every block completes.
-    let ctx = unsafe { &*(context as *const BatchFilterCtx) };
-    // The parallel_for item is the CHUNK index; a task may own several.
-    for chunk in start_index..end_index {
-        let n = ctx.candidates.len() as i64;
-        let cc = ctx.chunk_count as i64;
-        let lo = (chunk as i64 * n / cc) as usize;
-        let hi = ((chunk as i64 + 1) * n / cc) as usize;
-        // SAFETY: each chunk index is visited by exactly one task (block
-        // partitioning over [0, chunk_count)), so results[chunk] is unaliased.
-        let result = unsafe { ctx.results.get_mut(chunk as usize) };
-        result.pair_list.clear();
-        let mut no_filter: Option<Box<CustomFilterFcn>> = None;
-        for i in lo..hi {
-            let cand = ctx.candidates[i];
-            filter_and_emit_pair(
-                ctx.world,
-                &mut no_filter,
-                result,
-                ctx.pair_count,
-                ctx.move_pair_capacity,
-                cand.shape_index_a,
-                cand.shape_index_b,
-                cand.child_index,
-            );
-        }
-    }
-}
-
 // PORT EXTENSION — not in upstream C. Collect the batch candidate pairs by
-// (1) expanding each of the three BVTTs into a shared frontier of independent
-// subtree-pair work items (emitting any terminal leaf pairs found during
-// expansion straight into `out`), then (2) draining that frontier across the
-// task system into per-worker buffers, then (3) appending those buffers to
-// `out`. The upper tree is walked once (shared) instead of once per moved
-// proxy — the high-churn win — and the frontier is now distributed across
-// workers so it also parallelizes. The pair SET is identical to the serial
-// traversal (a frontier is a no-overlap cover of it); the caller canonically
-// sorts `out`, so the final order is independent of worker count.
-fn collect_batch_candidates(world: &mut World, worker_count: i32) {
+// running the three BVTT self/cross traversals (dynamic self + dynamic×static +
+// dynamic×kinematic) and emitting each overlapping leaf pair through its
+// per-traversal emit rule into `out`. The upper tree is walked once per
+// traversal (a shared descent) in place of one root-to-leaf query per moved
+// proxy — the high-churn win. The pair SET is identical to the per-mover path
+// (debug-asserted by the caller); the caller canonically sorts `out` for a
+// deterministic contact-creation order. Single-threaded: this is an opt-in
+// accelerator for churn-heavy scenes on one worker; the per-mover path (which
+// filters inline in the query callback) stays the multi-threaded default.
+fn collect_batch_candidates(world: &mut World) {
     let mut out = std::mem::take(&mut world.broad_phase.batch_candidates);
     let mut stack = std::mem::take(&mut world.broad_phase.batch_stack);
-    let mut frontier = std::mem::take(&mut world.broad_phase.batch_frontier);
-    let mut worker_candidates = std::mem::take(&mut world.broad_phase.batch_worker_candidates);
-    let mut worker_stacks = std::mem::take(&mut world.broad_phase.batch_worker_stacks);
     out.clear();
-    frontier.clear();
 
     let dyn_i = BodyType::Dynamic as usize;
     let stat_i = BodyType::Static as usize;
     let kin_i = BodyType::Kinematic as usize;
 
-    // ~8 items per worker keeps the frontier small but well load-balanced.
-    let target = (8 * worker_count.max(1)) as usize;
-
-    // Expand each traversal to a frontier, tagging leftover work items by kind,
-    // and stream any terminal leaf pairs found during expansion into `out`.
-    // (world is read immutably for the expansion; `out` is a taken-out local.)
+    // `world` is read immutably here; `out`/`stack` are taken-out locals, so the
+    // emit closures capturing `&mut out` do not alias the tree reads. The
+    // self/cross traversals clear the stack and guard empty trees internally.
     {
         let w = &*world;
         let dyn_tree = &w.broad_phase.trees[dyn_i];
         let stat_tree = &w.broad_phase.trees[stat_i];
         let kin_tree = &w.broad_phase.trees[kin_i];
 
-        // dynamic self
-        stack.clear();
-        if dyn_tree.root != crate::core::NULL_INDEX && dyn_tree.node_count != 0 {
-            stack.push((dyn_tree.root, dyn_tree.root, true));
-            dynamic_tree_bvtt_expand(dyn_tree, dyn_tree, &mut stack, target, &mut |id1, id2| {
-                emit_dyn_self(w, &mut out, id1, id2)
-            });
-            for &(a, b, is_self) in stack.iter() {
-                frontier.push(BatchWork { a, b, is_self, kind: 0 });
-            }
-        }
-
-        // dynamic × static
-        stack.clear();
-        if dyn_tree.root != crate::core::NULL_INDEX
-            && dyn_tree.node_count != 0
-            && stat_tree.root != crate::core::NULL_INDEX
-            && stat_tree.node_count != 0
-        {
-            stack.push((dyn_tree.root, stat_tree.root, false));
-            dynamic_tree_bvtt_expand(dyn_tree, stat_tree, &mut stack, target, &mut |d, s| {
-                emit_dyn_static(w, &mut out, d, s)
-            });
-            for &(a, b, is_self) in stack.iter() {
-                frontier.push(BatchWork { a, b, is_self, kind: 1 });
-            }
-        }
-
-        // dynamic × kinematic
-        stack.clear();
-        if dyn_tree.root != crate::core::NULL_INDEX
-            && dyn_tree.node_count != 0
-            && kin_tree.root != crate::core::NULL_INDEX
-            && kin_tree.node_count != 0
-        {
-            stack.push((dyn_tree.root, kin_tree.root, false));
-            dynamic_tree_bvtt_expand(dyn_tree, kin_tree, &mut stack, target, &mut |d, k| {
-                emit_dyn_kin(w, &mut out, d, k)
-            });
-            for &(a, b, is_self) in stack.iter() {
-                frontier.push(BatchWork { a, b, is_self, kind: 2 });
-            }
-        }
-    }
-
-    // Drain the frontier across the task system.
-    if worker_stacks.len() < worker_count as usize {
-        worker_stacks.resize_with(worker_count as usize, Vec::new);
-    }
-    if worker_candidates.len() < worker_count as usize {
-        worker_candidates.resize_with(worker_count as usize, Vec::new);
-    }
-    for buf in &mut worker_candidates[..worker_count as usize] {
-        buf.clear();
-    }
-
-    if !frontier.is_empty() {
-        let out_slice = crate::sync::SyncSlice::new(&mut worker_candidates[..worker_count as usize]);
-        let stack_slice = crate::sync::SyncSlice::new(&mut worker_stacks[..worker_count as usize]);
-        let ctx = BatchCtx {
-            world: &*world,
-            frontier: &frontier,
-            worker_out: &out_slice,
-            worker_stack: &stack_slice,
-        };
-        // SAFETY: each frontier index is visited by exactly one worker (block
-        // partitioning); worker_index is exclusive per task, so the per-worker
-        // out buffer and stack are unaliased; ctx outlives parallel_for (which
-        // blocks until all blocks complete). The trees are read immutably.
-        unsafe {
-            crate::parallel_for::parallel_for(
-                &world.task_system,
-                worker_count,
-                batch_drain_trampoline,
-                frontier.len() as i32,
-                1,
-                &ctx as *const BatchCtx as *mut (),
-                "batch pairs",
-            );
-        }
-        // Merge per-worker candidates (order here is irrelevant; the caller
-        // canonically sorts).
-        for buf in &mut worker_candidates[..worker_count as usize] {
-            out.append(buf);
-        }
+        dynamic_tree_self_pairs(dyn_tree, &mut stack, &mut |id1, id2| emit_dyn_self(w, &mut out, id1, id2));
+        dynamic_tree_cross_pairs(dyn_tree, stat_tree, &mut stack, &mut |d, s| emit_dyn_static(w, &mut out, d, s));
+        dynamic_tree_cross_pairs(dyn_tree, kin_tree, &mut stack, &mut |d, k| emit_dyn_kin(w, &mut out, d, k));
     }
 
     world.broad_phase.batch_candidates = out;
     world.broad_phase.batch_stack = stack;
-    world.broad_phase.batch_frontier = frontier;
-    world.broad_phase.batch_worker_candidates = worker_candidates;
-    world.broad_phase.batch_worker_stacks = worker_stacks;
 }
 
 // PORT EXTENSION — not in upstream C. Debug-only correctness oracle: the exact
@@ -1005,14 +797,13 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     let mut move_results = std::mem::take(&mut world.broad_phase.move_results);
     let mut pair_scratch = std::mem::take(&mut world.broad_phase.pair_scratch);
 
-    // Reuse the per-result pair list allocations from previous steps. The
-    // batch path also uses move_results[0..worker_count] as its per-chunk
-    // parallel-filter outputs, so size for both.
-    let results_len = (move_count as usize).max(world.worker_count as usize);
-    if move_results.len() < results_len {
-        move_results.resize_with(results_len, MoveResult::default);
+    // Reuse the per-result pair list allocations from previous steps. The batch
+    // path filters serially into move_results[0], so move_count entries (>= 1
+    // here, since move_count == 0 returned early) covers both paths.
+    if move_results.len() < move_count as usize {
+        move_results.resize_with(move_count as usize, MoveResult::default);
     }
-    for result in &mut move_results[..results_len] {
+    for result in &mut move_results[..move_count as usize] {
         result.pair_list.clear();
     }
     if pair_scratch.len() < world.worker_count as usize {
@@ -1024,88 +815,46 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     // Box<dyn FnMut> is not Sync (C requires the callback to be thread-safe).
     let mut custom_filter = world.custom_filter_fcn.take();
 
-    // PORT EXTENSION — not in upstream C. Number of contiguous candidate chunks
-    // the batch path filters in parallel (1 = serial: no batch, or a custom
-    // filter is installed). Fixed chunk boundaries keep the create order
-    // canonical regardless of worker count.
-    let batch_filter_chunks: i32 = if use_refit_dynamic && custom_filter.is_none() {
-        world.worker_count.max(1)
-    } else {
-        1
-    };
-
     if use_refit_dynamic {
         // PORT EXTENSION — not in upstream C. Batch BVTT path: three shared-tree
         // traversals (dynamic self + dynamic×static + dynamic×kinematic) in
-        // place of the per-moved-proxy queries, expanded to a frontier and
-        // drained across the task system. Produces the IDENTICAL pair SET
+        // place of the per-moved-proxy queries. Produces the IDENTICAL pair SET
         // (debug-asserted below against the per-mover path — the hash cannot
         // prove this since creation order, and thus contact ids, legitimately
         // change). The candidates are canonically sorted before filtering, so
-        // the result is independent of worker count and work distribution.
+        // the contact-creation order is deterministic run-to-run and matches
+        // across builds.
         #[cfg(debug_assertions)]
         let per_mover_keys = per_mover_pair_keys(&*world);
 
-        let batch_workers = world.worker_count;
-        collect_batch_candidates(world, batch_workers);
+        collect_batch_candidates(world);
         // Take the candidates out to sort + consume them while the world is
         // borrowed immutably by the filter.
         let mut batch_candidates = std::mem::take(&mut world.broad_phase.batch_candidates);
-        // Canonical order → deterministic contact-creation order (run-to-run,
-        // cross-worker, and independent of how the frontier was distributed).
+        // Canonical order → deterministic contact-creation order.
         batch_candidates.sort_unstable_by_key(|p| (p.shape_index_a, p.shape_index_b, p.child_index));
 
-        if batch_filter_chunks <= 1 {
-            let result = &mut move_results[0];
-            result.pair_list.clear();
-            for cand in &batch_candidates {
-                filter_and_emit_pair(
-                    &*world,
-                    &mut custom_filter,
-                    result,
-                    &pair_count,
-                    move_pair_capacity,
-                    cand.shape_index_a,
-                    cand.shape_index_b,
-                    cand.child_index,
-                );
-            }
-        } else {
-            // Parallel filter over fixed candidate-index chunks. No custom
-            // filter here (batch_filter_chunks > 1 implies none).
-            let results_slice =
-                crate::sync::SyncSlice::new(&mut move_results[..batch_filter_chunks as usize]);
-            let ctx = BatchFilterCtx {
-                world: &*world,
-                candidates: &batch_candidates,
-                chunk_count: batch_filter_chunks,
-                results: &results_slice,
-                pair_count: &pair_count,
+        let result = &mut move_results[0];
+        result.pair_list.clear();
+        for cand in &batch_candidates {
+            filter_and_emit_pair(
+                &*world,
+                &mut custom_filter,
+                result,
+                &pair_count,
                 move_pair_capacity,
-            };
-            // SAFETY: each chunk index is filtered by exactly one worker (block
-            // partitioning over [0, chunk_count)); results[chunk] is unaliased;
-            // world is read immutably; ctx outlives parallel_for (which blocks).
-            unsafe {
-                crate::parallel_for::parallel_for(
-                    &world.task_system,
-                    batch_filter_chunks,
-                    batch_filter_trampoline,
-                    batch_filter_chunks,
-                    1,
-                    &ctx as *const BatchFilterCtx as *mut (),
-                    "batch filter",
-                );
-            }
+                cand.shape_index_a,
+                cand.shape_index_b,
+                cand.child_index,
+            );
         }
         world.broad_phase.batch_candidates = batch_candidates;
 
         #[cfg(debug_assertions)]
         {
-            let batch_keys: std::collections::BTreeSet<u64> = move_results
-                [..batch_filter_chunks as usize]
+            let batch_keys: std::collections::BTreeSet<u64> = move_results[0]
+                .pair_list
                 .iter()
-                .flat_map(|r| r.pair_list.iter())
                 .map(|p| shape_pair_key(p.shape_index_a, p.shape_index_b, p.child_index))
                 .collect();
             assert_eq!(
@@ -1184,16 +933,13 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     // Single-threaded work
     // - Create contacts in deterministic order
     if use_refit_dynamic {
-        // PORT EXTENSION — batch path: the per-chunk filtered lists concatenated
-        // in chunk-index order == the canonically-sorted order (chunk boundaries
-        // are fixed by candidate index), so creation order is independent of
-        // worker count. move_results is a local (disjoint from world) so
-        // create_contact can borrow world mutably while we read the lists.
-        for chunk in 0..batch_filter_chunks as usize {
-            for idx in 0..move_results[chunk].pair_list.len() {
-                let pair = move_results[chunk].pair_list[idx];
-                crate::contact::create_contact(world, pair.shape_index_a, pair.shape_index_b, pair.child_index);
-            }
+        // PORT EXTENSION — batch path: the filtered list is already in
+        // canonical (shape_a, shape_b, child) order, so creation order is
+        // deterministic. move_results is a local (disjoint from world) so
+        // create_contact can borrow world mutably while we read the list.
+        for idx in 0..move_results[0].pair_list.len() {
+            let pair = move_results[0].pair_list[idx];
+            crate::contact::create_contact(world, pair.shape_index_a, pair.shape_index_b, pair.child_index);
         }
     } else {
         // C builds each pair list with head insertion and then walks it, so
