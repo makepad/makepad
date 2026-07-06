@@ -1695,6 +1695,218 @@ pub fn dynamic_tree_rebuild(tree: &mut DynamicTree, full_build: bool) -> i32 {
     leaf_count
 }
 
+/// PORT EXTENSION — not in upstream C. Bottom-up refit: recompute every
+/// internal node's AABB as the union of its children and clear ENLARGED_NODE
+/// on all nodes, keeping the existing topology. This is the cheap
+/// (single O(n) post-order pass) alternative to the median `dynamic_tree_rebuild`
+/// used by the adaptive broad-phase hybrid on high-churn steps. It preserves
+/// query CORRECTNESS — the leaf (fat) AABBs are untouched, and each internal
+/// AABB becomes the exact union of its descendants, which can never cause a
+/// query to miss an overlapping leaf. It does NOT rebalance, so a periodic
+/// full rebuild (the hybrid's cadence) is needed to keep query cost low.
+pub fn refit_and_clear_enlarged(tree: &mut DynamicTree) {
+    if tree.root == NULL_INDEX || tree.node_count == 0 {
+        return;
+    }
+
+    let mut stack = std::mem::take(&mut tree.refit_stack);
+    let mut order = std::mem::take(&mut tree.refit_order);
+    stack.clear();
+    order.clear();
+
+    // Pre-order DFS: clear ENLARGED on every node; record internal nodes so we
+    // can recompute their AABBs children-first (reverse pre-order is a valid
+    // post-order — a node always precedes its descendants in pre-order).
+    stack.push(tree.root);
+    while let Some(node_id) = stack.pop() {
+        let node = &mut tree.nodes[node_id as usize];
+        node.flags &= !ENLARGED_NODE;
+        if node.flags & LEAF_NODE == 0 {
+            let child1 = node.children.child1;
+            let child2 = node.children.child2;
+            order.push(node_id);
+            stack.push(child1);
+            stack.push(child2);
+        }
+    }
+
+    for i in (0..order.len()).rev() {
+        let node_id = order[i];
+        let (child1, child2) = {
+            let node = &tree.nodes[node_id as usize];
+            (node.children.child1, node.children.child2)
+        };
+        let a = tree.nodes[child1 as usize].aabb;
+        let b = tree.nodes[child2 as usize].aabb;
+        tree.nodes[node_id as usize].aabb = aabb_union(a, b);
+    }
+
+    tree.refit_stack = stack;
+    tree.refit_order = order;
+}
+
+/// PORT EXTENSION — not in upstream C. Enumerate every unordered pair of leaves
+/// in `tree` whose (fat) AABBs overlap, invoking `emit(leaf_a, leaf_b)` once per
+/// pair (leaf ids are proxy ids). This is the self-BVTT used by the adaptive
+/// broad-phase hybrid: one tree self-traversal in place of a per-moved-proxy
+/// query. `stack` is caller-owned scratch (reused across calls).
+pub fn dynamic_tree_self_pairs(tree: &DynamicTree, stack: &mut Vec<(i32, i32, bool)>, emit: &mut dyn FnMut(i32, i32)) {
+    if tree.root == NULL_INDEX || tree.node_count == 0 {
+        return;
+    }
+    stack.clear();
+    stack.push((tree.root, tree.root, true));
+    while let Some((a, b, is_self)) = stack.pop() {
+        if is_self {
+            let node = &tree.nodes[a as usize];
+            if is_leaf(node) {
+                continue;
+            }
+            let (c1, c2) = (node.children.child1, node.children.child2);
+            stack.push((c1, c1, true));
+            stack.push((c2, c2, true));
+            stack.push((c1, c2, false));
+        } else {
+            let na = &tree.nodes[a as usize];
+            let nb = &tree.nodes[b as usize];
+            if !aabb_overlaps(na.aabb, nb.aabb) {
+                continue;
+            }
+            let a_leaf = is_leaf(na);
+            let b_leaf = is_leaf(nb);
+            if a_leaf && b_leaf {
+                emit(a, b);
+            } else if b_leaf || (!a_leaf && perimeter(na.aabb) >= perimeter(nb.aabb)) {
+                stack.push((na.children.child1, b, false));
+                stack.push((na.children.child2, b, false));
+            } else {
+                stack.push((a, nb.children.child1, false));
+                stack.push((a, nb.children.child2, false));
+            }
+        }
+    }
+}
+
+/// PORT EXTENSION — not in upstream C. Enumerate overlapping leaf pairs across
+/// two trees (`leaf_a` in `tree_a`, `leaf_b` in `tree_b`), `emit(leaf_a, leaf_b)`
+/// once each. The cross-BVTT for dynamic-vs-static and dynamic-vs-kinematic.
+pub fn dynamic_tree_cross_pairs(
+    tree_a: &DynamicTree,
+    tree_b: &DynamicTree,
+    stack: &mut Vec<(i32, i32, bool)>,
+    emit: &mut dyn FnMut(i32, i32),
+) {
+    if tree_a.root == NULL_INDEX || tree_a.node_count == 0 || tree_b.root == NULL_INDEX || tree_b.node_count == 0 {
+        return;
+    }
+    stack.clear();
+    stack.push((tree_a.root, tree_b.root, false));
+    while let Some((a, b, _)) = stack.pop() {
+        let na = &tree_a.nodes[a as usize];
+        let nb = &tree_b.nodes[b as usize];
+        if !aabb_overlaps(na.aabb, nb.aabb) {
+            continue;
+        }
+        let a_leaf = is_leaf(na);
+        let b_leaf = is_leaf(nb);
+        if a_leaf && b_leaf {
+            emit(a, b);
+        } else if b_leaf || (!a_leaf && perimeter(na.aabb) >= perimeter(nb.aabb)) {
+            stack.push((na.children.child1, b, false));
+            stack.push((na.children.child2, b, false));
+        } else {
+            stack.push((a, nb.children.child1, false));
+            stack.push((a, nb.children.child2, false));
+        }
+    }
+}
+
+// PORT EXTENSION — not in upstream C. One BVTT descent step, shared by the
+// self- and cross-traversals above and by the parallel frontier machinery
+// below. For `is_self` (single-node self work, `a` in `tree_a`, `b` ignored)
+// it expands to the two child self-problems + the cross-problem, exactly like
+// dynamic_tree_self_pairs. Otherwise (`a` in `tree_a`, `b` in `tree_b`) it
+// descends the larger node, exactly like dynamic_tree_cross_pairs, reporting
+// overlapping leaf pairs via `on_leaf`. For a self-traversal callers pass
+// `tree_a == tree_b`.
+#[inline]
+fn bvtt_step(
+    tree_a: &DynamicTree,
+    tree_b: &DynamicTree,
+    a: i32,
+    b: i32,
+    is_self: bool,
+    stack: &mut Vec<(i32, i32, bool)>,
+    on_leaf: &mut dyn FnMut(i32, i32),
+) {
+    if is_self {
+        let node = &tree_a.nodes[a as usize];
+        if is_leaf(node) {
+            return;
+        }
+        let (c1, c2) = (node.children.child1, node.children.child2);
+        stack.push((c1, c1, true));
+        stack.push((c2, c2, true));
+        stack.push((c1, c2, false));
+    } else {
+        let na = &tree_a.nodes[a as usize];
+        let nb = &tree_b.nodes[b as usize];
+        if !aabb_overlaps(na.aabb, nb.aabb) {
+            return;
+        }
+        let a_leaf = is_leaf(na);
+        let b_leaf = is_leaf(nb);
+        if a_leaf && b_leaf {
+            on_leaf(a, b);
+        } else if b_leaf || (!a_leaf && perimeter(na.aabb) >= perimeter(nb.aabb)) {
+            stack.push((na.children.child1, b, false));
+            stack.push((na.children.child2, b, false));
+        } else {
+            stack.push((a, nb.children.child1, false));
+            stack.push((a, nb.children.child2, false));
+        }
+    }
+}
+
+/// PORT EXTENSION — not in upstream C. Drain a PRE-SEEDED work stack to
+/// completion, reporting every overlapping leaf pair via `on_leaf`. Used by
+/// the parallel batch drain: each worker seeds the stack with one frontier
+/// work item and drains it. Produces exactly the leaf pairs contained under
+/// that work item's subtree pair.
+pub fn dynamic_tree_bvtt_drain(
+    tree_a: &DynamicTree,
+    tree_b: &DynamicTree,
+    stack: &mut Vec<(i32, i32, bool)>,
+    on_leaf: &mut dyn FnMut(i32, i32),
+) {
+    while let Some((a, b, is_self)) = stack.pop() {
+        bvtt_step(tree_a, tree_b, a, b, is_self, stack, on_leaf);
+    }
+}
+
+/// PORT EXTENSION — not in upstream C. Expand a PRE-SEEDED work stack until it
+/// holds at least `target` items (or empties), reporting any terminal leaf
+/// pairs found during expansion via `on_leaf`. The leftover stack is a
+/// frontier: a set of independent subtree-pair work items that together cover
+/// exactly the not-yet-reported leaf pairs, with no overlap — so draining each
+/// (via `dynamic_tree_bvtt_drain`) in parallel and unioning the results
+/// reproduces the full serial traversal set exactly. Distribution-independent
+/// by construction.
+pub fn dynamic_tree_bvtt_expand(
+    tree_a: &DynamicTree,
+    tree_b: &DynamicTree,
+    stack: &mut Vec<(i32, i32, bool)>,
+    target: usize,
+    on_leaf: &mut dyn FnMut(i32, i32),
+) {
+    while stack.len() < target {
+        let Some((a, b, is_self)) = stack.pop() else {
+            break;
+        };
+        bvtt_step(tree_a, tree_b, a, b, is_self, stack, on_leaf);
+    }
+}
+
 /// Get proxy user data.
 #[inline]
 pub fn dynamic_tree_get_user_data(tree: &DynamicTree, proxy_id: i32) -> u64 {
