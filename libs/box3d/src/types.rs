@@ -93,6 +93,19 @@ pub struct WorldDef {
     /// state).
     pub enable_feature_recycling: bool,
 
+    /// PORT EXTENSION — not in upstream C. Adaptive broad-phase maintenance:
+    /// on steps where a large fraction of proxies moved (coherent-motion
+    /// scenes like a rotating drum), the dynamic tree is maintained with a
+    /// cheap bottom-up refit plus a periodic rebuild for balance, instead of
+    /// the per-step near-full median rebuild. Settled scenes (few movers) are
+    /// untouched — they keep the exact per-step median rebuild. The candidate
+    /// pair SET is identical either way (queries find the same overlaps), so
+    /// the physics is unchanged; only the tree topology, and thus the
+    /// pair-discovery order, differs, which shifts the determinism hash (a
+    /// re-baseline, like feature recycling). Determinism guarantees
+    /// (run-to-run, cross-worker, cross-arch) are preserved.
+    pub enable_broad_phase_hybrid: bool,
+
     /// Number of workers to use with the provided task system. This is clamped
     /// to the range [1, MAX_WORKERS]. Using a value above 1 turns on
     /// multithreading. If task callbacks are provided then Box3D will use the
@@ -142,6 +155,7 @@ pub fn default_world_def() -> WorldDef {
         enable_sleep: true,
         enable_continuous: true,
         enable_feature_recycling: true,
+        enable_broad_phase_hybrid: false,
         worker_count: 0,
         enqueue_task: None,
         finish_task: None,
@@ -1349,6 +1363,17 @@ pub struct DynamicTree {
 
     /// Allocated space for rebuilding.
     pub rebuild_capacity: i32,
+
+    /// PORT EXTENSION — not in upstream C. Reusable scratch for the bottom-up
+    /// refit (`refit_and_clear_enlarged`): a DFS stack and a pre-order list of
+    /// internal node ids. Empty unless the broad-phase hybrid is active.
+    pub refit_stack: Vec<i32>,
+    pub refit_order: Vec<i32>,
+
+    /// PORT EXTENSION — not in upstream C. Steps until the next full median
+    /// rebuild while the hybrid refit path is active (balance cadence). 0
+    /// forces a rebuild this step.
+    pub rebuild_countdown: i32,
 }
 
 /// These are performance results returned by dynamic tree queries.

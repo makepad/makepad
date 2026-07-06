@@ -700,6 +700,34 @@ fn determinism_across_worker_counts() {
     ensure!(hash1 != 0);
 }
 
+// PORT EXTENSION — not in upstream C. The adaptive broad-phase hybrid
+// (WorldDef.enable_broad_phase_hybrid) re-baselines the hash (contact creation
+// order changes), but must still be fully deterministic: the parallel BVTT
+// batch is canonically sorted, so its result is independent of worker count
+// and work distribution. This asserts the ON-path hash is identical across
+// worker counts (and, in debug builds, exercises the batch-vs-per-mover
+// SET-equality assertion inside update_broad_phase_pairs at every count).
+#[test]
+fn determinism_broad_phase_hybrid_across_worker_counts() {
+    let mut def1 = default_world_def();
+    def1.worker_count = 1;
+    def1.enable_broad_phase_hybrid = true;
+    let (sleep_step1, hash1) = run_scenario_with_def(def1);
+    println!("hybrid workers=1: sleepStep={} hash=0x{:08X}", sleep_step1, hash1);
+
+    for worker_count in [2u32, 4u32] {
+        let mut def = default_world_def();
+        def.worker_count = worker_count;
+        def.enable_broad_phase_hybrid = true;
+        let (sleep_step, hash) = run_scenario_with_def(def);
+        println!("hybrid workers={}: sleepStep={} hash=0x{:08X}", worker_count, sleep_step, hash);
+        ensure!(sleep_step == sleep_step1);
+        ensure!(hash == hash1);
+    }
+
+    ensure!(hash1 != 0);
+}
+
 // The external task-system hooks (C: b3WorldDef enqueueTask/finishTask) must
 // also be bit-deterministic: the same tasks run, just on user threads.
 #[test]

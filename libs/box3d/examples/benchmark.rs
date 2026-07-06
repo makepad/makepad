@@ -1320,6 +1320,7 @@ fn main() {
     let mut enable_continuous = true;
     let mut worker_count: u32 = 1;
     let mut feature_recycling: Option<bool> = None;
+    let mut broad_phase_hybrid: Option<bool> = None;
 
     for arg in std::env::args().skip(1) {
         if let Some(v) = arg.strip_prefix("-b=") {
@@ -1335,6 +1336,10 @@ fn main() {
             // PORT EXTENSION: force the feature-recycling tier on (1) or
             // off (0); default follows default_world_def().
             feature_recycling = Some(v.parse::<i32>().unwrap_or(0) != 0);
+        } else if let Some(v) = arg.strip_prefix("-bp=") {
+            // PORT EXTENSION: force the adaptive broad-phase hybrid on (1) or
+            // off (0); default follows default_world_def().
+            broad_phase_hybrid = Some(v.parse::<i32>().unwrap_or(0) != 0);
         } else if arg.starts_with("-t=") || arg == "-s" {
             println!("note: {} ignored (no thread sweep, no step-time files)", arg);
         } else if arg == "-h" {
@@ -1373,6 +1378,9 @@ fn main() {
             let mut world_def = default_world_def();
             world_def.enable_continuous = enable_continuous;
             world_def.worker_count = worker_count;
+            if let Some(bp) = broad_phase_hybrid {
+                world_def.enable_broad_phase_hybrid = bp;
+            }
             if let Some(fr) = feature_recycling {
                 world_def.enable_feature_recycling = fr;
             }
