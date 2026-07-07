@@ -23,17 +23,29 @@ script_mod! {
             auto_tail: true
             smooth_tail: true
             selectable: true
+            // Drop (don't pool) items that leave the list so a removed glass message's overlay
+            // draw list is freed — the overlay flush then clears its stuck lensing widgets.
+            reuse_items: false
 
-            User := RoundedView {
+            User := glass.Card {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
+                // Extra vertical margin gives the (now smaller) shadow room so it isn't clipped by
+                // the list-item bounds - the glass shader expands the quad by shadow_radius.
+                margin: Inset{top: 8 bottom: 10 left: 50 right: 8}
+                padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
                 flow: Overlay
-                show_bg: true
+                // Frosted blue glass message bubble: refracts the vector backdrop and tints it
+                // blue, instead of a flat solid fill.
                 draw_bg +: {
-                    color: #3a5a8a
-                    radius: 8.0
+                    corner_radius: 10.0
+                    tint_color: #x6fa6ff
+                    tint_alpha: 0.16
+                    lensing_effect: 0.5
+                    border_alpha: 0.5
+                    // Smaller, tighter shadow so it doesn't read as fat or get cut off.
+                    shadow_radius: 9.0
+                    shadow_offset: vec2(0.0, 3.0)
                 }
 
                 selectable := Markdown {
@@ -96,8 +108,10 @@ script_mod! {
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
                 flow: Overlay
                 show_bg: true
+                // Transparent assistant bubble so glass UIs rendered inside refract the window
+                // backdrop (an opaque bubble would be all the glass could "see").
                 draw_bg +: {
-                    color: #2a2a3a
+                    color: #2a2a3a00
                     radius: 8.0
                 }
 
@@ -180,9 +194,42 @@ script_mod! {
                 window.inner_size: vec2(900, 700)
                 window.title: "AI Chat"
                 body +: {
-                    flow: Down
-                    padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
-                    spacing: 12
+                    flow: Overlay
+                    show_bg: true
+                    draw_bg.color: #x05070e
+
+                    // Styled backdrop: a crisp VECTOR scene (resolution-independent) so the glass
+                    // UIs in the chat have real high-frequency detail to refract/blur. A pre-blurred
+                    // shader gradient blurs to nothing; hard vector edges (shapes, rings, ribbons,
+                    // dots) are exactly what makes the gauss lensing read as glass.
+                    Svg{
+                        width: Fill
+                        height: Fill
+                        // Drive the SVG's animateTransform clock (slowly drifting swirl drapes).
+                        animating: true
+                        draw_svg +: {
+                            // Stretch the art to fill the window (default preserve_aspect letterboxes
+                            // a fixed-ratio viewBox, leaving dead flat areas the glass can't lens).
+                            preserve_aspect: false
+                            svg: crate_resource("self:resources/background.svg")
+                        }
+                    }
+                    // Barely-there veil: just enough to seat the header text, but light enough
+                    // that the glass still refracts the FULL-brightness backdrop (a heavier veil
+                    // darkened the gauss and made the glass look black).
+                    View{
+                        width: Fill
+                        height: Fill
+                        show_bg: true
+                        draw_bg.color: #x05070e18
+                    }
+
+                    content_layer := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
+                        spacing: 12
 
                     View {
                         width: Fill
@@ -219,26 +266,29 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 1.0}
 
-                        input := TextInput {
+                        input := glass.TextInput {
                             width: Fill
-                            height: Fit
+                            height: 42
                             empty_text: "Type a message... (Enter to send)"
                         }
 
-                        send_button := Button {
+                        send_button := glass.GlassButtonProminent {
                             text: "Send"
-                            width: 80
+                            width: 84
+                            height: 42
                         }
 
-                        cancel_button := Button {
+                        cancel_button := glass.GlassButton {
                             text: "Cancel"
-                            width: 80
+                            width: 84
+                            height: 42
                             visible: false
                         }
 
-                        clear_button := Button {
+                        clear_button := glass.GlassButton {
                             text: "Clear"
-                            width: 80
+                            width: 84
+                            height: 42
                         }
                     }
 
@@ -253,6 +303,7 @@ script_mod! {
                             draw_text.text_style.font_size: 10
                             draw_text.color: #888
                         }
+                    }
                     }
                 }
             }
@@ -317,8 +368,11 @@ impl ChatData {
     }
 
     pub fn load_from_disk() -> Vec<ChatMessage> {
+        // Use the saved log if there is one; on a fresh install (no save file yet) seed the chat
+        // with the bundled default history so the showcase opens with example apps instead of blank.
         std::fs::read_to_string(CHAT_SAVE_PATH)
             .ok()
+            .or_else(|| Some(include_str!("../resources/default_history.json").to_string()))
             .and_then(|s| SavedHistory::deserialize_json(&s).ok())
             .map(|saved| {
                 saved
@@ -411,7 +465,7 @@ impl Widget for ChatList {
 
 fn claude_splash_system_prompt() -> String {
     let splash_md_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../splash.md");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../splash.md");
     let splash_md = std::fs::read_to_string(&splash_md_path)
         .unwrap_or_else(|_| include_str!("../../../splash.md").to_string());
     format!(
@@ -537,7 +591,10 @@ impl App {
             data.save_to_disk();
         }
         self.create_backend_session(cx, self.active_backend);
-        self.ui.redraw(cx);
+        // Full repaint (not just ui.redraw) so the window overlay pass is rebuilt — the glass
+        // widgets draw into self-managed overlay draw lists, and a partial redraw can leave
+        // those stale lists composited (the "stuck glass after Clear" bug).
+        cx.redraw_all();
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
@@ -581,7 +638,7 @@ impl App {
         }
 
         self.current_prompt = Some(agent.send_prompt(cx, session_id, &text));
-        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
+        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         let list = chat_list.portal_list(cx, ids!(list));
@@ -605,7 +662,7 @@ impl App {
             data.is_streaming = false;
             drop(data);
 
-            self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+            self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
     }
@@ -627,13 +684,13 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(send_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
-        if self.ui.button(cx, ids!(cancel_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(cancel_button)).clicked(actions) {
             self.cancel_request(cx);
         }
-        if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
+        if self.ui.glass_button(cx, ids!(clear_button)).clicked(actions) {
             self.clear_chat(cx);
         }
         if self
@@ -671,7 +728,8 @@ impl MatchEvent for App {
                     data.save_to_disk();
                 }
                 drop(data);
-                self.ui.redraw(cx);
+                // Full repaint so removing a glass message doesn't leave its overlay stuck.
+                cx.redraw_all();
             }
         }
     }
@@ -739,13 +797,13 @@ impl AppMain for App {
                         drop(data);
 
                         self.current_prompt = None;
-                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
                         CHAT_DATA.write().unwrap().is_streaming = false;
                         self.current_prompt = None;
-                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.ui
                             .label(cx, ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));

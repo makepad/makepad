@@ -59,6 +59,14 @@ pub struct ScriptHeap {
 }
 
 impl ScriptHeap {
+    /// A stable, unique identity for this heap for its lifetime, matching
+    /// [`ScriptObjectRef::heap_key`] for every ref minted here. Used to map a
+    /// heap to its owning script VM so a widget's objects are always resolved
+    /// against the heap that created them.
+    pub fn heap_key(&self) -> usize {
+        Rc::as_ptr(&self.root_objects) as *const () as usize
+    }
+
     /// Cap on the number of cleared `String` buffers kept around for reuse. Each one holds a
     /// heap allocation; a big script burst can stash thousands of them in `strings_reuse`,
     /// which would otherwise never be released.
