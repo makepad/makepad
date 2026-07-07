@@ -367,8 +367,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn bundled_font_path() -> PathBuf {
+        // No text fonts are bundled anymore; reuse a still-bundled code font as a
+        // generic readable asset for the file-loading tests.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../widgets/resources/IBMPlexSans-Text.ttf")
+            .join("../../widgets/resources/jetbrains_mono_variable.ttf")
     }
 
     #[test]

@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 use napi_ohos::sys::*;
-use std::ffi::CString;
+use std::ffi::{c_char, CString};
 use std::ptr::null_mut;
 
 fn value_type_to_string(val_type: &napi_valuetype) -> String {
@@ -49,6 +49,18 @@ pub fn get_value_string(raw_env: napi_env, str_value: napi_value) -> Option<Stri
         }
         Ok(s) => Some(s),
     }
+}
+
+pub fn create_string(raw_env: napi_env, s: &str) -> Option<napi_value> {
+    let mut result = null_mut();
+    let napi_status = unsafe {
+        napi_create_string_utf8(raw_env, s.as_ptr() as *const c_char, s.len(), &mut result)
+    };
+    if napi_status != Status::napi_ok {
+        crate::error!("failed to create napi string");
+        return None;
+    }
+    Some(result)
 }
 
 pub fn get_value_f64(raw_env: napi_env, f64_value: napi_value) -> Option<f64> {

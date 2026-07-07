@@ -345,43 +345,38 @@ script_mod! {
         font_size_4: theme.font_size_base + 1 * theme.font_size_contrast
         font_size_p: theme.font_size_base
 
+        // Only the UI (latin) font is declared statically. CJK and emoji are
+        // resolved on demand — the layouter reports uncovered scripts / emoji
+        // and `DrawText` fetches a covering system font and appends it as a
+        // fallback member. This keeps the large CJK and (very large) color
+        // emoji fonts out of memory unless text actually needs them.
         font_label: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: system_font("ui", 400, false) asc: -0.1 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_regular: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: system_font("ui", 400, false) asc: -0.1 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_bold: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: system_font("ui", 700, false) asc: -0.1 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_italic: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: system_font("ui", 400, true) asc: -0.1 desc: 0.0}
             }
             line_spacing: 1.2
         }
         font_bold_italic: TextStyle{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: system_font("ui", 700, true) asc: -0.1 desc: 0.0}
             }
             line_spacing: 1.2
         }

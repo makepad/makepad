@@ -186,43 +186,11 @@ fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
     }
 }
 
-fn should_skip_eager_resource_load(abs_path: &str) -> bool {
-    is_heavy_bundled_fallback_font_path(abs_path)
-}
-
-#[cfg(any(test, target_arch = "wasm32"))]
-fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
-    match path.replace('\\', "/").as_str() {
-        "makepad_widgets/resources/GoNotoKurrent-Bold.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-SemiBold.ttf")
-        }
-        "makepad_widgets/resources/GoNotoKurrent-Regular.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/LXGWWenKaiRegular.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/LXGWWenKaiBold.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        "makepad_widgets/resources/NotoColorEmoji.ttf" => {
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        }
-        _ => None,
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
-    let mut dep_path = dep_path;
     let mut base_path = String::new();
     if let crate::cx::OsType::Web(params) = &cx.os_type {
         base_path = web_resource_base_path(&params.pathname);
-        if params.small_font_aliases {
-            if let Some(remapped) = remapped_small_font_dependency_path(dep_path) {
-                dep_path = remapped;
-            }
-        }
     }
     if base_path.is_empty() {
         dep_path.to_string()
@@ -249,35 +217,6 @@ fn web_resource_base_path(pathname: &str) -> String {
         pathname
     };
     base_path.trim_start_matches('/').to_string()
-}
-
-fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
-    if !is_widgets_resources_path(path) {
-        return false;
-    }
-    matches!(
-        resource_basename(path),
-        Some(name)
-            if name.eq_ignore_ascii_case("LXGWWenKaiRegular.ttf")
-                || name.eq_ignore_ascii_case("LXGWWenKaiBold.ttf")
-                || name.eq_ignore_ascii_case("NotoColorEmoji.ttf")
-    )
-}
-
-fn is_widgets_resources_path(path: &str) -> bool {
-    let mut prev_is_widgets = false;
-    for component in path.split(['/', '\\']) {
-        let is_resources = component.eq_ignore_ascii_case("resources");
-        if prev_is_widgets && is_resources {
-            return true;
-        }
-        prev_is_widgets = component.eq_ignore_ascii_case("widgets");
-    }
-    false
-}
-
-fn resource_basename(path: &str) -> Option<&str> {
-    path.rsplit(['/', '\\']).next()
 }
 
 impl Cx {
@@ -419,7 +358,6 @@ impl Cx {
             let resources = self.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .filter(|res| !should_skip_eager_resource_load(&res.abs_path))
                 .map(|res| res.handle)
                 .collect::<Vec<_>>()
         };
@@ -436,53 +374,7 @@ impl Cx {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        remapped_small_font_dependency_path, should_skip_eager_resource_load,
-        web_resource_base_path,
-    };
-
-    #[test]
-    fn skips_only_heavy_widgets_fallback_fonts() {
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/LXGWWenKaiRegular.ttf"
-        ));
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
-        ));
-        assert!(should_skip_eager_resource_load(
-            "/tmp/widgets/resources/NotoColorEmoji.ttf"
-        ));
-        assert!(!should_skip_eager_resource_load(
-            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
-        ));
-        assert!(!should_skip_eager_resource_load(
-            "/tmp/app/resources/LXGWWenKaiRegular.ttf"
-        ));
-    }
-
-    #[test]
-    fn remaps_only_known_small_font_fallback_dependency_paths() {
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiBold.ttf"),
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/NotoColorEmoji.ttf"),
-            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
-            None
-        );
-        assert_eq!(
-            remapped_small_font_dependency_path("app/resources/LXGWWenKaiRegular.ttf"),
-            None
-        );
-    }
+    use super::web_resource_base_path;
 
     #[test]
     fn derives_web_resource_base_path_from_browser_pathname() {
@@ -994,6 +886,110 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 dependency_path: None,
                 web_url: None,
                 data: CxScriptResourceData::Loaded(Rc::new(bytes)),
+                handle,
+            });
+
+            handle.into()
+        },
+    );
+
+    // res.system_font(role, weight, italic)
+    //
+    // Resolves the platform's default font for a semantic `role` ("ui", "serif",
+    // "mono", "cjk", "emoji") at runtime via the OS font API and returns an
+    // in-memory resource handle backed by the resolved bytes. `weight` is the
+    // OpenType weight (400 = regular, 700 = bold) and `italic` a bool.
+    //
+    // On platforms with no system-font API (wasm), or when the OS can't satisfy
+    // the request, the returned handle carries no bytes; `update_font_definitions`
+    // then skips that family member gracefully (no substitution, no crash).
+    vm.add_method(
+        res,
+        id_lut!(system_font),
+        script_args_def!(role = NIL, weight = NIL, italic = NIL),
+        move |vm, args| {
+            let role_val = script_value!(vm, args.role);
+            let weight_val = script_value!(vm, args.weight);
+            let italic_val = script_value!(vm, args.italic);
+
+            let role = if let Some(s) = vm.string_with(role_val, |_vm, s| s.to_string()) {
+                match s.as_str() {
+                    "ui" | "sans" | "sans-serif" => SystemFontRole::Ui,
+                    "serif" => SystemFontRole::Serif,
+                    "mono" | "monospace" => SystemFontRole::Mono,
+                    "cjk" | "chinese" => SystemFontRole::Cjk,
+                    "emoji" => SystemFontRole::Emoji,
+                    _ => {
+                        return script_err_type_mismatch!(
+                            vm.trap(),
+                            "system_font: unknown role (use ui/serif/mono/cjk/emoji)"
+                        )
+                    }
+                }
+            } else {
+                return script_err_type_mismatch!(
+                    vm.trap(),
+                    "system_font: role must be a string"
+                );
+            };
+
+            let weight = weight_val.as_number().map(|n| n as u32).unwrap_or(400);
+            let italic = italic_val.as_bool().unwrap_or(false);
+
+            let query = SystemFontQuery {
+                role,
+                weight,
+                italic,
+                lang: String::new(),
+                sample: String::new(),
+            };
+
+            let abs_path = format!(
+                "system-font://{:?}/{}/{}",
+                query.role, query.weight, query.italic
+            );
+
+            let cx = vm.host.cx_mut();
+            // Reuse the handle if this exact query was already registered in this
+            // eval (the abs_path encodes the full query).
+            if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&abs_path) {
+                return existing.into();
+            }
+
+            let bytes = cx.resolve_system_font(&query);
+
+            let handle_gc = CxScriptResourceGc {
+                resources: cx.script_data.resources.resources.clone(),
+                handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
+                handle: ScriptHandle::ZERO,
+            };
+            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+            let data = match bytes {
+                // This script-facing resource is a raw byte blob with no place to
+                // carry a `.ttc` face index, so it exposes face 0's bytes. (The
+                // draw-text path uses the full `SystemFontResult`, index included.)
+                Some(result) => {
+                    // `result.bytes` is now `SharedBytes` (mmap-backed on
+                    // path-based backends), but `CxScriptResourceData::Loaded`
+                    // is shared with HTTP/file resources and its accessors are
+                    // tied to `Rc<Vec<u8>>`, so we materialize an owned copy
+                    // here. The copy is confined to this rarely-used
+                    // script-facing `system_font()` resource; the draw-text
+                    // fallback path (the emoji/CJK memory hot path) keeps the
+                    // bytes zero-copy via `SharedBytes`.
+                    CxScriptResourceData::Loaded(std::rc::Rc::new(
+                        result.bytes.as_slice().to_vec(),
+                    ))
+                }
+                None => CxScriptResourceData::Error("system font not available".to_string()),
+            };
+
+            cx.script_data.resources.insert_resource(CxScriptResource {
+                abs_path,
+                dependency_path: None,
+                web_url: None,
+                data,
                 handle,
             });
 

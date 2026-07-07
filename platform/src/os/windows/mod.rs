@@ -18,6 +18,7 @@ pub mod winrt_midi;
 //pub mod com_sys;
 pub mod angle;
 pub mod d3d11;
+pub mod dwrite_sys;
 pub mod windows;
 pub mod windows_game_input;
 pub mod windows_stdin;

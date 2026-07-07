@@ -54,6 +54,9 @@ impl fmt::Debug for FontFace {
 
 impl FontFace {
     pub fn from_data_and_index(data: FontData, index: u32) -> Option<Self> {
+        // `data` must be sfnt (TTF/OTF) bytes — ttf_parser only understands
+        // sfnt. Callers holding a compressed web font (e.g. WOFF2) decompress it
+        // themselves before handing the bytes here.
         let parsed_data = data.clone();
         let face = ttf_parser::Face::parse(parsed_data.as_slice(), index).ok()?;
         let parsed = ParsedFontFace {

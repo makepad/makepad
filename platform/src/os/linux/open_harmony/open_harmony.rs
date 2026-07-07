@@ -606,6 +606,14 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
+    fn os_load_system_font(
+        &mut self,
+        query: &crate::cx_api::SystemFontQuery,
+    ) -> Option<crate::cx_api::SystemFontResult> {
+        let arkts = self.os.arkts_obj.as_mut()?;
+        super::oh_system_fonts::load_system_font(arkts, query)
+    }
+
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,

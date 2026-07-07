@@ -166,6 +166,13 @@ impl Builder {
         }
     }
 
+    /// Number of path commands emitted so far (diagnostic: whether an outline
+    /// actually produced geometry).
+    #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+    pub fn verb_count(&self) -> usize {
+        self.commands.len()
+    }
+
     pub fn finish(self, bounds: Rect<f32>, units_per_em: f32) -> GlyphOutline {
         let complexity = estimate_complexity(&self.commands);
         GlyphOutline {

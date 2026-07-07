@@ -1,0 +1,18 @@
+[package]
+name = "makepad-woff2"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Minimal WOFF2 to sfnt font decompressor for Makepad"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+# woff2 fonts embed their font tables as a single brotli stream (WOFF2 spec §4).
+# Pure-Rust decompressor — builds for wasm32-unknown-unknown. The `std` feature
+# gives the `Decompressor` reader (wraps std::io::Read).
+brotli-decompressor = { version = "5.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+rustybuzz = { version = "0.18.0", path = "../rustybuzz" }

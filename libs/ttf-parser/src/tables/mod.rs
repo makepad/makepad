@@ -46,6 +46,8 @@ pub mod fvar;
 #[cfg(feature = "variable-fonts")]
 pub mod gvar;
 #[cfg(feature = "variable-fonts")]
+pub mod hvgl;
+#[cfg(feature = "variable-fonts")]
 pub mod hvar;
 #[cfg(feature = "variable-fonts")]
 pub mod mvar;

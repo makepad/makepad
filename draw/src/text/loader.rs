@@ -65,15 +65,20 @@ impl Loader {
         self.font_family_definitions.insert(id, definition);
     }
 
+    /// Redefine a family. Returns `true` if the definition actually changed (so
+    /// the caller — the layouter — knows to evict its layout caches). Returns
+    /// `false` when the new definition is identical to the current one, in which
+    /// case nothing is touched: this is what stops the per-frame reshape thrash
+    /// when on-demand fallbacks have already converged.
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
         definition: FontFamilyDefinition,
-    ) {
+    ) -> bool {
         // Skip cache eviction if the definition is unchanged.
         if let Some(existing) = self.font_family_definitions.get(&id) {
             if *existing == definition {
-                return;
+                return false;
             }
         }
         if let Some(cached) = self.font_family_cache.get(&id) {
@@ -81,11 +86,13 @@ impl Loader {
             if cached_ids == definition.font_ids
                 && definition.expected_member_count == definition.font_ids.len()
             {
-                return;
+                self.font_family_definitions.insert(id, definition);
+                return false;
             }
         }
         self.font_family_cache.remove(&id);
         self.font_family_definitions.insert(id, definition);
+        true
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -109,37 +116,44 @@ impl Loader {
     }
 
     fn load_font_family(&mut self, id: FontFamilyId) -> FontFamily {
+        // A font family that was never defined is not an error: text can be laid
+        // out (and simply not rendered) with no fonts at all. Fall back to an
+        // empty family so callers never panic just for asking about an unknown
+        // family — makepad is a UI toolkit first and only needs fonts when it
+        // actually has text to render.
         let definition = self
             .font_family_definitions
             .get(&id)
             .cloned()
-            .unwrap_or_else(|| panic!("font family {:?} is not defined", id));
+            .unwrap_or_else(|| FontFamilyDefinition {
+                font_ids: Vec::new(),
+                expected_member_count: 0,
+            });
         FontFamily::new(
             id,
             self.shaper.clone(),
             definition
                 .font_ids
                 .into_iter()
-                .map(|font_id| self.get_or_load_font(font_id).clone())
+                // A font whose bytes are missing or fail to parse is skipped
+                // rather than fatal: the remaining fonts in the family still
+                // render, and a family that ends up empty just renders no text.
+                .filter_map(|font_id| self.get_or_load_font(font_id).cloned())
                 .collect(),
         )
     }
 
-    pub fn get_or_load_font(&mut self, id: FontId) -> &Rc<Font> {
+    pub fn get_or_load_font(&mut self, id: FontId) -> Option<&Rc<Font>> {
         if !self.font_cache.contains_key(&id) {
-            let font = self.load_font(id);
+            let font = self.load_font(id)?;
             self.font_cache.insert(id, Rc::new(font));
         }
-        self.font_cache.get(&id).unwrap()
+        self.font_cache.get(&id)
     }
 
-    fn load_font(&mut self, id: FontId) -> Font {
-        let definition = self
-            .font_definitions
-            .remove(&id)
-            .expect("font is not defined");
-        let mut face = FontFace::from_data_and_index(definition.data, definition.index)
-            .expect("failed to load font from definition");
+    fn load_font(&mut self, id: FontId) -> Option<Font> {
+        let definition = self.font_definitions.remove(&id)?;
+        let mut face = FontFace::from_data_and_index(definition.data, definition.index)?;
         let mut variations = definition.variations;
         if let Some(weight) = definition.weight {
             const FONT_WEIGHT_AXIS_TAG: u32 = u32::from_be_bytes(*b"wght");
@@ -155,13 +169,14 @@ impl Loader {
         if !variations.is_empty() {
             face.set_variations(&variations);
         }
-        Font::new(
+        Some(Font::new(
             id,
             self.rasterizer.clone(),
             face,
             definition.ascender_fudge_in_ems,
             definition.descender_fudge_in_ems,
-        )
+            definition.is_color_emoji,
+        ))
     }
 }
 
@@ -187,6 +202,13 @@ pub struct FontDefinition {
     pub weight: Option<f32>,
     /// Font variation axis settings as (tag_u32, value) pairs.
     pub variations: Vec<(u32, f32)>,
+    /// Whether this is a color-emoji font whose color bitmaps are drawn via
+    /// CoreText (`CTFontDrawGlyphs`) rather than decoded by `ttf_parser`. Set by
+    /// `ensure_fallback_for_emoji`, which is the one place that knows the font
+    /// was resolved for `SystemFontRole::Emoji`. On Apple platforms the `sbix`
+    /// table is stripped before parsing (see `sfnt_bytes_from_ctfont`), so this
+    /// flag — not a physical `sbix` table probe — gates the CoreText raster path.
+    pub is_color_emoji: bool,
 }
 
 #[cfg(test)]
@@ -198,15 +220,18 @@ mod tests {
     };
     use std::path::PathBuf;
 
-    fn bundled_font_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    fn code_rendering_font_path() -> PathBuf {
+        // No text fonts are bundled anymore (system fonts are resolved at runtime),
+        // so this test reuses the monospace font that is still bundled for code rendering.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../widgets/resources/jetbrains_mono_variable.ttf")
     }
 
     #[test]
     fn get_or_load_font_reuses_cached_instance() {
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0xCAFE_BABE_u64.into();
-        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+        let font_data = SharedBytes::from_file_mmap_or_read(code_rendering_font_path())
             .expect("font bytes should load");
 
         loader.define_font(
@@ -218,11 +243,12 @@ mod tests {
                 descender_fudge_in_ems: 0.0,
                 weight: None,
                 variations: Vec::new(),
+                is_color_emoji: false,
             },
         );
 
-        let first = loader.get_or_load_font(font_id).clone();
-        let second = loader.get_or_load_font(font_id).clone();
+        let first = loader.get_or_load_font(font_id).unwrap().clone();
+        let second = loader.get_or_load_font(font_id).unwrap().clone();
         assert!(std::rc::Rc::ptr_eq(&first, &second));
     }
 
@@ -296,6 +322,7 @@ mod tests {
                 descender_fudge_in_ems: 0.0,
                 weight: Some(200.0),
                 variations: Vec::new(),
+                is_color_emoji: false,
             },
         );
         loader.define_font(
@@ -307,11 +334,12 @@ mod tests {
                 descender_fudge_in_ems: 0.0,
                 weight: Some(800.0),
                 variations: Vec::new(),
+                is_color_emoji: false,
             },
         );
 
-        let regular = loader.get_or_load_font(regular_id).clone();
-        let bold = loader.get_or_load_font(bold_id).clone();
+        let regular = loader.get_or_load_font(regular_id).unwrap().clone();
+        let bold = loader.get_or_load_font(bold_id).unwrap().clone();
         let glyph_id = regular.with_ttf_parser_face(|face| {
             face.glyph_index('B')
                 .expect("test glyph should exist in variable font")

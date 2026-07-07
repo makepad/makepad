@@ -4,6 +4,7 @@ import inputMethod from '@ohos.inputMethod';
 import { window } from '@kit.ArkUI';
 import common from '@ohos.app.ability.common';
 import resourceManager from '@ohos.resourceManager';
+import font from '@ohos.font';
 
 declare type Any = ESObject;
 
@@ -87,6 +88,131 @@ export class ArkGlue{
 
   hideKeyBoard(): void {
     this.hideTextInput();
+  }
+
+  // Resolve system fonts for makepad's runtime font loader. `queryJson` is a JSON
+  // object { role, weight, italic, lang, sample } sent from Rust. We enumerate the
+  // system fonts via @ohos.font (synchronous, so it can be called from the native
+  // uv_loop callback), rank candidates by the requested role/weight/style, and return
+  // their file paths newline-separated (best first). Rust reads the bytes and — for the
+  // per-glyph `sample` case — verifies cmap coverage itself, since FontInfo carries no
+  // charset. Returns "" on any error (older devices without @ohos.font just get no text
+  // rather than a crash).
+  getSystemFontPaths(queryJson: string): string {
+    try {
+      let query: Any = JSON.parse(queryJson);
+      let role: string = (query.role ?? "ui") as string;
+      let wantWeight: number = (query.weight ?? 400) as number;
+      let wantItalic: boolean = (query.italic ?? false) as boolean;
+      let lang: string = ((query.lang ?? "") as string).toLowerCase();
+      let hasSample: boolean = ((query.sample ?? "") as string).length > 0;
+
+      let hints: string[] = ArkGlue.roleHints(role, lang);
+
+      let names: string[] = font.getSystemFontList();
+      interface Cand { path: string; rank: number; weight: number; italic: boolean; }
+      let cands: Cand[] = [];
+      let seen: Set<string> = new Set();
+      for (let name of names) {
+        let info: font.FontInfo;
+        try {
+          info = font.getFontByName(name);
+        } catch (e) {
+          continue;
+        }
+        if (info == null || info.path == null || info.path.length == 0) {
+          continue;
+        }
+        if (seen.has(info.path)) {
+          continue;
+        }
+        // Normalize family + fullName for substring matching against the role hints.
+        let hay: string = ArkGlue.normalizeFontId(
+          ((info.family ?? "") as string) + " " + ((info.fullName ?? "") as string) + " " + name);
+        let rank: number = hints.length + 1;
+        for (let i = 0; i < hints.length; i++) {
+          if (hay.indexOf(hints[i]) >= 0) {
+            rank = i;
+            break;
+          }
+        }
+        // For the role case we require a role match; for the sample case we keep
+        // everything (Rust decides by coverage) but still order matched fonts first.
+        if (!hasSample && rank > hints.length) {
+          continue;
+        }
+        seen.add(info.path);
+        cands.push({
+          path: info.path,
+          rank: rank,
+          weight: (info.weight ?? 400) as number,
+          italic: (info.italic ?? false) as boolean,
+        });
+      }
+
+      cands.sort((a, b) => {
+        if (a.rank != b.rank) {
+          return a.rank - b.rank;
+        }
+        let sa: number = (a.italic == wantItalic) ? 0 : 10000;
+        let sb: number = (b.italic == wantItalic) ? 0 : 10000;
+        let pa: number = sa + Math.abs(a.weight - wantWeight);
+        let pb: number = sb + Math.abs(b.weight - wantWeight);
+        return pa - pb;
+      });
+
+      if (cands.length == 0) {
+        return "";
+      }
+      // Role case: a single best path is enough. Sample case: hand Rust the whole
+      // ordered list so it can pick the first that actually covers the glyphs.
+      let out: string[] = [];
+      if (hasSample) {
+        for (let c of cands) {
+          out.push(c.path);
+        }
+      } else {
+        out.push(cands[0].path);
+      }
+      return out.join("\n");
+    } catch (e) {
+      console.error("getSystemFontPaths failed: " + JSON.stringify(e));
+      return "";
+    }
+  }
+
+  // Role → substring hints (normalized, best first), matched against a font's
+  // family/fullName/family-list name. Mirrors the heuristics the Rust side used to run
+  // over filenames; kept here so font selection lives next to the ArkTS font API.
+  private static roleHints(role: string, lang: string): string[] {
+    if (role == "serif") {
+      return ["harmonyossansserif", "notoserif", "serif"];
+    }
+    if (role == "mono") {
+      return ["harmonyossansmono", "monospace", "mono"];
+    }
+    if (role == "emoji") {
+      return ["hmoscoloremoji", "coloremoji", "emoji", "notocoloremoji"];
+    }
+    if (role == "cjk") {
+      if (lang.startsWith("ja")) {
+        return ["notosansjp", "harmonyossansjp", "jp", "cjk", "notosanscjk"];
+      }
+      if (lang.startsWith("ko")) {
+        return ["notosanskr", "harmonyossanskr", "kr", "cjk", "notosanscjk"];
+      }
+      if (lang.startsWith("zh-hant") || lang.startsWith("zh-tw")
+        || lang.startsWith("zh-hk") || lang.indexOf("hant") >= 0) {
+        return ["harmonyossanstc", "notosanstc", "tc", "cjk", "notosanscjk"];
+      }
+      return ["harmonyossanssc", "notosanssc", "sc", "cjk", "notosanscjk"];
+    }
+    // "ui" and anything else.
+    return ["harmonyossans", "roboto", "sans"];
+  }
+
+  private static normalizeFontId(s: string): string {
+    return s.toLowerCase().replace(/[_\- ]/g, "");
   }
 
   private async showTextInput(): Promise<void> {

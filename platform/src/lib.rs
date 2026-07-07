@@ -73,7 +73,10 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
-pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
+pub use crate::cx_api::{
+    can_play_type, CxSystemBrowser, SystemBrowserId, SystemFontQuery, SystemFontResult,
+    SystemFontRole,
+};
 pub use crate::xr_tsdf::{
     XrDepthAlignHeightMap, XrTsdfCooperativeStepResult, XrTsdfCooperativeStepStats,
 };

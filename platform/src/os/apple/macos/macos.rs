@@ -1722,6 +1722,96 @@ impl Cx {
 mod tests {
     use super::*;
 
+    // NOTE: these tests assert that some font bytes come back AND that they form
+    // a structurally well-formed sfnt (valid version word + in-bounds table
+    // directory — see `assert_well_formed_sfnt`). They do NOT prove the outlines
+    // extract, because `ttf_parser` lives in the draw crate, not here. The bytes
+    // now come from reassembling the CTFont's tables in memory (with variable
+    // tables flattened), the same path iOS uses; that the flattened SF Pro / CJK
+    // outlines actually render is verified end-to-end and offline against
+    // `ttf_parser` (baseline: 24/27 sample chars outline non-empty).
+    #[test]
+    fn system_font_resolves_each_role() {
+        use crate::cx_api::{SystemFontQuery, SystemFontRole};
+        use crate::os::apple::apple_system_fonts::load_system_font;
+        for role in [
+            SystemFontRole::Ui,
+            SystemFontRole::Mono,
+            SystemFontRole::Cjk,
+            SystemFontRole::Emoji,
+        ] {
+            let q = SystemFontQuery {
+                role,
+                weight: 400,
+                italic: false,
+                lang: String::new(),
+                sample: String::new(),
+            };
+            let bytes = load_system_font(&q).unwrap_or_default();
+            assert!(
+                bytes.len() > 1000,
+                "role {:?} resolved {} bytes",
+                role,
+                bytes.len()
+            );
+            assert_well_formed_sfnt(&bytes, &format!("role {:?}", role));
+        }
+    }
+
+    /// Sanity-check that `bytes` is a structurally valid sfnt: a known version
+    /// word, a table directory that fits, and every record's data range in
+    /// bounds. This catches a gross reassembly regression (bad offsets/lengths,
+    /// truncated buffer) without needing `ttf_parser`, which lives elsewhere.
+    fn assert_well_formed_sfnt(bytes: &[u8], ctx: &str) {
+        assert!(bytes.len() >= 12, "{ctx}: too short for sfnt header");
+        let version = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        // TrueType (0x00010000), CFF/'OTTO', or TrueType-collection 'true'.
+        assert!(
+            version == 0x0001_0000 || version == 0x4F54_544F || version == 0x7472_7565,
+            "{ctx}: unexpected sfnt version {version:#010x}"
+        );
+        let num_tables = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+        assert!(num_tables > 0, "{ctx}: zero tables");
+        let dir_end = 12 + num_tables * 16;
+        assert!(dir_end <= bytes.len(), "{ctx}: table directory overruns buffer");
+        for i in 0..num_tables {
+            let rec = 12 + i * 16;
+            let off = u32::from_be_bytes([bytes[rec + 8], bytes[rec + 9], bytes[rec + 10], bytes[rec + 11]]) as usize;
+            let len = u32::from_be_bytes([bytes[rec + 12], bytes[rec + 13], bytes[rec + 14], bytes[rec + 15]]) as usize;
+            assert!(
+                off + len <= bytes.len(),
+                "{ctx}: table {i} range {off}..{} overruns buffer of {}",
+                off + len,
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn system_font_resolves_for_sample_scripts() {
+        use crate::cx_api::{SystemFontQuery, SystemFontRole};
+        use crate::os::apple::apple_system_fonts::load_system_font;
+        // Per-glyph fallback: a representative character from a script not in
+        // the default UI font must still resolve to *some* covering font.
+        for sample in ["ก", "अ", "ا", "가", "ሀ"] {
+            let q = SystemFontQuery {
+                role: SystemFontRole::Ui,
+                weight: 400,
+                italic: false,
+                lang: String::new(),
+                sample: sample.to_string(),
+            };
+            let bytes = load_system_font(&q).unwrap_or_default();
+            assert!(
+                bytes.len() > 1000,
+                "sample {:?} resolved {} bytes",
+                sample,
+                bytes.len()
+            );
+            assert_well_formed_sfnt(&bytes, &format!("sample {:?}", sample));
+        }
+    }
+
     #[test]
     fn defer_platform_op_breaks_when_requeued_op_is_alone() {
         let window_id = WindowId(0, 0);
@@ -1775,6 +1865,22 @@ impl CxOsApi for Cx {
             let _ = sender.send(event);
             SignalToUI::set_ui_signal();
         }));
+    }
+
+    fn os_load_system_font(
+        &mut self,
+        query: &crate::cx_api::SystemFontQuery,
+    ) -> Option<crate::cx_api::SystemFontResult> {
+        // CoreText hands back a single-face font file per query (not a raw `.ttc`
+        // slice), so the face index is always 0. The bytes are synthesized in
+        // memory (reassembled from `CTFontCopyTable`), so there is no file to
+        // mmap — always the owned variant.
+        crate::os::apple::apple_system_fonts::load_system_font(query).map(|bytes| {
+            crate::cx_api::SystemFontResult {
+                bytes: crate::shared_bytes::SharedBytes::from_owned(std::rc::Rc::new(bytes)),
+                index: 0,
+            }
+        })
     }
 
     fn spawn_thread<F>(&mut self, f: F)

@@ -10,8 +10,39 @@ use {
         slug_atlas::{SlugAtlas, SlugGlyphCacheResult},
     },
     crate::makepad_platform::*,
-    std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
+    unicode_script::Script,
+    std::{
+        cell::RefCell,
+        collections::{HashMap, HashSet},
+        mem::ManuallyDrop,
+        rc::Rc,
+    },
 };
+
+/// Per-font-family fallback state, shared across every `DrawText` instance that
+/// maps to the same `FontFamilyId`.
+///
+/// `FontFamily` is a live field on each `DrawText`, so each widget holds its own
+/// instance — but every instance of a declared family maps to a single shared
+/// `FontFamilyId` and thus a single, whole-overwrite family definition in the
+/// loader. If each instance accumulated its own resolved fallbacks, the last
+/// writer would clobber the others' fallbacks (regression b21c7e8f: multi-script
+/// text rendered as tofu because a CJK widget and a multi-script widget kept
+/// overwriting each other's fallback list). Accumulating the *union* here, keyed
+/// by family id, fixes that.
+#[derive(Default)]
+struct FamilyFallbackState {
+    /// On-demand-resolved fallback font ids, in resolution order. Union across
+    /// all `DrawText` instances of this family; appended after the static family
+    /// members when the family definition is rebuilt.
+    fallback_font_ids: Vec<FontId>,
+    /// Scripts (keyed with weight + italic) already attempted, so we don't
+    /// re-query the OS every frame for a script we already resolved (or failed).
+    attempted_scripts: HashSet<(Script, u32, bool)>,
+    /// Emoji are `Script::Common` and never appear in `attempted_scripts`, so
+    /// they get their own attempted flag.
+    attempted_emoji: bool,
+}
 
 fn default_slug_new_glyphs_per_redraw(cx: &Cx) -> usize {
     match cx.os_type() {
@@ -40,6 +71,18 @@ pub struct Fonts {
     slug_built_glyphs_this_redraw: usize,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
+    /// Families whose member resources have all reached a terminal state
+    /// (loaded or failed) so there is nothing left to load — even if the family
+    /// never became "complete" (e.g. on wasm a `system_font` member can never
+    /// resolve). Once a family is settled, `ensure_fonts_loaded` stops
+    /// re-attempting resource loads every frame. Cleared implicitly by never
+    /// inserting when a member is still in flight.
+    settled_font_families: std::collections::HashSet<FontFamilyId>,
+    /// Per-family fallback state, accumulated across all `DrawText` instances of
+    /// each family (see `FamilyFallbackState`). The union of every instance's
+    /// on-demand resolutions, so rebuilding a family definition never drops one
+    /// instance's fallbacks in favor of another's.
+    family_fallbacks: HashMap<FontFamilyId, FamilyFallbackState>,
 }
 
 impl Fonts {
@@ -99,6 +142,8 @@ impl Fonts {
             slug_built_glyphs_this_redraw: 0,
             msdf_job_sender,
             msdf_result_receiver,
+            settled_font_families: std::collections::HashSet::new(),
+            family_fallbacks: HashMap::new(),
         }
     }
 
@@ -204,6 +249,75 @@ impl Fonts {
             .unwrap_or(false)
     }
 
+    /// Whether every member resource of `id` has settled and there is nothing
+    /// left to load, so `ensure_fonts_loaded` can stop re-attempting. Distinct
+    /// from `is_font_family_complete`: a family can be settled-but-incomplete
+    /// (e.g. an unresolvable `system_font` member on wasm).
+    pub fn is_font_family_settled(&self, id: FontFamilyId) -> bool {
+        self.settled_font_families.contains(&id)
+    }
+
+    pub fn mark_font_family_settled(&mut self, id: FontFamilyId) {
+        self.settled_font_families.insert(id);
+    }
+
+    /// Whether we've already attempted to resolve a fallback for `key`
+    /// (script + weight + italic) for this family. See `FamilyFallbackState`.
+    pub fn family_fallback_attempted_script(
+        &self,
+        id: FontFamilyId,
+        key: (Script, u32, bool),
+    ) -> bool {
+        self.family_fallbacks
+            .get(&id)
+            .map(|s| s.attempted_scripts.contains(&key))
+            .unwrap_or(false)
+    }
+
+    pub fn mark_family_fallback_script_attempted(
+        &mut self,
+        id: FontFamilyId,
+        key: (Script, u32, bool),
+    ) {
+        self.family_fallbacks
+            .entry(id)
+            .or_default()
+            .attempted_scripts
+            .insert(key);
+    }
+
+    pub fn family_fallback_attempted_emoji(&self, id: FontFamilyId) -> bool {
+        self.family_fallbacks
+            .get(&id)
+            .map(|s| s.attempted_emoji)
+            .unwrap_or(false)
+    }
+
+    pub fn mark_family_fallback_emoji_attempted(&mut self, id: FontFamilyId) {
+        self.family_fallbacks.entry(id).or_default().attempted_emoji = true;
+    }
+
+    /// Append `font_id` to the family's shared fallback list, de-duplicating.
+    /// Returns whether it was newly added (so callers know the union changed).
+    pub fn push_family_fallback_font(&mut self, id: FontFamilyId, font_id: FontId) -> bool {
+        let state = self.family_fallbacks.entry(id).or_default();
+        if state.fallback_font_ids.contains(&font_id) {
+            false
+        } else {
+            state.fallback_font_ids.push(font_id);
+            true
+        }
+    }
+
+    /// The family's accumulated fallback font ids (union across all instances),
+    /// in resolution order. Empty slice if none resolved yet.
+    pub fn family_fallback_font_ids(&self, id: FontFamilyId) -> &[FontId] {
+        self.family_fallbacks
+            .get(&id)
+            .map(|s| s.fallback_font_ids.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn is_font_known(&self, id: FontId) -> bool {
         self.layouter.is_font_known(id)
     }
@@ -212,12 +326,14 @@ impl Fonts {
         self.layouter.define_font_family(id, definition);
     }
 
+    /// Returns whether the definition actually changed (see
+    /// `Layouter::set_font_family_definition`).
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
         definition: FontFamilyDefinition,
-    ) {
-        self.layouter.set_font_family_definition(id, definition);
+    ) -> bool {
+        self.layouter.set_font_family_definition(id, definition)
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {

@@ -1,4 +1,6 @@
 pub mod color;
+#[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+pub mod color_emoji_render;
 pub mod font;
 pub mod font_atlas;
 pub mod font_face;
@@ -7,6 +9,8 @@ pub mod fonts;
 pub mod geom;
 pub mod glyph_outline;
 pub mod glyph_raster_image;
+#[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+pub mod hvgl_render;
 pub mod image;
 pub mod intern;
 pub mod layouter;

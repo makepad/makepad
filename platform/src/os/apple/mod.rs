@@ -17,6 +17,7 @@ mod apple_resources;
 
 pub mod apple_classes;
 pub mod apple_game_input;
+pub mod apple_system_fonts;
 pub mod apple_media;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple_video_playback;

@@ -212,6 +212,15 @@ impl Rasterizer {
         {
             return Some(rasterized_glyph);
         }
+        // iOS/tvOS/macOS: `AppleColorEmoji` stores color bitmaps as the private
+        // `emjc` sbix format the raster-image path can't decode (and the `sbix`
+        // table is stripped before parsing anyway). Draw via CoreText.
+        #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_color_coretext(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
         if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
             return Some(rasterized_glyph);
         }
@@ -226,6 +235,12 @@ impl Rasterizer {
     ) -> Option<RasterizedGlyph> {
         if let Some(rasterized_glyph) =
             self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
+        #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_color_coretext(font, glyph_id, dpxs_per_em)
         {
             return Some(rasterized_glyph);
         }
@@ -487,6 +502,50 @@ impl Rasterizer {
                 atlas_plane: AtlasPlane::R.index(),
                 origin_in_dpxs: raster_image.origin_in_dpxs() * achieved,
                 dpxs_per_em: native_dpxs * achieved,
+            })
+        })?
+    }
+
+    /// iOS/tvOS/macOS color emoji via CoreText's `CTFontDrawGlyphs`. Mirrors
+    /// `rasterize_glyph_raster_image` — same shared color-atlas slot, padding,
+    /// and `AtlasKind::Color` output — but sources the pixels from CoreText
+    /// (which owns the private `emjc` sbix decoder) instead of `ttf_parser`.
+    #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+    fn rasterize_glyph_color_coretext(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        const PADDING: usize = 2;
+
+        font.with_color_emoji_raster(glyph_id, dpxs_per_em, |raster| {
+            let key = GlyphImageKey {
+                font_id: font.id(),
+                glyph_id,
+                size: raster.size() + Size::from(2 * PADDING),
+                kind: GlyphImageKind::Color,
+            };
+            let (slot, allocated) = self.allocate_shared_slot(key)?;
+            let atlas_image_bounds = if !allocated {
+                slot.rect
+            } else {
+                let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+                {
+                    let size = image.size();
+                    image = image.subimage_mut(Rect::from(size).unpad(PADDING));
+                    raster.decode(&mut image);
+                }
+                slot.rect
+            };
+            Some(RasterizedGlyph {
+                atlas_kind: AtlasKind::Color,
+                atlas_size: self.atlas.size(),
+                atlas_image_bounds,
+                atlas_image_padding: PADDING,
+                atlas_plane: AtlasPlane::R.index(),
+                origin_in_dpxs: raster.origin_in_dpxs(),
+                dpxs_per_em: raster.dpxs_per_em(),
             })
         })?
     }

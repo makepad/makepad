@@ -60,6 +60,14 @@ script_mod! {
             Pbolditalic{text: "P bold italic copy text"}
 
             Hr{}
+            H4{text: "System-font fallback (per-glyph)"}
+            P{text: "Scripts not covered by the declared family members (Latin/CJK/emoji) are resolved per-glyph from the OS. Frame 1 may show tofu; frame 2 should render correctly. CPU/repaint must settle (no continuous redraw)."}
+            Label{text: "Thai: \u{0E2A}\u{0E27}\u{0E31}\u{0E2A}\u{0E14}\u{0E35}"}
+            Label{text: "Devanagari: \u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947}"}
+            Label{text: "Arabic (RTL): \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"}
+            Label{text: "Hangul: \u{C548}\u{B155}\u{D558}\u{C138}\u{C694}"}
+
+            Hr{}
             H4{text: "Styling Attributes Reference"}
             Label{
                 draw_text +: {

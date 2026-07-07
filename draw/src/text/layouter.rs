@@ -23,6 +23,7 @@ use {
         mem,
         rc::Rc,
     },
+    unicode_script::Script,
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -109,15 +110,24 @@ impl Layouter {
         self.loader.define_font_family(id, definition);
     }
 
+    /// Returns whether the definition actually changed. Only evicts the layout
+    /// caches when it did — an unchanged redefinition (the steady state once
+    /// on-demand fallbacks have converged) is a no-op, which is what stops the
+    /// per-frame reshape thrash.
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
         definition: FontFamilyDefinition,
-    ) {
-        self.loader.set_font_family_definition(id, definition);
-        self.cached_results.clear();
-        self.cache_lru_order.clear();
-        self.cache_bytes = 0;
+    ) -> bool {
+        let changed = self.loader.set_font_family_definition(id, definition);
+        if changed {
+            // A font-family redefinition changes glyph geometry, so every cached
+            // `LaidoutText` is stale.
+            self.cached_results.clear();
+            self.cache_lru_order.clear();
+            self.cache_bytes = 0;
+        }
+        changed
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -314,6 +324,15 @@ struct LayoutContext {
     current_row_end: usize,
     rows: Vec<LaidoutRow>,
     glyphs: Vec<LaidoutGlyph>,
+    /// De-duplicated Unicode scripts of characters that no font in the family
+    /// could cover during this layout (accumulated from each shaped run). The
+    /// Cx-aware caller (`DrawText::layout`) reads this from the produced
+    /// `LaidoutText` to ask the OS for covering fonts.
+    missing_scripts: Vec<Script>,
+    /// Whether any uncovered glyph during this layout was an emoji code point.
+    /// Emoji are `Script::Common` so they never land in `missing_scripts`; this
+    /// separate flag drives on-demand loading of the (huge) color emoji font.
+    missing_emoji: bool,
 }
 
 impl LayoutContext {
@@ -333,7 +352,21 @@ impl LayoutContext {
             current_row_end: 0,
             rows: Vec::new(),
             glyphs: Vec::new(),
+            missing_scripts: Vec::new(),
+            missing_emoji: false,
         }
+    }
+
+    /// Merges the coverage gaps a shaped run reported into the running set:
+    /// scripts (de-duplicated) plus the emoji flag (OR-ed in). Called from every
+    /// path that consumes a `ShapedText`.
+    fn accumulate_missing(&mut self, shaped: &ShapedText) {
+        for &script in &shaped.missing_scripts {
+            if !self.missing_scripts.contains(&script) {
+                self.missing_scripts.push(script);
+            }
+        }
+        self.missing_emoji |= shaped.missing_emoji;
     }
 
     fn current_row_is_first(&self) -> bool {
@@ -370,26 +403,32 @@ impl LayoutContext {
     fn layout_multiline(mut self) -> LaidoutText {
         let has_ellipsis_config = self.options.max_rows.is_some() || self.options.ellipsis;
 
-        for (line_index, len) in self
-            .text
-            .clone()
-            .split('\n')
-            .map(|line| line.len())
-            .enumerate()
-        {
+        let text = self.text.clone();
+        let mut prev_separator_len = 0;
+        let mut lines = text.split('\n').peekable();
+        let mut line_index = 0;
+        while let Some(line) = lines.next() {
+            let is_last_line = lines.peek().is_none();
+            let has_cr = line.ends_with('\r');
+            let content_len = if has_cr { line.len() - 1 } else { line.len() };
+            // Every line except the last is terminated by a `\n`; add the `\r`
+            // when the source used a `\r\n` ending.
+            let separator_len = if is_last_line { 0 } else { 1 + has_cr as usize };
             if line_index != 0 {
-                self.finish_current_row(true);
+                self.finish_current_row(prev_separator_len);
             }
             if self.is_past_max_rows() {
                 break;
             }
-            self.layout(len);
+            prev_separator_len = separator_len;
+            self.layout(content_len);
+            line_index += 1;
         }
 
         if has_ellipsis_config {
             self.apply_ellipsis_truncation()
         } else {
-            self.finish_current_row(false);
+            self.finish_current_row(0);
             self.finish_with(false)
         }
     }
@@ -428,7 +467,7 @@ impl LayoutContext {
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
                     } else {
-                        self.finish_current_row(false);
+                        self.finish_current_row(0);
                     }
                 }
             }
@@ -452,7 +491,7 @@ impl LayoutContext {
                     if self.current_row_is_empty() {
                         self.layout_directly(fitter.pop());
                     } else {
-                        self.finish_current_row(false);
+                        self.finish_current_row(0);
                     }
                 }
             }
@@ -469,6 +508,7 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
+        self.accumulate_missing(text);
         for glyph in &text.glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
@@ -487,13 +527,29 @@ impl LayoutContext {
         self.current_row_end += text.text.len();
     }
 
-    fn finish_current_row(&mut self, newline: bool) {
+    fn finish_current_row(&mut self, separator_len: usize) {
+        let newline = separator_len != 0;
         let font = self.font_family.fonts().first();
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
-        let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
-        let descender_in_lpxs =
+        // The primary font's metrics are the floor (so empty rows still get a
+        // sensible height). Then expand to the largest ascent / deepest descent /
+        // widest line-gap across the fonts actually used by this row's glyphs:
+        // fallback fonts (notably color emoji, whose bitmaps span a full 1.0 em
+        // above the baseline) can be taller than the primary text font, and
+        // reserving only the primary font's ascent would clip their tops.
+        let mut ascender_in_lpxs =
+            font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
+        let mut descender_in_lpxs =
             font.map_or(0.0, |font| font.descender_in_ems()) * font_size_in_lpxs;
-        let line_gap_in_lpxs = font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        let mut line_gap_in_lpxs =
+            font.map_or(0.0, |font| font.line_gap_in_ems()) * font_size_in_lpxs;
+        for glyph in &self.glyphs {
+            ascender_in_lpxs = ascender_in_lpxs.max(glyph.ascender_in_lpxs());
+            // Descender is negative (below baseline); the deepest row descent is
+            // the minimum.
+            descender_in_lpxs = descender_in_lpxs.min(glyph.descender_in_lpxs());
+            line_gap_in_lpxs = line_gap_in_lpxs.max(glyph.line_gap_in_lpxs());
+        }
 
         let text = self
             .text
@@ -522,27 +578,30 @@ impl LayoutContext {
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
-        if newline {
-            self.current_row_start += 1;
-            self.current_row_end += 1;
-        }
+        // Skip the line-separator bytes (`\n` or `\r\n`) so the `\r` is never
+        // shaped as a `.notdef` glyph and the cursor lands on the next line.
+        self.current_row_start += separator_len;
+        self.current_row_end += separator_len;
         self.rows.push(row);
     }
 
     fn finish_with(self, is_truncated: bool) -> LaidoutText {
         let last_row = self.rows.last().unwrap();
+        let size_in_lpxs = Size::new(
+            self.rows
+                .iter()
+                .map(|row| row.width_in_lpxs)
+                .reduce(f32::max)
+                .unwrap_or(0.0),
+            last_row.origin_in_lpxs.y - last_row.descender_in_lpxs,
+        );
         LaidoutText {
             text: self.text,
-            size_in_lpxs: Size::new(
-                self.rows
-                    .iter()
-                    .map(|row| row.width_in_lpxs)
-                    .reduce(f32::max)
-                    .unwrap_or(0.0),
-                last_row.origin_in_lpxs.y - last_row.descender_in_lpxs,
-            ),
+            size_in_lpxs,
             rows: self.rows,
             is_truncated,
+            missing_scripts: self.missing_scripts,
+            missing_emoji: self.missing_emoji,
         }
     }
 
@@ -555,10 +614,12 @@ impl LayoutContext {
         self.finish_current_row_if_pending();
 
         // Detect whether all text was consumed during layout.
-        // If not, text was truncated by the max_rows early-exit.
-        let all_text_consumed = self.current_row_end >= self.text.len()
-            || (self.current_row_end + 1 == self.text.len()
-                && self.text.as_bytes()[self.current_row_end] == b'\n');
+        // If not, text was truncated by the max_rows early-exit. Any trailing
+        // line-separator bytes (`\n` or `\r\n`) that were never laid out still
+        // count as consumed.
+        let all_text_consumed = self.text.as_bytes()[self.current_row_end..]
+            .iter()
+            .all(|&byte| byte == b'\n' || byte == b'\r');
 
         let max_rows = match self.options.max_rows {
             Some(max) if max > 0 => max,
@@ -595,6 +656,7 @@ impl LayoutContext {
     /// Truncates the last row to fit within `max_width` and appends an ellipsis glyph.
     fn truncate_last_row_with_ellipsis(&mut self, max_width: f32) {
         let ellipsis_shaped = self.font_family.get_or_shape("…".into());
+        self.accumulate_missing(&ellipsis_shaped);
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
         let ellipsis_width: f32 = ellipsis_shaped
             .glyphs
@@ -647,7 +709,7 @@ impl LayoutContext {
         let has_pending_content =
             self.current_row_start != self.current_row_end || !self.glyphs.is_empty();
         if has_pending_content || self.rows.is_empty() {
-            self.finish_current_row(false);
+            self.finish_current_row(0);
         }
     }
 }
@@ -1062,6 +1124,16 @@ pub struct LaidoutText {
     pub rows: Vec<LaidoutRow>,
     /// True when the text was truncated (e.g., due to `max_rows` or ellipsis).
     pub is_truncated: bool,
+    /// De-duplicated Unicode scripts of characters that no font in the family
+    /// could cover. Empty in the common case. The Cx-aware caller
+    /// (`DrawText::layout`) reads this to dynamically fetch system fonts that
+    /// cover these scripts and reshape on the next frame.
+    pub missing_scripts: Vec<Script>,
+    /// True when an uncovered glyph was an emoji code point. Emoji are
+    /// `Script::Common` and never appear in `missing_scripts`; the Cx-aware
+    /// caller reads this flag to load the color emoji font on demand (it is not
+    /// resident by default because it is very large — ~180MB on macOS).
+    pub missing_emoji: bool,
 }
 
 impl LaidoutText {

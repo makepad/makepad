@@ -436,6 +436,11 @@ pub struct CxDrawItem {
     // these values stick around to reduce buffer churn
     pub draw_item_id: usize,
     pub instances: Option<Vec<f32>>,
+    // (len, content-hash) of the instance data last uploaded to the GPU.
+    // Lets a rebuilt draw call whose instance bytes are byte-identical skip a
+    // redundant GPU upload even though `instance_dirty` was set structurally.
+    // Backend-independent so the decision can be unit-tested headlessly.
+    pub last_uploaded_instances: Option<(usize, u64)>,
     pub os: CxOsDrawCall,
 }
 
@@ -443,6 +448,34 @@ impl std::ops::Deref for CxDrawItem {
     type Target = CxDrawKind;
     fn deref(&self) -> &Self::Target {
         &self.kind
+    }
+}
+
+impl CxDrawItem {
+    /// Content fingerprint of an instance-data slice: `(len, hash)`. The hash
+    /// is the platform-wide FNV `LiveId` over the raw instance bytes. Pairing
+    /// it with the length makes collision-driven false-skips astronomically
+    /// unlikely and cheap (single O(n) pass, no allocation).
+    pub fn instance_fingerprint(instances: &[f32]) -> (usize, u64) {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                instances.as_ptr() as *const u8,
+                instances.len() * std::mem::size_of::<f32>(),
+            )
+        };
+        let hash = LiveId::from_bytes(LiveId::SEED, bytes, 0, bytes.len(), 0).0;
+        (instances.len(), hash)
+    }
+
+    /// Decide whether a draw call flagged `instance_dirty` actually needs a GPU
+    /// re-upload. Skips only when the new fingerprint exactly equals the one
+    /// last uploaded (same length AND same content hash) — otherwise uploads.
+    /// Pure so the value-vs-structural dirty behavior is unit-testable headless.
+    pub fn needs_instance_upload(
+        last_uploaded: Option<(usize, u64)>,
+        new_fingerprint: (usize, u64),
+    ) -> bool {
+        last_uploaded != Some(new_fingerprint)
     }
 }
 
@@ -573,6 +606,7 @@ impl CxDrawItems {
                 draw_item_id,
                 redraw_id,
                 instances: Some(Vec::new()),
+                last_uploaded_instances: None,
                 os: CxOsDrawCall::default(),
                 kind: kind,
             });

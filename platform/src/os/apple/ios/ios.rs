@@ -1663,6 +1663,22 @@ impl CxOsApi for Cx {
         self.apple_bundle_load_dependencies();
     }
 
+    fn os_load_system_font(
+        &mut self,
+        query: &crate::cx_api::SystemFontQuery,
+    ) -> Option<crate::cx_api::SystemFontResult> {
+        // CoreText hands back a single-face font file per query (not a raw `.ttc`
+        // slice), so the face index is always 0. The bytes are synthesized in
+        // memory (reassembled from `CTFontCopyTable`), so there is no file to
+        // mmap — always the owned variant.
+        crate::os::apple::apple_system_fonts::load_system_font(query).map(|bytes| {
+            crate::cx_api::SystemFontResult {
+                bytes: crate::shared_bytes::SharedBytes::from_owned(std::rc::Rc::new(bytes)),
+                index: 0,
+            }
+        })
+    }
+
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,

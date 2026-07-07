@@ -1080,8 +1080,7 @@ pub fn copy_resources(
                     continue;
                 }
                 // Skip files that already ship from the sibling `resources/` dir —
-                // otherwise the same TTF lands in the bundle twice. The widgets crate
-                // for instance keeps LXGWWenKai*.ttf and NotoColorEmoji.ttf in both.
+                // otherwise the same font file lands in the bundle twice.
                 if resource_dir.join(path).is_file() {
                     continue;
                 }

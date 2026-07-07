@@ -256,8 +256,6 @@ pub struct WebParams {
     pub search: String,
     #[live]
     pub hash: String,
-    #[live]
-    pub small_font_aliases: bool,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]

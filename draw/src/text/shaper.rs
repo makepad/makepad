@@ -13,6 +13,7 @@ use {
         mem,
         rc::Rc,
     },
+    unicode_script::{Script, UnicodeScript},
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -47,6 +48,73 @@ fn is_definitely_ltr(text: &str) -> bool {
             // Mathematical Alphabetic Symbols, etc.).
             || (0x1E800..=0x1EFFF).contains(&c)
     })
+}
+
+/// Whether `ch` is an emoji (should be rendered by the color emoji font).
+///
+/// Emoji code points are classified as `Script::Common` by Unicode, so the
+/// `collect_missing_scripts` script filter drops them; this predicate lets the
+/// shaper surface a separate "missing emoji" signal instead. The ranges cover
+/// the main emoji blocks plus the dingbats/misc-symbol ranges that carry emoji
+/// presentation; it only needs to be right for characters that fell back to
+/// `.notdef`, so a conservative superset is fine (the OS does real coverage
+/// matching when we then fetch the emoji font).
+fn is_emoji(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1F300..=0x1FAFF   // Misc symbols & pictographs, emoticons, transport, supplemental, symbols-and-pictographs-extended-A
+        | 0x1F000..=0x1F0FF // Mahjong/dominoes/playing cards
+        | 0x2600..=0x27BF   // Misc symbols + dingbats
+        | 0x2B00..=0x2BFF   // Misc symbols and arrows (stars etc.)
+        | 0x1F1E6..=0x1F1FF // Regional indicator symbols (flags)
+        | 0xFE00..=0xFE0F   // Variation selectors (VS16 emoji presentation)
+        | 0x2190..=0x21FF   // Arrows (some emoji-presented)
+        | 0x2300..=0x23FF   // Misc technical (⌚ ⏰ etc.)
+    )
+}
+
+/// Scan shaped glyphs for any that fell back to `.notdef` (id 0 — no font in
+/// the family covered them) and return the de-duplicated Unicode scripts of the
+/// characters they came from, plus whether any of them were emoji. Non-emoji
+/// `Common`/`Inherited`/`Unknown` are filtered out of the script list: they
+/// belong to whitespace, combining marks and shared punctuation, which give no
+/// useful signal about which language font to fetch. Emoji are also `Common`
+/// but are reported separately via the returned `bool` (an uncovered emoji
+/// triggers on-demand loading of the color emoji font).
+///
+/// `cluster` is the byte offset of the glyph's source character in `text`;
+/// we decode the `char` starting there to obtain its script.
+///
+/// Takes `(glyph_id, cluster)` pairs rather than `&[ShapedGlyph]` so the
+/// script-detection logic can be unit-tested without constructing real fonts.
+fn collect_missing_scripts(
+    text: &str,
+    glyphs: impl IntoIterator<Item = (GlyphId, usize)>,
+) -> (Vec<Script>, bool) {
+    let mut scripts: Vec<Script> = Vec::new();
+    let mut missing_emoji = false;
+    for (id, cluster) in glyphs {
+        if id != 0 {
+            continue;
+        }
+        let Some(rest) = text.get(cluster..) else {
+            continue;
+        };
+        let Some(ch) = rest.chars().next() else {
+            continue;
+        };
+        if is_emoji(ch) {
+            missing_emoji = true;
+            continue;
+        }
+        let script = ch.script();
+        if matches!(script, Script::Common | Script::Inherited | Script::Unknown) {
+            continue;
+        }
+        if !scripts.contains(&script) {
+            scripts.push(script);
+        }
+    }
+    (scripts, missing_emoji)
 }
 
 /// Float wrapper that supports Hash and Eq via bit representation.
@@ -160,9 +228,11 @@ impl Shaper {
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
         let mut glyphs = Vec::new();
-        if params.fonts.is_empty() {
-            println!("WARNING: encountered empty font family");
-        } else {
+
+        // An empty font family is a normal state, not an error: on platforms
+        // without a system-font API (e.g. wasm) UI text may resolve to no fonts
+        // at all. Shape to zero glyphs (renders nothing) instead of warning.
+        if !params.fonts.is_empty() {
             let text: &str = &params.text;
             // Fast path: when the text is guaranteed to contain no RTL
             // characters, skip the Unicode Bidirectional Algorithm entirely
@@ -245,10 +315,15 @@ impl Shaper {
             }
         }
 
+        let (missing_scripts, missing_emoji) =
+            collect_missing_scripts(&params.text, glyphs.iter().map(|g| (g.id, g.cluster)));
+
         ShapedText {
             text: params.text,
             width_in_ems: glyphs.iter().map(|glyph| glyph.advance_in_ems).sum(),
             glyphs,
+            missing_scripts,
+            missing_emoji,
         }
     }
 
@@ -414,6 +489,7 @@ impl Shaper {
         let glyph_buffer =
             font.with_rustybuzz_face(|face| rustybuzz::shape(face, rb_features, unicode_buffer));
         let units_per_em = font.units_per_em();
+
         out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()
@@ -454,6 +530,18 @@ pub struct ShapedText {
     pub text: Substr,
     pub width_in_ems: f32,
     pub glyphs: Vec<ShapedGlyph>,
+    /// Unicode scripts of characters that no font in the family could cover
+    /// (they shaped to `.notdef` / id 0). De-duplicated and free of the
+    /// `Common`/`Inherited`/`Unknown` scripts (whitespace, combining marks,
+    /// punctuation), which carry no useful fallback signal. Higher layers use
+    /// this to ask the OS for a font covering each script (see
+    /// `DrawText::layout` per-glyph system-font fallback).
+    pub missing_scripts: Vec<Script>,
+    /// Whether any uncovered glyph was an emoji code point. Emoji are Unicode
+    /// `Script::Common` (so they never appear in `missing_scripts`); this flag
+    /// is the separate signal that triggers on-demand loading of the color
+    /// emoji font, which is otherwise never resident (it is huge — ~180MB).
+    pub missing_emoji: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -464,4 +552,81 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_missing_scripts, GlyphId, Script};
+
+    // Helper: byte offset of the nth char in `s`.
+    fn byte_at(s: &str, n: usize) -> usize {
+        s.char_indices().nth(n).unwrap().0
+    }
+
+    #[test]
+    fn missing_thai_with_latin_only_reports_thai() {
+        // Simulates the family covering Latin but not Thai: the Latin chars
+        // shaped to real glyph ids, the Thai chars fell back to `.notdef` (0).
+        let text = "Hi สวัสดี";
+        let glyphs: Vec<(GlyphId, usize)> = vec![
+            (10, byte_at(text, 0)), // H
+            (11, byte_at(text, 1)), // i
+            (0, byte_at(text, 3)),  // ส  -> notdef
+            (0, byte_at(text, 4)),  // ว  -> notdef
+        ];
+        assert_eq!(collect_missing_scripts(text, glyphs), (vec![Script::Thai], false));
+    }
+
+    #[test]
+    fn covered_text_reports_nothing() {
+        // No `.notdef` glyphs -> no missing scripts.
+        let text = "Hello";
+        let glyphs: Vec<(GlyphId, usize)> =
+            vec![(10, 0), (11, 1), (12, 2), (13, 3), (14, 4)];
+        let (scripts, emoji) = collect_missing_scripts(text, glyphs);
+        assert!(scripts.is_empty());
+        assert!(!emoji);
+    }
+
+    #[test]
+    fn deduplicates_and_preserves_first_seen_order() {
+        let text = "नमस्ते สวัสดี";
+        let deva0 = byte_at(text, 0); // न Devanagari
+        let deva1 = byte_at(text, 1); // म Devanagari
+        let thai = byte_at(text, 7); // ส Thai
+        let glyphs: Vec<(GlyphId, usize)> =
+            vec![(0, deva0), (0, deva1), (0, thai)];
+        assert_eq!(
+            collect_missing_scripts(text, glyphs),
+            (vec![Script::Devanagari, Script::Thai], false)
+        );
+    }
+
+    #[test]
+    fn filters_common_inherited_unknown() {
+        // A space (Common) and a digit (Common) that fell back to notdef carry
+        // no useful fallback signal and must be filtered out.
+        let text = "a 1";
+        let glyphs: Vec<(GlyphId, usize)> = vec![
+            (0, byte_at(text, 1)), // ' ' Common
+            (0, byte_at(text, 2)), // '1' Common
+        ];
+        let (scripts, emoji) = collect_missing_scripts(text, glyphs);
+        assert!(scripts.is_empty());
+        assert!(!emoji);
+    }
+
+    #[test]
+    fn detects_emoji_via_separate_flag() {
+        // Emoji are Script::Common, so they must NOT appear in the script list,
+        // but must set the missing_emoji flag when uncovered.
+        let text = "a😀";
+        let glyphs: Vec<(GlyphId, usize)> = vec![
+            (10, byte_at(text, 0)), // 'a'
+            (0, byte_at(text, 1)),  // 😀 -> notdef
+        ];
+        let (scripts, emoji) = collect_missing_scripts(text, glyphs);
+        assert!(scripts.is_empty());
+        assert!(emoji);
+    }
 }

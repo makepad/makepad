@@ -78,7 +78,7 @@ pub use tables::CFFError;
 #[cfg(feature = "apple-layout")]
 pub use tables::{ankr, feat, kerx, morx, trak};
 #[cfg(feature = "variable-fonts")]
-pub use tables::{avar, cff2, fvar, gvar, hvar, mvar, vvar};
+pub use tables::{avar, cff2, fvar, gvar, hvar, hvgl, mvar, vvar};
 pub use tables::{cbdt, cblc, cff1 as cff, vhea};
 pub use tables::{
     cmap, colr, cpal, glyf, head, hhea, hmtx, kern, loca, maxp, name, os2, post, sbix, svg, vorg,
@@ -969,6 +969,8 @@ pub struct RawFaceTables<'a> {
     #[cfg(feature = "variable-fonts")]
     pub gvar: Option<&'a [u8]>,
     #[cfg(feature = "variable-fonts")]
+    pub hvgl: Option<&'a [u8]>,
+    #[cfg(feature = "variable-fonts")]
     pub hvar: Option<&'a [u8]>,
     #[cfg(feature = "variable-fonts")]
     pub mvar: Option<&'a [u8]>,
@@ -1038,6 +1040,8 @@ pub struct FaceTables<'a> {
     pub fvar: Option<fvar::Table<'a>>,
     #[cfg(feature = "variable-fonts")]
     pub gvar: Option<gvar::Table<'a>>,
+    #[cfg(feature = "variable-fonts")]
+    pub hvgl: Option<hvgl::Table<'a>>,
     #[cfg(feature = "variable-fonts")]
     pub hvar: Option<hvar::Table<'a>>,
     #[cfg(feature = "variable-fonts")]
@@ -1173,6 +1177,8 @@ impl<'a> Face<'a> {
                 b"glyf" => tables.glyf = table_data,
                 #[cfg(feature = "variable-fonts")]
                 b"gvar" => tables.gvar = table_data,
+                #[cfg(feature = "variable-fonts")]
+                b"hvgl" => tables.hvgl = table_data,
                 b"head" => tables.head = table_data.unwrap_or_default(),
                 b"hhea" => tables.hhea = table_data.unwrap_or_default(),
                 b"hmtx" => tables.hmtx = table_data,
@@ -1345,6 +1351,8 @@ impl<'a> Face<'a> {
             fvar: raw_tables.fvar.and_then(fvar::Table::parse),
             #[cfg(feature = "variable-fonts")]
             gvar: raw_tables.gvar.and_then(gvar::Table::parse),
+            #[cfg(feature = "variable-fonts")]
+            hvgl: raw_tables.hvgl.and_then(hvgl::Table::parse),
             #[cfg(feature = "variable-fonts")]
             hvar: raw_tables.hvar.and_then(hvar::Table::parse),
             #[cfg(feature = "variable-fonts")]

@@ -1230,6 +1230,9 @@ pub type CFBooleanRef = *const c_void;
 pub type CFDataRef = *const c_void;
 pub type CFErrorRef = *const c_void;
 pub type CFRunLoopRef = *mut c_void;
+pub type CFURLRef = *const c_void;
+pub type CTFontRef = *const c_void;
+pub type CTFontDescriptorRef = *const c_void;
 pub type CFIndex = isize;
 pub type Boolean = u8;
 pub type CFTypeID = usize;
@@ -1886,7 +1889,66 @@ extern "C" {
     pub fn CFRunLoopRun();
     #[cfg(target_os = "macos")]
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
+    pub fn CFGetTypeID(cf: *const c_void) -> CFTypeID;
+    // kCFURLPOSIXPathStyle == 0
+    pub fn CFURLCopyFileSystemPath(anURL: CFURLRef, pathStyle: CFIndex) -> CFStringRef;
 }
+
+// CoreText: used to resolve the platform's default fonts at runtime so apps
+// don't have to bundle text fonts. We ask for a font descriptor by role and
+// read back its on-disk file URL via kCTFontURLAttribute.
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    pub static kCTFontURLAttribute: CFStringRef;
+    pub static kCTFontFamilyNameAttribute: CFStringRef;
+
+    pub fn CTFontCreateUIFontForLanguage(
+        uiType: u32,
+        size: f64,
+        language: CFStringRef,
+    ) -> CTFontRef;
+    pub fn CTFontCreateForString(
+        currentFont: CTFontRef,
+        string: CFStringRef,
+        range: CFRange,
+    ) -> CTFontRef;
+    pub fn CTFontCopyAttribute(font: CTFontRef, attribute: CFStringRef) -> CFTypeRef;
+
+    // Read raw sfnt table bytes straight from a CTFont, without touching the
+    // filesystem. Required on iOS, where system font files live outside the app
+    // sandbox and are not readable via kCTFontURLAttribute. `CTFontCopyTable`
+    // returns the table's bytes in sfnt (big-endian) order; `CTFontCopyAvailableTables`
+    // returns a CFArray of the tags (as CFNumbers) the font exposes.
+    pub fn CTFontCopyAvailableTables(
+        font: CTFontRef,
+        options: CTFontTableOptions,
+    ) -> CFArrayRef;
+    pub fn CTFontCopyTable(
+        font: CTFontRef,
+        table: CTFontTableTag,
+        options: CTFontTableOptions,
+    ) -> CFDataRef;
+
+    // Total glyph count of the resolved font. Apple's "LastResort" tofu font —
+    // returned by `CTFontCreateForString` when nothing covers the requested
+    // characters — has only a handful of glyphs, whereas any real covering font
+    // has hundreds to thousands. We use this to detect and reject LastResort.
+    pub fn CTFontGetGlyphCount(font: CTFontRef) -> CFIndex;
+
+    // PostScript name of the resolved font (diagnostic: reveals which physical
+    // font CoreText's cascade picked for a given script sample).
+    pub fn CTFontCopyPostScriptName(font: CTFontRef) -> CFStringRef;
+}
+
+// CTFontUIFontType values (subset we use).
+pub const kCTFontUIFontSystem: u32 = 2;
+pub const kCTFontUIFontEmphasizedSystem: u32 = 3;
+pub const kCTFontUIFontUserFixedPitch: u32 = 5;
+
+// sfnt table tag (FourCharCode) and copy options for CTFontCopyTable.
+pub type CTFontTableTag = u32;
+pub type CTFontTableOptions = u32;
+pub const kCTFontTableOptionNoOptions: CTFontTableOptions = 0;
 
 #[cfg(target_os = "macos")]
 #[link(name = "IOKit", kind = "framework")]

@@ -410,6 +410,13 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
+    fn os_load_system_font(
+        &mut self,
+        query: &crate::cx_api::SystemFontQuery,
+    ) -> Option<crate::cx_api::SystemFontResult> {
+        super::super::fontconfig_sys::load_system_font(query)
+    }
+
     fn spawn_thread<F>(&mut self, f: F)
     where
         F: FnOnce() + Send + 'static,

@@ -544,6 +544,13 @@ pub struct MidiInputListEvent {
 pub struct DrawEvent {
     pub draw_lists: Vec<DrawListId>,
     pub draw_lists_and_children: Vec<DrawListId>,
+    // Membership indices mirroring the two vecs above, so that the
+    // per-frame dedup done while collecting redraw requests is O(1) instead
+    // of an O(n) linear scan per push (O(n^2) across a frame). Order in the
+    // vecs is irrelevant: `draw_list_will_redraw` consumes them by
+    // membership / parent-chain, never by position.
+    draw_lists_set: HashSet<DrawListId>,
+    draw_lists_and_children_set: HashSet<DrawListId>,
     pub redraw_all: bool,
     pub xr_state: Option<Rc<XrState>>,
     pub time: f64,
@@ -552,6 +559,34 @@ pub struct DrawEvent {
 impl DrawEvent {
     pub fn will_redraw(&self) -> bool {
         self.redraw_all || self.draw_lists.len() != 0 || self.draw_lists_and_children.len() != 0
+    }
+
+    /// Record `draw_list_id` as pending redraw, deduped via `set`. Returns
+    /// true if it was newly inserted (i.e. pushed to `vec`). Pure helper so
+    /// the dedup behavior can be unit-tested without a live `Cx`.
+    pub(crate) fn push_deduped(
+        vec: &mut Vec<DrawListId>,
+        set: &mut HashSet<DrawListId>,
+        draw_list_id: DrawListId,
+    ) -> bool {
+        if set.insert(draw_list_id) {
+            vec.push(draw_list_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn push_draw_list(&mut self, draw_list_id: DrawListId) {
+        Self::push_deduped(&mut self.draw_lists, &mut self.draw_lists_set, draw_list_id);
+    }
+
+    pub(crate) fn push_draw_list_and_children(&mut self, draw_list_id: DrawListId) {
+        Self::push_deduped(
+            &mut self.draw_lists_and_children,
+            &mut self.draw_lists_and_children_set,
+            draw_list_id,
+        );
     }
 
     pub fn draw_list_will_redraw(&self, cx: &Cx, draw_list_id: DrawListId) -> bool {

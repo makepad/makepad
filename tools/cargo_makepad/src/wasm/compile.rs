@@ -27,7 +27,6 @@ pub struct WasmConfig {
     pub strip: bool,
     pub lan: bool,
     pub port: Option<u16>,
-    pub small_fonts: bool,
     pub brotli: bool,
     pub bindgen: bool,
     pub threads: bool,
@@ -255,12 +254,6 @@ pub fn generate_html(
     } else {
         ""
     };
-    let small_font_aliases = if config.small_fonts {
-        "\n            window.makepad_small_font_aliases = true;"
-    } else {
-        ""
-    };
-
     let preloads = if config.bindgen {
         "
         <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
@@ -328,7 +321,6 @@ pub fn generate_html(
             }});
 
             try {{
-                {small_font_aliases}
                 {init}
                 class MyWasmApp {{
                     constructor(wasm) {{
@@ -394,15 +386,15 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
     let _ = fs::remove_file(dest_path_br);
 }
 
-fn small_font_fallback_target(file_name: &str) -> Option<&'static str> {
-    match file_name {
-        "GoNotoKurrent-Bold.ttf" => Some("IBMPlexSans-SemiBold.ttf"),
-        "GoNotoKurrent-Regular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiBold.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiRegular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "NotoColorEmoji.ttf" => Some("IBMPlexSans-Text.ttf"),
-        _ => None,
-    }
+/// True if a bundled resource file is a font we can render text with. Used to
+/// enforce that a wasm build presets at least one font (no system-font fallback).
+fn is_font_resource(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.ends_with(".ttf")
+        || lower.ends_with(".otf")
+        || lower.ends_with(".ttc")
+        || lower.ends_with(".woff")
+        || lower.ends_with(".woff2")
 }
 
 fn minify_js(input: &str) -> String {
@@ -641,6 +633,13 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
+    // Wasm has no runtime system-font access and no fallback: the app must bundle
+    // at least one font resource (the framework no longer ships any text fonts).
+    // We track whether any font was copied into the web output and fail the build
+    // below if none was found.
+    // `walk_all` takes an `Fn` closure, so use interior mutability for the counter.
+    let bundled_font_count = std::cell::Cell::new(0usize);
+
     if local_resources_path.is_dir() {
         // if we have an index.html in src/ copy that one
         let underscore_build_crate = build_crate.replace('-', "_");
@@ -656,6 +655,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
                     .to_string_lossy()
                     .to_string();
+                if is_font_resource(&source_file_name) {
+                    bundled_font_count.set(bundled_font_count.get() + 1);
+                }
                 let dest_path = dest_dir.join(&source_file_name);
                 cp(&source_path, &dest_path, false)?;
                 if config.brotli {
@@ -749,27 +751,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         if resources_path.is_dir() {
             let dst_dir = app_dir.join(&name).join("resources");
             mkdir(&dst_dir)?;
-            if config.small_fonts {
-                for file_name in [
-                    "GoNotoKurrent-Bold.ttf",
-                    "GoNotoKurrent-Regular.ttf",
-                    "LXGWWenKaiBold.ttf",
-                    "LXGWWenKaiRegular.ttf",
-                    "NotoColorEmoji.ttf",
-                ] {
-                    let stale_path = dst_dir.join(file_name);
-                    let _ = fs::remove_file(&stale_path);
-                    remove_brotli_artifact(&stale_path);
-                }
-            }
             walk_all(&resources_path, &dst_dir, &mut |source_path, dest_dir| {
                 let source_file_name = source_path
                     .file_name()
                     .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
                     .to_string_lossy()
                     .to_string();
-                if config.small_fonts && small_font_fallback_target(&source_file_name).is_some() {
-                    return Ok(());
+                if is_font_resource(&source_file_name) {
+                    bundled_font_count.set(bundled_font_count.get() + 1);
                 }
                 let dest_path = dest_dir.join(&source_file_name);
                 cp(source_path, &dest_path, false)?;
@@ -782,6 +771,22 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             })?;
         }
     }
+
+    // Wasm cannot resolve system fonts at runtime and performs no fallback, so a
+    // wasm build that bundles no font would render no text at all. Fail loudly and
+    // tell the author to preset their font(s) via crate_resource(...).
+    if bundled_font_count.get() == 0 {
+        return Err(
+            "No font resource was bundled for this wasm build.\n\
+             Wasm has no access to system fonts and no fallback, so you must preset at least \
+             one font: place a .ttf/.otf/.ttc/.woff/.woff2 file under your crate's `resources/` \
+             directory and reference it from your theme via crate_resource(\"self:resources/<font>\").\n\
+             If your app shows multiple scripts (e.g. Latin + emoji + CJK), bundle a font for each; \
+             any glyph whose font is not bundled will not render."
+                .to_string(),
+        );
+    }
+
     let wasm_source = if config.bindgen {
         shell(
             build_dir.as_path(),
@@ -2166,27 +2171,13 @@ mod tests {
     }
 
     #[test]
-    fn small_font_fallbacks_cover_heavy_widget_fonts() {
-        assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Bold.ttf"),
-            Some("IBMPlexSans-SemiBold.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Regular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiBold.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiRegular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("NotoColorEmoji.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(small_font_fallback_target("IBMPlexSans-Text.ttf"), None);
+    fn font_resources_are_detected_by_extension() {
+        assert!(is_font_resource("regular.ttf"));
+        assert!(is_font_resource("NewCMMath-Regular.otf"));
+        assert!(is_font_resource("some.TTC"));
+        assert!(is_font_resource("web.woff"));
+        assert!(is_font_resource("web.woff2"));
+        assert!(!is_font_resource("icon.svg"));
+        assert!(!is_font_resource("image.png"));
     }
 }
