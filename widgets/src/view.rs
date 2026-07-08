@@ -768,29 +768,40 @@ impl Widget for View {
                 return;
             }
         }
+        // A press that catches an in-progress momentum fling stops the scroll and is consumed:
+        // it must not also activate a child widget under the finger, as on iOS, Android, and
+        // macOS. So when the scroll bars report a caught fling, skip dispatching this press to
+        // children. This runs before the child loop below, since children would otherwise
+        // capture the press first.
+        let mut fling_caught = false;
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             let mut actions = Vec::new();
             scroll_bars.handle_main_event(cx, event, scope, &mut actions);
             if actions.len() > 0 {
                 cx.redraw_area_and_children(self.area);
             };
+            fling_caught = scroll_bars.catch_fling_on_press(cx, event);
         }
 
-        match &self.event_order {
-            EventOrder::Up => {
-                for (_id, child) in self.children.iter_mut().rev() {
-                    child.handle_event(cx, event, scope);
-                }
-            }
-            EventOrder::Down => {
-                for (_id, child) in self.children.iter_mut() {
-                    child.handle_event(cx, event, scope);
-                }
-            }
-            EventOrder::List(list) => {
-                for id in list {
-                    if let Some((_, child)) = self.children.iter_mut().find(|(id2, _)| id2 == id) {
+        if !fling_caught {
+            match &self.event_order {
+                EventOrder::Up => {
+                    for (_id, child) in self.children.iter_mut().rev() {
                         child.handle_event(cx, event, scope);
+                    }
+                }
+                EventOrder::Down => {
+                    for (_id, child) in self.children.iter_mut() {
+                        child.handle_event(cx, event, scope);
+                    }
+                }
+                EventOrder::List(list) => {
+                    for id in list {
+                        if let Some((_, child)) =
+                            self.children.iter_mut().find(|(id2, _)| id2 == id)
+                        {
+                            child.handle_event(cx, event, scope);
+                        }
                     }
                 }
             }
@@ -798,7 +809,11 @@ impl Widget for View {
 
         event.hit_tweak_ray(self.area(), self.widget_uid());
 
-        if self.visible && self.cursor.is_some() || self.animator.is_defined {
+        // Also skip this View's own press-driven hit handling when a fling was caught, so the
+        // catching press is fully consumed (it neither activates a child nor fires this
+        // View's own FingerDown/animator). `fling_caught` is only ever true on a press event
+        // over a flinging scroll view, so key/hover handling is unaffected.
+        if !fling_caught && (self.visible && self.cursor.is_some() || self.animator.is_defined) {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
                     if self.grab_key_focus {

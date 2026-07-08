@@ -485,6 +485,7 @@ impl Cx {
                     handled_y: Cell::new(false),
                     is_mouse: e.is_mouse,
                     time: e.time,
+                    phase: crate::event::ScrollPhase::None,
                 }));
             }
             StudioToApp::KeyDown(e) => {

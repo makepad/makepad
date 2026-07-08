@@ -1,4 +1,4 @@
-use crate::{makepad_draw::*, scroll_bar::*};
+use crate::{event::TouchState, makepad_draw::*, scroll_bar::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -166,6 +166,45 @@ impl ScrollBars {
                 }
             }
         }
+    }
+
+    /// Stop an in-progress momentum fling on either bar when a press lands inside the
+    /// scrollable content, the "press to catch the scroll" behavior that iOS, Android, and
+    /// macOS all have. It applies on any tap, click, or touch, independent of `drag_scrolling`
+    /// or finger count. Returns `true` if a fling was caught, in which case the containing view
+    /// treats the press as consumed and does not forward it to children, so catching a runaway
+    /// scroll never also activates a widget under the finger.
+    ///
+    /// It tests the raw press event against the content rect rather than `event.hits`, so it
+    /// fires even when a child would otherwise capture the press, and it must run before the
+    /// view dispatches the event to its children.
+    pub fn catch_fling_on_press(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let flinging = (self.show_scroll_x && self.scroll_bar_x.is_flinging())
+            || (self.show_scroll_y && self.scroll_bar_y.is_flinging());
+        if !flinging {
+            return false;
+        }
+        let area_rect = self.area.rect(cx);
+        let pressed_in_area = match event {
+            Event::MouseDown(e) => area_rect.contains(e.abs),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .any(|t| matches!(t.state, TouchState::Start) && area_rect.contains(t.abs)),
+            _ => false,
+        };
+        if !pressed_in_area {
+            return false;
+        }
+        // Stop both axes: a single press catches a 2D fling on both bars.
+        let mut caught = false;
+        if self.show_scroll_x {
+            caught |= self.scroll_bar_x.stop_fling();
+        }
+        if self.show_scroll_y {
+            caught |= self.scroll_bar_y.stop_fling();
+        }
+        caught
     }
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {

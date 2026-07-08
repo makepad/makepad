@@ -49,7 +49,7 @@ use wayland_protocols::{
 
 use crate::{
     cx_native::EventFlow,
-    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, WindowGeom},
+    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom},
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
     x11::xlib_event::XlibEvent,
@@ -140,6 +140,11 @@ pub(crate) struct WaylandState {
 
     pub(crate) scroll_accumulator: Vec2d,
     pub(crate) scroll_is_wheel: bool,
+    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame: the fingers
+    /// lifted off the touchpad. The frame's Scroll event is then sent with
+    /// `ScrollPhase::Ended` (even if its delta is zero) so widgets can start their own
+    /// fling — Wayland compositors do not synthesize momentum scrolling for clients.
+    pub(crate) scroll_stopped: bool,
     pub(crate) last_scroll_time: f64,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
@@ -201,6 +206,7 @@ impl WaylandState {
             event_callback: Some(event_callback),
             scroll_accumulator: dvec2(0.0, 0.0),
             scroll_is_wheel: false,
+            scroll_stopped: false,
             last_scroll_time: 0.0,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
@@ -1341,7 +1347,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
             }
             wl_pointer::Event::Frame => {
                 let acc = state.scroll_accumulator;
-                if acc.x != 0.0 || acc.y != 0.0 {
+                // Dispatch when there is a scroll delta, or when the touchpad gesture just
+                // ended (AxisStop): the `Ended` event may carry a zero delta but is what lets
+                // widgets start their fling animation at finger lift-off.
+                if acc.x != 0.0 || acc.y != 0.0 || state.scroll_stopped {
                     if let Some(window_id) = state.pointer_window {
                         let time_now = state.time_now();
                         let scroll = if state.scroll_is_wheel {
@@ -1367,6 +1376,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         } else {
                             acc
                         };
+                        // Wheels have no gesture phases. Finger-driven (touchpad) scrolling
+                        // reports `Changed` per frame and `Ended` when the fingers lift
+                        // (AxisStop), letting widgets run their own momentum fling —
+                        // Wayland compositors do not synthesize momentum for clients.
+                        let phase = if state.scroll_is_wheel {
+                            ScrollPhase::None
+                        } else if state.scroll_stopped {
+                            ScrollPhase::Ended
+                        } else {
+                            ScrollPhase::Changed
+                        };
                         state.do_callback(XlibEvent::Scroll(ScrollEvent {
                             window_id,
                             scroll,
@@ -1376,13 +1396,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                             handled_x: Cell::new(false),
                             handled_y: Cell::new(false),
                             time: time_now,
+                            phase,
                         }));
                     }
                 }
                 state.scroll_accumulator = dvec2(0.0, 0.0);
                 state.scroll_is_wheel = false;
+                state.scroll_stopped = false;
             }
-            wl_pointer::Event::AxisStop { time: _, axis: _ } => {}
+            wl_pointer::Event::AxisStop { time: _, axis: _ } => {
+                // Fingers lifted off the touchpad: mark the gesture ended so this pointer
+                // frame's Scroll event goes out with `ScrollPhase::Ended`.
+                state.scroll_stopped = true;
+            }
             wl_pointer::Event::AxisDiscrete {
                 axis: _,
                 discrete: _,

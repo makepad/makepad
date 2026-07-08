@@ -1443,6 +1443,9 @@ impl Win32Window {
             is_mouse,
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
+            // WM_MOUSEWHEEL carries no gesture phase; precision-touchpad momentum is
+            // synthesized by the driver as plain wheel messages we cannot distinguish.
+            phase: ScrollPhase::None,
         }));
     }
 

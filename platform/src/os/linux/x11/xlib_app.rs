@@ -906,6 +906,8 @@ impl XlibApp {
                                 handled_x: Cell::new(false),
                                 handled_y: Cell::new(false),
                                 time: self.last_scroll_time,
+                                // Legacy X11 wheel buttons carry no gesture info.
+                                phase: ScrollPhase::None,
                             }))
                         } else {
                             // do all the 'nonclient' area messaging to the window manager

@@ -1,11 +1,15 @@
 use {
     crate::{
         animator::AnimatorImpl,
-        event::{TouchState, TAP_COUNT_DISTANCE},
+        event::{ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
+        scroll_motion::{
+            estimate_release_velocity, raw_os_momentum, Fling, ScrollSample,
+            FLING_MIN_TOTAL_DELTA, FLING_MOMENTUM_SMOOTH_BELOW, PER_FRAME_TO_PER_SECOND,
+        },
         widget::*,
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
@@ -31,12 +35,6 @@ script_mod! {
 /// The maximum number of items that will be shown as part of a smooth scroll animation.
 const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 
-#[derive(Clone, Copy)]
-struct ScrollSample {
-    abs: f64,
-    time: f64,
-}
-
 enum ScrollState {
     Stopped,
     Drag {
@@ -48,11 +46,10 @@ enum ScrollState {
         committed: bool,
     },
     Flick {
-        /// Current fling velocity in pixels per second. Decays per the native (iOS-style)
-        /// exponential momentum model in the handler — frame-rate-independent.
-        velocity: f64,
-        /// Wall-clock time of the previous fling step (0.0 = not yet started).
-        last_time: f64,
+        /// The momentum-fling animation state (native iOS-style exponential decay,
+        /// frame-rate-independent). Shared with ScrollBar via [`crate::scroll_motion`]
+        /// so every scrollable widget decelerates identically.
+        fling: Fling,
         next_frame: NextFrame,
     },
     Pulldown {
@@ -367,18 +364,32 @@ pub struct PortalList {
     #[rust(0usize)]
     visible_items: usize,
 
+    /// The minimum release speed for a fling, in per-frame pixels at a nominal 60fps
+    /// (×60 → px/s). Below this a finger lift is a stop, not a flick; an active fling
+    /// also stops once it decays below this speed.
     #[live(0.2)]
     flick_scroll_minimum: f64,
-    #[live(80.0)]
+    /// The maximum fling speed, in per-frame pixels at a nominal 60fps (×60 → px/s).
+    /// 240 → 14,400 px/s. This is the ceiling on how fast a hard flick can throw the
+    /// list; raise it for even faster flicks, lower it to tame them.
+    #[live(240.0)]
     flick_scroll_maximum: f64,
+    /// Deprecated: unused. The fling speed now comes directly from the tracked release
+    /// velocity (see [`crate::scroll_motion`]); kept only so existing DSL doesn't break.
     #[live(0.005)]
     flick_scroll_scaling: f64,
+    /// Deprecated: unused. The deceleration rate is the shared
+    /// [`crate::scroll_motion::FLING_DECEL_RATE_PER_MS`] exponential model;
+    /// kept only so existing DSL doesn't break.
     #[live(0.97)]
     flick_scroll_decay: f64,
-    /// Running EMA (seconds) of the momentum-fling inter-frame interval. The deceleration step is
-    /// driven off a `dt` clamped to a tight band around this, so frame-delivery jitter (a late or
-    /// early frame) does not turn into an uneven jump/stall in the motion. Reset per fling.
-    #[rust] fling_dt_ema: f64,
+    /// Set on a trackpad gesture `Ended`, cleared once its momentum ends or the scroll is
+    /// otherwise interrupted. It gates starting a momentum fling, so a stray `Momentum` event
+    /// (e.g. a still-live trackpad stream after a mouse click caught the fling) can't restart it.
+    #[rust] expect_momentum: bool,
+    /// Wall-clock time of the previous trackpad scroll event, used to seed the deceleration
+    /// tail's velocity (`delta / dt`) at the moment it hands off from direct OS application.
+    #[rust] last_trackpad_time: f64,
     #[live(80.0)]
     max_pull_down: f64,
     #[live(true)]
@@ -2059,53 +2070,32 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Flick { velocity, last_time, next_frame } => {
+            ScrollState::Flick { fling, next_frame } => {
                 if let Some(ne) = next_frame.is_event(event) {
-                    if *last_time <= 0.0 {
-                        // First fling frame: establish the time baseline, no movement yet.
-                        *last_time = ne.time;
-                        *next_frame = cx.new_next_frame();
-                        self.fling_dt_ema = 0.0; // re-seed the frame-interval estimate per fling
-                    } else {
-                        // Native (iOS UIScrollView) momentum model: velocity decays continuously as
-                        // `v *= decelerationRate^(elapsed_ms)`, with the standard "normal" rate of
-                        // 0.998 (UIScrollViewDecelerationRateNormal). Android's OverScroller spline
-                        // is a touch firmer but feels essentially the same; this matches both
-                        // closely. The per-frame displacement is the exact integral of that decay
-                        // over the elapsed time, so motion is smooth and frame-rate-independent. dt
-                        // is clamped so a hitch produces a small catch-up rather than a jump.
-                        const DECEL_RATE_PER_MS: f64 = 0.998;
-                        let raw_dt = (ne.time - *last_time).clamp(0.0, 0.1);
-                        *last_time = ne.time;
-                        // Frame delivery on Windows is not perfectly vsync-uniform: `Present(1,0)`
-                        // can return early or span more than one vblank, so the raw inter-frame dt
-                        // jitters (≈5–27 ms around a ~10 ms vblank). Integrating the deceleration on
-                        // that raw dt turns the jitter into uneven per-frame displacement — the
-                        // choppiness at the slow end of a flick. Track an EMA of the interval and
-                        // clamp the dt actually used to a tight band around it, so a single late/early
-                        // frame can't produce a visible jump or stall. The EMA adapts to the real
-                        // refresh, keeping the motion frame-rate-independent.
-                        if self.fling_dt_ema <= 0.0 {
-                            self.fling_dt_ema = raw_dt;
-                        } else {
-                            self.fling_dt_ema = self.fling_dt_ema * 0.85 + raw_dt * 0.15;
-                        }
-                        let dt = raw_dt.clamp(self.fling_dt_ema * 0.5, self.fling_dt_ema * 1.5);
-                        let factor = DECEL_RATE_PER_MS.powf(dt * 1000.0);
-                        // v(t) = v0 * e^(-λt); displacement over dt = v0 * (1 - factor) / λ.
-                        let lambda = -DECEL_RATE_PER_MS.ln() * 1000.0;
-                        let displacement = *velocity * (1.0 - factor) / lambda;
-                        *velocity *= factor;
-                        // Stop once the speed drops below the minimum (px/s; the per-frame
-                        // `flick_scroll_minimum` ×60 → per-second).
-                        if velocity.abs() > self.flick_scroll_minimum * 60.0 {
+                    // The scroll animation lives in `scroll_motion::Fling`, shared with
+                    // ScrollBar. Both the touch-drag flick and the trackpad deceleration tail
+                    // self-decay; they differ only in decay rate and edge behavior.
+                    match fling.step(ne.time) {
+                        None => {
+                            // First fling frame: time baseline established, no movement yet.
                             *next_frame = cx.new_next_frame();
-                            self.delta_top_scroll(cx, displacement, false, true);
-                            cx.widget_action(uid, PortalListAction::Scroll);
-                            self.area.redraw(cx);
-                        } else {
-                            self.was_scrolling = false;
-                            self.scroll_state = ScrollState::Stopped;
+                        }
+                        Some(displacement) => {
+                            let min_velocity =
+                                self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
+                            if fling.is_active(min_velocity) {
+                                *next_frame = cx.new_next_frame();
+                                // A touch flick may overscroll into the pulldown bounce; a trackpad
+                                // tail clips at the edges like a wheel.
+                                let ov = fling.allows_overscroll();
+                                self.delta_top_scroll(cx, displacement, !ov, ov);
+                                cx.widget_action(uid, PortalListAction::Scroll);
+                                self.area.redraw(cx);
+                            } else {
+                                self.was_scrolling = false;
+                                self.expect_momentum = false;
+                                self.scroll_state = ScrollState::Stopped;
+                            }
                         }
                     }
                 }
@@ -2193,21 +2183,105 @@ impl Widget for PortalList {
             let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
             match hit {
                 Hit::FingerScroll(e) => {
-                    self.tail_range = false;
-                    self.detect_tail_in_draw = true;
-                    self.was_scrolling = false;
-                    self.scroll_state = ScrollState::Stopped;
-                    // For mouse wheel: clip to top and don't transition to pulldown
-                    // (pulldown/overscroll is only for touch drag/flick)
-                    self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
-                    // Note: we intentionally do NOT reset `at_end` here.
-                    // `at_end` is authoritatively recalculated each draw cycle
-                    // in `end()`, and the redraw is already triggered below.
-                    // Eagerly resetting it here would create a stale `false` value
-                    // visible to any code that checks `is_at_end()` in response
-                    // to the Scroll action before the next draw completes.
-                    cx.widget_action(uid, PortalListAction::Scroll);
-                    self.area.redraw(cx);
+                    // Trackpad scrolling on macOS is a gesture with phases: user-driven deltas
+                    // while the fingers move (`Began`/`Changed`), then the OS's own decaying
+                    // `Momentum` deltas after they lift. We apply the user-driven and fast
+                    // momentum deltas directly, then once the momentum slows past a threshold
+                    // hand off to our own gentler self-decaying tail (see `scroll_motion`).
+                    // Phase-less events (`None`: wheels, X11, Windows) apply their delta directly.
+                    let delta = -e.scroll.index(vi);
+                    match e.phase {
+                        ScrollPhase::Momentum if raw_os_momentum() => {
+                            // Diagnostic: apply the OS momentum delta directly, no smoothed tail.
+                            self.tail_range = false;
+                            self.detect_tail_in_draw = true;
+                            self.was_scrolling = false;
+                            self.scroll_state = ScrollState::Stopped;
+                            self.delta_top_scroll(cx, delta, true, false);
+                            cx.widget_action(uid, PortalListAction::Scroll);
+                            self.area.redraw(cx);
+                        }
+                        ScrollPhase::Momentum => {
+                            // While the flick is fast, apply the OS momentum directly (responsive,
+                            // and the timing jitter is invisible at speed). Once it slows past the
+                            // threshold, hand off to a self-decaying tail fling that glides to a
+                            // stop on its own, gentler and longer than the OS's short tail. macOS
+                            // ends its momentum when the trackpad is touched, giving a native stop.
+                            match &mut self.scroll_state {
+                                // The tail fling already owns the deceleration; it self-decays, so
+                                // ignore the OS momentum stream from here on.
+                                ScrollState::Flick { .. } => {}
+                                ScrollState::Stopped if self.expect_momentum => {
+                                    self.tail_range = false;
+                                    self.detect_tail_in_draw = true;
+                                    self.was_scrolling = false;
+                                    // Apply this delta directly either way, so the fast phase and
+                                    // the handoff frame both move (no dead frame at the seam).
+                                    self.delta_top_scroll(cx, delta, true, false);
+                                    if delta.abs() < FLING_MOMENTUM_SMOOTH_BELOW {
+                                        // Deceleration tail: hand off to a self-decaying fling
+                                        // seeded at the current speed for a smooth continuation.
+                                        // Clamp against a degenerate dt between coalesced events.
+                                        let dt = (e.time - self.last_trackpad_time).max(1.0 / 240.0);
+                                        let max_v =
+                                            self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
+                                        let velocity = (delta / dt).clamp(-max_v, max_v);
+                                        self.scroll_state = ScrollState::Flick {
+                                            fling: Fling::new_trackpad_tail(velocity),
+                                            next_frame: cx.new_next_frame(),
+                                        };
+                                    } else {
+                                        // Fast phase: keep applying the OS delta directly.
+                                        self.last_trackpad_time = e.time;
+                                    }
+                                    cx.widget_action(uid, PortalListAction::Scroll);
+                                    self.area.redraw(cx);
+                                }
+                                _ => {}
+                            }
+                        }
+                        // The stream finished (decayed or the user touched the pad). The tail
+                        // fling self-decays to a stop; just drop the momentum expectation.
+                        ScrollPhase::MomentumEnded => {
+                            self.expect_momentum = false;
+                        }
+                        ScrollPhase::Ended => {
+                            // Fingers lifted. Apply the final delta; the momentum fling starts on
+                            // the first `Momentum` event that follows (gated on `expect_momentum`).
+                            self.was_scrolling = false;
+                            self.scroll_state = ScrollState::Stopped;
+                            self.expect_momentum = true;
+                            self.last_trackpad_time = e.time;
+                            if delta != 0.0 {
+                                self.tail_range = false;
+                                self.detect_tail_in_draw = true;
+                                self.delta_top_scroll(cx, delta, true, false);
+                                cx.widget_action(uid, PortalListAction::Scroll);
+                                self.area.redraw(cx);
+                            }
+                        }
+                        // `None` (wheels), `Began`, and `Changed` all apply the delta directly.
+                        // A user-driven delta also stops any in-progress momentum fling, so
+                        // putting fingers back on the pad catches the scroll.
+                        _ => {
+                            self.tail_range = false;
+                            self.detect_tail_in_draw = true;
+                            self.was_scrolling = false;
+                            self.expect_momentum = false;
+                            self.scroll_state = ScrollState::Stopped;
+                            // Clip to the top and don't transition to pulldown; overscroll bounce
+                            // is only for touch drag/flick.
+                            self.delta_top_scroll(cx, delta, true, false);
+                            // Note: we intentionally do NOT reset `at_end` here.
+                            // `at_end` is authoritatively recalculated each draw cycle
+                            // in `end()`, and the redraw is already triggered below.
+                            // Eagerly resetting it here would create a stale `false` value
+                            // visible to any code that checks `is_at_end()` in response
+                            // to the Scroll action before the next draw completes.
+                            cx.widget_action(uid, PortalListAction::Scroll);
+                            self.area.redraw(cx);
+                        }
+                    }
                 }
                 Hit::KeyDown(ke) => match ke.key_code {
                     KeyCode::Home => {
@@ -2290,6 +2364,23 @@ impl Widget for PortalList {
                     // The tap should only stop the scroll, not activate a child widget.
                     // If the list was NOT scrolling, clear any previous suppression.
                     self.suppress_child_events = self.was_scrolling;
+
+                    // A press stops an active momentum fling or pulldown bounce, the "press to
+                    // catch the scroll" behavior that iOS, Android, and macOS all have. It runs
+                    // before the selection and drag branches below so it works even when the
+                    // list is `selectable`: on a selectable list a tap on text takes the
+                    // selection branch, which would otherwise leave the fling running. `Drag`
+                    // below still supersedes `Stopped` for drag-scroll, and `suppress_child_events`
+                    // (set above from `was_scrolling`) keeps this press from also activating a child.
+                    // A press ends any expectation of momentum, so a still-live trackpad stream
+                    // (e.g. a mouse click during a trackpad coast) can't start or restart a fling.
+                    self.expect_momentum = false;
+                    if matches!(
+                        self.scroll_state,
+                        ScrollState::Flick { .. } | ScrollState::Pulldown { .. }
+                    ) {
+                        self.scroll_state = ScrollState::Stopped;
+                    }
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
@@ -2424,40 +2515,29 @@ impl Widget for PortalList {
                             self.scroll_state = ScrollState::Stopped;
                         } else {
                             // Estimate the release velocity (pixels/second) like a native
-                            // VelocityTracker: average over the most recent retained samples
-                            // (the oldest→newest of the last ~4 finger positions). `abs` is the
-                            // finger position along the scroll axis in the same pixel units as
-                            // `first_scroll`, so this is directly a scroll velocity.
-                            let mut total_delta = 0.0;
-                            for w in samples.windows(2) {
-                                total_delta += w[1].abs - w[0].abs;
-                            }
-                            let release_velocity = if let (Some(first), Some(last_s)) =
-                                (samples.first(), samples.last())
-                            {
-                                let dt = last_s.time - first.time;
-                                if dt > 0.0001 { (last_s.abs - first.abs) / dt } else { 0.0 }
-                            } else {
-                                0.0
-                            };
+                            // VelocityTracker (see `scroll_motion`): oldest→newest of the last
+                            // ~4 finger positions. `abs` is the finger position along the scroll
+                            // axis in the same pixel units as `first_scroll`, so this is
+                            // directly a scroll velocity.
+                            let (release_velocity, total_delta) =
+                                estimate_release_velocity(samples);
                             // Cap to a sane maximum flick speed (px/s). `flick_scroll_maximum`
                             // is a per-frame value; ×60 converts it to per-second.
-                            let max_velocity = self.flick_scroll_maximum * 60.0;
+                            let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
                             let release_velocity =
                                 release_velocity.clamp(-max_velocity, max_velocity);
                             // Minimum release speed (px/s) below which a lift is treated as a stop,
                             // not a fling. `flick_scroll_minimum` is per-frame; ×60 → per-second.
-                            let min_velocity = self.flick_scroll_minimum * 60.0;
+                            let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
                             if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {
                                     next_frame: cx.new_next_frame(),
                                 };
-                            } else if total_delta.abs() > 10.0
+                            } else if total_delta.abs() > FLING_MIN_TOTAL_DELTA
                                 && release_velocity.abs() > min_velocity
                             {
                                 self.scroll_state = ScrollState::Flick {
-                                    velocity: release_velocity,
-                                    last_time: 0.0,
+                                    fling: Fling::new(release_velocity),
                                     next_frame: cx.new_next_frame(),
                                 };
                             } else {
@@ -2604,9 +2684,9 @@ impl PortalListRef {
                 state = "Drag";
                 drag_samples = samples.len();
             }
-            ScrollState::Flick { velocity: v, .. } => {
+            ScrollState::Flick { fling, .. } => {
                 state = "Flick";
-                delta = *v;
+                delta = fling.velocity;
             }
             ScrollState::Pulldown { .. } => {
                 state = "Pulldown";

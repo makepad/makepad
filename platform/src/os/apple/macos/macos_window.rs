@@ -3,7 +3,7 @@ use {
         area::Area,
         event::{
             finger::MouseButton, DragItem, KeyModifiers, MouseDownEvent, MouseMoveEvent,
-            MouseUpEvent, ScrollEvent, TextInputEvent, WindowCloseRequestedEvent,
+            MouseUpEvent, ScrollEvent, ScrollPhase, TextInputEvent, WindowCloseRequestedEvent,
             WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom,
             WindowGeomChangeEvent,
         },
@@ -813,7 +813,13 @@ impl MacosWindow {
         //get_macos_app_global().ns_event = ptr::null_mut();
     }
 
-    pub fn send_scroll(&mut self, scroll: Vec2d, modifiers: KeyModifiers, is_mouse: bool) {
+    pub fn send_scroll(
+        &mut self,
+        scroll: Vec2d,
+        modifiers: KeyModifiers,
+        is_mouse: bool,
+        phase: ScrollPhase,
+    ) {
         self.do_callback(MacosEvent::Scroll(ScrollEvent {
             window_id: self.window_id,
             scroll,
@@ -823,6 +829,7 @@ impl MacosWindow {
             is_mouse,
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
+            phase,
         }));
     }
 

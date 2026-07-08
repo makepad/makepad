@@ -309,6 +309,7 @@ impl From<ToWasmScroll> for ScrollEvent {
             handled_y: Cell::new(false),
             is_mouse: true,
             time: v.time,
+            phase: crate::event::ScrollPhase::None,
         }
     }
 }
