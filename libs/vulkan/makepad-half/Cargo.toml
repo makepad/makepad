@@ -82,9 +82,11 @@ optional = true
 default-features = false
 
 [dependencies.cfg-if]
+path = "../../cfg-if"
 version = "1.0.0"
 
 [dependencies.num-traits]
+path = "../num-traits"
 version = "0.2.16"
 features = ["std"]
 optional = true
@@ -112,9 +114,11 @@ optional = true
 default-features = false
 
 [dependencies.zerocopy]
+path = "../zerocopy"
 version = "0.8.26"
 features = ["simd"]
 default-features = false
 
 [target.'cfg(target_arch = "spirv")'.dependencies.crunchy]
+path = "../crunchy"
 version = "0.2.2"
