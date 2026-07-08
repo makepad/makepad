@@ -48,6 +48,7 @@ rustdoc-args = [
 no-dev-version = true
 
 [dependencies.libloading]
+path = "../libloading"
 version = "0.8"
 optional = true
 

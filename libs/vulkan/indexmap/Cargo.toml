@@ -101,10 +101,12 @@ optional = true
 default-features = false
 
 [dependencies.equivalent]
+path = "../equivalent"
 version = "1.0"
 default-features = false
 
 [dependencies.hashbrown]
+path = "../hashbrown"
 version = "0.16.1"
 default-features = false
 
