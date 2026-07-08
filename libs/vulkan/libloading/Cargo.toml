@@ -66,9 +66,11 @@ name = "windows"
 path = "tests/windows.rs"
 
 [target."cfg(unix)".dependencies.cfg-if]
+path = "../../cfg-if"
 version = "1"
 
 [target."cfg(windows)".dependencies.windows-link]
+path = "../../windows/windows-link"
 version = "0.2"
 
 [lints.rust.unexpected_cfgs]

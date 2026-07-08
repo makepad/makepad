@@ -39,6 +39,7 @@ name = "bench"
 path = "benches/bench.rs"
 
 [dependencies.bit-vec]
+path = "../bit-vec"
 version = "0.8.0"
 default-features = false
 

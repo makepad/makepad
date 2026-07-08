@@ -103,5 +103,5 @@ name = "test_transparent"
 path = "tests/test_transparent.rs"
 
 [dependencies.thiserror-impl]
+path = "../thiserror-impl"
 version = "=2.0.18"
-
