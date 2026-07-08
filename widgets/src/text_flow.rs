@@ -1369,7 +1369,13 @@ impl TextFlow {
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
-        self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
+        // Tolerate unbalanced HTML: a stray close tag with no matching `begin_code`
+        // (untrusted input, e.g. a chat message containing `</pre>`) must not panic
+        // here or unbalance the turtle stack by ending a block that never began.
+        let Some(area) = self.area_stack.pop() else {
+            return;
+        };
+        self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
         if self.selectable {
             self.selection_tracker.push_newline();
@@ -1402,8 +1408,9 @@ impl TextFlow {
         // the text after the marker rather than being over-indented.
         let actual_indent = cx.turtle().pos().x - cx.turtle().origin().x;
         cx.turtle_mut().set_padding_left(actual_indent);
-
-        self.area_stack.push(self.draw_block.draw_vars.area);
+        // Note: deliberately NOT pushed onto `area_stack` — `end_list_item` never pops,
+        // so a push here would leak an entry per list item and let a stray close tag
+        // (unbalanced HTML) pop the wrong block's area in `end_code`/`end_quote`.
     }
 
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
@@ -1455,7 +1462,11 @@ impl TextFlow {
     }
 
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
-        self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
+        // Tolerate unbalanced HTML (see `end_code`): never panic on a stray close tag.
+        let Some(area) = self.area_stack.pop() else {
+            return;
+        };
+        self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
         if self.selectable {
             self.selection_tracker.push_newline();
