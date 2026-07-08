@@ -4,7 +4,8 @@ use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
     estimate_release_velocity, push_sample, raw_os_momentum, Fling, ScrollSample,
-    FLING_MIN_TOTAL_DELTA, FLING_MOMENTUM_SMOOTH_BELOW, PER_FRAME_TO_PER_SECOND,
+    FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, FLING_MOMENTUM_SMOOTH_BELOW,
+    FLING_MOMENTUM_TAIL_DECEL_PER_MS, PER_FRAME_TO_PER_SECOND,
 };
 
 script_mod! {
@@ -237,11 +238,21 @@ pub struct ScrollBar {
     /// velocity (see [`crate::scroll_motion`]); kept only so existing DSL doesn't break.
     #[live(0.005)]
     flick_scroll_scaling: f64,
-    /// Deprecated: unused. The deceleration rate is the shared
-    /// [`crate::scroll_motion::FLING_DECEL_RATE_PER_MS`] exponential model;
-    /// kept only so existing DSL doesn't break.
+    /// Deprecated: unused. The deceleration rate is now `fling_decel`; kept so existing DSL
+    /// doesn't break.
     #[live(0.97)]
     flick_scroll_decay: f64,
+    /// Per-ms velocity decay of a touch-drag flick; lower stops sooner (see `scroll_motion`).
+    #[live(FLING_DECEL_RATE_PER_MS)]
+    fling_decel: f64,
+    /// Trackpad speed (per-frame px) at which momentum hands off from raw OS deltas to the
+    /// smoothed tail; raise to start smoothing sooner.
+    #[live(FLING_MOMENTUM_SMOOTH_BELOW)]
+    fling_smoothing_cutoff_speed: f64,
+    /// Per-ms velocity decay of the trackpad deceleration tail; raise toward 1.0 for a longer,
+    /// softer glide, lower for a quicker stop.
+    #[live(FLING_MOMENTUM_TAIL_DECEL_PER_MS)]
+    fling_tail_decel: f64,
     /// Whether to enable drag scrolling
     #[live(false)]
     drag_scrolling: bool,
@@ -538,13 +549,15 @@ impl ScrollBar {
                             // is touched, so following it also gives a native stop on the first
                             // touch.
                             if self.owns_gesture {
+                                // Read into locals up front so the guard/body don't borrow `self`
+                                // while `self.scroll_state` is matched below.
+                                let cutoff_speed = self.fling_smoothing_cutoff_speed;
+                                let tail_decel = self.fling_tail_decel;
                                 match &mut self.scroll_state {
                                     // The tail fling already owns the deceleration; it self-decays,
                                     // so ignore the OS momentum stream from here on.
                                     ScrollState::Flick { .. } => {}
-                                    ScrollState::Stopped
-                                        if scroll.abs() < FLING_MOMENTUM_SMOOTH_BELOW =>
-                                    {
+                                    ScrollState::Stopped if scroll.abs() < cutoff_speed => {
                                         // Deceleration tail: apply this delta directly (no dead
                                         // frame at the seam), then hand off to a self-decaying
                                         // fling seeded at the current speed. Clamp the seed against
@@ -557,7 +570,7 @@ impl ScrollBar {
                                             self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
                                         let velocity = (-scroll / dt).clamp(-max_v, max_v);
                                         self.scroll_state = ScrollState::Flick {
-                                            fling: Fling::new_trackpad_tail(velocity),
+                                            fling: Fling::new_trackpad_tail(velocity, tail_decel),
                                             next_frame: cx.new_next_frame(),
                                         };
                                     }
@@ -723,7 +736,7 @@ impl ScrollBar {
                         && release_velocity.abs() > min_velocity
                     {
                         self.scroll_state = ScrollState::Flick {
-                            fling: Fling::new(release_velocity),
+                            fling: Fling::new(release_velocity, self.fling_decel),
                             next_frame: cx.new_next_frame(),
                         };
                     } else {

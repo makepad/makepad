@@ -23,10 +23,8 @@ pub fn raw_os_momentum() -> bool {
     })
 }
 
-/// Per-millisecond velocity decay for a self-decaying fling. This is the dial for how quickly
-/// a touch-drag flick coasts to a stop; lower stops sooner. For reference, iOS
-/// `UIScrollViewDecelerationRateNormal` is 0.998 (~346 ms velocity half-life) and iOS "fast"
-/// is 0.99; we run a little firmer so flings settle slightly quicker.
+/// Default per-ms decay for a touch-drag flick (the widgets' `fling_decel` field). For
+/// reference, iOS `UIScrollViewDecelerationRateNormal` is 0.998; we run a little firmer.
 pub const FLING_DECEL_RATE_PER_MS: f64 = 0.997;
 
 /// EMA weight for the newest inter-frame interval sample (see [`Fling::step`]).
@@ -53,20 +51,12 @@ pub const FLING_MIN_TOTAL_DELTA: f64 = 10.0;
 /// keep their meaning under the time-based model.
 pub const PER_FRAME_TO_PER_SECOND: f64 = 60.0;
 
-/// Per-event momentum-delta magnitude (pixels) below which trackpad momentum hands off from
-/// direct OS application to our own decaying tail. While the flick is fast (deltas above this)
-/// the OS deltas are applied as-is — responsive, and the per-frame timing jitter is
-/// imperceptible at speed. Once it slows past this, we take over with a self-decaying fling
-/// (see [`Fling::new_trackpad_tail`]) that glides to a stop smoothly, since the OS's own tail is
-/// short and its small, unevenly-timed steps read as choppy. Raise it to start smoothing sooner
-/// (a longer smoothed glide); lower it to keep more of the coast as raw OS momentum.
+/// Default trackpad fast→tail handoff speed, in per-event pixels (the widgets'
+/// `fling_smoothing_cutoff_speed` field).
 pub const FLING_MOMENTUM_SMOOTH_BELOW: f64 = 35.0;
 
-/// Per-millisecond velocity decay for the trackpad deceleration tail. Gentler than the
-/// touch-drag [`FLING_DECEL_RATE_PER_MS`], so the tail lasts longer and eases out more
-/// gradually than the OS's short tail. From the ~`FLING_MOMENTUM_SMOOTH_BELOW` handoff speed
-/// this is roughly a ~1.3 s / ~500 px glide. Raise toward 0.998 for a longer, softer coast;
-/// lower toward 0.994 for a quicker stop.
+/// Default per-ms decay for the trackpad deceleration tail (the widgets' `fling_tail_decel`
+/// field). Gentler than [`FLING_DECEL_RATE_PER_MS`] for a longer, smoother glide.
 pub const FLING_MOMENTUM_TAIL_DECEL_PER_MS: f64 = 0.996;
 
 /// One position sample along the scroll axis: a finger/mouse position for drag scrolling, or
@@ -113,14 +103,13 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
 /// One kinetic-scroll animation along a single scroll axis: a velocity that decays
 /// exponentially, integrated per frame so the motion is smooth and frame-rate-independent.
 ///
-/// - A touch-drag flick ([`Fling::new`]) decays at [`FLING_DECEL_RATE_PER_MS`] and may overscroll
-///   into the pulldown bounce.
+/// - A touch-drag flick ([`Fling::new`]) may overscroll into the pulldown bounce.
 /// - A trackpad deceleration tail ([`Fling::new_trackpad_tail`]) takes over once the OS momentum
-///   slows past [`FLING_MOMENTUM_SMOOTH_BELOW`], decays at the gentler
-///   [`FLING_MOMENTUM_TAIL_DECEL_PER_MS`] for a long smooth glide, and clips at the edges.
+///   slows past the widget's handoff threshold, and clips at the edges instead.
 ///
-/// Drive it once per animation frame with [`Fling::step`], apply the returned displacement, and
-/// stop when [`Fling::is_active`] returns false.
+/// The `decay_rate_per_ms` is supplied by the caller (a widget `#[live]` field), so the feel is
+/// configurable per widget. Drive it once per animation frame with [`Fling::step`], apply the
+/// returned displacement, and stop when [`Fling::is_active`] returns false.
 #[derive(Clone, Copy, Debug)]
 pub struct Fling {
     /// Current velocity in pixels per second.
@@ -140,27 +129,27 @@ pub struct Fling {
 
 impl Default for Fling {
     fn default() -> Self {
-        Self::new(0.0)
+        Self::new(0.0, FLING_DECEL_RATE_PER_MS)
     }
 }
 
 impl Fling {
-    /// A touch-drag flick: decays at [`FLING_DECEL_RATE_PER_MS`], may overscroll.
-    pub fn new(velocity: f64) -> Self {
+    /// A touch-drag flick decaying at `decay_rate_per_ms`; may overscroll.
+    pub fn new(velocity: f64, decay_rate_per_ms: f64) -> Self {
         Self {
             velocity,
-            decay_rate_per_ms: FLING_DECEL_RATE_PER_MS,
+            decay_rate_per_ms,
             overscroll: true,
             last_time: 0.0,
             dt_ema: 0.0,
         }
     }
 
-    /// A trackpad deceleration tail: gentler decay for a long smooth glide, clips at the edges.
-    pub fn new_trackpad_tail(velocity: f64) -> Self {
+    /// A trackpad deceleration tail decaying at `decay_rate_per_ms`; clips at the edges.
+    pub fn new_trackpad_tail(velocity: f64, decay_rate_per_ms: f64) -> Self {
         Self {
             velocity,
-            decay_rate_per_ms: FLING_MOMENTUM_TAIL_DECEL_PER_MS,
+            decay_rate_per_ms,
             overscroll: false,
             last_time: 0.0,
             dt_ema: 0.0,

@@ -8,7 +8,8 @@ use {
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         scroll_motion::{
             estimate_release_velocity, raw_os_momentum, Fling, ScrollSample,
-            FLING_MIN_TOTAL_DELTA, FLING_MOMENTUM_SMOOTH_BELOW, PER_FRAME_TO_PER_SECOND,
+            FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, FLING_MOMENTUM_SMOOTH_BELOW,
+            FLING_MOMENTUM_TAIL_DECEL_PER_MS, PER_FRAME_TO_PER_SECOND,
         },
         widget::*,
         widget_async::CxSplashVmExt,
@@ -378,11 +379,21 @@ pub struct PortalList {
     /// velocity (see [`crate::scroll_motion`]); kept only so existing DSL doesn't break.
     #[live(0.005)]
     flick_scroll_scaling: f64,
-    /// Deprecated: unused. The deceleration rate is the shared
-    /// [`crate::scroll_motion::FLING_DECEL_RATE_PER_MS`] exponential model;
-    /// kept only so existing DSL doesn't break.
+    /// Deprecated: unused. The deceleration rate is now `fling_decel`; kept so existing DSL
+    /// doesn't break.
     #[live(0.97)]
     flick_scroll_decay: f64,
+    /// Per-ms velocity decay of a touch-drag flick; lower stops sooner (see `scroll_motion`).
+    #[live(FLING_DECEL_RATE_PER_MS)]
+    fling_decel: f64,
+    /// Trackpad speed (per-frame px) at which momentum hands off from raw OS deltas to the
+    /// smoothed tail; raise to start smoothing sooner.
+    #[live(FLING_MOMENTUM_SMOOTH_BELOW)]
+    fling_smoothing_cutoff_speed: f64,
+    /// Per-ms velocity decay of the trackpad deceleration tail; raise toward 1.0 for a longer,
+    /// softer glide, lower for a quicker stop.
+    #[live(FLING_MOMENTUM_TAIL_DECEL_PER_MS)]
+    fling_tail_decel: f64,
     /// Set on a trackpad gesture `Ended`, cleared once its momentum ends or the scroll is
     /// otherwise interrupted. It gates starting a momentum fling, so a stray `Momentum` event
     /// (e.g. a still-live trackpad stream after a mouse click caught the fling) can't restart it.
@@ -2218,7 +2229,7 @@ impl Widget for PortalList {
                                     // Apply this delta directly either way, so the fast phase and
                                     // the handoff frame both move (no dead frame at the seam).
                                     self.delta_top_scroll(cx, delta, true, false);
-                                    if delta.abs() < FLING_MOMENTUM_SMOOTH_BELOW {
+                                    if delta.abs() < self.fling_smoothing_cutoff_speed {
                                         // Deceleration tail: hand off to a self-decaying fling
                                         // seeded at the current speed for a smooth continuation.
                                         // Clamp against a degenerate dt between coalesced events.
@@ -2226,8 +2237,9 @@ impl Widget for PortalList {
                                         let max_v =
                                             self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
                                         let velocity = (delta / dt).clamp(-max_v, max_v);
+                                        let decel = self.fling_tail_decel;
                                         self.scroll_state = ScrollState::Flick {
-                                            fling: Fling::new_trackpad_tail(velocity),
+                                            fling: Fling::new_trackpad_tail(velocity, decel),
                                             next_frame: cx.new_next_frame(),
                                         };
                                     } else {
@@ -2537,7 +2549,7 @@ impl Widget for PortalList {
                                 && release_velocity.abs() > min_velocity
                             {
                                 self.scroll_state = ScrollState::Flick {
-                                    fling: Fling::new(release_velocity),
+                                    fling: Fling::new(release_velocity, self.fling_decel),
                                     next_frame: cx.new_next_frame(),
                                 };
                             } else {
