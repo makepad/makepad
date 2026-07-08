@@ -699,7 +699,11 @@ impl ShaderBackend {
                 } else if id == id!(self) {
                     "_self".to_string()
                 } else {
-                    format!("{}", id)
+                    // Prefix like Hlsl/Glsl above: a user-declared local emitted verbatim can
+                    // collide with a reserved word in the target language (e.g. `half`, `kernel`,
+                    // `constant`, `thread` in MSL; WGSL reserves even more), which fails shader
+                    // compilation at runtime.
+                    format!("l_{}", id)
                 }
             }
         }
