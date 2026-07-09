@@ -30,11 +30,14 @@ const LPXS_PER_INCH: f32 = 96.0;
 const PTS_PER_INCH: f32 = 72.0;
 
 /// Approximate upper bound, in bytes, on the memory retained by the layout cache.
-/// Entry weights are estimates (text bytes plus laid-out row/glyph storage), and the
-/// most recently used entry is always kept even if it alone exceeds the budget, so
-/// the true footprint can deviate somewhat. Tune this to trade memory for fewer
-/// re-layouts of long texts during scrolling.
-pub const LAYOUT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Entry weights are estimates (text bytes plus laid-out row/glyph storage), where a
+/// laid-out glyph is ~64 bytes, so a maximal ~60 KB pasted-wall message weighs about
+/// 4 MB and a typical 2-10 KB code block 130-650 KB. This budget keeps several such
+/// messages warm for scroll-back. Texts drawn in the current frame are never evicted
+/// even over budget (see `evict_lru_to_limits`), and the excess is reclaimed at the
+/// end of the first frame that no longer draws them (see `advance_cache_generation`),
+/// so the true footprint can exceed this only briefly and only by the visible set.
+pub const LAYOUT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// A layout cache entry, tracked with its estimated size, its position in the
 /// least-recently-used order (the tick under which it is registered in
@@ -80,8 +83,13 @@ impl Layouter {
     }
 
     /// Marks a frame boundary for the cache's working-set protection; called once
-    /// per frame from the font system's per-frame preparation.
+    /// per frame from the font system's per-frame preparation, which runs after the
+    /// frame's draws. Eviction runs first, while the finished frame's entries are
+    /// still protected: anything older that pushed the cache over its limits (e.g.
+    /// a huge message that just scrolled off screen) is reclaimed here, one frame
+    /// after it was last drawn, rather than lingering until some later insert.
     pub fn advance_cache_generation(&mut self) {
+        self.evict_lru_to_limits();
         self.cache_generation += 1;
     }
 
@@ -1554,5 +1562,30 @@ mod tests {
         assert!(layouter
             .cached_results
             .contains_key(&cache_test_params(&fresh)));
+    }
+
+    #[test]
+    fn layout_cache_reclaims_over_budget_memory_at_frame_boundaries() {
+        let mut layouter = Layouter::new(Settings::default());
+
+        // A frame draws texts that collectively exceed the budget; they are all
+        // kept for that frame.
+        let weight = LAYOUT_CACHE_MAX_BYTES * 2 / 5;
+        let texts: Vec<String> = (0..4)
+            .map(|i| char::from(b'a' + i as u8).to_string().repeat(weight))
+            .collect();
+        for text in &texts {
+            layouter.insert_cached_result(cache_test_params(text), cache_test_result(text));
+        }
+        assert!(layouter.cache_bytes > LAYOUT_CACHE_MAX_BYTES);
+
+        // The frame boundary right after that frame still protects its entries.
+        layouter.advance_cache_generation();
+        assert!(layouter.cache_bytes > LAYOUT_CACHE_MAX_BYTES);
+
+        // The boundary after the first frame that no longer draws them reclaims
+        // the excess without waiting for a new insert.
+        layouter.advance_cache_generation();
+        assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
     }
 }
