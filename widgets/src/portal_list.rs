@@ -223,28 +223,31 @@ impl HeightTree {
         }
     }
 
-    /// Update the height at index i to new_height
-    fn update(&mut self, i: usize, new_height: f64) {
+    /// Update the height at index i to new_height.
+    /// Returns true when this is the item's first measurement or its stored
+    /// height actually changed, so callers can react only to real changes.
+    fn update(&mut self, i: usize, new_height: f64) -> bool {
         if i >= self.size {
-            return;
+            return false;
         }
 
+        let first_measurement = !self.measured[i];
         let old_height = self.point_query(i);
         let delta = new_height - old_height;
 
+        self.measured[i] = true;
+
         if delta.abs() < 0.001 {
             // No significant change
-            self.measured[i] = true;
-            return;
+            return first_measurement;
         }
-
-        self.measured[i] = true;
 
         let mut j = i + 1; // convert to 1-indexed
         while j <= self.size {
             self.tree[j] += delta;
             j += j & j.wrapping_neg(); // add lowest set bit
         }
+        true
     }
 
     /// Get the total sum of all heights
@@ -322,7 +325,10 @@ impl HeightTree {
 
     /// Update the default height for unmeasured items
     fn update_default_height(&mut self, new_default: f64) {
-        if (new_default - self.default_height).abs() < 0.001 {
+        // Re-applying the default walks every unmeasured item, which is costly
+        // on large lists, so only do it once the average has drifted noticeably.
+        // Unmeasured heights are estimates anyway, so sub-pixel drift is fine.
+        if (new_default - self.default_height).abs() < 0.5 {
             return;
         }
 
@@ -736,12 +742,15 @@ impl PortalList {
                         let height = item.size.index(vi);
                         let idx = item.index - self.range_start;
 
-                        // Record in cache for average calculation
-                        self.height_cache.record_height(height);
-
-                        // Update in tree
                         if let Some(ref mut tree) = self.height_tree {
-                            tree.update(idx, height);
+                            // Fold the height into the running average only on first
+                            // measurement or a real change; re-recording every visible
+                            // item per frame would weight the average by on-screen time.
+                            if tree.update(idx, height) {
+                                self.height_cache.record_height(height);
+                            }
+                        } else {
+                            self.height_cache.record_height(height);
                         }
                     }
                 }

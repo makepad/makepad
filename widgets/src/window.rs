@@ -368,6 +368,11 @@ pub struct Window {
     /// `ensure_initialized`.
     #[rust]
     caption_query_sig: Option<(bool, Option<f64>, Option<f64>)>,
+    /// The resolved title last pushed to the caption label. `sync_caption_title` runs on
+    /// every event via `ensure_initialized`, so it uses this to skip the widget-tree label
+    /// lookup and `set_text` when the title is unchanged.
+    #[rust]
+    last_synced_title: Option<String>,
     #[deref]
     view: View,
 
@@ -830,23 +835,38 @@ impl Window {
 
         let caption_label = self.view(cx, ids!(caption_label));
         if let Some(mut inner) = caption_label.borrow_mut() {
-            inner.layout.padding.left = padding_left;
+            // Redraw when the padding actually changes; nothing else re-lays-out
+            // the caption label now that the title sync skips unchanged titles.
+            if (inner.layout.padding.left - padding_left).abs() > 0.1 {
+                inner.layout.padding.left = padding_left;
+                inner.redraw(cx);
+            }
         }
         drop(caption_label);
     }
 
     fn sync_caption_title(&mut self, cx: &mut Cx) {
         let title = if self.window.title.is_empty() {
-            cx.windows[self.window.handle.window_id()]
-                .create_title
-                .clone()
+            &cx.windows[self.window.handle.window_id()].create_title
         } else {
-            self.window.title.clone()
+            &self.window.title
         };
-        if !title.is_empty() {
-            self.label(cx, ids!(caption_label.label))
-                .set_text(cx, &title);
+        // Bail out early when the resolved title was already synced: pushing an
+        // unchanged title through `set_text` every event would still cost a
+        // widget-tree lookup per event.
+        if self.last_synced_title.as_deref() == Some(title.as_str()) {
+            return;
         }
+        let title = title.clone();
+        if !title.is_empty() {
+            let label = self.label(cx, ids!(caption_label.label));
+            if label.borrow().is_none() {
+                // No caption label in the tree yet; retry on a later event.
+                return;
+            }
+            label.set_text(cx, &title);
+        }
+        self.last_synced_title = Some(title);
     }
 
     /// Resolves the desired system-bar (status/navigation bar) icon tint and,
@@ -1189,6 +1209,11 @@ impl Widget for Window {
             let cx = &mut Cx2d::new(&mut cx_draw);
             self.draw_all(cx, scope);
             return;
+        }
+        if matches!(event, Event::LiveEdit) {
+            // A live reload can re-apply DSL text over the caption label, so
+            // force the next sync to push the title again.
+            self.last_synced_title = None;
         }
         self.ensure_initialized(cx);
 

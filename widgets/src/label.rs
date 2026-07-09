@@ -319,6 +319,11 @@ impl Widget for Label {
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        // Identical text produces identical visuals, so skip the string
+        // rebuild and the redraw that would dirty the whole draw list.
+        if self.text.as_ref() == v {
+            return;
+        }
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
