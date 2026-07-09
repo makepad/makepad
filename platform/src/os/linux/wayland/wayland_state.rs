@@ -1373,6 +1373,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     || state.scroll_stopped
                 {
                     if let Some(window_id) = state.pointer_window {
+                        // Deliver any buffered motion first so the Scroll event's hover
+                        // position is current (Button and Leave already do this).
+                        state.flush_pending_motion();
                         let time_now = state.time_now();
                         let scroll = if state.scroll_is_wheel {
                             if detents.x != 0.0 || detents.y != 0.0 {
@@ -1752,6 +1755,14 @@ impl WaylandState {
         let Some((window_id, pos)) = self.pending_motion.take() else {
             return;
         };
+        // The window may have been closed by an event earlier in this batch;
+        // dispatching a motion for a dead window would hit a stale or recycled
+        // window pool slot downstream.
+        if !self.windows.iter().any(|w| w.window_id == window_id)
+            && !self.popups.iter().any(|w| w.window_id == window_id)
+        {
+            return;
+        }
         self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
             abs: pos,
             window_id,
