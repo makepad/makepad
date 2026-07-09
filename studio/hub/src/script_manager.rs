@@ -333,12 +333,7 @@ fn script_value_to_string_array(
             continue;
         };
         let item_what = format!("{}[{}]", what, index);
-        out.push(
-            match script_value_to_checked_string(vm, value, &item_what) {
-                Ok(value) => value,
-                Err(err) => return Err(err),
-            },
-        );
+        out.push(script_value_to_checked_string(vm, value, &item_what)?);
     }
     Ok(out)
 }
@@ -368,14 +363,8 @@ fn script_value_to_string_map(
 
     let mut out = HashMap::with_capacity(pairs.len());
     for (key, value) in pairs {
-        let key = match script_value_to_checked_string(vm, key, &format!("{} key", what)) {
-            Ok(key) => key,
-            Err(err) => return Err(err),
-        };
-        let value = match script_value_to_checked_string(vm, value, &format!("{}[{}]", what, key)) {
-            Ok(value) => value,
-            Err(err) => return Err(err),
-        };
+        let key = script_value_to_checked_string(vm, key, &format!("{} key", what))?;
+        let value = script_value_to_checked_string(vm, value, &format!("{}[{}]", what, key))?;
         out.insert(key, value);
     }
     Ok(out)
@@ -392,14 +381,11 @@ fn parse_registered_run_item(
         ));
     };
 
-    let name = match script_value_to_checked_string(
+    let name = script_value_to_checked_string(
         vm,
         vm.bx.heap.value(item, id!(name).into(), vm.trap()),
         "hub.set_run_items item.name",
-    ) {
-        Ok(name) => name,
-        Err(err) => return Err(err),
-    };
+    )?;
     if name.trim().is_empty() {
         return Err(script_err_unexpected!(
             vm.trap(),
@@ -497,7 +483,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
     let studio_ip = vm.new_string_with(|_vm, out| out.push_str(&studio_ip));
     vm.bx
         .heap
-        .set_value_def(hub, id!(studio_ip).into(), studio_ip.into());
+        .set_value_def(hub, id!(studio_ip).into(), studio_ip);
 
     vm.add_method(
         hub,
@@ -519,7 +505,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
                 .downcast_ref::<ScriptHost>()
                 .map(|host| studio_url_for_app(host.studio_local_addr.as_deref(), build_id))
                 .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&url)).into()
+            vm.new_string_with(|_vm, out| out.push_str(&url))
         },
     );
 
@@ -533,7 +519,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
                 .downcast_ref::<ScriptHost>()
                 .map(|host| normalize_studio_host(host.studio_local_addr.as_deref()))
                 .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&host)).into()
+            vm.new_string_with(|_vm, out| out.push_str(&host))
         },
     );
 
@@ -556,7 +542,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
                 .downcast_ref::<ScriptHost>()
                 .map(|host| studio_url_for_app(host.studio_ext_addr.as_deref(), build_id))
                 .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&url)).into()
+            vm.new_string_with(|_vm, out| out.push_str(&url))
         },
     );
 
@@ -570,7 +556,7 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
                 .downcast_ref::<ScriptHost>()
                 .map(|host| normalize_studio_host(host.studio_ext_addr.as_deref()))
                 .unwrap_or_default();
-            vm.new_string_with(|_vm, out| out.push_str(&host)).into()
+            vm.new_string_with(|_vm, out| out.push_str(&host))
         },
     );
 
@@ -658,10 +644,7 @@ fn run_pending_script_commands(
     std: &mut ScriptStd,
     script_vm: &mut Option<Box<ScriptVmBase>>,
 ) {
-    loop {
-        let Ok(command) = host.command_rx.try_recv() else {
-            break;
-        };
+    while let Ok(command) = host.command_rx.try_recv() {
         match command {
             ScriptCommand::RunItem {
                 name,
@@ -729,6 +712,7 @@ fn normalize_script_source(source: &str) -> String {
     normalized
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_script_build(
     script_id: ScriptId,
     mount: String,

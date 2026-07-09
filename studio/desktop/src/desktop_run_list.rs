@@ -13,13 +13,23 @@ script_mod! {
         show_bg: true
         draw_bg +: {
             hover: instance(0.0)
+            status: instance(0.0)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.move_to(3.0, 2.0)
-                sdf.line_to(11.0, 7.0)
-                sdf.line_to(3.0, 12.0)
-                sdf.close_path()
-                sdf.fill(theme.color_label_inner.mix(#xFFFFFF, self.hover))
+                if self.status < 0.5 {
+                    sdf.move_to(3.0, 2.0)
+                    sdf.line_to(11.0, 7.0)
+                    sdf.line_to(3.0, 12.0)
+                    sdf.close_path()
+                    sdf.fill(theme.color_label_inner.mix(#xFFFFFF, self.hover))
+                } else if self.status < 1.5 {
+                    let center = self.rect_size * 0.5
+                    sdf.circle(center.x, center.y, 4.0)
+                    sdf.fill(#xe2c08d)
+                } else {
+                    sdf.box(3.0, 3.0, 8.0, 8.0, 1.0)
+                    sdf.fill(#x89ca78)
+                }
                 return sdf.result
             }
         }
@@ -88,6 +98,7 @@ script_mod! {
                 color_focus: #xFFFFFF
             }
         }
+
     }
 
     mod.widgets.RunListEmpty = View {
@@ -219,6 +230,35 @@ impl DesktopRunList {
                 mount: active_mount.to_string(),
                 name: entry.name.clone(),
             });
+
+            let mut icon = item.view(cx, ids!(icon));
+            let mut status = None;
+            for state in data.run_tab_state.values() {
+                if state.mount == *active_mount && state.package == entry.name {
+                    status = Some(state.status.clone());
+                    break;
+                }
+            }
+
+            if let Some(status_str) = status {
+                if status_str == "building" {
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 1.0}
+                    });
+                } else if status_str == "running" {
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 2.0}
+                    });
+                } else {
+                    script_apply_eval!(cx, icon, {
+                        draw_bg +: {status: 0.0}
+                    });
+                }
+            } else {
+                script_apply_eval!(cx, icon, {
+                    draw_bg +: {status: 0.0}
+                });
+            }
             item.draw_all(cx, &mut Scope::empty());
         }
     }
@@ -244,9 +284,9 @@ impl Widget for DesktopRunList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 if let Some(data) = scope.data.get_mut::<AppData>() {
-                    self.draw_entries(cx, &mut *list, data);
+                    self.draw_entries(cx, &mut list, data);
                 } else {
-                    self.draw_empty(cx, &mut *list, "No app state");
+                    self.draw_empty(cx, &mut list, "No app state");
                 }
             }
         }

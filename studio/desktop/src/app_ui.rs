@@ -1,526 +1,30 @@
 use crate::makepad_widgets::*;
 
+#[path = "app_ui/ai_pane.rs"]
+pub mod ai_pane;
+#[path = "app_ui/bottom_panes.rs"]
+pub mod bottom_panes;
+#[path = "app_ui/editor_panes.rs"]
+pub mod editor_panes;
+#[path = "app_ui/shared.rs"]
+pub mod shared;
+#[path = "app_ui/sidebar_panes.rs"]
+pub mod sidebar_panes;
+
+pub fn register_all(vm: &mut ScriptVm) {
+    shared::script_mod(vm);
+    ai_pane::script_mod(vm);
+    sidebar_panes::script_mod(vm);
+    editor_panes::script_mod(vm);
+    bottom_panes::script_mod(vm);
+    self::script_mod(vm);
+}
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
     let STUDIO_HEADER_HEIGHT = 36.0
-
-    let PaneToolbar = RectView {
-        width: Fill
-        height: STUDIO_HEADER_HEIGHT
-        flow: Right
-        align: Align {x: 0.0 y: 0.5}
-        padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
-        spacing: theme.space_2
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-    }
-
-    let AiChatMarkdown = Markdown {
-        width: Fill
-        height: Fit
-        selectable: true
-        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
-        paragraph_spacing: 9.0
-        pre_code_spacing: 4.0
-        inline_code_padding: Inset {left: 4.0 right: 4.0 top: 1.0 bottom: 3.0}
-        inline_code_margin: Inset {left: 2.0 right: 2.0 top: 0.0 bottom: 0.0}
-        heading_base_scale: 1.45
-        quote_layout: Layout {
-            flow: Flow.Right {wrap: true}
-            padding: Inset {left: 8.0 right: 8.0 top: 4.0 bottom: 5.0}
-        }
-        draw_block +: {
-            quote_bg_color: theme.color_bg_highlight
-            quote_fg_color: theme.color_label_inner_inactive
-            code_color: theme.color_bg_highlight
-        }
-        splash_block := View {
-            width: Fill
-            height: 54.0
-            flow: Overlay
-            margin: Inset {left: 0.0 right: 0.0 top: 3.0 bottom: 1.0}
-            splash_view := CodeView {
-                keep_cursor_at_end: false
-                editor +: {
-                    height: 54.0
-                    word_wrap: true
-                    pad_left_top: vec2(8.0, 5.0)
-                    draw_bg +: {
-                        color: theme.color_bg_highlight
-                    }
-                }
-            }
-        }
-        body: ""
-    }
-
-    let LogToolbarToggle = Toggle {
-        margin: Inset {}
-        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
-        label_walk: Walk {width: Fit height: Fit margin: Inset {left: 24.0 right: 0.0 top: 0.0 bottom: 0.0}}
-        draw_bg +: {
-            size: 13.0
-        }
-        draw_text +: {
-            color: theme.color_label_outer_off
-            color_hover: theme.color_label_outer
-            color_active: theme.color_label_outer
-        }
-    }
-
-    let SidebarFilterInput = TextInputFlat {
-        height: 26.0
-        margin: Inset {}
-        padding: Inset {left: 12.0 right: 12.0 top: 5.0 bottom: 1.0}
-        draw_bg +: {
-            border_radius: 4.0
-
-            color: theme.color_bg_app * 0.82
-            color_hover: theme.color_bg_app * 0.88
-            color_focus: theme.color_bg_app * 0.92
-            color_down: theme.color_bg_app * 0.85
-            color_empty: theme.color_bg_app * 0.82
-
-            border_color: theme.color_u_hidden
-            border_color_hover: theme.color_u_hidden
-            border_color_focus: theme.color_u_hidden
-            border_color_down: theme.color_u_hidden
-            border_color_empty: theme.color_u_hidden
-            border_color_disabled: theme.color_u_hidden
-
-            border_color_2: theme.color_u_hidden
-            border_color_2_hover: theme.color_u_hidden
-            border_color_2_focus: theme.color_u_hidden
-            border_color_2_down: theme.color_u_hidden
-            border_color_2_empty: theme.color_u_hidden
-            border_color_2_disabled: theme.color_u_hidden
-        }
-        draw_text +: {
-            color_empty: theme.color_label_inner_inactive
-            color_empty_hover: theme.color_label_inner_inactive
-            color_empty_focus: theme.color_label_outer
-        }
-    }
-
-    let LogToolbarFilterInput = TextInputFlat {
-        height: 26.0
-        margin: Inset {}
-        padding: Inset {left: 10.0 right: 10.0 top: 5.0 bottom: 1.0}
-        draw_bg +: {
-            border_radius: 4.0
-
-            color: theme.color_bg_app * 0.84
-            color_hover: theme.color_bg_app * 0.9
-            color_focus: theme.color_bg_app * 0.94
-            color_down: theme.color_bg_app * 0.87
-            color_empty: theme.color_bg_app * 0.84
-
-            border_color: theme.color_u_hidden
-            border_color_hover: theme.color_u_hidden
-            border_color_focus: theme.color_u_hidden
-            border_color_down: theme.color_u_hidden
-            border_color_empty: theme.color_u_hidden
-            border_color_disabled: theme.color_u_hidden
-
-            border_color_2: theme.color_u_hidden
-            border_color_2_hover: theme.color_u_hidden
-            border_color_2_focus: theme.color_u_hidden
-            border_color_2_down: theme.color_u_hidden
-            border_color_2_empty: theme.color_u_hidden
-            border_color_2_disabled: theme.color_u_hidden
-        }
-        draw_text +: {
-            color_empty: theme.color_label_inner_inactive
-            color_empty_hover: theme.color_label_inner_inactive
-            color_empty_focus: theme.color_label_outer
-        }
-    }
-
-    let LogToolbarButton = ButtonFlatter {
-        margin: Inset {}
-        padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
-        draw_text +: {
-            color: theme.color_label_outer_off
-            color_hover: theme.color_label_outer
-            color_down: theme.color_label_outer
-            color_focus: theme.color_label_outer
-        }
-    }
-
-    let LogToolbarIconButton = ButtonFlatterIcon {
-        width: 22.0
-        height: 22.0
-        margin: Inset {}
-        icon_walk: Walk {width: 13.0 height: 13.0}
-        draw_icon +: {
-            color: theme.color_label_outer_off
-            color_hover: theme.color_label_outer
-            color_down: theme.color_label_outer
-            color_focus: theme.color_label_outer
-        }
-    }
-
-    let AiPromptInput = TextInputFlat {
-        width: Fill
-        height: 92.0
-        is_multiline: true
-        submit_on_enter: false
-        empty_text: "Ask AI"
-        margin: Inset {}
-        padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 10.0}
-        draw_bg +: {
-            border_radius: 7.0
-
-            color: theme.color_bg_highlight * 0.72
-            color_hover: theme.color_bg_highlight * 0.78
-            color_focus: theme.color_bg_highlight * 0.84
-            color_down: theme.color_bg_highlight * 0.74
-            color_empty: theme.color_bg_highlight * 0.72
-
-            border_color: theme.color_u_hidden
-            border_color_hover: theme.color_u_hidden
-            border_color_focus: theme.color_bevel_focus
-            border_color_down: theme.color_u_hidden
-            border_color_empty: theme.color_u_hidden
-            border_color_disabled: theme.color_u_hidden
-
-            border_color_2: theme.color_u_hidden
-            border_color_2_hover: theme.color_u_hidden
-            border_color_2_focus: theme.color_u_hidden
-            border_color_2_down: theme.color_u_hidden
-            border_color_2_empty: theme.color_u_hidden
-            border_color_2_disabled: theme.color_u_hidden
-        }
-        draw_text +: {
-            color_empty: theme.color_label_inner_inactive
-            color_empty_hover: theme.color_label_inner_inactive
-            color_empty_focus: theme.color_label_inner_inactive
-        }
-    }
-
-    let AiRunButton = ButtonFlat {
-        width: 42.0
-        height: 42.0
-        margin: Inset {}
-        padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
-        text: "▶"
-        draw_bg +: {
-            border_radius: 7.0
-            color: theme.color_bg_highlight * 0.9
-            color_hover: theme.color_bg_highlight * 1.04
-            color_down: theme.color_bg_highlight * 0.76
-            color_focus: theme.color_bg_highlight
-            border_color: theme.color_u_hidden
-            border_color_hover: theme.color_u_hidden
-            border_color_focus: theme.color_u_hidden
-            border_color_down: theme.color_u_hidden
-            border_color_disabled: theme.color_bg_odd
-        }
-        draw_text +: {
-            color: theme.color_label_outer
-            color_hover: theme.color_label_outer
-            color_down: theme.color_label_outer
-            color_focus: theme.color_label_outer
-            color_disabled: theme.color_label_inner_inactive
-            text_style: theme.font_bold {
-                font_size: 15.0
-            }
-        }
-    }
-
-    let AiPaneDivider = View {
-        width: Fill
-        height: 1.0
-        margin: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
-        show_bg: true
-        draw_bg +: {
-            color: theme.color_bg_highlight * 0.86
-        }
-    }
-
-    let AiPane = RectView {
-        width: Fill
-        height: Fill
-        flow: Down
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-
-        RectView {
-            width: Fill
-            height: STUDIO_HEADER_HEIGHT
-            flow: Right
-            align: Align {x: 0.0 y: 0.5}
-            padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
-            spacing: theme.space_2
-            draw_bg +: {
-                color: theme.color_bg_highlight
-            }
-
-            View {
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                align: Align {x: 0.0 y: 0.5}
-
-                Label {
-                    text: "AI"
-                }
-
-                Filler {}
-
-                ai_status_label := Label {
-                    width: Fit
-                    text: "Loading AI..."
-                }
-            }
-        }
-
-        RectView {
-            width: Fill
-            height: Fit
-            flow: Right
-            spacing: theme.space_2
-            padding: Inset {left: 12.0 right: 12.0 top: 12.0 bottom: 8.0}
-            draw_bg +: {
-                color: theme.color_bg_highlight
-            }
-
-            ai_agent_dropdown := DropDown {
-                width: Fill
-                labels: ["Chat 1"]
-            }
-
-            ai_new_button := ButtonFlat {
-                width: 34.0
-                text: "+"
-            }
-
-            ai_delete_button := ButtonFlat {
-                width: 34.0
-                text: "x"
-            }
-        }
-
-        RectView {
-            width: Fill
-            height: Fit
-            flow: Down
-            padding: Inset {left: 12.0 right: 12.0 top: 4.0 bottom: 0.0}
-            draw_bg +: {
-                color: theme.color_bg_highlight
-            }
-
-            Label {
-                text: "Live"
-                draw_text.color: theme.color_label_outer
-            }
-
-            ai_live_scroll := ScrollYView {
-                width: Fill
-                height: 132.0
-                flow: Down
-                show_bg: true
-                padding: Inset {left: 8.0 right: 8.0 top: 8.0 bottom: 8.0}
-                draw_bg +: {
-                    color: theme.color_bg_highlight * 0.76
-                }
-                ai_live_markdown := AiChatMarkdown {}
-            }
-        }
-
-        AiPaneDivider {}
-
-        chat_scroll := ScrollYView {
-            width: Fill
-            height: Fill
-            flow: Down
-            show_bg: true
-            padding: Inset {left: 12.0 right: 12.0 top: 10.0 bottom: 14.0}
-            draw_bg +: {
-                color: theme.color_bg_container * 1.02
-            }
-            ai_chat_markdown := AiChatMarkdown {}
-        }
-
-        AiPaneDivider {}
-
-        RectView {
-            width: Fill
-            height: Fit
-            flow: Right
-            spacing: theme.space_2
-            align: Align {x: 0.0 y: 1.0}
-            padding: Inset {left: 12.0 right: 12.0 top: 8.0 bottom: 12.0}
-            draw_bg +: {
-                color: theme.color_bg_highlight
-            }
-
-            ai_prompt_input := AiPromptInput {}
-            ai_run_button := AiRunButton {}
-        }
-    }
-
-    let FileTreePane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        PaneToolbar {
-            file_tree_filter := SidebarFilterInput {
-                width: Fill
-                empty_text: "Filter"
-            }
-        }
-        file_tree := DesktopFileTree {}
-    }
-
-    let CodeEditorPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        code_editor := DesktopCodeEditor {}
-    }
-
-    let EditorFirstPane = RectView {
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-    }
-
-    let RunListPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        PaneToolbar {
-            run_stop_all := ButtonFlat {text: "Stop All"}
-        }
-        run_list := DesktopRunList {}
-    }
-
-    let RunningAppPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        run_view := DesktopRunView {}
-    }
-
-    let RunFirstPane = RectView {
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-        View {
-            width: Fill
-            height: Fill
-            align: Align {x: 0.5 y: 0.5}
-            placeholder := Label {
-                text: "Click play in Run to launch"
-                draw_text.color: theme.color_label_outer
-            }
-        }
-    }
-
-    let LogPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        PaneToolbar {
-            View {
-                width: Fit
-                height: Fit
-                flow: Right
-                align: Align {x: 0.0 y: 0.5}
-                spacing: theme.space_1
-
-                log_tail_toggle := LogToolbarToggle {
-                    text: "Tail"
-                    active: true
-                }
-            }
-            Filler {}
-            View {
-                width: Fit
-                height: Fit
-                flow: Right
-                align: Align {x: 0.0 y: 0.5}
-                spacing: 4.0
-
-                log_filter := LogToolbarFilterInput {
-                    width: 216.0
-                    empty_text: "Filter"
-                }
-                clear_log_filter := LogToolbarButton {
-                    width: 20.0
-                    height: 20.0
-                    text: "x"
-                    padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
-                }
-            }
-            View {width: 10.0 height: Fit}
-            View {
-                width: Fit
-                height: Fit
-                flow: Right
-                align: Align {x: 0.0 y: 0.5}
-                spacing: 8.0
-
-                clear_log := LogToolbarButton {
-                    text: "Clear"
-                }
-                log_open_profiler := LogToolbarIconButton {
-                    draw_icon +: {
-                        svg: crate_resource("self://resources/icons/icon_profiler.svg")
-                    }
-                }
-            }
-        }
-        log_view := DesktopLogView {}
-    }
-
-    let ProfilerPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        profiler_view := DesktopProfilerView {}
-    }
-
-    let LogFirstPane = LogPane {}
-
-    let StudioTerminalView = DesktopTerminalView {
-        pad_x: 6.0
-        pad_y: 4.0
-    }
-
-    let TerminalPane = View {
-        width: Fill
-        height: Fill
-        flow: Down
-        terminal_view := StudioTerminalView {}
-    }
-
-    let TerminalFirstPane = RectView {
-        draw_bg +: {
-            color: theme.color_bg_container
-        }
-        View {
-            width: Fill
-            height: Fill
-            flow: Down
-            align: Center
-            spacing: theme.space_3
-            placeholder := Label {
-                text: "Terminal tabs live here"
-                draw_text.color: theme.color_label_outer
-            }
-            terminal_add_button := ButtonFlat {
-                width: 136.0
-                text: "Add Terminal"
-            }
-        }
-    }
 
     let CaptionChromeToggle = ButtonFlatterIcon {
         width: 36.0
@@ -543,9 +47,79 @@ script_mod! {
         }
     }
 
-    let CaptionPanelToggle = CaptionChromeToggle {
+    let BottomBarIconButton = ButtonFlatterIcon {
+        width: 38.0
+        height: 26.0
+        margin: Inset {}
+        icon_walk: Walk {width: 16.0 height: 16.0}
+        draw_bg +: {
+            color: theme.color_u_hidden
+            color_hover: theme.color_bg_highlight
+            color_down: theme.color_bg_highlight * 0.78
+            color_focus: theme.color_u_hidden
+            border_radius: 4.0
+        }
         draw_icon +: {
-            svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
+            color: theme.color_label_outer
+            color_hover: theme.color_label_outer_hover
+            color_down: theme.color_label_inner_active
+            color_focus: theme.color_label_outer
+        }
+    }
+
+    let StudioBottomBar = SolidView {
+        width: Fill
+        height: 30.0
+        flow: Right
+        align: Align {x: 0.0 y: 0.5}
+        padding: Inset {left: 5.0 right: 5.0 top: 0.0 bottom: 0.0}
+        spacing: 4.0
+        draw_bg +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                let color = vec4(theme.color_bg_container.rgb, 0.12)
+                let highlight = 0.02 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+
+                // Top separator line
+                let thickness = 1.0
+                if self.pos.y * self.rect_size.y <= thickness {
+                    sdf.clear(vec4(1.0, 1.0, 1.0, 0.05))
+                }
+                return sdf.result
+            }
+        }
+
+        let BottomBarSeparator = View {
+            width: 1.0
+            height: 14.0
+            margin: Inset {left: 2.0 right: 2.0}
+            show_bg: true
+            draw_bg +: {
+                color: vec4(1.0, 1.0, 1.0, 0.08)
+            }
+        }
+
+        bottom_file_tree_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_file.svg")
+        }
+        BottomBarSeparator {}
+        bottom_run_list_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_run.svg")
+        }
+        BottomBarSeparator {}
+        bottom_panel_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
+        }
+        bottom_bar_spacer := View {
+            width: Fill
+            height: Fill
+        }
+        BottomBarSeparator {}
+        bottom_agent_toggle := BottomBarIconButton {
+            draw_icon.svg: crate_resource("self://resources/icons/icon_ai.svg")
         }
     }
 
@@ -576,17 +150,49 @@ script_mod! {
             color_active: theme.color_label_inner_active
         }
         draw_bg +: {
-            color: theme.color_bg_app * 0.84
-            color_hover: theme.color_bg_app * 0.96
-            color_active: theme.color_fg_app
+            color: vec4(1.0, 1.0, 1.0, 0.0)
+            color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+            color_active: vec4(1.0, 1.0, 1.0, 0.08)
 
             border_color: theme.color_u_hidden
             border_color_hover: theme.color_u_hidden
-            border_color_active: theme.color_bg_app * 0.92
+            border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
 
             border_color_2: theme.color_u_hidden
             border_color_2_hover: theme.color_u_hidden
-            border_color_2_active: theme.color_bg_app * 0.92
+            border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                sdf.box_y(
+                    self.border_size + self.overlap_fix
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2. - self.overlap_fix
+                    self.rect_size.y
+                    self.border_radius
+                    max(self.border_size * 0.5, 0.5)
+                )
+
+                let fill = self.color
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_active, self.active)
+
+                let stroke = self.border_color
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_active, self.active)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
+
+                let accent_thickness = 1.5
+                let accent_color = vec4(0.38, 0.69, 0.91, 1.0)
+                if self.active > 0.5 && self.pos.y * self.rect_size.y >= self.rect_size.y - accent_thickness {
+                    return accent_color
+                }
+
+                return sdf.result
+            }
         }
     }
 
@@ -661,17 +267,49 @@ script_mod! {
             color_active: theme.color_label_inner_active
         }
         draw_bg +: {
-            color: theme.color_bg_app * 0.84
-            color_hover: theme.color_bg_app * 0.95
-            color_active: theme.color_fg_app
+            color: vec4(1.0, 1.0, 1.0, 0.0)
+            color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+            color_active: vec4(1.0, 1.0, 1.0, 0.08)
 
             border_color: theme.color_u_hidden
             border_color_hover: theme.color_u_hidden
-            border_color_active: theme.color_bg_app * 0.92
+            border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
 
             border_color_2: theme.color_u_hidden
             border_color_2_hover: theme.color_u_hidden
-            border_color_2_active: theme.color_bg_app * 0.92
+            border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                sdf.box_y(
+                    self.border_size + self.overlap_fix
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2. - self.overlap_fix
+                    self.rect_size.y
+                    self.border_radius
+                    max(self.border_size * 0.5, 0.5)
+                )
+
+                let fill = self.color
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_active, self.active)
+
+                let stroke = self.border_color
+                    .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_active, self.active)
+
+                sdf.fill_keep(fill)
+                sdf.stroke(stroke, self.border_size)
+
+                let accent_thickness = 1.5
+                let accent_color = vec4(0.38, 0.69, 0.91, 1.0)
+                if self.active > 0.5 && self.pos.y * self.rect_size.y >= self.rect_size.y - accent_thickness {
+                    return accent_color
+                }
+
+                return sdf.result
+            }
         }
         close_button +: {
             width: 11.0
@@ -688,12 +326,123 @@ script_mod! {
     let StudioDock = DockFlat {
         tab_bar +: {
             height: STUDIO_HEADER_HEIGHT
+            draw_bg +: {
+                color: vec4(0.0, 0.0, 0.0, 0.0)
+            }
+            CloseableTab := mod.widgets.TabFlat {
+                closeable: true
+                spacing: theme.space_1
+                draw_text +: {
+                    color: theme.color_label_inner_inactive
+                    color_hover: theme.color_label_inner
+                    color_active: theme.color_label_inner_active
+                }
+                draw_bg +: {
+                    color: vec4(1.0, 1.0, 1.0, 0.0)
+                    color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+                    color_active: vec4(1.0, 1.0, 1.0, 0.08)
+
+                    border_color: theme.color_u_hidden
+                    border_color_hover: theme.color_u_hidden
+                    border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    border_color_2: theme.color_u_hidden
+                    border_color_2_hover: theme.color_u_hidden
+                    border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                        sdf.box_y(
+                            self.border_size + self.overlap_fix
+                            self.border_size
+                            self.rect_size.x - self.border_size * 2. - self.overlap_fix
+                            self.rect_size.y
+                            self.border_radius
+                            max(self.border_size * 0.5, 0.5)
+                        )
+
+                        let fill = self.color
+                            .mix(self.color_hover, self.hover)
+                            .mix(self.color_active, self.active)
+
+                        let stroke = self.border_color
+                            .mix(self.border_color_hover, self.hover)
+                            .mix(self.border_color_active, self.active)
+
+                        sdf.fill_keep(fill)
+                        sdf.stroke(stroke, self.border_size)
+
+                        let accent_thickness = 1.5
+                        let accent_color = vec4(0.38, 0.69, 0.91, 1.0)
+                        if self.active > 0.5 && self.pos.y * self.rect_size.y >= self.rect_size.y - accent_thickness {
+                            return accent_color
+                          }
+
+                        return sdf.result
+                    }
+                }
+            }
+            PermanentTab := mod.widgets.TabFlat {
+                closeable: false
+                spacing: theme.space_1
+                draw_text +: {
+                    color: theme.color_label_inner_inactive
+                    color_hover: theme.color_label_inner
+                    color_active: theme.color_label_inner_active
+                }
+                draw_bg +: {
+                    color: vec4(1.0, 1.0, 1.0, 0.0)
+                    color_hover: vec4(1.0, 1.0, 1.0, 0.04)
+                    color_active: vec4(1.0, 1.0, 1.0, 0.08)
+
+                    border_color: theme.color_u_hidden
+                    border_color_hover: theme.color_u_hidden
+                    border_color_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    border_color_2: theme.color_u_hidden
+                    border_color_2_hover: theme.color_u_hidden
+                    border_color_2_active: vec4(1.0, 1.0, 1.0, 0.12)
+
+                    pixel: fn() {
+                        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+
+                        sdf.box_y(
+                            self.border_size + self.overlap_fix
+                            self.border_size
+                            self.rect_size.x - self.border_size * 2. - self.overlap_fix
+                            self.rect_size.y
+                            self.border_radius
+                            max(self.border_size * 0.5, 0.5)
+                        )
+
+                        let fill = self.color
+                            .mix(self.color_hover, self.hover)
+                            .mix(self.color_active, self.active)
+
+                        let stroke = self.border_color
+                            .mix(self.border_color_hover, self.hover)
+                            .mix(self.border_color_active, self.active)
+
+                        sdf.fill_keep(fill)
+                        sdf.stroke(stroke, self.border_size)
+
+                        let accent_thickness = 1.5
+                        let accent_color = vec4(0.38, 0.69, 0.91, 1.0)
+                        if self.active > 0.5 && self.pos.y * self.rect_size.y >= self.rect_size.y - accent_thickness {
+                            return accent_color
+                        }
+
+                        return sdf.result
+                    }
+                }
+            }
         }
         splitter +: {
             draw_bg +: {
-                color: theme.color_bg_container
-                color_hover: theme.color_bevel_outset_1_hover * 0.45
-                color_drag: theme.color_bevel_outset_1_hover * 0.7
+                color: vec4(1.0, 1.0, 1.0, 0.05)
+                color_hover: vec4(1.0, 1.0, 1.0, 0.20)
+                color_drag: vec4(1.0, 1.0, 1.0, 0.45)
                 border_radius: 1.5
                 splitter_pad: 1.5
             }
@@ -701,15 +450,33 @@ script_mod! {
     }
 
     mod.widgets.AppUI = Window {
+        pass +: { clear_color: #00000000 }
         window.inner_size: vec2(1400 900)
         caption_bar := SolidView {
             visible: true
             height: STUDIO_HEADER_HEIGHT
             flow: Right
             align: Align {x: 0.0 y: 0.5}
-            draw_bg.color: theme.color_bg_app
+            draw_bg +: {
+                pixel: fn() {
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.rect(0.0, 0.0, self.rect_size.x, self.rect_size.y)
+                    let color = vec4(theme.color_bg_app.rgb, 0.12)
+                    let highlight = 0.03 * smoothstep(1.5, 0.0, self.pos.y * self.rect_size.y)
+                    let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.005
+                    sdf.fill(vec4(color.rgb + highlight + noise, color.a))
+
+                    // Bottom separator line
+                    let thickness = 1.0
+                    if self.pos.y * self.rect_size.y >= self.rect_size.y - thickness {
+                        sdf.clear(vec4(1.0, 1.0, 1.0, 0.06))
+                    }
+                    return sdf.result
+                }
+            }
 
             left_controls := View {
+                visible: false
                 width: Fit
                 height: Fit
                 flow: Right
@@ -742,7 +509,6 @@ script_mod! {
                 spacing: theme.space_1
                 margin: Inset {left: 0.0 right: 96.0 top: 0.0 bottom: 0.0}
 
-                bottom_panel_toggle := CaptionPanelToggle {}
                 voice_wave := VoiceWave {
                     width: Fit
                     height: Fit
@@ -771,7 +537,10 @@ script_mod! {
         }
         draw_bg +: {
             pixel: fn() {
-                return theme.color_bg_app
+                let color = vec4(theme.color_bg_app.rgb, 0.55)
+                let highlight = 0.04 * smoothstep(2.0, 0.0, self.pos.y * self.rect_size.y)
+                let noise = (Math.random_2d(self.pos * 1000.0) - 0.5) * 0.008
+                return vec4(color.rgb + highlight + noise, color.a)
             }
         }
 
@@ -780,176 +549,199 @@ script_mod! {
             height: Fill
             flow: Down
             spacing: 0.0
-            padding: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 10.0}
+            padding: Inset {}
 
-            RoundedView {
-                visible: false
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: theme.space_2
-                padding: Inset {left: 10.0 right: 10.0 top: 6.0 bottom: 6.0}
-                draw_bg.color: #x1B2332
-                draw_bg.border_radius: 6.0
-
-                status_label := Label {
-                    width: Fit
-                    text: "Starting backend..."
-                    draw_text.color: #xD5E4FF
-                }
-                Filler {}
-                current_file_label := Label {
-                    width: Fit
-                    text: "No file"
-                    draw_text.color: #x89A0C7
-                }
-            }
-
-            mount_dock := StudioDock {
+            main_work_area := View {
                 width: Fill
                 height: Fill
+                margin: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 0.0}
+                flow: Down
+                spacing: 0.0
 
-                tab_bar +: {
-                    MountTab := MountTab {}
-                }
-
-                root := DockTabs {
-                    tabs: [@mount_first]
-                    selected: 0
-                    closable: false
-                }
-
-                mount_first := DockTab {
-                    name: "makepad"
-                    template: @MountTab
-                    kind: @MountWorkspace
-                }
-
-                MountWorkspace := View {
+                RoundedView {
+                    visible: false
                     width: Fill
-                    height: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: theme.space_2
+                    padding: Inset {left: 10.0 right: 10.0 top: 6.0 bottom: 6.0}
+                    draw_bg.color: #x1B2332
+                    draw_bg.border_radius: 6.0
 
-                    dock := StudioDock {
-                        width: Fill
-                        height: Fill
-
-                        tab_bar +: {
-                            FilesTab := FilesTab {}
-                            RunListTab := RunListTab {}
-                            AiTab := AiTab {}
-                            EditorFirstTab := EditorFirstTab {}
-                            EditorTab := EditorTab {}
-                            RunFirstTab := RunFirstTab {}
-                            RunAppTab := RunAppTab {}
-                            LogFirstTab := LogFirstTab {}
-                            LogTab := LogTab {}
-                            TerminalTab := TerminalTab {}
-                            TerminalCloseableTab := TerminalCloseableTab {}
-                        }
-
-                        root := DockSplitter {
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.FromA(310.0)
-                            a: @tree_tabs
-                            b: @main_split
-                        }
-
-                        main_split := DockSplitter {
-                            axis: SplitterAxis.Vertical
-                            align: SplitterAlign.FromB(220.0)
-                            a: @editor_split
-                            b: @bottom_panel_tabs
-                        }
-
-                        editor_split := DockSplitter {
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.Weighted(0.62)
-                            a: @editor_tabs
-                            b: @run_tabs
-                        }
-
-                        bottom_panel_tabs := DockTabs {
-                            tabs: [@log_first @terminal_first]
-                            selected: 0
-                            closable: false
-                        }
-
-                        tree_tabs := DockTabs {
-                            tabs: [@tree_tab @run_list_tab @ai_tab]
-                            selected: 0
-                            closable: false
-                        }
-
-                        editor_tabs := DockTabs {
-                            tabs: [@editor_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        run_tabs := DockTabs {
-                            tabs: [@run_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        tree_tab := DockTab {
-                            name: "Files"
-                            template: @FilesTab
-                            kind: @FileTreePane
-                        }
-
-                        run_list_tab := DockTab {
-                            name: "Run"
-                            template: @RunListTab
-                            kind: @RunListPane
-                        }
-
-                        ai_tab := DockTab {
-                            name: "AI"
-                            template: @AiTab
-                            kind: @AiPane
-                        }
-
-                        editor_first := DockTab {
-                            name: ""
-                            template: @EditorFirstTab
-                            kind: @EditorFirstPane
-                        }
-
-                        run_first := DockTab {
-                            name: ""
-                            template: @RunFirstTab
-                            kind: @RunFirstPane
-                        }
-
-                        log_first := DockTab {
-                            name: "Logs"
-                            template: @LogFirstTab
-                            kind: @LogFirstPane
-                        }
-
-                        terminal_first := DockTab {
-                            name: "Terminal"
-                            template: @TerminalTab
-                            kind: @TerminalFirstPane
-                        }
-
-                        FileTreePane := FileTreePane {}
-                        RunListPane := RunListPane {}
-                        AiPane := AiPane {}
-                        CodeEditorPane := CodeEditorPane {}
-                        EditorFirstPane := EditorFirstPane {}
-                        RunningAppPane := RunningAppPane {}
-                        RunFirstPane := RunFirstPane {}
-                        LogFirstPane := LogFirstPane {}
-                        LogPane := LogPane {}
-                        ProfilerPane := ProfilerPane {}
-                        TerminalFirstPane := TerminalFirstPane {}
-                        TerminalPane := TerminalPane {}
+                    status_label := Label {
+                        width: Fit
+                        text: "Starting backend..."
+                        draw_text.color: #xD5E4FF
+                    }
+                    Filler {}
+                    current_file_label := Label {
+                        width: Fit
+                        text: "No file"
+                        draw_text.color: #x89A0C7
                     }
                 }
 
+                mount_dock := StudioDock {
+                    width: Fill
+                    height: Fill
+
+                    tab_bar +: {
+                        MountTab := MountTab {}
+                    }
+
+                    root := DockTabs {
+                        tabs: [@mount_first]
+                        selected: 0
+                        closable: false
+                    }
+
+                    mount_first := DockTab {
+                        name: "makepad"
+                        template: @MountTab
+                        kind: @MountWorkspace
+                    }
+
+                    MountWorkspace := View {
+                        width: Fill
+                        height: Fill
+
+                        dock := StudioDock {
+                            width: Fill
+                            height: Fill
+
+                            tab_bar +: {
+                                FilesTab := FilesTab {}
+                                RunListTab := RunListTab {}
+                                AiTab := AiTab {}
+                                EditorFirstTab := EditorFirstTab {}
+                                EditorTab := EditorTab {}
+                                RunFirstTab := RunFirstTab {}
+                                RunAppTab := RunAppTab {}
+                                LogFirstTab := LogFirstTab {}
+                                LogTab := LogTab {}
+                                TerminalTab := TerminalTab {}
+                                TerminalCloseableTab := TerminalCloseableTab {}
+                            }
+
+                            root := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.FromA(310.0)
+                                a: @tree_tabs
+                                b: @agent_split
+                            }
+
+                            agent_split := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.FromB(310.0)
+                                a: @main_split
+                                b: @agent_tabs
+                            }
+
+                            main_split := DockSplitter {
+                                axis: SplitterAxis.Vertical
+                                align: SplitterAlign.FromB(220.0)
+                                a: @editor_split
+                                b: @bottom_panel_tabs
+                            }
+
+                            editor_split := DockSplitter {
+                                axis: SplitterAxis.Horizontal
+                                align: SplitterAlign.Weighted(0.62)
+                                a: @editor_tabs
+                                b: @run_tabs
+                            }
+
+                            bottom_panel_tabs := DockTabs {
+                                tabs: [@log_first @terminal_first]
+                                selected: 0
+                                closable: false
+                            }
+
+                            tree_tabs := DockTabs {
+                                tabs: [@tree_tab @run_list_tab]
+                                selected: 0
+                                closable: false
+                                hide_tab_bar: true
+                            }
+
+                            agent_tabs := DockTabs {
+                                tabs: [@ai_tab]
+                                selected: 0
+                                closable: false
+                            }
+
+                            editor_tabs := DockTabs {
+                                tabs: [@editor_first]
+                                selected: 0
+                                closable: true
+                            }
+
+                            run_tabs := DockTabs {
+                                tabs: [@run_first]
+                                selected: 0
+                                closable: true
+                            }
+
+                            tree_tab := DockTab {
+                                name: "Files"
+                                template: @FilesTab
+                                kind: @FileTreePane
+                            }
+
+                            run_list_tab := DockTab {
+                                name: "Run"
+                                template: @RunListTab
+                                kind: @RunListPane
+                            }
+
+                            ai_tab := DockTab {
+                                name: "AI"
+                                template: @AiTab
+                                kind: @AiPane
+                            }
+
+                            editor_first := DockTab {
+                                name: ""
+                                template: @EditorFirstTab
+                                kind: @EditorFirstPane
+                            }
+
+                            run_first := DockTab {
+                                name: ""
+                                template: @RunFirstTab
+                                kind: @RunFirstPane
+                            }
+
+                            log_first := DockTab {
+                                name: "Logs"
+                                template: @LogFirstTab
+                                kind: @LogFirstPane
+                            }
+
+                            terminal_first := DockTab {
+                                name: "Terminal"
+                                template: @TerminalTab
+                                kind: @TerminalFirstPane
+                            }
+
+                            FileTreePane := FileTreePane {}
+                            RunListPane := RunListPane {}
+                            AiPane := AiPane {}
+                            CodeEditorPane := CodeEditorPane {}
+                            EditorFirstPane := EditorFirstPane {}
+                            RunningAppPane := RunningAppPane {}
+                            RunFirstPane := RunFirstPane {}
+                            LogFirstPane := LogFirstPane {}
+                            LogPane := LogPane {}
+                            ProfilerPane := ProfilerPane {}
+                            TerminalFirstPane := TerminalFirstPane {}
+                            TerminalPane := TerminalPane {}
+                        }
+                    }
+                }
             }
+
+            StudioBottomBar {}
         }
     }
 }

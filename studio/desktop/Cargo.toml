@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-code-editor = { path = "../../code_editor", version = "2.0.0" }
+makepad-studio-ai = { path = "../ai", version = "0.1.0" }
+makepad-studio-widgets = { path = "../widgets", version = "0.1.0" }
 makepad-studio-hub = { path = "../hub", version = "0.1.0" }
 makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
 makepad-terminal-core = { path = "../../libs/terminal_core", version = "1.0.0" }
+unicode-segmentation = { version = "1.12.0", path = "../../libs/unicode/unicode-segmentation" }
+pulldown-cmark = { version = "0.12.2", path = "../../libs/pulldown-cmark", default-features = false, features = ["simd"] }

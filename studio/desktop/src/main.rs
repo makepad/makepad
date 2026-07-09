@@ -1,15 +1,17 @@
-pub mod ai_manager;
+mod ai_manager;
 pub mod app_data;
 pub mod app_ui;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
+
 pub mod desktop_profiler_view;
 pub mod desktop_run_list;
 pub mod desktop_run_view;
 pub mod desktop_terminal_view;
 
 pub use makepad_code_editor;
+pub use makepad_studio_ai;
 pub use makepad_studio_hub;
 pub use makepad_widgets;
 pub use makepad_widgets::makepad_draw;
@@ -35,9 +37,8 @@ use crate::{
     makepad_studio_hub::{HubConfig, MountConfig, StudioHub},
     makepad_widgets::*,
 };
-use makepad_studio_protocol::hub_protocol::{
-    ClientToHub, FileNodeType, HubToClient, LogEntry, QueryId,
-};
+use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, LogEntry, QueryId};
+use makepad_studio_widgets::studio_command_text_input::StudioCommandTextInputWidgetRefExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
@@ -53,12 +54,15 @@ mod app_tabs;
 pub fn register_script_modules(vm: &mut ScriptVm) {
     crate::desktop_file_tree::script_mod(vm);
     crate::desktop_code_editor::script_mod(vm);
+    makepad_studio_widgets::studio_command_text_input::script_mod(vm);
+    makepad_studio_widgets::studio_text_flow::script_mod(vm);
+    makepad_studio_widgets::studio_markdown::script_mod(vm);
     crate::desktop_log_view::script_mod(vm);
     crate::desktop_profiler_view::script_mod(vm);
     crate::desktop_run_list::script_mod(vm);
     crate::desktop_run_view::script_mod(vm);
     crate::desktop_terminal_view::script_mod(vm);
-    crate::app_ui::script_mod(vm);
+    crate::app_ui::register_all(vm);
 }
 
 app_main!(App);
@@ -92,6 +96,13 @@ pub struct BottomPanelAnimation {
     mount: String,
     from_height: f64,
     to_height: f64,
+    start_time: Option<f64>,
+}
+
+pub struct AgentPanelAnimation {
+    mount: String,
+    from_width: f64,
+    to_width: f64,
     start_time: Option<f64>,
 }
 
@@ -141,6 +152,10 @@ pub struct App {
     #[rust]
     pub bottom_panel_animation_next_frame: NextFrame,
     #[rust]
+    pub agent_panel_animation: Option<AgentPanelAnimation>,
+    #[rust]
+    pub agent_panel_animation_next_frame: NextFrame,
+    #[rust]
     pub ai_chat_scroll_pending: bool,
     #[rust]
     pub ai_chat_scroll_next_frame: NextFrame,
@@ -150,6 +165,31 @@ pub struct App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        let window_id = CxWindowPool::id_zero();
+        let backdrop = if matches!(cx.os_type(), OsType::Windows) {
+            WindowBackdrop::Acrylic
+        } else if matches!(cx.os_type(), OsType::Macos) {
+            WindowBackdrop::Blur
+        } else {
+            WindowBackdrop::None
+        };
+        let visuals = WindowVisuals {
+            transparent: backdrop != WindowBackdrop::None,
+            backdrop,
+            backdrop_intensity: 1.0,
+        }
+        .normalized();
+
+        if cx.windows[window_id].window_visuals() != visuals {
+            cx.windows[window_id].transparent = visuals.transparent;
+            cx.windows[window_id].backdrop = visuals.backdrop;
+            cx.windows[window_id].backdrop_intensity = visuals.backdrop_intensity;
+
+            if cx.windows[window_id].is_created {
+                cx.push_unique_platform_op(CxOsOp::SetWindowVisuals(window_id, visuals));
+            }
+        }
+
         self.set_current_file_label(cx, None);
         self.start_backend(cx);
         self.load_state(cx, 0);
@@ -157,12 +197,43 @@ impl MatchEvent for App {
             self.sync_run_preview_splitter(cx, &mount);
         }
         self.init_ai_manager(cx);
+        self.sync_bottom_bar_state(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_mount_sidebar(cx, &active_mount);
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(bottom_file_tree_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_sidebar_tab(cx, &active_mount, id!(tree_tab));
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(bottom_run_list_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_sidebar_tab(cx, &active_mount, id!(run_list_tab));
+            }
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(bottom_agent_toggle))
+            .clicked(actions)
+        {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_agent_panel(cx, &active_mount);
             }
         }
 
@@ -202,6 +273,18 @@ impl MatchEvent for App {
                 {
                     self.select_ai_manager_agent(&active_mount, index);
                 }
+                if let Some(index) = workspace
+                    .drop_down(cx, ids!(ai_model_picker))
+                    .selected(actions)
+                {
+                    self.select_ai_manager_backend(&active_mount, index);
+                }
+                if workspace
+                    .button(cx, ids!(ai_configure_button))
+                    .clicked(actions)
+                {
+                    self.configure_ai_manager_backend(cx, &active_mount);
+                }
                 if workspace.button(cx, ids!(ai_new_button)).clicked(actions) {
                     self.create_ai_manager_agent(&active_mount);
                 }
@@ -218,14 +301,13 @@ impl MatchEvent for App {
                         self.send_ai_manager_prompt(cx, &active_mount);
                     }
                 }
-                if workspace
-                    .text_input(cx, ids!(ai_prompt_input))
-                    .escaped(actions)
-                {
+                let ai_prompt_input =
+                    workspace.studio_command_text_input(cx, ids!(ai_prompt_input));
+                if ai_prompt_input.text_input_ref(cx).escaped(actions) {
                     self.cancel_ai_manager_prompt(&active_mount);
                 }
-                if workspace
-                    .text_input(cx, ids!(ai_prompt_input))
+                if ai_prompt_input
+                    .text_input_ref(cx)
                     .returned(actions)
                     .is_some()
                 {
@@ -300,6 +382,12 @@ impl MatchEvent for App {
 
         for action in actions {
             if let Some(action) = action.as_widget_action() {
+                if let MarkdownAction::LinkNavigated(href) = action.cast::<MarkdownAction>() {
+                    if let Some(path) = makepad_studio_ai::ai_file_link_path_from_href(&href) {
+                        self.open_path_in_editor(cx, &path);
+                        continue;
+                    }
+                }
                 match action.cast() {
                     DockAction::TabWasPressed(tab_id) => {
                         if let Some(mount) = self.data.tab_to_mount.get(&tab_id).cloned() {
@@ -388,6 +476,7 @@ impl MatchEvent for App {
                 }
             }
         }
+        self.sync_bottom_bar_state(cx);
     }
 }
 
@@ -415,6 +504,14 @@ impl AppMain for App {
                     self.cancel_ai_manager_prompt(&active_mount);
                 }
             }
+            if key_event.key_code == KeyCode::KeyC
+                && key_event.modifiers.alt
+                && key_event.modifiers.logo
+            {
+                if let Some(active_mount) = self.data.active_mount.clone() {
+                    self.configure_ai_manager_backend(cx, &active_mount);
+                }
+            }
         }
         self.match_event(cx, event);
         self.ui
@@ -430,6 +527,13 @@ impl AppMain for App {
                 .is_some()
             {
                 self.step_bottom_panel_animation(cx, ne.time);
+            }
+            if self
+                .agent_panel_animation_next_frame
+                .is_event(event)
+                .is_some()
+            {
+                self.step_agent_panel_animation(cx, ne.time);
             }
             if self.ai_chat_scroll_pending
                 && self.ai_chat_scroll_next_frame.is_event(event).is_some()
@@ -447,7 +551,27 @@ impl AppMain for App {
                     .button(cx, ids!(bottom_panel_toggle))
                     .area()
                     .rect(cx);
-                if sidebar_rect.contains(dq.abs) || panel_rect.contains(dq.abs) {
+                let bottom_file_tree_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_file_tree_toggle))
+                    .area()
+                    .rect(cx);
+                let bottom_run_list_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_run_list_toggle))
+                    .area()
+                    .rect(cx);
+                let bottom_agent_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_agent_toggle))
+                    .area()
+                    .rect(cx);
+                if sidebar_rect.contains(dq.abs)
+                    || panel_rect.contains(dq.abs)
+                    || bottom_file_tree_rect.contains(dq.abs)
+                    || bottom_run_list_rect.contains(dq.abs)
+                    || bottom_agent_rect.contains(dq.abs)
+                {
                     dq.response.set(WindowDragQueryResponse::Client);
                     cx.set_cursor(MouseCursor::Default);
                 }

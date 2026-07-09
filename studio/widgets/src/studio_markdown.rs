@@ -1,0 +1,1064 @@
+use crate::studio_text_flow::StudioTextFlow;
+use makepad_widgets::*;
+
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
+
+script_mod! {
+    use mod.prelude.widgets_internal.*
+    use mod.widgets.*
+
+    mod.widgets.MarkdownLinkBase = #(StudioMarkdownLink::register_widget(vm))
+
+    mod.widgets.MarkdownBase = #(StudioMarkdown::register_widget(vm))
+
+    mod.widgets.StudioMarkdownLink = set_type_default() do mod.widgets.MarkdownLinkBase{
+        width: Fit height: Fit
+        align: Align{x: 0. y: 0.}
+
+        label_walk: Walk{width: Fit height: Fit}
+
+        draw_icon +: {
+            hover: instance(0.0)
+            pressed: instance(0.0)
+
+            get_color: fn() {
+                return mix(
+                    mix(
+                        theme.color_label_inner,
+                        theme.color_label_inner_hover,
+                        self.hover
+                    ),
+                    theme.color_label_inner_down,
+                    self.pressed
+                )
+            }
+        }
+
+        animator: Animator{
+            hover: {
+                default: @off
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.1}}
+                    apply: {
+                        draw_bg: {pressed: 0.0 hover: 0.0}
+                        draw_icon: {pressed: 0.0 hover: 0.0}
+                        draw_text: {pressed: 0.0 hover: 0.0}
+                    }
+                }
+
+                on: AnimatorState{
+                    from: {
+                        all: Forward {duration: 0.1}
+                        pressed: Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_bg: {pressed: 0.0 hover: snap(1.0)}
+                        draw_icon: {pressed: 0.0 hover: snap(1.0)}
+                        draw_text: {pressed: 0.0 hover: snap(1.0)}
+                    }
+                }
+
+                pressed: AnimatorState{
+                    from: {all: Forward {duration: 0.2}}
+                    apply: {
+                        draw_bg: {pressed: snap(1.0) hover: 1.0}
+                        draw_icon: {pressed: snap(1.0) hover: 1.0}
+                        draw_text: {pressed: snap(1.0) hover: 1.0}
+                    }
+                }
+            }
+        }
+
+        draw_bg +: {
+            pressed: instance(0.0)
+            hover: instance(0.0)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let offset_y = 1.0
+                sdf.move_to(0. self.rect_size.y-offset_y)
+                sdf.line_to(self.rect_size.x self.rect_size.y-offset_y)
+                return sdf.stroke(mix(
+                    theme.color_label_inner,
+                    theme.color_label_inner_down,
+                    self.pressed
+                ), mix(0.0, 0.8, self.hover))
+            }
+        }
+
+        draw_text +: {
+            pressed: instance(0.0)
+            hover: instance(0.0)
+
+            color_hover: uniform(theme.color_label_inner_hover)
+            color_pressed: uniform(theme.color_label_inner_down)
+
+            color: theme.color_label_inner
+            text_style: theme.font_regular{
+                font_size: theme.font_size_p
+            }
+            get_color: fn() {
+                return mix(
+                    mix(
+                        self.color,
+                        self.color_hover,
+                        self.hover
+                    ),
+                    self.color_pressed,
+                    self.pressed
+                )
+            }
+        }
+    }
+
+    mod.widgets.StudioMarkdown = set_type_default() do mod.widgets.MarkdownBase{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
+        padding: theme.mspace_1
+
+        font_size: theme.font_size_p
+        font_color: theme.color_label_inner
+
+        paragraph_spacing: 16
+        pre_code_spacing: 8
+        inline_code_padding: theme.mspace_1
+        inline_code_margin: theme.mspace_1
+        heading_base_scale: 1.8
+
+        draw_text +: {
+            color: theme.color_label_inner
+        }
+
+        text_style_normal: theme.font_regular{
+            font_size: theme.font_size_p
+        }
+
+        text_style_italic: theme.font_italic{
+            font_size: theme.font_size_p
+        }
+
+        text_style_bold: theme.font_bold{
+            font_size: theme.font_size_p
+        }
+
+        text_style_bold_italic: theme.font_bold_italic{
+            font_size: theme.font_size_p
+        }
+
+        text_style_fixed: theme.font_code{
+            font_size: theme.font_size_p
+        }
+
+        code_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: 10}
+        }
+        code_walk: Walk{width: Fill height: Fit}
+
+        quote_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: theme.space_3, right: theme.space_3, top: theme.space_2, bottom: theme.space_2}
+        }
+        quote_walk: Walk{width: Fill height: Fit}
+
+        list_item_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: theme.mspace_1
+        }
+        list_item_walk: Walk{
+            height: Fit width: Fill
+        }
+
+        sep_walk: Walk{
+            width: Fill height: 4.
+            margin: theme.mspace_v_1
+        }
+
+        draw_block +: {
+            line_color: theme.color_label_inner
+            sep_color: theme.color_shadow
+            quote_bg_color: theme.color_bg_highlight
+            quote_fg_color: theme.color_label_inner
+            code_color: theme.color_bg_highlight
+            selection_color: theme.color_selection_focus
+            table_header_bg_color: theme.color_bg_highlight
+            table_border_color: theme.color_shadow
+            space_1: uniform(theme.space_1)
+            space_2: uniform(theme.space_2)
+        }
+
+        link := mod.widgets.StudioMarkdownLink{}
+    }
+}
+
+/// The state of a list at a given nesting level.
+struct ListState {
+    // Current item number for ordered lists.
+    current_number: u64,
+    // Start number for ordered lists, None for unordered.
+    start_number: Option<u64>,
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct StudioMarkdown {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    pub text_flow: StudioTextFlow,
+    #[live]
+    body: ArcStringMut,
+    #[live]
+    paragraph_spacing: f64,
+    #[live]
+    pre_code_spacing: f64,
+    #[live(false)]
+    use_code_block_widget: bool,
+    #[rust]
+    in_code_block: bool,
+    #[rust]
+    code_block_string: String,
+    #[rust]
+    in_splash_block: bool,
+    #[rust]
+    splash_block_string: String,
+    #[rust]
+    link_href: Option<String>,
+    #[rust]
+    link_text: String,
+    #[live(false)]
+    use_math_widget: bool,
+    #[rust]
+    auto_id: u64,
+    #[live]
+    heading_base_scale: f64,
+}
+
+impl Widget for StudioMarkdown {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.text_flow.handle_event(cx, event, scope);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.auto_id = 0;
+
+        self.begin(cx, walk);
+        self.process_markdown_doc(cx);
+        self.end(cx);
+
+        DrawStep::done()
+    }
+
+    fn text(&self) -> String {
+        self.body.as_ref().to_string()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.body.as_ref() != v {
+            self.body.set(v);
+            self.redraw(cx);
+        }
+    }
+}
+
+impl StudioMarkdown {
+    fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
+        let tf = &mut self.text_flow;
+        // Track state for nested formatting
+        let mut list_stack: Vec<ListState> = Vec::new();
+        let mut is_first_block = true;
+        // Per-column alignments for the current table, and the current cell's
+        // column index within its row. Both are reset when a new table starts.
+        let mut table_alignments: Vec<Alignment> = Vec::new();
+        let mut table_cell_index: usize = 0;
+
+        let parser = Parser::new_ext(
+            self.body.as_ref(),
+            Options::ENABLE_TABLES | Options::ENABLE_MATH,
+        );
+        let events: Vec<MdEvent> = parser.into_iter().collect();
+
+        // Merge Text("["), Text(role), Text("]") into a single Text("[role]") event
+        let mut merged_events = Vec::new();
+        let mut i = 0;
+        while i < events.len() {
+            if i + 2 < events.len() {
+                if let (MdEvent::Text(t1), MdEvent::Text(t2), MdEvent::Text(t3)) =
+                    (&events[i], &events[i + 1], &events[i + 2])
+                {
+                    if t1.as_ref() == "[" && t3.as_ref() == "]" {
+                        let role = t2.as_ref();
+                        if [
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ]
+                        .contains(&role)
+                        {
+                            let merged_text: pulldown_cmark::CowStr = format!("[{}]", role).into();
+                            merged_events.push(MdEvent::Text(merged_text));
+                            i += 3;
+                            continue;
+                        }
+                    }
+                }
+            }
+            merged_events.push(events[i].clone());
+            i += 1;
+        }
+        let events = merged_events;
+
+        // Pre-process events to merge/strip [User], [Assistant], etc.
+        let mut cleaned_events = Vec::new();
+        let mut i = 0;
+        let mut quote_roles = Vec::new();
+        while i < events.len() {
+            let mut is_header_pattern = false;
+            let mut matched_role = None;
+            let mut header_skip_count = 0;
+            if let MdEvent::Start(Tag::BlockQuote(_)) = &events[i] {
+                let mut j = i + 1;
+                if j < events.len() {
+                    if let MdEvent::Start(Tag::Paragraph) = &events[j] {
+                        j += 1;
+                    }
+                }
+                // Check for bracketed role first (e.g. [User])
+                if j < events.len() {
+                    if let MdEvent::Text(t1) = &events[j] {
+                        let t1_ref = t1.as_ref();
+                        for role_name in &[
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ] {
+                            let prefix = format!("[{}]", role_name);
+                            if t1_ref.starts_with(&prefix) {
+                                is_header_pattern = true;
+                                matched_role = Some(*role_name);
+                                header_skip_count = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Check for bold role header (e.g. **User**)
+                if !is_header_pattern && j + 2 < events.len() {
+                    if let (
+                        MdEvent::Start(Tag::Strong),
+                        MdEvent::Text(t_role),
+                        MdEvent::End(TagEnd::Strong),
+                    ) = (&events[j], &events[j + 1], &events[j + 2])
+                    {
+                        let role_name = t_role.as_ref();
+                        if [
+                            "User",
+                            "Assistant",
+                            "Thinking",
+                            "Tools",
+                            "Waiting",
+                            "Observation",
+                            "System",
+                            "Error",
+                        ]
+                        .contains(&role_name)
+                        {
+                            is_header_pattern = true;
+                            matched_role = Some(role_name);
+                            header_skip_count = 3;
+                        }
+                    }
+                }
+            }
+
+            if is_header_pattern {
+                quote_roles.push(matched_role);
+                // Keep the BlockQuote and Paragraph start events
+                cleaned_events.push(events[i].clone());
+                let mut next_i = i + 1;
+                if next_i < events.len() {
+                    if let MdEvent::Start(Tag::Paragraph) = &events[next_i] {
+                        cleaned_events.push(events[next_i].clone());
+                        next_i += 1;
+                    }
+                }
+
+                // Skip the header events
+                let header_start = next_i;
+                i = header_start + header_skip_count;
+
+                // Skip optional following SoftBreak or HardBreak or empty/space Text event
+                if i < events.len() {
+                    match &events[i] {
+                        MdEvent::SoftBreak | MdEvent::HardBreak => {
+                            i += 1;
+                        }
+                        MdEvent::Text(t) if t.trim().is_empty() => {
+                            i += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                if let MdEvent::Start(Tag::BlockQuote(_)) = &events[i] {
+                    // Fallback pre-scan to check for unbracketed User/Assistant
+                    let mut role = None;
+                    let mut k = i + 1;
+                    while k < events.len() {
+                        match &events[k] {
+                            MdEvent::End(TagEnd::BlockQuote(_)) => break,
+                            MdEvent::Text(text) => {
+                                let text_ref = text.as_ref();
+                                if text_ref.starts_with("User") {
+                                    role = Some("User");
+                                    break;
+                                } else if text_ref.starts_with("Assistant")
+                                    || text_ref.starts_with("AI")
+                                {
+                                    role = Some("Assistant");
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    quote_roles.push(role);
+                }
+                cleaned_events.push(events[i].clone());
+                i += 1;
+            }
+        }
+
+        let mut quote_idx = 0;
+        for event in cleaned_events {
+            match event {
+                MdEvent::Start(Tag::Heading { level, .. }) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    let heading_base = self.heading_base_scale;
+                    let scale = match level {
+                        HeadingLevel::H1 => heading_base,
+                        HeadingLevel::H2 => heading_base * 0.75,
+                        HeadingLevel::H3 => heading_base * 0.58,
+                        HeadingLevel::H4 => heading_base * 0.5,
+                        HeadingLevel::H5 => heading_base * 0.42,
+                        HeadingLevel::H6 => heading_base * 0.33,
+                    };
+                    tf.push_size_abs_scale(scale);
+                    tf.bold.push();
+                }
+                MdEvent::End(TagEnd::Heading(_level)) => {
+                    tf.bold.pop();
+                    tf.font_sizes.pop();
+                    tf.new_line_collapsed(cx);
+                }
+                MdEvent::Start(Tag::Paragraph) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                }
+                MdEvent::End(TagEnd::Paragraph) => {
+                    // No special handling needed, turtle position is managed by content/following blocks
+                }
+                MdEvent::Start(Tag::BlockQuote(_)) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+
+                    let mut quote_bg = tf.draw_block.quote_bg_color;
+                    let mut quote_fg = tf.draw_block.quote_fg_color;
+
+                    if quote_idx < quote_roles.len() {
+                        if let Some(role) = quote_roles[quote_idx] {
+                            match role {
+                                "User" => {
+                                    // User bubble: soft translucent blue, right aligned
+                                    quote_bg = vec4(0.24, 0.44, 0.67, 0.14);
+                                    quote_fg = vec4(0.38, 0.69, 0.91, 0.75);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 48.0,
+                                        right: 8.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                                "Assistant" => {
+                                    // Assistant bubble: soft translucent white/gray, left aligned
+                                    quote_bg = vec4(1.0, 1.0, 1.0, 0.05);
+                                    quote_fg = vec4(1.0, 1.0, 1.0, 0.35);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                                "Thinking" => {
+                                    // Thinking bubble: soft translucent yellow
+                                    quote_bg = vec4(1.0, 0.84, 0.0, 0.04);
+                                    quote_fg = vec4(1.0, 0.84, 0.0, 0.25);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                                "Tools" => {
+                                    // Tools bubble: soft translucent purple/magenta
+                                    quote_bg = vec4(0.6, 0.3, 0.8, 0.05);
+                                    quote_fg = vec4(0.7, 0.4, 0.9, 0.3);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                                "Error" => {
+                                    // Error bubble: soft translucent red
+                                    quote_bg = vec4(0.95, 0.33, 0.33, 0.08);
+                                    quote_fg = vec4(0.95, 0.4, 0.4, 0.4);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                                _ => {
+                                    // Default / Other (System, Waiting, etc.)
+                                    quote_bg = vec4(1.0, 1.0, 1.0, 0.03);
+                                    quote_fg = vec4(1.0, 1.0, 1.0, 0.2);
+                                    tf.quote_walk.margin = Inset {
+                                        left: 8.0,
+                                        right: 48.0,
+                                        top: 0.0,
+                                        bottom: 0.0,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    quote_idx += 1;
+
+                    let saved_bg = tf.draw_block.quote_bg_color;
+                    let saved_fg = tf.draw_block.quote_fg_color;
+                    tf.draw_block.quote_bg_color = quote_bg;
+                    tf.draw_block.quote_fg_color = quote_fg;
+
+                    tf.begin_quote(cx);
+
+                    tf.draw_block.quote_bg_color = saved_bg;
+                    tf.draw_block.quote_fg_color = saved_fg;
+                }
+                MdEvent::End(TagEnd::BlockQuote(_quote_kind)) => {
+                    tf.end_quote(cx);
+                    tf.quote_walk.margin = Inset::default();
+                }
+                MdEvent::Start(Tag::List(first_number)) => {
+                    list_stack.push(ListState {
+                        start_number: first_number,
+                        current_number: first_number.unwrap_or(1),
+                    });
+                }
+                MdEvent::End(TagEnd::List(_is_ordered)) => {
+                    list_stack.pop();
+                }
+                MdEvent::Start(Tag::Item) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed(cx);
+                    }
+                    is_first_block = false;
+                    let marker = if let Some(state) = list_stack.last_mut() {
+                        if state.start_number.is_some() {
+                            // Ordered list - use and increment the counter
+                            let num = state.current_number;
+                            state.current_number += 1;
+                            format!("{}.", num)
+                        } else {
+                            // Unordered list - use bullet
+                            "•".to_string()
+                        }
+                    } else {
+                        "•".to_string()
+                    };
+                    tf.begin_list_item(cx, &marker, 2.5);
+                }
+                MdEvent::End(TagEnd::Item) => {
+                    tf.end_list_item(cx);
+                }
+                MdEvent::Start(Tag::Emphasis) => {
+                    tf.italic.push();
+                }
+                MdEvent::End(TagEnd::Emphasis) => {
+                    tf.italic.pop();
+                }
+                MdEvent::Start(Tag::Strong) => {
+                    tf.bold.push();
+                }
+                MdEvent::End(TagEnd::Strong) => {
+                    tf.bold.pop();
+                }
+                MdEvent::Start(Tag::Strikethrough) => {
+                    tf.underline.push();
+                }
+                MdEvent::End(TagEnd::Strikethrough) => {
+                    tf.underline.pop();
+                }
+                MdEvent::Start(Tag::Link { dest_url, .. }) => {
+                    self.link_href = Some(dest_url.to_string());
+                    self.link_text.clear();
+                }
+                MdEvent::End(TagEnd::Link) => {
+                    if let Some(href) = self.link_href.take() {
+                        self.auto_id += 1;
+                        let label = if self.link_text.trim().is_empty() {
+                            href.as_str()
+                        } else {
+                            self.link_text.trim()
+                        };
+                        let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
+                        let link = item.as_markdown_link();
+                        link.set_href(&href);
+                        link.set_label(cx, label);
+                        item.draw_all_unscoped(cx);
+                        self.link_text.clear();
+                    }
+                }
+                MdEvent::Start(Tag::Image {
+                    dest_url, title, ..
+                }) => {
+                    tf.draw_text(cx, "Image[name:");
+                    tf.draw_text(cx, &title);
+                    tf.draw_text(cx, ", url:");
+                    tf.draw_text(cx, &dest_url);
+                    tf.draw_text(cx, "]");
+                }
+                MdEvent::Start(Tag::CodeBlock(kind)) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.pre_code_spacing);
+                    }
+                    is_first_block = false;
+                    // Check if this is a runsplash block
+                    let is_runsplash = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "runsplash");
+                    if is_runsplash {
+                        self.in_splash_block = true;
+                        self.splash_block_string.clear();
+                    } else if self.use_code_block_widget {
+                        self.in_code_block = true;
+                        self.code_block_string.clear();
+                    } else {
+                        const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                        tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                        tf.combine_spaces.push(false);
+                        tf.fixed.push();
+                        tf.begin_code(cx);
+                    }
+                }
+                MdEvent::End(TagEnd::CodeBlock) => {
+                    if self.in_splash_block {
+                        self.in_splash_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let sbs = &self.splash_block_string;
+
+                        // Draw the splash block using the $splash_block template
+                        tf.item_with(cx, entry_id, id!(splash_block), |cx, item, _tf| {
+                            //let tree = item.widget_tree();
+                            //cx.with_vm(|vm| {
+                            //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
+                            //});
+                            item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else if self.in_code_block {
+                        self.in_code_block = false;
+                        let entry_id = tf.new_counted_id();
+                        let cbs = &self.code_block_string;
+
+                        // Draw the code block and capture the CodeView widget ref
+                        let mut code_view_ref = WidgetRef::empty();
+                        tf.item_with(cx, entry_id, id!(code_block), |cx, item, _tf| {
+                            item.widget(cx, ids!(code_view)).set_text(cx, cbs);
+                            item.draw_all_unscoped(cx);
+                            code_view_ref = item.widget(cx, ids!(code_view));
+                        });
+
+                        // Register the code view widget for cross-child selection
+                        // (its area will be queried at event time, not draw time)
+                        tf.push_widget_text_for_selection(code_view_ref, &self.code_block_string);
+                    } else {
+                        tf.font_sizes.pop();
+                        tf.fixed.pop();
+                        tf.combine_spaces.pop();
+                        tf.end_code(cx);
+                    }
+                }
+                // Inline code
+                MdEvent::Code(text) => {
+                    if self.link_href.is_some() {
+                        self.link_text.push_str(&text);
+                        continue;
+                    }
+                    const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                    tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                    tf.fixed.push();
+                    tf.inline_code.push();
+                    tf.draw_text(cx, &text);
+                    tf.font_sizes.pop();
+                    tf.fixed.pop();
+                    tf.inline_code.pop();
+                }
+                // Inline math ($...$)
+                MdEvent::InlineMath(text) => {
+                    if self.use_math_widget {
+                        let entry_id = tf.new_counted_id();
+                        tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
+                            item.set_text(cx, &text);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else {
+                        // Fallback: render as inline code style
+                        const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                        tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                        tf.fixed.push();
+                        tf.inline_code.push();
+                        tf.draw_text(cx, &text);
+                        tf.font_sizes.pop();
+                        tf.fixed.pop();
+                        tf.inline_code.pop();
+                    }
+                }
+                // Display math ($$...$$)
+                MdEvent::DisplayMath(text) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+
+                    if self.use_math_widget {
+                        let entry_id = tf.new_counted_id();
+                        tf.item_with(cx, entry_id, live_id!(display_math), |cx, item, _tf| {
+                            item.set_text(cx, &text);
+                            item.draw_all_unscoped(cx);
+                        });
+                    } else {
+                        // Fallback: render as code block style
+                        tf.begin_code(cx);
+                        tf.fixed.push();
+                        tf.draw_text(cx, &text);
+                        tf.fixed.pop();
+                        tf.end_code(cx);
+                    }
+                }
+                MdEvent::Text(text) => {
+                    if self.in_splash_block {
+                        self.splash_block_string.push_str(&text);
+                    } else if self.in_code_block {
+                        self.code_block_string.push_str(&text);
+                    } else if self.link_href.is_some() {
+                        self.link_text.push_str(text.trim_end_matches("\n"));
+                    } else {
+                        let mut text_val = text.to_string();
+                        let mut stripped = false;
+                        for prefix in &[
+                            "[User]",
+                            "[Assistant]",
+                            "[Thinking]",
+                            "[Tools]",
+                            "[Waiting]",
+                            "[Observation]",
+                            "[System]",
+                            "[Error]",
+                            "User:",
+                            "Assistant:",
+                        ] {
+                            if text_val.starts_with(prefix) {
+                                text_val = text_val.strip_prefix(prefix).unwrap().to_string();
+                                stripped = true;
+                                break;
+                            }
+                        }
+
+                        let mut text_str = text_val.as_str();
+                        if stripped {
+                            text_str = text_str.trim_start_matches(|ch: char| {
+                                ch.is_whitespace() || ch == '\n' || ch == '\r'
+                            });
+                        }
+
+                        let text_trimmed = text_str.trim_end_matches("\n");
+                        if text_trimmed.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(stripped) = text_trimmed.strip_prefix("✓") {
+                            tf.font_colors.push(vec4(0.29, 0.68, 0.31, 1.0)); // Green
+                            tf.draw_text(cx, "✓");
+                            tf.font_colors.pop();
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("▶") {
+                            tf.font_colors.push(vec4(0.38, 0.69, 0.91, 1.0)); // Light Blue
+                            tf.draw_text(cx, "▶");
+                            tf.font_colors.pop();
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("✗") {
+                            tf.font_colors.push(vec4(0.95, 0.33, 0.33, 1.0)); // Red
+                            tf.draw_text(cx, "✗");
+                            tf.font_colors.pop();
+                            tf.draw_text(cx, stripped);
+                        } else if let Some(stripped) = text_trimmed.strip_prefix("○") {
+                            tf.font_colors.push(vec4(1.0, 1.0, 1.0, 0.35)); // Soft gray/white
+                            tf.draw_text(cx, "○");
+                            tf.font_colors.pop();
+                            tf.draw_text(cx, stripped);
+                        } else {
+                            tf.draw_text(cx, text_trimmed);
+                        }
+                    }
+                }
+                MdEvent::SoftBreak => {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
+                        self.code_block_string.push('\n');
+                    } else if self.link_href.is_some() {
+                        self.link_text.push(' ');
+                    } else {
+                        tf.draw_text(cx, " ");
+                    }
+                }
+                MdEvent::HardBreak => {
+                    if self.in_splash_block {
+                        self.splash_block_string.push('\n');
+                    } else if self.in_code_block {
+                        self.code_block_string.push('\n');
+                    } else {
+                        tf.new_line_collapsed(cx);
+                    }
+                }
+                MdEvent::Rule => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    tf.sep(cx);
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                }
+                MdEvent::TaskListMarker(_) => {
+                    // TODO: Implement task list markers
+                }
+                MdEvent::Start(Tag::Table(alignments)) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    tf.begin_table(cx, alignments.len());
+                    table_alignments = alignments;
+                    table_cell_index = 0;
+                }
+                MdEvent::End(TagEnd::Table) => {
+                    tf.end_table(cx);
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    table_alignments.clear();
+                    table_cell_index = 0;
+                }
+                MdEvent::Start(Tag::TableHead) => {
+                    tf.begin_table_header_row(cx);
+                    table_cell_index = 0;
+                }
+                MdEvent::End(TagEnd::TableHead) => {
+                    tf.end_table_row(cx);
+                    tf.in_table_header = false;
+                }
+                MdEvent::Start(Tag::TableRow) => {
+                    tf.begin_table_row(cx);
+                    table_cell_index = 0;
+                }
+                MdEvent::End(TagEnd::TableRow) => {
+                    tf.end_table_row(cx);
+                }
+                MdEvent::Start(Tag::TableCell) => {
+                    let align_x = table_alignments
+                        .get(table_cell_index)
+                        .map(alignment_to_x)
+                        .unwrap_or(0.0);
+                    tf.begin_table_cell(cx, align_x);
+                    if tf.in_table_header {
+                        tf.bold.push();
+                    }
+                }
+                MdEvent::End(TagEnd::TableCell) => {
+                    if tf.in_table_header {
+                        tf.bold.pop();
+                    }
+                    tf.end_table_cell(cx);
+                    table_cell_index += 1;
+                }
+                MdEvent::InlineHtml(text) => {
+                    // Support a handful of inline HTML tags that have no
+                    // CommonMark equivalent. Anything not matched is ignored,
+                    // matching the pre-existing behavior.
+                    match text.trim().to_ascii_lowercase().as_str() {
+                        "<sub>" => {
+                            tf.push_size_rel_scale(0.7);
+                            tf.y_shift_scales.push(0.55);
+                        }
+                        "</sub>" => {
+                            tf.font_sizes.pop();
+                            tf.y_shift_scales.pop();
+                        }
+                        "<sup>" => {
+                            tf.push_size_rel_scale(0.7);
+                            tf.y_shift_scales.push(-0.2);
+                        }
+                        "</sup>" => {
+                            tf.font_sizes.pop();
+                            tf.y_shift_scales.pop();
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {} // Unimplemented or unnecessary events
+            }
+        }
+    }
+}
+
+/// Maps pulldown_cmark table-column alignment to `Layout::align.x`.
+fn alignment_to_x(alignment: &Alignment) -> f64 {
+    match alignment {
+        Alignment::None | Alignment::Left => 0.0,
+        Alignment::Center => 0.5,
+        Alignment::Right => 1.0,
+    }
+}
+
+impl StudioMarkdownRef {
+    pub fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.set_text(cx, v)
+    }
+
+    /// Start streaming text animation with fade-in effect.
+    pub fn start_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.start_streaming_animation();
+        }
+    }
+
+    /// Reset and start streaming animation (for reused widgets).
+    pub fn reset_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.reset_streaming_animation();
+        }
+    }
+
+    /// Stop streaming animation (fade will complete naturally).
+    pub fn stop_streaming_animation(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.stop_streaming_animation();
+        }
+    }
+
+    /// Check if streaming animation is completely done.
+    pub fn is_streaming_animation_done(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.text_flow.is_streaming_animation_done()
+        } else {
+            true
+        }
+    }
+
+    /// Reset all streaming animations (text fade).
+    pub fn reset_all_streaming_animations(&self) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.text_flow.reset_all_streaming_animations();
+        }
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+struct StudioMarkdownLink {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    link: LinkLabel,
+    #[live]
+    href: String,
+}
+
+impl WidgetMatchEvent for StudioMarkdownLink {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        if self.link.clicked(actions) {
+            cx.widget_action(
+                self.widget_uid(),
+                StudioMarkdownAction::LinkNavigated(self.href.clone()),
+            );
+        }
+    }
+}
+
+impl Widget for StudioMarkdownLink {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.link.handle_event(cx, event, scope);
+        self.widget_match_event(cx, event, scope)
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.link.draw_walk(cx, scope, walk)
+    }
+
+    fn text(&self) -> String {
+        self.link.text()
+    }
+
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        self.link.set_text(cx, v);
+    }
+}
+
+impl StudioMarkdownLinkRef {
+    pub fn set_href(&self, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.href = v.to_string();
+    }
+
+    pub fn set_label(&self, cx: &mut Cx, v: &str) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.link.set_text(cx, v);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum StudioMarkdownAction {
+    #[default]
+    None,
+    LinkNavigated(String),
+}

@@ -115,10 +115,8 @@ fn wait_for_terminal_frame_contains(
             HubToClient::TerminalFramebuffer {
                 path: output_path,
                 frame,
-            } if output_path == path => {
-                if framebuffer_to_text(&frame).contains(needle) {
-                    return true;
-                }
+            } if output_path == path && framebuffer_to_text(&frame).contains(needle) => {
+                return true;
             }
             _ => {}
         }
@@ -144,10 +142,8 @@ where
             HubToClient::TerminalFramebuffer {
                 path: output_path,
                 frame,
-            } if output_path == path => {
-                if predicate(&frame) {
-                    return Some(frame);
-                }
+            } if output_path == path && predicate(&frame) => {
+                return Some(frame);
             }
             _ => {}
         }
@@ -347,11 +343,9 @@ fn terminal_large_paste_keeps_session_alive() {
             HubToClient::TerminalFramebuffer {
                 path: output_path,
                 frame,
-            } if output_path == path => {
-                if framebuffer_to_text(&frame).contains("__paste_ok__") {
-                    saw_marker = true;
-                    break;
-                }
+            } if output_path == path && framebuffer_to_text(&frame).contains("__paste_ok__") => {
+                saw_marker = true;
+                break;
             }
             _ => {}
         }
@@ -2557,27 +2551,27 @@ fn file_watch_picks_up_external_new_file() {
             continue;
         };
         match msg {
-            HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => {
-                if changes.iter().any(|change| {
+            HubToClient::FileTreeDiff { mount, changes }
+                if mount == "repo" && changes.iter().any(|change| {
                     matches!(
                         change,
                         makepad_studio_protocol::hub_protocol::FileTreeChange::Added { path, .. }
                             if path == "repo/src/new_file.rs"
                     )
-                }) {
-                    saw_new_file = true;
-                    break;
-                }
+                }) =>
+            {
+                saw_new_file = true;
+                break;
             }
-            HubToClient::FileTree { mount, data } if mount == "repo" => {
-                if data
-                    .nodes
-                    .iter()
-                    .any(|node| node.path == "repo/src/new_file.rs")
-                {
-                    saw_new_file = true;
-                    break;
-                }
+            HubToClient::FileTree { mount, data }
+                if mount == "repo"
+                    && data
+                        .nodes
+                        .iter()
+                        .any(|node| node.path == "repo/src/new_file.rs") =>
+            {
+                saw_new_file = true;
+                break;
             }
             _ => {}
         }
@@ -2718,25 +2712,27 @@ fn file_watch_picks_up_external_removed_directory() {
             continue;
         };
         match msg {
-            HubToClient::FileTreeDiff { mount, changes } if mount == "repo" => {
-                if changes.iter().any(|change| {
-                    matches!(
-                        change,
-                        makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
-                            if path == "repo/src/nested" || path.starts_with("repo/src/nested/")
-                    )
-                }) {
-                    saw_nested_removed = true;
-                    break;
-                }
+            HubToClient::FileTreeDiff { mount, changes }
+                if mount == "repo"
+                    && changes.iter().any(|change| {
+                        matches!(
+                            change,
+                            makepad_studio_protocol::hub_protocol::FileTreeChange::Removed { path }
+                                if path == "repo/src/nested" || path.starts_with("repo/src/nested/")
+                        )
+                    }) =>
+            {
+                saw_nested_removed = true;
+                break;
             }
-            HubToClient::FileTree { mount, data } if mount == "repo" => {
-                if !data.nodes.iter().any(|node| {
-                    node.path == "repo/src/nested" || node.path.starts_with("repo/src/nested/")
-                }) {
-                    saw_nested_removed = true;
-                    break;
-                }
+            HubToClient::FileTree { mount, data }
+                if mount == "repo"
+                    && !data.nodes.iter().any(|node| {
+                        node.path == "repo/src/nested" || node.path.starts_with("repo/src/nested/")
+                    }) =>
+            {
+                saw_nested_removed = true;
+                break;
             }
             _ => {}
         }

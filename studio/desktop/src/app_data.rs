@@ -66,6 +66,7 @@ pub struct MountState {
     pub root: PathBuf,
     pub tab_id: Option<LiveId>,
     pub sidebar_restore_width: Option<f64>,
+    pub agent_panel_restore_width: Option<f64>,
     pub bottom_panel_restore_height: Option<f64>,
     pub file_tree_data: Option<FileTreeData>,
     pub run_items: Vec<RunItem>,
@@ -90,6 +91,7 @@ impl Default for MountState {
             root: PathBuf::new(),
             tab_id: None,
             sidebar_restore_width: None,
+            agent_panel_restore_width: None,
             bottom_panel_restore_height: None,
             file_tree_data: None,
             run_items: Vec::new(),
@@ -149,6 +151,7 @@ pub struct AppData {
     pub pending_log_jumps: HashMap<String, (usize, usize)>,
     /// Last non-collapsed `editor_split` ratio, used when reopening the Run preview column.
     pub run_panel_split_restore: HashMap<String, SplitterAlign>,
+    pub model_search_filter: String,
 }
 
 #[derive(Clone)]
@@ -292,7 +295,7 @@ impl FlatFileTree {
             .iter()
             .map(|(id, node)| (node.path.matches('/').count(), *id))
             .collect();
-        ids_by_depth.sort_by(|a, b| b.0.cmp(&a.0));
+        ids_by_depth.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         for (_, id) in ids_by_depth {
             let Some(node) = self.nodes.get(&id) else {

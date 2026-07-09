@@ -466,7 +466,7 @@ impl VirtualFs {
             };
             let regex = Regex::new_with_options(pattern, options)
                 .map_err(|err| VirtualFsError::Search(err.to_string()))?;
-            FindInFilesMatcher::Regex(regex)
+            FindInFilesMatcher::Regex(Box::new(regex))
         } else {
             FindInFilesMatcher::Literal(pattern.as_bytes().to_vec())
         };
@@ -844,7 +844,7 @@ impl VirtualFs {
 
 enum FindInFilesMatcher {
     Literal(Vec<u8>),
-    Regex(Regex),
+    Regex(Box<Regex>),
 }
 
 fn dispatch_regex_search_job(

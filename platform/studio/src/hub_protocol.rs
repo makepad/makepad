@@ -208,10 +208,20 @@ pub enum ClientToHub {
         mount: String,
         backend_id: String,
     },
+    AiConfigureBackend {
+        mount: String,
+        backend_id: String,
+    },
     AiSendPrompt {
         mount: String,
         agent_id: AiAgentId,
         text: String,
+    },
+    AiSpawnSubagent {
+        mount: String,
+        parent_agent_id: AiAgentId,
+        role: String,
+        task: String,
     },
     AiCancelPrompt {
         mount: String,
@@ -652,6 +662,30 @@ pub struct AiBackendInfo {
     pub label: String,
     pub detail: String,
     pub configured: bool,
+    pub configuration_url: Option<String>,
+    pub configuration_hint: Option<String>,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct WorkflowStepState {
+    pub name: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct ActiveWorkflowState {
+    pub name: String,
+    pub current_step: usize,
+    pub steps: Vec<WorkflowStepState>,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AiVisibilityEvent {
+    pub kind: String,
+    pub agent_id: Option<AiAgentId>,
+    pub title: String,
+    pub detail: String,
+    pub timestamp: f64,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
@@ -663,6 +697,14 @@ pub struct AiAgentSummary {
     pub pending: bool,
     pub updated_at: f64,
     pub message_count: usize,
+    pub parent_agent_id: Option<AiAgentId>,
+    pub role: Option<String>,
+    pub current_action: Option<String>,
+    pub files_touched: Vec<String>,
+    pub state_changed_at: f64,
+    pub workflow_step_name: Option<String>,
+    pub workflow_step_status: Option<String>,
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
@@ -673,6 +715,15 @@ pub struct AiAgentState {
     pub status: String,
     pub pending: bool,
     pub messages: Vec<AiMessage>,
+    pub parent_agent_id: Option<AiAgentId>,
+    pub role: Option<String>,
+    pub subagents: Vec<AiAgentId>,
+    pub current_action: Option<String>,
+    pub files_touched: Vec<String>,
+    pub state_changed_at: f64,
+    pub workflow_step_name: Option<String>,
+    pub workflow_step_status: Option<String>,
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson)]
@@ -683,8 +734,9 @@ pub struct AiMountState {
     pub agents: Vec<AiAgentSummary>,
     pub active_agent: Option<AiAgentState>,
     pub live_markdown: String,
+    pub active_workflow: Option<ActiveWorkflowState>,
+    pub visibility_events: Vec<AiVisibilityEvent>,
 }
-
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct BuildBoxInfo {
     pub name: String,

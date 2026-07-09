@@ -276,6 +276,7 @@ pub struct BuildManager {
 }
 
 impl BuildManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn start_command_run(
         &mut self,
         build_id: QueryId,
@@ -395,6 +396,7 @@ impl BuildManager {
         Ok(info)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_cargo_run(
         &mut self,
         build_id: QueryId,

@@ -34,6 +34,7 @@ pub struct TerminalManager {
 }
 
 impl TerminalManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn open_terminal(
         &mut self,
         path: String,
@@ -176,10 +177,7 @@ fn run_terminal_loop(
         }
 
         let now = std::time::Instant::now();
-        while delayed_input
-            .front()
-            .is_some_and(|input| input.due <= now)
-        {
+        while delayed_input.front().is_some_and(|input| input.due <= now) {
             if let Some(input) = delayed_input.pop_front() {
                 pending_input.push_back(PendingInput {
                     data: input.data,
@@ -215,10 +213,7 @@ fn run_terminal_loop(
         }
 
         let mut output = Vec::new();
-        loop {
-            let Some(data) = pty.try_read() else {
-                break;
-            };
+        while let Some(data) = pty.try_read() {
             if data.is_empty() {
                 continue;
             }

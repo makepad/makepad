@@ -59,7 +59,7 @@ let RunStudio = RunItem{
         hub.run(
             {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
             "cargo", 
-            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json"  "--bind=0.0.0.0" "--stdin-loop" "--mounts=makepad:./sub"
+            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json"  "--bind=0.0.0.0" "--stdin-loop" "--mounts=makepad:."
             ],
         )
     }

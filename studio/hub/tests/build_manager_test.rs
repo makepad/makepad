@@ -38,10 +38,8 @@ fn build_manager_emits_output_and_exit_for_cargo() {
         match event {
             HubEvent::ProcessOutput {
                 build_id: id, line, ..
-            } if id == build_id => {
-                if line.contains("cargo") {
-                    saw_output = true;
-                }
+            } if id == build_id && line.contains("cargo") => {
+                saw_output = true;
             }
             HubEvent::ProcessExited {
                 build_id: id,

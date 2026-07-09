@@ -107,7 +107,7 @@ impl Widget for FoldHeader {
                 if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
                     // Check if this action came from a widget within our header
                     // by verifying the widget exists in the widget tree under our header
-                    if !cx.widget_tree().widget(widget_action.widget_uid).is_empty() {
+                    if widget_action.widget_uid == self.header.widget(cx, ids!(fold_button)).widget_uid() {
                         match widget_action.cast::<FoldButtonAction>() {
                             FoldButtonAction::Opening => {
                                 self.animator_play(cx, ids!(active.on));

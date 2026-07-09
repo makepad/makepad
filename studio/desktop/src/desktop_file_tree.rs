@@ -243,7 +243,7 @@ impl Widget for DesktopFileTree {
             if let Some(mut file_tree) = step.as_file_tree().borrow_mut() {
                 if !filter_active {
                     if let Some(data) = scope.data.get_mut::<AppData>() {
-                        data.file_tree.draw(cx, &mut *file_tree);
+                        data.file_tree.draw(cx, &mut file_tree);
                     }
                 }
             } else if let Some(mut list) = step.as_portal_list().borrow_mut() {
@@ -267,7 +267,7 @@ impl Widget for DesktopFileTree {
                                 };
                                 self.draw_filtered_list(
                                     cx,
-                                    &mut *list,
+                                    &mut list,
                                     &visible_paths,
                                     &data.file_tree,
                                     empty_text,
@@ -275,7 +275,7 @@ impl Widget for DesktopFileTree {
                             } else {
                                 self.draw_filtered_list(
                                     cx,
-                                    &mut *list,
+                                    &mut list,
                                     &[],
                                     &data.file_tree,
                                     "No mount",
@@ -284,7 +284,7 @@ impl Widget for DesktopFileTree {
                         } else {
                             self.draw_filtered_list(
                                 cx,
-                                &mut *list,
+                                &mut list,
                                 &[],
                                 &data.file_tree,
                                 "No mount",
