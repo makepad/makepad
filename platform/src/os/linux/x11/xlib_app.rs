@@ -1,6 +1,7 @@
 use {
     self::super::{
-        super::select_timer::SelectTimers, x11_sys, xlib_event::XlibEvent, xlib_window::*,
+        super::select_timer::SelectTimers, super::windowing_backend::PIXELS_PER_WHEEL_DETENT,
+        x11_sys, xlib_event::XlibEvent, xlib_window::*,
     },
     crate::{cursor::MouseCursor, event::*, makepad_math::Vec2d, os::cx_native::EventFlow},
     std::{
@@ -483,7 +484,6 @@ pub struct XlibApp {
 
     pub timers: SelectTimers,
 
-    pub last_scroll_time: f64,
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
     pub event_callback: Option<Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>>,
@@ -526,7 +526,6 @@ impl XlibApp {
                 //signal_fds,
                 clipboard: String::new(),
                 primary_selection: String::new(),
-                last_scroll_time: 0.0,
                 last_click_time: 0.0,
                 last_click_pos: (0, 0),
                 window_map: HashMap::new(),
@@ -876,26 +875,22 @@ impl XlibApp {
                         );
 
                         if button.button >= 4 && button.button <= 7 {
-                            let last_scroll_time = self.last_scroll_time;
-                            self.last_scroll_time = time_now;
-                            // completely arbitrary scroll acceleration curve.
-                            let speed = 1200.0
-                                * (0.2 - 2. * (self.last_scroll_time - last_scroll_time)).max(0.01);
-
+                            // Core-protocol wheel buttons deliver exactly one press per
+                            // detent with no magnitude, so scroll a fixed distance each.
                             self.do_callback(XlibEvent::Scroll(ScrollEvent {
                                 window_id: window.window_id,
                                 scroll: Vec2d {
                                     x: if button.button == 6 {
-                                        -speed
+                                        -PIXELS_PER_WHEEL_DETENT
                                     } else if button.button == 7 {
-                                        speed
+                                        PIXELS_PER_WHEEL_DETENT
                                     } else {
                                         0.
                                     },
                                     y: if button.button == 4 {
-                                        -speed
+                                        -PIXELS_PER_WHEEL_DETENT
                                     } else if button.button == 5 {
-                                        speed
+                                        PIXELS_PER_WHEEL_DETENT
                                     } else {
                                         0.
                                     },
@@ -905,7 +900,7 @@ impl XlibApp {
                                 is_mouse: true,
                                 handled_x: Cell::new(false),
                                 handled_y: Cell::new(false),
-                                time: self.last_scroll_time,
+                                time: time_now,
                                 // Legacy X11 wheel buttons carry no gesture info.
                                 phase: ScrollPhase::None,
                             }))
