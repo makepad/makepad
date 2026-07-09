@@ -510,6 +510,18 @@ impl Image {
         self.texture.is_some()
     }
 
+    /// True if this `Image` currently has displayable content:
+    /// either a raster texture or a loaded SVG.
+    ///
+    /// This distinguishes "the load was accepted" from "there is actually
+    /// something to draw". Note that a pending async load does not imply this
+    /// is false: content deliberately kept visible while the load decodes
+    /// (a `set_texture` placeholder, or a previous load of the same key)
+    /// still counts as content.
+    pub fn has_content(&self) -> bool {
+        self.texture.is_some() || self.draw_svg.is_some()
+    }
+
     /// Loads an SVG into this `Image` by parsing the UTF-8 SVG `data` and drawing
     /// it with makepad's native vector engine instead of a raster texture.
     ///
@@ -675,7 +687,7 @@ impl Image {
                 self.begin_async_load(cx, image_path, (w, h));
             }
             Ok(AsyncLoadResult::Loaded) => {
-                self.finish_async_load(cx);
+                self.finish_async_load(cx, image_path);
             }
             Err(_) => {
                 self.cancel_async_load(cx);
@@ -699,7 +711,7 @@ impl Image {
                 self.begin_async_load(cx, image_path, (w, h));
             }
             Ok(AsyncLoadResult::Loaded) => {
-                self.finish_async_load(cx);
+                self.finish_async_load(cx, image_path);
             }
             Err(_) => {
                 self.cancel_async_load(cx);
@@ -719,7 +731,7 @@ impl Image {
                 self.begin_async_load(cx, Path::new(url), (w, h));
             }
             Ok(AsyncLoadResult::Loaded) => {
-                self.finish_async_load(cx);
+                self.finish_async_load(cx, Path::new(url));
             }
             Err(_) => {
                 self.cancel_async_load(cx);
@@ -755,9 +767,14 @@ impl Image {
 
     /// The requested image was already cached and its texture has been set: clear
     /// the pending-load state so the draw path binds the texture directly.
-    fn finish_async_load(&mut self, cx: &mut Cx) {
+    fn finish_async_load(&mut self, cx: &mut Cx, image_path: &Path) {
         self.async_image_size = None;
         self.async_image_path = None;
+        // Record which load produced the texture, just like the decode-completion
+        // path does. Without this, a cache-hit texture has no provenance and a
+        // later load for a different key would wrongly keep it visible on a
+        // recycled widget while the new source decodes.
+        self.texture_async_source = Some(image_path.to_path_buf());
         self.animator_play(cx, ids!(async_load.off));
         self.redraw(cx);
     }
@@ -964,6 +981,15 @@ impl ImageRef {
     pub fn has_texture(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.has_texture()
+        } else {
+            false
+        }
+    }
+
+    /// See [`Image::has_content()`].
+    pub fn has_content(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.has_content()
         } else {
             false
         }
