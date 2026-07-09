@@ -2780,7 +2780,26 @@ impl CxTexture {
                         gl_sys::TEXTURE_MAX_LEVEL,
                         max_level.unwrap_or(1000) as i32,
                     );
+                    // On GLES 3, glGenerateMipmap on the unsized BGRA internal format is
+                    // driver-dependent (modern Mesa allows it; stricter implementations
+                    // raise INVALID_OPERATION and generate nothing). A mipmap-incomplete
+                    // texture samples opaque black, so verify and fall back to plain
+                    // linear filtering if generation failed. Drain any earlier error
+                    // first so it isn't misattributed to glGenerateMipmap.
+                    while (gl.glGetError)() != gl_sys::NO_ERROR {}
                     (gl.glGenerateMipmap)(gl_sys::TEXTURE_2D);
+                    if (gl.glGetError)() != gl_sys::NO_ERROR {
+                        crate::warning!(
+                            "glGenerateMipmap failed for a BGRA image texture; \
+                             falling back to non-mipmapped filtering"
+                        );
+                        (gl.glTexParameteri)(
+                            gl_sys::TEXTURE_2D,
+                            gl_sys::TEXTURE_MIN_FILTER,
+                            gl_sys::LINEAR as i32,
+                        );
+                        (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, 0);
+                    }
                 }
             }
 
