@@ -92,6 +92,7 @@ use crate::{
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
+            System::Threading::WaitForSingleObject,
         },
     },
 };
@@ -558,6 +559,23 @@ impl Cx {
         // let time1 = Cx::profile_time_ns();
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
 
+        // Pace the CPU to the display refresh by waiting on this swap chain's
+        // frame-latency waitable before building the frame. The waitable is a
+        // counted semaphore replenished once per retired Present, so each wait
+        // must be paired with the vsync Present below; popups have no waitable
+        // and live-resize presents without vsync, so neither waits here. The
+        // finite timeout (roughly two refresh intervals) keeps the loop alive
+        // if the compositor stops signaling, e.g. while the window is
+        // occluded; on timeout we simply proceed with the frame.
+        if vsync
+            && !d3d11_window.is_in_resize
+            && !d3d11_window.frame_latency_waitable.is_invalid()
+        {
+            unsafe {
+                let _ = WaitForSingleObject(d3d11_window.frame_latency_waitable, 33);
+            }
+        }
+
         self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
 
         let mut zbias = 0.0;
@@ -984,6 +1002,18 @@ impl D3d11Window {
     pub fn stop_resize(&mut self) {
         self.is_in_resize = false;
         self.alloc_size = Vec2d::default();
+        // Live-resize presents without vsync and skips the frame-latency wait, but
+        // every retired Present still credits the waitable semaphore. Drain the
+        // accumulated credits here so the per-frame wait in draw_pass_to_window
+        // actually paces again instead of returning immediately for the rest of
+        // the window's lifetime.
+        if !self.frame_latency_waitable.is_invalid() {
+            unsafe {
+                while WaitForSingleObject(self.frame_latency_waitable, 0)
+                    == windows::Win32::Foundation::WAIT_OBJECT_0
+                {}
+            }
+        }
     }
 
     /// Update the swap chain's background color to match the pass clear

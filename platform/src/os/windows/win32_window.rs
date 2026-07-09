@@ -584,40 +584,43 @@ impl Win32Window {
                         KeyCode::KeyV => {
                             // paste
                             if let Ok(()) = OpenClipboard(None) {
-                                let mut data: Vec<u16> = Vec::new();
-                                let h_clipboard_data =
-                                    GetClipboardData(CF_UNICODETEXT.0 as u32).unwrap();
-                                let h_clipboard_ptr =
-                                    GlobalLock(std::mem::transmute::<_, HGLOBAL>(h_clipboard_data))
-                                        as *mut u16;
-                                let clipboard_size =
-                                    GlobalSize(std::mem::transmute::<_, HGLOBAL>(h_clipboard_data));
-                                if clipboard_size > 2 {
-                                    data.resize((clipboard_size >> 1) - 1, 0);
-                                    std::ptr::copy_nonoverlapping(
-                                        h_clipboard_ptr,
-                                        data.as_mut_ptr(),
-                                        data.len(),
-                                    );
-                                    GlobalUnlock(std::mem::transmute::<_, HGLOBAL>(
-                                        h_clipboard_data,
-                                    ))
-                                    .unwrap();
-                                    CloseClipboard().unwrap();
-                                    if let Ok(utf8) = String::from_utf16(&data) {
-                                        window.do_callback(Win32Event::TextInput(TextInputEvent {
-                                            input: utf8,
-                                            was_paste: true,
-                                            replace_last: false,
-                                            ..Default::default()
-                                        }));
+                                let mut paste_text = None;
+                                // GetClipboardData fails when the clipboard holds
+                                // non-text content (e.g. an image or files); skip the
+                                // paste in that case but still close the clipboard.
+                                if let Ok(h_clipboard_data) =
+                                    GetClipboardData(CF_UNICODETEXT.0 as u32)
+                                {
+                                    let h_global =
+                                        std::mem::transmute::<_, HGLOBAL>(h_clipboard_data);
+                                    let h_clipboard_ptr = GlobalLock(h_global) as *mut u16;
+                                    if !h_clipboard_ptr.is_null() {
+                                        let clipboard_size = GlobalSize(h_global);
+                                        if clipboard_size > 2 {
+                                            let mut data: Vec<u16> = Vec::new();
+                                            data.resize((clipboard_size >> 1) - 1, 0);
+                                            std::ptr::copy_nonoverlapping(
+                                                h_clipboard_ptr,
+                                                data.as_mut_ptr(),
+                                                data.len(),
+                                            );
+                                            paste_text = String::from_utf16(&data).ok();
+                                        }
+                                        // GlobalUnlock reports failure when the lock
+                                        // count reaches zero with GetLastError() ==
+                                        // NO_ERROR, which is the normal outcome of the
+                                        // last unlock, so its result is ignored.
+                                        let _ = GlobalUnlock(h_global);
                                     }
-                                } else {
-                                    GlobalUnlock(std::mem::transmute::<_, HGLOBAL>(
-                                        h_clipboard_data,
-                                    ))
-                                    .unwrap();
-                                    CloseClipboard().unwrap();
+                                }
+                                let _ = CloseClipboard();
+                                if let Some(input) = paste_text {
+                                    window.do_callback(Win32Event::TextInput(TextInputEvent {
+                                        input,
+                                        was_paste: true,
+                                        replace_last: false,
+                                        ..Default::default()
+                                    }));
                                 }
                             }
                         }

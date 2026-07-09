@@ -31,10 +31,7 @@ use {
         //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
         window::{CxWindowPool, WindowId},
-        windows::Win32::{
-            Graphics::Direct3D11::ID3D11Device,
-            System::Threading::WaitForSingleObject,
-        },
+        windows::Win32::Graphics::Direct3D11::ID3D11Device,
     },
     std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
 };
@@ -254,25 +251,6 @@ impl Cx {
                     }
                 }
 
-                // Pace the CPU render loop to the display refresh (vblank) using the
-                // main window's DXGI frame-latency waitable object. This is the
-                // canonical low-latency present pattern: waiting here once per frame
-                // makes the loop run ~once per vblank instead of spinning, so the OS
-                // can coalesce mouse-move messages (avoiding the WM_NCHITTEST storm)
-                // and frames are delivered without judder. We wait on the first
-                // window that has a valid waitable (the main window); popups store a
-                // null handle and are skipped. A finite 100ms timeout guarantees the
-                // loop can never deadlock if DWM stops signaling (e.g. occlusion).
-                if let Some(waitable) = d3d11_windows
-                    .iter()
-                    .map(|w| w.frame_latency_waitable)
-                    .find(|h| !h.is_invalid())
-                {
-                    unsafe {
-                        let _ = WaitForSingleObject(waitable, 100);
-                    }
-                }
-
                 let time_now = with_win32_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
@@ -283,7 +261,15 @@ impl Cx {
                 }
                 // ok here we send out to all our childprocesses
 
-                self.handle_repaint(d3d11_windows, d3d11_cx);
+                let presented = self.handle_repaint(d3d11_windows, d3d11_cx);
+                // A presenting pass blocks in the frame-latency wait or Present, pacing
+                // the Poll loop to the display. A pass that presents nothing has no
+                // blocking call at all, so a NextFrame listener that re-arms without
+                // dirtying a pass (e.g. a video player polling between decoded frames)
+                // would spin the loop at full speed; sleep briefly to cap that.
+                if !presented && self.new_next_frames.len() != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
 
                 // Run script-VM garbage collection at a safe point after paint, matching
                 // the macOS backend, so the script object heap doesn't grow without bound:
@@ -429,11 +415,14 @@ impl Cx {
         }
     }
 
+    /// Repaints all dirty passes. Returns whether any window pass was presented,
+    /// so the Paint handler can tell a paced (vsync-blocking) pass from a no-op one.
     pub(crate) fn handle_repaint(
         &mut self,
         d3d11_windows: &mut Vec<D3d11Window>,
         d3d11_cx: &mut D3d11Cx,
-    ) {
+    ) -> bool {
+        let mut presented = false;
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -453,6 +442,7 @@ impl Cx {
                         // Present paced to the display refresh (vsync); see `windows_window_vsync()`
                         // for why this defaults to ON.
                         self.draw_pass_to_window(*draw_pass_id, windows_window_vsync(), window, d3d11_cx);
+                        presented = true;
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
@@ -464,6 +454,7 @@ impl Cx {
                 }
             }
         }
+        presented
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
