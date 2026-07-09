@@ -381,7 +381,8 @@ pub struct DrawCallUniforms {
 }
 
 impl DrawCallUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>()] {
+    // The array length is in f32 elements, not bytes, hence the >> 2.
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
     }
     /*
@@ -524,7 +525,8 @@ impl Default for DrawListUniforms {
 }
 
 impl DrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
+    // The array length is in f32 elements, not bytes, hence the >> 2.
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
     }
 }
