@@ -2,7 +2,7 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas},
     geom::{Point, Rect, Size},
-    glyph_outline::{Command, GlyphOutline},
+    glyph_outline::{GlyphOutline, OutlineComplexity},
     image::{Bgra, Image, R},
     msdfer,
     msdfer::Msdfer,
@@ -280,7 +280,7 @@ impl Rasterizer {
         dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
+        let outline = outline.unwrap_or_else(|| font.glyph_outline_rc(glyph_id).unwrap());
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.sdfer.settings().padding;
         let key = GlyphImageKey {
@@ -341,8 +341,8 @@ impl Rasterizer {
         }
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
-        let complexity = estimate_outline_complexity(&outline);
+        let outline = outline.unwrap_or_else(|| font.glyph_outline_rc(glyph_id).unwrap());
+        let complexity = outline.complexity();
         if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
@@ -385,9 +385,12 @@ impl Rasterizer {
             self.seed_msdf_slot_from_sdf(slot, sdf_glyph);
         }
         if self.outline_msdf_pending.insert(key.clone()) {
+            // The job crosses a thread boundary, so it needs an owned copy of the
+            // outline. This deep clone happens at most once per glyph per atlas
+            // epoch, guarded by the pending set above.
             self.queued_msdf_jobs.push(QueuedMsdfJob {
                 key,
-                outline,
+                outline: (*outline).clone(),
                 dpxs_per_em,
                 epoch: self.atlas_epoch,
             });
@@ -904,37 +907,6 @@ fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<us
         size_in_dpxs.width.ceil() as usize,
         size_in_dpxs.height.ceil() as usize,
     )
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OutlineComplexity {
-    outline_commands: usize,
-    estimated_segments: usize,
-}
-
-fn estimate_outline_complexity(outline: &GlyphOutline) -> OutlineComplexity {
-    const QUAD_COMPLEXITY_SEGMENTS: usize = 8;
-    const CUBIC_COMPLEXITY_SEGMENTS: usize = 12;
-
-    let mut estimated_segments = 0usize;
-    for command in outline.commands().iter().copied() {
-        match command {
-            Command::MoveTo(_) => {}
-            Command::LineTo(_) => estimated_segments = estimated_segments.saturating_add(1),
-            Command::QuadTo(_, _) => {
-                estimated_segments = estimated_segments.saturating_add(QUAD_COMPLEXITY_SEGMENTS);
-            }
-            Command::CurveTo(_, _, _) => {
-                estimated_segments = estimated_segments.saturating_add(CUBIC_COMPLEXITY_SEGMENTS);
-            }
-            Command::Close => estimated_segments = estimated_segments.saturating_add(1),
-        }
-    }
-
-    OutlineComplexity {
-        outline_commands: outline.commands().len(),
-        estimated_segments,
-    }
 }
 
 fn is_msdf_complexity_acceptable(
