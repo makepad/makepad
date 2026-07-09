@@ -706,8 +706,6 @@ impl Widget for Html {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.text_flow.begin(cx, walk);
         let mut node = self.doc.new_walker();
-        let mut auto_id: u64 = 0;
-        let mut details_auto_id: u64 = 0;
         self.details_stack.clear();
         self.skip_details_depth = None;
         self.summary_click_areas.clear();
@@ -745,10 +743,11 @@ impl Widget for Html {
                     let details_id = if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
                         LiveId::from_str(id_str)
                     } else {
-                        details_auto_id += 1;
-                        // Offset into the high bits to avoid colliding with
-                        // HtmlLink's auto_id (small ints) in the items map.
-                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(details_auto_id))
+                        // Key by the node's stable doc index (a visit-order counter
+                        // would renumber when a collapsed <details> hides nodes).
+                        // Offset into the high bits to avoid colliding with the
+                        // custom-widget ids (small ints) in the items map.
+                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(node.index as u64))
                     };
                     let initial_open = node.find_attr_lc(live_id!(open)).is_some();
                     self.details_stack.push(DetailsLevel {
@@ -934,7 +933,7 @@ impl Widget for Html {
                 &self.ol_separator,
             ) {
                 (Some(_), _tws) => {
-                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id);
+                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node);
                 }
                 (None, tws) => {
                     trim = tws;
@@ -955,9 +954,18 @@ impl Widget for Html {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.body.set(v);
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
-        self.seen_details.clear();
-        self.summary_area_cache.clear();
+        let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
+        // Rebuild only when the content actually changed, mirroring
+        // on_after_apply. Sub-widgets are keyed by position and capture their
+        // node attributes at creation, so stale items must be dropped when the
+        // doc changes; when it is unchanged, keeping them preserves
+        // user-toggled <details> state across re-populates.
+        if new_doc != self.doc {
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+            self.seen_details.clear();
+            self.summary_area_cache.clear();
+        }
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -971,13 +979,15 @@ fn handle_custom_widget(
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
-    auto_id: &mut u64,
 ) {
     let id = if let Some(id) = node.find_attr_lc(live_id!(id)) {
         LiveId::from_str(id)
     } else {
-        *auto_id += 1;
-        LiveId(*auto_id)
+        // Key by the node's stable index in the parsed doc rather than a
+        // visit-order counter: skip mode (a collapsed <details>) doesn't visit
+        // hidden nodes, so a counter would renumber every widget after the
+        // details on toggle, rebinding links and spans to the wrong nodes.
+        LiveId(node.index as u64)
     };
 
     let template = node.open_tag_nc().unwrap();

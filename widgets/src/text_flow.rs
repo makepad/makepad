@@ -1775,6 +1775,14 @@ impl TextFlow {
                     });
                     (widget, template)
                 });
+            // If the template changed, recreate the widget from the new
+            // template, as item_with does.
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value_scoped(vm, scope, template_value)
+                });
+                *entry = (widget, template);
+            }
             cx.widget_tree_mark_dirty(self.uid);
             return Some(entry.0.clone());
         }
