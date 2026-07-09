@@ -420,6 +420,19 @@ impl Rasterizer {
             } else {
                 1.0
             };
+            // Quantize the scale into coarse buckets (powers of 1.25, rounded up toward
+            // native). The atlas slot and the strike decode below are keyed by the
+            // resulting size, so without this a continuous zoom or a fractional-DPI
+            // change re-decodes the full strike and allocates a fresh slot for every
+            // sub-pixel size step. Rounding up keeps at least the requested resolution,
+            // and the achieved-scale compensation below keeps the on-screen size exact.
+            const SIZE_BUCKET_FACTOR: f32 = 1.25;
+            let scale = if scale > 0.0 && scale < 1.0 {
+                let steps = ((1.0 / scale).ln() / SIZE_BUCKET_FACTOR.ln() + 1.0e-3).floor();
+                (1.0 / SIZE_BUCKET_FACTOR.powf(steps)).min(1.0)
+            } else {
+                scale
+            };
             let target = if scale < 1.0 {
                 Size::new(
                     ((native.width as f32 * scale).round() as usize).max(1),
