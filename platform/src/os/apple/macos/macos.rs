@@ -402,8 +402,18 @@ impl Cx {
                     {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
+                        // PerfMonitor: a presented window frame starts here;
+                        // nextDrawable is where vsync/pool pressure blocks
+                        // the main thread, so it gets its own channel.
+                        self.perf_monitor
+                            .frame_boundary(with_macos_app(|app| app.time_now()));
+                        let wait_t0 = std::time::Instant::now();
                         let drawable: ObjcId =
                             unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
+                        self.perf_monitor.add(
+                            crate::perf_monitor::PERF_CHANNEL_DRAWABLE_WAIT,
+                            wait_t0.elapsed().as_micros() as u64,
+                        );
                         if drawable == nil {
                             return;
                         }
@@ -573,11 +583,20 @@ impl Cx {
                     }
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
+                    let gc_t0 = std::time::Instant::now();
+                    let mut did_gc = false;
                     self.with_vm(|vm| {
                         if vm.heap().needs_gc() {
                             vm.gc();
+                            did_gc = true;
                         }
                     });
+                    if did_gc {
+                        self.perf_monitor.add(
+                            crate::perf_monitor::PERF_CHANNEL_GC,
+                            gc_t0.elapsed().as_micros() as u64,
+                        );
+                    }
 
                     // block till the next timer
                     return EventFlow::Wait;

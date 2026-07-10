@@ -252,6 +252,36 @@ const PEEK_SNAP_GAP_TICKS: u64 = 18;
 
 const GAME_PREFIX: &str = "use mod.prelude.widgets.*\n";
 
+/// PERF: one profiler reporting window (~2s of frames). Everything is main-
+/// thread wall-clock μs. "script" is on_tick + timers + on_touch calls into
+/// the isolate, "physics" is step_world + touch collection, "house" is the
+/// agent poll / save / log flush, "scene" is the 3D pass encode and "overlay"
+/// the HUD/nametag 2D pass. The worst_* fields catch single-frame spikes —
+/// stutter lives there, not in the averages.
+#[derive(Default)]
+struct PerfWindow {
+    draws: u64,
+    ticks: u64,
+    script_us: u64,
+    physics_us: u64,
+    house_us: u64,
+    scene_us: u64,
+    worst_scene_us: u64,
+    slab_us: u64,
+    slab_rebuilds: u64,
+    overlay_us: u64,
+    worst_tick_us: u64,
+    gap_ms_sum: f64,
+    worst_gap_ms: f64,
+    gaps: u64,
+    static_instances: u64,
+    dyn_instances: u64,
+}
+
+fn perf_us(t0: std::time::Instant) -> u64 {
+    t0.elapsed().as_micros() as u64
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum BodyKind {
     /// Doesn't move on its own; the world for everything else to stand on.
@@ -1109,17 +1139,22 @@ pub struct GameView {
     area: Area,
     #[rust(false)]
     initialized: bool,
-    // PERF: counters behind AIGAME_PERF=1 (see draw_scene).
+    // PERF: per-phase frame profiler, always collected (a few Instant reads
+    // per frame). F3 toggles the on-screen overlay, `ag perf` fetches the
+    // report, AIGAME_PERF=1 also prints it to stderr every window.
     #[rust(std::env::var_os("AIGAME_PERF").is_some())]
-    perf_enabled: bool,
+    perf_log: bool,
     #[rust]
-    perf_accum_us: u64,
+    perf: PerfWindow,
     #[rust]
-    perf_frames: u64,
+    perf_report: String,
+    #[rust(false)]
+    perf_overlay: bool,
+    #[rust(false)]
+    perf_want_file: bool,
+    // PerfGraph widget channel for the physics step (registered on first use).
     #[rust]
-    perf_static_count: u64,
-    #[rust]
-    perf_dyn_count: u64,
+    perf_physics_ch: Option<PerfChannel>,
     // PERF: unit shape geometries, built once (index = Shape::index()).
     #[rust]
     shape_geometries: [Option<Geometry>; 5],
@@ -1389,6 +1424,7 @@ impl GameView {
         };
 
         let vm_id = self.vm_id;
+        let eval_t0 = std::time::Instant::now();
         let errors = cx.with_script_vm_id(vm_id, |vm| {
             // Install the captured-error sink: run_core drains errors as they
             // occur (and streaming evals silence them); the sink is the only
@@ -1399,6 +1435,10 @@ impl GameView {
             });
             vm.take_errors()
         });
+        // Evals are splash exec too — a hot-reload hitch shows as a script
+        // spike on the PerfGraph.
+        cx.perf_monitor
+            .add(PERF_CHANNEL_SCRIPT, perf_us(eval_t0));
 
         let generation = self.eval_generation;
         if errors.is_empty() {
@@ -1529,6 +1569,14 @@ impl GameView {
 
     fn poll_agent_requests(&mut self, cx: &mut Cx) {
         let Some(dir) = self.agent_dir() else { return };
+
+        // `ag perf`: answer with the NEXT completed profiler window (≤2s away)
+        // so the numbers are a fresh whole window, not a stale one.
+        let perf_request = dir.join("perf_request");
+        if perf_request.exists() {
+            let _ = std::fs::remove_file(&perf_request);
+            self.perf_want_file = true;
+        }
 
         let peek_request = dir.join("peek_request");
         if peek_request.exists() && self.peek_run.is_none() {
@@ -1769,7 +1817,14 @@ impl GameView {
     #[cfg(headless)]
     fn poll_gamepad(&mut self, _cx: &mut Cx) {}
 
+    fn perf_physics_channel(&mut self, cx: &mut Cx) -> PerfChannel {
+        *self
+            .perf_physics_ch
+            .get_or_insert_with(|| cx.perf_monitor.channel("physics", 0x58ffd0))
+    }
+
     fn run_tick(&mut self, cx: &mut Cx) {
+        let tick_t0 = std::time::Instant::now();
         let in_test = self.tick_test_run(cx);
         // Scripts steer relative to the camera ("run where the camera looks"),
         // so the EFFECTIVE yaw must be visible world state: the orbit yaw, or
@@ -1856,7 +1911,11 @@ impl GameView {
             (world.on_tick.clone(), self.input_snapshot(&world))
         };
         if let Some(on_tick) = on_tick {
+            let t0 = std::time::Instant::now();
             self.call_script_fn2(cx, on_tick, ScriptValue::from_f64(TICK_DT as f64), input_snapshot);
+            let us = perf_us(t0);
+            self.perf.script_us += us;
+            cx.perf_monitor.add(PERF_CHANNEL_SCRIPT, us);
         }
 
         // Timers. Repeating ones (game.every) re-arm after firing; a fired
@@ -1876,11 +1935,18 @@ impl GameView {
             }
             due
         };
-        for timer in due {
-            self.call_script_fn0(cx, timer.func);
+        if !due.is_empty() {
+            let t0 = std::time::Instant::now();
+            for timer in due {
+                self.call_script_fn0(cx, timer.func);
+            }
+            let us = perf_us(t0);
+            self.perf.script_us += us;
+            cx.perf_monitor.add(PERF_CHANNEL_SCRIPT, us);
         }
 
         // Physics + sensors.
+        let t_phys = std::time::Instant::now();
         let touch_events = {
             let mut world = self.world.borrow_mut();
             step_world(&mut world);
@@ -1889,16 +1955,27 @@ impl GameView {
             world.pressed.clear();
             collect_touches(&world)
         };
+        {
+            let us = perf_us(t_phys);
+            self.perf.physics_us += us;
+            let ch = self.perf_physics_channel(cx);
+            cx.perf_monitor.add(ch, us);
+        }
         let on_touch = self.world.borrow().on_touch.clone();
         if let Some(on_touch) = on_touch {
+            let t0 = std::time::Instant::now();
             for (a, b) in touch_events {
                 let args = self.make_touch_args(cx, a, b);
                 if let Some((av, bv)) = args {
                     self.call_script_fn2(cx, on_touch.clone(), av, bv);
                 }
             }
+            let us = perf_us(t0);
+            self.perf.script_us += us;
+            cx.perf_monitor.add(PERF_CHANNEL_SCRIPT, us);
         }
 
+        let t_house = std::time::Instant::now();
         // Agent RPC.
         if self.world.borrow().tick % AGENT_POLL_TICKS == 0 {
             self.poll_agent_requests(cx);
@@ -1909,6 +1986,9 @@ impl GameView {
         }
         self.tick_peek_run(cx);
         self.flush_log();
+        self.perf.house_us += perf_us(t_house);
+        self.perf.ticks += 1;
+        self.perf.worst_tick_us = self.perf.worst_tick_us.max(perf_us(tick_t0));
         let _ = in_test;
     }
 
@@ -2300,24 +2380,62 @@ impl GameView {
     }
 
     fn draw_scene(&mut self, cx: &mut Cx3d, scene_state: SceneState3D) {
-        // PERF instrumentation: AIGAME_PERF=1 logs avg draw_scene CPU time and
-        // instance counts every 120 frames to stderr.
-        let perf_t0 = self.perf_enabled.then(std::time::Instant::now);
+        let t0 = std::time::Instant::now();
         self.draw_scene_inner(cx, scene_state);
-        if let Some(t0) = perf_t0 {
-            self.perf_accum_us += t0.elapsed().as_micros() as u64;
-            self.perf_frames += 1;
-            if self.perf_frames >= 120 {
-                eprintln!(
-                    "[aigame-perf] draw_scene avg {}us over {} frames ({} static + {} dynamic instances)",
-                    self.perf_accum_us / self.perf_frames,
-                    self.perf_frames,
-                    self.perf_static_count,
-                    self.perf_dyn_count,
-                );
-                self.perf_accum_us = 0;
-                self.perf_frames = 0;
-            }
+        let us = perf_us(t0);
+        self.perf.scene_us += us;
+        self.perf.worst_scene_us = self.perf.worst_scene_us.max(us);
+        self.perf.draws += 1;
+        if self.perf.draws >= 120 {
+            self.finish_perf_window();
+        }
+    }
+
+    /// Close the ~2s profiler window: format the report, hand it to whoever
+    /// asked (F3 overlay, `ag perf`, AIGAME_PERF=1 stderr), start the next.
+    fn finish_perf_window(&mut self) {
+        let w = std::mem::take(&mut self.perf);
+        let draws = w.draws.max(1);
+        let ticks = w.ticks.max(1);
+        let fps = if w.gaps > 0 && w.gap_ms_sum > 0.0 {
+            1000.0 / (w.gap_ms_sum / w.gaps as f64)
+        } else {
+            0.0
+        };
+        let (entities, parts, labels, timers) = {
+            let world = self.world.borrow();
+            (world.entities.len(), world.parts.len(), world.labels.len(), world.timers.len())
+        };
+        self.perf_report = format!(
+            "fps {:.1}  worst gap {:.1}ms\n\
+             tick: script {}us  physics {}us  house {}us  worst {}us\n\
+             scene: {}us avg  {}us worst  slab {} rebuilds {}us\n\
+             overlay: {}us   inst {} static + {} dyn\n\
+             entities {}  parts {}  labels {}  timers {}",
+            fps,
+            w.worst_gap_ms,
+            w.script_us / ticks,
+            w.physics_us / ticks,
+            w.house_us / ticks,
+            w.worst_tick_us,
+            w.scene_us / draws,
+            w.worst_scene_us,
+            w.slab_rebuilds,
+            w.slab_us,
+            w.overlay_us / draws,
+            w.static_instances,
+            w.dyn_instances,
+            entities,
+            parts,
+            labels,
+            timers,
+        );
+        if self.perf_log {
+            eprintln!("[aigame-perf] {}", self.perf_report.replace('\n', " | "));
+        }
+        if self.perf_want_file {
+            self.perf_want_file = false;
+            self.write_agent_file("perf.txt", &self.perf_report.clone());
         }
     }
 
@@ -2383,13 +2501,14 @@ impl GameView {
         let vars_ready = self.draw_cube.cube.draw_vars.can_instance()
             && self.draw_alpha.cube.cube.draw_vars.can_instance();
         if vars_ready && self.slab_rev != Some(world.render_rev) {
+            let t0 = std::time::Instant::now();
             self.rebuild_static_slabs(&world);
+            self.perf.slab_us += perf_us(t0);
+            self.perf.slab_rebuilds += 1;
             self.slab_rev = Some(world.render_rev);
         }
-        if self.perf_enabled {
-            self.perf_static_count = self.slab_instance_count;
-            self.perf_dyn_count = 0;
-        }
+        self.perf.static_instances = self.slab_instance_count;
+        self.perf.dyn_instances = 0;
 
         // PERF: resolve dynamic parts and shape membership ONCE per frame —
         // the per-shape loops below must not re-scan entities per part.
@@ -2461,7 +2580,7 @@ impl GameView {
                 self.draw_cube.cube.depth_clip = 1.0;
                 self.draw_cube.glow = e.glow;
                 self.draw_cube.cube.draw(cx);
-                self.perf_dyn_count += 1;
+                self.perf.dyn_instances += 1;
             }
             // Parts that are NOT in the slab: dynamic owner, or mid-animation.
             for (part_index, owner_index) in dyn_parts.iter().copied() {
@@ -2489,7 +2608,7 @@ impl GameView {
                 self.draw_cube.cube.depth_clip = 1.0;
                 self.draw_cube.glow = part.glow;
                 self.draw_cube.cube.draw(cx);
-                self.perf_dyn_count += 1;
+                self.perf.dyn_instances += 1;
             }
             // Immediate-mode beams (box batch): a box stretched between two
             // points (grapple cables, lasers). Cable axis on local z.
@@ -2529,7 +2648,7 @@ impl GameView {
                     self.draw_cube.cube.depth_clip = 1.0;
                     self.draw_cube.glow = beam.glow;
                     self.draw_cube.cube.draw(cx);
-                    self.perf_dyn_count += 1;
+                    self.perf.dyn_instances += 1;
                 }
             }
             if let Some(mi) = self.draw_cube.cube.many_instances.take() {
@@ -2608,7 +2727,7 @@ impl GameView {
                     self.draw_alpha.cube.cube.depth_clip = 1.0;
                     self.draw_alpha.cube.glow = 0.0;
                     self.draw_alpha.cube.cube.draw(cx);
-                    self.perf_dyn_count += 1;
+                    self.perf.dyn_instances += 1;
                 }
             }
             for e in world
@@ -2636,7 +2755,7 @@ impl GameView {
                 self.draw_alpha.cube.cube.depth_clip = 1.0;
                 self.draw_alpha.cube.glow = e.glow;
                 self.draw_alpha.cube.cube.draw(cx);
-                self.perf_dyn_count += 1;
+                self.perf.dyn_instances += 1;
             }
             if let Some(mi) = self.draw_alpha.cube.cube.many_instances.take() {
                 cx.end_many_instances(mi);
@@ -5001,6 +5120,12 @@ impl Widget for GameView {
         if self.next_frame.is_event(event).is_some() {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
+            if time > last {
+                let gap_ms = (time - last) * 1000.0;
+                self.perf.gap_ms_sum += gap_ms;
+                self.perf.worst_gap_ms = self.perf.worst_gap_ms.max(gap_ms);
+                self.perf.gaps += 1;
+            }
             self.time_accum += (time - last).min(0.25);
             let mut ticked = false;
             while self.time_accum >= TICK_DT as f64 {
@@ -5012,6 +5137,15 @@ impl Widget for GameView {
                 self.area.redraw(cx);
             }
             self.next_frame = cx.new_next_frame();
+        }
+
+        // F4 toggles the engine's text overlay (phase averages + world
+        // counts); F3 is the app-level PerfGraph widget.
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::F4 && !ke.is_repeat {
+                self.perf_overlay = !self.perf_overlay;
+                self.area.redraw(cx);
+            }
         }
 
         // Keyboard -> named actions. Test runs feed the tape instead.
@@ -5121,6 +5255,7 @@ impl Widget for GameView {
         self.area = self.draw_bg.area();
         cx.set_pass_area(&self.pass, self.area);
 
+        let t_overlay = std::time::Instant::now();
         // HUD: named text slots pinned to anchors (slots sharing an anchor
         // stack downward in insertion order), plus gauges. "center" is the big
         // banner, "hint" the small top-left control help — their historical
@@ -5319,6 +5454,40 @@ impl Widget for GameView {
                 self.draw_label.text_style.font_size = 11.0;
                 self.draw_label.color = vec4(1.0, 1.0, 1.0, 0.87);
             }
+        }
+        self.perf.overlay_us += perf_us(t_overlay);
+
+        // F3 profiler overlay: the last completed ~2s window, top-right.
+        if self.perf_overlay {
+            let report = if self.perf_report.is_empty() {
+                "perf: collecting...".to_string()
+            } else {
+                self.perf_report.clone()
+            };
+            let lines: Vec<&str> = report.lines().collect();
+            let pad = 8.0f64;
+            let line_h = 13.0f64;
+            let w = 350.0f64;
+            let h = lines.len() as f64 * line_h + pad * 2.0;
+            let x = rect.pos.x + rect.size.x - w - 10.0;
+            let y = rect.pos.y + 10.0;
+            self.draw_dot.color = vec4(0.04, 0.05, 0.09, 0.78);
+            self.draw_dot.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x, y),
+                    size: dvec2(w, h),
+                },
+            );
+            self.draw_dot.color = vec4(1.0, 1.0, 1.0, 0.9);
+            self.draw_hud.text_style.font_size = 8.0;
+            self.draw_hud.color = vec4(0.65, 1.0, 0.75, 0.95);
+            for (i, line) in lines.iter().enumerate() {
+                self.draw_hud
+                    .draw_abs(cx, dvec2(x + pad, y + pad + i as f64 * line_h), line);
+            }
+            self.draw_hud.text_style.font_size = 22.0;
+            self.draw_hud.color = vec4(1.0, 1.0, 1.0, 0.93);
         }
         DrawStep::done()
     }

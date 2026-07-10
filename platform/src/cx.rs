@@ -18,6 +18,7 @@ use {
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
+        perf_monitor::PerfMonitor,
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
@@ -160,6 +161,8 @@ pub struct Cx {
     pub(crate) studio_http: String,
 
     pub performance_stats: PerformanceStats,
+    /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
+    pub perf_monitor: PerfMonitor,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     #[allow(dead_code)]
@@ -486,6 +489,7 @@ impl Cx {
 
             self_ref: None,
             performance_stats: Default::default(),
+            perf_monitor: Default::default(),
 
             display_context: Default::default(),
             pending_script_reapply: false,
