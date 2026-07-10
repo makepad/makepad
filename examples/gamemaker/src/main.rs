@@ -374,12 +374,12 @@ script_mod! {
                                 game_view := GameView {}
 
                                 // Frame profiler hovering bottom-right above
-                                // the game; F3 hides/shows it. No align on
-                                // the wrapper: the widget corner-pins itself
-                                // (DrawVector geometry and deferred turtle
-                                // alignment don't mix).
+                                // the game; hidden until F3 shows it. No
+                                // align on the wrapper: the widget corner-
+                                // pins itself (DrawVector geometry and
+                                // deferred turtle alignment don't mix).
                                 perf_overlay := View {
-                                    visible: true
+                                    visible: false
                                     width: Fill
                                     height: Fill
 
