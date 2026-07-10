@@ -816,6 +816,39 @@ impl TextFlow {
             }
         }
     }
+
+    /// Sets the default font color used for all text.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_font_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.font_color == color {
+            return;
+        }
+        self.font_color = color;
+        self.redraw(cx);
+    }
+
+    /// Sets the background color of inline code and code blocks.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_code_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.draw_block.code_color == color {
+            return;
+        }
+        self.draw_block.code_color = color;
+        self.redraw(cx);
+    }
+
+    /// Sets the background color of quote blocks.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_quote_bg_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.draw_block.quote_bg_color == color {
+            return;
+        }
+        self.draw_block.quote_bg_color = color;
+        self.redraw(cx);
+    }
 }
 
 impl ScriptHook for TextFlow {

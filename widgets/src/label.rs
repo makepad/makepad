@@ -349,6 +349,19 @@ impl Widget for Label {
     }
 }
 
+impl Label {
+    /// Sets the text color.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_text_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.draw_text.color == color {
+            return;
+        }
+        self.draw_text.color = color;
+        self.redraw(cx);
+    }
+}
+
 impl LabelRef {
     pub fn text(&self) -> String {
         if let Some(inner) = self.borrow() {
@@ -361,6 +374,13 @@ impl LabelRef {
     pub fn set_text(&self, cx: &mut Cx, text: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, text);
+        }
+    }
+
+    /// See [`Label::set_text_color()`].
+    pub fn set_text_color(&self, cx: &mut Cx, color: Vec4f) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_text_color(cx, color);
         }
     }
 

@@ -13,6 +13,12 @@ use crate::{
 
 const BULLET: &str = "•";
 
+/// The default text color of an [`HtmlLink`]: #0000EE, the classic browser link blue.
+pub const HTML_LINK_COLOR: Vec4f = vec4(0.0, 0.0, 238.0 / 255.0, 1.0);
+/// The default text color of an [`HtmlLink`] while pressed: #EE0000, the classic
+/// browser active-link red.
+pub const HTML_LINK_PRESSED_COLOR: Vec4f = vec4(238.0 / 255.0, 0.0, 0.0, 1.0);
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -25,9 +31,9 @@ script_mod! {
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
 
-        color: #x0000EE
-        hover_color: #x00EE00
-        pressed_color: #xEE0000
+        color: #(HTML_LINK_COLOR)
+        // Standard browsers don't recolor links on hover, so no hover_color here.
+        pressed_color: #(HTML_LINK_PRESSED_COLOR)
 
         animator: Animator{
             hover: {
@@ -952,6 +958,11 @@ impl Widget for Html {
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        // Skip the parse entirely when the text is unchanged; callers commonly
+        // re-populate widgets with identical content on every draw frame.
+        if self.body.as_ref() == v {
+            return;
+        }
         self.body.set(v);
         let mut errors = Some(Vec::new());
         let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
@@ -1161,22 +1172,20 @@ impl Widget for HtmlLink {
 
         tf.underline.push();
         tf.areas_tracker.push_tracker();
-        let mut pushed_color = false;
-        if self.hovered > 0.0 {
-            if let Some(color) = self.hover_color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
-        } else if self.pressed > 0.0 {
-            if let Some(color) = self.pressed_color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
+        // Pressed wins over hovered (a press also sets `hovered`), and both fall
+        // back to the base color when unset, so a link with no hover_color keeps
+        // its color while hovered instead of dropping to the ambient text color.
+        let state_color = if self.pressed > 0.0 {
+            self.pressed_color.or(self.color)
+        } else if self.hovered > 0.0 {
+            self.hover_color.or(self.color)
         } else {
-            if let Some(color) = self.color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
+            self.color
+        };
+        let mut pushed_color = false;
+        if let Some(color) = state_color {
+            tf.font_colors.push(color);
+            pushed_color = true;
         }
         tf.draw_text(cx, self.text.as_ref());
 
@@ -1218,7 +1227,32 @@ impl HtmlRef {
     }
 }
 
+impl HtmlLink {
+    /// Sets the link's default (non-hovered) font color.
+    /// `None` makes the link inherit the surrounding text's font color.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_color(&mut self, cx: &mut Cx, color: Option<Vec4f>) {
+        if self.color == color {
+            return;
+        }
+        self.color = color;
+        // This widget is drawn by its parent TextFlow, so redraw the areas
+        // it was actually drawn into.
+        for area in self.drawn_areas.iter() {
+            area.redraw(cx);
+        }
+    }
+}
+
 impl HtmlLinkRef {
+    /// See [`HtmlLink::set_color()`].
+    pub fn set_color(&self, cx: &mut Cx, color: Option<Vec4f>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_color(cx, color);
+        }
+    }
+
     pub fn set_url(&mut self, url: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.url = url.to_string();
