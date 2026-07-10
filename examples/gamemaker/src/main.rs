@@ -209,6 +209,12 @@ script_mod! {
                 // still works — the caption's hidden VoiceWave keeps receiving
                 // key events (only mouse/touch/scroll require visibility).
                 show_caption_bar: false
+                // Push-to-talk on Escape too — the big friendly key for kids.
+                caption_bar +: {
+                    voice_wave +: {
+                        ptt_use_escape: true
+                    }
+                }
                 body +: {
                     flow: Overlay
                     show_bg: true
@@ -321,7 +327,7 @@ script_mod! {
                                     input := glass.TextInput {
                                         width: Fill
                                         height: 46
-                                        empty_text: "Type, or hold F1"
+                                        empty_text: "Type, or hold Esc and talk"
                                         // The app parks key focus on this input (voice injects
                                         // into the focused widget), so the FOCUS empty color is
                                         // the one that actually shows — dim them all.
@@ -1776,7 +1782,7 @@ impl AppMain for App {
                             &error,
                         );
                     } else {
-                        self.set_status(cx, "Ready! Type, or hold F1 and talk.");
+                        self.set_status(cx, "Ready! Type, or hold Esc (or F1) and talk.");
                     }
                     self.ui.text_input(cx, ids!(input)).set_key_focus(cx);
                     cx.redraw_all();
