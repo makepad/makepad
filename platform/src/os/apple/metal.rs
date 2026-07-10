@@ -872,6 +872,26 @@ impl Cx {
             (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
         });
 
+        // MAKEPAD_GPU_PASS_TRACE=1: log each pass's GPU time to stderr —
+        // per-pass breakdown for chasing frame-budget overruns.
+        if std::env::var_os("MAKEPAD_GPU_PASS_TRACE").is_some() {
+            let name = if self.passes[draw_pass_id].debug_name.is_empty() {
+                "main".to_string()
+            } else {
+                self.passes[draw_pass_id].debug_name.clone()
+            };
+            let () = unsafe {
+                msg_send![
+                    command_buffer,
+                    addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
+                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                        eprintln!("[gpu-pass] {} {:.3}ms", name, (end - start) * 1000.0);
+                    })
+                ]
+            };
+        }
+
         match mode {
             DrawPassMode::MTKView(view) => {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
@@ -1164,6 +1184,11 @@ impl Cx {
                         gpu_counters
                     };
                     if let Some((raw_sample_start, raw_sample_end)) = raw_range {
+                        // PerfMonitor "gpu" channel: one presented frame's
+                        // aggregated GPU interval (no-op unless enabled).
+                        crate::perf_monitor::perf_gpu_frame_completed(
+                            raw_sample_end - raw_sample_start,
+                        );
                         if let Some((start, end)) = map_metal_gpu_times_to_app_timeline(
                             raw_sample_start,
                             raw_sample_end,

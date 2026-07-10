@@ -475,7 +475,25 @@ impl Cx {
     fn ensure_timer0_started(&mut self) {
         if !self.os.timer0_armed {
             with_macos_app(|app| app.stop_timer(0));
-            with_macos_app(|app| app.start_timer(0, 0.008, true));
+            // Pace the paint clock to the fastest attached display. The old
+            // fixed 8ms beat against an 8.33ms (120Hz) refresh: presents
+            // outran vsync, the drawable pool drifted full and nextDrawable
+            // blocked the main thread in a ~25-frame sawtooth (rough/smooth
+            // phases as the beat drifted through vblank alignment). Matching
+            // the refresh period (+0.2% so NSTimer lateness drains the queue
+            // instead of accumulating) keeps acquisition non-blocking.
+            let interval = unsafe {
+                let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                let count: usize = msg_send![screens, count];
+                let mut max_fps: i64 = 60;
+                for i in 0..count {
+                    let screen: ObjcId = msg_send![screens, objectAtIndex: i];
+                    let fps: i64 = msg_send![screen, maximumFramesPerSecond];
+                    max_fps = max_fps.max(fps);
+                }
+                1.002 / max_fps.max(1) as f64
+            };
+            with_macos_app(|app| app.start_timer(0, interval, true));
             self.os.timer0_armed = true;
             self.os.timer0_idle_since = None;
         }
