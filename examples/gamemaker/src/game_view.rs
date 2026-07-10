@@ -1229,6 +1229,11 @@ pub struct GameView {
     #[cfg(not(headless))]
     #[rust]
     pad_reset_prev: bool,
+    /// Right analog stick, deadzoned, in mouse-drag pixel convention
+    /// (x: drag right+, y: drag down+ — which this orbit reads as look up,
+    /// so stick-up = look-up). Rotates the camera exactly like a drag.
+    #[rust]
+    pad_look: DVec2,
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     #[rust]
     terrain_geometry: Option<Geometry>,
@@ -1762,6 +1767,8 @@ impl GameView {
             };
             let score = pad.left_stick.x.abs() as f32
                 + pad.left_stick.y.abs() as f32
+                + pad.right_stick.x.abs() as f32
+                + pad.right_stick.y.abs() as f32
                 + pad.dpad_up
                 + pad.dpad_down
                 + pad.dpad_left
@@ -1780,6 +1787,19 @@ impl GameView {
             let stick_z = -(pad.left_stick.y as f64);
             let mut axis_x = if stick_x.abs() > DEADZONE { stick_x } else { 0.0 };
             let mut axis_z = if stick_z.abs() > DEADZONE { stick_z } else { 0.0 };
+            // Right stick = camera, deadzone rescaled so motion starts at
+            // zero. Stick up (+y) maps to look-up (see pad_look docs).
+            let dz = |v: f64| {
+                if v.abs() > DEADZONE {
+                    (v.abs() - DEADZONE) / (1.0 - DEADZONE) * v.signum()
+                } else {
+                    0.0
+                }
+            };
+            self.pad_look = dvec2(
+                dz(pad.right_stick.x as f64),
+                dz(pad.right_stick.y as f64),
+            );
             axis_x += (pad.dpad_right > 0.5) as i8 as f64 - (pad.dpad_left > 0.5) as i8 as f64;
             axis_z += (pad.dpad_down > 0.5) as i8 as f64 - (pad.dpad_up > 0.5) as i8 as f64;
             let jump = pad.a > 0.5;
@@ -1805,6 +1825,7 @@ impl GameView {
                 },
             )
         } else {
+            self.pad_look = dvec2(0.0, 0.0);
             (false, false, false, false, PadState::default())
         };
         self.pad_jump_prev = jump;
@@ -1831,6 +1852,19 @@ impl GameView {
         // 0 for the fixed side-on camera (where raw axes are already correct).
         // Tape runs pin it to 0 — repeatability must not depend on where the
         // kid happened to leave the camera.
+        // Right stick rotates the camera exactly like a mouse drag, engine-
+        // default: same 0.01 rad/px orbit through pseudo-pixels (~2.6 rad/s
+        // at full deflection), same look_dx/dy for scripts, same chase-cam
+        // authority below. Applied BEFORE script writes, like real mouse
+        // events, so a script set_cam_yaw still wins its tick.
+        let stick_look = if in_test { dvec2(0.0, 0.0) } else { self.pad_look };
+        let stick_active = stick_look.x != 0.0 || stick_look.y != 0.0;
+        if stick_active {
+            let px = stick_look * (260.0 * TICK_DT as f64);
+            self.orbit_yaw -= px.x as f32 * 0.01;
+            self.orbit_pitch = (self.orbit_pitch + px.y as f32 * 0.01).clamp(-1.45, 1.45);
+            self.look_accum += px;
+        }
         {
             let mut world = self.world.borrow_mut();
             // Script camera writes (game.set_cam_yaw/pitch, camera({pitch}))
@@ -1855,7 +1889,8 @@ impl GameView {
             // e.yaw + PI — my-game-5's hand-rolled heading+PI never rendered
             // (BUG 3) so the sign error there went unnoticed.
             if world.cam_chase != 0 {
-                let dragging = !in_test && self.orbit_last_abs.is_some();
+                let dragging =
+                    !in_test && (self.orbit_last_abs.is_some() || stick_active);
                 if dragging {
                     self.chase_hold = world.cam_recenter;
                 } else if self.chase_hold > 0.0 {
@@ -1887,7 +1922,8 @@ impl GameView {
             // once and the mouse is inert, so script camera writes stick and
             // stay deterministic.
             world.cam_pitch = self.orbit_pitch;
-            world.cam_dragging = !in_test && self.orbit_last_abs.is_some();
+            world.cam_dragging =
+                !in_test && (self.orbit_last_abs.is_some() || stick_active);
             let look = std::mem::take(&mut self.look_accum);
             world.look_dx = if in_test { 0.0 } else { look.x };
             world.look_dy = if in_test { 0.0 } else { look.y };
