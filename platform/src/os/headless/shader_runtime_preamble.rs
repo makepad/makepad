@@ -210,6 +210,26 @@ impl ops::Sub<f32> for Vec2f {
         vec2(self.x - s, self.y - s)
     }
 }
+// Commuted scalar-vector forms: shader languages allow `s + v` etc., and only
+// Mul had the f32-on-the-left impl (the erf-polynomial glass shader hit this).
+impl ops::Add<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn add(self, v: Vec2f) -> Vec2f {
+        vec2(self + v.x, self + v.y)
+    }
+}
+impl ops::Sub<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn sub(self, v: Vec2f) -> Vec2f {
+        vec2(self - v.x, self - v.y)
+    }
+}
+impl ops::Div<Vec2f> for f32 {
+    type Output = Vec2f;
+    fn div(self, v: Vec2f) -> Vec2f {
+        vec2(self / v.x, self / v.y)
+    }
+}
 
 // ─── Vec3f operators ───
 
@@ -273,6 +293,24 @@ impl ops::Sub<f32> for Vec3f {
         vec3(self.x - s, self.y - s, self.z - s)
     }
 }
+impl ops::Add<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn add(self, v: Vec3f) -> Vec3f {
+        vec3(self + v.x, self + v.y, self + v.z)
+    }
+}
+impl ops::Sub<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn sub(self, v: Vec3f) -> Vec3f {
+        vec3(self - v.x, self - v.y, self - v.z)
+    }
+}
+impl ops::Div<Vec3f> for f32 {
+    type Output = Vec3f;
+    fn div(self, v: Vec3f) -> Vec3f {
+        vec3(self / v.x, self / v.y, self / v.z)
+    }
+}
 
 // ─── Vec4f operators ───
 
@@ -334,6 +372,24 @@ impl ops::Sub<f32> for Vec4f {
     type Output = Vec4f;
     fn sub(self, s: f32) -> Vec4f {
         vec4(self.x - s, self.y - s, self.z - s, self.w - s)
+    }
+}
+impl ops::Add<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn add(self, v: Vec4f) -> Vec4f {
+        vec4(self + v.x, self + v.y, self + v.z, self + v.w)
+    }
+}
+impl ops::Sub<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn sub(self, v: Vec4f) -> Vec4f {
+        vec4(self - v.x, self - v.y, self - v.z, self - v.w)
+    }
+}
+impl ops::Div<Vec4f> for f32 {
+    type Output = Vec4f;
+    fn div(self, v: Vec4f) -> Vec4f {
+        vec4(self / v.x, self / v.y, self / v.z, self / v.w)
     }
 }
 
@@ -694,6 +750,24 @@ impl ops::Mul<Vec4f> for Mat4f {
             self.v[2] * v.x + self.v[6] * v.y + self.v[10] * v.z + self.v[14] * v.w,
             self.v[3] * v.x + self.v[7] * v.y + self.v[11] * v.z + self.v[15] * v.w,
         )
+    }
+}
+
+// Column-major, same convention as Mul<Vec4f> above: (a*b)*v == a*(b*v).
+impl ops::Mul<Mat4f> for Mat4f {
+    type Output = Mat4f;
+    fn mul(self, b: Mat4f) -> Mat4f {
+        let mut v = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                let mut sum = 0.0;
+                for k in 0..4 {
+                    sum += self.v[k * 4 + row] * b.v[col * 4 + k];
+                }
+                v[col * 4 + row] = sum;
+            }
+        }
+        Mat4f { v }
     }
 }
 

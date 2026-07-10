@@ -21,6 +21,19 @@ use {
     std::rc::Rc,
 };
 
+/// File sinks for in-app frame captures (`Cx::capture_next_frame_to_file`).
+/// A static mutex rather than Cx state because the metal completion handler
+/// that produces the PNG runs off the main thread.
+static SCREENSHOT_FILE_SINKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+static SCREENSHOT_FILE_NEXT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1 << 63);
+
+fn screenshot_file_sinks() -> &'static std::sync::Mutex<HashMap<u64, std::path::PathBuf>> {
+    SCREENSHOT_FILE_SINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 impl Cx {
     #[allow(dead_code)]
     pub(crate) fn repaint_windows(&mut self) {
@@ -145,6 +158,25 @@ impl Cx {
         }
     }
 
+    /// Capture the next presented frame of the main window to a PNG file.
+    /// The readback + write happen on the GPU completion thread after the next
+    /// repaint, so the caller should poll for the file to appear. Piggybacks on
+    /// the studio screenshot pipeline: ids above `SCREENSHOT_FILE_ID_BASE` are
+    /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
+    /// (Headless builds write frames to files on their own; this is for the
+    /// live GPU-rendered app.)
+    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) {
+        let request_id = SCREENSHOT_FILE_NEXT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        screenshot_file_sinks().lock().unwrap().insert(request_id, path);
+        self.screenshot_requests
+            .push(makepad_studio_protocol::ScreenshotRequest {
+                request_id,
+                kind_id: 0,
+            });
+        self.redraw_all();
+    }
+
     #[allow(dead_code)]
     pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
         let mut request_ids = Vec::new();
@@ -169,8 +201,33 @@ impl Cx {
         if request_ids.is_empty() {
             return;
         }
+        // Ids registered by capture_next_frame_to_file get written to disk;
+        // the rest (if any) still go to studio.
+        let mut studio_ids = Vec::new();
+        {
+            let mut sinks = screenshot_file_sinks().lock().unwrap();
+            for id in request_ids {
+                if let Some(path) = sinks.remove(&id) {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(err) = std::fs::write(&path, &png) {
+                        crate::error!(
+                            "capture_next_frame_to_file: write {} failed: {}",
+                            path.display(),
+                            err
+                        );
+                    }
+                } else {
+                    studio_ids.push(id);
+                }
+            }
+        }
+        if studio_ids.is_empty() {
+            return;
+        }
         Cx::send_studio_message(AppToStudio::Screenshot(ScreenshotResponse {
-            request_ids,
+            request_ids: studio_ids,
             png,
             width,
             height,

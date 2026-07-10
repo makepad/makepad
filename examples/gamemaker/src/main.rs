@@ -141,6 +141,64 @@ script_mod! {
         }
     }
 
+    // Quiet macOS-toolbar controls: small pills, regular weight, soft slate
+    // text instead of hard white — the glass lens supplies the hover glow, the
+    // type stays out of the way. Fit width so "Muted" ↔ "Sound on" reflows and
+    // nothing falls off a narrowed column.
+    let ToolButton = glass.GlassButton {
+        width: Fit
+        height: 26
+        padding: Inset{left: 12, right: 12, top: 0, bottom: 0}
+        draw_text +: {
+            color: #xccd6e6c0
+            text_style: theme.font_regular{font_size: 11}
+        }
+        draw_glass +: {
+            corner_radius: uniform(3.0)
+        }
+    }
+    // "Prominent" with the volume turned down: a whisper of accent tint.
+    let ToolButtonSolid = glass.GlassButtonProminent {
+        width: Fit
+        height: 26
+        padding: Inset{left: 12, right: 12, top: 0, bottom: 0}
+        draw_text +: {
+            color: #xf2f6ffe0
+            text_style: theme.font_regular{font_size: 11}
+        }
+        draw_glass +: {
+            tint: uniform(vec4(0.22, 0.42, 0.80, 0.20))
+            corner_radius: uniform(3.0)
+        }
+    }
+    // Input-row buttons: a hair shorter than the 46px field so the pill floats
+    // inside the row rather than boxing it in.
+    let SendButton = glass.GlassButtonProminent {
+        width: Fit
+        height: 42
+        padding: Inset{left: 18, right: 18, top: 0, bottom: 0}
+        draw_text +: {
+            color: #xf2f6ffe0
+            text_style: theme.font_regular{font_size: 12}
+        }
+        draw_glass +: {
+            tint: uniform(vec4(0.22, 0.42, 0.80, 0.20))
+            corner_radius: uniform(4.5)
+        }
+    }
+    let SendRowButton = glass.GlassButton {
+        width: Fit
+        height: 42
+        padding: Inset{left: 14, right: 14, top: 0, bottom: 0}
+        draw_text +: {
+            color: #xccd6e6c0
+            text_style: theme.font_regular{font_size: 12}
+        }
+        draw_glass +: {
+            corner_radius: uniform(4.5)
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -204,7 +262,8 @@ script_mod! {
 
                                     Label {
                                         text: "Game Maker"
-                                        draw_text.text_style.font_size: 16
+                                        draw_text.color: #xb9c4d6b0
+                                        draw_text.text_style: theme.font_regular{font_size: 13}
                                     }
 
                                     View { width: Fill height: 1 }
@@ -213,7 +272,8 @@ script_mod! {
                                     project_dropdown := DropDown {
                                         width: 150
                                         labels: ["..."]
-                                        draw_text.text_style.font_size: 12
+                                        draw_text.color: #xccd6e6c0
+                                        draw_text.text_style.font_size: 11
                                     }
                                 }
 
@@ -225,37 +285,22 @@ script_mod! {
                                     spacing: 8
                                     align: Align{y: 0.5}
 
-                                    new_button := glass.GlassButton {
-                                        text: "New"
-                                        width: 58
-                                        height: 34
-                                    }
+                                    new_button := ToolButton { text: "New" }
 
-                                    clear_button := glass.GlassButton {
-                                        text: "Clear"
-                                        width: 64
-                                        height: 34
-                                    }
+                                    clear_button := ToolButton { text: "Clear" }
 
-                                    restart_button := glass.GlassButtonProminent {
-                                        text: "Restart"
-                                        width: 80
-                                        height: 34
-                                    }
+                                    restart_button := ToolButtonSolid { text: "Restart" }
 
                                     View { width: Fill height: 1 }
 
                                     model_dropdown := DropDown {
                                         width: 110
                                         labels: ["..."]
-                                        draw_text.text_style.font_size: 12
+                                        draw_text.color: #xccd6e6c0
+                                        draw_text.text_style.font_size: 11
                                     }
 
-                                    mute_button := glass.GlassButton {
-                                        text: "Sound on"
-                                        width: 86
-                                        height: 34
-                                    }
+                                    mute_button := ToolButton { text: "Sound on" }
                                 }
 
                                 chat_list := ChatList {}
@@ -286,18 +331,17 @@ script_mod! {
                                         }
                                     }
 
-                                    send_button := glass.GlassButtonProminent {
-                                        text: "Go"
-                                        width: 70
-                                        height: 46
-                                    }
+                                    send_button := SendButton { text: "Go" }
 
-                                    cancel_button := glass.GlassButton {
+                                    cancel_button := SendRowButton {
                                         text: "Stop"
-                                        width: 70
-                                        height: 46
                                         visible: false
                                     }
+
+                                    // Stops the voice mid-sentence without
+                                    // touching the turn — for when a huge reply
+                                    // starts getting read aloud.
+                                    quiet_button := SendRowButton { text: "Shh" }
                                 }
 
                                 View {
@@ -407,6 +451,8 @@ struct Speech {
     generation: Arc<AtomicU64>,
     /// Streamed reply text not yet spoken.
     pending: String,
+    /// "Shh" latch: swallow the rest of the current reply (see `hush`).
+    hushed: bool,
 }
 
 /// Don't speak a fragment shorter than this — one-word clips sound like hiccups.
@@ -461,6 +507,7 @@ impl Speech {
             muted,
             generation,
             pending: String::new(),
+            hushed: false,
         }
     }
 
@@ -500,7 +547,7 @@ impl Speech {
     }
 
     fn enqueue(&self, raw: &str) {
-        if self.muted.load(Ordering::Relaxed) {
+        if self.muted.load(Ordering::Relaxed) || self.hushed {
             return;
         }
         let text = spoken_text(raw);
@@ -518,6 +565,18 @@ impl Speech {
         let mut playback = self.playback.lock().unwrap();
         playback.samples.clear();
         playback.cursor = 0.0;
+    }
+
+    /// "Shh": stop speaking AND stay quiet for the rest of the current reply.
+    /// Without the latch, the still-streaming reply would resume at its next
+    /// sentence boundary. Cleared when a new prompt starts (`unhush`).
+    fn hush(&mut self) {
+        self.hushed = true;
+        self.stop();
+    }
+
+    fn unhush(&mut self) {
+        self.hushed = false;
     }
 
     fn is_muted(&self) -> bool {
@@ -1224,7 +1283,9 @@ impl App {
 
         // Say something right away: the reply's first sentence can be many
         // seconds out, and silence after speaking reads as "it didn't hear me".
-        if let Some(speech) = self.speech.as_ref() {
+        // A new prompt lifts the "Shh" latch — the kid asked something new.
+        if let Some(speech) = self.speech.as_mut() {
+            speech.unhush();
             const ACKS: &[&str] = &["Okay!", "On it!", "Let me try!", "Hmm, let me think."];
             speech.enqueue(ACKS[items_len % ACKS.len()]);
         }
@@ -1339,7 +1400,9 @@ impl App {
         }
         self.current_prompt = Some(agent.send_prompt(cx, session_id, &prompt));
         self.turn_started = Some(std::time::Instant::now());
-        if let Some(speech) = self.speech.as_ref() {
+        if let Some(speech) = self.speech.as_mut() {
+            // A fix-it wake-up is a new reply: lift the "Shh" latch.
+            speech.unhush();
             speech.enqueue("Oops — let me fix that!");
         }
         self.ui.widget(cx, ids!(cancel_button)).set_visible(cx, true);
@@ -1356,7 +1419,14 @@ impl App {
         match tool_name {
             "Edit" | "Write" => Some("Changing the game".to_string()),
             "Read" => Some(format!("Looking at {file}")),
-            "Bash" => Some("Trying out the game".to_string()),
+            // The only shell surface is tools/ag — say which verb it is,
+            // "trying out" was wrong for error checks and log reads.
+            "Bash" if subject.contains("ag test") => Some("Playtesting the game".to_string()),
+            "Bash" if subject.contains("ag peek") => Some("Peeking at the game".to_string()),
+            "Bash" if subject.contains("ag errors") || subject.contains("ag logs") => {
+                Some("Checking my work".to_string())
+            }
+            "Bash" => Some("Working on it".to_string()),
             "Glob" | "Grep" => Some("Looking around".to_string()),
             _ => None,
         }
@@ -1410,6 +1480,14 @@ impl MatchEvent for App {
                 speech.set_muted(muted);
                 let label = if muted { "Muted" } else { "Sound on" };
                 self.ui.glass_button(cx, ids!(mute_button)).set_text(cx, label);
+            }
+        }
+        // One-shot hush: drop the in-flight synthesis, the queued sentences and
+        // the playback buffer, and stay quiet for the REST of this reply — the
+        // turn keeps running, only the voice stops.
+        if self.ui.glass_button(cx, ids!(quiet_button)).clicked(actions) {
+            if let Some(speech) = self.speech.as_mut() {
+                speech.hush();
             }
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(project_dropdown)).selected(actions) {
@@ -1598,6 +1676,13 @@ impl AppMain for App {
                         let mut data = CHAT_DATA.write().unwrap();
                         data.streaming_text.push_str(&text);
                         data.last_delta = Some(std::time::Instant::now());
+                    }
+                    // Prose is flowing again: drop the last tool's activity
+                    // label ("Playtesting the game" must not linger under a
+                    // reply that is just being written).
+                    if !CHAT_DATA.read().unwrap().activity.is_empty() {
+                        self.clear_activity(cx);
+                        self.set_status(cx, "Talking to you...");
                     }
                     // The id is known once the turn starts streaming; persisting
                     // now (not just on completion) keeps an interrupted turn

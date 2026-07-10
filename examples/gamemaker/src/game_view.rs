@@ -316,6 +316,10 @@ pub struct Entity {
     pub color: Vec4f,
     pub tag: String,
     pub sensor: bool,
+    /// `collide: false` = opaque decoration: renders like a solid, but no
+    /// physics, no touch reports (rotated road slabs, arches, scenery).
+    /// Distinct from `sensor`, which is translucent AND reports touches.
+    pub collide: bool,
     pub gravity_scale: f32,
     pub on_floor: bool,
     /// Entity id this mover rests on (for kinematic carry), 0 = none.
@@ -427,6 +431,49 @@ impl Terrain {
         })
     }
 
+    /// Surface normal of the triangle under (x, z) — the SAME triangle
+    /// height_at picks, so cars can align to the slope they collide with.
+    pub fn normal_at(&self, x: f32, z: f32) -> Option<Vec3f> {
+        let fx = (x - self.origin) / self.cell_size;
+        let fz = (z - self.origin) / self.cell_size;
+        if fx < 0.0 || fz < 0.0 {
+            return None;
+        }
+        let max = (self.cells - 1) as f32;
+        if fx >= max || fz >= max {
+            return None;
+        }
+        let ix = fx.floor() as usize;
+        let iz = fz.floor() as usize;
+        let u = fx - ix as f32;
+        let v = fz - iz as f32;
+        let h = |gx: usize, gz: usize| self.heights[gz * self.cells + gx];
+        let s = self.cell_size;
+        let x0 = self.origin + ix as f32 * s;
+        let z0 = self.origin + iz as f32 * s;
+        // Same diagonal split as height_at / the mesh.
+        let (a, b, c) = if u + v < 1.0 {
+            (
+                vec3f(x0, h(ix, iz), z0),
+                vec3f(x0 + s, h(ix + 1, iz), z0),
+                vec3f(x0, h(ix, iz + 1), z0 + s),
+            )
+        } else {
+            (
+                vec3f(x0 + s, h(ix + 1, iz + 1), z0 + s),
+                vec3f(x0, h(ix, iz + 1), z0 + s),
+                vec3f(x0 + s, h(ix + 1, iz), z0),
+            )
+        };
+        let normal = Vec3f::cross(b - a, c - a);
+        let normal = if normal.y < 0.0 { normal * -1.0 } else { normal };
+        let len = normal.length();
+        if len <= 1.0e-6 {
+            return Some(vec3f(0.0, 1.0, 0.0));
+        }
+        Some(normal * (1.0 / len))
+    }
+
     /// Max ground height under an AABB footprint (corners + center) — what a
     /// box standing here rests on.
     pub fn floor_under(&self, pos: Vec3f, half: Vec3f) -> Option<f32> {
@@ -460,12 +507,50 @@ pub struct Beam {
     pub glow: f32,
 }
 
+/// Where a HUD slot pins to the pane. Slots sharing an anchor stack downward
+/// in insertion order.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum HudAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    #[default]
+    Center,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl HudAnchor {
+    fn parse(name: &str) -> HudAnchor {
+        match name {
+            "top_left" => HudAnchor::TopLeft,
+            "top" => HudAnchor::Top,
+            "top_right" => HudAnchor::TopRight,
+            "bottom_left" => HudAnchor::BottomLeft,
+            "bottom" => HudAnchor::Bottom,
+            "bottom_right" => HudAnchor::BottomRight,
+            _ => HudAnchor::Center,
+        }
+    }
+}
+
 /// One line of screen text. `size`/`color.w` of 0 mean "use the slot default".
 #[derive(Clone, Default)]
 pub struct HudSlot {
     pub text: String,
     pub color: Vec4f,
     pub size: f32,
+    pub anchor: HudAnchor,
+}
+
+/// A HUD gauge (speedometer, boost). Fraction 0..1 fills left to right.
+#[derive(Clone)]
+pub struct HudBar {
+    pub name: String,
+    pub fraction: f32,
+    pub color: Vec4f,
+    pub anchor: HudAnchor,
 }
 
 /// A billboard nametag. Each entity has at most one DEFAULT label (the plain
@@ -511,8 +596,26 @@ impl Default for SkyConfig {
 
 #[derive(Clone)]
 struct GameTimer {
+    id: u64,
     at_tick: u64,
+    /// 0 = one-shot (game.after); N = re-arm every N ticks (game.every).
+    interval_ticks: u64,
     func: ScriptObjectRef,
+}
+
+/// One persisted save value (game.save/game.load). Numbers and strings only —
+/// enough for best laps, high scores, unlocked things.
+#[derive(Clone)]
+pub enum SaveVal {
+    Num(f64),
+    Str(String),
+}
+
+/// Serialized form of the save map (micro_serde has no HashMap support).
+#[derive(SerJson, DeJson, Default)]
+struct SaveFile {
+    nums: Vec<(String, f64)>,
+    strs: Vec<(String, String)>,
 }
 
 /// One frame-indexed scripted input event (same shape as the Godot tapes).
@@ -562,10 +665,11 @@ pub struct GameWorld {
     on_tick: Option<ScriptObjectRef>,
     on_touch: Option<ScriptObjectRef>,
     timers: Vec<GameTimer>,
-    /// HUD: center banner (game.text), top line, and the small hint line.
-    pub hud_center: HudSlot,
-    pub hud_top: HudSlot,
-    pub hud_hint: HudSlot,
+    /// HUD text, keyed by slot name ("center"/"top"/"hint" + any the script
+    /// invents), each pinned to an anchor. Replace-on-set; empty text removes.
+    pub hud_slots: Vec<(String, HudSlot)>,
+    /// HUD gauges, keyed by name.
+    pub hud_bars: Vec<HudBar>,
     pub crosshair: bool,
     /// Camera requests from script.
     pub cam_target: Vec3f,
@@ -576,8 +680,40 @@ pub struct GameWorld {
     pub cam_third: u64,
     pub cam_height: f32,
     pub cam_boom: f32,
-    /// One-shot pitch set from script, consumed by the widget next tick.
+    /// Chase rig (camera({chase: id})): renders exactly like third_person
+    /// (setting chase also sets cam_third) but additionally eases the orbit
+    /// yaw to sit BEHIND the target every tick. Authority: script write >
+    /// mouse this-tick > rig easing. 0 = off (mouse owns the orbit again).
+    pub cam_chase: u64,
+    /// Ease time-constant in seconds (smaller = tighter).
+    pub cam_lag: f32,
+    /// Seconds of mouse authority after a drag ends before the rig resumes.
+    pub cam_recenter: f32,
+    /// Scales the ease rate up with target speed: rate = (1/lag)·(1+speed·this).
+    pub cam_speed_tighten: f32,
+    /// One-shot angle sets from script, consumed by the widget next tick —
+    /// the writable half of the chase-cam API (the mouse owns the angles
+    /// otherwise, so writes go through the same authoritative widget state).
     pub cam_pitch_request: Option<f32>,
+    pub cam_yaw_request: Option<f32>,
+    /// Widget state mirrored into the world each tick, so scripts can read
+    /// the full camera pose and hand control back gracefully after drags.
+    pub cam_pitch: f32,
+    pub cam_dragging: bool,
+    /// Mouse orbit delta accumulated since the last tick (0 while not
+    /// dragging, always 0 under tapes).
+    pub look_dx: f64,
+    pub look_dy: f64,
+    /// Vertical field of view (degrees). Racing games widen it with speed.
+    pub cam_fov: f32,
+    /// Decaying random camera offset amplitude (game.cam_shake).
+    pub cam_shake: f32,
+    /// game.save/game.load persistence. NOT cleared on eval — surviving
+    /// edits is the whole point (best laps). Loaded from save_path at
+    /// project switch; flushed by the widget at most once a second.
+    pub save_data: std::collections::HashMap<String, SaveVal>,
+    pub save_path: Option<PathBuf>,
+    pub save_dirty: bool,
     /// Immediate-mode cables, cleared at the top of every tick.
     pub beams: Vec<Beam>,
     /// Input state, written by the ActionMap / tape, read by script.
@@ -619,6 +755,9 @@ pub struct PadState {
     pub shoot_pressed: bool,
     pub grab: bool,
     pub grab_pressed: bool,
+    /// Gamepad Y — the "reset my car" action (keyboard R).
+    pub reset: bool,
+    pub reset_pressed: bool,
 }
 
 impl GameWorld {
@@ -632,6 +771,7 @@ impl GameWorld {
             x if x == live_id!(jump) => self.pad.jump,
             x if x == live_id!(shoot) => self.pad.shoot,
             x if x == live_id!(grab) => self.pad.grab,
+            x if x == live_id!(reset) => self.pad.reset,
             x if x == live_id!(left) => self.pad.axis_x < -0.5,
             x if x == live_id!(right) => self.pad.axis_x > 0.5,
             x if x == live_id!(up) => self.pad.axis_z < -0.5,
@@ -648,6 +788,7 @@ impl GameWorld {
             x if x == live_id!(jump) => self.pad.jump_pressed,
             x if x == live_id!(shoot) => self.pad.shoot_pressed,
             x if x == live_id!(grab) => self.pad.grab_pressed,
+            x if x == live_id!(reset) => self.pad.reset_pressed,
             _ => false,
         }
     }
@@ -663,9 +804,8 @@ impl GameWorld {
         self.on_tick = None;
         self.on_touch = None;
         self.timers.clear();
-        self.hud_center = HudSlot::default();
-        self.hud_top = HudSlot::default();
-        self.hud_hint = HudSlot::default();
+        self.hud_slots.clear();
+        self.hud_bars.clear();
         self.crosshair = false;
         self.beams.clear();
         self.cam_target = vec3f(0.0, 2.0, 0.0);
@@ -675,10 +815,31 @@ impl GameWorld {
         self.cam_third = 0;
         self.cam_height = 1.6;
         self.cam_boom = 10.0;
+        self.cam_chase = 0;
+        self.cam_lag = 0.3;
+        self.cam_recenter = 1.2;
+        self.cam_speed_tighten = 0.0;
         self.cam_pitch_request = None;
+        self.cam_yaw_request = None;
+        self.cam_fov = 40.0;
+        self.cam_shake = 0.0;
         self.rng = 0x9E37_79B9_7F4A_7C15;
+        // The doc contract: game.time() restarts at 0 on every reload. The
+        // tick counter stays monotonic (log stamps, timer scheduling).
+        // save_data deliberately survives — that's what game.save is FOR.
+        self.time = 0.0;
+        // A rebuilt world must never inherit a stuck engine hum either.
+        crate::synth::stop_all_tones();
         // A rebuilt world must never alias a previous world's slab revision.
         self.mark_render_dirty();
+    }
+
+    /// Find a HUD slot by name (mut), or None.
+    fn hud_slot_mut(&mut self, name: &str) -> Option<&mut HudSlot> {
+        self.hud_slots
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| s)
     }
 
     fn rand(&mut self) -> f64 {
@@ -710,6 +871,78 @@ impl GameWorld {
     fn is_static_visual(&self, id: u64) -> bool {
         self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
     }
+}
+
+/// Decaying random camera offset (game.cam_shake). Hash of the tick, NOT the
+/// world rng — pixels may wobble, simulation must not. Pinned to zero in tapes.
+fn camera_shake_offset(world: &GameWorld, in_test: bool) -> Vec3f {
+    if in_test || world.cam_shake <= 0.001 {
+        return vec3f(0.0, 0.0, 0.0);
+    }
+    let mut h = world.tick.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 33;
+    let fx = ((h & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
+    let fy = (((h >> 16) & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
+    let fz = (((h >> 32) & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
+    vec3f(fx, fy, fz) * world.cam_shake * 0.35
+}
+
+/// game.raycast: march a ray against the terrain heightfield and every solid
+/// AABB (sensors skipped; `collide:false` decor IS hit — it's visually solid,
+/// and the grapple/AI wall-senses should see it). Returns (id, point, normal,
+/// distance); TERRAIN_ID for ground hits.
+fn world_raycast(world: &GameWorld, from: Vec3f, dir: Vec3f, max: f32) -> Option<(u64, Vec3f, Vec3f, f32)> {
+    let len = dir.length();
+    if len <= 1.0e-6 || max <= 0.0 {
+        return None;
+    }
+    let dir = dir * (1.0 / len);
+    const STEP: f32 = 0.15;
+    let steps = ((max / STEP).ceil() as usize).max(1);
+    let mut prev = from;
+    for i in 1..=steps {
+        let t = (i as f32 * STEP).min(max);
+        let p = from + dir * t;
+        if let Some(terrain) = &world.terrain {
+            if let Some(h) = terrain.height_at(p.x, p.z) {
+                if p.y <= h {
+                    // Refine between prev and p for a tighter hit point.
+                    let hit = (prev + p) * 0.5;
+                    let normal = terrain
+                        .normal_at(hit.x, hit.z)
+                        .unwrap_or(vec3f(0.0, 1.0, 0.0));
+                    return Some((TERRAIN_ID, vec3f(hit.x, h, hit.z), normal, t));
+                }
+            }
+        }
+        for e in &world.entities {
+            if e.sensor {
+                continue;
+            }
+            if (p.x - e.pos.x).abs() < e.half.x
+                && (p.y - e.pos.y).abs() < e.half.y
+                && (p.z - e.pos.z).abs() < e.half.z
+            {
+                // Face normal: the axis the ray is deepest along, pushed
+                // back out — right for boxes, close enough for shapes.
+                let rel = p - e.pos;
+                let dx = (rel.x / e.half.x).abs();
+                let dy = (rel.y / e.half.y).abs();
+                let dz = (rel.z / e.half.z).abs();
+                let normal = if dx >= dy && dx >= dz {
+                    vec3f(rel.x.signum(), 0.0, 0.0)
+                } else if dy >= dz {
+                    vec3f(0.0, rel.y.signum(), 0.0)
+                } else {
+                    vec3f(0.0, 0.0, rel.z.signum())
+                };
+                let hit = (prev + p) * 0.5;
+                return Some((e.id, hit, normal, t));
+            }
+        }
+        prev = p;
+    }
+    None
 }
 
 /// How far the third-person boom may extend before hitting geometry: march
@@ -817,9 +1050,8 @@ struct WorldSnapshot {
     on_tick: Option<ScriptObjectRef>,
     on_touch: Option<ScriptObjectRef>,
     timers: Vec<GameTimer>,
-    hud_center: HudSlot,
-    hud_top: HudSlot,
-    hud_hint: HudSlot,
+    hud_slots: Vec<(String, HudSlot)>,
+    hud_bars: Vec<HudBar>,
     crosshair: bool,
     cam_target: Vec3f,
     cam_distance: f32,
@@ -828,6 +1060,12 @@ struct WorldSnapshot {
     cam_third: u64,
     cam_height: f32,
     cam_boom: f32,
+    cam_chase: u64,
+    cam_lag: f32,
+    cam_recenter: f32,
+    cam_speed_tighten: f32,
+    cam_fov: f32,
+    time: f64,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -926,6 +1164,14 @@ pub struct GameView {
     orbit_pitch: f32,
     #[rust]
     orbit_last_abs: Option<DVec2>,
+    /// Chase-rig mouse authority: seconds left before easing resumes after a
+    /// drag (refreshed while dragging, counts down after release).
+    #[rust]
+    chase_hold: f32,
+    /// Mouse orbit delta accumulated between ticks, handed to the script as
+    /// input.look_dx/look_dy (drag detection for chase cams).
+    #[rust]
+    look_accum: DVec2,
     /// Pane rect from the last draw, for mouse hit checks (raw mouse events,
     /// not the finger-hit system — same pattern as XrCamera's desktop orbit).
     #[rust]
@@ -945,6 +1191,9 @@ pub struct GameView {
     #[cfg(not(headless))]
     #[rust]
     pad_grab_prev: bool,
+    #[cfg(not(headless))]
+    #[rust]
+    pad_reset_prev: bool,
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     #[rust]
     terrain_geometry: Option<Geometry>,
@@ -988,7 +1237,55 @@ impl GameView {
     }
 
     pub fn set_project_dir(&mut self, dir: PathBuf) {
+        // game.save/game.load live beside the app's other per-game state.
+        let save_path = dir.join(".gamemaker").join("save.json");
+        {
+            let mut world = self.world.borrow_mut();
+            world.save_data.clear();
+            world.save_dirty = false;
+            if let Ok(json) = std::fs::read_to_string(&save_path) {
+                if let Ok(file) = SaveFile::deserialize_json(&json) {
+                    for (k, v) in file.nums {
+                        world.save_data.insert(k, SaveVal::Num(v));
+                    }
+                    for (k, v) in file.strs {
+                        world.save_data.insert(k, SaveVal::Str(v));
+                    }
+                }
+            }
+            world.save_path = Some(save_path);
+        }
         self.project_dir = Some(dir);
+    }
+
+    /// Write the save map through to disk (called from the tick, debounced to
+    /// once a second so a per-tick game.save can't thrash the disk).
+    fn flush_save(&mut self) {
+        let (path, file) = {
+            let mut world = self.world.borrow_mut();
+            if !world.save_dirty {
+                return;
+            }
+            world.save_dirty = false;
+            let Some(path) = world.save_path.clone() else {
+                return;
+            };
+            let mut file = SaveFile::default();
+            for (k, v) in world.save_data.iter() {
+                match v {
+                    SaveVal::Num(n) => file.nums.push((k.clone(), *n)),
+                    SaveVal::Str(s) => file.strs.push((k.clone(), s.clone())),
+                }
+            }
+            // Deterministic file contents (HashMap order isn't).
+            file.nums.sort_by(|a, b| a.0.cmp(&b.0));
+            file.strs.sort_by(|a, b| a.0.cmp(&b.0));
+            (path, file)
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, file.serialize_json());
     }
 
     fn agent_dir(&self) -> Option<PathBuf> {
@@ -1047,9 +1344,8 @@ impl GameView {
                 on_tick: world.on_tick.clone(),
                 on_touch: world.on_touch.clone(),
                 timers: std::mem::take(&mut world.timers),
-                hud_center: std::mem::take(&mut world.hud_center),
-                hud_top: std::mem::take(&mut world.hud_top),
-                hud_hint: std::mem::take(&mut world.hud_hint),
+                hud_slots: std::mem::take(&mut world.hud_slots),
+                hud_bars: std::mem::take(&mut world.hud_bars),
                 crosshair: world.crosshair,
                 cam_target: world.cam_target,
                 cam_distance: world.cam_distance,
@@ -1058,6 +1354,12 @@ impl GameView {
                 cam_third: world.cam_third,
                 cam_height: world.cam_height,
                 cam_boom: world.cam_boom,
+                cam_chase: world.cam_chase,
+                cam_lag: world.cam_lag,
+                cam_recenter: world.cam_recenter,
+                cam_speed_tighten: world.cam_speed_tighten,
+                cam_fov: world.cam_fov,
+                time: world.time,
             };
             world.reset_content();
             snapshot
@@ -1071,12 +1373,17 @@ impl GameView {
         // never hits this because its wrapper auto-closes with `}`. The empty
         // statement is harmless after any complete file. (bugs.md, my-game-5.)
         let code = format!("{}{}\n;", GAME_PREFIX, self.body);
+        // Errors print `file:(row + line):col` — with `file: "game.splash"` and
+        // `line: 0`, the 0-based parse row exactly cancels the one-line
+        // GAME_PREFIX, so reported lines are REAL 1-based game.splash lines.
+        // The widget identity keys the body via `column` (never printed; the
+        // (file, line, column) tuple is only checkpoint identity).
         let script_mod = ScriptMod {
             cargo_manifest_path: String::new(),
             module_path: String::new(),
-            file: String::new(),
-            line: self_id,
-            column: 0,
+            file: "game.splash".to_string(),
+            line: 0,
+            column: self_id,
             code: String::new(),
             values: vec![],
         };
@@ -1114,9 +1421,8 @@ impl GameView {
                 world.on_tick = snapshot.on_tick;
                 world.on_touch = snapshot.on_touch;
                 world.timers = snapshot.timers;
-                world.hud_center = snapshot.hud_center;
-                world.hud_top = snapshot.hud_top;
-                world.hud_hint = snapshot.hud_hint;
+                world.hud_slots = snapshot.hud_slots;
+                world.hud_bars = snapshot.hud_bars;
                 world.crosshair = snapshot.crosshair;
                 world.cam_target = snapshot.cam_target;
                 world.cam_distance = snapshot.cam_distance;
@@ -1125,6 +1431,13 @@ impl GameView {
                 world.cam_third = snapshot.cam_third;
                 world.cam_height = snapshot.cam_height;
                 world.cam_boom = snapshot.cam_boom;
+                world.cam_chase = snapshot.cam_chase;
+                world.cam_lag = snapshot.cam_lag;
+                world.cam_recenter = snapshot.cam_recenter;
+                world.cam_speed_tighten = snapshot.cam_speed_tighten;
+                world.cam_fov = snapshot.cam_fov;
+                // The rolled-back world keeps ITS clock (reset_content zeroed it).
+                world.time = snapshot.time;
             }
             let joined = errors.join("\n");
             self.append_log(&format!("eval #{generation}: FAILED\n{joined}"));
@@ -1259,6 +1572,24 @@ impl GameView {
 
             // Restart the game so the run is repeatable from spawn state.
             self.reeval_for_test(cx);
+            // Deterministic starting camera: canonical pins per mode, set ONCE.
+            // From here the angles move only via SCRIPT writes (deterministic
+            // under tapes — the mouse is inert during a test), so chase cams
+            // are tape-testable instead of being silently pinned every frame
+            // (bugs.md BUG 3: set_cam_yaw appeared clobbered because every
+            // probe ran inside a test).
+            {
+                let world = self.world.borrow();
+                if world.cam_third != 0 {
+                    self.orbit_yaw = 0.0;
+                } else {
+                    self.orbit_yaw = 0.6;
+                }
+                self.orbit_pitch = -0.35;
+                // A drag just before test start must not leak mouse authority
+                // into the (mouse-inert) test — chase rigs stay deterministic.
+                self.chase_hold = 0.0;
+            }
             self.test_run = Some(TestRun {
                 frame: 0,
                 frames: request.frames.max(1),
@@ -1394,7 +1725,7 @@ impl GameView {
                 best = Some(pad.clone());
             }
         }
-        let (jump, shoot, grab, pad_state) = if let Some(pad) = best {
+        let (jump, shoot, grab, reset, pad_state) = if let Some(pad) = best {
             const DEADZONE: f64 = 0.22;
             let stick_x = pad.left_stick.x as f64;
             // Stick up = forward = negative axis_z (axis_z is down-minus-up).
@@ -1406,10 +1737,12 @@ impl GameView {
             let jump = pad.a > 0.5;
             let shoot = pad.x > 0.5;
             let grab = pad.b > 0.5;
+            let reset = pad.y > 0.5;
             (
                 jump,
                 shoot,
                 grab,
+                reset,
                 PadState {
                     axis_x: axis_x.clamp(-1.0, 1.0),
                     axis_z: axis_z.clamp(-1.0, 1.0),
@@ -1419,14 +1752,17 @@ impl GameView {
                     shoot_pressed: shoot && !self.pad_shoot_prev,
                     grab,
                     grab_pressed: grab && !self.pad_grab_prev,
+                    reset,
+                    reset_pressed: reset && !self.pad_reset_prev,
                 },
             )
         } else {
-            (false, false, false, PadState::default())
+            (false, false, false, false, PadState::default())
         };
         self.pad_jump_prev = jump;
         self.pad_shoot_prev = shoot;
         self.pad_grab_prev = grab;
+        self.pad_reset_prev = reset;
         self.world.borrow_mut().pad = pad_state;
     }
 
@@ -1442,19 +1778,68 @@ impl GameView {
         // kid happened to leave the camera.
         {
             let mut world = self.world.borrow_mut();
-            // Script asked for a pitch (game.camera({pitch: ...})): apply it
-            // to the live rig once, then the mouse owns it again.
+            // Script camera writes (game.set_cam_yaw/pitch, camera({pitch}))
+            // apply to the live rig here — the SAME state the mouse writes,
+            // so script and kid share one camera and never fork.
             if let Some(pitch) = world.cam_pitch_request.take() {
                 self.orbit_pitch = pitch;
+            }
+            let mut script_wrote_yaw = false;
+            if let Some(yaw) = world.cam_yaw_request.take() {
+                self.orbit_yaw = yaw;
+                script_wrote_yaw = true;
+            }
+            // Chase rig: ease the orbit yaw to sit behind the target.
+            // Authority, in order: a script set_cam_yaw sticks untouched for
+            // the tick it lands; the mouse owns the orbit while dragging and
+            // for cam_recenter seconds after (peek-around while driving);
+            // otherwise the rig eases with time-constant cam_lag, tightening
+            // with target speed. The camera yaw convention is mirror-handed
+            // vs entity yaw (cam forward is (sin y, -cos y), entities face
+            // atan2(-vx,-vz)), so "behind the target" is -e.yaw, NOT
+            // e.yaw + PI — my-game-5's hand-rolled heading+PI never rendered
+            // (BUG 3) so the sign error there went unnoticed.
+            if world.cam_chase != 0 {
+                let dragging = !in_test && self.orbit_last_abs.is_some();
+                if dragging {
+                    self.chase_hold = world.cam_recenter;
+                } else if self.chase_hold > 0.0 {
+                    self.chase_hold -= TICK_DT;
+                } else if !script_wrote_yaw {
+                    if let Some(e) = world.entity(world.cam_chase) {
+                        let desired = -e.yaw;
+                        let speed = (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt();
+                        let rate = (1.0 / world.cam_lag.max(0.05))
+                            * (1.0 + speed * world.cam_speed_tighten.max(0.0));
+                        let mut d = desired - self.orbit_yaw;
+                        while d > std::f32::consts::PI {
+                            d -= std::f32::consts::TAU;
+                        }
+                        while d < -std::f32::consts::PI {
+                            d += std::f32::consts::TAU;
+                        }
+                        self.orbit_yaw += d * (rate * TICK_DT).min(1.0);
+                    }
+                }
             }
             // Beams are immediate-mode: whatever on_tick re-issues below
             // survives to render; everything else vanishes right here.
             world.beams.clear();
-            world.cam_yaw = if world.cam_side || in_test {
-                0.0
-            } else {
-                self.orbit_yaw
-            };
+            world.cam_yaw = if world.cam_side { 0.0 } else { self.orbit_yaw };
+            // Mirror the rest of the camera pose for script reads, and hand
+            // over the drag deltas (zeroed under tapes for determinism).
+            // Tests no longer pin per-frame: the test START pins the orbit
+            // once and the mouse is inert, so script camera writes stick and
+            // stay deterministic.
+            world.cam_pitch = self.orbit_pitch;
+            world.cam_dragging = !in_test && self.orbit_last_abs.is_some();
+            let look = std::mem::take(&mut self.look_accum);
+            world.look_dx = if in_test { 0.0 } else { look.x };
+            world.look_dy = if in_test { 0.0 } else { look.y };
+            // Camera shake decays over ~half a second.
+            world.cam_shake = (world.cam_shake - world.cam_shake * 3.0 * TICK_DT as f32
+                - 0.01 * TICK_DT as f32)
+                .max(0.0);
         }
         if in_test {
             // Tapes own the input during a test; a bumped stick must not
@@ -1474,13 +1859,21 @@ impl GameView {
             self.call_script_fn2(cx, on_tick, ScriptValue::from_f64(TICK_DT as f64), input_snapshot);
         }
 
-        // Timers.
+        // Timers. Repeating ones (game.every) re-arm after firing; a fired
+        // one-shot is gone. game.cancel removed its id before we got here.
         let due: Vec<GameTimer> = {
             let mut world = self.world.borrow_mut();
             let now = world.tick;
             let (due, rest): (Vec<_>, Vec<_>) =
                 world.timers.drain(..).partition(|t| t.at_tick <= now);
             world.timers = rest;
+            for timer in &due {
+                if timer.interval_ticks > 0 {
+                    let mut again = timer.clone();
+                    again.at_tick = now + timer.interval_ticks;
+                    world.timers.push(again);
+                }
+            }
             due
         };
         for timer in due {
@@ -1509,6 +1902,10 @@ impl GameView {
         // Agent RPC.
         if self.world.borrow().tick % AGENT_POLL_TICKS == 0 {
             self.poll_agent_requests(cx);
+        }
+        // Persist game.save data at most once a second.
+        if self.world.borrow().tick % 60 == 0 {
+            self.flush_save();
         }
         self.tick_peek_run(cx);
         self.flush_log();
@@ -1544,6 +1941,14 @@ impl GameView {
         heap.set_value(obj, id!(shoot_pressed).into(), ScriptValue::from_bool(world.action_pressed(live_id!(shoot))), trap);
         heap.set_value(obj, id!(grab).into(), ScriptValue::from_bool(world.action_held(live_id!(grab))), trap);
         heap.set_value(obj, id!(grab_pressed).into(), ScriptValue::from_bool(world.action_pressed(live_id!(grab))), trap);
+        heap.set_value(obj, id!(reset).into(), ScriptValue::from_bool(world.action_held(live_id!(reset))), trap);
+        heap.set_value(obj, id!(reset_pressed).into(), ScriptValue::from_bool(world.action_pressed(live_id!(reset))), trap);
+        heap.set_value(obj, id!(back).into(), ScriptValue::from_bool(world.action_held(live_id!(back))), trap);
+        heap.set_value(obj, id!(back_pressed).into(), ScriptValue::from_bool(world.action_pressed(live_id!(back))), trap);
+        // Mouse-drag deltas this tick (0 while not orbiting / under tapes):
+        // chase cams use these to yield to the kid's hand.
+        heap.set_value(obj, id!(look_dx).into(), ScriptValue::from_f64(world.look_dx), trap);
+        heap.set_value(obj, id!(look_dy).into(), ScriptValue::from_f64(world.look_dy), trap);
         heap.set_value(obj, id!(axis_x).into(), ScriptValue::from_f64(axis), trap);
         heap.set_value(obj, id!(axis_z).into(), ScriptValue::from_f64(axis_z), trap);
         // Camera-relative movement: what the kid MEANS by "left" is screen-left.
@@ -1641,11 +2046,10 @@ impl GameView {
         if world.cam_third != 0 {
             if let Some(e) = world.entity(world.cam_third) {
                 let pivot = e.pos + vec3f(0.0, world.cam_height, 0.0);
-                let (yaw, pitch) = if in_test {
-                    (0.0f32, -0.35f32)
-                } else {
-                    (self.orbit_yaw, self.orbit_pitch.clamp(-1.2, 0.25))
-                };
+                // No per-frame test pin: test start pins the orbit once and
+                // the mouse is inert during tests, so script camera writes
+                // render (and stay deterministic).
+                let (yaw, pitch) = (self.orbit_yaw, self.orbit_pitch.clamp(-1.2, 0.25));
                 let forward = vec3f(
                     yaw.sin() * pitch.cos(),
                     pitch.sin(),
@@ -1653,13 +2057,15 @@ impl GameView {
                 )
                 .normalize();
                 let boom = camera_boom_limit(&world, pivot, forward * -1.0, world.cam_boom);
-                let camera_pos = pivot - forward * boom;
+                let mut camera_pos = pivot - forward * boom;
+                camera_pos = camera_pos + camera_shake_offset(&world, in_test);
                 let view = Mat4f::look_at(camera_pos, pivot, vec3f(0.0, 1.0, 0.0));
                 let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
                 // Near plane 1.0 (Godot's CAM_NEAR): a creature overlapping the
                 // lens clips open instead of filling the screen with one giant
-                // polygon.
-                let projection = Mat4f::perspective(40.0, aspect, 1.0, 500.0);
+                // polygon. FOV is script-tunable (racing games widen with speed).
+                let projection =
+                    Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 1.0, 500.0);
                 return Some(SceneState3D {
                     time,
                     camera_pos,
@@ -1680,10 +2086,8 @@ impl GameView {
         let (yaw, pitch) = if world.cam_side {
             // Side-on 2D style camera: look down -z.
             (0.0f32, -0.08f32)
-        } else if in_test {
-            // The widget's startup defaults: deterministic captures.
-            (0.6f32, -0.35f32)
         } else {
+            // Tests pinned at test START (orbit reset once, mouse inert).
             (self.orbit_yaw, self.orbit_pitch.clamp(-1.45, 1.45))
         };
         let forward = vec3f(
@@ -1693,10 +2097,12 @@ impl GameView {
         )
         .normalize();
         // Camera sits behind the target looking along `forward` at it.
-        let camera_pos = target - forward * distance;
+        let mut camera_pos = target - forward * distance;
+        camera_pos = camera_pos + camera_shake_offset(&world, in_test);
         let view = Mat4f::look_at(camera_pos, target, vec3f(0.0, 1.0, 0.0));
         let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-        let projection = Mat4f::perspective(40.0, aspect, 1.0, 500.0);
+        let projection =
+            Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 1.0, 500.0);
         Some(SceneState3D {
             time,
             camera_pos,
@@ -2512,6 +2918,30 @@ fn fn_ref(vm: &mut ScriptVm, v: ScriptValue) -> Option<ScriptObjectRef> {
     Some(vm.bx.heap.new_object_ref(obj))
 }
 
+/// Typo guard: a misspelled option (`pich: -0.2`) used to be silently ignored
+/// and cost the agent whole test cycles (features.md §2). Every options-taking
+/// verb enumerates its object's keys against an allow-list and logs strays.
+fn warn_unknown_keys(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    verb: &str,
+    opts: ScriptObject,
+    allowed: &[LiveId],
+) {
+    let len = vm.bx.heap.iter_len(opts);
+    for index in 0..len {
+        let kv = vm.bx.heap.iter_key_value(opts, index, NoTrap);
+        let Some(key) = kv.key.as_id() else {
+            continue; // positional/vec entry, not a named option
+        };
+        if !allowed.contains(&key) {
+            world
+                .borrow_mut()
+                .log(format!("game.{verb}: unknown option `{key}` (ignored)"));
+        }
+    }
+}
+
 /// Script `[...]` literals are ScriptArrays; some paths hand us vec-objects.
 /// Accept either — a heights list must never silently fall back to noise.
 fn list_len(vm: &ScriptVm, v: ScriptValue) -> usize {
@@ -2544,6 +2974,30 @@ fn spawn_entity(
     let Some(opts) = opts_val.as_object() else {
         return NIL;
     };
+    warn_unknown_keys(
+        vm,
+        world,
+        "box/mover/spawn",
+        opts,
+        &[
+            id!(pos),
+            id!(size),
+            id!(color),
+            id!(tag),
+            id!(sensor),
+            id!(collide),
+            id!(body),
+            id!(gravity),
+            id!(vel),
+            id!(life),
+            id!(hits),
+            id!(glow),
+            id!(face),
+            id!(rot_y),
+            id!(turn_rate),
+            id!(shape),
+        ],
+    );
     let pos_v = opts_value(vm, opts, id!(pos));
     let size_v = opts_value(vm, opts, id!(size));
     let color_v = opts_value(vm, opts, id!(color));
@@ -2556,6 +3010,8 @@ fn spawn_entity(
     let hits_v = opts_value(vm, opts, id!(hits));
     let glow_v = opts_value(vm, opts, id!(glow));
     let face_v = opts_value(vm, opts, id!(face));
+    let rot_y_v = opts_value(vm, opts, id!(rot_y));
+    let collide_v = opts_value(vm, opts, id!(collide));
     let turn_v = opts_value(vm, opts, id!(turn_rate));
 
     let pos = if pos_v.is_nil() { vec3f(0.0, 0.0, 0.0) } else { value_vec3(vm, pos_v) };
@@ -2602,7 +3058,16 @@ fn spawn_entity(
     let hits = hits_v.as_bool().unwrap_or(false);
     let ip = vm.bx.threads.cur_ref().trap.ip;
     let glow = if glow_v.is_nil() { 0.0 } else { vm.bx.heap.cast_to_f64(glow_v, ip) as f32 };
-    let yaw = if face_v.is_nil() { 0.0 } else { vm.bx.heap.cast_to_f64(face_v, ip) as f32 };
+    // `rot_y:` is the natural spelling for placed geometry (a rotated road
+    // slab); `face:` reads better for characters. Same visual yaw either way.
+    let yaw = if !rot_y_v.is_nil() {
+        vm.bx.heap.cast_to_f64(rot_y_v, ip) as f32
+    } else if !face_v.is_nil() {
+        vm.bx.heap.cast_to_f64(face_v, ip) as f32
+    } else {
+        0.0
+    };
+    let collide = collide_v.as_bool().unwrap_or(true);
     let turn_rate = if turn_v.is_nil() { 7.0 } else { vm.bx.heap.cast_to_f64(turn_v, ip) as f32 };
 
     let shape_v = opts_value(vm, opts, id!(shape));
@@ -2634,6 +3099,7 @@ fn spawn_entity(
         color,
         tag,
         sensor,
+        collide,
         gravity_scale,
         on_floor: false,
         floor_id: 0,
@@ -2869,6 +3335,7 @@ fn spawn_terrain(
                 color: vec4(0.25, 0.55, 0.85, 0.6),
                 tag: "water".to_string(),
                 sensor: true,
+                collide: true,
                 gravity_scale: 1.0,
                 on_floor: false,
                 floor_id: 0,
@@ -2913,6 +3380,7 @@ fn spawn_terrain(
                 color,
                 tag: tag.clone(),
                 sensor: false,
+                collide: true,
                 gravity_scale: 1.0,
                 on_floor: false,
                 floor_id: 0,
@@ -2957,6 +3425,13 @@ fn game_dispatch(
             let Some(opts) = arg_opt(vm, args, 1).as_object() else {
                 return NIL;
             };
+            warn_unknown_keys(
+                vm,
+                world,
+                "part",
+                opts,
+                &[id!(pos), id!(size), id!(color), id!(glow), id!(rot_x), id!(rot_y), id!(rot_z), id!(shape)],
+            );
             let pos_v = opts_value(vm, opts, id!(pos));
             let size_v = opts_value(vm, opts, id!(size));
             let color_v = opts_value(vm, opts, id!(color));
@@ -3070,16 +3545,30 @@ fn game_dispatch(
         }
         // Manual facing: sets the model yaw and takes over from auto-face —
         // vehicles pointing where they drive, the headcrab's riding spin.
+        // The takeover is STICKY (walk does not revert it — no silent
+        // write-then-revert, features.md Idea 2); `game.face(id)` with no yaw
+        // hands facing back to auto.
         x if x == live_id!(face) => {
             let id = arg_id(vm, args, 0);
-            let yaw = arg_f32(vm, args, 1);
+            let yaw_v = arg_opt(vm, args, 1);
+            let yaw = if yaw_v.is_nil() {
+                None
+            } else {
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                Some(vm.bx.heap.cast_to_f64(yaw_v, ip) as f32)
+            };
             let mut world = world.borrow_mut();
             if world.is_static_visual(id) {
                 world.mark_render_dirty();
             }
             if let Some(e) = world.entity_mut(id) {
-                e.yaw = yaw;
-                e.auto_face = false;
+                match yaw {
+                    None => e.auto_face = e.kind == BodyKind::Mover,
+                    Some(yaw) => {
+                        e.yaw = yaw;
+                        e.auto_face = false;
+                    }
+                }
             }
             NIL
         }
@@ -3129,6 +3618,7 @@ fn game_dispatch(
         x if x == live_id!(sky) => {
             let mut config = SkyConfig::default();
             if let Some(opts) = arg_opt(vm, args, 0).as_object() {
+                warn_unknown_keys(vm, world, "sky", opts, &[id!(top), id!(horizon), id!(ground), id!(fog)]);
                 let top_v = opts_value(vm, opts, id!(top));
                 let horizon_v = opts_value(vm, opts, id!(horizon));
                 let ground_v = opts_value(vm, opts, id!(ground));
@@ -3297,8 +3787,42 @@ fn game_dispatch(
             let mut world = world.borrow_mut();
             let at_tick = world.tick + (secs.max(0.0) / TICK_DT) as u64;
             if let Some(func) = func {
-                world.timers.push(GameTimer { at_tick, func });
+                world.next_id += 1;
+                let id = world.next_id;
+                world.timers.push(GameTimer {
+                    id,
+                    at_tick,
+                    interval_ticks: 0,
+                    func,
+                });
+                return ScriptValue::from_f64(id as f64);
             }
+            NIL
+        }
+        // Repeating timer: fires every `secs` until game.cancel(id) or reload.
+        x if x == live_id!(every) => {
+            let secs = arg_f32(vm, args, 0);
+            let func = arg(vm, args, 1);
+            let func = fn_ref(vm, func);
+            let mut world = world.borrow_mut();
+            let interval_ticks = ((secs.max(0.02) / TICK_DT) as u64).max(1);
+            let at_tick = world.tick + interval_ticks;
+            if let Some(func) = func {
+                world.next_id += 1;
+                let id = world.next_id;
+                world.timers.push(GameTimer {
+                    id,
+                    at_tick,
+                    interval_ticks,
+                    func,
+                });
+                return ScriptValue::from_f64(id as f64);
+            }
+            NIL
+        }
+        x if x == live_id!(cancel) => {
+            let id = arg_id(vm, args, 0);
+            world.borrow_mut().timers.retain(|t| t.id != id);
             NIL
         }
         x if x == live_id!(walk) => {
@@ -3417,11 +3941,23 @@ fn game_dispatch(
             array.into()
         }
         x if x == live_id!(distance) => {
-            let a = arg_id(vm, args, 0);
-            let b = arg_id(vm, args, 1);
+            // Either argument may be an entity id or a vec3 point — checkpoints
+            // are positions, not entities (features.md §15).
+            let resolve = |vm: &mut ScriptVm, world: &GameWorld, v: ScriptValue| -> Option<Vec3f> {
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                match NumericValue::from_script_value_heap(&vm.bx.heap, v, ip) {
+                    NumericValue::Vec3(p) => Some(p),
+                    _ => {
+                        let id = vm.bx.heap.cast_to_f64(v, ip) as u64;
+                        world.entity(id).map(|e| e.pos)
+                    }
+                }
+            };
+            let av = arg(vm, args, 0);
+            let bv = arg(vm, args, 1);
             let world = world.borrow();
-            let d = match (world.entity(a), world.entity(b)) {
-                (Some(a), Some(b)) => (a.pos - b.pos).length(),
+            let d = match (resolve(vm, &world, av), resolve(vm, &world, bv)) {
+                (Some(a), Some(b)) => (a - b).length(),
                 _ => f32::MAX,
             };
             ScriptValue::from_f64(d as f64)
@@ -3447,6 +3983,27 @@ fn game_dispatch(
         x if x == live_id!(camera) => {
             let opts_val = arg(vm, args, 0);
             if let Some(opts) = opts_val.as_object() {
+                warn_unknown_keys(
+                    vm,
+                    world,
+                    "camera",
+                    opts,
+                    &[
+                        id!(target),
+                        id!(distance),
+                        id!(follow),
+                        id!(side),
+                        id!(third_person),
+                        id!(chase),
+                        id!(lag),
+                        id!(recenter),
+                        id!(speed_tighten),
+                        id!(height),
+                        id!(boom),
+                        id!(pitch),
+                        id!(fov),
+                    ],
+                );
                 let target_v = opts_value(vm, opts, id!(target));
                 let distance_v = opts_value(vm, opts, id!(distance));
                 let follow_v = opts_value(vm, opts, id!(follow));
@@ -3483,6 +4040,31 @@ fn game_dispatch(
                 if !third_v.is_nil() {
                     world.cam_third = vm.bx.heap.cast_to_f64(third_v, ip) as u64;
                 }
+                // Chase rig: third_person's rendering (pivot, boom, occlusion
+                // pull-in) plus engine-side ease-behind-the-target, so a
+                // racing camera is one line instead of hand-rolled yaw math.
+                // chase: 0 stops the easing but leaves the third-person rig
+                // on the last chase target for the mouse to orbit.
+                let chase_v = opts_value(vm, opts, id!(chase));
+                if !chase_v.is_nil() {
+                    world.cam_chase = vm.bx.heap.cast_to_f64(chase_v, ip) as u64;
+                    if world.cam_chase != 0 {
+                        world.cam_third = world.cam_chase;
+                    }
+                }
+                let lag_v = opts_value(vm, opts, id!(lag));
+                if !lag_v.is_nil() {
+                    world.cam_lag = (vm.bx.heap.cast_to_f64(lag_v, ip) as f32).max(0.05);
+                }
+                let recenter_v = opts_value(vm, opts, id!(recenter));
+                if !recenter_v.is_nil() {
+                    world.cam_recenter = (vm.bx.heap.cast_to_f64(recenter_v, ip) as f32).max(0.0);
+                }
+                let tighten_v = opts_value(vm, opts, id!(speed_tighten));
+                if !tighten_v.is_nil() {
+                    world.cam_speed_tighten =
+                        (vm.bx.heap.cast_to_f64(tighten_v, ip) as f32).max(0.0);
+                }
                 if !height_v.is_nil() {
                     world.cam_height = vm.bx.heap.cast_to_f64(height_v, ip) as f32;
                 }
@@ -3493,12 +4075,19 @@ fn game_dispatch(
                     world.cam_pitch_request =
                         Some((vm.bx.heap.cast_to_f64(pitch_v, ip) as f32).clamp(-1.2, 0.25));
                 }
+                // Wider FOV = faster feel; racing games lerp it with speed.
+                let fov_v = opts_value(vm, opts, id!(fov));
+                if !fov_v.is_nil() {
+                    world.cam_fov = (vm.bx.heap.cast_to_f64(fov_v, ip) as f32).clamp(20.0, 120.0);
+                }
             }
             NIL
         }
         x if x == live_id!(text) => {
-            // game.text(msg) → center banner (the classic form).
-            // game.text(slot, msg, {color, size}) → "center" | "top" | "hint".
+            // game.text(msg) → the "center" banner (the classic form).
+            // game.text(slot, msg, {color, size, anchor}) → ANY named slot:
+            // "lap", "best", ... — a race scoreboard is a handful of slots.
+            // "center"/"top"/"hint" keep their historical looks and homes.
             let a1 = arg_opt(vm, args, 1);
             let (slot_name, text) = if a1.is_nil() {
                 ("center".to_string(), arg_string(vm, args, 0))
@@ -3507,9 +4096,17 @@ fn game_dispatch(
             };
             let mut color = vec4(0.0, 0.0, 0.0, 0.0);
             let mut size = 0.0f32;
+            // Slot-name defaults; an explicit anchor: overrides.
+            let mut anchor = match slot_name.as_str() {
+                "hint" => HudAnchor::TopLeft,
+                "top" => HudAnchor::Top,
+                _ => HudAnchor::Center,
+            };
             if let Some(opts) = arg_opt(vm, args, 2).as_object() {
+                warn_unknown_keys(vm, world, "text", opts, &[id!(color), id!(size), id!(anchor)]);
                 let color_v = opts_value(vm, opts, id!(color));
                 let size_v = opts_value(vm, opts, id!(size));
+                let anchor_v = opts_value(vm, opts, id!(anchor));
                 if !color_v.is_nil() {
                     color = value_color(vm, color_v);
                 }
@@ -3517,13 +4114,26 @@ fn game_dispatch(
                     let ip = vm.bx.threads.cur_ref().trap.ip;
                     size = vm.bx.heap.cast_to_f64(size_v, ip) as f32;
                 }
+                if !anchor_v.is_nil() {
+                    let name = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(anchor_v, out);
+                        out.to_string()
+                    });
+                    anchor = HudAnchor::parse(&name);
+                }
             }
-            let slot = HudSlot { text, color, size };
             let mut world = world.borrow_mut();
-            match slot_name.as_str() {
-                "top" => world.hud_top = slot,
-                "hint" => world.hud_hint = slot,
-                _ => world.hud_center = slot,
+            if text.is_empty() {
+                world.hud_slots.retain(|(n, _)| *n != slot_name);
+            } else if let Some(slot) = world.hud_slot_mut(&slot_name) {
+                slot.text = text;
+                slot.color = color;
+                slot.size = size;
+                slot.anchor = anchor;
+            } else {
+                world
+                    .hud_slots
+                    .push((slot_name, HudSlot { text, color, size, anchor }));
             }
             NIL
         }
@@ -3692,12 +4302,399 @@ fn game_dispatch(
             NIL
         }
         x if x == live_id!(time) => ScriptValue::from_f64(world.borrow().time),
+        // ── writable camera (the chase-cam API, features.md §1) ─────────
+        x if x == live_id!(set_cam_yaw) => {
+            let yaw = arg_f32(vm, args, 0);
+            world.borrow_mut().cam_yaw_request = Some(yaw);
+            NIL
+        }
+        x if x == live_id!(set_cam_pitch) => {
+            let pitch = arg_f32(vm, args, 0).clamp(-1.2, 0.25);
+            world.borrow_mut().cam_pitch_request = Some(pitch);
+            NIL
+        }
+        x if x == live_id!(set_cam_dist) => {
+            let d = arg_f32(vm, args, 0);
+            let mut world = world.borrow_mut();
+            if world.cam_third != 0 {
+                world.cam_boom = d.clamp(1.0, 60.0);
+            } else {
+                world.cam_distance = d.clamp(0.5, 120.0);
+            }
+            NIL
+        }
+        x if x == live_id!(set_cam_fov) => {
+            let fov = arg_f32(vm, args, 0).clamp(20.0, 120.0);
+            world.borrow_mut().cam_fov = fov;
+            NIL
+        }
+        x if x == live_id!(cam_pitch) => {
+            ScriptValue::from_f64(world.borrow().cam_pitch as f64)
+        }
+        x if x == live_id!(cam_dist) => {
+            let world = world.borrow();
+            let d = if world.cam_third != 0 { world.cam_boom } else { world.cam_distance };
+            ScriptValue::from_f64(d as f64)
+        }
+        x if x == live_id!(cam_fov) => {
+            ScriptValue::from_f64(world.borrow().cam_fov as f64)
+        }
+        x if x == live_id!(cam_dragging) => {
+            ScriptValue::from_bool(world.borrow().cam_dragging)
+        }
+        x if x == live_id!(cam_shake) => {
+            let amount = arg_f32(vm, args, 0).max(0.0);
+            let mut world = world.borrow_mut();
+            world.cam_shake = (world.cam_shake + amount).clamp(0.0, 1.5);
+            NIL
+        }
+        // ── spatial queries (features.md §7) ─────────────────────────────
+        x if x == live_id!(raycast) => {
+            let from_v = arg(vm, args, 0);
+            let from = value_vec3(vm, from_v);
+            let dir_v = arg(vm, args, 1);
+            let dir = value_vec3(vm, dir_v);
+            let max = arg_f32(vm, args, 2).max(0.0);
+            let hit = world_raycast(&world.borrow(), from, dir, max);
+            match hit {
+                Some((id, pos, normal, dist)) => {
+                    let obj = vm.bx.heap.new_object();
+                    vm.bx.heap.set_object_storage_auto(obj);
+                    // Terrain reports as hit: -1 (u64::MAX doesn't survive f64).
+                    let hit_id = if id == TERRAIN_ID { -1.0 } else { id as f64 };
+                    let pos_v = vec3_value(vm, pos);
+                    let normal_v = vec3_value(vm, normal);
+                    let heap = &mut vm.bx.heap;
+                    heap.set_value(obj, id!(hit).into(), ScriptValue::from_f64(hit_id), NoTrap);
+                    heap.set_value(obj, id!(pos).into(), pos_v, NoTrap);
+                    heap.set_value(obj, id!(normal).into(), normal_v, NoTrap);
+                    heap.set_value(obj, id!(dist).into(), ScriptValue::from_f64(dist as f64), NoTrap);
+                    obj.into()
+                }
+                None => NIL,
+            }
+        }
+        x if x == live_id!(overlap_sphere) => {
+            let center_v = arg(vm, args, 0);
+            let center = value_vec3(vm, center_v);
+            let r = arg_f32(vm, args, 1).max(0.0);
+            let ids: Vec<u64> = world
+                .borrow()
+                .entities
+                .iter()
+                .filter(|e| {
+                    // Distance from sphere center to the entity's AABB.
+                    let dx = ((center.x - e.pos.x).abs() - e.half.x).max(0.0);
+                    let dy = ((center.y - e.pos.y).abs() - e.half.y).max(0.0);
+                    let dz = ((center.z - e.pos.z).abs() - e.half.z).max(0.0);
+                    dx * dx + dy * dy + dz * dz <= r * r
+                })
+                .map(|e| e.id)
+                .collect();
+            let array = vm.bx.heap.new_array();
+            let trap = vm.bx.threads.cur().trap.pass();
+            for id in ids {
+                vm.bx.heap.array_push(array, ScriptValue::from_f64(id as f64), trap);
+            }
+            array.into()
+        }
+        x if x == live_id!(ground_normal) => {
+            let x = arg_f32(vm, args, 0);
+            let z = arg_f32(vm, args, 1);
+            let normal = world
+                .borrow()
+                .terrain
+                .as_ref()
+                .and_then(|t| t.normal_at(x, z));
+            match normal {
+                Some(n) => vec3_value(vm, n),
+                None => vec3_value(vm, vec3f(0.0, 1.0, 0.0)),
+            }
+        }
+        // ── push (features.md §8): add to velocity, don't overwrite it ──
+        x if x == live_id!(push) => {
+            let id = arg_id(vm, args, 0);
+            let v_raw = arg(vm, args, 1);
+            let v = value_vec3(vm, v_raw);
+            if let Some(e) = world.borrow_mut().entity_mut(id) {
+                e.vel = e.vel + v;
+            }
+            NIL
+        }
+        // ── save/load (features.md §9): best laps survive edits ─────────
+        x if x == live_id!(save) => {
+            let key = arg_string(vm, args, 0);
+            let v = arg(vm, args, 1);
+            // Strings first: the numeric cast coerces strings to NaN.
+            let val = if let Some(text) = vm.bx.heap.string_with(v, |_, s| s.to_string()) {
+                SaveVal::Str(text)
+            } else {
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                SaveVal::Num(vm.bx.heap.cast_to_f64(v, ip))
+            };
+            let mut world = world.borrow_mut();
+            world.save_data.insert(key, val);
+            world.save_dirty = true;
+            NIL
+        }
+        x if x == live_id!(load) => {
+            let key = arg_string(vm, args, 0);
+            let world_ref = world.borrow();
+            match world_ref.save_data.get(&key) {
+                Some(SaveVal::Num(n)) => ScriptValue::from_f64(*n),
+                Some(SaveVal::Str(text)) => {
+                    let text = text.clone();
+                    drop(world_ref);
+                    vm.bx.heap.new_string_from_str(&text)
+                }
+                None => {
+                    drop(world_ref);
+                    arg_opt(vm, args, 1) // the default, or NIL
+                }
+            }
+        }
+        // ── sustained tones (features.md §10): the car-engine primitive ──
+        x if x == live_id!(tone) => {
+            let mut freq = 220.0f32;
+            let mut gain = 0.15f32;
+            let mut wave = crate::synth::Wave::Saw;
+            if let Some(opts) = arg_opt(vm, args, 0).as_object() {
+                warn_unknown_keys(vm, world, "tone", opts, &[id!(freq), id!(gain), id!(wave)]);
+                let freq_v = opts_value(vm, opts, id!(freq));
+                let gain_v = opts_value(vm, opts, id!(gain));
+                let wave_v = opts_value(vm, opts, id!(wave));
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                if !freq_v.is_nil() {
+                    freq = vm.bx.heap.cast_to_f64(freq_v, ip) as f32;
+                }
+                if !gain_v.is_nil() {
+                    gain = vm.bx.heap.cast_to_f64(gain_v, ip) as f32;
+                }
+                if !wave_v.is_nil() {
+                    let name = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(wave_v, out);
+                        out.to_string()
+                    });
+                    wave = crate::synth::Wave::parse(&name);
+                }
+            }
+            ScriptValue::from_f64(crate::synth::tone(freq, wave, gain) as f64)
+        }
+        x if x == live_id!(tone_set) => {
+            let id = arg_id(vm, args, 0);
+            let mut freq = None;
+            let mut gain = None;
+            if let Some(opts) = arg_opt(vm, args, 1).as_object() {
+                warn_unknown_keys(vm, world, "tone_set", opts, &[id!(freq), id!(gain)]);
+                let freq_v = opts_value(vm, opts, id!(freq));
+                let gain_v = opts_value(vm, opts, id!(gain));
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                if !freq_v.is_nil() {
+                    freq = Some(vm.bx.heap.cast_to_f64(freq_v, ip) as f32);
+                }
+                if !gain_v.is_nil() {
+                    gain = Some(vm.bx.heap.cast_to_f64(gain_v, ip) as f32);
+                }
+            }
+            crate::synth::tone_set(id, freq, gain);
+            NIL
+        }
+        x if x == live_id!(tone_stop) => {
+            crate::synth::tone_stop(arg_id(vm, args, 0));
+            NIL
+        }
+        // ── HUD extras (features.md §13) ─────────────────────────────────
+        x if x == live_id!(format) => {
+            let value = arg_f32(vm, args, 0) as f64;
+            let decimals = arg_opt(vm, args, 1);
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            let decimals = if decimals.is_nil() {
+                1
+            } else {
+                (vm.bx.heap.cast_to_f64(decimals, ip) as usize).min(6)
+            };
+            let text = format!("{:.*}", decimals, value);
+            vm.bx.heap.new_string_from_str(&text)
+        }
+        x if x == live_id!(bar) => {
+            let name = arg_string(vm, args, 0);
+            let fraction = arg_f32(vm, args, 1);
+            let mut color = vec4(0.4, 0.85, 0.4, 0.9);
+            let mut anchor = HudAnchor::BottomLeft;
+            if let Some(opts) = arg_opt(vm, args, 2).as_object() {
+                warn_unknown_keys(vm, world, "bar", opts, &[id!(color), id!(anchor)]);
+                let color_v = opts_value(vm, opts, id!(color));
+                let anchor_v = opts_value(vm, opts, id!(anchor));
+                if !color_v.is_nil() {
+                    color = value_color(vm, color_v);
+                }
+                if !anchor_v.is_nil() {
+                    let name = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(anchor_v, out);
+                        out.to_string()
+                    });
+                    anchor = HudAnchor::parse(&name);
+                }
+            }
+            let mut world = world.borrow_mut();
+            world.hud_bars.retain(|b| b.name != name);
+            // A negative fraction removes the gauge.
+            if fraction >= 0.0 {
+                world.hud_bars.push(HudBar {
+                    name,
+                    fraction: fraction.min(1.0),
+                    color,
+                    anchor,
+                });
+            }
+            NIL
+        }
+        x if x == live_id!(api) => {
+            // Introspection (features.md Idea 6): dump the whole verb surface
+            // so the agent can lint itself without six test cycles.
+            let mut world = world.borrow_mut();
+            world.log("game.* API:".to_string());
+            for (verb, sig) in GAME_API {
+                world.log(format!("  game.{verb}{sig}"));
+            }
+            NIL
+        }
         _ => {
-            let mut w = world.borrow_mut();
-            w.log(format!("unknown game method: {:?}", method));
+            // A typo'd verb must be indistinguishable from any other script
+            // error: it fails the eval (last-good keeps the old world) and the
+            // text reaches the agent through last_error.txt / the wake-up push.
+            // Silence here once cost six blind test cycles (features.md §2).
+            // Location + did-you-mean, like the VM's own variable errors.
+            let name = format!("{}", method);
+            let loc = vm
+                .bx
+                .code
+                .ip_to_loc(vm.bx.threads.cur_ref().trap.ip)
+                .map(|l| format!("{l}: "))
+                .unwrap_or_default();
+            let message = match suggest_verb(&name) {
+                Some(s) => {
+                    format!("{loc}unknown game verb '{name}'. Did you mean '{s}'?")
+                }
+                None => format!(
+                    "{loc}unknown game verb '{name}' — game.api() lists every verb"
+                ),
+            };
+            world.borrow_mut().log(message.clone());
+            if let Some(sink) = vm.bx.captured_errors.as_mut() {
+                sink.push(message);
+            }
             NIL
         }
     }
+}
+
+/// The full verb surface, for `game.api()` dumps and typo suggestions.
+/// Keep in sync with `game_dispatch` and splashgame.md.
+const GAME_API: &[(&str, &str)] = &[
+    ("box", "({pos, size, color, tag, sensor, collide, body, gravity, vel, life, hits, glow, face|rot_y, turn_rate, shape})"),
+    ("block", " — alias of game.box"),
+    ("mover", " — same options as box (kinematic character, turn_rate default 7)"),
+    ("spawn", " — same options as box (dynamic body; vel, life, hits)"),
+    ("part", "(owner, {pos, size, color, glow, rot_x, rot_y, rot_z, shape})"),
+    ("terrain", "({size, cells, smooth, water, seed, freq, offset, amp, step, min, max, plaza: [{r, ramp, h}], bands: [{h, color}], heights, colors, color, base, tag})"),
+    ("label", "(id, text, {height, color, size}?)"),
+    ("label_text", "(label_id, text)"),
+    ("on_tick", "(|dt, input| ...)"),
+    ("on_touch", "(|a, b| ...)"),
+    ("walk", "(id, vx, vz)"),
+    ("jump", "(id, v)"),
+    ("on_floor", "(id)"),
+    ("pos", "(id)"),
+    ("vel", "(id)"),
+    ("set_pos", "(id, v)"),
+    ("teleport", "(id, v)"),
+    ("set_vel", "(id, v)"),
+    ("push", "(id, v)"),
+    ("face", "(id, yaw?) — no yaw resumes auto-facing"),
+    ("yaw", "(id)"),
+    ("find", "(tag)"),
+    ("tag", "(id)"),
+    ("distance", "(a, b) — ids or vec3 points"),
+    ("remove", "(id)"),
+    ("attach", "(id, owner, offset | {pos, mode, spin})"),
+    ("detach", "(id)"),
+    ("speed_mult", "(id, f)"),
+    ("raycast", "(from, dir, max)"),
+    ("overlap_sphere", "(pos, r)"),
+    ("ground_y", "(x, z)"),
+    ("ground_normal", "(x, z)"),
+    ("ground_peak", "()"),
+    ("gravity", "(g)"),
+    ("camera", "({third_person|chase|follow, lag, recenter, speed_tighten, height, boom, pitch, distance, side, fov, target})"),
+    ("set_cam_yaw", "(a)"),
+    ("set_cam_pitch", "(p)"),
+    ("set_cam_dist", "(d)"),
+    ("set_cam_fov", "(f)"),
+    ("cam_yaw", "()"),
+    ("cam_pitch", "()"),
+    ("cam_dist", "()"),
+    ("cam_fov", "()"),
+    ("cam_dragging", "()"),
+    ("cam_shake", "(amount)"),
+    ("sky", "({top, horizon, ground, fog})"),
+    ("set_color", "(id, c)"),
+    ("glow", "(id, e)"),
+    ("scale", "(id, s)"),
+    ("move_part", "(part, {pos, rot_x, rot_y, rot_z, size, rate})"),
+    ("beam", "(from, to, {size, color, glow})"),
+    ("text", "(msg | slot, msg, {color, size, anchor})"),
+    ("bar", "(name, fraction, {color, anchor})"),
+    ("crosshair", "(bool)"),
+    ("format", "(x, decimals)"),
+    ("sfx", "(name, pitch?)"),
+    ("beep", "({freq, to, ms, wave, gain})"),
+    ("jingle", "(notes, ms_per_note?)"),
+    ("tone", "({freq, wave, gain})"),
+    ("tone_set", "(tone_id, {freq, gain})"),
+    ("tone_stop", "(tone_id)"),
+    ("save", "(key, value)"),
+    ("load", "(key, default)"),
+    ("after", "(secs, fn)"),
+    ("every", "(secs, fn)"),
+    ("cancel", "(timer_id)"),
+    ("held", "(action)"),
+    ("pressed", "(action)"),
+    ("axis", "(neg, pos)"),
+    ("rand", "()"),
+    ("rand_range", "(a, b)"),
+    ("log", "(msg)"),
+    ("time", "()"),
+    ("reset", "()"),
+    ("api", "()"),
+];
+
+/// Nearest verb by edit distance (≤2), for typo suggestions.
+fn suggest_verb(name: &str) -> Option<&'static str> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for (verb, _) in GAME_API {
+        let d = edit_distance(name, verb);
+        if d <= 2 && best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, verb));
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 // ── physics ─────────────────────────────────────────────────────────────
@@ -3707,8 +4704,11 @@ fn step_world(world: &mut GameWorld) {
     let statics: Vec<Entity> = world
         .entities
         .iter()
-        // Sensors report touches but never collide — the documented contract.
-        .filter(|e| !e.sensor && matches!(e.kind, BodyKind::Static | BodyKind::Kinematic))
+        // Sensors report touches but never collide; `collide: false` decor
+        // neither collides nor reports — both documented contracts.
+        .filter(|e| {
+            !e.sensor && e.collide && matches!(e.kind, BodyKind::Static | BodyKind::Kinematic)
+        })
         .cloned()
         .collect();
     // Cloned like `statics` above: the mover loop holds &mut entities.
@@ -4039,7 +5039,14 @@ impl Widget for GameView {
         // in finger capture the way plain widgets do, and this is the exact
         // pattern XrCamera's desktop orbit uses.
         match event {
-            Event::MouseDown(me) if self.view_rect.contains(me.abs) && me.button.is_primary() => {
+            // Mouse orbit is inert during a tape test — determinism now relies
+            // on this (test start pins the orbit once; only script writes may
+            // move it afterwards).
+            Event::MouseDown(me)
+                if self.test_run.is_none()
+                    && self.view_rect.contains(me.abs)
+                    && me.button.is_primary() =>
+            {
                 self.orbit_last_abs = Some(me.abs);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
@@ -4049,6 +5056,8 @@ impl Widget for GameView {
                     self.orbit_yaw -= delta.x as f32 * 0.01;
                     self.orbit_pitch =
                         (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
+                    // Scripts see this as input.look_dx/look_dy next tick.
+                    self.look_accum += delta;
                     self.orbit_last_abs = Some(me.abs);
                     self.area.redraw(cx);
                 } else if self.view_rect.contains(me.abs) {
@@ -4058,7 +5067,7 @@ impl Widget for GameView {
             Event::MouseUp(me) if me.button.is_primary() => {
                 self.orbit_last_abs = None;
             }
-            Event::Scroll(se) if self.view_rect.contains(se.abs) => {
+            Event::Scroll(se) if self.test_run.is_none() && self.view_rect.contains(se.abs) => {
                 let scroll_axis = if se.scroll.y.abs() > f64::EPSILON {
                     se.scroll.y
                 } else {
@@ -4112,62 +5121,118 @@ impl Widget for GameView {
         self.area = self.draw_bg.area();
         cx.set_pass_area(&self.pass, self.area);
 
-        // HUD slots. Center = the big banner, top = a second line under it,
-        // hint = small control help top-left (the Godot HUD trio). Color/size
-        // of 0 fall back to the slot's default look.
+        // HUD: named text slots pinned to anchors (slots sharing an anchor
+        // stack downward in insertion order), plus gauges. "center" is the big
+        // banner, "hint" the small top-left control help — their historical
+        // looks are the slot-name defaults. Color/size of 0 = defaults.
         {
-            let (center, top, hint, crosshair) = {
+            let (slots, bars, crosshair) = {
                 let world = self.world.borrow();
-                (
-                    world.hud_center.clone(),
-                    world.hud_top.clone(),
-                    world.hud_hint.clone(),
-                    world.crosshair,
-                )
+                (world.hud_slots.clone(), world.hud_bars.clone(), world.crosshair)
             };
             let default_color = vec4(1.0, 1.0, 1.0, 0.93);
-            let draw_slot = |view: &mut Self,
-                                 cx: &mut Cx2d,
-                                 slot: &HudSlot,
-                                 default_size: f32,
-                                 pos: DVec2,
-                                 centered: bool| {
-                if slot.text.is_empty() {
-                    return;
+            // Per-anchor stacking cursors (y offset from the anchor's origin).
+            let mut cursors: [f64; 7] = [0.0; 7];
+            let anchor_index = |a: HudAnchor| match a {
+                HudAnchor::TopLeft => 0usize,
+                HudAnchor::Top => 1,
+                HudAnchor::TopRight => 2,
+                HudAnchor::Center => 3,
+                HudAnchor::BottomLeft => 4,
+                HudAnchor::Bottom => 5,
+                HudAnchor::BottomRight => 6,
+            };
+            let margin = 12.0f64;
+            // (x anchor: -1 left, 0 center, 1 right; base y; stack direction)
+            let anchor_home = |a: HudAnchor, rect: Rect| -> (f64, f64, f64) {
+                match a {
+                    HudAnchor::TopLeft => (rect.pos.x + margin, rect.pos.y + 10.0, 1.0),
+                    HudAnchor::Top => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 84.0, 1.0),
+                    HudAnchor::TopRight => {
+                        (rect.pos.x + rect.size.x - margin, rect.pos.y + 10.0, 1.0)
+                    }
+                    HudAnchor::Center => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 42.0, 1.0),
+                    HudAnchor::BottomLeft => {
+                        (rect.pos.x + margin, rect.pos.y + rect.size.y - 26.0, -1.0)
+                    }
+                    HudAnchor::Bottom => (
+                        rect.pos.x + rect.size.x * 0.5,
+                        rect.pos.y + rect.size.y - 26.0,
+                        -1.0,
+                    ),
+                    HudAnchor::BottomRight => (
+                        rect.pos.x + rect.size.x - margin,
+                        rect.pos.y + rect.size.y - 26.0,
+                        -1.0,
+                    ),
                 }
-                view.draw_hud.text_style.font_size =
-                    if slot.size > 0.0 { slot.size } else { default_size };
-                view.draw_hud.color = if slot.color.w > 0.0 {
+            };
+            for (name, slot) in &slots {
+                if slot.text.is_empty() {
+                    continue;
+                }
+                let default_size = match name.as_str() {
+                    "center" => 22.0,
+                    "top" => 15.0,
+                    "hint" => 9.0,
+                    _ => 12.0,
+                };
+                let size = if slot.size > 0.0 { slot.size } else { default_size };
+                self.draw_hud.text_style.font_size = size;
+                self.draw_hud.color = if slot.color.w > 0.0 {
                     slot.color
                 } else {
                     default_color
                 };
-                let pos = if centered {
-                    let width = view
-                        .draw_hud
-                        .layout(cx, 0.0, 0.0, None, false, Align::default(), &slot.text)
-                        .size_in_lpxs
-                        .width as f64;
-                    dvec2(pos.x - width * 0.5, pos.y)
-                } else {
-                    pos
+                let (home_x, home_y, stack_dir) = anchor_home(slot.anchor, rect);
+                let layout = self
+                    .draw_hud
+                    .layout(cx, 0.0, 0.0, None, false, Align::default(), &slot.text);
+                let width = layout.size_in_lpxs.width as f64;
+                let x = match slot.anchor {
+                    HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - width * 0.5,
+                    HudAnchor::TopRight | HudAnchor::BottomRight => home_x - width,
+                    _ => home_x,
                 };
-                view.draw_hud.draw_abs(cx, pos, &slot.text);
-            };
-            let mid_x = rect.pos.x + rect.size.x * 0.5;
-            draw_slot(self, cx, &center, 22.0, dvec2(mid_x, rect.pos.y + 42.0), true);
-            draw_slot(self, cx, &top, 15.0, dvec2(mid_x, rect.pos.y + 84.0), true);
-            draw_slot(
-                self,
-                cx,
-                &hint,
-                9.0,
-                dvec2(rect.pos.x + 12.0, rect.pos.y + 10.0),
-                false,
-            );
-            // Restore the banner defaults for anyone else using draw_hud.
+                let ai = anchor_index(slot.anchor);
+                let y = home_y + cursors[ai] * stack_dir;
+                cursors[ai] += size as f64 * 1.55;
+                self.draw_hud.draw_abs(cx, dvec2(x, y), &slot.text);
+            }
+            // Gauges stack after the texts of their anchor.
+            for bar in &bars {
+                let (home_x, home_y, stack_dir) = anchor_home(bar.anchor, rect);
+                let ai = anchor_index(bar.anchor);
+                let y = home_y + cursors[ai] * stack_dir + 3.0;
+                cursors[ai] += 16.0;
+                let bar_w = 140.0f64;
+                let x = match bar.anchor {
+                    HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - bar_w * 0.5,
+                    HudAnchor::TopRight | HudAnchor::BottomRight => home_x - bar_w,
+                    _ => home_x,
+                };
+                // Track, then fill.
+                self.draw_dot.color = vec4(0.05, 0.06, 0.1, 0.65);
+                self.draw_dot.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(x, y),
+                        size: dvec2(bar_w, 10.0),
+                    },
+                );
+                self.draw_dot.color = bar.color;
+                self.draw_dot.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(x + 1.0, y + 1.0),
+                        size: dvec2((bar_w - 2.0) * bar.fraction.clamp(0.0, 1.0) as f64, 8.0),
+                    },
+                );
+            }
+            // Restore defaults for anyone else using these draws.
             self.draw_hud.text_style.font_size = 22.0;
             self.draw_hud.color = default_color;
+            self.draw_dot.color = vec4(1.0, 1.0, 1.0, 0.9);
 
             if crosshair {
                 let dot = 5.0;
@@ -4268,6 +5333,8 @@ fn key_to_action(key_code: KeyCode) -> Option<LiveId> {
         KeyCode::Space | KeyCode::ReturnKey => Some(live_id!(jump)),
         KeyCode::KeyF => Some(live_id!(shoot)),
         KeyCode::KeyG => Some(live_id!(grab)),
+        KeyCode::KeyR => Some(live_id!(reset)),
+        KeyCode::KeyC => Some(live_id!(back)),
         _ => None,
     }
 }
