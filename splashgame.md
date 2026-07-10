@@ -111,11 +111,18 @@ game.terrain({size: 160, cells: 257, smooth: true, water: 3.5,
 shoot_pressed grab_pressed reset_pressed back_pressed` (this tick only),
 `axis_x axis_z` (raw −1..1), **`move_x move_z` — the axes rotated to match the
 camera. ALWAYS walk with these** (raw axes only for `side: true` 2D games),
-and `look_dx look_dy` — the mouse-drag delta this tick (0 unless the kid is
-orbiting; chase cams use it to yield to the kid's hand). Keyboard (WASD/
-arrows, Space, F shoot, G grab, R reset — kids get stuck upside-down, give
-them a reset! — C back) and gamepad (stick/dpad, A jump, X shoot, B grab,
-Y reset) both feed everything automatically.
+and `look_dx look_dy` — the camera-look delta this tick (0 unless the kid is
+mouse-orbiting or on the gamepad's RIGHT stick; chase cams use it to yield to
+the kid's hand). Keyboard (WASD/arrows, Space, F shoot, G grab, R reset —
+kids get stuck upside-down, give them a reset! — C back) and gamepad (left
+stick/dpad move, RIGHT stick rotates the camera like the mouse, A jump,
+X shoot, B grab, Y reset) both feed everything automatically — never write
+your own camera-from-stick code.
+
+**When you add an ability, always give it a gamepad path too**: bind it to
+one of the named actions above (`jump shoot grab back reset` all have pad
+buttons) instead of inventing keyboard-only triggers, so the kid on a
+controller is never locked out of something you built.
 
 | call | meaning |
 |---|---|
