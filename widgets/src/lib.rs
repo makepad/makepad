@@ -119,6 +119,7 @@ pub mod slide_panel;
 pub mod flat_list;
 
 pub mod chart;
+pub mod perf_graph;
 
 // Commented out modules (not yet converted)
 // lets depricate these for now
@@ -237,6 +238,7 @@ pub use crate::svg::*;
 pub use crate::vector::*;
 
 pub use crate::chart::*;
+pub use crate::perf_graph::*;
 
 pub use crate::video::*;
 
@@ -592,6 +594,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::svg::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
+    crate::perf_graph::script_mod(vm);
     #[cfg(feature = "maps")]
     crate::map::style::script_mod(vm);
     #[cfg(feature = "maps")]

@@ -577,6 +577,12 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
+        // PerfMonitor "draw" channel: CPU-side pass encode (all passes of a
+        // frame sum), separate from the nextDrawable wait timed by the caller.
+        let perf_t0 = self
+            .perf_monitor
+            .enabled()
+            .then(std::time::Instant::now);
         self.os.bytes_written = 0;
         self.os.draw_calls_done = 0;
         self.os.instances_done = 0;
@@ -979,6 +985,12 @@ impl Cx {
             }
         }
         let () = unsafe { msg_send![pool, release] };
+        if let Some(t0) = perf_t0 {
+            self.perf_monitor.add(
+                crate::perf_monitor::PERF_CHANNEL_DRAW,
+                t0.elapsed().as_micros() as u64,
+            );
+        }
     }
 
     fn build_screenshot_struct(
