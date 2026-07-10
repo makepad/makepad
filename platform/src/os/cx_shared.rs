@@ -735,6 +735,14 @@ impl Cx {
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
+        // PerfMonitor "event" channel: time only the OUTERMOST dispatch —
+        // Paint recurses into this from the Timer handler on macos.
+        let perf_timing = self.perf_monitor.enabled();
+        if perf_timing {
+            self.perf_monitor.event_depth += 1;
+        }
+        let perf_t0 = (perf_timing && self.perf_monitor.event_depth == 1)
+            .then(std::time::Instant::now);
         if (Cx::has_studio_web_socket()
             && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
             || Cx::local_profile_capture_enabled()
@@ -758,6 +766,15 @@ impl Cx {
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
+        }
+        if perf_timing {
+            self.perf_monitor.event_depth -= 1;
+            if let Some(t0) = perf_t0 {
+                self.perf_monitor.add(
+                    crate::perf_monitor::PERF_CHANNEL_EVENT,
+                    t0.elapsed().as_micros() as u64,
+                );
+            }
         }
 
         if Cx::has_studio_web_socket() {

@@ -6,6 +6,7 @@
 #   tools/ag test [frames] [tape] restart + replay an input tape -> .agent/sheet.png + probe.txt
 #   tools/ag errors               the last eval/runtime error (empty output = your edit is live)
 #   tools/ag logs                 tail of the game log (eval reports + game.log lines)
+#   tools/ag perf                 per-phase frame profile of the live game (~2s window)
 set -uo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,10 +77,19 @@ cmd_logs() {
 	tail -40 "$AGENT_DIR/game.log"
 }
 
+cmd_perf() {
+	rm -f "$AGENT_DIR/perf.txt"
+	: >"$AGENT_DIR/perf_request"
+	# The engine answers with the next COMPLETED ~2s profiler window.
+	wait_for_file "$AGENT_DIR/perf.txt" 8 || die "perf timed out — is the Game Maker app running this game?"
+	cat "$AGENT_DIR/perf.txt"
+}
+
 case "${1:-}" in
 	peek)   cmd_peek ;;
 	test)   shift; cmd_test "$@" ;;
 	errors) cmd_errors ;;
 	logs)   cmd_logs ;;
-	*)      sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+	perf)   cmd_perf ;;
+	*)      sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
 esac
