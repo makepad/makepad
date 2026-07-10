@@ -1,0 +1,181 @@
+let image_results = []
+
+let ResultCard = glass.Card{
+    width: Fill
+    height: Fit
+    flow: Right
+    spacing: 12
+    padding: 10
+
+    thumb := Image{
+        width: 128
+        height: 92
+        fit: ImageFit.CropToFill
+    }
+
+    // Named, so `info.title` / `info.source` are addressable from an instantiation.
+    // Named children are only fields of their *direct* parent, so an unnamed wrapper
+    // would make `title`/`source` unreachable.
+    info := View{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: 5
+
+        title := glass.Body{
+            text: ""
+            width: Fill
+        }
+
+        source := glass.Caption{
+            text: ""
+            width: Fill
+        }
+    }
+}
+
+fn fetch(url, extra_headers){
+    let p = promise()
+    let headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    }
+    if extra_headers != nil {
+        for key, value in extra_headers {
+            headers[key] = value
+        }
+    }
+    net.http_request(net.HttpRequest{url: url method: net.HttpMethod.GET headers: headers}) do net.HttpEvents{
+        on_response: |res| p.resolve(res)
+        on_error: |_err| p.resolve(nil)
+    }
+    p
+}
+
+fn set_status(text){
+    ui.status.set_text(text)
+}
+
+fn search_images(query){
+    let clean = ("" + query).trim()
+    if clean == "" {
+        set_status("Enter a search query")
+        return
+    }
+
+    image_results.clear()
+    ui.results.render()
+    set_status("Searching DuckDuckGo images...")
+
+    let encoded = clean.url_encode()
+    let page = fetch("https://duckduckgo.com/?q=" + encoded + "&iax=images&ia=images", nil).await()
+    if page == nil {
+        set_status("Search failed")
+        return
+    }
+
+    let vqd = ""
+    let token_parts = page.body.to_string().split("vqd=\"")
+    if token_parts.len() > 1 {
+        vqd = token_parts[1].split("\"")[0]
+    }
+    if vqd == "" {
+        set_status("DuckDuckGo did not return an image token")
+        return
+    }
+
+    let response = fetch(
+        "https://duckduckgo.com/i.js?l=us-en&o=json&q=" + encoded + "&vqd=" + vqd + "&f=,,,,,&p=1",
+        {"Referer": "https://duckduckgo.com/"}
+    ).await()
+    if response == nil {
+        set_status("Image request failed")
+        return
+    }
+
+    let data = response.body.to_string().parse_json()
+    if data != nil && data.results != nil {
+        for img in data.results {
+            if image_results.len() < 48 {
+                image_results.push({
+                    title: img.title
+                    source: img.source
+                    thumbnail: img.thumbnail
+                })
+            }
+        }
+    }
+
+    if image_results.len() == 0 {
+        set_status("No images found")
+    } else {
+        set_status("" + image_results.len() + " images for " + clean)
+    }
+    ui.results.render()
+}
+
+View{
+    width: Fill
+    height: Fit
+    flow: Down
+    spacing: 14
+    padding: 4
+
+    View{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: 4
+        glass.H1{text: "Picture Search"}
+        glass.Caption{text: "DUCKDUCKGO IMAGE RESULTS"}
+    }
+
+    glass.Card{
+        width: Fill
+        height: Fit
+        flow: Right
+        spacing: 10
+        padding: 12
+
+        query := glass.TextInput{
+            width: Fill
+            height: 38
+            empty_text: "Search for images..."
+            on_return: |text| search_images(text)
+        }
+
+        glass.GlassButtonProminent{
+            text: "Search"
+            height: 38
+            on_click: || search_images(ui.query.text())
+        }
+    }
+
+    status := glass.Caption{
+        text: "Type a query and press Search"
+        width: Fill
+    }
+
+    results := ScrollYView{
+        width: Fill
+        height: 610
+        flow: Down
+        spacing: 10
+        on_render: || {
+            if image_results.len() == 0 {
+                glass.Card{
+                    width: Fill
+                    height: 140
+                    align: Align{x: 0.5 y: 0.5}
+                    glass.Body{text: "Results will appear here."}
+                }
+            }
+            else for item in image_results {
+                ResultCard{
+                    thumb.src: http_resource(item.thumbnail)
+                    info.title.text: item.title
+                    info.source.text: item.source
+                }
+            }
+        }
+    }
+}

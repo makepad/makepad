@@ -1201,9 +1201,25 @@ impl TextInput {
         // (avoiding floating-point mismatch with relative Fit bounds).
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
-        let max_scroll_y = (laidout_text_height - height).max(0.0);
-        self.cached_max_scroll_y = max_scroll_y;
-        self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+        if self.is_multiline {
+            let max_scroll_y = (laidout_text_height - height).max(0.0);
+            self.cached_max_scroll_y = max_scroll_y;
+            self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+        } else {
+            // Single-line: nothing scrolls vertically, so the offset centres the
+            // line box in the inner rect instead. Pinning to padding.top would
+            // ride high in tall fields and, because a font's line box is taller
+            // than its point size suggests, clip descenders in tight ones. Going
+            // through scroll_y keeps every downstream coordinate (hit test, IME,
+            // selection rects) consistent, since they all compensate for it.
+            let text_height =
+                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
+            let centering = (text_height - height) * 0.5;
+            self.cached_max_scroll_y = 0.0;
+            // Guard NaN (an unresolved turtle size), which the old clamp
+            // sanitized implicitly and which would poison the align shift.
+            self.scroll_y = if centering.is_finite() { centering } else { 0.0 };
+        }
 
         let laidout_text_width = laidout_text.size_in_lpxs.width as f64;
         let max_scroll_x = (laidout_text_width - width).max(0.0);
@@ -1222,10 +1238,24 @@ impl TextInput {
         );
 
         // Update the content clip rect AFTER shift_align_range, because the shift
-        // also moves BeginClip entries. By setting the clip to inner_rect here,
-        // we override whatever shift was applied, keeping the clip at the correct
-        // absolute position (the inner area excluding padding).
-        cx.update_clip_rect_at(content_clip_index, inner_rect);
+        // also moves BeginClip entries. By setting the clip here, we override
+        // whatever shift was applied, keeping the clip at the correct absolute
+        // position. Multiline clips to the inner rect (scrolled content must not
+        // bleed into the padding); single-line clips vertically to the whole
+        // padded box, because the centred line box may legitimately overhang the
+        // padding (descenders) and should only be cut by the background box.
+        let content_clip = if self.is_multiline {
+            inner_rect
+        } else {
+            let outer_rect = cx.turtle().rect();
+            rect(
+                inner_rect.pos.x,
+                outer_rect.pos.y,
+                inner_rect.size.x,
+                outer_rect.size.y,
+            )
+        };
+        cx.update_clip_rect_at(content_clip_index, content_clip);
     }
 
     /// Draws the vertical scrollbar when the text content overflows the visible area.
@@ -2109,7 +2139,11 @@ impl Widget for TextInput {
             // Cache the caret relative to the draw_bg box (same draw space) so
             // cursor_rect_in_absolute can add the box's window position at event time.
             // Only the focused field needs this, so we piggyback on the focus check.
-            self.cached_caret_offset = text_rect.pos + cursor_rect.pos - self.draw_bg.area().rect(cx).pos;
+            // The scroll offset (which for single-line inputs includes the vertical
+            // centering shift) moves the drawn caret, so subtract it here too.
+            self.cached_caret_offset = text_rect.pos + cursor_rect.pos
+                - self.draw_bg.area().rect(cx).pos
+                - dvec2(self.scroll_x, self.scroll_y);
             self.cached_caret_size = cursor_rect.size;
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);

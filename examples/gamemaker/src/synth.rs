@@ -49,13 +49,96 @@ struct Voice {
     noise: u32,
 }
 
+/// Sustained voice cap — engine hums, wind, sirens. Small on purpose.
+const MAX_TONES: usize = 6;
+/// Parameter smoothing rate (≈30ms to target) so per-tick retuning from
+/// `game.tone_set` glides instead of zipper-stepping.
+const TONE_SMOOTH_RATE: f32 = 33.0;
+const TONE_ATTACK_RATE: f32 = 60.0;
+const TONE_RELEASE_RATE: f32 = 18.0;
+
+/// A looping tone: no envelope end, retunable without retriggering. This is
+/// the "car engine note" primitive one-shot beeps can't fake (60 envelope
+/// restarts a second).
+struct Tone {
+    id: u64,
+    wave: Wave,
+    freq: f32,
+    freq_target: f32,
+    gain: f32,
+    gain_target: f32,
+    /// Attack/release level; a released tone fades out and is dropped.
+    level: f32,
+    releasing: bool,
+    phase: f32,
+    noise: u32,
+}
+
 pub struct Synth {
     voices: Vec<Voice>,
+    tones: Vec<Tone>,
+    next_tone_id: u64,
 }
 
 /// Shared with the audio callback in main.rs. The script side only ever
 /// pushes voices; the audio thread only ever advances and drops them.
-static SYNTH: Mutex<Synth> = Mutex::new(Synth { voices: Vec::new() });
+static SYNTH: Mutex<Synth> = Mutex::new(Synth {
+    voices: Vec::new(),
+    tones: Vec::new(),
+    next_tone_id: 0,
+});
+
+/// Start a sustained tone; returns its id for `tone_set`/`tone_stop`.
+pub fn tone(freq: f32, wave: Wave, gain: f32) -> u64 {
+    let Ok(mut synth) = SYNTH.lock() else { return 0 };
+    if synth.tones.len() >= MAX_TONES {
+        synth.tones.remove(0);
+    }
+    synth.next_tone_id += 1;
+    let id = synth.next_tone_id;
+    synth.tones.push(Tone {
+        id,
+        wave,
+        freq: freq.clamp(20.0, 8000.0),
+        freq_target: freq.clamp(20.0, 8000.0),
+        gain: 0.0,
+        gain_target: gain.clamp(0.0, 1.0),
+        level: 0.0,
+        releasing: false,
+        phase: 0.0,
+        noise: 0x51ed_2705,
+    });
+    id
+}
+
+/// Retune a running tone — smoothed, never retriggered.
+pub fn tone_set(id: u64, freq: Option<f32>, gain: Option<f32>) {
+    let Ok(mut synth) = SYNTH.lock() else { return };
+    if let Some(tone) = synth.tones.iter_mut().find(|t| t.id == id) {
+        if let Some(freq) = freq {
+            tone.freq_target = freq.clamp(20.0, 8000.0);
+        }
+        if let Some(gain) = gain {
+            tone.gain_target = gain.clamp(0.0, 1.0);
+        }
+    }
+}
+
+pub fn tone_stop(id: u64) {
+    let Ok(mut synth) = SYNTH.lock() else { return };
+    if let Some(tone) = synth.tones.iter_mut().find(|t| t.id == id) {
+        tone.releasing = true;
+    }
+}
+
+/// A rebuilt world must never inherit a stuck engine hum: called on every
+/// eval/reset from GameWorld::reset_content.
+pub fn stop_all_tones() {
+    let Ok(mut synth) = SYNTH.lock() else { return };
+    for tone in synth.tones.iter_mut() {
+        tone.releasing = true;
+    }
+}
 
 /// One tone, optionally gliding from `freq` to `to` over its length.
 pub fn beep(freq: f32, to: f32, secs: f32, wave: Wave, gain: f32, delay: f32) {
@@ -159,7 +242,7 @@ pub fn play_named(name: &str, pitch: f32) -> bool {
 /// no allocation, one brief lock. Callers zero or fill the buffer first.
 pub fn mix_into(output: &mut AudioBuffer, sample_rate: f64) {
     let Ok(mut synth) = SYNTH.lock() else { return };
-    if synth.voices.is_empty() {
+    if synth.voices.is_empty() && synth.tones.is_empty() {
         return;
     }
     let dt = 1.0 / sample_rate as f32;
@@ -167,6 +250,39 @@ pub fn mix_into(output: &mut AudioBuffer, sample_rate: f64) {
     let channels = output.channel_count();
     for frame in 0..frames {
         let mut sample = 0.0f32;
+        for tone in synth.tones.iter_mut() {
+            // Smooth toward targets; ramp level up (attack) or down (release).
+            tone.freq += (tone.freq_target - tone.freq) * (TONE_SMOOTH_RATE * dt).min(1.0);
+            tone.gain += (tone.gain_target - tone.gain) * (TONE_SMOOTH_RATE * dt).min(1.0);
+            if tone.releasing {
+                tone.level -= TONE_RELEASE_RATE * dt;
+            } else {
+                tone.level = (tone.level + TONE_ATTACK_RATE * dt).min(1.0);
+            }
+            if tone.level <= 0.0 {
+                continue;
+            }
+            tone.phase = (tone.phase + tone.freq * dt).fract();
+            let raw = match tone.wave {
+                Wave::Sine => (tone.phase * std::f32::consts::TAU).sin(),
+                Wave::Square => {
+                    if tone.phase < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
+                Wave::Saw => 2.0 * tone.phase - 1.0,
+                Wave::Triangle => 1.0 - 4.0 * (tone.phase - 0.5).abs(),
+                Wave::Noise => {
+                    tone.noise ^= tone.noise << 13;
+                    tone.noise ^= tone.noise >> 17;
+                    tone.noise ^= tone.noise << 5;
+                    (tone.noise as f32 / u32::MAX as f32) * 2.0 - 1.0
+                }
+            };
+            sample += raw * tone.level * tone.gain;
+        }
         for voice in synth.voices.iter_mut() {
             if voice.delay > 0.0 {
                 voice.delay -= dt;
@@ -209,4 +325,5 @@ pub fn mix_into(output: &mut AudioBuffer, sample_rate: f64) {
         }
     }
     synth.voices.retain(|v| v.delay > 0.0 || v.t < v.len);
+    synth.tones.retain(|t| !(t.releasing && t.level <= 0.0));
 }

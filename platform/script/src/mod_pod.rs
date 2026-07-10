@@ -269,6 +269,60 @@ pub fn define_pod_module(heap: &mut ScriptHeap, native: &mut ScriptNative) -> Sc
         },
     );
 
+    // Vector convenience methods, GDScript-style: v.length(), v.normalized(),
+    // a.dot(b), a.cross(b). The DSL guides teach these idioms; without them
+    // every steering AI has to hand-roll sqrt(dx*dx + ...). Registered under
+    // BOTH pod reduxes: runtime vec values dispatch as REDUX_POD_TYPE (13),
+    // heap pods as REDUX_POD (12).
+    for redux in [ScriptValueType::REDUX_POD, ScriptValueType::REDUX_POD_TYPE] {
+        native.add_type_method(heap, redux, id!(length), script_args!(), |vm, args| {
+            let trap = vm.bx.threads.cur_ref().trap.pass();
+            let sself = vm.bx.heap.value(args, id!(self).into(), trap);
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            let nv = NumericValue::from_script_value_heap(&vm.bx.heap, sself, ip);
+            ScriptValue::from_f64(nv.length())
+        });
+        for method in [id!(normalized), id!(normalize)] {
+            native.add_type_method(heap, redux, method, script_args!(), |vm, args| {
+                let trap = vm.bx.threads.cur_ref().trap.pass();
+                let sself = vm.bx.heap.value(args, id!(self).into(), trap);
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                let nv = NumericValue::from_script_value_heap(&vm.bx.heap, sself, ip);
+                nv.normalize().to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
+            });
+        }
+        native.add_type_method(
+            heap,
+            redux,
+            id!(dot),
+            script_args!(other = 0.0),
+            |vm, args| {
+                let trap = vm.bx.threads.cur_ref().trap.pass();
+                let sself = vm.bx.heap.value(args, id!(self).into(), trap);
+                let other = vm.bx.heap.value(args, id!(other).into(), trap);
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                let a = NumericValue::from_script_value_heap(&vm.bx.heap, sself, ip);
+                let b = NumericValue::from_script_value_heap(&vm.bx.heap, other, ip);
+                ScriptValue::from_f64(a.dot(b))
+            },
+        );
+        native.add_type_method(
+            heap,
+            redux,
+            id!(cross),
+            script_args!(other = 0.0),
+            |vm, args| {
+                let trap = vm.bx.threads.cur_ref().trap.pass();
+                let sself = vm.bx.heap.value(args, id!(self).into(), trap);
+                let other = vm.bx.heap.value(args, id!(other).into(), trap);
+                let ip = vm.bx.threads.cur_ref().trap.ip;
+                let a = NumericValue::from_script_value_heap(&vm.bx.heap, sself, ip);
+                let b = NumericValue::from_script_value_heap(&vm.bx.heap, other, ip);
+                a.cross(b).to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
+            },
+        );
+    }
+
     let ps = ScriptPodBuiltins {
         pod_void,
         pod_struct,
