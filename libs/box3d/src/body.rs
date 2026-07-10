@@ -1887,6 +1887,13 @@ pub fn body_set_mass_data(world: &mut World, body_id: BodyId, mass_data: MassDat
 
     body_sim.inv_mass = if mass_data.mass > 0.0 { 1.0 / mass_data.mass } else { 0.0 };
     body_sim.inv_inertia_local = if det(mass_data.inertia) > 0.0 { invert_t(mass_data.inertia) } else { Matrix3::ZERO };
+
+    // Refresh the cached world space inverse inertia. Without this the body
+    // keeps the tensor derived from the old mass data until the next
+    // body_set_transform or solver finalize, so torques and impulses applied
+    // before the next step see a stale rotational response.
+    let rotation_matrix = make_matrix_from_quat(body_sim.transform.q);
+    body_sim.inv_inertia_world = mul_mm(mul_mm(rotation_matrix, body_sim.inv_inertia_local), transpose(rotation_matrix));
 }
 
 pub fn body_get_mass_data(world: &World, body_id: BodyId) -> MassData {

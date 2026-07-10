@@ -282,19 +282,28 @@ pub enum ViewAction {
 }
 
 impl View {
+    /// Build the object `on_render` appends its children to. It is re-applied to this
+    /// View with `Apply::Reload`, so whatever isn't reachable on its prototype chain
+    /// reverts to the base widget's defaults.
+    ///
+    /// It therefore protos off the *instance* source — the declaration site — not the
+    /// instance's template. Protoing off `source.proto` skipped the declaration level
+    /// and silently dropped every property set there: `results := ScrollYView{height: 610}`
+    /// re-applied as the base `height: Fill`, which a `Fit` parent defers to zero, so
+    /// the view (and every rendered row in it) vanished after the first `render()`.
+    ///
+    /// `script_result` restores `self.source` afterwards, so the chain stays
+    /// `me -> declaration` instead of growing a link per render. `no_vec` leaves `me`'s
+    /// own vec empty so `on_render` fully owns the child list.
     fn make_render_me(&self, vm: &mut ScriptVm) -> ScriptValue {
         if self.source.is_zero() {
             return NIL;
         }
 
-        let source_obj = self.source.as_object();
-        let source_proto = vm.bx.heap.proto(source_obj);
-        let proto = if source_proto.as_object().is_some() {
-            source_proto
-        } else {
-            source_obj.into()
-        };
-        vm.bx.heap.new_with_proto_no_vec(proto).into()
+        vm.bx
+            .heap
+            .new_with_proto_no_vec(self.source.as_object().into())
+            .into()
     }
 
     pub fn set_debug_dump(&mut self, cx: &mut Cx, debug: bool) {
@@ -743,7 +752,13 @@ impl Widget for View {
 
         if call.method() == id!(render) && !result.is_err() {
             if let Some(me_obj) = call.me().as_object() {
+                // `#[source]` is reassigned by any non-eval script apply, so this Reload
+                // would leave `source` pointing at `me`. Keep it on the declaration object:
+                // the next `make_render_me` protos off it (see there), and `me` is a
+                // throwaway whose children already hold their own refs.
+                let declaration = self.source.clone();
                 self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
+                self.source = declaration;
                 self.redraw(vm.cx_mut());
             }
         }
