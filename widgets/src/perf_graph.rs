@@ -225,7 +225,7 @@ impl Widget for PerfGraph {
         // strip captions + budget-guide labels
         self.draw_text.text_style.font_size = 6.5;
         self.draw_text.draw_abs(cx, dvec2(x0 + 1.0, gap_y0 - 1.0), "frame gap  (guides: 8.3ms = 120Hz, 16.7ms = 60Hz)");
-        self.draw_text.draw_abs(cx, dvec2(x0 + 1.0, cpu_y0 - 1.0), "main thread ms, stacked");
+        self.draw_text.draw_abs(cx, dvec2(x0 + 1.0, cpu_y0 - 1.0), "cpu stacked + gpu (violet), ms");
 
         // ── legend: swatch + name + avg ms, three per row ──
         self.draw_text.text_style.font_size = 7.0;
