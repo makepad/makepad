@@ -2077,6 +2077,7 @@ pub fn main() {
 
     let gpu_mb3d_shader_stages = script! {
         use mod.std.println
+        use mod.std.assert
         use mod.pod.*
         use mod.math.*
         use mod.shader
@@ -3794,6 +3795,82 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4j)
+
+        println("GPU stage 4k: scalar casts on the Rust backend")
+        let gpu_stage_4k = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            limit: shader.uniform(4.0)
+
+            probe: fn() {
+                let as_u = u32(self.limit)
+                let as_i = i32(self.limit)
+                let mask = (as_u & u32(7)) | (u32(1) << u32(3))
+                let back = f32(mask) + f32(as_i)
+                if mask > u32(0) {
+                    return vec4(back, 0.0, 0.0, 1.0)
+                }
+                return vec4(0.0, back, 0.0, 1.0)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe()
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4k)
+        // Rust has no u32(x) call form: scalar constructors must land as casts.
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4k, "as u32)"))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4k, "as i32)"))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4k, "as f32)"))
+
+        println("GPU stage 4l: heterogeneous constructor expands var refs on the Rust backend")
+        let gpu_stage_4l = #(GpuShaderStageTest::script_shader(vm)){
+            vertex_pos: shader.vertex_position(vec4f)
+            pixel: shader.fragment_output(0, vec4f)
+            v_uv: shader.varying(vec2f)
+            tint: shader.uniform(vec3f)
+
+            probe: fn() {
+                // `c` reaches the constructor as a bare variable reference
+                // (ShaderType::Id). The Rust expansion must resolve it to 3
+                // slots — not treat it as 1 and splat-pad the alpha.
+                let c = self.tint * 0.5
+                let a = 0.75
+                return vec4(c, a)
+            }
+
+            vertex: fn() {
+                self.v_uv = vec2(0.5, 0.5)
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 1.0)
+            }
+
+            fragment: fn() {
+                self.pixel = self.probe()
+            }
+        }
+        shader.test_compile_draw(gpu_stage_4l)
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4l, "c.x, c.y, c.z"))
+
+        println("Runtime vector methods + lerp + TAU (value-level, not shader)")
+        assert(vec3(3.0, 4.0, 0.0).length() == 5.0)
+        let n = vec3(0.0, 2.0, 0.0).normalized()
+        assert(n.y == 1.0)
+        assert(vec3(0.0, 3.0, 0.0).normalize().y == 1.0)
+        assert(vec3(1.0, 0.0, 0.0).dot(vec3(0.0, 1.0, 0.0)) == 0.0)
+        assert(vec3(2.0, 0.0, 0.0).dot(vec3(3.0, 0.0, 0.0)) == 6.0)
+        let c = vec3(1.0, 0.0, 0.0).cross(vec3(0.0, 1.0, 0.0))
+        assert(c.z == 1.0)
+        assert(lerp(0.0, 10.0, 0.5) == 5.0)
+        let lv = lerp(vec3(0.0, 0.0, 0.0), vec3(2.0, 4.0, 6.0), 0.5)
+        assert(lv.y == 2.0)
+        assert(TAU > 6.28)
+        assert(TAU < 6.29)
     };
     vm.eval(gpu_mb3d_shader_stages);
 

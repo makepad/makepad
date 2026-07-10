@@ -57,7 +57,17 @@ cmd_errors() {
 		echo "--- errors ---"
 		cat "$AGENT_DIR/last_error.txt"
 	else
-		echo "--- no errors ---"
+		# Warnings (unknown option keys etc.) don't fail the eval so they never
+		# reach last_error.txt — count them since the last eval, so "no errors"
+		# can't hide a misspelled option.
+		local warnings
+		warnings=$(awk '/ eval #/{n=0; next} /\(ignored\)/{n++} END{print n+0}' \
+			"$AGENT_DIR/game.log" 2>/dev/null || echo 0)
+		if [[ "${warnings:-0}" -gt 0 ]]; then
+			echo "--- no errors ($warnings warnings, see ag logs) ---"
+		else
+			echo "--- no errors ---"
+		fi
 	fi
 }
 

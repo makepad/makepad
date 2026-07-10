@@ -1,6 +1,13 @@
+/// Metal backend debug breadcrumbs (init, dispatch choices). Off by default —
+/// set GGML_METAL_TRACE=1 to enable, mirroring MAKEPAD_CUDA_TRACE.
+fn log_metal_trace() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GGML_METAL_TRACE").is_some())
+}
+
 #[allow(dead_code)]
 fn log_mul_mat_requested() -> bool {
-    false
+    log_metal_trace()
 }
 
 pub fn is_available() -> bool {
@@ -1899,7 +1906,9 @@ mod imp {
                     }
                 };
 
-                eprintln!("[ggml][metal] backend initialized (shared kernels)");
+                if super::log_metal_trace() {
+                    eprintln!("[ggml][metal] backend initialized (shared kernels)");
+                }
 
                 return Ok(Self {
                     device,
@@ -2827,7 +2836,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mv_ext");
             }
 
@@ -2941,7 +2950,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mm");
             }
 
@@ -3043,7 +3052,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mv");
             }
 

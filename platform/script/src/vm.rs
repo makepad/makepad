@@ -493,13 +493,58 @@ impl<'a> ScriptVm<'a> {
         self.call_with_scope(scope, me)
     }
 
+    fn format_error(&self, err: &crate::trap::ScriptError) -> String {
+        let loc = err
+            .value
+            .as_err()
+            .and_then(|ptr| self.bx.code.ip_to_loc(ptr.ip));
+        if let Some(loc) = loc {
+            format!(
+                "{}:{}:{}: {} ({}:{})",
+                loc.file, loc.line, loc.col, err.message, err.origin_file, err.origin_line
+            )
+        } else {
+            format!("{}: {}", err.origin_file, err.message)
+        }
+    }
+
+    /// Drain pending errors into formatted strings instead of logging them.
+    /// Note that errors raised DURING execution are drained by `run_core`
+    /// itself (into the log, or into the captured-error sink when one is
+    /// installed) — this only sees errors still queued afterwards. Hosts that
+    /// need reliable capture install a sink: `vm.bx.captured_errors =
+    /// Some(Vec::new())` before running, then take it after.
+    pub fn take_errors(&mut self) -> Vec<String> {
+        let mut out = std::mem::take(&mut self.bx.captured_errors).unwrap_or_default();
+        loop {
+            let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
+            let Some(err) = err else {
+                break;
+            };
+            out.push(self.format_error(&err));
+        }
+        out
+    }
+
     /// Drain and log any pending errors in the error queue.
     /// Call this after operations that may produce errors outside of run_core
     /// (e.g., script_apply calls from Rust code).
+    ///
+    /// When a captured-error sink is installed (`bx.captured_errors`), errors
+    /// go there instead of the log — even while `silence_errors` is set, so a
+    /// host can collect diagnostics from streaming/incremental evals that
+    /// would otherwise be dropped as meaningless-mid-stream.
     pub fn drain_errors(&mut self) {
         loop {
             let err = self.bx.threads.cur().trap.err.borrow_mut().pop_front();
             if let Some(err) = err {
+                if self.bx.captured_errors.is_some() {
+                    let formatted = self.format_error(&err);
+                    if let Some(sink) = self.bx.captured_errors.as_mut() {
+                        sink.push(formatted);
+                    }
+                    continue;
+                }
                 if self.bx.silence_errors {
                     continue;
                 }
@@ -642,11 +687,9 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur_ref().trap,
                     "script instruction limit exceeded"
                 );
-                if self.bx.silence_errors {
-                    self.bx.threads.cur().trap.err.borrow_mut().clear();
-                } else {
-                    self.drain_errors();
-                }
+                // drain_errors routes to the captured-error sink, the log, or
+                // the void depending on host configuration.
+                self.drain_errors();
                 self.bx
                     .threads
                     .cur()
@@ -1300,6 +1343,11 @@ pub struct ScriptVmBase {
     pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
+    /// When Some, drained errors are pushed here (formatted) instead of being
+    /// logged or dropped — even under `silence_errors`. Install before an
+    /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
+    /// agent editing the script live).
+    pub captured_errors: Option<Vec<String>>,
     pub run_budget: Option<ScriptRunBudget>,
 }
 
@@ -1314,6 +1362,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            captured_errors: None,
             run_budget: None,
         }
     }
@@ -1346,6 +1395,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            captured_errors: None,
             run_budget: None,
         }
     }

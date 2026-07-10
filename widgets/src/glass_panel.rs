@@ -267,6 +267,8 @@ script_mod! {
             ripple_age: uniform(1000.0)
             ripple_strength: uniform(0.0)
             diffraction_strength: uniform(4.0)
+            // Lens corner radius (visual radius is 2x this, Sdf2d convention).
+            corner_radius: uniform(9.0)
 
             // Frosted sample (weight the blurred mips) so the button reads as glass and a
             // hard background line doesn't show as a sharp dark bar behind the label.
@@ -282,7 +284,8 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let r = 9.0
+                // NOTE: Sdf2d.box renders a VISUAL corner radius of 2*r.
+                let r = self.corner_radius
                 // Smooth shrink is the primary press indicator (eased in Rust, no jiggle).
                 let shrink = clamp(self.press, 0.0, 1.0)
                 let ins = 2.0 + shrink * 2.6
@@ -842,8 +845,8 @@ script_mod! {
     mod.widgets.glass.TextInput = mod.widgets.TextInputFlat{
         height: 38
         margin: 0
-        // TextInput pins its text to padding.top (layout align does not move it), so the
-        // vertical padding is what centres the glyphs in the 38px field.
+        // Single-line TextInput centres its glyphs vertically on its own; the
+        // vertical padding only bounds the multiline/scroll clip.
         padding: Inset{left: 14, right: 14, top: 11, bottom: 11}
         empty_text: "Text"
         draw_bg +: {
@@ -865,7 +868,6 @@ script_mod! {
             color_empty: #xd9e2f0aa
             color_empty_hover: #xffffffff
             color_empty_focus: #xffffffff
-            // Tight line spacing so `align: y:0.5` centres the glyphs, not a tall line box.
             text_style: theme.font_regular{font_size: 12, line_spacing: 1.0}
         }
     }

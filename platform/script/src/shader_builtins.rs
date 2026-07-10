@@ -35,6 +35,7 @@ pub fn define_shader_builtins(
     // constants
     let consts = [
         (id_lut!(PI), 3.141592653589793),
+        (id_lut!(TAU), 6.283185307179586),
         (id_lut!(E), 2.718281828459045),
         (id_lut!(LN2), 0.6931471805599453),
         (id_lut!(LN10), 2.302585092994046),
@@ -339,6 +340,26 @@ pub fn define_shader_builtins(
             let nv = NumericValue::from_script_value_vm(vm, x_val);
             // length returns a scalar for vectors
             ScriptValue::from_f64(nv.length())
+        },
+    );
+    // lerp(a, b, t) — the GDScript spelling; identical to mix. Works for
+    // scalars and vectors (component-wise with scalar t).
+    native.add_method(
+        heap,
+        math,
+        id_lut!(lerp),
+        script_args!(a = 0.0, b = 0.0, t = 0.0),
+        |vm, args| {
+            let trap = vm.bx.threads.cur_ref().trap.pass();
+            let a_val = vm.bx.heap.value(args, id!(a).into(), trap);
+            let b_val = vm.bx.heap.value(args, id!(b).into(), trap);
+            let t_val = vm.bx.heap.value(args, id!(t).into(), trap);
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            let a_nv = NumericValue::from_script_value_heap(&vm.bx.heap, a_val, ip);
+            let b_nv = NumericValue::from_script_value_heap(&vm.bx.heap, b_val, ip);
+            let t = vm.bx.heap.cast_to_f64(t_val, ip);
+            a_nv.mix_scalar(b_nv, t)
+                .to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
         },
     );
     native.add_method(

@@ -243,6 +243,56 @@ impl ShaderFnCompiler {
                     if let ScriptPodTy::Struct { .. } = &pod_ty_data.ty {
                         write!(out, "{} {{ ", name).ok();
                     } else {
+                        // Scalar constructors are casts, and Rust has no u32(x) call
+                        // form — emit `as` casts (with != for bool, which `as` can't
+                        // target, and via u32 for bool→float, which `as` can't source).
+                        let is_scalar = matches!(
+                            pod_ty_data.ty,
+                            ScriptPodTy::F32
+                                | ScriptPodTy::F16
+                                | ScriptPodTy::U32
+                                | ScriptPodTy::I32
+                                | ScriptPodTy::Bool
+                        );
+                        if is_scalar && args.len() == 1 {
+                            let builtins = &vm.bx.code.builtins.pod;
+                            let arg = &args[0];
+                            let arg_ty =
+                                arg.ty.make_concrete(builtins).unwrap_or(builtins.pod_void);
+                            let arg_is_float =
+                                arg_ty == builtins.pod_f32 || arg_ty == builtins.pod_f16;
+                            let arg_is_bool = arg_ty == builtins.pod_bool;
+                            match &pod_ty_data.ty {
+                                ScriptPodTy::Bool if arg_is_bool => {
+                                    write!(out, "({})", arg.s).ok();
+                                }
+                                ScriptPodTy::Bool if arg_is_float => {
+                                    write!(out, "(({}) != 0.0)", arg.s).ok();
+                                }
+                                ScriptPodTy::Bool => {
+                                    write!(out, "(({}) != 0)", arg.s).ok();
+                                }
+                                ScriptPodTy::F32 | ScriptPodTy::F16 if arg_is_bool => {
+                                    write!(out, "(({}) as u32 as f32)", arg.s).ok();
+                                }
+                                ScriptPodTy::F32 | ScriptPodTy::F16 => {
+                                    write!(out, "(({}) as f32)", arg.s).ok();
+                                }
+                                ScriptPodTy::U32 => {
+                                    write!(out, "(({}) as u32)", arg.s).ok();
+                                }
+                                ScriptPodTy::I32 => {
+                                    write!(out, "(({}) as i32)", arg.s).ok();
+                                }
+                                _ => unreachable!(),
+                            }
+                            for arg in args {
+                                self.stack.free_string(arg.s);
+                            }
+                            self.stack
+                                .push(self.trap.pass(), ShaderType::Pod(pod_ty), out);
+                            return;
+                        }
                         // For vec types, we need to expand heterogeneous constructors
                         // like vec4f(vec3, f32) → vec4(v.x, v.y, v.z, s)
                         // This is handled by rust_expand_pod_construct below
@@ -2312,6 +2362,14 @@ impl ShaderFnCompiler {
                 ShaderType::Pod(pt) | ShaderType::PodPtr(pt) => {
                     vm.bx.heap.pod_types[pt.index as usize].ty.slots()
                 }
+                // A bare variable reference reaches here unresolved — look it
+                // up in the scope, or `vec4(some_vec3, s)` counts it as one
+                // slot and the splat-fill below pads with repeated scalars.
+                ShaderType::Id(id) => self
+                    .shader_scope
+                    .find_var(*id)
+                    .map(|(sc, _)| vm.bx.heap.pod_types[sc.ty().index as usize].ty.slots())
+                    .unwrap_or(1),
                 ShaderType::AbstractInt | ShaderType::AbstractFloat => 1,
                 _ => 1,
             };

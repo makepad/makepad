@@ -100,6 +100,24 @@ See the template CLAUDE.md for the full API table the AI is taught. Summary:
   opts, `game.label_text(lid, ...)` updates. Tape runs pin BOTH camera angles
   (third-person: yaw 0/pitch −0.35; orbit: the widget defaults), so captures
   are deterministic.
+- **Racing batch** (features.md, my-game-5, 2026-07-10): writable camera
+  (`set_cam_yaw/pitch/dist/fov` + `cam_pitch/dist/fov/dragging` readers +
+  `input.look_dx/dy` — script writes go through cam_yaw/pitch_request so the
+  mouse and script share ONE authoritative rig; tapes pin everything),
+  `cam_shake` (tick-hashed offset, never the world rng — pixels wobble,
+  simulation doesn't), unknown VERBS are captured errors (eval fails,
+  last-good holds) and unknown OPTION keys log warnings (warn_unknown_keys
+  allow-lists per verb), `game.time()` resets per eval (snapshot-restored on
+  rollback), `rot_y`/`collide:false` on spawnables (visual yaw renders for
+  statics via the slab; decor = opaque + non-colliding, still raycast-hittable
+  and camera-blocking), `raycast`/`overlap_sphere`/`ground_normal` (step-march
+  vs terrain + AABBs, face normals from deepest axis), `push` (velocity add),
+  `save`/`load` (SaveVal map → .gamemaker/save.json, 1s debounced flush,
+  survives eval/reset by design), sustained `tone`/`tone_set`/`tone_stop`
+  (synth.rs Tone voices, 30ms param smoothing, killed on reset_content),
+  HUD named slots with 7 anchors + `bar` gauges + `format`, inputs `reset`
+  (R/pad-Y) + `back` (C), `every`/`cancel` repeating timers (after returns an
+  id too), `distance` takes ids or points.
 - Adding a verb = one match arm in `game_dispatch` + a row in the template
   CLAUDE.md. The dispatcher mutates a shared `Rc<RefCell<GameWorld>>`
   synchronously — no async widget trampoline — so world-building finishes
