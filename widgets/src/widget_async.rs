@@ -160,6 +160,7 @@ struct WidgetToScriptCallRequest {
 }
 
 struct IsolatedSplashVm {
+    network_enabled: bool,
     std: ScriptStd,
     vm: Option<Box<ScriptVmBase>>,
 }
@@ -206,8 +207,66 @@ impl ScriptHandleGc for CxWidgetHandleGc {
     }
 }
 
+/// Swap isolate `vm_id` onto `Cx` — its `ScriptStd` into `cx.script_data.std` and its
+/// `ScriptVmBase` into `cx.script_vm` — for the duration of `f`, then put the previous
+/// pair back.
+///
+/// **Every path that executes an isolate's script must go through this.** A `ScriptVm`
+/// hands `&mut Cx` to native code via `with_cx`/`with_cx_mut`, which park the executing
+/// `bx` into `cx.script_vm` and take it back out. Run an isolate while the app VM still
+/// occupies that slot and the park silently drops the app VM's entire heap, nulls the
+/// slot, and leaves every subsequent `Cx`-mediated script access resolving isolate
+/// object pointers against the wrong heap. Handing the isolate's `std`/`vm` to a
+/// function as side-channel `&mut` args is exactly that mistake.
+///
+/// Nested installs are fine: the enclosing `with_vm` owns the outer `bx` (so the slot
+/// reads `None` here) and restores it on the way out.
+fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut Cx) -> R) -> R {
+    let mut isolated = cx
+        .global::<CxWidgetAsync>()
+        .isolated_vms
+        .vms
+        .remove(&vm_id)
+        .unwrap_or_else(|| panic!("missing Splash VM {:?}", vm_id));
+
+    let previous_vm_id = cx.global::<CxWidgetAsync>().current_vm_id;
+    cx.global::<CxWidgetAsync>().current_vm_id = vm_id;
+
+    let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
+    let outer_vm = cx.script_vm.take();
+    cx.script_vm = isolated.vm.take();
+
+    let out = f(cx);
+
+    isolated.vm = cx.script_vm.take();
+    cx.script_vm = outer_vm;
+    isolated.std = std::mem::replace(&mut cx.script_data.std, outer_std);
+
+    cx.global::<CxWidgetAsync>().current_vm_id = previous_vm_id;
+    cx.global::<CxWidgetAsync>()
+        .isolated_vms
+        .vms
+        .insert(vm_id, isolated);
+
+    out
+}
+
+/// A Splash isolate runs untrusted-ish user script on the UI thread; cap how long any
+/// single entry into it may run.
+fn with_splash_budget<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+    let old_budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(
+        std::time::Duration::from_millis(64),
+        std::time::Duration::from_millis(64),
+        512,
+    ));
+    let out = f(vm);
+    vm.bx.run_budget = old_budget;
+    out
+}
+
 pub trait CxSplashVmExt {
     fn alloc_splash_vm(&mut self) -> SplashVmId;
+    fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
     fn with_script_vm_id_thread<R>(
         &mut self,
@@ -224,6 +283,10 @@ pub trait CxSplashVmExt {
 
 impl CxSplashVmExt for Cx {
     fn alloc_splash_vm(&mut self) -> SplashVmId {
+        self.alloc_splash_vm_with_network(false)
+    }
+
+    fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId {
         ensure_widget_async_hooks_registered(self);
         // Reclaim isolates from dropped Splashes before growing, so the live count
         // tracks the number of live Splash widgets rather than accumulating.
@@ -239,7 +302,11 @@ impl CxSplashVmExt for Cx {
             id
         };
 
-        let mut std = ScriptStd::new();
+        let mut std = if network_enabled {
+            ScriptStd::with_network_runtime(self.net.clone())
+        } else {
+            ScriptStd::new()
+        };
         let bx = {
             let mut vm = ScriptVm {
                 host: self,
@@ -259,6 +326,7 @@ impl CxSplashVmExt for Cx {
         state.isolated_vms.vms.insert(
             id,
             IsolatedSplashVm {
+                network_enabled,
                 std,
                 vm: Some(bx),
             },
@@ -272,42 +340,11 @@ impl CxSplashVmExt for Cx {
             return self.with_vm(f);
         }
 
-        let mut isolated = self
-            .global::<CxWidgetAsync>()
-            .isolated_vms
-            .vms
-            .remove(&vm_id)
-            .unwrap_or_else(|| panic!("missing Splash VM {:?}", vm_id));
+        if self.global::<CxWidgetAsync>().current_vm_id == vm_id {
+            return self.with_vm(f);
+        }
 
-        let previous_vm_id = self.global::<CxWidgetAsync>().current_vm_id;
-        self.global::<CxWidgetAsync>().current_vm_id = vm_id;
-
-        let main_std = std::mem::replace(&mut self.script_data.std, isolated.std);
-        let main_vm = self.script_vm.take();
-        self.script_vm = isolated.vm.take();
-
-        let out = self.with_vm(|vm| {
-            let old_budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(
-                std::time::Duration::from_millis(64),
-                std::time::Duration::from_millis(64),
-                512,
-            ));
-            let out = f(vm);
-            vm.bx.run_budget = old_budget;
-            out
-        });
-
-        isolated.vm = self.script_vm.take();
-        self.script_vm = main_vm;
-        isolated.std = std::mem::replace(&mut self.script_data.std, main_std);
-
-        self.global::<CxWidgetAsync>().current_vm_id = previous_vm_id;
-        self.global::<CxWidgetAsync>()
-            .isolated_vms
-            .vms
-            .insert(vm_id, isolated);
-
-        out
+        with_isolate_installed(self, vm_id, |cx| cx.with_vm(|vm| with_splash_budget(vm, f)))
     }
 
     fn with_script_vm_id_thread<R>(
@@ -320,42 +357,13 @@ impl CxSplashVmExt for Cx {
             return self.with_vm_thread(thread_id, f);
         }
 
-        let mut isolated = self
-            .global::<CxWidgetAsync>()
-            .isolated_vms
-            .vms
-            .remove(&vm_id)
-            .unwrap_or_else(|| panic!("missing Splash VM {:?}", vm_id));
+        if self.global::<CxWidgetAsync>().current_vm_id == vm_id {
+            return self.with_vm_thread(thread_id, f);
+        }
 
-        let previous_vm_id = self.global::<CxWidgetAsync>().current_vm_id;
-        self.global::<CxWidgetAsync>().current_vm_id = vm_id;
-
-        let main_std = std::mem::replace(&mut self.script_data.std, isolated.std);
-        let main_vm = self.script_vm.take();
-        self.script_vm = isolated.vm.take();
-
-        let out = self.with_vm_thread(thread_id, |vm| {
-            let old_budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(
-                std::time::Duration::from_millis(64),
-                std::time::Duration::from_millis(64),
-                512,
-            ));
-            let out = f(vm);
-            vm.bx.run_budget = old_budget;
-            out
-        });
-
-        isolated.vm = self.script_vm.take();
-        self.script_vm = main_vm;
-        isolated.std = std::mem::replace(&mut self.script_data.std, main_std);
-
-        self.global::<CxWidgetAsync>().current_vm_id = previous_vm_id;
-        self.global::<CxWidgetAsync>()
-            .isolated_vms
-            .vms
-            .insert(vm_id, isolated);
-
-        out
+        with_isolate_installed(self, vm_id, |cx| {
+            cx.with_vm_thread(thread_id, |vm| with_splash_budget(vm, f))
+        })
     }
 
     fn script_ref_vm_id(&mut self, script_ref: &ScriptObjectRef) -> SplashVmId {
@@ -369,6 +377,30 @@ impl CxSplashVmExt for Cx {
             .copied()
             .unwrap_or(MAIN_SPLASH_VM_ID)
     }
+}
+
+/// Deliver `Event::NetworkResponses` to a Splash isolate's script (resolving its
+/// `net.http_request` callbacks / promises). Responses that belong to other VMs simply
+/// find no matching request id in this isolate's `ScriptStd` and are ignored.
+pub(crate) fn handle_splash_network_responses(
+    cx: &mut Cx,
+    vm_id: SplashVmId,
+    responses: &[NetworkResponse],
+) {
+    if vm_id == MAIN_SPLASH_VM_ID || responses.is_empty() {
+        return;
+    }
+
+    match cx.global::<CxWidgetAsync>().isolated_vms.vms.get(&vm_id) {
+        Some(isolated) if isolated.network_enabled => {}
+        _ => return,
+    }
+
+    // The isolate has to be installed on `Cx` while its handlers run — see
+    // `with_isolate_installed`.
+    with_isolate_installed(cx, vm_id, |cx| {
+        cx.handle_script_network_events_for_current_vm(responses)
+    });
 }
 
 #[doc(hidden)]

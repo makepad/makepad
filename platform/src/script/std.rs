@@ -216,4 +216,21 @@ impl Cx {
             makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
         });
     }
+
+    /// Run the script network handlers against whichever VM is currently *installed*
+    /// on this `Cx` (`Cx::script_vm` + `Cx::script_data.std`).
+    ///
+    /// Splash isolates call this after swapping themselves onto `Cx`. They must never
+    /// run a VM that is passed alongside `Cx` as a separate `&mut`: `ScriptVm::with_cx`
+    /// parks the executing `bx` into `cx.script_vm` and takes it back out, so a VM
+    /// executing while a *different* VM sits in that slot would overwrite (and drop) it.
+    ///
+    /// Unlike [`Cx::handle_script_network_events`], this does not resolve `http_resource`
+    /// loads — those live on `Cx::script_data.resources` and are handled once, for the
+    /// app VM, before the event is dispatched to the widget tree.
+    pub fn handle_script_network_events_for_current_vm(&mut self, responses: &[NetworkResponse]) {
+        self.with_script_std_vm(|host, std, script_vm| {
+            makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
+        });
+    }
 }

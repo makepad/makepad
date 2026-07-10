@@ -1148,8 +1148,8 @@ impl XrRoot {
         self.env.physics_tsdf_query_ms()
     }
 
-    pub fn physics_rapier_step_ms(&self) -> f64 {
-        self.env.physics_rapier_step_ms()
+    pub fn physics_engine_step_ms(&self) -> f64 {
+        self.env.physics_engine_step_ms()
     }
 
     pub fn physics_time_scale(&self) -> f32 {

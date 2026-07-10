@@ -71,6 +71,7 @@ script_mod! {
                         width: Fill
                         height: Fit
                         splash_view := Splash {
+                            allow_net: true
                             width: Fill
                             height: Fit
                         }
@@ -154,6 +155,7 @@ script_mod! {
                             width: Fill
                             height: Fit
                             splash_view := Splash {
+                                allow_net: true
                                 flow: Overlay
                                 width: Fill
                                 height: Fit
@@ -473,7 +475,7 @@ fn claude_splash_system_prompt() -> String {
 
 You can answer questions normally using markdown. But when it makes sense to show something visually — a layout, a UI mockup, a styled card, a button arrangement, an animation, or anything graphical — you should embed a ```runsplash code block in your markdown response. The content inside a ```runsplash block is live Splash script that will be rendered as real interactive UI inline in the chat.
 
-IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, etc.) are already in scope.
+IMPORTANT: `use mod.prelude.widgets.*` is automatically prepended to every runsplash block — do NOT include it yourself. All widget names (View, Label, Button, Image, etc.) are already in scope. AI Chat also enables the network sandbox and prepends `use mod.net`, so networked mini apps may use `net.http_request`, `http_resource(...)`, `parse_json()`, and `url_encode()` directly.
 
 For requests to create an app, tool, form, todo app, calculator, editor, or anything with buttons/inputs/lists, produce working Splash business logic inside the ```runsplash block. Splash supports local `let` state, `fn` functions, widget callbacks such as `on_click`, `on_return`, `on_change`, and `CheckBox{{on_click: |checked| ...}}`, plus `ui.<id>.render()`, `ui.<id>.text()`, and `ui.<id>.set_text(...)`.
 

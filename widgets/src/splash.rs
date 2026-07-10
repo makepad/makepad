@@ -28,11 +28,14 @@ pub struct Splash {
     pub view: View,
     #[live]
     body: ArcStringMut,
+    #[live]
+    allow_net: bool,
     #[rust]
     vm_id: SplashVmId,
 }
 
-const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*View{height:Fit, ";
+const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nView{height:Fit, ";
+const SPLASH_NET_PREFIX: &str = "use mod.prelude.widgets.*\nuse mod.net\nView{height:Fit, ";
 const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
 
 impl Splash {
@@ -48,12 +51,17 @@ impl Splash {
         }
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
-            self.vm_id = cx.alloc_splash_vm();
+            self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
         }
 
         let self_id = self.self_id();
         // Full code string: prefix + body (no closing - parser auto-closes)
-        let code = format!("{}{}", SPLASH_PREFIX, body);
+        let prefix = if self.allow_net {
+            SPLASH_NET_PREFIX
+        } else {
+            SPLASH_PREFIX
+        };
+        let code = format!("{}{}", prefix, body);
 
         // ScriptMod identity is stable (same file/line/column each call)
         let script_mod = ScriptMod {
@@ -123,6 +131,11 @@ impl Drop for Splash {
 
 impl Widget for Splash {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.allow_net {
+            if let Event::NetworkResponses(responses) = event {
+                crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
+            }
+        }
         self.view.handle_event(cx, event, scope);
     }
 

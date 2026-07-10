@@ -4,7 +4,7 @@ use super::{
         RetainedDepthQueryHit,
     },
     xr_hands::sync_hands_on_scene,
-    xr_physics::{makepad_pose, RapierScene, XR_MAX_DEPTH_QUERY_KEYS_PER_CUBE},
+    xr_physics::{PhysicsScene, XR_MAX_DEPTH_QUERY_KEYS_PER_CUBE},
     CollectedXrCube,
 };
 use crate::{
@@ -118,7 +118,7 @@ pub(super) struct XrPhysicsWorkerResult {
     pub(super) depth_query_retained_hits: Option<HashMap<u64, RetainedDepthQueryHit>>,
     pub(super) physics_compute_ms: f64,
     pub(super) physics_tsdf_query_ms: f64,
-    pub(super) physics_rapier_step_ms: f64,
+    pub(super) physics_engine_step_ms: f64,
     pub(super) physics_depth_query_surface_count: usize,
     pub(super) physics_scene_body_count: usize,
     pub(super) physics_body_spawn_apply_count: usize,
@@ -331,7 +331,7 @@ fn physics_worker_loop(
 ) {
     let mut seen_version = 0u64;
     let mut revision = 0u64;
-    let mut scene: Option<RapierScene> = None;
+    let mut scene: Option<PhysicsScene> = None;
     let mut retained_hits = HashMap::new();
     let mut runtime_bodies_scratch = HashMap::new();
     let mut runtime_contacts_scratch = Vec::new();
@@ -564,13 +564,13 @@ fn physics_worker_loop(
                 let (
                     runtime_bodies,
                     runtime_contacts,
-                    physics_rapier_step_ms,
+                    physics_engine_step_ms,
                     physics_depth_query_surface_count,
                 ) = if let Some(scene) = scene.as_mut() {
                     let simulation_dt = (adaptive_step_dt * step.time_scale.clamp(0.1, 1.0))
                         .clamp(XR_WORKER_SIMULATION_DT_MIN, XR_WORKER_SIMULATION_DT_MAX);
                     scene.set_simulation_dt(simulation_dt);
-                    let rapier_step_started = Instant::now();
+                    let engine_step_started = Instant::now();
                     scene.step();
                     for body_drive in pending_body_drives.iter().copied() {
                         if body_drive.revision != revision {
@@ -586,15 +586,15 @@ fn physics_worker_loop(
                             simulation_dt,
                         );
                     }
-                    let physics_rapier_step_ms =
-                        rapier_step_started.elapsed().as_secs_f64() * 1000.0;
+                    let physics_engine_step_ms =
+                        engine_step_started.elapsed().as_secs_f64() * 1000.0;
                     let stats = scene.depth_query_stats();
                     snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
                     scene.snapshot_active_contacts(&mut runtime_contacts_scratch);
                     (
                         mem::take(&mut runtime_bodies_scratch),
                         mem::take(&mut runtime_contacts_scratch),
-                        physics_rapier_step_ms,
+                        physics_engine_step_ms,
                         stats.surface_count,
                     )
                 } else {
@@ -616,7 +616,7 @@ fn physics_worker_loop(
                             .then(|| mem::take(&mut retained_hits_snapshot_scratch)),
                         physics_compute_ms: started.elapsed().as_secs_f64() * 1000.0,
                         physics_tsdf_query_ms,
-                        physics_rapier_step_ms,
+                        physics_engine_step_ms,
                         physics_depth_query_surface_count,
                         physics_scene_body_count: scene
                             .as_ref()
@@ -659,7 +659,7 @@ fn physics_worker_loop(
                     depth_query_retained_hits: None,
                     physics_compute_ms: 0.0,
                     physics_tsdf_query_ms: 0.0,
-                    physics_rapier_step_ms: 0.0,
+                    physics_engine_step_ms: 0.0,
                     physics_depth_query_surface_count: surface_count,
                     physics_scene_body_count: scene
                         .as_ref()
@@ -714,8 +714,8 @@ fn clear_depth_query_keys(
     }
 }
 
-fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> RapierScene {
-    let mut scene = RapierScene::new(gravity);
+fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> PhysicsScene {
+    let mut scene = PhysicsScene::new(gravity);
     for cube in cubes {
         let spawn_pool = cube.spawn_pool;
         match cube.body_kind {
@@ -748,9 +748,7 @@ fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> RapierScene {
                     );
                 }
                 if let Some(body_handle) = scene.cubes.last().map(|cube| cube.body) {
-                    if let Some(body) = scene.bodies.get_mut(body_handle) {
-                        body.set_gravity_scale(cube.gravity_scale.max(0.0), true);
-                    }
+                    scene.set_body_gravity_scale(body_handle, cube.gravity_scale.max(0.0));
                 }
                 if spawn_pool && !scene.cubes.is_empty() {
                     scene.register_spawn_pool_cube(scene.cubes.len() - 1);
@@ -786,45 +784,37 @@ fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> RapierScene {
 }
 
 fn snapshot_runtime_bodies(
-    scene: &RapierScene,
+    scene: &PhysicsScene,
     runtime_bodies: &mut HashMap<WidgetUid, XrRuntimeBodyState>,
 ) {
     runtime_bodies.clear();
     runtime_bodies.reserve(scene.cubes.len().saturating_sub(runtime_bodies.capacity()));
     for cube in &scene.cubes {
-        if let Some(body) = scene.bodies.get(cube.body) {
-            if !body.is_enabled() {
-                continue;
-            }
-            runtime_bodies.insert(
-                cube.widget_uid,
-                XrRuntimeBodyState {
-                    pose: makepad_pose(body.position()),
-                    scale: cube.scale,
-                    linvel: scene
-                        .shadow_body_motion_for_body(cube.body)
-                        .map(|(linvel, _)| linvel)
-                        .unwrap_or_else(|| {
-                            let linvel = body.linvel();
-                            vec3f(linvel.x, linvel.y, linvel.z)
-                        }),
-                    angvel: scene
-                        .shadow_body_motion_for_body(cube.body)
-                        .map(|(_, angvel)| angvel)
-                        .unwrap_or_else(|| {
-                            let angvel = body.angvel();
-                            vec3f(angvel.x, angvel.y, angvel.z)
-                        }),
-                    sleeping: body.is_sleeping(),
-                    dynamic_body: body.body_type() == rapier3d::prelude::RigidBodyType::Dynamic,
-                    shadowed: scene.is_shadow_body(cube.body),
-                    held_by: scene.held_by_for_body(cube.body),
-                    linked_support_local_poses: scene.cube_linked_support_local_poses(*cube),
-                    linked_support_spin_angles: scene.cube_linked_support_spin_angles(*cube),
-                    linked_support_steer_angles: scene.cube_linked_support_steer_angles(*cube),
-                },
-            );
+        if !scene.body_is_valid(cube.body) || !scene.body_is_enabled(cube.body) {
+            continue;
         }
+        runtime_bodies.insert(
+            cube.widget_uid,
+            XrRuntimeBodyState {
+                pose: scene.body_pose(cube.body),
+                scale: cube.scale,
+                linvel: scene
+                    .shadow_body_motion_for_body(cube.body)
+                    .map(|(linvel, _)| linvel)
+                    .unwrap_or_else(|| scene.body_linvel(cube.body)),
+                angvel: scene
+                    .shadow_body_motion_for_body(cube.body)
+                    .map(|(_, angvel)| angvel)
+                    .unwrap_or_else(|| scene.body_angvel(cube.body)),
+                sleeping: scene.body_is_sleeping(cube.body),
+                dynamic_body: scene.body_is_dynamic(cube.body),
+                shadowed: scene.is_shadow_body(cube.body),
+                held_by: scene.held_by_for_body(cube.body),
+                linked_support_local_poses: scene.cube_linked_support_local_poses(*cube),
+                linked_support_spin_angles: scene.cube_linked_support_spin_angles(*cube),
+                linked_support_steer_angles: scene.cube_linked_support_steer_angles(*cube),
+            },
+        );
     }
 }
 

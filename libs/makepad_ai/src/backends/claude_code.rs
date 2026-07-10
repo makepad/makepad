@@ -35,6 +35,14 @@ impl ClaudeCodeProcess {
         for arg in args {
             command.arg(arg);
         }
+        // Its own process group, so cancelling a prompt can take the CLI's
+        // children (a shell, a game it launched) down with it instead of
+        // orphaning them mid-task.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
 
         let mut child = command.spawn().map_err(|err| err.to_string())?;
         let stdout = child
@@ -86,7 +94,20 @@ impl ClaudeCodeProcess {
     }
 
     fn kill(&mut self) {
+        // Whole group, then reap. `Child::kill` alone leaves the CLI's own
+        // children running and the CLI itself as a zombie.
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            const SIGKILL: i32 = 9;
+            unsafe {
+                kill(-(self.child.id() as i32), SIGKILL);
+            }
+        }
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     fn try_recv(&mut self) -> Option<ClaudeCodeOutput> {
@@ -117,10 +138,16 @@ struct ClaudeCodeSession {
     cwd: String,
     system_prompt: Option<String>,
     model: Option<String>,
+    allowed_tools: Vec<String>,
+    permission_mode: Option<String>,
+    settings_json: Option<String>,
     claude_session_id: Option<String>,
     current_prompt: Option<PromptId>,
     process: Option<ClaudeCodeProcess>,
     last_assistant_text: String,
+    /// Whether this turn already produced assistant text. The `result` event
+    /// carries the final text too, and must not re-emit what was streamed.
+    emitted_text: bool,
     stderr_text: String,
 }
 
@@ -146,6 +173,16 @@ impl ClaudeCodeAgent {
 
     pub fn is_available() -> bool {
         Self::find_cli().is_some()
+    }
+
+    /// The backend's own session id, once the CLI has reported one. Persist this
+    /// to resume the same conversation in a later run via
+    /// [`SessionConfig::resume_session_id`].
+    pub fn native_session_id(&self, session_id: SessionId) -> Option<&str> {
+        self.sessions
+            .get(&session_id.0)?
+            .claude_session_id
+            .as_deref()
     }
 
     pub fn find_cli() -> Option<String> {
@@ -188,10 +225,21 @@ impl ClaudeCodeAgent {
             "--strict-mcp-config".to_string(),
             "--mcp-config".to_string(),
             r#"{"mcpServers":{}}"#.to_string(),
+            // Comma-joined, never space-separated: `--tools` is variadic and a
+            // space-separated list would swallow the positional prompt below.
+            // An empty string means "no tools", which is the chat-only default.
             "--tools".to_string(),
-            "".to_string(),
+            session.allowed_tools.join(","),
         ];
 
+        if let Some(permission_mode) = &session.permission_mode {
+            args.push("--permission-mode".to_string());
+            args.push(permission_mode.clone());
+        }
+        if let Some(settings_json) = &session.settings_json {
+            args.push("--settings".to_string());
+            args.push(settings_json.clone());
+        }
         if let Some(model) = &session.model {
             args.push("--model".to_string());
             args.push(model.clone());
@@ -231,6 +279,7 @@ impl ClaudeCodeAgent {
                 };
                 if let Some(text) = stream_event_text_delta(&value) {
                     session.last_assistant_text.push_str(&text);
+                    session.emitted_text = true;
                     events.push(AgentEvent::TextDelta { prompt_id, text });
                 }
             }
@@ -244,13 +293,29 @@ impl ClaudeCodeAgent {
                     } else {
                         text.clone()
                     };
-                    session.last_assistant_text = text;
+                    // Delta accounting restarts per assistant message, not per turn:
+                    // `--include-partial-messages` streams one set of deltas for each
+                    // message, and a turn that calls tools contains several. Carrying
+                    // the accumulator across them makes `starts_with` fail on message
+                    // two onwards, and the whole message gets emitted a second time.
+                    session.last_assistant_text.clear();
                     if !delta.is_empty() {
+                        session.emitted_text = true;
                         events.push(AgentEvent::TextDelta {
                             prompt_id,
                             text: delta,
                         });
                     }
+                }
+                // Claude Code runs its own tools, so these are informational: they
+                // report what the agent is doing, and no tool result is expected back.
+                for (tool_use_id, tool_name, tool_input) in assistant_tool_uses(&value) {
+                    events.push(AgentEvent::ToolRequest {
+                        prompt_id,
+                        tool_use_id,
+                        tool_name,
+                        tool_input,
+                    });
                 }
             }
             Some("result") => {
@@ -265,7 +330,9 @@ impl ClaudeCodeAgent {
                         error: result_text.to_string(),
                     });
                 } else {
-                    if session.last_assistant_text.is_empty() && !result_text.is_empty() {
+                    // Only when nothing was streamed — otherwise `result` would
+                    // repeat the whole reply.
+                    if !session.emitted_text && !result_text.is_empty() {
                         events.push(AgentEvent::TextDelta {
                             prompt_id,
                             text: result_text.to_string(),
@@ -278,6 +345,7 @@ impl ClaudeCodeAgent {
                 }
                 session.state = ClaudeCodeSessionState::Ready;
                 session.last_assistant_text.clear();
+                session.emitted_text = false;
                 session.stderr_text.clear();
             }
             _ => {}
@@ -370,10 +438,14 @@ impl Agent for ClaudeCodeAgent {
                 cwd,
                 system_prompt: config.system_prompt,
                 model: config.model,
-                claude_session_id: None,
+                allowed_tools: config.allowed_tools,
+                permission_mode: config.permission_mode,
+                settings_json: config.settings_json,
+                claude_session_id: config.resume_session_id,
                 current_prompt: None,
                 process: None,
                 last_assistant_text: String::new(),
+                emitted_text: false,
                 stderr_text: String::new(),
             },
         );
@@ -418,6 +490,7 @@ impl Agent for ClaudeCodeAgent {
                 session.current_prompt = Some(prompt_id);
                 session.process = Some(process);
                 session.last_assistant_text.clear();
+                session.emitted_text = false;
                 session.stderr_text.clear();
             }
             Err(error) => {
@@ -448,6 +521,7 @@ impl Agent for ClaudeCodeAgent {
                 session.current_prompt = None;
                 session.state = ClaudeCodeSessionState::Ready;
                 session.last_assistant_text.clear();
+                session.emitted_text = false;
                 session.stderr_text.clear();
                 break;
             }
@@ -501,6 +575,37 @@ fn assistant_text(value: &JsonValue) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Extract `(tool_use_id, tool_name, subject)` for each tool the assistant invoked.
+/// `subject` is the most human-meaningful field of the tool input — the file being
+/// edited, or the command being run — so a UI can say "editing player.gd".
+fn assistant_tool_uses(value: &JsonValue) -> Vec<(String, String, String)> {
+    let Some(message) = value.key("message") else {
+        return Vec::new();
+    };
+    let Some(JsonValue::Array(items)) = message.key("content") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| json_string(item.key("type")) == Some("tool_use"))
+        .map(|item| {
+            let subject = item
+                .key("input")
+                .and_then(|input| {
+                    ["file_path", "command", "pattern", "path", "url"]
+                        .iter()
+                        .find_map(|key| json_string(input.key(key)))
+                })
+                .unwrap_or_default();
+            (
+                json_string(item.key("id")).unwrap_or_default().to_string(),
+                json_string(item.key("name")).unwrap_or_default().to_string(),
+                subject.to_string(),
+            )
+        })
+        .collect()
 }
 
 fn stream_event_text_delta(value: &JsonValue) -> Option<String> {
