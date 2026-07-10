@@ -80,7 +80,12 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
+            // nextDrawable never throttles to compositor consumption (may
+            // tear). Distinguishes "our frames are slow" from "the
+            // compositor returns drawables slowly/unevenly".
+            let () = msg_send![ca_layer, setDisplaySyncEnabled:
+                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
@@ -121,7 +126,12 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
+            // nextDrawable never throttles to compositor consumption (may
+            // tear). Distinguishes "our frames are slow" from "the
+            // compositor returns drawables slowly/unevenly".
+            let () = msg_send![ca_layer, setDisplaySyncEnabled:
+                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
@@ -532,6 +542,27 @@ impl Cx {
             }
             MacosEvent::Timer(te) => {
                 if te.timer_id == 0 {
+                    // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
+                    // act — was the gap a LATE FIRE (runloop starved / OS
+                    // deferred the NSTimer) or a SLOW CALLBACK (our work)?
+                    let trace_t0 = if std::env::var_os("MAKEPAD_TIMER_TRACE").is_some() {
+                        thread_local! {
+                            static LAST_FIRE: std::cell::Cell<Option<std::time::Instant>> =
+                                const { std::cell::Cell::new(None) };
+                        }
+                        let now = std::time::Instant::now();
+                        LAST_FIRE.with(|last| {
+                            if let Some(prev) = last.replace(Some(now)) {
+                                let gap_ms = prev.elapsed().as_secs_f64() * 1000.0;
+                                if gap_ms > 20.0 {
+                                    eprintln!("[timer-trace] fire-to-fire gap {:.1}ms", gap_ms);
+                                }
+                            }
+                        });
+                        Some(now)
+                    } else {
+                        None
+                    };
                     let mut needs_timer = false;
 
                     if self.screenshot_requests.len() > 0 {
@@ -581,9 +612,16 @@ impl Cx {
                             self.os.timer0_idle_since = Some(now);
                         }
                     }
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.run_live_edit_if_needed("macos");
+                    let live_edit_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.handle_networking_events();
+                    let net_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.handle_gamepad_events();
+                    let pad_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let paint_t = trace_t0.map(|_| std::time::Instant::now());
                     // Propagate Exit from the inner Paint dispatch. The
                     // signal handling above (Ctrl+C / SIGTERM) calls
                     // `request_quit`, which queues a `CxOsOp::Quit`; that op
@@ -599,6 +637,7 @@ impl Cx {
                     if let EventFlow::Exit = self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows) {
                         return EventFlow::Exit;
                     }
+                    let paint_ms = paint_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
                     let gc_t0 = std::time::Instant::now();
@@ -614,6 +653,21 @@ impl Cx {
                             crate::perf_monitor::PERF_CHANNEL_GC,
                             gc_t0.elapsed().as_micros() as u64,
                         );
+                    }
+
+                    if let Some(t0) = trace_t0 {
+                        let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        if took_ms > 10.0 {
+                            eprintln!(
+                                "[timer-trace] slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
+                                took_ms,
+                                live_edit_ms.unwrap_or(0.0),
+                                net_ms.unwrap_or(0.0),
+                                pad_ms.unwrap_or(0.0),
+                                paint_ms.unwrap_or(0.0),
+                                if did_gc { gc_t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 },
+                            );
+                        }
                     }
 
                     // block till the next timer
