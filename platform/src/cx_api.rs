@@ -1273,6 +1273,13 @@ impl Cx {
     pub fn text_ime_was_dismissed(&mut self) {
         self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.set_text_ime_dismissed();
+        // A focused TextInput re-pushes ShowTextIME on every draw, so a show op
+        // queued by a frame drawn just before this dismissal landed can still be
+        // in platform_ops. If it drains after the backend forgets its last-shown
+        // config (e.g. Android's ResizeTextIME-closed clearing last_ime_config),
+        // it re-opens the keyboard the user just closed. Drop the stale shows.
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::ShowTextIME(..)));
         self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 

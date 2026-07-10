@@ -2214,6 +2214,20 @@ public class MakepadActivity
         clipboard.setPrimaryClip(clip);
     }
 
+    // Fire the system share sheet (ACTION_SEND) for social sharing. Called
+    // from Rust via `android_jni::to_java_share_text`.
+    public void shareText(String content) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("text/plain");
+            intent.putExtra(Intent.EXTRA_TEXT, content);
+            Intent chooser = Intent.createChooser(intent, "Share");
+            startActivity(chooser);
+        } catch (Exception e) {
+            Log.e("Makepad", "shareText failed: " + e.toString());
+        }
+    }
+
     public String pasteFromClipboard() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard.hasPrimaryClip()) {
