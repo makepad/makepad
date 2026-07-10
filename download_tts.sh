@@ -12,10 +12,10 @@
 # Everything lands in the repo root, which is where the loaders look when the
 # apps are run from there (see libs/tts/src/kokoro.rs and libs/voice).
 #
-#   usage: tools/download_tts.sh [--with-whisper]   # whisper is ~1.6 GB, opt-in
+#   usage: ./download_tts.sh [--with-whisper]   # whisper is ~1.6 GB, opt-in
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 KOKORO_URL="https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/kokoro-v1_0.pth"
