@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::xr_physics::{makepad_pose, DepthQuerySource, RapierScene};
+use super::xr_physics::{DepthQuerySource, PhysicsScene};
 use super::*;
 use crate::algorithms::tsdf_query::{
     depth_query_might_need_impact_refresh, depth_query_plane_supports_body, evaluate_tsdf_query,
@@ -297,26 +297,25 @@ impl XrEnv {
 
     fn sync_depth_query_source(
         retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
-        scene: &mut RapierScene,
+        scene: &mut PhysicsScene,
         source: DepthQuerySource,
         snapshot: Option<&TsdfPublishedSnapshot>,
         clear_keys: &mut Vec<u64>,
         expired_retained_keys: &mut Vec<u64>,
     ) {
-        let key = RapierScene::depth_query_key(source.set_index);
-        let Some(body) = scene.bodies.get(source.body) else {
+        let key = PhysicsScene::depth_query_key(source.set_index);
+        if !scene.body_is_valid(source.body) {
             clear_keys.push(key);
             return;
-        };
-        if !body.is_enabled() {
+        }
+        if !scene.body_is_enabled(source.body) {
             scene.sync_depth_query_surface_set(source.set_index, &std::array::from_fn(|_| None));
             clear_keys.push(key);
             return;
         }
-        let body_sleeping = body.is_sleeping();
-        let body_pose = makepad_pose(body.position());
-        let linvel = body.linvel();
-        let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
+        let body_sleeping = scene.body_is_sleeping(source.body);
+        let body_pose = scene.body_pose(source.body);
+        let body_velocity = scene.body_linvel(source.body);
         let gravity = scene.gravity_vector();
 
         let query_request = XrEnv::build_depth_query_request(
@@ -363,7 +362,7 @@ impl XrEnv {
 
     pub(super) fn sync_depth_query_surfaces(
         retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
-        scene: Option<&mut RapierScene>,
+        scene: Option<&mut PhysicsScene>,
         cx: &mut Cx,
     ) {
         if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
@@ -628,7 +627,7 @@ impl XrDepthRuntime {
 }
 
 pub(super) fn clear_depth_query_state_for_scene(
-    scene: Option<&RapierScene>,
+    scene: Option<&PhysicsScene>,
     retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
 ) {
     let _ = scene;
@@ -637,7 +636,7 @@ pub(super) fn clear_depth_query_state_for_scene(
 
 pub(super) fn sync_depth_query_surfaces_with_store(
     retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
-    scene: Option<&mut RapierScene>,
+    scene: Option<&mut PhysicsScene>,
     depth_mesh: &XrTsdfStore,
     floor_y_override: Option<f32>,
 ) {

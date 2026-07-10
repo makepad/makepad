@@ -13,14 +13,16 @@ General Makepad Splash DSL patterns that apply to ANY app body.
 - **`as int` type casting produces NaN** — use string display + `set_text()` only
 - **Colons inside string arguments work correctly** — `"Time: 2:30"` is fine
 - Every `TextInput` must have a fixed numeric height (e.g. `34`)
-- No `on_render` in embedded apps
+- `on_render` works for dynamic lists. Store results in an array, render rows inside a `ScrollYView{on_render: || {...}}`, and call `ui.<view>.render()` after the array changes. Give the scroll view a fixed `height` (e.g. `height: 360`) — a `Fill` height inside a `Fit` parent collapses to zero.
+- **A `:=` id is only a field of its DIRECT parent.** In `Card{ a := Image{} inner := View{ b := Label{} } }`, reach the label as `Card{inner.b.text: "x"}` — `Card{b.text: ...}` fails with "field b not found in type-check". Name every wrapper you need to address through.
+- AI Chat `runsplash` blocks run in a sandbox with `net.http_request`, `http_resource(...)`, `parse_json()`, and `url_encode()` enabled. Use these for HTTP-backed mini apps.
 - **Array / argument / object-body items may be separated by whitespace, newlines, OR commas — all work.** Adjacent values like `{a:1} {b:2}` (or one per line) are TWO separate items. Two object literals next to each other are NEVER "object inherits from object" — to extend/merge an object use `base += {field: val}` or a named prototype `Proto{...}`, not bare `{...}{...}`. (So `let days = [{...} {...} {...}]` correctly yields a 3-element array; a stray earlier bug collapsed comma-less object arrays to length 1.)
 
 ## Widget Availability
 
-**Available:** View, RoundedView, Label, TextInput, LinkLabel, Button, ButtonFlat, ButtonFlatter, Slider, CheckBox, CheckBoxFlat, RadioButton, RadioButtonFlat, ToggleFlat, DropDown, TabBar, Tab, PopupMenu, ScrollBar, ScrollBars, LoadingSpinner, Hr, Vr, Icon
+**Available:** View, RoundedView, SolidView, ScrollYView, Label, TextInput, LinkLabel, Button, ButtonFlat, ButtonFlatter, Slider, CheckBox, CheckBoxFlat, RadioButton, RadioButtonFlat, ToggleFlat, DropDown, TabBar, Tab, PopupMenu, ScrollBar, ScrollBars, LoadingSpinner, Hr, Vr, Icon, Image
 
-**NOT available (silently fail):** Stack, Divider, ProgressBar, IconButton, ToggleButton, Image, ListView, Grid, ColorPicker, ScrollPair
+**NOT available (silently fail):** Stack, Divider, ProgressBar, IconButton, ToggleButton, ListView, Grid, ColorPicker, ScrollPair
 
 | Wanted | Not Available | Use Instead |
 |--------|--------------|-------------|
@@ -80,6 +82,7 @@ RoundedView{width:Fill height:Fit show_bg:true draw_bg.color:#x334
 | **`Button`** | Click → variable write, `set_text()`, `text()` | Standard buttons |
 | **`Label`** | `set_text()` updates visible text, `text()` reads back | Display values, status, dynamic list display |
 | **`TextInput`** | `type_text` fills first input, `text()` reads value, `set_text()` writes | Text entry |
+| **`Image`** | `src: http_resource(url)`, `set_src(http_resource(url))`, `fit: ImageFit.CropToFill/Smallest` | Thumbnails and remote images |
 | **`Hr`** | Full-width line divider | Visual separation |
 | **`RoundedView`** | Container with rounded corners | App root, groups |
 
@@ -237,6 +240,79 @@ input := TextInput{
     on_return: |text| add_item(text)
 }
 Button{text: "Add" width: 64 height: 34 on_click: || add_item(ui.input.text())}
+```
+
+### Networked Image Search
+
+For image-search mini apps in AI Chat, use the built-in network sandbox. Fetch text/JSON with `net.http_request`, parse with `.parse_json()`, and display thumbnails with `Image{src: http_resource(url)}`. Render changing result arrays through `ScrollYView.on_render` and refresh with `ui.results.render()`.
+
+```splash
+let image_results = []
+
+let ResultCard = glass.Card{
+    width: Fill height: Fit
+    flow: Right spacing: 10 padding: 10
+    thumb := Image{width: 92 height: 72 fit: ImageFit.CropToFill}
+    // Name every wrapper you need to reach through: a `:=` id is only a field of its
+    // DIRECT parent. Under an unnamed `View{...}`, `title`/`source` would be unreachable
+    // from `ResultCard{...}` ("field title not found in type-check").
+    info := View{width: Fill height: Fit flow: Down spacing: 3
+        title := glass.Body{text: "" width: Fill}
+        source := glass.Caption{text: ""}
+    }
+}
+
+fn fetch(url, extra_headers){
+    let p = promise()
+    let h = {"User-Agent": "Mozilla/5.0"}
+    if extra_headers != nil { for k, v in extra_headers { h[k] = v } }
+    net.http_request(net.HttpRequest{url: url method: net.HttpMethod.GET headers: h}) do net.HttpEvents{
+        on_response: |res| p.resolve(res)
+        on_error: |_err| p.resolve(nil)
+    }
+    p
+}
+
+fn search_images(query){
+    let clean = ("" + query).trim()
+    if clean == "" { return }
+    ui.status.set_text("Searching...")
+    let q = clean.url_encode()
+    let page = fetch("https://duckduckgo.com/?q=" + q + "&iax=images&ia=images", nil).await()
+    if page == nil { ui.status.set_text("Search failed"); return }
+    let vqd = ""
+    let parts = page.body.to_string().split("vqd=\"")
+    if parts.len() > 1 { vqd = parts[1].split("\"")[0] }
+    if vqd == "" { ui.status.set_text("No image token"); return }
+    let res = fetch("https://duckduckgo.com/i.js?l=us-en&o=json&q=" + q + "&vqd=" + vqd + "&f=,,,,,&p=1", {"Referer": "https://duckduckgo.com/"}).await()
+    if res == nil { ui.status.set_text("No response"); return }
+    let data = res.body.to_string().parse_json()
+    image_results.clear()
+    if data != nil && data.results != nil {
+        for img in data.results {
+            image_results.push({title: img.title source: img.source thumbnail: img.thumbnail})
+        }
+    }
+    ui.status.set_text("" + image_results.len() + " images")
+    ui.results.render()
+}
+
+View{width: Fill height: Fit flow: Down spacing: 12 padding: 16
+    glass.H1{text: "Picture Search"}
+    glass.Card{width: Fill height: Fit flow: Right spacing: 8
+        query := glass.TextInput{width: Fill height: 38 empty_text: "Search images..." on_return: |text| search_images(text)}
+        glass.GlassButtonProminent{text: "Search" height: 38 on_click: || search_images(ui.query.text())}
+    }
+    status := glass.Caption{text: "Type a query"}
+    results := ScrollYView{width: Fill height: 360 flow: Down spacing: 8 on_render: || {
+        if image_results.len() == 0 {
+            glass.Card{glass.Body{text: "Results will appear here."}}
+        }
+        else for item in image_results {
+            ResultCard{thumb.src: http_resource(item.thumbnail) info.title.text: item.title info.source.text: item.source}
+        }
+    }}
+}
 ```
 
 ### Sequential Digit Input

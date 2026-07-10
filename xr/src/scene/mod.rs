@@ -1,3 +1,4 @@
+pub(crate) mod raycast_vehicle;
 pub mod xr_body_spawn;
 pub mod xr_env;
 mod xr_gesture;

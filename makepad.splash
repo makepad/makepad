@@ -79,11 +79,13 @@ let RunStudioExt = RunItem{
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-hello-world"}
     RunStudioRelease{name: "makepad-example-aichat"}
+    RunStudioRelease{name: "makepad-example-box3d"}
     RunStudioRelease{name: "makepad-example-comfyui"}
     RunStudioRelease{name: "makepad-example-browser"}
     RunStudioRelease{name: "makepad-example-charts"}
     RunStudioRelease{name: "makepad-example-windows-blur"}
     RunStudioRelease{name: "makepad-example-splash"}
+    RunStudioRelease{name: "makepad-example-ddgo"}
     RunStudioRelease{name: "makepad-example-slides"}
     RunStudioRelease{name: "makepad-example-isolate"}
     RunAndroid{name: "makepad-example-pdf"}

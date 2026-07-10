@@ -1,4 +1,7 @@
-use crate::makepad_platform::*;
+use crate::{
+    makepad_platform::*,
+    widget_async::{CxSplashVmExt, SplashVmId},
+};
 use makepad_math::Vec4f;
 use std::f64::consts::PI;
 
@@ -284,6 +287,8 @@ pub struct Animator {
     pub next_frame: NextFrame,
     #[rust]
     pub groups: LiveIdMap<LiveId, AnimatorGroup>,
+    #[rust]
+    vm_id: SplashVmId,
     /// Runtime: Current state for each state group
     #[rust]
     current_states: LiveIdMap<LiveId, LiveId>,
@@ -313,6 +318,8 @@ impl ScriptHook for Animator {
         let Some(obj) = value.as_object() else {
             return false;
         };
+        let obj_ref = vm.bx.heap.new_object_ref(obj);
+        self.vm_id = vm.cx_mut().script_ref_vm_id(&obj_ref);
 
         let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {
@@ -389,6 +396,33 @@ impl AnimatorAction {
 }
 
 impl Animator {
+    /// The VM that owns this animator's script objects: the isolate VM of the
+    /// `Splash` the widget was built in, or `MAIN_SPLASH_VM_ID` for the app VM.
+    /// Captured from the animator's own object ref in `on_custom_apply`.
+    pub fn vm_id(&self) -> SplashVmId {
+        self.vm_id
+    }
+
+    /// Apply an animator-produced value to `target` in the VM that owns it.
+    ///
+    /// `cut`/`play`/`handle_event`/`flush_deferred` build their apply object on
+    /// the animator's own heap. Applying it under the plain `cx.with_vm` would
+    /// resolve isolate object pointers against the *app* heap — an out-of-bounds
+    /// index at best, silent cross-VM corruption at worst. So the apply has to
+    /// run under the same VM that produced the value. Called by the `Animator`
+    /// derive; for `MAIN_SPLASH_VM_ID` this is exactly `cx.with_vm`.
+    pub fn apply_value<T: ScriptApply>(
+        cx: &mut Cx,
+        vm_id: SplashVmId,
+        target: &mut T,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        cx.with_script_vm_id(vm_id, |vm| {
+            target.script_apply(vm, &Apply::Animate, scope, value);
+        });
+    }
+
     /// Returns the apply `ScriptObject` for the current state of the given
     /// state group, falling back to the group's default state if no current
     /// state is set yet.
@@ -476,7 +510,8 @@ impl Animator {
             // Update current state
             self.current_states.insert(group_id, target_state_id);
             // Merge target values into state_object
-            cx.with_vm(|vm| {
+            let vm_id = self.vm_id;
+            cx.with_script_vm_id(vm_id, |vm| {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
@@ -501,7 +536,8 @@ impl Animator {
         // once per play() call, NOT during animation frames.
         // The snapshot must be a separate object that won't be mutated during animation.
         // We sample from state_object (current animated values) or fall back to static state apply.
-        let from_snapshot = cx.with_vm(|vm| {
+        let vm_id = self.vm_id;
+        let from_snapshot = cx.with_script_vm_id(vm_id, |vm| {
             let snapshot = vm.bx.heap.new_object();
 
             // Get the default state's apply for fallback values
@@ -600,7 +636,8 @@ impl Animator {
         self.current_states.insert(group_id, target_state_id);
 
         // Merge target values into state_object
-        cx.with_vm(|vm| {
+        let vm_id = self.vm_id;
+        cx.with_script_vm_id(vm_id, |vm| {
             let state_obj = if let Some(ref obj_ref) = self.state_object {
                 obj_ref.as_object()
             } else {
@@ -780,7 +817,8 @@ impl Animator {
             // Process tracks and interpolate into the shared state_object.
             // NOTE: After the first frame, no new objects should be allocated here.
             // The state_object structure is populated on first frame and reused thereafter.
-            let result = cx.with_vm(|vm| {
+            let vm_id = self.vm_id;
+            let result = cx.with_script_vm_id(vm_id, |vm| {
                 // Get or create the shared state object (created once, reused forever)
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
