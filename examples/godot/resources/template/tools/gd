@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Godot control surface. The single entry point the agent uses to drive the game.
+#
+#   tools/gd play [scene]                 launch the game in a window for the player
+#   tools/gd stop                         stop the running game
+#   tools/gd restart [scene]              stop, then play
+#   tools/gd peek                         screenshots of the RUNNING game -> .agent/sheet.png
+#   tools/gd shot <scene> [frames] [tape] background capture (separate instance) -> .agent/sheet.png
+#   tools/gd errors                       errors from the last run
+set -uo pipefail
+
+GODOT="${GODOT:-/Applications/Godot.app/Contents/MacOS/Godot}"
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_DIR="$PROJ/.agent"
+PIDFILE="$AGENT_DIR/game.pid"
+mkdir -p "$AGENT_DIR"
+
+die() { echo "gd: $*" >&2; exit 1; }
+
+# Launch godot WITHOUT stealing focus: agent-driven runs must never yank the
+# desk out from under the kid. LaunchServices (`open -g`) starts the app in the
+# background; direct spawn is the fallback when GODOT isn't an .app bundle.
+# The pid is not reported either way — callers find it with pgrep on a
+# distinctive argument.
+launch_bg() { # <logfile> <godot args...>
+	local log="$1"; shift
+	if [[ "$GODOT" == *.app/* ]]; then
+		open -g -n -a "${GODOT%%.app/*}.app" --stdout "$log" --stderr "$log" --args "$@"
+	else
+		"$GODOT" "$@" >"$log" 2>&1 &
+	fi
+}
+
+wait_for_pid() { # <pgrep pattern> -> pid
+	local pid="" deadline=$(( SECONDS + 15 ))
+	while :; do
+		pid="$(pgrep -nf -- "$1" 2>/dev/null)"
+		[[ -n "$pid" ]] && { echo "$pid"; return 0; }
+		(( SECONDS > deadline )) && return 1
+		sleep 0.2
+	done
+}
+
+cmd_stop() {
+	if [[ -f "$PIDFILE" ]]; then
+		local pid; pid="$(cat "$PIDFILE")"
+		if kill -0 "$pid" 2>/dev/null; then
+			kill "$pid" 2>/dev/null
+			echo "stopped (pid $pid)"
+		fi
+		rm -f "$PIDFILE"
+	else
+		echo "not running"
+	fi
+}
+
+cmd_play() {
+	cmd_stop >/dev/null
+	local args=(--path "$PROJ")
+	[[ $# -ge 1 && -n "${1:-}" ]] && args+=(--scene "$1")
+	"$GODOT" "${args[@]}" >"$AGENT_DIR/play.log" 2>&1 &
+	echo $! >"$PIDFILE"
+	echo "playing (pid $!)"
+}
+
+cmd_peek() {
+	local live="$AGENT_DIR/live"
+	# The peek is answered by the game itself (the AgentEye autoload), so the
+	# game must be running; start it if it is not — in the background, since
+	# the kid didn't ask for a game window to jump in their face.
+	local running=""
+	[[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && running=1
+	if [[ -z "$running" ]]; then
+		launch_bg "$AGENT_DIR/play.log" --path "$PROJ"
+		local pid
+		pid="$(wait_for_pid "--path $PROJ")" || die "game did not start (see .agent/play.log)"
+		echo "$pid" >"$PIDFILE"
+		sleep 2
+	fi
+	rm -rf "$live"
+	: >"$AGENT_DIR/peek_request"
+	local deadline=$(( SECONDS + 12 ))
+	while [[ ! -f "$live/done" ]]; do
+		(( SECONDS > deadline )) && die "peek timed out — game not responding (try tools/gd errors)"
+		sleep 0.2
+	done
+	python3 "$PROJ/tools/sheet.py" "$live" "$AGENT_DIR/sheet.png" 4 4 480 || die "sheet failed"
+	echo "--- state ---"
+	cat "$live/state.txt" 2>/dev/null
+	cmd_errors
+}
+
+cmd_shot() {
+	local scene="${1:-}"
+	[[ -n "$scene" ]] || die "usage: gd shot <res://scene.tscn> [frames] [tape]"
+	local frames="${2:-120}" tape="${3:-}"
+	local cap="$AGENT_DIR/cap"
+	rm -rf "$cap"; mkdir -p "$cap"
+
+	local args=(
+		--path "$PROJ" --scene res://tools/harness.tscn
+		--write-movie "$cap/f.png" --fixed-fps 60 --quit-after "$frames"
+		-- --target "$scene"
+	)
+	[[ -n "$tape" ]] && args+=(--tape "$tape")
+
+	# Background instance so the kid's game keeps focus; harness.gd additionally
+	# marks the capture window unfocusable and moves it offscreen.
+	launch_bg "$AGENT_DIR/shot.log" "${args[@]}"
+	local gpid
+	gpid="$(wait_for_pid "$cap/f.png")" || die "capture did not start (see .agent/shot.log)"
+
+	# Watchdog: a capture that outlives its budget is wedged, not slow — kill it
+	# rather than hanging the caller's turn forever.
+	local deadline=$(( SECONDS + 60 ))
+	while kill -0 "$gpid" 2>/dev/null; do
+		if (( SECONDS > deadline )); then
+			kill -9 "$gpid" 2>/dev/null
+			echo "gd: capture timed out after 60s; killed godot (see .agent/shot.log)" >&2
+			break
+		fi
+		sleep 0.2
+	done
+	python3 "$PROJ/tools/sheet.py" "$cap" "$AGENT_DIR/sheet.png" 8 4 320 || die "sheet failed"
+	echo "--- runtime ---"
+	grep -E "\[harness\]|\[probe\]" "$AGENT_DIR/shot.log" | head -30
+	cmd_errors
+}
+
+cmd_errors() {
+	local log="$AGENT_DIR/shot.log"
+	[[ -f "$AGENT_DIR/play.log" && "$AGENT_DIR/play.log" -nt "$log" ]] && log="$AGENT_DIR/play.log"
+	[[ -f "$log" ]] || { echo "no run log yet"; return 0; }
+	if grep -qE "SCRIPT ERROR|^ERROR:|Program crashed" "$log"; then
+		echo "--- errors ---"
+		grep -E -A2 "SCRIPT ERROR|^ERROR:|Program crashed" "$log" | head -30
+	else
+		echo "--- no errors ---"
+	fi
+}
+
+case "${1:-}" in
+	play)    shift; cmd_play "${1:-}" ;;
+	stop)    cmd_stop ;;
+	restart) shift; cmd_play "${1:-}" ;;
+	peek)    cmd_peek ;;
+	shot)    shift; cmd_shot "$@" ;;
+	errors)  cmd_errors ;;
+	*)       sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+esac

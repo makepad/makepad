@@ -1,0 +1,939 @@
+// sandbox3d.splash v2 — full-parity port of ~/games/my-game (2026-07-09 state).
+//
+// Godot source: scenes/main3d.tscn + scripts/{main3d,player3d,villager3d,critter3d,
+// kissy3d,mini_kissy3d,injured_kissy3d,nightmare3d,nightmare_critter3d,
+// nightmare_huggy3d,huggy3d,mini_huggy3d,giant_dogday3d,baba_chops3d,prototype3d,
+// headcrab3d,animal3d,vehicle3d,bolt3d,sfx}.gd (~3600 active lines).
+// Cast: 44 creatures + 2 trucks, all from main3d._ready()'s spawn tables, with the
+// same names, positions, colors and behavior constants. Terrain: ENGINE noise at
+// full Godot scale (257x257 vertices = 256 cells at 0.625u, freq/amp/terrace/plaza
+// matched, zero eval cost). Grapple hand on the G/pad-B "grab" action. Labels are
+// engine-outlined. Fidelity ledger + gaps: aigame_port_findings.md ("v2 re-port").
+//
+// Dropped (memo'd): cave tunnels (no height-carving API); height-BAND terrain
+// colors (a 257^2 colors array would blow the eval budget — single-color
+// auto-shade instead; engine follow-up memo'd).
+
+// ---- world constants (Godot names + values) ----
+let SPAN = 160.0
+let PLAZA_R = 26.0
+let PLAZA_H = 7.0
+let WATER_Y = 3.5
+
+let SAND = #xd9c780
+let GRASS = #x5cad4c
+let DIRT = #x734f33
+let STONE = #x8c8c9e
+let SNOW = #xf0f5ff
+let WOOD = #x6b4729
+let LEAF = #x3d8c3d
+let GOLD = #xffd133
+let ROCK = #x666675
+let PINK = #xfa8cbf
+let PALE = #xc78c9e
+let DARK = #x1a1a22
+let CREAM = #xf2e2c2
+
+// ---- terrain: engine noise at full Godot scale (main3d._make_heights) ----
+// Godot: FastNoiseLite simplex freq 0.022 world, amp 12, base 12.5, snap 0.5,
+// plaza 26/14/7, clamp [0.5, 26]. Engine mapping: per-cell lattice freq =
+// 0.022 * 0.625; offset 0.5 centers value noise like simplex's [-1,1]*12.
+// amp 30 (vs Godot's effective 24): value noise crowds the middle more than
+// simplex, so overdrive it and let the max-clamp carve snowy plateau peaks.
+// The bands paint Godot's sand/grass/dirt/stone/snow by height — that's what
+// makes the tall edge hills read as a mountain range on the horizon.
+game.terrain({size: SPAN, cells: 257, base: 0.0, smooth: true, water: WATER_Y,
+              seed: 7, freq: 0.01375, offset: 0.5, amp: 30.0, step: 0.5,
+              min: 0.5, max: 26.0,
+              bands: [{h: 3.6, color: SAND}, {h: 13.0, color: GRASS},
+                      {h: 17.5, color: DIRT}, {h: 21.0, color: STONE},
+                      {h: 999.0, color: SNOW}],
+              plaza: {r: PLAZA_R, ramp: 14.0, h: PLAZA_H}})
+
+// Daylight (Godot ProceduralSky colors are the engine defaults).
+game.sky({})
+
+// ---- trees (scenery: the camera boom ignores them, like Godot's layer-16 trees) ----
+let planted = 0
+for t in 0..200 {
+    if planted < 14 {
+        let twx = game.rand_range(-SPAN * 0.5 + 6.0, SPAN * 0.5 - 6.0)
+        let twz = game.rand_range(-SPAN * 0.5 + 6.0, SPAN * 0.5 - 6.0)
+        let th = game.ground_y(twx, twz)
+        if th >= 4.0 && th <= 13.0 && sqrt(twx * twx + twz * twz) > PLAZA_R * 0.7 {
+            game.box({pos: vec3(twx, th + 1.5, twz), size: vec3(0.8, 3.0, 0.8), color: WOOD, tag: "scenery"})
+            game.box({pos: vec3(twx, th + 3.6, twz), size: vec3(3.0, 1.6, 3.0), color: LEAF, tag: "scenery"})
+            game.box({pos: vec3(twx, th + 4.8, twz), size: vec3(1.6, 1.0, 1.6), color: LEAF, tag: "scenery"})
+            planted = planted + 1
+        }
+    }
+}
+
+// ---- the golden goal on the true peak, with its glowing beacon ----
+let peak = game.ground_peak()
+let goal_y = peak.y + 1.4
+game.box({pos: vec3(peak.x, goal_y, peak.z), size: vec3(1.6, 1.6, 1.6),
+          color: GOLD, sensor: true, tag: "goal", glow: 1.2})
+game.box({pos: vec3(peak.x, goal_y + 20.0, peak.z), size: vec3(0.5, 40.0, 0.5),
+          color: #xffe680, sensor: true, glow: 1.5, tag: "scenery"})
+
+// ---- the player (6-part model like player3d._build_model) ----
+let SPEED = 6.0
+let JUMP = 9.0
+let spawn_pos = vec3(-8.0, PLAZA_H + 2.0, 8.0)
+let player = game.mover({pos: spawn_pos, size: vec3(0.9, 1.8, 0.9),
+                         color: #x3d6ef0, tag: "player"})
+game.part(player, {pos: vec3(0.0, 0.75, 0.0), size: vec3(0.55, 0.5, 0.5), color: #xf0c8a0})
+game.part(player, {pos: vec3(-0.14, 0.82, -0.26), size: vec3(0.1, 0.1, 0.05), color: DARK})
+game.part(player, {pos: vec3(0.14, 0.82, -0.26), size: vec3(0.1, 0.1, 0.05), color: DARK})
+game.part(player, {pos: vec3(-0.55, 0.1, 0.0), size: vec3(0.22, 0.8, 0.24), color: #x3d6ef0})
+game.part(player, {pos: vec3(0.55, 0.1, 0.0), size: vec3(0.22, 0.8, 0.24), color: #x3d6ef0})
+game.label(player, "You")
+
+// The adventure camera: behind the player, drag to look, walls pull it in.
+game.camera({third_person: player, height: 1.6, boom: 10.0, pitch: -0.35})
+game.crosshair(true)
+game.text("hint", "WASD/arrows walk - SPACE jump - F zap - G grapple - walk into a truck to drive", {size: 10})
+game.gravity(18)
+
+// ---- HUD flash with a cancel token (main3d._flash) ----
+let flash_id = 0
+fn flash(msg, secs) {
+    game.text(msg)
+    flash_id = flash_id + 1
+    let mine = flash_id
+    game.after(secs, || {
+        if flash_id == mine { game.text("") }
+    })
+}
+
+// ═══════════════════════ the cast ═══════════════════════
+// One actor table; `kind` picks the brain. Records carry all Godot per-actor
+// state (dir, timers, stun, awake, watched, heal, latch...).
+let actors = []
+
+// Common face: brow + two eyes (every Godot model has a face at -z).
+fn add_face(id, size_v, eye_color) {
+    let hy = size_v.y * 0.5
+    game.part(id, {pos: vec3(-size_v.x * 0.22, hy - 0.1, -size_v.z * 0.5), size: vec3(0.12, 0.12, 0.06), color: eye_color})
+    game.part(id, {pos: vec3(size_v.x * 0.22, hy - 0.1, -size_v.z * 0.5), size: vec3(0.12, 0.12, 0.06), color: eye_color})
+}
+
+fn home_y(x, z, tall) { return game.ground_y(x, z) + tall + 1.0 }
+
+fn add_actor(kind, name, x, z, color, speed, size_v, tall) {
+    let id = game.mover({pos: vec3(x, home_y(x, z, tall), z), size: size_v, color: color, tag: kind})
+    game.label(id, name)
+    let a = {id: id, kind: kind, name: name, color: color, speed: speed,
+             sx: size_v.x, sy: size_v.y, sz: size_v.z,
+             dir_x: 0.0, dir_z: 0.0, timer: game.rand_range(0.8, 2.5),
+             spawn_x: x, spawn_z: z, hop_timer: game.rand_range(0.4, 1.4),
+             tall: tall,
+             stun: 0.0, awake: false, riding: false, healed: false, heal: 0.0,
+             latched: false, latch_t: 0.0, call_t: game.rand_range(4.0, 14.0),
+             eye_l: 0, eye_r: 0, arm_l: 0, arm_r: 0, glow_e: 0.0,
+             sfx: "", pitch_lo: 1.0, pitch_hi: 1.0}
+    actors.push(a)
+    return a
+}
+
+// -- villagers (villager3d: wander, chase-greet, board trucks) --
+fn add_villager(name, x, z, shirt, speed) {
+    let a = add_actor("villager", name, x, z, shirt, speed, vec3(0.7, 1.6, 0.7), 0.8)
+    game.part(a.id, {pos: vec3(0.0, 0.65, 0.0), size: vec3(0.5, 0.45, 0.45), color: #xf0c8a0})
+    add_face(a.id, vec3(0.7, 1.6, 0.7), DARK)
+    game.part(a.id, {pos: vec3(-0.42, 0.1, 0.0), size: vec3(0.18, 0.7, 0.2), color: shirt})
+    game.part(a.id, {pos: vec3(0.42, 0.1, 0.0), size: vec3(0.18, 0.7, 0.2), color: shirt})
+    return a
+}
+add_villager("Ann", -6.0, 4.0, #xe85959, 2.4)
+add_villager("Bo", -12.0, -2.0, #x598ceb, 3.0)
+add_villager("Cleo", 9.0, 2.0, #xf2b840, 2.2)
+add_villager("Dev", 13.0, -6.0, #x9966d9, 3.4)
+add_villager("Elsie", 4.0, 11.0, #x4dbf99, 2.0)
+
+// -- the Smiling Critters (critter3d: bouncy, want to be near you) --
+fn add_critter(name, x, z, fur, speed) {
+    let a = add_actor("critter", name, x, z, fur, speed, vec3(0.6, 1.5, 0.6), 0.75)
+    game.part(a.id, {pos: vec3(0.0, 0.9, 0.0), size: vec3(0.62, 0.5, 0.55), color: fur})
+    add_face(a.id, vec3(0.6, 1.9, 0.6), DARK)
+    game.part(a.id, {pos: vec3(-0.28, 1.25, 0.0), size: vec3(0.14, 0.3, 0.1), color: fur})
+    game.part(a.id, {pos: vec3(0.28, 1.25, 0.0), size: vec3(0.14, 0.3, 0.1), color: fur})
+    game.part(a.id, {pos: vec3(0.0, 0.62, -0.3), size: vec3(0.3, 0.08, 0.06), color: #x662222})
+    return a
+}
+add_critter("DogDay", -3.0, 6.0, #xff9926, 3.4)
+add_critter("CatNap", -13.0, -3.0, #x9459d9, 3.0)
+add_critter("Bubba", 3.0, 9.0, #x59bf66, 2.8)
+add_critter("Hoppy", 7.0, 3.0, #xff80b8, 3.6)
+add_critter("Bobby", -1.0, -7.0, #xf25966, 3.1)
+add_critter("Crafty", 10.0, 6.0, #x59b3e6, 3.3)
+add_critter("PickyPiggy", -6.0, 11.0, #xffb8d1, 2.9)
+add_critter("KickinChicken", 5.0, -5.0, #xffde4d, 3.9)
+
+// -- Kissy Missy, bodyguard (kissy3d) + MiniKissy --
+fn add_kissy(kind, name, x, z, size_v, tall, speed) {
+    let a = add_actor(kind, name, x, z, PINK, speed, size_v, tall)
+    game.part(a.id, {pos: vec3(0.0, size_v.y * 0.42, 0.0), size: vec3(size_v.x * 0.9, size_v.y * 0.28, size_v.z * 0.9), color: PINK})
+    add_face(a.id, size_v, DARK)
+    game.part(a.id, {pos: vec3(0.0, size_v.y * 0.28, -size_v.z * 0.5), size: vec3(0.22, 0.14, 0.08), color: #xd94f7a})
+    a.arm_l = game.part(a.id, {pos: vec3(-size_v.x * 0.62, 0.2, 0.0), size: vec3(0.2, size_v.y * 0.45, 0.22), color: PINK})
+    a.arm_r = game.part(a.id, {pos: vec3(size_v.x * 0.62, 0.2, 0.0), size: vec3(0.2, size_v.y * 0.45, 0.22), color: PINK})
+    return a
+}
+let kissy = add_kissy("kissy", "Kissy", -9.0, 5.0, vec3(0.9, 2.4, 0.7), 1.2, 4.6)
+add_kissy("kissy", "MiniKissy", -10.5, 6.5, vec3(0.5, 1.2, 0.4), 0.6, 3.8)
+
+// -- Injured Kissy (injured_kissy3d: heal her, she joins the friends) --
+let injured = add_kissy("injured", "InjuredKissy", -4.0, 12.0, vec3(0.9, 2.4, 0.7), 1.2, 4.4)
+game.set_color(injured.id, PALE)
+injured.color = PALE
+let heal_label = game.label(injured.id, "stay with me", {height: 2.6, color: #xff9999, size: 11})
+game.scale(injured.id, vec3(1.0, 0.88, 1.0))
+
+// -- Huggy and his pack (huggy3d + mini_huggy3d: they hunt, Kissy defends) --
+fn add_huggy(kind, name, x, z, size_v, tall, speed, fur) {
+    let a = add_actor(kind, name, x, z, fur, speed, size_v, tall)
+    game.part(a.id, {pos: vec3(0.0, size_v.y * 0.42, 0.0), size: vec3(size_v.x * 1.05, size_v.y * 0.26, size_v.z * 1.05), color: fur})
+    add_face(a.id, size_v, #xf2f230)
+    game.part(a.id, {pos: vec3(0.0, size_v.y * 0.3, -size_v.z * 0.52), size: vec3(size_v.x * 0.5, 0.12, 0.1), color: #xcc2222})
+    a.arm_l = game.part(a.id, {pos: vec3(-size_v.x * 0.62, 0.2, 0.0), size: vec3(0.2, size_v.y * 0.5, 0.22), color: fur})
+    a.arm_r = game.part(a.id, {pos: vec3(size_v.x * 0.62, 0.2, 0.0), size: vec3(0.2, size_v.y * 0.5, 0.22), color: fur})
+    return a
+}
+add_huggy("huggy", "Huggy", -4.0, -15.0, vec3(1.0, 2.6, 0.8), 1.3, 3.4, #x2a7fd4)
+add_huggy("minihuggy", "MiniHuggy1", -6.0, -14.5, vec3(0.5, 1.3, 0.4), 0.65, 3.0, #x4499e0)
+add_huggy("minihuggy", "MiniHuggy2", -2.0, -15.0, vec3(0.5, 1.3, 0.4), 0.65, 3.0, #x4499e0)
+add_huggy("minihuggy", "MiniHuggy3", -4.5, -16.0, vec3(0.5, 1.3, 0.4), 0.65, 3.0, #x4499e0)
+
+// -- Nightmare Huggy (nightmare_huggy3d: relentless, arms reach out) --
+let nhuggy = add_huggy("nightmarehuggy", "NightmareHuggy", -30.0, -30.0, vec3(1.3, 3.7, 0.9), 1.85, 3.2, #x232333)
+game.glow(nhuggy.eye_l, 0.0)
+nhuggy.eye_l = game.part(nhuggy.id, {pos: vec3(-0.28, 1.6, -0.48), size: vec3(0.16, 0.16, 0.06), color: #xff3333, glow: 3.0})
+nhuggy.eye_r = game.part(nhuggy.id, {pos: vec3(0.28, 1.6, -0.48), size: vec3(0.16, 0.16, 0.06), color: #xff3333, glow: 3.0})
+
+// -- Nightmare CatNap (nightmare3d: sleeps curled, hunts when close) --
+let catnap = add_actor("catnap", "NightmareCatNap", 24.0, 16.0, #x59468c, 5.2, vec3(1.2, 3.4, 1.0), 1.7)
+game.part(catnap.id, {pos: vec3(0.0, 1.5, 0.0), size: vec3(1.1, 0.9, 0.95), color: #x59468c})
+game.part(catnap.id, {pos: vec3(-0.4, 2.1, 0.0), size: vec3(0.22, 0.4, 0.12), color: #x59468c})
+game.part(catnap.id, {pos: vec3(0.4, 2.1, 0.0), size: vec3(0.22, 0.4, 0.12), color: #x59468c})
+catnap.eye_l = game.part(catnap.id, {pos: vec3(-0.26, 1.55, -0.5), size: vec3(0.16, 0.1, 0.06), color: #xbb66ff, glow: 1.5})
+catnap.eye_r = game.part(catnap.id, {pos: vec3(0.26, 1.55, -0.5), size: vec3(0.16, 0.1, 0.06), color: #xbb66ff, glow: 1.5})
+game.scale(catnap.id, vec3(1.0, 0.6, 1.0))
+
+// -- nightmare critters (nightmare_critter3d: creep in, nip, bounce you) --
+fn add_ncritter(name, x, z, fur, speed) {
+    let a = add_actor("nightmarecritter", name, x, z, fur, speed, vec3(0.65, 1.6, 0.65), 0.8)
+    game.part(a.id, {pos: vec3(0.0, 0.95, 0.0), size: vec3(0.66, 0.5, 0.6), color: fur})
+    a.eye_l = game.part(a.id, {pos: vec3(-0.2, 1.05, -0.32), size: vec3(0.12, 0.1, 0.05), color: #xff4444, glow: 2.5})
+    a.eye_r = game.part(a.id, {pos: vec3(0.2, 1.05, -0.32), size: vec3(0.12, 0.1, 0.05), color: #xff4444, glow: 2.5})
+    game.part(a.id, {pos: vec3(0.0, 0.75, -0.32), size: vec3(0.34, 0.07, 0.05), color: #xf2f2f2})
+    return a
+}
+add_ncritter("NightmareDogDay", 30.0, -18.0, #x6b3819, 4.8)
+add_ncritter("NightmareHoppy", -30.0, -22.0, #x662947, 5.0)
+add_ncritter("NightmareBubba", -26.0, 26.0, #x295233, 4.4)
+add_ncritter("NightmareBobby", 28.0, 24.0, #x6b2429, 4.7)
+
+// -- Baba Chops (baba_chops3d: the ram; fire eyes flare as she closes) --
+let baba = add_actor("baba", "BabaChops", 26.0, -24.0, #x2b2b30, 4.0, vec3(1.8, 2.8, 2.6), 1.4)
+game.part(baba.id, {pos: vec3(0.0, 1.15, 0.0), size: vec3(2.0, 1.1, 2.8), color: #x141418})
+game.part(baba.id, {pos: vec3(0.0, 1.0, -1.5), size: vec3(0.9, 0.8, 0.7), color: #xe8e2d5})
+game.part(baba.id, {pos: vec3(0.0, 0.8, -1.95), size: vec3(0.5, 0.45, 0.5), color: #xe8e2d5})
+baba.eye_l = game.part(baba.id, {pos: vec3(-0.26, 1.15, -1.85), size: vec3(0.16, 0.14, 0.06), color: #xff6619, glow: 2.0})
+baba.eye_r = game.part(baba.id, {pos: vec3(0.26, 1.15, -1.85), size: vec3(0.16, 0.14, 0.06), color: #xff6619, glow: 2.0})
+game.part(baba.id, {pos: vec3(-0.62, 1.55, -1.4), size: vec3(0.24, 0.24, 0.5), color: #xd9d2c2})
+game.part(baba.id, {pos: vec3(0.62, 1.55, -1.4), size: vec3(0.24, 0.24, 0.5), color: #xd9d2c2})
+game.part(baba.id, {pos: vec3(-0.78, 1.3, -1.1), size: vec3(0.2, 0.2, 0.4), color: #xd9d2c2})
+game.part(baba.id, {pos: vec3(0.78, 1.3, -1.1), size: vec3(0.2, 0.2, 0.4), color: #xd9d2c2})
+for bl in 0..4 {
+    let lx = -0.7 + floor(bl / 2.0) * 1.4
+    let lz = -0.8 + (bl % 2) * 1.6
+    game.part(baba.id, {pos: vec3(lx, -0.9, lz), size: vec3(0.32, 1.0, 0.32), color: #x141418})
+}
+
+// -- the Prototype (prototype3d: only moves when you're not looking) --
+let proto = add_actor("prototype", "Prototype", -6.0, 40.0, #x8a8f99, 4.2, vec3(1.2, 3.6, 1.0), 1.8)
+game.part(proto.id, {pos: vec3(0.0, 1.55, 0.0), size: vec3(0.9, 0.75, 0.8), color: #x707684})
+proto.eye_l = game.part(proto.id, {pos: vec3(0.0, 1.6, -0.44), size: vec3(0.3, 0.12, 0.06), color: #xffb020, glow: 1.5})
+proto.eye_r = proto.eye_l
+game.part(proto.id, {pos: vec3(0.75, 0.3, 0.0), size: vec3(0.34, 1.5, 0.4), color: #xa03030})
+game.part(proto.id, {pos: vec3(0.75, -0.55, -0.25), size: vec3(0.44, 0.3, 0.6), color: #xc04040})
+game.part(proto.id, {pos: vec3(-0.7, 0.3, 0.0), size: vec3(0.26, 1.3, 0.3), color: #x707684})
+
+// -- Giant DogDay, the guardian (giant_dogday3d, model scale 1.9) --
+let dogday = add_actor("dogday", "GiantDogDay", -16.0, 2.0, #xf29a33, 3.2, vec3(3.2, 7.6, 2.5), 3.8)
+game.part(dogday.id, {pos: vec3(0.0, 0.4, -0.4), size: vec3(1.7, 1.5, 0.9), color: CREAM})
+game.part(dogday.id, {pos: vec3(0.0, 2.4, 0.0), size: vec3(1.9, 1.5, 1.6), color: #xf29a33})
+game.part(dogday.id, {pos: vec3(0.0, 2.1, -1.0), size: vec3(0.9, 0.7, 0.7), color: CREAM})
+game.part(dogday.id, {pos: vec3(0.0, 2.25, -1.4), size: vec3(0.3, 0.25, 0.25), color: DARK})
+dogday.eye_l = game.part(dogday.id, {pos: vec3(-0.5, 2.7, -0.85), size: vec3(0.26, 0.26, 0.08), color: DARK})
+dogday.eye_r = game.part(dogday.id, {pos: vec3(0.5, 2.7, -0.85), size: vec3(0.26, 0.26, 0.08), color: DARK})
+dogday.arm_l = game.part(dogday.id, {pos: vec3(-1.25, 3.1, 0.0), size: vec3(0.5, 1.1, 0.5), color: #xf29a33})
+dogday.arm_r = game.part(dogday.id, {pos: vec3(1.25, 3.1, 0.0), size: vec3(0.5, 1.1, 0.5), color: #xf29a33})
+game.part(dogday.id, {pos: vec3(-1.05, -1.6, 0.0), size: vec3(0.6, 1.6, 0.7), color: #xf29a33})
+game.part(dogday.id, {pos: vec3(1.05, -1.6, 0.0), size: vec3(0.6, 1.6, 0.7), color: #xf29a33})
+game.part(dogday.id, {pos: vec3(0.0, -0.6, 1.3), size: vec3(0.35, 0.35, 1.0), color: #xf29a33})
+for sb in 0..8 {
+    let sa = sb * 0.785398
+    game.part(dogday.id, {pos: vec3(sin(sa) * 0.85, 1.55, cos(sa) * 0.85 - 0.2),
+                          size: vec3(0.3, 0.3, 0.3), color: #xffd94d, glow: 0.6})
+}
+game.scale(dogday.id, 1.9)
+
+// -- headcrabs (headcrab3d: scuttle, leap, ride your head; jump to shake off) --
+fn add_headcrab(name, x, z) {
+    let a = add_actor("headcrab", name, x, z, #xc9a06a, 3.2, vec3(0.6, 0.6, 0.55), 0.3)
+    game.part(a.id, {pos: vec3(0.0, 0.22, 0.0), size: vec3(0.62, 0.3, 0.58), color: #xb8905c})
+    game.part(a.id, {pos: vec3(0.0, -0.05, 0.0), size: vec3(0.45, 0.2, 0.42), color: #xd9b985})
+    for hl in 0..4 {
+        let hx = -0.3 + floor(hl / 2.0) * 0.6
+        let hz = -0.2 + (hl % 2) * 0.4
+        game.part(a.id, {pos: vec3(hx, -0.2, hz), size: vec3(0.1, 0.28, 0.1), color: #xa07d4d})
+    }
+    game.part(a.id, {pos: vec3(-0.12, -0.12, -0.3), size: vec3(0.07, 0.22, 0.07), color: #xe8d5b0})
+    game.part(a.id, {pos: vec3(0.12, -0.12, -0.3), size: vec3(0.07, 0.22, 0.07), color: #xe8d5b0})
+    return a
+}
+add_headcrab("Headcrab1", 7.0, 13.0)
+add_headcrab("Headcrab2", -15.0, -9.0)
+add_headcrab("Headcrab3", 15.0, 11.0)
+
+// -- farm animals (animal3d: graze, shy, call out in their own voices) --
+fn add_animal(kind, name, x, z, body, leg, size_m, call_sfx, plo, phi) {
+    let a = add_actor("animal", name, x, z, body, game.rand_range(1.8, 2.6),
+                      vec3(0.7 * size_m, 1.1 * size_m, 1.2 * size_m), 0.55 * size_m)
+    a.sfx = call_sfx
+    a.pitch_lo = plo
+    a.pitch_hi = phi
+    game.part(a.id, {pos: vec3(0.0, 0.45 * size_m, -0.62 * size_m), size: vec3(0.42 * size_m, 0.4 * size_m, 0.4 * size_m), color: body})
+    add_face(a.id, vec3(0.7 * size_m, 1.7 * size_m, 1.24 * size_m), DARK)
+    for al in 0..4 {
+        let ax = (-0.22 + floor(al / 2.0) * 0.44) * size_m
+        let az = (-0.4 + (al % 2) * 0.8) * size_m
+        game.part(a.id, {pos: vec3(ax, -0.7 * size_m, az), size: vec3(0.16 * size_m, 0.5 * size_m, 0.16 * size_m), color: leg})
+    }
+    if kind == "pig" {
+        game.part(a.id, {pos: vec3(0.0, 0.4 * size_m, -0.88 * size_m), size: vec3(0.2, 0.14, 0.1), color: #xdb8c99})
+    }
+    if kind == "cow" {
+        game.part(a.id, {pos: vec3(-0.2 * size_m, 0.72 * size_m, -0.6 * size_m), size: vec3(0.1, 0.18, 0.1), color: #xd9d2c2})
+        game.part(a.id, {pos: vec3(0.2 * size_m, 0.72 * size_m, -0.6 * size_m), size: vec3(0.1, 0.18, 0.1), color: #xd9d2c2})
+        game.part(a.id, {pos: vec3(0.15 * size_m, 0.1 * size_m, 0.2 * size_m), size: vec3(0.34 * size_m, 0.3 * size_m, 0.4 * size_m), color: #x3d3833})
+    }
+    if kind == "chicken" {
+        game.part(a.id, {pos: vec3(0.0, 0.62 * size_m, -0.6 * size_m), size: vec3(0.08, 0.12, 0.06), color: #xe03030})
+        game.part(a.id, {pos: vec3(0.0, 0.42 * size_m, -0.92 * size_m), size: vec3(0.08, 0.08, 0.14), color: #xf2b830})
+    }
+    return a
+}
+add_animal("pig", "pig1", -20.0, 14.0, #xf2a6b3, #xd9808c, 1.0, "moo", 1.0, 1.2)
+add_animal("pig", "pig2", -17.0, 17.0, #xf2a6b3, #xd9808c, 1.0, "moo", 1.0, 1.2)
+add_animal("cow", "cow3", 18.0, 16.0, #xede9e0, #x59524a, 1.15, "moo", 0.7, 0.85)
+add_animal("cow", "cow4", 21.0, 12.0, #xede9e0, #x59524a, 1.15, "moo", 0.7, 0.85)
+add_animal("sheep", "sheep5", -19.0, -14.0, #xe6e0d6, #x59524a, 1.0, "moo", 1.3, 1.5)
+add_animal("sheep", "sheep6", -22.0, -11.0, #xe6e0d6, #x59524a, 1.0, "moo", 1.3, 1.5)
+add_animal("sheep", "sheep7", -16.0, -17.0, #xe6e0d6, #x59524a, 1.0, "moo", 1.3, 1.5)
+add_animal("chicken", "chicken8", 16.0, -15.0, #xf7f5f0, #xf2bf33, 1.0, "squeak", 1.8, 2.2)
+add_animal("chicken", "chicken9", 19.0, -12.0, #xf7f5f0, #xf2bf33, 1.0, "squeak", 1.8, 2.2)
+add_animal("chicken", "chicken10", 13.0, -18.0, #xf7f5f0, #xf2bf33, 1.0, "squeak", 1.8, 2.2)
+
+// -- trucks (vehicle3d; seat mount, passengers pile in) --
+let vehicles = []
+fn add_vehicle(name, x, z, color, top_speed) {
+    let id = game.mover({pos: vec3(x, PLAZA_H + 1.0, z), size: vec3(2.0, 1.4, 3.4),
+                         color: color, tag: "vehicle"})
+    game.part(id, {pos: vec3(0.0, 0.9, 0.4), size: vec3(1.8, 0.7, 1.6), color: color})
+    for wl in 0..4 {
+        let wx = -0.95 + floor(wl / 2.0) * 1.9
+        let wz = -1.1 + (wl % 2) * 2.2
+        game.part(id, {pos: vec3(wx, -0.6, wz), size: vec3(0.3, 0.6, 0.6), color: DARK})
+    }
+    game.label(id, name)
+    vehicles.push({id: id, top_speed: top_speed, cooldown: 0.0, passengers: []})
+    return id
+}
+add_vehicle("Car", -6.0, 1.0, #xe63333, 9.0)
+add_vehicle("Truck", 8.0, -8.0, #x4080e6, 7.5)
+
+// ═══════════════════════ game state ═══════════════════════
+let driving = 0
+let shoot_cd = 0.0
+let won = false
+let ridden_by = 0          // headcrab actor id currently on the player's head
+let dogday_beam_t = 0.0    // bonk flash: beam re-issued while > 0
+let dogday_beam_from = vec3(0.0, 0.0, 0.0)
+let dogday_beam_to = vec3(0.0, 0.0, 0.0)
+
+// grapple hand (grab_hand3d): G fires a hand at 32 u/s to range 16 on a cable.
+// Hitting ground/terrain yanks the player; hitting a creature hauls it back.
+let grap_active = false
+let grap_x = 0.0
+let grap_y = 0.0
+let grap_z = 0.0
+let grap_dx = 0.0
+let grap_dz = 0.0
+let grap_dist = 0.0
+let grap_cd = 0.0
+let grap_haul = 0          // actor id being hauled, 0 = none
+let grap_haul_t = 0.0
+
+fn send_home(reason) {
+    game.set_pos(player, spawn_pos)
+    if ridden_by != 0 {
+        for a in actors { if a.id == ridden_by { drop_crab(a) } }
+    }
+    flash(reason, 1.6)
+}
+
+fn drop_crab(a) {
+    game.detach(a.id)
+    game.speed_mult(player, 1.0)
+    a.latched = false
+    a.stun = 2.5
+    ridden_by = 0
+    let pp = game.pos(player)
+    game.set_pos(a.id, vec3(pp.x + game.rand_range(-2.0, 2.0), pp.y + 1.0, pp.z + game.rand_range(-2.0, 2.0)))
+    game.set_vel(a.id, vec3(game.rand_range(-4.0, 4.0), 3.0, game.rand_range(-4.0, 4.0)))
+    game.sfx("shove", 1.4)
+}
+
+// zap contract (bolt3d duck-dispatch): stun + retreat home for every threat kind.
+fn zap_actor(a) {
+    a.stun = 4.5
+    a.awake = false
+    if a.latched { drop_crab(a) }
+    game.set_pos(a.id, vec3(a.spawn_x, home_y(a.spawn_x, a.spawn_z, a.tall), a.spawn_z))
+    game.sfx("zap")
+    flash("ZAPPED!", 1.2)
+}
+
+fn is_threat_kind(k) {
+    return k == "huggy" || k == "minihuggy" || k == "nightmarehuggy" ||
+           k == "nightmarecritter" || k == "baba" || k == "catnap" ||
+           k == "headcrab" || k == "prototype"
+}
+
+// shared wander/chase brain (villager3d/critter3d/animal3d common core)
+fn wanderer_tick(a, dt, px, pz) {
+    let p = game.pos(a.id)
+    let dx = px - p.x
+    let dz = pz - p.z
+    let gap = sqrt(dx * dx + dz * dz)
+    let chasing = false
+    let range = 12.0
+    if a.kind == "critter" { range = 13.0 }
+    if a.kind == "animal" { range = 0.0 }
+    if range > 0.0 && gap < range {
+        chasing = true
+        if gap < 1.6 {
+            a.dir_x = 0.0
+            a.dir_z = 0.0
+        } else {
+            a.dir_x = dx / gap
+            a.dir_z = dz / gap
+        }
+    }
+    // Animals: shy — bolt away when crowded (animal3d SHY_DIST 4.5, bolt 4.4).
+    if a.kind == "animal" && gap < 4.5 && gap > 0.01 {
+        chasing = true
+        a.dir_x = 0.0 - dx / gap
+        a.dir_z = 0.0 - dz / gap
+        game.walk(a.id, a.dir_x * 4.4, a.dir_z * 4.4)
+    }
+    if !chasing {
+        a.timer = a.timer - dt
+        if a.timer <= 0.0 {
+            a.timer = game.rand_range(0.8, 2.5)
+            let roll = floor(game.rand_range(0.0, 4.0))
+            if roll < 1.0 {
+                a.dir_x = 0.0
+                a.dir_z = 0.0
+            } else {
+                let ang = game.rand_range(0.0, 2.0 * PI)
+                a.dir_x = cos(ang)
+                a.dir_z = sin(ang)
+            }
+        }
+    }
+    if !(a.kind == "animal" && chasing) {
+        let boost = 1.0
+        if chasing && a.kind == "villager" { boost = 1.6 }
+        game.walk(a.id, a.dir_x * a.speed * boost, a.dir_z * a.speed * boost)
+    }
+    if a.kind == "critter" && (a.dir_x != 0.0 || a.dir_z != 0.0) {
+        a.hop_timer = a.hop_timer - dt
+        if a.hop_timer <= 0.0 && game.on_floor(a.id) {
+            a.hop_timer = game.rand_range(0.6, 1.4)
+            game.jump(a.id, 6.0)
+            if game.rand() < 0.2 { game.sfx("squeak", game.rand_range(0.85, 1.25)) }
+        }
+    }
+    // Animal calls, in their own voices (animal3d 4-14 s).
+    if a.kind == "animal" {
+        a.call_t = a.call_t - dt
+        if a.call_t <= 0.0 {
+            a.call_t = game.rand_range(4.0, 14.0)
+            game.sfx(a.sfx, game.rand_range(a.pitch_lo, a.pitch_hi))
+        }
+    }
+    if p.y < -25.0 {
+        game.set_pos(a.id, vec3(a.spawn_x, home_y(a.spawn_x, a.spawn_z, a.tall), a.spawn_z))
+    }
+}
+
+// hunter brain: walk straight at the player (nightmare kinds).
+fn hunt_step(a, speed, px, pz) {
+    let p = game.pos(a.id)
+    let dx = px - p.x
+    let dz = pz - p.z
+    let d = sqrt(dx * dx + dz * dz)
+    if d > 0.01 {
+        game.walk(a.id, dx / d * speed, dz / d * speed)
+        if game.on_floor(a.id) && game.rand() < 0.03 { game.jump(a.id, 6.5) }
+    }
+    return d
+}
+
+game.on_tick(|dt, input| {
+    let ppos = game.pos(player)
+    let pvel = game.vel(player)
+    shoot_cd = shoot_cd - dt
+
+    // ---- player ----
+    if driving == 0 {
+        game.walk(player, input.move_x * SPEED, input.move_z * SPEED)
+        if input.jump_pressed && game.on_floor(player) {
+            game.jump(player, JUMP)
+            game.sfx("jump")
+        }
+        if ppos.y < -25.0 { send_home("CAREFUL OUT THERE!") }
+        for v in vehicles {
+            if driving == 0 && v.cooldown <= 0.0 && ridden_by == 0 && game.distance(player, v.id) < 2.9 {
+                driving = v.id
+                game.attach(player, v.id, vec3(0.0, 1.8, 0.0))
+                game.sfx("board")
+            }
+        }
+    } else {
+        for v in vehicles {
+            if v.id == driving {
+                game.walk(v.id, input.move_x * v.top_speed, input.move_z * v.top_speed)
+                v.cooldown = v.cooldown - dt
+                if input.jump_pressed && v.cooldown <= -0.4 {
+                    let vp = game.pos(v.id)
+                    game.detach(player)
+                    game.set_pos(player, vec3(vp.x + 3.4, vp.y + 1.0, vp.z))
+                    for pass in v.passengers {
+                        game.detach(pass)
+                        game.set_pos(pass, vec3(vp.x - 2.0, vp.y + 1.2, vp.z + 1.6))
+                    }
+                    v.passengers = []
+                    v.cooldown = 0.6
+                    driving = 0
+                }
+            }
+        }
+    }
+    for v in vehicles {
+        if v.id != driving { v.cooldown = v.cooldown - dt }
+    }
+
+    // F: zap bolt, level, the way the camera faces (player3d._shoot).
+    if input.shoot_pressed && shoot_cd <= 0.0 && driving == 0 {
+        shoot_cd = 0.3
+        game.sfx("shoot")
+        let cam = game.cam_yaw()
+        let ax = sin(cam)
+        let az = 0.0 - cos(cam)
+        game.spawn({pos: vec3(ppos.x + ax * 1.2, ppos.y + 1.3, ppos.z + az * 1.2),
+                    vel: vec3(ax * 26.0, 0.0, az * 26.0),
+                    size: vec3(0.3, 0.3, 0.3), color: #x66ffff, glow: 2.0,
+                    gravity: 0, life: 2.0, hits: true, tag: "bolt"})
+    }
+
+    // DogDay's bonk flash: a golden arc while the timer runs.
+    if dogday_beam_t > 0.0 {
+        dogday_beam_t = dogday_beam_t - dt
+        game.beam(dogday_beam_from, dogday_beam_to, {size: 0.18, color: #xffd94d, glow: 2.0})
+    }
+
+    // ---- grapple hand (grab_hand3d): G fires it the way the camera faces ----
+    grap_cd = grap_cd - dt
+    if input.grab_pressed && grap_cd <= 0.0 && !grap_active && grap_haul == 0 && driving == 0 {
+        let cam = game.cam_yaw()
+        grap_dx = sin(cam)
+        grap_dz = 0.0 - cos(cam)
+        grap_x = ppos.x + grap_dx * 1.2
+        grap_y = ppos.y + 1.3
+        grap_z = ppos.z + grap_dz * 1.2
+        grap_dist = 0.0
+        grap_active = true
+        grap_cd = 0.6
+        game.sfx("whip")
+    }
+    if grap_active {
+        grap_x = grap_x + grap_dx * 32.0 * dt
+        grap_z = grap_z + grap_dz * 32.0 * dt
+        grap_dist = grap_dist + 32.0 * dt
+        game.beam(vec3(ppos.x + grap_dx * 0.6, ppos.y + 1.1, ppos.z + grap_dz * 0.6),
+                  vec3(grap_x, grap_y, grap_z), {size: 0.12, color: STONE})
+        // creature hit: haul it back (grab_hand3d CharacterBody3D branch)
+        for t in actors {
+            if grap_active && !t.riding && !t.latched {
+                let tp = game.pos(t.id)
+                let gx = tp.x - grap_x
+                let gy = tp.y - grap_y
+                let gz = tp.z - grap_z
+                if gx * gx + gy * gy + gz * gz < 1.6 {
+                    grap_active = false
+                    grap_haul = t.id
+                    grap_haul_t = 1.2
+                    t.riding = true
+                    game.attach(t.id, player, {pos: vec3(0.0, 0.6, -1.3), mode: "ride"})
+                    game.sfx("grab")
+                }
+            }
+        }
+        // ground/terrain hit: yank the player (StaticBody3D branch)
+        if grap_active && grap_y <= game.ground_y(grap_x, grap_z) + 0.2 {
+            grap_active = false
+            let px = grap_x - ppos.x
+            let py = grap_y - ppos.y
+            let pz = grap_z - ppos.z
+            let pd = sqrt(px * px + py * py + pz * pz) + 0.001
+            game.set_vel(player, vec3(px / pd * 22.0, py / pd * 22.0 + 6.5, pz / pd * 22.0))
+            game.sfx("clank")
+        }
+        if grap_active && grap_dist >= 16.0 { grap_active = false }
+    }
+    // hauled creature: hold briefly, then set it down at the player's feet
+    if grap_haul != 0 {
+        grap_haul_t = grap_haul_t - dt
+        if grap_haul_t <= 0.0 {
+            for t in actors {
+                if t.id == grap_haul {
+                    game.detach(t.id)
+                    t.riding = false
+                    let fp = game.pos(player)
+                    game.set_pos(t.id, vec3(fp.x + grap_dx * 1.8, fp.y + 0.5, fp.z + grap_dz * 1.8))
+                    game.set_vel(t.id, vec3(0.0, 4.0, 0.0))
+                }
+            }
+            grap_haul = 0
+        }
+    }
+
+    // ---- the cast ----
+    for a in actors {
+        if a.stun > 0.0 {
+            a.stun = a.stun - dt
+            game.walk(a.id, 0.0, 0.0)
+        } else if a.riding {
+            // aboard a truck
+        } else if a.latched {
+            // riding the player's head: timer or a jump shakes it off (headcrab3d)
+            a.latch_t = a.latch_t - dt
+            if a.latch_t <= 0.0 || pvel.y > 5.0 { drop_crab(a) }
+        } else if a.kind == "villager" || a.kind == "critter" || a.kind == "animal" {
+            wanderer_tick(a, dt, ppos.x, ppos.z)
+            if driving != 0 && (a.kind == "villager" || a.kind == "critter") {
+                for v in vehicles {
+                    if v.id == driving && v.passengers.len() < 3 && game.distance(a.id, v.id) < 2.6 {
+                        let seat = v.passengers.len()
+                        game.attach(a.id, v.id, vec3(seat * 0.9 - 0.9, 2.0, 1.1))
+                        v.passengers.push(a.id)
+                        a.riding = true
+                        if a.kind == "critter" { game.sfx("squeak", 1.2) }
+                    }
+                }
+            }
+        } else if a.kind == "kissy" {
+            // bodyguard (kissy3d): intercept any huggy-kind near the player.
+            let threat_id = 0
+            let ti_x = 0.0
+            let ti_z = 0.0
+            for t in actors {
+                if threat_id == 0 && (t.kind == "huggy" || t.kind == "minihuggy" || t.kind == "nightmarehuggy") && t.stun <= 0.0 {
+                    let tp = game.pos(t.id)
+                    let d_pl = sqrt((tp.x - ppos.x) * (tp.x - ppos.x) + (tp.z - ppos.z) * (tp.z - ppos.z))
+                    if d_pl < 18.0 && game.distance(a.id, t.id) < 34.0 {
+                        threat_id = t.id
+                        ti_x = tp.x
+                        ti_z = tp.z
+                    }
+                }
+            }
+            if threat_id != 0 {
+                let aim_x = ti_x + (ppos.x - ti_x) * 0.2
+                let aim_z = ti_z + (ppos.z - ti_z) * 0.2
+                let p = game.pos(a.id)
+                let cx = aim_x - p.x
+                let cz = aim_z - p.z
+                let cd = sqrt(cx * cx + cz * cz)
+                if game.distance(a.id, threat_id) < 2.2 {
+                    for t in actors {
+                        if t.id == threat_id {
+                            t.stun = 1.6
+                            game.set_vel(t.id, vec3(cx / cd * 8.0, 4.0, cz / cd * 8.0))
+                        }
+                    }
+                    game.sfx("shove")
+                    flash("KISSY PUSHED IT AWAY!", 1.4)
+                } else if cd > 0.01 {
+                    game.walk(a.id, cx / cd * 7.6, cz / cd * 7.6)
+                    game.move_part(a.arm_l, {pos: vec3(-a.sx * 0.62, a.sy * 0.35, -a.sz * 0.5), rot_x: -1.4})
+                    game.move_part(a.arm_r, {pos: vec3(a.sx * 0.62, a.sy * 0.35, -a.sz * 0.5), rot_x: -1.4})
+                }
+            } else {
+                game.move_part(a.arm_l, {pos: vec3(-a.sx * 0.62, 0.2, 0.0), rot_x: 0.0})
+                game.move_part(a.arm_r, {pos: vec3(a.sx * 0.62, 0.2, 0.0), rot_x: 0.0})
+                wanderer_tick(a, dt, ppos.x, ppos.z)
+            }
+        } else if a.kind == "injured" {
+            if !a.healed {
+                game.walk(a.id, 0.0, 0.0)
+                if game.distance(a.id, player) < 2.8 {
+                    a.heal = a.heal + dt
+                    game.label_text(heal_label, "healing...")
+                    if a.heal >= 3.0 {
+                        a.healed = true
+                        a.kind = "kissy"
+                        game.set_color(a.id, PINK)
+                        game.scale(a.id, 1.0)
+                        game.label_text(heal_label, "")
+                        game.sfx("rescue")
+                        flash("KISSY MISSY IS ALL BETTER!", 1.8)
+                    }
+                } else {
+                    if a.heal > 0.0 { a.heal = a.heal - dt * 0.5 }
+                    game.label_text(heal_label, "stay with me")
+                }
+            }
+        } else if a.kind == "huggy" || a.kind == "minihuggy" {
+            // the pack hunts, gently (huggy3d): chase in range, catch = send home
+            let gap = hunt_step(a, a.speed, ppos.x, ppos.z)
+            if gap < 2.0 && driving == 0 { send_home("HUGGY GOT YOU! IT WAS ONLY A DREAM...") }
+        } else if a.kind == "nightmarehuggy" {
+            // relentless (nightmare_huggy3d: HUNT_RANGE 90, arms reach inside 30)
+            let gap = hunt_step(a, a.speed, ppos.x, ppos.z)
+            if gap < 30.0 {
+                game.move_part(a.arm_l, {pos: vec3(-a.sx * 0.62, a.sy * 0.4, -a.sz * 0.6), rot_x: -1.5})
+                game.move_part(a.arm_r, {pos: vec3(a.sx * 0.62, a.sy * 0.4, -a.sz * 0.6), rot_x: -1.5})
+            } else {
+                game.move_part(a.arm_l, {pos: vec3(-a.sx * 0.62, 0.2, 0.0), rot_x: 0.0})
+                game.move_part(a.arm_r, {pos: vec3(a.sx * 0.62, 0.2, 0.0), rot_x: 0.0})
+            }
+            if gap < 2.0 && driving == 0 { send_home("NIGHTMARE HUGGY GOT YOU!") }
+        } else if a.kind == "nightmarecritter" {
+            // creep + nip-bounce (nightmare_critter3d: range 30, nip 1.3)
+            let gap = game.distance(a.id, player)
+            if gap < 30.0 {
+                hunt_step(a, a.speed, ppos.x, ppos.z)
+                if gap < 1.3 {
+                    let p = game.pos(a.id)
+                    let bx = ppos.x - p.x
+                    let bz = ppos.z - p.z
+                    let bd = sqrt(bx * bx + bz * bz) + 0.001
+                    game.set_vel(player, vec3(bx / bd * 5.0, 4.0, bz / bd * 5.0))
+                    a.stun = 1.6
+                    game.sfx("hurt")
+                    flash("OUCH! A NIGHTMARE NIPPED YOU!", 1.2)
+                }
+            } else {
+                game.walk(a.id, 0.0, 0.0)
+            }
+        } else if a.kind == "baba" {
+            // the ram (baba_chops3d: charge inside 14 at 7.2, ram at 2.4)
+            let gap = game.distance(a.id, player)
+            game.glow(a.eye_l, 2.0 + 3.0 * max(0.0, 1.0 - gap / 20.0))
+            game.glow(a.eye_r, 2.0 + 3.0 * max(0.0, 1.0 - gap / 20.0))
+            if gap < 14.0 && driving == 0 {
+                hunt_step(a, 7.2, ppos.x, ppos.z)
+                if gap < 2.4 {
+                    send_home("BABA CHOPS RAMMED YOU!")
+                    a.stun = 2.0
+                }
+            } else {
+                wanderer_tick(a, dt, ppos.x, ppos.z)
+            }
+        } else if a.kind == "prototype" {
+            // weeping angel (prototype3d: freeze when watched; LOS dot 0.55 in 34)
+            let p = game.pos(a.id)
+            let tx = p.x - ppos.x
+            let tz = p.z - ppos.z
+            let td = sqrt(tx * tx + tz * tz) + 0.001
+            let cam = game.cam_yaw()
+            let look_dot = (sin(cam) * tx + (0.0 - cos(cam)) * tz) / td
+            let watched = td < 34.0 && look_dot > 0.55
+            if watched {
+                game.walk(a.id, 0.0, 0.0)
+                game.glow(a.eye_l, 1.5)
+            } else {
+                game.glow(a.eye_l, 4.5)
+                if td < 70.0 {
+                    hunt_step(a, a.speed, ppos.x, ppos.z)
+                    if td < 2.1 && driving == 0 { send_home("THE PROTOTYPE CAUGHT YOU!") }
+                } else {
+                    game.walk(a.id, 0.0, 0.0)
+                }
+            }
+        } else if a.kind == "catnap" {
+            // sleeps curled until you're close (nightmare3d)
+            let gap = game.distance(a.id, player)
+            if !a.awake {
+                game.walk(a.id, 0.0, 0.0)
+                if gap < 9.0 && driving == 0 {
+                    a.awake = true
+                    game.scale(a.id, 1.0)
+                    game.glow(a.eye_l, 4.0)
+                    game.glow(a.eye_r, 4.0)
+                    game.sfx("roar")
+                    flash("NIGHTMARE CATNAP AWAKENS", 1.6)
+                }
+            } else {
+                if gap > 26.0 || driving != 0 {
+                    a.awake = false
+                    game.scale(a.id, vec3(1.0, 0.6, 1.0))
+                    game.glow(a.eye_l, 1.5)
+                    game.glow(a.eye_r, 1.5)
+                    game.set_pos(a.id, vec3(a.spawn_x, home_y(a.spawn_x, a.spawn_z, a.tall), a.spawn_z))
+                } else if gap < 1.9 {
+                    send_home("IT WAS ONLY A DREAM...")
+                    a.awake = false
+                    game.scale(a.id, vec3(1.0, 0.6, 1.0))
+                    game.set_pos(a.id, vec3(a.spawn_x, home_y(a.spawn_x, a.spawn_z, a.tall), a.spawn_z))
+                } else {
+                    hunt_step(a, a.speed, ppos.x, ppos.z)
+                }
+            }
+        } else if a.kind == "headcrab" {
+            // scuttle/chase/leap/latch (headcrab3d)
+            let gap = game.distance(a.id, player)
+            if gap < 1.5 && ridden_by == 0 && driving == 0 {
+                a.latched = true
+                a.latch_t = 4.0
+                ridden_by = a.id
+                game.attach(a.id, player, {pos: vec3(0.0, 1.95, 0.0), mode: "ride", spin: 2.0})
+                game.speed_mult(player, 0.5)
+                game.sfx("grab", 1.5)
+                flash("A HEADCRAB! JUMP TO SHAKE IT OFF!", 2.0)
+            } else if gap < 6.0 {
+                a.hop_timer = a.hop_timer - dt
+                if a.hop_timer <= 0.0 && game.on_floor(a.id) {
+                    a.hop_timer = 1.8
+                    let p = game.pos(a.id)
+                    let lx = ppos.x - p.x
+                    let lz = ppos.z - p.z
+                    let ld = sqrt(lx * lx + lz * lz) + 0.001
+                    game.set_vel(a.id, vec3(lx / ld * 7.0, 8.0, lz / ld * 7.0))
+                    game.sfx("whip", 1.3)
+                }
+            } else if gap < 26.0 {
+                hunt_step(a, a.speed, ppos.x, ppos.z)
+            } else {
+                wanderer_tick(a, dt, ppos.x, ppos.z)
+            }
+        } else if a.kind == "dogday" {
+            // the guardian (giant_dogday3d): intercept-charge threats near his human.
+            let threat_id = 0
+            let tt_x = 0.0
+            let tt_z = 0.0
+            for t in actors {
+                if threat_id == 0 && is_threat_kind(t.kind) && t.kind != "huggy" && t.kind != "minihuggy" && t.stun <= 0.0 && !t.latched {
+                    let tp = game.pos(t.id)
+                    let d_pl = sqrt((tp.x - ppos.x) * (tp.x - ppos.x) + (tp.z - ppos.z) * (tp.z - ppos.z))
+                    if d_pl < 26.0 && game.distance(a.id, t.id) < 44.0 {
+                        threat_id = t.id
+                        tt_x = tp.x
+                        tt_z = tp.z
+                    }
+                }
+            }
+            let p = game.pos(a.id)
+            if threat_id != 0 {
+                let gap_t = game.distance(a.id, threat_id)
+                if gap_t < 5.0 {
+                    for t in actors {
+                        if t.id == threat_id {
+                            t.stun = 1.6
+                            let kx = tt_x - p.x
+                            let kz = tt_z - p.z
+                            let kd = sqrt(kx * kx + kz * kz) + 0.001
+                            game.set_vel(t.id, vec3(kx / kd * 10.0, 5.0, kz / kd * 10.0))
+                            if t.latched { drop_crab(t) }
+                        }
+                    }
+                    game.sfx("bark")
+                    flash("DOGDAY SAVED YOU!", 1.4)
+                    dogday_beam_t = 0.18
+                    dogday_beam_from = vec3(p.x, p.y + 3.0, p.z)
+                    dogday_beam_to = vec3(tt_x, p.y + 1.0, tt_z)
+                } else {
+                    // cut it off, don't chase its tail
+                    let aim_x = tt_x + (ppos.x - tt_x) * 0.15
+                    let aim_z = tt_z + (ppos.z - tt_z) * 0.15
+                    let cx = aim_x - p.x
+                    let cz = aim_z - p.z
+                    let cd = sqrt(cx * cx + cz * cz) + 0.001
+                    game.walk(a.id, cx / cd * 8.4, cz / cd * 8.4)
+                }
+                a.call_t = a.call_t - dt
+                if a.call_t <= 0.0 {
+                    a.call_t = 0.9
+                    game.sfx("bark", 0.8)
+                }
+            } else {
+                let dx = ppos.x - p.x
+                let dz = ppos.z - p.z
+                let d = sqrt(dx * dx + dz * dz)
+                if d < 34.0 && d > 9.5 {
+                    game.walk(a.id, dx / d * a.speed, dz / d * a.speed)
+                } else {
+                    game.walk(a.id, 0.0, 0.0)
+                }
+            }
+            // happy bounding
+            a.hop_timer = a.hop_timer - dt
+            let v = game.vel(a.id)
+            if (v.x * v.x + v.z * v.z) > 0.5 && game.on_floor(a.id) && a.hop_timer <= 0.0 {
+                a.hop_timer = game.rand_range(0.7, 1.5)
+                game.jump(a.id, 6.5)
+            }
+            if p.y < -25.0 { game.set_pos(a.id, vec3(a.spawn_x, home_y(a.spawn_x, a.spawn_z, a.tall), a.spawn_z)) }
+        }
+    }
+
+    // riders freed when their truck empties
+    for a in actors {
+        if a.riding {
+            let free = true
+            for v in vehicles {
+                for pass in v.passengers { if pass == a.id { free = false } }
+            }
+            if free { a.riding = false }
+        }
+    }
+})
+
+game.on_touch(|a, b| {
+    if !won && (game.tag(a) == "goal" || game.tag(b) == "goal") {
+        won = true
+        game.text("YOU FOUND THE GOLD!")
+        game.sfx("win")
+    }
+    if game.tag(a) == "bolt" || game.tag(b) == "bolt" {
+        let bolt = a
+        let other = b
+        if game.tag(b) == "bolt" {
+            bolt = b
+            other = a
+        }
+        game.remove(bolt)
+        for act in actors {
+            if act.id == other && is_threat_kind(act.kind) {
+                zap_actor(act)
+            }
+        }
+    }
+})

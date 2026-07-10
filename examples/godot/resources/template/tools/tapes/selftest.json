@@ -1,0 +1,9 @@
+{
+  "probe": ["Player"],
+  "events": [
+    { "f": 5, "press": "ui_right" },
+    { "f": 30, "press": "ui_accept" },
+    { "f": 32, "release": "ui_accept" },
+    { "f": 90, "release": "ui_right" }
+  ]
+}

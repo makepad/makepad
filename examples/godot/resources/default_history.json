@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {
+      "role": "assistant",
+      "content": "Hi! I make games with you.\n\nHold down the **F1** key, say what you want, then let go.\n\nTry: *\"make a little guy who can run and jump\"*"
+    }
+  ]
+}

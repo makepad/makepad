@@ -1,0 +1,13 @@
+[package]
+name = "makepad-example-gamemaker"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Voice-driven makepad-native game maker for kids, backed by Claude Code"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", features = ["maps", "pdf", "voice"] }
+makepad-code-editor = { path = "../../code_editor" }
+makepad-ai = { path = "../../libs/makepad_ai" }
+makepad-tts = { path = "../../libs/tts" }
