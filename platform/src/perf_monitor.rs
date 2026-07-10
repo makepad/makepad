@@ -16,6 +16,20 @@
 pub const PERF_MONITOR_HISTORY: usize = 240;
 pub const PERF_MONITOR_MAX_CHANNELS: usize = 12;
 
+/// GPU completion handlers run off-thread; they park each presented frame's
+/// GPU time here and the next `frame_boundary` folds it into the ring.
+static GPU_ACCUM_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GPU_COLLECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Call from a GPU command-buffer completion handler (any thread) with one
+/// presented frame's GPU interval in seconds.
+pub fn perf_gpu_frame_completed(seconds: f64) {
+    use std::sync::atomic::Ordering;
+    if GPU_COLLECT.load(Ordering::Relaxed) && seconds.is_finite() && seconds > 0.0 {
+        GPU_ACCUM_US.fetch_add((seconds * 1e6) as u32, Ordering::Relaxed);
+    }
+}
+
 /// Index of a registered channel; hand out once, add to it every frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PerfChannel(pub usize);
@@ -27,6 +41,10 @@ pub const PERF_CHANNEL_SCRIPT: PerfChannel = PerfChannel(1);
 pub const PERF_CHANNEL_GC: PerfChannel = PerfChannel(2);
 pub const PERF_CHANNEL_DRAW: PerfChannel = PerfChannel(3);
 pub const PERF_CHANNEL_DRAWABLE_WAIT: PerfChannel = PerfChannel(4);
+/// GPU time of a presented frame (command-buffer start→end, completion
+/// handler thread). Runs CONCURRENT with the CPU channels — read it as its
+/// own series, not as part of the main-thread total.
+pub const PERF_CHANNEL_GPU: PerfChannel = PerfChannel(5);
 
 #[derive(Clone, Copy, Default)]
 pub struct PerfMonitorFrame {
@@ -68,6 +86,7 @@ impl Default for PerfMonitor {
                 PerfChannelInfo { name: "gc".into(), color: 0xd0c24f },
                 PerfChannelInfo { name: "draw".into(), color: 0xff9a4f },
                 PerfChannelInfo { name: "wait".into(), color: 0xe05555 },
+                PerfChannelInfo { name: "gpu".into(), color: 0xb08cff },
             ],
             ring: Vec::new(),
             at: 0,
@@ -82,10 +101,12 @@ impl Default for PerfMonitor {
 impl PerfMonitor {
     pub fn set_enabled(&mut self, on: bool) {
         self.enabled = on;
+        GPU_COLLECT.store(on, std::sync::atomic::Ordering::Relaxed);
         if !on {
             self.last_frame_time = None;
             self.cur = Default::default();
             self.event_deduct = 0;
+            GPU_ACCUM_US.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -135,6 +156,13 @@ impl PerfMonitor {
         }
         if self.ring.is_empty() {
             self.ring.resize(PERF_MONITOR_HISTORY, Default::default());
+        }
+        // Fold in GPU time completed since the last boundary (one frame late
+        // by construction — fine for a monitor).
+        let gpu_us = GPU_ACCUM_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if gpu_us > 0 {
+            let slot = &mut self.cur.channel_us[PERF_CHANNEL_GPU.0];
+            *slot = slot.saturating_add(gpu_us);
         }
         if let Some(last) = self.last_frame_time {
             self.cur.gap_ms = ((time - last) * 1000.0) as f32;
