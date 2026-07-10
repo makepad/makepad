@@ -1,0 +1,50 @@
+// __PROJECT_NAME__ — the kid's game. This file re-runs from the top on every
+// edit: build the world, then drive it from game.on_tick.
+
+let SPEED = 6.0
+let JUMP = 11.0
+
+// Daylight.
+game.sky({})
+
+// The ground and a few steps to hop up.
+game.box({pos: vec3(0, -0.5, 0), size: vec3(40, 1, 10), color: #x3a8f4a, tag: "ground"})
+game.box({pos: vec3(6, 0.5, 0), size: vec3(3, 1, 4), color: #x8a6a3a})
+game.box({pos: vec3(10, 1.5, 0), size: vec3(3, 1, 4), color: #x8a6a3a})
+game.box({pos: vec3(14, 2.5, 0), size: vec3(3, 1, 4), color: #x8a6a3a})
+
+// The golden goal block on top.
+let goal = game.box({pos: vec3(14, 4.0, 0), size: vec3(1.2, 1.2, 1.2), color: #xf5c13a, tag: "goal", sensor: true})
+
+// The player — with little eyes (visual parts) and a nametag.
+let player = game.mover({pos: vec3(-4, 1.5, 0), size: vec3(0.8, 1.6, 0.8), color: #x4a7fd6, tag: "player"})
+game.part(player, {pos: vec3(-0.18, 0.55, -0.38), size: vec3(0.14, 0.14, 0.06), color: #x11131a})
+game.part(player, {pos: vec3(0.18, 0.55, -0.38), size: vec3(0.14, 0.14, 0.06), color: #x11131a})
+game.label(player, "You")
+
+game.camera({follow: player, distance: 20})
+
+// The little controls line, tucked top-left.
+game.text("hint", "arrows or WASD run - space jumps")
+
+game.on_tick(|dt, input| {
+    // move_x/move_z are camera-relative: left means screen-left even after
+    // the kid orbits the camera.
+    game.walk(player, input.move_x * SPEED, input.move_z * SPEED)
+    if input.jump_pressed && game.on_floor(player) {
+        game.jump(player, JUMP)
+        game.sfx("jump")
+    }
+    // Fell off the world? Back to the start.
+    if game.pos(player).y < -12 {
+        game.set_pos(player, vec3(-4, 1.5, 0))
+    }
+})
+
+game.on_touch(|a, b| {
+    if game.tag(a) == "goal" || game.tag(b) == "goal" {
+        game.text("You did it!")
+        game.sfx("win")
+        game.after(2.0, || game.text(""))
+    }
+})
