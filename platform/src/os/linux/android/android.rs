@@ -1101,6 +1101,25 @@ impl Cx {
                 self.os
                     .video_surfaces
                     .insert(LiveId(video_id), surface_texture);
+
+                // Resize the 2D blit companion to match the actual video resolution
+                // so playback isn't capped at the placeholder 1920x1080.
+                if video_width > 0 && video_height > 0 {
+                    if let Some(texture_id) = self
+                        .os
+                        .video_external_texture_ids
+                        .get(&LiveId(video_id))
+                        .copied()
+                    {
+                        let gl: *const LibGl = self.os.gl();
+                        self.textures[texture_id].ensure_2d_companion(
+                            unsafe { &*gl },
+                            video_width as i32,
+                            video_height as i32,
+                        );
+                    }
+                }
+
                 self.call_event_handler(&e);
             }
             FromJavaMessage::VideoPlaybackCompleted { video_id } => {
@@ -1566,6 +1585,40 @@ impl Cx {
                 }
             }
         }
+
+        // After each SurfaceTexture commit, blit OES → sampler2D companion so the
+        // main draw pass can sample plain GL_TEXTURE_2D. Blit is best-effort: if
+        // the minimal ESSL 1.00 blit program failed to compile (very rare even on
+        // Adreno) we just leave the companion empty and the video shows black.
+        for live_id in &videos_to_update {
+            let Some(texture_id) = self.os.video_external_texture_ids.get(live_id).copied()
+            else {
+                continue;
+            };
+            let oes_handle = self.textures[texture_id].os.gl_texture;
+            let companion = self.textures[texture_id].os.gl_2d_companion;
+            let fbo = self.textures[texture_id].os.gl_2d_companion_fbo;
+            let size = self.textures[texture_id].os.gl_2d_companion_size;
+            let (Some(oes), Some(_dst), Some(fbo)) = (oes_handle, companion, fbo) else {
+                continue;
+            };
+            if size.0 == 0 || size.1 == 0 {
+                continue;
+            }
+            if self.os.oes_blit.is_none() {
+                let gl = self.os.gl();
+                let result = crate::os::linux::opengl::OesBlitContext::try_new(gl);
+                if let Err(ref err) = result {
+                    crate::warning!("OES blit init failed: {}", err);
+                }
+                self.os.oes_blit = Some(result);
+            }
+            if let Some(Ok(blit)) = self.os.oes_blit.as_ref() {
+                let gl = self.os.gl();
+                blit.blit(gl, oes, fbo, size.0, size.1);
+            }
+        }
+
         videos_to_update
     }
 
@@ -2652,6 +2705,11 @@ impl Cx {
                         tex_v,
                     }));
 
+                    // Remember the texture so get_video_updates can blit OES→2D each frame.
+                    self.os
+                        .video_external_texture_ids
+                        .insert(video_id, texture_id);
+
                     unsafe {
                         let env = attach_jni_env();
                         android_jni::to_java_prepare_video_playback(
@@ -2730,6 +2788,7 @@ impl Cx {
                     }
                 }
                 CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    self.os.video_external_texture_ids.remove(&video_id);
                     if let Some(mut player) = self.os.camera_players.remove(&video_id) {
                         player.cleanup();
                         unsafe {
@@ -3158,6 +3217,8 @@ impl Default for CxOs {
             fullscreen: false,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
+            video_external_texture_ids: HashMap::new(),
+            oes_blit: None,
             video_configs: HashMap::new(),
             camera_players: HashMap::new(),
             pending_camera_preview_windows: HashMap::new(),
@@ -3265,6 +3326,14 @@ pub struct CxOs {
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
+    /// Maps each native-video `LiveId` to the Makepad `TextureId` of its
+    /// `VideoExternal` companion. Populated when `PrepareVideoPlayback` runs so
+    /// `get_video_updates` can look up the OES texture (and its 2D companion)
+    /// without changing the `video_surfaces` schema.
+    pub(crate) video_external_texture_ids: HashMap<LiveId, crate::texture::TextureId>,
+    /// Lazily compiled minimal ESSL 1.00 OES → sampler2D blit program.
+    pub(crate) oes_blit:
+        Option<Result<crate::os::linux::opengl::OesBlitContext, String>>,
     pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
     pub(crate) camera_players: HashMap<LiveId, AndroidCameraPlayer>,
     pub(crate) pending_camera_preview_windows: HashMap<LiveId, *mut ndk_sys::ANativeWindow>,
