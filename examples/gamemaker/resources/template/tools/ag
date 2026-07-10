@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Agent harness for the in-process Game Maker engine. The game runs INSIDE the
+# Game Maker app; these verbs talk to it through the .agent/ directory.
+#
+#   tools/ag peek                 4 screenshots of the LIVE game + entity state -> .agent/sheet.png
+#   tools/ag test [frames] [tape] restart + replay an input tape -> .agent/sheet.png + probe.txt
+#   tools/ag errors               the last eval/runtime error (empty output = your edit is live)
+#   tools/ag logs                 tail of the game log (eval reports + game.log lines)
+set -uo pipefail
+
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_DIR="$PROJ/.agent"
+mkdir -p "$AGENT_DIR"
+
+die() { echo "ag: $*" >&2; exit 1; }
+
+wait_for_file() { # <path> <seconds>
+	local deadline=$(( SECONDS + $2 ))
+	while [[ ! -f "$1" ]]; do
+		(( SECONDS > deadline )) && return 1
+		sleep 0.2
+	done
+	return 0
+}
+
+cmd_peek() {
+	rm -rf "$AGENT_DIR/live"
+	: >"$AGENT_DIR/peek_request"
+	wait_for_file "$AGENT_DIR/live/done" 15 || die "peek timed out — is the Game Maker app running this game?"
+	# The last PNG lands slightly after done; give the GPU readback a moment.
+	wait_for_file "$AGENT_DIR/live/f0003.png" 5 || true
+	sleep 0.3
+	python3 "$PROJ/tools/sheet.py" "$AGENT_DIR/live" "$AGENT_DIR/sheet.png" 4 4 480 || die "sheet failed"
+	echo "--- state ---"
+	cat "$AGENT_DIR/live/state.txt" 2>/dev/null
+	cmd_errors
+}
+
+cmd_test() {
+	local frames="${1:-120}" tape="${2:-}"
+	rm -f "$AGENT_DIR/test_done" "$AGENT_DIR/probe.txt"
+	rm -rf "$AGENT_DIR/cap"
+	printf '{"frames":%d,"tape":"%s","every":%d}' \
+		"$frames" "$tape" "$(( frames / 16 + 1 ))" >"$AGENT_DIR/test_request"
+	# 60 ticks/second plus capture latency.
+	local budget=$(( frames / 30 + 20 ))
+	wait_for_file "$AGENT_DIR/test_done" "$budget" || die "test timed out — is the Game Maker app running this game?"
+	sleep 0.5
+	python3 "$PROJ/tools/sheet.py" "$AGENT_DIR/cap" "$AGENT_DIR/sheet.png" 8 4 320 || die "sheet failed"
+	echo "--- probe ---"
+	cat "$AGENT_DIR/probe.txt" 2>/dev/null | head -40
+	cmd_errors
+}
+
+cmd_errors() {
+	if [[ -s "$AGENT_DIR/last_error.txt" ]]; then
+		echo "--- errors ---"
+		cat "$AGENT_DIR/last_error.txt"
+	else
+		echo "--- no errors ---"
+	fi
+}
+
+cmd_logs() {
+	[[ -f "$AGENT_DIR/game.log" ]] || { echo "no log yet"; return 0; }
+	tail -40 "$AGENT_DIR/game.log"
+}
+
+case "${1:-}" in
+	peek)   cmd_peek ;;
+	test)   shift; cmd_test "$@" ;;
+	errors) cmd_errors ;;
+	logs)   cmd_logs ;;
+	*)      sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+esac
