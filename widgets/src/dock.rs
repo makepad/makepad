@@ -1344,6 +1344,14 @@ impl Dock {
                                 tabs[*selected]
                             };
                             self.select_tab(cx, next_tab);
+                            // When the closed tab was the active one, the next tab usually
+                            // lands at the same selected index, so select_tab's
+                            // index-unchanged shortcut skips the redraw. The displayed
+                            // contents still changed to a different item, so redraw them
+                            // explicitly or the closed tab's pixels stay on screen.
+                            if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
+                                tab_bar.contents_draw_list.redraw(cx);
+                            }
                             if !keep_item {
                                 self.dock_items.remove(&tab_id);
                                 self.items.remove(&tab_id);
