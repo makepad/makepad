@@ -1,26 +1,17 @@
 //! Shared kinetic-scroll ("fling") math used by the scrollable widgets (PortalList and
 //! ScrollBar, and thus ScrollBars / ScrollXView / ScrollYView / ScrollXYView).
 //!
-//! Both touch-drag flicks and the trackpad deceleration tail use the iOS `UIScrollView`
-//! momentum model: velocity decays as `v *= DECEL_RATE^(elapsed_ms)`, and each frame's
-//! displacement is the integral of that decay, so the motion is smooth and frame-rate-
-//! independent. Trackpad scrolling applies the OS momentum directly while fast, then hands off
-//! to a gentler self-decaying tail once it slows (see [`Fling::new_trackpad_tail`]).
+//! Touch-drag flicks use the iOS `UIScrollView` momentum model: velocity decays as
+//! `v *= DECEL_RATE^(elapsed_ms)`, and each frame's displacement is the integral of that
+//! decay, so the motion is smooth and frame-rate-independent. Trackpad scrolling follows
+//! the OS momentum stream exactly instead: each delta is applied as it arrives, and the
+//! OS owns the deceleration and stops the stream when the pad is touched.
 
-use std::sync::OnceLock;
-
-/// Diagnostic toggle: when the `MAKEPAD_RAW_TRACKPAD_MOMENTUM` env var is set (to anything
-/// other than empty / `0` / `false`), trackpad momentum is applied exactly as the OS delivers
-/// it, bypassing the self-decaying tail. Use it to A/B the smoothed deceleration against raw
-/// native momentum — raw follows the OS's short, choppy tail; the smoothed path hands off to a
-/// gentler, longer glide once the flick slows.
-pub fn raw_os_momentum() -> bool {
-    static RAW: OnceLock<bool> = OnceLock::new();
-    *RAW.get_or_init(|| {
-        std::env::var("MAKEPAD_RAW_TRACKPAD_MOMENTUM")
-            .map(|v| !v.is_empty() && v != "0" && v != "false")
-            .unwrap_or(false)
-    })
+/// Diagnostic toggle: when the `MAKEPAD_SCROLL_DEBUG` env var is set, the scrollable
+/// widgets log scroll-phase handling and press-suppression decisions to stderr.
+pub fn scroll_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok_and(|v| !v.is_empty()))
 }
 
 /// Default per-ms decay for a touch-drag flick (the widgets' `fling_decel` field). For
@@ -51,13 +42,40 @@ pub const FLING_MIN_TOTAL_DELTA: f64 = 10.0;
 /// keep their meaning under the time-based model.
 pub const PER_FRAME_TO_PER_SECOND: f64 = 60.0;
 
-/// Default trackpad fast→tail handoff speed, in per-event pixels (the widgets'
-/// `fling_smoothing_cutoff_speed` field).
-pub const FLING_MOMENTUM_SMOOTH_BELOW: f64 = 35.0;
+/// How long (in seconds) after the last applied OS momentum delta a trackpad coast still
+/// counts as live. Momentum events arrive at display refresh rate, so a stream silent for
+/// this long has stopped reaching the widget: it ended, or the pointer or window routing
+/// changed mid-coast without a final event.
+pub const COAST_STREAM_TIMEOUT: f64 = 0.2;
 
-/// Default per-ms decay for the trackpad deceleration tail (the widgets' `fling_tail_decel`
-/// field). Gentler than [`FLING_DECEL_RATE_PER_MS`] for a longer, smoother glide.
-pub const FLING_MOMENTUM_TAIL_DECEL_PER_MS: f64 = 0.996;
+/// How long (in seconds) after a trackpad touch stops live scroll motion its own
+/// press still counts as that stop rather than a click. The touch and the press are
+/// separate events (the press is the tap's click, delivered or synthesized at finger
+/// lift), so this only bridges one tap's internal latency. It is single-use and armed
+/// only when the touch interrupted real motion, so a stationary list never consumes
+/// a press.
+pub const CATCH_PRESS_WINDOW: f64 = 0.4;
+
+/// A trackpad touch that catches a coast makes the OS end its momentum stream, but the
+/// end event and the touch event can be delivered in either order. If the end arrives
+/// first it clears the coasting state, so the touch handler must still count a stream
+/// cut this recently (in seconds) as live motion. The two events come from the same
+/// physical touch, so the real gap is a few milliseconds.
+pub const MOMENTUM_CUT_TOUCH_WINDOW: f64 = 0.1;
+
+/// The rubber-band edge bounce follows Chrome's model on macOS
+/// (`cc/input/elastic_overscroll_controller_exponential.cc`):
+/// * a bounce from momentum animates as `x(t) = (x0 + v0·t·A)·e^(−S·t/P)`,
+///   so the overshoot is proportional to the velocity remaining at the edge;
+/// * a finger-driven stretch displays the accumulated overscroll divided by `S`.
+pub const RUBBER_BAND_STIFFNESS: f64 = 20.0;
+pub const RUBBER_BAND_AMPLITUDE: f64 = 0.31;
+pub const RUBBER_BAND_PERIOD: f64 = 1.6;
+
+/// How much raw finger travel it takes to produce one pixel of displayed stretch.
+/// Lower is more sensitive. Split from [`RUBBER_BAND_STIFFNESS`] (which also sets the
+/// spring's decay rate) so the stretch feel can be tuned without changing the bounce.
+pub const RUBBER_BAND_STRETCH_STIFFNESS: f64 = 12.0;
 
 /// One position sample along the scroll axis: a finger/mouse position for drag scrolling, or
 /// the accumulated applied scroll delta for trackpad gestures. Its derivative is the scroll
@@ -145,18 +163,7 @@ impl Fling {
         }
     }
 
-    /// A trackpad deceleration tail decaying at `decay_rate_per_ms`; clips at the edges.
-    pub fn new_trackpad_tail(velocity: f64, decay_rate_per_ms: f64) -> Self {
-        Self {
-            velocity,
-            decay_rate_per_ms,
-            overscroll: false,
-            last_time: 0.0,
-            dt_ema: 0.0,
-        }
-    }
-
-    /// Whether this fling may overscroll into the pulldown bounce (touch) rather than clip (trackpad).
+    /// Whether this fling may overscroll into the pulldown bounce.
     pub fn allows_overscroll(&self) -> bool {
         self.overscroll
     }

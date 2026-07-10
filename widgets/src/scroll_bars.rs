@@ -179,32 +179,48 @@ impl ScrollBars {
     /// fires even when a child would otherwise capture the press, and it must run before the
     /// view dispatches the event to its children.
     pub fn catch_fling_on_press(&mut self, cx: &mut Cx, event: &Event) -> bool {
-        let flinging = (self.show_scroll_x && self.scroll_bar_x.is_flinging())
-            || (self.show_scroll_y && self.scroll_bar_y.is_flinging());
+        let area_rect = self.area.rect(cx);
+        // The press time also gates the coast check below, so a momentum stream that
+        // silently stopped reaching this view can't leave it eating presses.
+        let press_time = match event {
+            Event::MouseDown(e) if area_rect.contains(e.abs) => e.time,
+            Event::TouchUpdate(e)
+                if e.touches
+                    .iter()
+                    .any(|t| matches!(t.state, TouchState::Start) && area_rect.contains(t.abs)) =>
+            {
+                e.time
+            }
+            _ => return false,
+        };
+        // Use `|` so both bars' catch markers are consumed by this one press.
+        let press_catch = (self.show_scroll_x && self.scroll_bar_x.take_press_catch(press_time))
+            | (self.show_scroll_y && self.scroll_bar_y.take_press_catch(press_time));
+        let flinging = press_catch
+            || (self.show_scroll_x && self.scroll_bar_x.is_motion_live(press_time))
+            || (self.show_scroll_y && self.scroll_bar_y.is_motion_live(press_time));
         if !flinging {
             return false;
         }
-        let area_rect = self.area.rect(cx);
-        let pressed_in_area = match event {
-            Event::MouseDown(e) => area_rect.contains(e.abs),
-            Event::TouchUpdate(e) => e
-                .touches
-                .iter()
-                .any(|t| matches!(t.state, TouchState::Start) && area_rect.contains(t.abs)),
-            _ => false,
-        };
-        if !pressed_in_area {
-            return false;
+        if crate::scroll_motion::scroll_debug() {
+            eprintln!(
+                "[scroll_bars] press consumed as catch: x(fling={} coast={}) y(fling={} coast={})",
+                self.scroll_bar_x.is_flinging(),
+                self.scroll_bar_x.is_coasting(press_time),
+                self.scroll_bar_y.is_flinging(),
+                self.scroll_bar_y.is_coasting(press_time),
+            );
         }
-        // Stop both axes: a single press catches a 2D fling on both bars.
-        let mut caught = false;
+        // Stop both axes: a single press catches a 2D fling on both bars. The press
+        // is consumed in every motion case, even ones with nothing to stop (the
+        // bounce spring keeps settling on its own).
         if self.show_scroll_x {
-            caught |= self.scroll_bar_x.stop_fling();
+            self.scroll_bar_x.stop_fling();
         }
         if self.show_scroll_y {
-            caught |= self.scroll_bar_y.stop_fling();
+            self.scroll_bar_y.stop_fling();
         }
-        caught
+        true
     }
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {
