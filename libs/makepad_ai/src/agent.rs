@@ -40,6 +40,18 @@ pub struct SessionConfig {
     pub model: Option<String>,
     /// Tool definitions exposed to the backend.
     pub tools: Vec<ToolDefinition>,
+    /// Names of the backend's own built-in tools the session may use, e.g.
+    /// `["Read", "Edit", "Bash"]`. Empty runs the session without any tools.
+    pub allowed_tools: Vec<String>,
+    /// Backend permission policy, e.g. `"dontAsk"`, `"acceptEdits"`, `"plan"`.
+    pub permission_mode: Option<String>,
+    /// Inline settings JSON handed to the backend. Prefer this over a settings
+    /// file in `cwd`: workspace settings are ignored until the user has accepted
+    /// the trust dialog there, whereas inline settings always apply.
+    pub settings_json: Option<String>,
+    /// A backend-native session id to pick up where a previous run left off.
+    /// Lets a conversation survive an app restart, not just a new prompt.
+    pub resume_session_id: Option<String>,
 }
 
 /// Events emitted by an agent during operation
