@@ -180,6 +180,10 @@ pub struct VoiceWave {
     voice_input: WindowVoiceInput,
     #[rust]
     voice_initialized: bool,
+    /// Also accept Escape as a push-to-talk key (opt-in per app — Escape
+    /// doubles as cancel/dismiss elsewhere, so hosts choose).
+    #[live(false)]
+    ptt_use_escape: bool,
     #[rust]
     ptt_f1_down: bool,
     #[rust]
@@ -512,9 +516,13 @@ impl VoiceWave {
             self.voice_input.shutdown(cx);
         }
 
-        // F1 push-to-talk and Cmd/Ctrl+1 toggle
+        // F1 push-to-talk (+ Escape when opted in) and Cmd/Ctrl+1 toggle.
+        // Both keys drive the same logical talk button.
+        let is_ptt_key = |key_code: KeyCode, use_escape: bool| {
+            key_code == KeyCode::F1 || (use_escape && key_code == KeyCode::Escape)
+        };
         if let Event::KeyDown(key_event) = event {
-            if key_event.key_code == KeyCode::F1 && !key_event.is_repeat {
+            if is_ptt_key(key_event.key_code, self.ptt_use_escape) && !key_event.is_repeat {
                 if !self.ptt_f1_down {
                     self.ptt_f1_down = true;
                     self.ptt_owns_capture = !self.voice_input.is_enabled();
@@ -534,7 +542,7 @@ impl VoiceWave {
             }
         }
         if let Event::KeyUp(key_event) = event {
-            if key_event.key_code == KeyCode::F1 && self.ptt_f1_down {
+            if is_ptt_key(key_event.key_code, self.ptt_use_escape) && self.ptt_f1_down {
                 self.ptt_f1_down = false;
                 if self.ptt_owns_capture {
                     self.ptt_owns_capture = false;
