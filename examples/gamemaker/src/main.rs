@@ -35,6 +35,7 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.CodeView
     use mod.widgets.GameView
+    use mod.widgets.PerfGraph
 
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
@@ -362,8 +363,22 @@ script_mod! {
                             b: View {
                                 width: Fill
                                 height: Fill
+                                flow: Overlay
 
                                 game_view := GameView {}
+
+                                // Frame profiler hovering bottom-right above
+                                // the game; F3 hides/shows it. No align on
+                                // the wrapper: the widget corner-pins itself
+                                // (DrawVector geometry and deferred turtle
+                                // alignment don't mix).
+                                perf_overlay := View {
+                                    visible: true
+                                    width: Fill
+                                    height: Fill
+
+                                    perf_graph := PerfGraph {}
+                                }
                             }
                         }
                     }
@@ -1644,6 +1659,16 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+
+        // F3: toggle the frame profiler hovering the game's bottom-right.
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::F3 && !ke.is_repeat {
+                let overlay = self.ui.view(cx, ids!(perf_overlay));
+                let visible = overlay.visible();
+                overlay.set_visible(cx, !visible);
+                self.ui.widget(cx, ids!(game_view)).redraw(cx);
+            }
+        }
 
         if let Some(frame) = self.next_frame.is_event(event) {
             if self.focus_armed {
