@@ -768,6 +768,15 @@ impl Image {
     /// The requested image was already cached and its texture has been set: clear
     /// the pending-load state so the draw path binds the texture directly.
     fn finish_async_load(&mut self, cx: &mut Cx, image_path: &Path) {
+        // Re-loading the image that is already bound changes nothing; skip the
+        // animator and redraw so widgets that re-issue loads on every draw
+        // (e.g. list items repopulated per frame) don't dirty themselves into
+        // an endless redraw loop.
+        if self.async_image_path.is_none()
+            && self.texture_async_source.as_deref() == Some(image_path)
+        {
+            return;
+        }
         self.async_image_size = None;
         self.async_image_path = None;
         // Record which load produced the texture, just like the decode-completion
