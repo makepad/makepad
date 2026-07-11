@@ -7,7 +7,7 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         scroll_motion::{
-            estimate_release_velocity, Fling, MomentumStream, ScrollSample,
+            estimate_release_velocity, push_sample, Fling, MomentumStream, ScrollSample,
             CATCH_PRESS_WINDOW,
             FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA,
             PER_FRAME_TO_PER_SECOND,
@@ -55,6 +55,12 @@ enum ScrollState {
         /// so every scrollable widget decelerates identically.
         fling: Fling,
         next_frame: NextFrame,
+        /// True while the fling is pinned at a non-bouncing edge: it keeps
+        /// decaying silently (no movement, no redraws, presses are ordinary
+        /// clicks), and resumes if content grows past the edge — the same
+        /// contract as `MomentumStream::Pinned`, so a touch flick also
+        /// continues naturally through pagination.
+        parked: bool,
     },
     Pulldown {
         next_frame: NextFrame,
@@ -441,6 +447,9 @@ pub struct PortalList {
     /// Whether the previous draw ended at the end, to emit `ReachedEnd` only on the
     /// frame the end comes into view.
     #[rust] at_end_last_drawn: bool,
+    /// Whether the last mouse move was inside the list, so the move that leaves
+    /// is still forwarded to items (their hover-out) before fan-out stops.
+    #[rust] pointer_was_inside: bool,
     /// Whether content rubber-bands past the start (top) edge. The stretch and the
     /// bounce follow the incoming gesture's momentum (see `scroll_motion`); there is
     /// no fixed cap.
@@ -1464,7 +1473,7 @@ impl PortalList {
     fn motion_live(&self, time: f64) -> bool {
         matches!(
             self.scroll_state,
-            ScrollState::Flick { .. }
+            ScrollState::Flick { parked: false, .. }
                 | ScrollState::Pulldown { .. }
                 | ScrollState::ScrollingTo { .. }
                 | ScrollState::Tailing { .. }
@@ -2089,7 +2098,7 @@ impl Widget for PortalList {
             // for genuine user scroll-bar drags (when no such animation is active).
             let animation_owns_scroll = matches!(
                 self.scroll_state,
-                ScrollState::Flick { .. }
+                ScrollState::Flick { parked: false, .. }
                     | ScrollState::Pulldown { .. }
                     | ScrollState::ScrollingTo { .. }
                     | ScrollState::Tailing { .. }
@@ -2158,7 +2167,7 @@ impl Widget for PortalList {
         };
         let is_scroll_animating = matches!(
             self.scroll_state,
-            ScrollState::Flick { .. }
+            ScrollState::Flick { parked: false, .. }
                 | ScrollState::ScrollingTo { .. }
                 | ScrollState::Tailing { .. }
         ) || coasting_now;
@@ -2214,6 +2223,18 @@ impl Widget for PortalList {
                 }
                 _ => {}
             }
+        }
+
+        // A pointer move only matters to items when the pointer is over the list,
+        // or just left it (so the last hovered item still sees its hover-out).
+        // One rect test here guards the entire item subtree from high-rate
+        // mouse-move fan-out.
+        if let Event::MouseMove(e) = event {
+            let inside = self.area.clipped_rect(cx).contains(e.abs);
+            if !inside && !self.pointer_was_inside {
+                pass_through_to_children = false;
+            }
+            self.pointer_was_inside = inside;
         }
 
         if pass_through_to_children {
@@ -2338,7 +2359,7 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Flick { fling, next_frame } => {
+            ScrollState::Flick { fling, next_frame, .. } => {
                 if let Some(ne) = next_frame.is_event(event) {
                     // The scroll animation lives in `scroll_motion::Fling`, shared with
                     // ScrollBar. Both the touch-drag flick and the trackpad deceleration tail
@@ -2359,17 +2380,29 @@ impl Widget for PortalList {
                                 let fling_velocity = fling.velocity;
                                 let before = (self.first_id, self.first_scroll);
                                 self.delta_top_scroll(cx, displacement, !ov, ov, fling_velocity);
-                                if displacement != 0.0
-                                    && (self.first_id, self.first_scroll) == before
-                                    && matches!(self.scroll_state, ScrollState::Flick { .. })
+                                let moved = (self.first_id, self.first_scroll) != before;
+                                if let ScrollState::Flick { parked, .. } =
+                                    &mut self.scroll_state
                                 {
-                                    // Pinned at an edge: the fling can't move the list, so stop
-                                    // it now. Letting it run down while pinned would keep eating
-                                    // presses as catch attempts on a visibly stationary list.
-                                    self.was_scrolling = false;
-                                    self.momentum = MomentumStream::Idle;
-                                    self.scroll_state = ScrollState::Stopped;
+                                    if displacement != 0.0 && !moved {
+                                        // Pinned at a non-bouncing edge: park the fling.
+                                        // It keeps decaying silently and presses are
+                                        // ordinary clicks, but if content grows past the
+                                        // edge (e.g. pagination prepending items), the
+                                        // next step moves the list again and the flick
+                                        // continues naturally.
+                                        if !*parked {
+                                            *parked = true;
+                                            self.was_scrolling = false;
+                                        }
+                                    } else {
+                                        if *parked && moved {
+                                            *parked = false;
+                                        }
+                                        self.area.redraw(cx);
+                                    }
                                 } else {
+                                    // The delta handed the motion to the pulldown bounce.
                                     self.area.redraw(cx);
                                 }
                             } else {
@@ -2838,26 +2871,14 @@ impl Widget for PortalList {
                                     self.suppress_child_events = true;
                                 } else {
                                     // Still under threshold — track samples but don't scroll.
-                                    samples.push(ScrollSample {
-                                        abs: new_abs,
-                                        time: e.time,
-                                    });
-                                    if samples.len() > 4 {
-                                        samples.remove(0);
-                                    }
+                                    push_sample(samples, new_abs, e.time);
                                     // Don't apply scroll delta yet.
                                     return;
                                 }
                             }
 
                             let old_sample = *samples.last().unwrap();
-                            samples.push(ScrollSample {
-                                abs: new_abs,
-                                time: e.time,
-                            });
-                            if samples.len() > 4 {
-                                samples.remove(0);
-                            }
+                            push_sample(samples, new_abs, e.time);
                             self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false, 0.0);
                             self.area.redraw(cx);
                         }
@@ -2930,6 +2951,7 @@ impl Widget for PortalList {
                                 self.scroll_state = ScrollState::Flick {
                                     fling: Fling::new(release_velocity, self.fling_decel),
                                     next_frame: cx.new_next_frame(),
+                                    parked: false,
                                 };
                             } else {
                                 self.was_scrolling = false;

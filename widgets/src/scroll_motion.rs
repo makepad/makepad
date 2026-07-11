@@ -22,9 +22,20 @@ const FLING_DT_BAND: (f64, f64) = (0.5, 1.5);
 /// catch-up rather than a huge jump.
 const FLING_MAX_DT: f64 = 0.1;
 
-/// How many of the most recent position samples are retained for velocity estimation,
-/// like a native `VelocityTracker`.
-pub const FLING_SAMPLE_WINDOW: usize = 4;
+/// How much history (in seconds) the release-velocity estimate covers, like a native
+/// `VelocityTracker` (~100ms). The window is time-based, not event-count-based: mice
+/// can report at 500Hz+, where a fixed count of samples would span only a few
+/// milliseconds and turn the estimate into amplified instantaneous noise, launching
+/// maximum-speed flings from tiny drags.
+pub const FLING_SAMPLE_MAX_AGE: f64 = 0.1;
+
+/// Hard cap on retained samples, bounding memory at extreme event rates.
+pub const FLING_SAMPLE_CAP: usize = 64;
+
+/// The minimum time span (seconds) the retained samples must cover for a release
+/// velocity to be meaningful. A press that moved for less time than this is a jerk,
+/// not a flick; its instantaneous velocity says nothing about intent.
+pub const FLING_MIN_SAMPLE_SPAN: f64 = 0.01;
 
 /// The minimum total travel (pixels) across the retained samples for a release to count as a
 /// fling. Filters out taps and micro-jitters.
@@ -164,10 +175,13 @@ pub struct ScrollSample {
     pub time: f64,
 }
 
-/// Append a sample, retaining only the most recent [`FLING_SAMPLE_WINDOW`] of them.
+/// Append a sample, retaining the last [`FLING_SAMPLE_MAX_AGE`] seconds of history
+/// (capped at [`FLING_SAMPLE_CAP`] entries).
 pub fn push_sample(samples: &mut Vec<ScrollSample>, abs: f64, time: f64) {
     samples.push(ScrollSample { abs, time });
-    if samples.len() > FLING_SAMPLE_WINDOW {
+    while samples.len() > FLING_SAMPLE_CAP
+        || (samples.len() > 1 && time - samples[0].time > FLING_SAMPLE_MAX_AGE)
+    {
         samples.remove(0);
     }
 }
@@ -185,7 +199,7 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
     }
     let release_velocity = if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
         let dt = last.time - first.time;
-        if dt > 0.0001 {
+        if dt > FLING_MIN_SAMPLE_SPAN {
             (last.abs - first.abs) / dt
         } else {
             0.0
