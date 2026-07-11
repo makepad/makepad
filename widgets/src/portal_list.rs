@@ -125,11 +125,14 @@ pub enum PortalListAction {
     /// most once per frame, from the draw, so every kind of scrolling (events,
     /// animations, draw-side renormalization) reports identically.
     Scroll,
-    /// The start of the range (item `range_start`) just came into view. Emitted
-    /// once, on the first frame it is drawn; re-armed when it leaves view.
-    /// Infinite lists paginate on this instead of tracking scroll positions.
+    /// The start of the list is now on screen (within `reached_start_margin`
+    /// items). Sent once; not repeated while the start stays on screen. Sent
+    /// again after the start goes off screen and comes back, or after
+    /// [`PortalListRef::forget_reached_edges`]. Infinite lists load more
+    /// history when they get this.
     ReachedStart,
-    /// The end of the range just came into view (see [`Self::ReachedStart`]).
+    /// The end of the list is now on screen (within `reached_end_margin`
+    /// items); same behavior as [`Self::ReachedStart`].
     ReachedEnd,
     SmoothScrollReached,
     #[default]
@@ -441,12 +444,11 @@ pub struct PortalList {
     /// frame in which the viewport actually moved, wherever the motion came from
     /// (events, animations, or draw-side renormalization).
     #[rust] last_notified_pos: (usize, f64, f64),
-    /// Whether the previous draw started at `range_start`, to emit `ReachedStart` only
-    /// on the frame the start comes into view.
-    #[rust] at_start_last_drawn: bool,
-    /// Whether the previous draw ended at the end, to emit `ReachedEnd` only on the
-    /// frame the end comes into view.
-    #[rust] at_end_last_drawn: bool,
+    /// Whether we already told the app the start of the list is on screen
+    /// (so `ReachedStart` is sent once, not on every draw).
+    #[rust] told_reached_start: bool,
+    /// Whether we already told the app the end of the list is on screen.
+    #[rust] told_reached_end: bool,
     /// Whether the last mouse move was inside the list, so the move that leaves
     /// is still forwarded to items (their hover-out) before fan-out stops.
     #[rust] pointer_was_inside: bool,
@@ -460,11 +462,21 @@ pub struct PortalList {
     bounce_at_end: bool,
     /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves, at
     /// most once per frame. On by default; lists with no scroll-position consumers
-    /// can disable it to skip the per-frame action. The edge sentinels
-    /// ([`PortalListAction::ReachedStart`] and [`PortalListAction::ReachedEnd`])
-    /// are always emitted.
+    /// can disable it to skip the per-frame action. The one-shot edge sentinels
+    /// are controlled separately by [`Self::reached_start_margin`] and
+    /// [`Self::reached_end_margin`].
     #[live(true)]
     emit_scroll_actions: bool,
+    /// Whether (and how early) to emit [`PortalListAction::ReachedStart`]:
+    /// `Some(0)` (the default) fires exactly when the first item is drawn; a
+    /// small margin lets an infinite list prefetch (e.g. paginate history)
+    /// shortly before the user actually hits the top; `nil`/`None` never emits.
+    #[live(Some(0u32))]
+    reached_start_margin: Option<u32>,
+    /// Whether (and how early) to emit [`PortalListAction::ReachedEnd`]
+    /// (see [`Self::reached_start_margin`]). `Some(0)` is the default.
+    #[live(Some(0u32))]
+    reached_end_margin: Option<u32>,
     #[live(true)]
     align_top_when_empty: bool,
     #[live(false)]
@@ -999,18 +1011,24 @@ impl PortalList {
             }
         }
 
-        // Edge sentinels: notify once, on the frame an edge of the range comes into
-        // view; re-armed when it leaves. Infinite lists paginate on these instead of
-        // tracking scroll positions.
-        let at_start_now = self.first_id == self.range_start;
-        if at_start_now && !self.at_start_last_drawn {
-            cx.widget_action(self.widget_uid(), PortalListAction::ReachedStart);
+        // Tell the app when an end of the list comes on screen — once, not on
+        // every draw. While it stays on screen we stay quiet; once it goes off
+        // screen, coming back gets announced again.
+        if let Some(margin) = self.reached_start_margin {
+            let start_on_screen = self.first_id <= self.range_start + margin as usize;
+            if start_on_screen && !self.told_reached_start {
+                cx.widget_action(self.widget_uid(), PortalListAction::ReachedStart);
+            }
+            self.told_reached_start = start_on_screen;
         }
-        self.at_start_last_drawn = at_start_now;
-        if self.at_end && !self.at_end_last_drawn {
-            cx.widget_action(self.widget_uid(), PortalListAction::ReachedEnd);
+        if let Some(margin) = self.reached_end_margin {
+            let end_on_screen = self.at_end
+                || self.first_id + self.visible_items + margin as usize >= self.range_end;
+            if end_on_screen && !self.told_reached_end {
+                cx.widget_action(self.widget_uid(), PortalListAction::ReachedEnd);
+            }
+            self.told_reached_end = end_on_screen;
         }
-        self.at_end_last_drawn = self.at_end;
 
         // Scrolling of every kind funnels through a draw, so one comparison here
         // notifies every viewport move — event-driven, animated, or draw-side
@@ -1586,11 +1604,16 @@ impl PortalList {
     pub fn set_first_id_and_scroll(&mut self, first_id: usize, first_scroll: f64) {
         self.first_id = first_id;
         self.first_scroll = first_scroll;
-        // Re-targeting re-arms the edge sentinels: the next draw that shows an
-        // edge is a fresh arrival (e.g. a list re-purposed for other content),
-        // not a continuation of the previous frame's state.
-        self.at_start_last_drawn = false;
-        self.at_end_last_drawn = false;
+        // The list was repositioned by code, so showing the start/end now is
+        // news again (e.g. a list re-purposed for other content).
+        self.forget_reached_edges();
+    }
+
+    /// Forget that we already announced the start/end being on screen, so the
+    /// next draw that shows one announces it again.
+    fn forget_reached_edges(&mut self) {
+        self.told_reached_start = false;
+        self.told_reached_end = false;
     }
 
     /// Returns the number of items that are currently visible in the viewport.
@@ -3014,8 +3037,7 @@ impl PortalListRef {
     /// Sets the first item to be shown and its scroll offset.
     pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.first_id = id;
-            inner.first_scroll = s;
+            inner.set_first_id_and_scroll(id, s);
         }
     }
 
@@ -3023,6 +3045,8 @@ impl PortalListRef {
     pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
+            // The list was repositioned by code; announce the edges again.
+            inner.forget_reached_edges();
         }
     }
 
