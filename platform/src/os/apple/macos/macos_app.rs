@@ -601,14 +601,6 @@ impl MacosApp {
                 // both. See `ScrollPhase` for how widgets use these.
                 let phase_bits: u64 = msg_send![ns_event, phase];
                 let momentum_bits: u64 = msg_send![ns_event, momentumPhase];
-                if momentum_bits & ((1 << 3) | (1 << 4)) != 0
-                    && std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok()
-                {
-                    // Diagnostic: does macOS report Cancelled (16) for a touch-cut
-                    // momentum stream vs Ended (8) for a natural fade-out? If so,
-                    // the cut/fade distinction can use this instead of timing.
-                    eprintln!("[macos] momentum end bits={momentum_bits}");
-                }
                 let phase = if momentum_bits & ((1 << 3) | (1 << 4)) != 0 {
                     ScrollPhase::MomentumEnded
                 } else if momentum_bits != 0 {

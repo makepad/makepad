@@ -838,9 +838,6 @@ impl MacosWindow {
         let began = self.touch_began_time;
         self.touch_began_time = 0.0;
         if began > 0.0 && !self.touch_disqualified && self.time_now() - began < 0.3 {
-            if std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok() {
-                eprintln!("[macos] synthesizing tap suppressed by momentum");
-            }
             self.send_mouse_down(MouseButton::PRIMARY, modifiers);
             self.send_mouse_up(MouseButton::PRIMARY, modifiers);
         }

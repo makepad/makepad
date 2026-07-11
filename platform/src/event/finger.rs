@@ -403,9 +403,6 @@ impl CxFingers {
         time: f64,
         abs_start: Vec2d,
     ) {
-        if std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok() {
-            eprintln!("[fingers] capture_digit area={:?} abs={:?}", area, abs_start);
-        }
         /*if let Some(capture) = self.captures.iter_mut().find( | v | v.digit_id == digit_id) {
             capture.sweep_area = sweep_area;
             capture.area = area;
@@ -1366,12 +1363,6 @@ impl Event {
 
                 cx.fingers
                     .capture_digit(digit_id, area, options.sweep_area, e.time, e.abs);
-                if std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok() {
-                    eprintln!(
-                        "[fingers] MouseDown captured by area={:?} rect={:?} abs={:?}",
-                        area, rect, e.abs
-                    );
-                }
                 e.handled.set(area);
                 cx.fingers.new_hover_area(digit_id, area);
                 return Hit::FingerDown(FingerDownEvent {

@@ -202,15 +202,6 @@ impl ScrollBars {
         if !flinging {
             return false;
         }
-        if crate::scroll_motion::scroll_debug() {
-            eprintln!(
-                "[scroll_bars] press consumed as catch: x(fling={} coast={}) y(fling={} coast={})",
-                self.scroll_bar_x.is_flinging(),
-                self.scroll_bar_x.is_coasting(press_time),
-                self.scroll_bar_y.is_flinging(),
-                self.scroll_bar_y.is_coasting(press_time),
-            );
-        }
         // Stop both axes: a single press catches a 2D fling on both bars. The press
         // is consumed in every motion case, even ones with nothing to stop (the
         // bounce spring keeps settling on its own).
