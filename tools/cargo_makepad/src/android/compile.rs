@@ -1673,6 +1673,35 @@ fn add_rust_library(
             build_paths,
             &current_build_dir,
         )?;
+
+        // Bundle extra native-lib binaries named by the
+        // `MAKEPAD_ANDROID_EXTRA_LIBS` env var (format: `name=path` entries
+        // separated by `;`). Each `path` is copied into `lib/<abi>/<name>` and
+        // added to the APK exactly like `libmakepad.so`. Intended for shipping
+        // a helper *executable* as a `lib*.so` so it lands in the app's
+        // nativeLibraryDir — the only location an Android `untrusted_app` may
+        // exec a binary from. The bundled path must be the matching-ABI binary.
+        if let Ok(extra) = std::env::var("MAKEPAD_ANDROID_EXTRA_LIBS") {
+            for entry in extra.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                let (name, src) = entry.split_once('=').ok_or_else(|| {
+                    format!("MAKEPAD_ANDROID_EXTRA_LIBS: bad entry {entry:?} (want name=path)")
+                })?;
+                let binary_path = format!("lib/{abi}/{}", name.trim());
+                let dst_lib = build_paths.out_dir.join(&binary_path);
+                cp(Path::new(src.trim()), &dst_lib, false)?;
+                shell_env_cap(
+                    &[],
+                    &build_paths.out_dir,
+                    aapt_path(sdk_dir, urls).to_str().unwrap(),
+                    &[
+                        "add",
+                        build_paths.dst_unaligned_apk.to_str().unwrap(),
+                        &binary_path,
+                    ],
+                )?;
+                println!("  Bundled extra native lib: {} (for {abi})", name.trim());
+            }
+        }
     }
     // for the quest variant add the precompiled openXR loader
     if let AndroidVariant::Quest = variant {
