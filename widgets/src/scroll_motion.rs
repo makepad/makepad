@@ -7,13 +7,6 @@
 //! the OS momentum stream exactly instead: each delta is applied as it arrives, and the
 //! OS owns the deceleration and stops the stream when the pad is touched.
 
-/// Diagnostic toggle: when the `MAKEPAD_SCROLL_DEBUG` env var is set, the scrollable
-/// widgets log scroll-phase handling and press-suppression decisions to stderr.
-pub fn scroll_debug() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_SCROLL_DEBUG").is_ok_and(|v| !v.is_empty()))
-}
-
 /// Default per-ms decay for a touch-drag flick (the widgets' `fling_decel` field). For
 /// reference, iOS `UIScrollViewDecelerationRateNormal` is 0.998; we run a little firmer.
 pub const FLING_DECEL_RATE_PER_MS: f64 = 0.997;
@@ -76,6 +69,91 @@ pub const RUBBER_BAND_PERIOD: f64 = 1.6;
 /// Lower is more sensitive. Split from [`RUBBER_BAND_STIFFNESS`] (which also sets the
 /// spring's decay rate) so the stretch feel can be tuned without changing the bounce.
 pub const RUBBER_BAND_STRETCH_STIFFNESS: f64 = 12.0;
+
+/// The lifecycle of the OS trackpad momentum stream for one scrollable widget.
+///
+/// The OS owns the deceleration: after fingers lift it streams `Momentum` deltas until the
+/// coast fades out at rest or a trackpad touch cuts it. This enum is the single record of
+/// where that stream stands, replacing a family of booleans and timestamps whose stale
+/// combinations repeatedly misreported whether content was moving. Every transition is an
+/// explicit state change, so evidence (a live coast, a fresh cut) is carried forward
+/// instead of erased by whichever event happens to be delivered first.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum MomentumStream {
+    /// No stream is expected or running.
+    #[default]
+    Idle,
+    /// Fingers lifted from a scroll gesture at `since`; the OS stream may begin.
+    Expected { since: f64 },
+    /// Deltas are being applied: the content is moving while `scroll_state` stays
+    /// `Stopped`. The stream can stop reaching the widget without a final event
+    /// (pointer or window routing can change mid-coast), so liveness also requires
+    /// the last delta to be recent (see [`MomentumStream::is_live`]).
+    Live {
+        /// Wall-clock time of the newest applied delta.
+        last_delta_time: f64,
+        /// Speed (px/s) of the newest applied delta; seeds the rubber-band bounce
+        /// when the coast reaches an edge.
+        velocity: f64,
+        /// Sign of the applied deltas, so the draw can end the coast the instant
+        /// it reaches the edge the coast was headed toward.
+        direction: f64,
+    },
+    /// Pinned at a non-bouncing edge with the stream still running: deltas are
+    /// consumed with no visible effect and presses are ordinary clicks. If content
+    /// grows past the edge (e.g. pagination prepending items), the stream's next
+    /// delta moves the content again, so the original flick continues naturally.
+    /// `last_delta_time` is refreshed by each consumed delta; a parked stream whose
+    /// deltas stop arriving (rerouted mid-coast, end event lost) expires instead of
+    /// staying armed for some later, unrelated stream.
+    Pinned { last_delta_time: f64 },
+    /// The stream ended at `at` while still live (a touch cut it, or it faded on
+    /// its final delta). The touch that cut it can be delivered after the end
+    /// event, so the record lets that touch see the motion it stopped.
+    Cut { at: f64 },
+}
+
+impl MomentumStream {
+    /// Whether the stream is moving content at `time`: live, with a recent delta.
+    pub fn is_live(&self, time: f64) -> bool {
+        match self {
+            Self::Live { last_delta_time, .. } => time - last_delta_time < COAST_STREAM_TIMEOUT,
+            _ => false,
+        }
+    }
+
+    /// Whether the stream was cut within the cut-to-touch pairing window before `time`.
+    pub fn cut_near(&self, time: f64) -> bool {
+        match self {
+            Self::Cut { at } => time - at < MOMENTUM_CUT_TOUCH_WINDOW,
+            _ => false,
+        }
+    }
+
+    /// Whether an OS momentum delta arriving at `time` belongs to this widget's
+    /// gesture and should be processed. `Cut`/`Idle` streams stay dead: a stray
+    /// delta (e.g. from a stream a press already caught) must not restart motion.
+    /// A `Pinned` stream must be receiving deltas continuously to stay armed.
+    pub fn accepts_deltas(&self, time: f64) -> bool {
+        match self {
+            Self::Expected { .. } | Self::Live { .. } => true,
+            Self::Pinned { last_delta_time } => {
+                time - last_delta_time < COAST_STREAM_TIMEOUT
+            }
+            _ => false,
+        }
+    }
+
+    /// The time base for a velocity estimate of the next delta, if one exists.
+    pub fn prev_delta_time(&self) -> Option<f64> {
+        match self {
+            Self::Expected { since } => Some(*since),
+            Self::Live { last_delta_time, .. } => Some(*last_delta_time),
+            Self::Pinned { last_delta_time } => Some(*last_delta_time),
+            _ => None,
+        }
+    }
+}
 
 /// One position sample along the scroll axis: a finger/mouse position for drag scrolling, or
 /// the accumulated applied scroll delta for trackpad gestures. Its derivative is the scroll
