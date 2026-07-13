@@ -213,19 +213,23 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    // compare in native units, before new_geom is converted below
+                    let geom_changed = re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor;
+
+                    // Keep the wayland geom native (buffer/viewport size + the next resize's dpi come
+                    // from it). Store the zoomed geom here and the next resize reads its dpi back as
+                    // "native", so the zoom drifts/resets and the window flickers on maximize. Only
+                    // the Cx window gets the zoomed geom.
+                    window.window_geom = re.new_geom.clone();
                     {
                         let cx_window = &mut cx.windows[re.window_id];
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-
-                    window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    // Redraw this window root draw list when logical size or
-                    // backing scale changes.
-                    if re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                    {
+                    // redraw when the size or scale changed
+                    if geom_changed {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -235,16 +239,17 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    let geom_changed = re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor;
+                    // same deal — keep the wayland geom native
+                    window.window_geom = re.new_geom.clone();
                     {
                         let cx_window = &mut cx.windows[re.window_id];
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-                    window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    if re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                    {
+                    if geom_changed {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
