@@ -148,6 +148,32 @@ impl Cx {
                 } else {
                     continue;
                 };
+                // The zbias is the fragment depth, and it is handed out from the global draw
+                // order. It must advance for every draw call in the tree, ahead of the early-outs
+                // below, or the sequence would depend on which draw calls happen to be dirty this
+                // frame rather than on the draw tree alone.
+                let zbias_changed = draw_call.draw_call_uniforms.set_zbias(*zbias);
+                *zbias += zbias_step;
+
+                // A cached draw call (one whose draw list was not redrawn this frame) has
+                // `uniforms_dirty` unset, but its zbias still shifts whenever any draw list drawn
+                // before it grows or shrinks. Uploading only on `uniforms_dirty` would leave the
+                // GPU with a stale depth, and the LESS_EQUAL depth test then rejects the draw
+                // call. `buffer.is_none()` covers a buffer that was never uploaded at all.
+                if draw_call.uniforms_dirty
+                    || zbias_changed
+                    || draw_item.os.draw_call_uniforms.buffer.is_none()
+                {
+                    draw_call.uniforms_dirty = false;
+                    draw_item
+                        .os
+                        .draw_call_uniforms
+                        .update_with_f32_constant_data(
+                            d3d11_cx,
+                            draw_call.draw_call_uniforms.as_slice(),
+                        );
+                }
+
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
@@ -168,21 +194,6 @@ impl Cx {
                         d3d11_cx,
                         draw_item.instances.as_ref().unwrap(),
                     );
-                }
-
-                // update the zbias uniform if we have it.
-                draw_call.draw_call_uniforms.set_zbias(*zbias);
-                *zbias += zbias_step;
-
-                if draw_call.uniforms_dirty {
-                    draw_call.uniforms_dirty = false;
-                    draw_item
-                        .os
-                        .draw_call_uniforms
-                        .update_with_f32_constant_data(
-                            d3d11_cx,
-                            draw_call.draw_call_uniforms.as_slice(),
-                        );
                 }
                 if draw_call.dyn_uniforms.len() != 0 {
                     draw_item

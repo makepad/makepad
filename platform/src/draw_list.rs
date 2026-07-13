@@ -390,8 +390,17 @@ impl DrawCallUniforms {
         self.draw_scroll
     }*/
 
-    pub fn set_zbias(&mut self, zbias: f32) {
+    /// Sets the zbias, returning `true` if it actually changed.
+    ///
+    /// The zbias is recomputed from the global draw order on every frame, so it shifts whenever
+    /// a sibling draw list grows or shrinks -- including for a cached draw call that was not
+    /// redrawn and therefore has `uniforms_dirty` unset. Backends that only upload
+    /// `DrawCallUniforms` when `uniforms_dirty` is set must also upload when this returns `true`,
+    /// or the GPU keeps a stale depth for that draw call and the depth test rejects it.
+    pub fn set_zbias(&mut self, zbias: f32) -> bool {
+        let changed = self.zbias != zbias;
         self.zbias = zbias;
+        changed
     }
     /*
     pub fn set_clip(&mut self, clip: (Vec2f, Vec2f)) {
