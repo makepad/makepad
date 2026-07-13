@@ -206,10 +206,10 @@ impl ScrollBars {
         // is consumed in every motion case, even ones with nothing to stop (the
         // bounce spring keeps settling on its own).
         if self.show_scroll_x {
-            self.scroll_bar_x.stop_fling();
+            self.scroll_bar_x.stop_fling(press_time);
         }
         if self.show_scroll_y {
-            self.scroll_bar_y.stop_fling();
+            self.scroll_bar_y.stop_fling(press_time);
         }
         true
     }

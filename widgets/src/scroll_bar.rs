@@ -3,12 +3,11 @@ use crate::event::ScrollPhase;
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
-    estimate_release_velocity, push_sample, Fling, ScrollSample, CATCH_PRESS_WINDOW,
-    COAST_STREAM_TIMEOUT,
-    FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW,
-    PER_FRAME_TO_PER_SECOND,
-    RUBBER_BAND_AMPLITUDE, RUBBER_BAND_PERIOD, RUBBER_BAND_STIFFNESS,
-    RUBBER_BAND_STRETCH_STIFFNESS,
+    estimate_release_velocity, push_sample, rubber_band_bounce, soften_bounce_velocity,
+    stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample, CATCH_PRESS_WINDOW,
+    COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
+    FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW, PER_FRAME_TO_PER_SECOND,
+    RUBBER_BAND_STRETCH_STIFFNESS, RUBBER_BAND_TOUCH_RANGE,
 };
 
 script_mod! {
@@ -199,16 +198,22 @@ enum ScrollState {
     Drag {
         samples: Vec<ScrollSample>,
     },
-    /// The rubber-band bounce at a scroll limit (Chrome's model; see `scroll_motion`).
+    /// The rubber-band bounce at a scroll limit (see `scroll_motion`).
     /// `x0`/`v0` are signed: negative stretches before the start, positive past the end.
+    /// `v0` is softened against the overscroll headroom on the bounce's first frame.
     Bounce {
         next_frame: NextFrame,
         x0: f64,
         v0: f64,
-        t0: Option<f64>,
+        /// Jitter-smoothed animation time, started on the first bounce frame.
+        clock: FrameClock,
+        /// Whether a finger on the screen caused this bounce (touch/mouse drag or the
+        /// flick it released), which springs back with the stronger iOS curve, rather
+        /// than trackpad momentum (Chrome's stiffer macOS curve).
+        touch: bool,
     },
     Flick {
-        /// The momentum-fling animation state (native iOS-style exponential decay,
+        /// The momentum-fling animation state (the platform's native momentum curve,
         /// frame-rate-independent). Shared with PortalList via [`crate::scroll_motion`]
         /// so every scrollable widget decelerates identically.
         fling: Fling,
@@ -308,6 +313,11 @@ pub struct ScrollBar {
     /// same tap is consumed as the stop rather than delivered as a click.
     #[rust]
     touch_caught_motion_at: Option<f64>,
+    /// The `(velocity, time)` of a fling the user just caught with a press. A quick
+    /// same-direction re-flick adds this speed back (fling boost), so repeated
+    /// flicks build up speed; consumed by the press's release either way.
+    #[rust]
+    caught_fling: Option<(f64, f64)>,
     /// When the OS momentum stream ended while still live (i.e. was cut by a touch
     /// rather than fading out at rest). The cut and its touch can be delivered in
     /// either order, so the touch handler reads this to see the motion it stopped.
@@ -400,6 +410,14 @@ impl ScrollBar {
             view_total: self.view_total,
             view_visible: self.view_visible,
         }
+    }
+
+    /// Whether this axis has any content to scroll (beyond layout rounding error).
+    /// The rubber band only engages on a scrollable axis: a view whose content fits
+    /// entirely — e.g. the unused direction of a two-axis scroll view — must not
+    /// stretch or bounce.
+    fn scrollable(&self) -> bool {
+        self.view_total - self.view_visible > 0.5
     }
 
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
@@ -589,7 +607,7 @@ impl ScrollBar {
                                     } else {
                                         self.bounce_at_start
                                     };
-                                    if bounces {
+                                    if bounces && self.scrollable() {
                                         let dt = (e.time - self.last_trackpad_time)
                                             .max(1.0 / 240.0);
                                         let max_v = self.flick_scroll_maximum
@@ -599,7 +617,8 @@ impl ScrollBar {
                                             next_frame: cx.new_next_frame(),
                                             x0: 0.0,
                                             v0,
-                                            t0: None,
+                                            clock: FrameClock::default(),
+                                            touch: false,
                                         };
                                     }
                                 }
@@ -642,6 +661,12 @@ impl ScrollBar {
                             self.owns_gesture = false;
                             self.coasting = false;
                             self.overscroll = 0.0;
+                            // A wheel scroll takes over from a running bounce; the
+                            // spring must stop too, or its next frame would rewrite
+                            // the overscroll just cleared above.
+                            if matches!(self.scroll_state, ScrollState::Bounce { .. }) {
+                                self.scroll_state = ScrollState::Stopped;
+                            }
                             if !self.smoothing.is_none() && e.is_mouse {
                                 let scroll_pos_target = self.get_scroll_target();
                                 if self.set_scroll_target(cx, scroll_pos_target + scroll) {
@@ -691,7 +716,7 @@ impl ScrollBar {
                                 } else {
                                     self.bounce_at_start
                                 };
-                                if bounces {
+                                if bounces && self.scrollable() {
                                     self.overscroll += scroll / RUBBER_BAND_STRETCH_STIFFNESS;
                                     mark_handled(e, self.axis);
                                 }
@@ -715,7 +740,8 @@ impl ScrollBar {
                                     next_frame: cx.new_next_frame(),
                                     x0: self.overscroll,
                                     v0: 0.0,
-                                    t0: None,
+                                    clock: FrameClock::default(),
+                                    touch: false,
                                 };
                             }
                             let scroll_pos = self.get_scroll_pos();
@@ -770,7 +796,13 @@ impl ScrollBar {
     /// whether a fling was actually stopped. The containing view calls this on any press in
     /// the content, independent of `drag_scrolling`, so kinetic scrolling always halts on a
     /// tap or click as it does on iOS, Android, and macOS.
-    pub fn stop_fling(&mut self) -> bool {
+    pub fn stop_fling(&mut self, time: f64) -> bool {
+        if let ScrollState::Flick { fling, .. } = &self.scroll_state {
+            // Remember the caught speed briefly: a quick same-direction re-flick
+            // adds it back (fling boost), so repeated flicks build up speed the
+            // way Chrome and native scrollers allow.
+            self.caught_fling = Some((fling.velocity, time));
+        }
         if self.is_flinging() || self.coasting {
             self.scroll_state = ScrollState::Stopped;
             self.coasting = false;
@@ -796,14 +828,25 @@ impl ScrollBar {
         }
 
         // Don't start or continue a touch-based drag scroll if scrolling is blocked.
+        // These force-stops must also let go of any stretched rubber band: leaving
+        // `overscroll` set with the spring stopped would freeze the stretch on
+        // screen with nothing left to pull it back.
         if !cx.is_scrolling_allowed_within(&scroll_area) {
             self.scroll_state = ScrollState::Stopped;
+            if self.overscroll != 0.0 {
+                self.overscroll = 0.0;
+                dispatch_action(cx, self.make_scroll_action());
+            }
             return;
         }
 
         // Check if scroll bar handle is not captured
         if self.is_area_captured(cx) {
             self.scroll_state = ScrollState::Stopped;
+            if self.overscroll != 0.0 {
+                self.overscroll = 0.0;
+                dispatch_action(cx, self.make_scroll_action());
+            }
             return;
         }
 
@@ -826,10 +869,49 @@ impl ScrollBar {
                     let old_sample = *samples.last().unwrap();
                     push_sample(samples, new_abs, e.time);
 
-                    let delta = new_abs - old_sample.abs;
-                    let scroll_pos = self.get_scroll_pos();
+                    let mut delta = new_abs - old_sample.abs;
+                    let extent = self.view_visible;
+                    let mut changed = false;
 
-                    if self.set_scroll_pos(cx, scroll_pos - delta) {
+                    // A stretched rubber band unwinds along the same curve it
+                    // stretched by, so the content tracks the finger exactly;
+                    // only travel beyond the unwind scrolls the content again.
+                    if self.overscroll != 0.0 && delta != 0.0 {
+                        let raw = stretch_raw(self.overscroll, extent, true) - delta;
+                        if raw == 0.0 || raw.signum() == self.overscroll.signum() {
+                            self.overscroll = stretch_displayed(raw, extent, true);
+                            delta = 0.0;
+                        } else {
+                            self.overscroll = 0.0;
+                            delta = -raw;
+                        }
+                        changed = true;
+                    }
+
+                    if delta != 0.0 {
+                        let scroll_pos = self.get_scroll_pos();
+                        let max_scroll = (self.view_total - self.view_visible).max(0.0);
+                        let target = scroll_pos - delta;
+                        let clamped = target.clamp(0.0, max_scroll);
+                        if self.set_scroll_pos(cx, clamped) {
+                            changed = true;
+                        }
+                        // Finger travel past a scroll limit stretches the rubber
+                        // band there (the loose iOS curve; see `scroll_motion`),
+                        // when that edge has the bounce enabled.
+                        let leftover = target - clamped;
+                        let bounces = if leftover > 0.0 {
+                            self.bounce_at_end
+                        } else {
+                            self.bounce_at_start
+                        };
+                        if leftover != 0.0 && bounces && self.scrollable() {
+                            self.overscroll = stretch_displayed(leftover, extent, true);
+                            changed = true;
+                        }
+                    }
+
+                    if changed {
                         dispatch_action(cx, self.make_scroll_action());
                     }
                 }
@@ -837,6 +919,9 @@ impl ScrollBar {
             },
             Hit::FingerUp(fe) if fe.is_primary_hit() => match &mut self.scroll_state {
                 ScrollState::Drag { samples } => {
+                    // The press's release settles the fate of any fling it caught:
+                    // only a qualifying same-direction flick below adds it back.
+                    let caught_fling = self.caught_fling.take();
                     // Estimate the release velocity (pixels/second) like a native
                     // VelocityTracker (see `scroll_motion`), then start the same momentum
                     // fling as PortalList — same model, same parameters — so drag flicks
@@ -845,9 +930,32 @@ impl ScrollBar {
                     let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
                     let release_velocity = release_velocity.clamp(-max_velocity, max_velocity);
                     let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
-                    if total_delta.abs() > FLING_MIN_TOTAL_DELTA
+                    if self.overscroll != 0.0 {
+                        // Lifted while stretched past an edge: spring back, with the
+                        // lift velocity carried into the bounce (positive further
+                        // into the overscroll, matching the overscroll's sign).
+                        self.scroll_state = ScrollState::Bounce {
+                            next_frame: cx.new_next_frame(),
+                            x0: self.overscroll,
+                            v0: -release_velocity,
+                            clock: FrameClock::default(),
+                            touch: true,
+                        };
+                    } else if total_delta.abs() > FLING_MIN_TOTAL_DELTA
                         && release_velocity.abs() > min_velocity
                     {
+                        // Fling boost: a quick same-direction re-flick adds the
+                        // speed of the fling this press caught.
+                        let release_velocity = match caught_fling {
+                            Some((caught_velocity, caught_at))
+                                if caught_velocity * release_velocity > 0.0
+                                    && fe.time - caught_at < FLING_BOOST_MAX_DWELL =>
+                            {
+                                (release_velocity + caught_velocity)
+                                    .clamp(-max_velocity, max_velocity)
+                            }
+                            _ => release_velocity,
+                        };
                         self.scroll_state = ScrollState::Flick {
                             fling: Fling::new(release_velocity, self.fling_decel),
                             next_frame: cx.new_next_frame(),
@@ -945,23 +1053,35 @@ impl ScrollBar {
         }
     }
 
-    /// Animates the rubber-band bounce back to the scroll limit (Chrome's model,
-    /// see `scroll_motion`), driving `overscroll` and dispatching scroll updates.
+    /// Animates the rubber-band bounce back to the scroll limit (see `scroll_motion`;
+    /// the curve depends on the input that caused the bounce), driving `overscroll`
+    /// and dispatching scroll updates.
     fn handle_bounce(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
     ) {
-        let step = if let ScrollState::Bounce { next_frame, x0, v0, t0 } = &mut self.scroll_state {
+        let step = if let ScrollState::Bounce { next_frame, x0, v0, clock, touch } =
+            &mut self.scroll_state
+        {
             if let Some(ne) = next_frame.is_event(event) {
-                let t_start = *t0.get_or_insert(ne.time);
-                let t = (ne.time - t_start).max(0.0);
-                let lambda = RUBBER_BAND_STIFFNESS / RUBBER_BAND_PERIOD;
-                let x = (*x0 + *v0 * RUBBER_BAND_AMPLITUDE * t) * (-lambda * t).exp();
-                let past_peak = t * lambda > 1.0;
-                let settled =
-                    x.abs() <= 0.5 && (past_peak || (v0.abs() <= 1.0 && x0.abs() <= 0.5));
+                // The bounce may never travel farther than the drag stretch can
+                // reach, however fast the fling that hit the edge was: the seed
+                // velocity is softened against the headroom (huge flicks compress,
+                // gentle ones keep their feel), and the clamp below is a backstop.
+                let max_overscroll = self.view_visible * RUBBER_BAND_TOUCH_RANGE;
+                if clock.not_started() {
+                    *v0 = soften_bounce_velocity(*v0, *x0, max_overscroll, *touch);
+                }
+                let t = clock.advance(ne.time);
+                let (x, past_peak) = rubber_band_bounce(*x0, *v0, t, *touch);
+                let x = x.clamp(-max_overscroll, max_overscroll);
+                // A lift velocity opposing the stretch can swing the spring through
+                // the edge; the content is back at rest there, so settle.
+                let crossed = x * *x0 < 0.0;
+                let settled = crossed
+                    || (x.abs() <= 0.5 && (past_peak || (v0.abs() <= 1.0 && x0.abs() <= 0.5)));
                 if !settled {
                     *next_frame = cx.new_next_frame();
                 }
@@ -994,7 +1114,7 @@ impl ScrollBar {
         let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
         let step = if let ScrollState::Flick { fling, next_frame } = &mut self.scroll_state {
             if let Some(ne) = next_frame.is_event(event) {
-                Some((fling.step(ne.time), fling.is_active(min_velocity)))
+                Some((fling.step(ne.time), fling.is_active(min_velocity), fling.velocity))
             } else {
                 None
             }
@@ -1004,13 +1124,13 @@ impl ScrollBar {
 
         match step {
             None => {}
-            Some((None, _)) => {
+            Some((None, ..)) => {
                 // First fling frame: time baseline established, no movement yet.
                 if let ScrollState::Flick { next_frame, .. } = &mut self.scroll_state {
                     *next_frame = cx.new_next_frame();
                 }
             }
-            Some((Some(displacement), active)) => {
+            Some((Some(displacement), active, velocity)) => {
                 if active {
                     let scroll_pos = self.get_scroll_pos();
                     if self.set_scroll_pos(cx, scroll_pos - displacement) {
@@ -1019,10 +1139,29 @@ impl ScrollBar {
                             *next_frame = cx.new_next_frame();
                         }
                     } else if displacement != 0.0 {
-                        // Pinned at a scroll limit: the fling can't move the content, so
-                        // stop it now. Letting it run down while pinned would keep eating
-                        // presses as catch attempts on visibly stationary content.
-                        self.scroll_state = ScrollState::Stopped;
+                        // Reached a scroll limit: hand the remaining momentum to the
+                        // rubber-band bounce when that edge has it enabled. Otherwise
+                        // stop the fling now — letting it run down while pinned would
+                        // keep eating presses as catch attempts on visibly stationary
+                        // content. The overscroll rate is the scroll-position rate:
+                        // positive past the end, negative before the start.
+                        let v0 = -velocity;
+                        let bounces = if v0 > 0.0 {
+                            self.bounce_at_end
+                        } else {
+                            self.bounce_at_start
+                        };
+                        if bounces && v0 != 0.0 && self.scrollable() {
+                            self.scroll_state = ScrollState::Bounce {
+                                next_frame: cx.new_next_frame(),
+                                x0: self.overscroll,
+                                v0,
+                                clock: FrameClock::default(),
+                                touch: true,
+                            };
+                        } else {
+                            self.scroll_state = ScrollState::Stopped;
+                        }
                         self.owns_gesture = false;
                     } else if let ScrollState::Flick { next_frame, .. } = &mut self.scroll_state {
                         *next_frame = cx.new_next_frame();

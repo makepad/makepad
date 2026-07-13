@@ -2,14 +2,116 @@
 //! ScrollBar, and thus ScrollBars / ScrollXView / ScrollYView / ScrollXYView).
 //!
 //! Touch-drag flicks use the iOS `UIScrollView` momentum model: velocity decays as
-//! `v *= DECEL_RATE^(elapsed_ms)`, and each frame's displacement is the integral of that
-//! decay, so the motion is smooth and frame-rate-independent. Trackpad scrolling follows
-//! the OS momentum stream exactly instead: each delta is applied as it arrives, and the
-//! OS owns the deceleration and stops the stream when the pad is touched.
+//! `v *= DECEL_RATE^(elapsed_ms)`, and each frame's displacement is the integral of
+//! that decay, so the motion is smooth and frame-rate-independent. Hard flicks decay
+//! more slowly and open with a glide, approximating how far native scrollers carry
+//! them (see `FLING_FAST_DECEL_*` / `FLING_GLIDE_*`). An exact port of Android's
+//! `OverScroller` fling spline — the same curve Chrome uses on Android — is also
+//! here behind [`USE_ANDROID_FLING_SPLINE`] for A/B testing.
+//!
+//! Trackpad scrolling follows the OS momentum stream exactly instead: each delta is
+//! applied as it arrives, and the OS owns the deceleration and stops the stream when
+//! the pad is touched.
+
+use std::sync::OnceLock;
+
+/// Whether touch flicks animate along Android's native fling spline instead of the
+/// exponential decay. Currently off: the spline's high-speed tail runs very long
+/// (a maximum fling coasts ~2.6s, boosted ones several times longer), which felt
+/// too strong in testing. Set to `cfg!(target_os = "android")` to A/B the native curve.
+const USE_ANDROID_FLING_SPLINE: bool = false;
 
 /// Default per-ms decay for a touch-drag flick (the widgets' `fling_decel` field). For
 /// reference, iOS `UIScrollViewDecelerationRateNormal` is 0.998; we run a little firmer.
 pub const FLING_DECEL_RATE_PER_MS: f64 = 0.997;
+
+/// Hard flicks decay more slowly than gentle ones, blending from the widget's base
+/// rate at [`FLING_FAST_DECEL_START`] px/s up to [`FLING_FAST_DECEL_RATE_PER_MS`] at
+/// [`FLING_FAST_DECEL_FULL`] px/s. Native scrollers carry hard flicks far: Android's
+/// fling spline travels ~ v^1.7 (a max fling covers ~7,200dp over ~2.6s) and iOS
+/// decays at 0.998/ms, while a flat exponential tuned for pleasant gentle scrolling
+/// sheds a hard flick's speed several times faster than either. With these values a
+/// maximum flick glides a near-native distance and duration, easing back into the
+/// familiar base decay as it slows.
+pub const FLING_FAST_DECEL_START: f64 = 2_000.0;
+pub const FLING_FAST_DECEL_FULL: f64 = 8_000.0;
+pub const FLING_FAST_DECEL_RATE_PER_MS: f64 = 0.9985;
+
+/// A fast fling first glides — decaying at [`FLING_GLIDE_RATE_PER_MS`], i.e.
+/// holding nearly constant speed — easing into the regular decay over its first
+/// [`FLING_GLIDE_TIME`] seconds. Android's fling spline similarly front-loads
+/// its travel; without this, deceleration bites the moment the finger lifts and
+/// a hard flick never feels like it reaches its speed. Scaled by the same speed
+/// blend as the fast decay, so gentle flicks don't float.
+pub const FLING_GLIDE_TIME: f64 = 0.25;
+pub const FLING_GLIDE_RATE_PER_MS: f64 = 0.9997;
+
+// The Android fling model, ported from AOSP's `OverScroller.SplineOverScroller`.
+// A fling launched at velocity v travels a fixed total distance over a fixed duration
+// (distance grows ~ v^1.7, duration ~ v^0.7; a maximum-strength fling covers ~7,200dp
+// in ~2.6s), animated along a spline that front-loads the travel and eases out long.
+const ANDROID_SCROLL_FRICTION: f64 = 0.015;
+/// ln(0.78) / ln(0.9): the fling loses 22% of its speed for every 10% of remaining time.
+const ANDROID_DECELERATION_RATE: f64 = 2.3582018154259448;
+const ANDROID_INFLEXION: f64 = 0.35;
+/// Earth gravity (m/s²) × inches-per-meter × 160dpi × Android's look-and-feel factor.
+/// Android computes this with the device's real ppi because it works in physical
+/// pixels; our touch coordinates are logical (physical ÷ density), which cancels the
+/// density out of the fling equations exactly, so the 160dpi baseline (1 logical px =
+/// 1dp) reproduces the native curve on every screen.
+const ANDROID_PHYSICAL_COEFF: f64 = 9.80665 * 39.37 * 160.0 * 0.84;
+
+const SPLINE_SAMPLES: usize = 100;
+const SPLINE_START_TENSION: f64 = 0.5;
+const SPLINE_END_TENSION: f64 = 1.0;
+const SPLINE_P1: f64 = SPLINE_START_TENSION * ANDROID_INFLEXION;
+const SPLINE_P2: f64 = 1.0 - SPLINE_END_TENSION * (1.0 - ANDROID_INFLEXION);
+
+/// Fraction of the fling's total distance covered at each hundredth of its duration:
+/// `OverScroller`'s `SPLINE_POSITION` table, generated the same way (for each time
+/// fraction, bisect for the Bézier parameter, then evaluate the position curve there).
+fn spline_position_table() -> &'static [f64; SPLINE_SAMPLES + 1] {
+    static TABLE: OnceLock<[f64; SPLINE_SAMPLES + 1]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [1.0; SPLINE_SAMPLES + 1];
+        let mut x_min = 0.0;
+        for i in 0..SPLINE_SAMPLES {
+            let alpha = i as f64 / SPLINE_SAMPLES as f64;
+            let mut x_max = 1.0;
+            loop {
+                let x = x_min + (x_max - x_min) / 2.0;
+                let coef = 3.0 * x * (1.0 - x);
+                let tx = coef * ((1.0 - x) * SPLINE_P1 + x * SPLINE_P2) + x * x * x;
+                if (tx - alpha).abs() < 1e-5 {
+                    table[i] = coef * ((1.0 - x) * SPLINE_START_TENSION + x * SPLINE_END_TENSION)
+                        + x * x * x;
+                    break;
+                }
+                if tx > alpha {
+                    x_max = x;
+                } else {
+                    x_min = x;
+                }
+            }
+        }
+        table
+    })
+}
+
+/// The total signed travel (logical px) and duration (seconds) of an Android-model
+/// fling released at `velocity` px/s: `OverScroller`'s `getSplineFlingDistance` and
+/// `getSplineFlingDuration`.
+fn android_fling_target(velocity: f64) -> (f64, f64) {
+    if velocity == 0.0 {
+        return (0.0, 0.0);
+    }
+    let friction_coeff = ANDROID_SCROLL_FRICTION * ANDROID_PHYSICAL_COEFF;
+    let l = (ANDROID_INFLEXION * velocity.abs() / friction_coeff).ln();
+    let decel_minus_one = ANDROID_DECELERATION_RATE - 1.0;
+    let duration = (l / decel_minus_one).exp();
+    let distance = friction_coeff * (ANDROID_DECELERATION_RATE / decel_minus_one * l).exp();
+    (distance.copysign(velocity), duration)
+}
 
 /// EMA weight for the newest inter-frame interval sample (see [`Fling::step`]).
 const FLING_DT_EMA_ALPHA: f64 = 0.15;
@@ -36,6 +138,18 @@ pub const FLING_SAMPLE_CAP: usize = 64;
 /// velocity to be meaningful. A press that moved for less time than this is a jerk,
 /// not a flick; its instantaneous velocity says nothing about intent.
 pub const FLING_MIN_SAMPLE_SPAN: f64 = 0.01;
+
+/// The release velocity is measured over this most-recent slice (seconds) of the
+/// gesture, so it reflects how fast the finger was moving at lift-off — the way
+/// native velocity trackers weight recent motion — rather than the average of the
+/// whole gesture, which under-reads a flick that accelerates toward the end.
+pub const FLING_VELOCITY_SPAN: f64 = 0.04;
+
+/// How recently a fling must have been caught for a same-direction re-flick to
+/// add the caught speed back (the "fling boost" that lets repeated flicks build
+/// up speed, as Chrome on Android does). Measured from the catching touch to the
+/// lift that re-flicks; holding longer is a deliberate stop.
+pub const FLING_BOOST_MAX_DWELL: f64 = 0.4;
 
 /// The minimum total travel (pixels) across the retained samples for a release to count as a
 /// fling. Filters out taps and micro-jitters.
@@ -67,7 +181,9 @@ pub const CATCH_PRESS_WINDOW: f64 = 0.4;
 /// physical touch, so the real gap is a few milliseconds.
 pub const MOMENTUM_CUT_TOUCH_WINDOW: f64 = 0.1;
 
-/// The rubber-band edge bounce follows Chrome's model on macOS
+/// The rubber-band edge overscroll has two feels, chosen by input:
+///
+/// Trackpad/wheel input follows Chrome's model on macOS
 /// (`cc/input/elastic_overscroll_controller_exponential.cc`):
 /// * a bounce from momentum animates as `x(t) = (x0 + v0·t·A)·e^(−S·t/P)`,
 ///   so the overshoot is proportional to the velocity remaining at the edge;
@@ -80,6 +196,137 @@ pub const RUBBER_BAND_PERIOD: f64 = 1.6;
 /// Lower is more sensitive. Split from [`RUBBER_BAND_STIFFNESS`] (which also sets the
 /// spring's decay rate) so the stretch feel can be tuned without changing the bounce.
 pub const RUBBER_BAND_STRETCH_STIFFNESS: f64 = 12.0;
+
+/// A finger on the screen (touch or mouse drag of the content, and the flicks they
+/// release) follows the iOS `UIScrollView` rubber band instead, which is much looser
+/// than the trackpad one:
+/// * a drag of `raw` px past the edge shows `raw·c·d / (raw·c + d)` of it, where `d`
+///   is the viewport extent times [`RUBBER_BAND_TOUCH_RANGE`] — just over half the
+///   finger travel at first, flattening so the stretch never exceeds that range
+///   ([`RUBBER_BAND_TOUCH_COEFF`] is `c`; iOS uses the full viewport as the range,
+///   which lets the content be pulled farther than feels right here);
+/// * released (or reached by a flick), it springs back along a critically damped
+///   spring `x(t) = (x0 + (v0 + λ·x0)·t)·e^(−λ·t)`, whose overshoot carries the
+///   full remaining velocity ([`RUBBER_BAND_TOUCH_DECAY`] is `λ`, per second).
+///
+/// A flick into an edge overshoots by `v/(λ·e)` px and the spring settles in
+/// `~7.5/λ` seconds, so raising `λ` makes the bounce both shorter and snappier
+/// (iOS is closest to λ≈14; we run firmer so the overshoot stays modest).
+///
+/// [`RUBBER_BAND_TOUCH_RANGE`] × the viewport extent is the hard limit on all
+/// displayed overscroll: the drag stretch flattens toward it, and the widgets
+/// clamp the spring-back overshoot to it, so no bounce ever travels farther.
+pub const RUBBER_BAND_TOUCH_COEFF: f64 = 0.55;
+pub const RUBBER_BAND_TOUCH_DECAY: f64 = 20.0;
+pub const RUBBER_BAND_TOUCH_RANGE: f64 = 0.35;
+
+/// The displayed overscroll for `raw` px of finger travel past the edge (signed), in
+/// a viewport `extent` px long. `touch` picks the iOS curve; trackpad input keeps the
+/// stiffer linear stretch.
+pub fn stretch_displayed(raw: f64, extent: f64, touch: bool) -> f64 {
+    if touch {
+        let range = (extent * RUBBER_BAND_TOUCH_RANGE).max(1.0);
+        let c = RUBBER_BAND_TOUCH_COEFF;
+        (raw.abs() * c * range / (raw.abs() * c + range)).copysign(raw)
+    } else {
+        raw / RUBBER_BAND_STRETCH_STIFFNESS
+    }
+}
+
+/// Inverse of [`stretch_displayed`]: the raw finger travel that shows as `displayed`.
+/// Round-tripping through these lets a widget keep only the displayed stretch as
+/// state while the finger stretches and unwinds along the same curve.
+pub fn stretch_raw(displayed: f64, extent: f64, touch: bool) -> f64 {
+    if touch {
+        let range = (extent * RUBBER_BAND_TOUCH_RANGE).max(1.0);
+        let c = RUBBER_BAND_TOUCH_COEFF;
+        let d = displayed.abs().min(range * 0.999);
+        (d * range / (c * (range - d))).copysign(displayed)
+    } else {
+        displayed * RUBBER_BAND_STRETCH_STIFFNESS
+    }
+}
+
+/// Soften a touch bounce's seed velocity so its overshoot approaches the headroom
+/// left under `max_overscroll` asymptotically instead of slamming into it: a gentle
+/// bounce keeps nearly its full velocity, while a huge flick's is compressed so the
+/// spring peaks smoothly below the limit rather than being clipped flat against it.
+pub fn soften_bounce_velocity(v0: f64, x0: f64, max_overscroll: f64, touch: bool) -> f64 {
+    if !touch || v0 == 0.0 {
+        return v0;
+    }
+    let headroom = (max_overscroll - x0.abs()).max(0.0);
+    if headroom <= 0.0 {
+        return 0.0;
+    }
+    // A spring entering the edge at v peaks at v/(λ·e).
+    let peak = v0.abs() / (RUBBER_BAND_TOUCH_DECAY * std::f64::consts::E);
+    v0 * headroom / (peak + headroom)
+}
+
+/// A clock for the bounce animations that advances by jitter-clamped frame steps —
+/// the same smoothing [`Fling::step`] applies — so a late or early frame becomes a
+/// slightly uneven step instead of a visible jerk in the spring's fast early motion.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameClock {
+    /// Wall-clock time of the previous frame (0.0 = not yet started).
+    last_time: f64,
+    /// Running EMA (seconds) of the inter-frame interval.
+    dt_ema: f64,
+    /// Smoothed elapsed time (seconds) since the first frame.
+    t: f64,
+}
+
+/// The bounce clock's first frame advances by this nominal step rather than zero.
+/// The spring is always seeded mid-motion (a fling hitting the edge, a finger
+/// lifting off a stretch), so its first frame must move like every other frame:
+/// spending it measuring the frame interval would freeze the content for one frame
+/// right at the hand-off — a visible hitch at fling speeds. Real frame deltas take
+/// over from the second frame.
+const FRAME_CLOCK_FIRST_STEP: f64 = 1.0 / 60.0;
+
+impl FrameClock {
+    /// Whether [`FrameClock::advance`] has ever run; the first frame advances by
+    /// the nominal step (see [`FRAME_CLOCK_FIRST_STEP`]).
+    pub fn not_started(&self) -> bool {
+        self.last_time <= 0.0
+    }
+
+    /// Advance to wall-clock `now`, returning the smoothed elapsed time.
+    pub fn advance(&mut self, now: f64) -> f64 {
+        if self.last_time <= 0.0 {
+            self.last_time = now;
+            self.t = FRAME_CLOCK_FIRST_STEP;
+            return self.t;
+        }
+        let raw_dt = (now - self.last_time).clamp(0.0, FLING_MAX_DT);
+        self.last_time = now;
+        if self.dt_ema <= 0.0 {
+            self.dt_ema = raw_dt;
+        } else {
+            self.dt_ema =
+                self.dt_ema * (1.0 - FLING_DT_EMA_ALPHA) + raw_dt * FLING_DT_EMA_ALPHA;
+        }
+        self.t += raw_dt.clamp(self.dt_ema * FLING_DT_BAND.0, self.dt_ema * FLING_DT_BAND.1);
+        self.t
+    }
+}
+
+/// The bounce-back animation, evaluated `t` seconds after release: returns the
+/// displayed overscroll and whether the spring is past its peak (callers should only
+/// settle after the peak, so an overshoot isn't cut off while still growing).
+/// `x0` is the stretch at release and `v0` the velocity still carrying into the
+/// overscroll, both signed the same way.
+pub fn rubber_band_bounce(x0: f64, v0: f64, t: f64, touch: bool) -> (f64, bool) {
+    let (x, lambda) = if touch {
+        let lambda = RUBBER_BAND_TOUCH_DECAY;
+        ((x0 + (v0 + lambda * x0) * t) * (-lambda * t).exp(), lambda)
+    } else {
+        let lambda = RUBBER_BAND_STIFFNESS / RUBBER_BAND_PERIOD;
+        ((x0 + v0 * RUBBER_BAND_AMPLITUDE * t) * (-lambda * t).exp(), lambda)
+    };
+    (x, t * lambda > 1.0)
+}
 
 /// The lifecycle of the OS trackpad momentum stream for one scrollable widget.
 ///
@@ -197,10 +444,23 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
     for w in samples.windows(2) {
         total_delta += w[1].abs - w[0].abs;
     }
-    let release_velocity = if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-        let dt = last.time - first.time;
+    // Velocity comes from the last FLING_VELOCITY_SPAN of the gesture (falling
+    // back to the oldest sample when the gesture is shorter), so it reflects the
+    // speed at lift-off rather than the whole-gesture average.
+    let release_velocity = if let Some(last) = samples.last() {
+        let start = samples
+            .iter()
+            .find(|s| last.time - s.time <= FLING_VELOCITY_SPAN)
+            .unwrap_or(last);
+        let (start, dt) = if last.time - start.time > FLING_MIN_SAMPLE_SPAN {
+            (start, last.time - start.time)
+        } else if let Some(first) = samples.first() {
+            (first, last.time - first.time)
+        } else {
+            (last, 0.0)
+        };
         if dt > FLING_MIN_SAMPLE_SPAN {
-            (last.abs - first.abs) / dt
+            (last.abs - start.abs) / dt
         } else {
             0.0
         }
@@ -210,31 +470,38 @@ pub fn estimate_release_velocity(samples: &[ScrollSample]) -> (f64, f64) {
     (release_velocity, total_delta)
 }
 
-/// One kinetic-scroll animation along a single scroll axis: a velocity that decays
-/// exponentially, integrated per frame so the motion is smooth and frame-rate-independent.
+/// One kinetic-scroll animation along a single scroll axis, stepped per frame so the
+/// motion is smooth and frame-rate-independent. The curve is the platform's native one:
+/// Android's fling spline, or exponentially decaying velocity everywhere else.
 ///
-/// - A touch-drag flick ([`Fling::new`]) may overscroll into the pulldown bounce.
-/// - A trackpad deceleration tail ([`Fling::new_trackpad_tail`]) takes over once the OS momentum
-///   slows past the widget's handoff threshold, and clips at the edges instead.
-///
-/// The `decay_rate_per_ms` is supplied by the caller (a widget `#[live]` field), so the feel is
-/// configurable per widget. Drive it once per animation frame with [`Fling::step`], apply the
-/// returned displacement, and stop when [`Fling::is_active`] returns false.
+/// The `decay_rate_per_ms` is supplied by the caller (a widget `#[live]` field), so the
+/// exponential feel is configurable per widget; the Android spline ignores it, since the
+/// native curve is fully determined by the release velocity. Drive it once per animation
+/// frame with [`Fling::step`], apply the returned displacement, and stop when
+/// [`Fling::is_active`] returns false.
 #[derive(Clone, Copy, Debug)]
 pub struct Fling {
     /// Current velocity in pixels per second.
     pub velocity: f64,
-    /// Per-millisecond velocity decay factor applied each step.
+    /// Per-millisecond velocity decay factor applied each step (exponential model only).
     decay_rate_per_ms: f64,
     /// Whether this fling may overscroll into the pulldown bounce (touch-drag) or clips at the
     /// edges (trackpad tail).
     overscroll: bool,
     /// Wall-clock time of the previous step (0.0 = not yet started).
     last_time: f64,
+    /// Total animated time (seconds) since launch, driving the Android spline lookup.
+    age: f64,
     /// Running EMA (seconds) of the inter-frame interval. The step is driven off a `dt`
     /// clamped to a tight band around this, so frame-delivery jitter (a late or early frame)
     /// does not turn into an uneven jump/stall in the motion.
     dt_ema: f64,
+    /// Total signed travel of an Android-model fling (see [`android_fling_target`]).
+    spline_distance: f64,
+    /// Total duration (seconds) of an Android-model fling.
+    spline_duration: f64,
+    /// Travel already handed out by previous steps of an Android-model fling.
+    spline_emitted: f64,
 }
 
 impl Default for Fling {
@@ -244,14 +511,23 @@ impl Default for Fling {
 }
 
 impl Fling {
-    /// A touch-drag flick decaying at `decay_rate_per_ms`; may overscroll.
+    /// A touch-drag flick released at `velocity` px/s; may overscroll.
     pub fn new(velocity: f64, decay_rate_per_ms: f64) -> Self {
+        let (spline_distance, spline_duration) = if USE_ANDROID_FLING_SPLINE {
+            android_fling_target(velocity)
+        } else {
+            (0.0, 0.0)
+        };
         Self {
             velocity,
             decay_rate_per_ms,
             overscroll: true,
             last_time: 0.0,
             dt_ema: 0.0,
+            age: 0.0,
+            spline_distance,
+            spline_duration,
+            spline_emitted: 0.0,
         }
     }
 
@@ -289,11 +565,54 @@ impl Fling {
                 self.dt_ema * (1.0 - FLING_DT_EMA_ALPHA) + raw_dt * FLING_DT_EMA_ALPHA;
         }
         let dt = raw_dt.clamp(self.dt_ema * FLING_DT_BAND.0, self.dt_ema * FLING_DT_BAND.1);
-        let factor = self.decay_rate_per_ms.powf(dt * 1000.0);
+        if USE_ANDROID_FLING_SPLINE {
+            self.age += dt;
+            return Some(self.step_android_spline());
+        }
+        // Hard flicks carry farther: blend the decay rate toward the fast-fling
+        // rate as speed rises (see FLING_FAST_DECEL_*), so gentle scrolling keeps
+        // the base feel while a hard flick glides the way native scrollers do.
+        let fast_rate = FLING_FAST_DECEL_RATE_PER_MS.max(self.decay_rate_per_ms);
+        let speed_blend = ((self.velocity.abs() - FLING_FAST_DECEL_START)
+            / (FLING_FAST_DECEL_FULL - FLING_FAST_DECEL_START))
+            .clamp(0.0, 1.0);
+        let rate = self.decay_rate_per_ms + (fast_rate - self.decay_rate_per_ms) * speed_blend;
+        // A fast fling's opening stretch glides at nearly constant speed, easing
+        // into the regular decay over FLING_GLIDE_TIME (see the constants above).
+        let glide_rate = FLING_GLIDE_RATE_PER_MS.max(rate);
+        let glide_blend = (1.0 - self.age / FLING_GLIDE_TIME).clamp(0.0, 1.0) * speed_blend;
+        let rate = rate + (glide_rate - rate) * glide_blend;
+        self.age += dt;
+        let factor = rate.powf(dt * 1000.0);
         // v(t) = v0 * e^(-λt); displacement over dt = v0 * (1 - factor) / λ.
-        let lambda = -self.decay_rate_per_ms.ln() * 1000.0;
+        let lambda = -rate.ln() * 1000.0;
         let displacement = self.velocity * (1.0 - factor) / lambda;
         self.velocity *= factor;
         Some(displacement)
+    }
+
+    /// One frame of the Android-model fling (`OverScroller.update`): the position comes
+    /// straight from the spline table, and `velocity` is refreshed to the curve's current
+    /// slope so callers that read it (edge bounce seeding, catching a fling to boost the
+    /// next flick) see the true current speed.
+    fn step_android_spline(&mut self) -> f64 {
+        if self.spline_duration <= 0.0 || self.age >= self.spline_duration {
+            self.velocity = 0.0;
+            let rest = self.spline_distance - self.spline_emitted;
+            self.spline_emitted = self.spline_distance;
+            return rest;
+        }
+        let table = spline_position_table();
+        let t = self.age / self.spline_duration;
+        let index = ((SPLINE_SAMPLES as f64 * t) as usize).min(SPLINE_SAMPLES - 1);
+        let t_inf = index as f64 / SPLINE_SAMPLES as f64;
+        let t_sup = (index + 1) as f64 / SPLINE_SAMPLES as f64;
+        let velocity_coef = (table[index + 1] - table[index]) / (t_sup - t_inf);
+        let distance_coef = table[index] + (t - t_inf) * velocity_coef;
+        let target = distance_coef * self.spline_distance;
+        let displacement = target - self.spline_emitted;
+        self.spline_emitted = target;
+        self.velocity = velocity_coef * self.spline_distance / self.spline_duration;
+        displacement
     }
 }
