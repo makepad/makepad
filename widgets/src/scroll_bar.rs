@@ -3,9 +3,9 @@ use crate::event::ScrollPhase;
 use crate::makepad_derive_widget::*;
 use crate::makepad_draw::*;
 use crate::scroll_motion::{
-    estimate_release_velocity, push_sample, rubber_band_bounce, soften_bounce_velocity,
-    stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample, CATCH_PRESS_WINDOW,
-    COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
+    estimate_release_velocity, press_settles_finger_scroll, push_sample, rubber_band_bounce,
+    soften_bounce_velocity, stretch_displayed, stretch_raw, Fling, FrameClock, ScrollSample,
+    CATCH_PRESS_WINDOW, COAST_STREAM_TIMEOUT, FLING_BOOST_MAX_DWELL, FLING_DECEL_RATE_PER_MS,
     FLING_MIN_TOTAL_DELTA, MOMENTUM_CUT_TOUCH_WINDOW, PER_FRAME_TO_PER_SECOND,
     RUBBER_BAND_STRETCH_STIFFNESS, RUBBER_BAND_TOUCH_RANGE,
 };
@@ -324,9 +324,10 @@ pub struct ScrollBar {
     #[rust]
     momentum_cut_at: Option<f64>,
     /// Wall-clock time of the last finger-driven scroll delta, so presses during
-    /// active scrolling count as stops rather than clicks.
+    /// active scrolling count as stops rather than clicks. `None` until a finger has
+    /// actually scrolled this bar — see [`press_settles_finger_scroll`].
     #[rust]
-    last_finger_scroll_time: f64,
+    last_finger_scroll_time: Option<f64>,
     /// True during the fast phase of a trackpad coast, when OS momentum deltas are applied
     /// directly and `scroll_state` stays `Stopped`. This flag is then the only sign that the
     /// view is still moving. The stream can stop reaching the view without a final event
@@ -690,7 +691,7 @@ impl ScrollBar {
                             self.coasting = false;
                             self.scroll_state = ScrollState::Stopped;
                             if scroll != 0.0 {
-                                self.last_finger_scroll_time = e.time;
+                                self.last_finger_scroll_time = Some(e.time);
                             }
                             let mut scroll = scroll;
                             // A stretched rubber band unwinds first, symmetrically.
@@ -779,7 +780,7 @@ impl ScrollBar {
             self.scroll_state,
             ScrollState::Flick { .. } | ScrollState::Bounce { .. }
         ) || self.is_coasting(time)
-            || time - self.last_finger_scroll_time < 0.15
+            || press_settles_finger_scroll(self.last_finger_scroll_time, time)
     }
 
     /// Whether a press at `time` belongs to a touch that just stopped live motion.

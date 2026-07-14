@@ -181,6 +181,26 @@ pub const CATCH_PRESS_WINDOW: f64 = 0.4;
 /// physical touch, so the real gap is a few milliseconds.
 pub const MOMENTUM_CUT_TOUCH_WINDOW: f64 = 0.1;
 
+/// How long (in seconds) after the last finger-driven scroll delta a press still counts
+/// as settling that scroll rather than clicking a child. Callers must track the last
+/// delta as an `Option` and treat `None` (nothing has ever scrolled this widget) as not
+/// live: a plain `f64` defaulting to `0.0` reads as "scrolled at time zero", which
+/// swallows every press in the first `FINGER_SCROLL_SETTLE_WINDOW` of an app's life,
+/// since app clocks also start at zero.
+pub const FINGER_SCROLL_SETTLE_WINDOW: f64 = 0.15;
+
+/// Whether a press at `time` lands close enough after the finger scroll at
+/// `last_finger_scroll_time` to be settling it rather than clicking through.
+///
+/// `None` means nothing has scrolled the widget yet, so no press can be settling one.
+/// Negative gaps are rejected too: a press timestamped before the scroll it would be
+/// settling means the two came from different clocks, and answering "yes" there would
+/// swallow presses indefinitely.
+pub fn press_settles_finger_scroll(last_finger_scroll_time: Option<f64>, time: f64) -> bool {
+    last_finger_scroll_time
+        .is_some_and(|at| (0.0..FINGER_SCROLL_SETTLE_WINDOW).contains(&(time - at)))
+}
+
 /// The rubber-band edge overscroll has two feels, chosen by input:
 ///
 /// Trackpad/wheel input follows Chrome's model on macOS
@@ -614,5 +634,42 @@ impl Fling {
         self.spline_emitted = target;
         self.velocity = velocity_coef * self.spline_distance / self.spline_duration;
         displacement
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_widget_that_never_scrolled_never_settles_a_press() {
+        // Regression: this used to be a plain `f64` defaulting to 0.0, which read as
+        // "finger-scrolled at time zero". App clocks also start at zero, so every press
+        // in the first 150ms of an app's life was swallowed as a scroll-stop instead of
+        // reaching the widget under it.
+        assert!(!press_settles_finger_scroll(None, 0.0));
+        assert!(!press_settles_finger_scroll(None, 0.05));
+        assert!(!press_settles_finger_scroll(None, 10_000.0));
+    }
+
+    #[test]
+    fn a_press_settles_only_a_scroll_inside_the_window() {
+        assert!(press_settles_finger_scroll(Some(10.0), 10.0));
+        assert!(press_settles_finger_scroll(
+            Some(10.0),
+            10.0 + FINGER_SCROLL_SETTLE_WINDOW / 2.0
+        ));
+        assert!(!press_settles_finger_scroll(
+            Some(10.0),
+            10.0 + FINGER_SCROLL_SETTLE_WINDOW
+        ));
+        assert!(!press_settles_finger_scroll(Some(10.0), 11.0));
+    }
+
+    #[test]
+    fn a_press_older_than_the_scroll_does_not_settle_it() {
+        // A negative gap means the press and the scroll were stamped from different
+        // clocks. Treating that as "settling" would swallow presses indefinitely.
+        assert!(!press_settles_finger_scroll(Some(1_784_000_000.0), 5.0));
     }
 }

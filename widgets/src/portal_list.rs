@@ -7,9 +7,9 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         scroll_motion::{
-            estimate_release_velocity, push_sample, rubber_band_bounce,
-            soften_bounce_velocity, stretch_displayed, stretch_raw, Fling, FrameClock,
-            MomentumStream, ScrollSample, CATCH_PRESS_WINDOW, FLING_BOOST_MAX_DWELL,
+            estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            rubber_band_bounce, soften_bounce_velocity, stretch_displayed, stretch_raw, Fling,
+            FrameClock, MomentumStream, ScrollSample, CATCH_PRESS_WINDOW, FLING_BOOST_MAX_DWELL,
             FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, PER_FRAME_TO_PER_SECOND,
             RUBBER_BAND_TOUCH_RANGE,
         },
@@ -440,8 +440,9 @@ pub struct PortalList {
     /// than delivered as a click.
     #[rust] touch_caught_motion_at: Option<f64>,
     /// Wall-clock time of the last finger-driven scroll delta (trackpad Began/Changed),
-    /// so presses during active scrolling count as stops rather than clicks.
-    #[rust] last_finger_scroll_time: f64,
+    /// so presses during active scrolling count as stops rather than clicks. `None` until
+    /// a finger has actually scrolled this list — see [`press_settles_finger_scroll`].
+    #[rust] last_finger_scroll_time: Option<f64>,
     /// The `(velocity, time)` of a fling the user just caught with a press. A quick
     /// same-direction re-flick adds this speed back (fling boost), so repeated
     /// flicks build up speed; consumed by the press's release either way.
@@ -1527,7 +1528,7 @@ impl PortalList {
                 | ScrollState::ScrollingTo { .. }
                 | ScrollState::Tailing { .. }
         ) || self.momentum.is_live(time)
-            || time - self.last_finger_scroll_time < 0.15
+            || press_settles_finger_scroll(self.last_finger_scroll_time, time)
     }
 
     fn delta_top_scroll(
@@ -2744,7 +2745,7 @@ impl Widget for PortalList {
                             self.was_scrolling = false;
                             self.momentum = MomentumStream::Idle;
                             if delta != 0.0 {
-                                self.last_finger_scroll_time = e.time;
+                                self.last_finger_scroll_time = Some(e.time);
                             }
                             self.scroll_state = ScrollState::Stopped;
                             self.delta_top_scroll(cx, delta, false, false, 0.0, false);
