@@ -174,6 +174,13 @@ pub struct Image {
     /// allocated, so non-SVG images pay just a pointer, not a whole `DrawSvg`.
     #[rust]
     draw_svg: Option<Box<DrawSvg>>,
+    /// The SVG source currently loaded into `draw_svg`, when the caller supplied it
+    /// as shared bytes (see [`Image::load_svg_from_shared_data`]). Holding a share of
+    /// the caller's bytes costs a pointer, not a copy, and keeps them alive so their
+    /// address stays a valid identity to compare against. `Some` only while `draw_svg`
+    /// is, and only for loads that came through the shared-bytes entry point.
+    #[rust]
+    svg_source: Option<Arc<[u8]>>,
     /// Animation clock (seconds) for animated SVGs, advanced via `next_frame`.
     #[rust]
     svg_time: f64,
@@ -188,6 +195,7 @@ impl ImageCacheImpl for Image {
         self.texture = texture;
         // Keep the invariant that `draw_svg` is `Some` only while showing an SVG.
         self.draw_svg = None;
+        self.svg_source = None;
         // The texture is now this widget's content: drop any pending async-load
         // state so the draw path binds it instead of the loading placeholder and
         // a stale decode result for an older key can no longer replace it. It was
@@ -528,6 +536,40 @@ impl Image {
     /// The `DrawSvg` is allocated on first use, so images that never show an SVG
     /// carry only a null pointer.
     pub fn load_svg_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        self.parse_and_show_svg(cx, data)
+    }
+
+    /// Like [`Image::load_svg_from_data`], but for source the caller holds in shared
+    /// bytes, which lets re-loading the very same source be recognized and skipped.
+    ///
+    /// Prefer this wherever the load is re-issued on every draw (list items are
+    /// repopulated per frame): unlike a raster load, this path is synchronous with no
+    /// cache behind it, so without the check it re-parses the source and re-builds its
+    /// geometry every single frame. The cached raster path gets the same treatment in
+    /// `finish_async_load`.
+    pub fn load_svg_from_shared_data(
+        &mut self,
+        cx: &mut Cx,
+        data: Arc<[u8]>,
+    ) -> Result<(), ImageError> {
+        // Identity of the shared bytes is the check: the same allocation is the same
+        // drawing, and holding a share of it keeps the address meaningful (nothing
+        // else can be freed into it). This costs one pointer comparison, and holding
+        // the source costs a refcount rather than a copy of it.
+        if self.draw_svg.is_some()
+            && self
+                .svg_source
+                .as_ref()
+                .is_some_and(|shown| Arc::ptr_eq(shown, &data))
+        {
+            return Ok(());
+        }
+        self.parse_and_show_svg(cx, &data)?;
+        self.svg_source = Some(data);
+        Ok(())
+    }
+
+    fn parse_and_show_svg(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if data.len() > MAX_SVG_BYTES {
             return Err(ImageError::DataTooLarge {
                 bytes: data.len(),
@@ -541,6 +583,9 @@ impl Image {
         if let Some(draw_svg) = self.draw_svg.as_mut() {
             draw_svg.load_from_str(svg_str);
         }
+        // Only a caller that shared its bytes leaves an identity behind to skip on;
+        // `load_svg_from_shared_data` records it once this has succeeded.
+        self.svg_source = None;
         self.texture = None;
         self.texture_async_source = None;
         // The SVG is now this widget's content: a pending raster load no longer
@@ -759,6 +804,7 @@ impl Image {
         }
         // An SVG is always different content from an incoming raster load.
         self.draw_svg = None;
+        self.svg_source = None;
         self.async_image_size = Some(size);
         self.async_image_path = Some(image_path.into());
         self.animator_play(cx, ids!(async_load.on));
@@ -798,6 +844,7 @@ impl Image {
         self.texture = None;
         self.texture_async_source = None;
         self.draw_svg = None;
+        self.svg_source = None;
         self.animator_play(cx, ids!(async_load.off));
         self.redraw(cx);
     }
@@ -955,6 +1002,21 @@ impl ImageRef {
     pub fn load_svg_from_data(&self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
             inner.load_svg_from_data(cx, data)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
+    /// See [`Image::load_svg_from_shared_data`]: the same, but re-loading the very
+    /// same source is recognized and skipped, so a caller that re-issues its load on
+    /// every draw doesn't re-parse the SVG every frame.
+    pub fn load_svg_from_shared_data(
+        &self,
+        cx: &mut Cx,
+        data: Arc<[u8]>,
+    ) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.load_svg_from_shared_data(cx, data)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
         }
