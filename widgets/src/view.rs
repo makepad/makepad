@@ -1163,15 +1163,21 @@ impl View {
     }
 
     pub fn walk_from_previous_size(&self, walk: Walk) -> Walk {
+        // Fill and Fixed sizes are already known before drawing, so keep them live —
+        // a Fixed size can be fresh truth for this frame (e.g. a deferred fill the
+        // parent just resolved), and pinning it to the previous frame's measurement
+        // would make the cached-draw dirty check miss a pure size change. Only
+        // content-driven sizes fall back to the previous measurement, since they
+        // cannot be known before the children draw.
         let view_size = self.view_size.unwrap_or(Vec2d::default());
         Walk {
             abs_pos: walk.abs_pos,
-            width: if walk.width.is_fill() {
+            width: if walk.width.is_fill() || walk.width.is_fixed() {
                 walk.width
             } else {
                 Size::Fixed(view_size.x)
             },
-            height: if walk.height.is_fill() {
+            height: if walk.height.is_fill() || walk.height.is_fixed() {
                 walk.height
             } else {
                 Size::Fixed(view_size.y)
