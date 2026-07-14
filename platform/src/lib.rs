@@ -47,6 +47,7 @@ pub mod ime;
 mod live_reload;
 mod macos_menu;
 mod performance_stats;
+pub mod perf_monitor;
 pub mod permission;
 mod texture;
 mod uniform_buffer;
@@ -199,6 +200,7 @@ pub use {
         },
         midi::*,
         os::*,
+        perf_monitor::*,
         playback_session::{
             mix_active_media_audio, register_active_media_audio, register_media_playback_session,
             take_registered_media_playback_session, unregister_active_media_audio,

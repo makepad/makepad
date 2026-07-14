@@ -43,6 +43,12 @@ impl GaussWindowGlobal {
 }
 
 pub(crate) fn window_wants_gauss_capture(cx: &mut Cx, window_id: WindowId) -> bool {
+    // MAKEPAD_NO_GAUSS=1: skip the scene capture + blur pyramid entirely
+    // (glass falls back to fallback_color). A/B switch for frame-budget
+    // hunts — the pyramid is most of an idle UI's per-frame GPU cost.
+    if std::env::var_os("MAKEPAD_NO_GAUSS").is_some() {
+        return false;
+    }
     cx.global::<GaussWindowGlobal>()
         .entry_mut(window_id)
         .requested_last_frame

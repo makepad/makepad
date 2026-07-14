@@ -1,0 +1,23 @@
+[package]
+name = "makepad-tts"
+version = "0.1.0"
+edition = "2021"
+description = "Speech synthesis for Makepad. Text in, PCM out — the caller owns the audio device."
+license = "MIT OR Apache-2.0"
+
+# Standalone, like libs/voice: excluded from the makepad workspace, and this
+# empty table keeps the outer ~/makepad workspace from claiming it too.
+[workspace]
+
+[dependencies]
+
+# Metal offload for the matrix products Kokoro spends its time in. The pure-Rust
+# fallbacks in `kokoro::ops` remain the reference implementation everywhere else.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# `metal-precompile` bakes the metallib at build time; without it the first
+# dispatch compiles the full shader source at runtime, ~8 s on an M-series.
+makepad-ggml = { path = "../ggml", features = ["metal-precompile"] }
+
+# Only the round-trip harness needs an ASR: synthesize, transcribe, compare.
+[dev-dependencies]
+makepad-voice = { path = "../voice" }
