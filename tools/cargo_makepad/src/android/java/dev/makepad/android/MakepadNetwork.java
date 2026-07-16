@@ -5,6 +5,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.URL;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -43,6 +45,31 @@ public class MakepadNetwork {
     public MakepadNetwork() {
     }
 
+    // Build an explicit HTTP proxy from the standard JVM proxy system properties
+    // (http.proxyHost/Port for http URLs, https.proxyHost/Port for https URLs).
+    // Returns null when no proxy is configured, so the caller connects directly.
+    private static Proxy selectProxy(URL urlObj) {
+        String scheme = urlObj.getProtocol();
+        if (scheme == null) {
+            return null;
+        }
+        scheme = scheme.toLowerCase();
+        if (!scheme.equals("http") && !scheme.equals("https")) {
+            return null;
+        }
+        String host = System.getProperty(scheme + ".proxyHost");
+        String portStr = System.getProperty(scheme + ".proxyPort");
+        if (host == null || host.isEmpty() || portStr == null || portStr.isEmpty()) {
+            return null;
+        }
+        try {
+            int port = Integer.parseInt(portStr.trim());
+            return new Proxy(Proxy.Type.HTTP, new InetSocketAddress(host, port));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     public CompletableFuture<HttpResponse> performHttpRequest(String url, String method, String headers, byte[] body) {
         return CompletableFuture.supplyAsync(() -> {
             HttpURLConnection connection = null;
@@ -50,7 +77,15 @@ public class MakepadNetwork {
 
             try {
                 URL urlObj = new URL(url);
-                connection = (HttpURLConnection) urlObj.openConnection();
+                // Route app-initiated requests through the proxy named by the standard
+                // JVM proxy system properties (Android populates them from the
+                // system / Wi-Fi proxy configuration; a host may also set them itself).
+                // We apply it explicitly rather than relying on the default
+                // ProxySelector picking the properties up.
+                Proxy proxy = selectProxy(urlObj);
+                connection = (HttpURLConnection) (proxy != null
+                        ? urlObj.openConnection(proxy)
+                        : urlObj.openConnection());
                 connection.setRequestMethod(method);
 
                 String[] headerPairs = headers.split("\r\n");
