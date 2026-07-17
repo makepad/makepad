@@ -452,6 +452,37 @@ enum State {
 }
 
 impl State {
+    /// Whether this state is an unclosed `( )` / `[ ]` context (grouping, call
+    /// args, array literal, or index). Inside these, newlines are insignificant
+    /// and expressions continue across them (Python/Swift/JS-style).
+    fn is_round_square_container(&self) -> bool {
+        matches!(
+            self,
+            State::EndRound | State::EndCall { .. } | State::EndBareSquare | State::ArrayIndex
+        )
+    }
+
+    /// Whether this state is an unclosed `{ }` / statement-list context, where
+    /// newlines DO delimit statements (function/match/block bodies, object and
+    /// bare blocks).
+    fn is_statement_container(&self) -> bool {
+        matches!(
+            self,
+            State::EndProto
+                | State::EndProtoInherit
+                | State::EndScopeInherit
+                | State::EndFieldInherit
+                | State::EndIndexInherit
+                | State::EndBare
+                | State::EndFnBlock { .. }
+                | State::EndFnExpr { .. }
+                | State::MatchArmBody { .. }
+                | State::MatchArmBlock { .. }
+                | State::MatchWildcardBody { .. }
+                | State::MatchWildcardBlock { .. }
+        )
+    }
+
     fn is_short_circuit_op(op: LiveId) -> bool {
         op == id!(&&) || op == id!(||) || op == id!(|?)
     }
@@ -711,6 +742,14 @@ pub struct ScriptParser {
     // Temporary storage for destructuring defaults (binding_id, value_code, value_map)
     pub(crate) destruct_defaults: Vec<(LiveId, Vec<ScriptValue>, Vec<Option<u32>>)>,
 
+    /// Code position most recently patched as a short-circuit (&&, ||, |?) jump
+    /// target. `set_pop_to_me` must not fuse the POP_TO_ME flag onto the opcode
+    /// just before this position: the fused commit would sit inside the region
+    /// the jump skips, so a taken short-circuit would lose the value (it never
+    /// reaches the enclosing call-args/object). A standalone POP_TO_ME emitted
+    /// AT this position is the jump target itself, so both paths commit.
+    last_short_circuit_target: u32,
+
     // Storage for nested patterns during parsing
     // Each entry is (pattern_info). The index into this vec is encoded in the ids list.
     nested_patterns: Vec<NestedPattern>,
@@ -731,6 +770,7 @@ impl Default for ScriptParser {
             col_offset: 0,
             destruct_defaults: Default::default(),
             nested_patterns: Default::default(),
+            last_short_circuit_target: u32::MAX,
         }
     }
 }
@@ -790,17 +830,40 @@ impl ScriptParser {
         self.source_map.push(None);
     }
 
-    fn set_pop_to_me(&mut self) {
-        if let Some(code) = self.opcodes.last_mut() {
-            if let Some((opcode, _args)) = code.as_opcode() {
-                if opcode == Opcode::RETURN {
-                    self.push_code(Opcode::POP_TO_ME.into(), self.index)
-                } else {
-                    code.set_opcode_args_pop_to_me();
-                }
-            } else {
-                self.push_code(Opcode::POP_TO_ME.into(), self.index)
+    /// Whether the parser is currently inside an unclosed `( )` / `[ ]` context
+    /// (grouping, call args, array literal, or index), where newlines do not
+    /// delimit statements. Scans the state stack for the nearest enclosing
+    /// container: round/square = inside brackets, curly/block = statement list.
+    fn inside_round_square_bracket(&self) -> bool {
+        for state in self.state.iter().rev() {
+            if state.is_round_square_container() {
+                return true;
             }
+            if state.is_statement_container() {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn set_pop_to_me(&mut self) {
+        let Some(code) = self.opcodes.last() else {
+            return;
+        };
+        let fuse = match code.as_opcode() {
+            // RETURN can't carry the flag, and fusing onto a short-circuit jump
+            // target boundary would let a taken jump skip the commit (see the
+            // last_short_circuit_target field docs).
+            Some((opcode, _args)) => {
+                opcode != Opcode::RETURN && self.code_len() != self.last_short_circuit_target
+            }
+            // A raw value slot can't carry the flag.
+            None => false,
+        };
+        if fuse {
+            self.opcodes.last_mut().unwrap().set_opcode_args_pop_to_me();
+        } else {
+            self.push_code(Opcode::POP_TO_ME.into(), self.index)
         }
     }
 
@@ -2660,12 +2723,14 @@ impl ScriptParser {
             State::ShortCircuitEnd { test_slot } => {
                 // Patch the TEST opcode's jump to skip to current position (after second operand)
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                self.last_short_circuit_target = self.code_len();
                 return 0;
             }
             State::ShortCircuitAssignEnd { test_slot, index } => {
                 // Emit ASSIGN after RHS, then patch the jump
                 self.push_code(Opcode::ASSIGN.into(), index);
                 self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                self.last_short_circuit_target = self.code_len();
                 return 0;
             }
             State::EmitReturn {
@@ -3321,6 +3386,14 @@ impl ScriptParser {
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
+                // NOTE on `use x.*` semantics: a glob import copies the names
+                // that exist in the target namespace AT THIS POINT in
+                // evaluation. Names registered later — including later in the
+                // SAME script_mod! block (e.g. `mod.widgets.Foo = ...` below a
+                // `use mod.widgets.*`) — are NOT visible through the import
+                // and must be referenced fully qualified (`mod.widgets.Foo`).
+                // The runtime reports such misses as "variable X not found in
+                // scope" with suggestions.
                 if id == id!(use) {
                     self.state.push(State::Use { index: self.index });
                     self.state.push(State::BeginExpr { required: true });
@@ -3453,6 +3526,31 @@ impl ScriptParser {
             }
 
             State::EndExpr => {
+                // Newline-delimited statements: a *postfix* `(` (call) or `[`
+                // (index) on a new line does NOT glue onto the just-completed
+                // expression; it begins a new statement. Without this, `let h =
+                // x % 7` followed by `(h + 6) % 7` on the next line parses as
+                // calling the number 7 with `(h + 6)` -- the calendar-app bug.
+                // These two are the footgun class: a leading `(`/`[` can be BOTH a
+                // postfix operator on the previous value AND the start of a fresh
+                // statement (a grouped expression / an array literal), so greedy
+                // gluing is a silent surprise.
+                //
+                // Infix operators and `.` are deliberately NOT diverted: they
+                // cannot begin a statement, so a leading one is unambiguously a
+                // continuation -- and makepad's shader DSL relies on exactly that
+                // to break long math across lines (`let c = a * k\n + (b) * j`).
+                // To continue an expression across lines, lead the new line with an
+                // operator (or trail the previous line with one).
+                //
+                // Suppressed inside `( )`/`[ ]`, where newlines are insignificant
+                // and even a `(`/`[` is part of the surrounding expression.
+                if tokenizer.token_preceded_by_newline(self.index)
+                    && (tok.is_open_round() || tok.is_open_square())
+                    && !self.inside_round_square_bracket()
+                {
+                    return 0;
+                }
                 if op == id!(~) {
                     return 0;
                 }
@@ -3514,6 +3612,7 @@ impl ScriptParser {
                                 test_slot,
                                 OpcodeArgs::from_u32(self.code_len() - test_slot),
                             );
+                            self.last_short_circuit_target = self.code_len();
                         } else {
                             break;
                         }
@@ -3826,6 +3925,9 @@ impl ScriptParser {
                     return 1;
                 }
                 if tok.is_open_round() {
+                    // (A `(` starting a new line was already diverted to a new
+                    // statement by the newline-continuation guard at the top of
+                    // EndExpr, so here it is always a same-line call.)
                     if let Some(last) = self.state.pop() {
                         if let State::EmitOp {
                             what_op: id!(.) | id!(.?),
@@ -4062,6 +4164,22 @@ impl ScriptParser {
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
                 }
+                State::CallMaybeDo { is_method, index } => {
+                    // A call as the final tokens of the source: no next token
+                    // arrived to rule out a trailing `do` block, so resolve it
+                    // as a plain call here.
+                    if is_method {
+                        self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
+                    } else {
+                        self.push_code(Opcode::CALL_EXEC.into(), index);
+                    }
+                }
+                State::ShortCircuitEnd { test_slot } => {
+                    // A short-circuit op at end of source: patch its jump so a
+                    // taken test doesn't land on a stale zero offset.
+                    self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_short_circuit_target = self.code_len();
+                }
                 _ => {
                     // Other states (EndExpr, BeginStmt, etc.) - just drop them
                 }
@@ -4252,6 +4370,23 @@ impl ScriptParser {
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                State::CallMaybeDo { is_method, index } => {
+                    // A call as the final tokens of the source: no next token
+                    // arrived to rule out a trailing `do` block, so resolve it
+                    // as a plain call here (a later streamed append restores
+                    // the checkpoint and re-parses if a `do` does arrive).
+                    if is_method {
+                        self.push_code(Opcode::METHOD_CALL_EXEC.into(), index);
+                    } else {
+                        self.push_code(Opcode::CALL_EXEC.into(), index);
+                    }
+                }
+                State::ShortCircuitEnd { test_slot } => {
+                    // A short-circuit op at end of source: patch its jump so a
+                    // taken test doesn't land on a stale zero offset.
+                    self.set_opcode_args(test_slot, OpcodeArgs::from_u32(self.code_len() - test_slot));
+                    self.last_short_circuit_target = self.code_len();
                 }
                 _ => {}
             }
