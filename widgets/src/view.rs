@@ -4,7 +4,7 @@ use {
         animator::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        makepad_script::ScriptFnRef,
+        makepad_script::{script_err_wrong_value, ScriptFnRef},
         scroll_bars::ScrollBars,
         widget::*,
         widget_async::{
@@ -749,6 +749,36 @@ impl Widget for View {
                     id!(render),
                 )
             });
+        }
+        if method == live_id!(set_visible) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let visible = value
+                    .as_bool()
+                    .or_else(|| value.as_number().map(|n| n != 0.0));
+                match visible {
+                    Some(visible) => {
+                        vm.with_cx_mut(|cx| {
+                            if self.visible != visible {
+                                self.visible = visible;
+                                self.redraw(cx);
+                            }
+                        });
+                    }
+                    // Never guess on a bad argument: a silent default (especially
+                    // `true`) turns script bugs into invisible misbehavior. Keep
+                    // the current visibility and surface an error instead.
+                    None => {
+                        return ScriptAsyncResult::Return(script_err_wrong_value!(
+                            vm.trap(),
+                            "set_visible expects a bool (or number), got {:?}",
+                            value.value_type()
+                        ));
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
         }
         ScriptAsyncResult::MethodNotFound
     }

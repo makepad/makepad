@@ -3,7 +3,9 @@ use crate::{
     makepad_draw::*,
     view::View,
     widget::*,
-    widget_async::{CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID},
+    widget_async::{
+        CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID, WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+    },
     widget_tree::CxWidgetExt,
 };
 
@@ -32,6 +34,12 @@ pub struct Splash {
     allow_net: bool,
     #[rust]
     vm_id: SplashVmId,
+    /// Index of this Splash's script body in its isolate's bodies list, cached
+    /// at eval time so host->script calls don't depend on re-deriving the
+    /// pointer-based ScriptMod identity (the struct could in principle move
+    /// between eval and a later call).
+    #[rust]
+    body_id: Option<u16>,
 }
 
 const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nView{height:Fit, ";
@@ -87,11 +95,21 @@ impl Splash {
         });
 
         if let Some(view) = new_view {
+            // Cache the body index for host->script calls (call_script_fn etc).
+            self.body_id = cx.with_script_vm_id(vm_id, |vm| {
+                let bodies = vm.bx.code.bodies.borrow();
+                bodies.iter().position(|body| match &body.source {
+                    ScriptSource::Mod(m) => m.line == self_id && m.file.is_empty(),
+                    _ => false,
+                })
+            })
+            .map(|i| i as u16);
             self.view = view;
-            // Make `ui` a global in this splash's VM (pointing at the freshly-built view root) so
-            // helper `fn`s inside the block can use `ui.<id>.set_text(...)`, not just inline
-            // handlers. Without this, calculators/forms that route through a helper silently fail.
-            crate::widget_async::inject_splash_ui_handle(cx, self.vm_id, self.view.widget_uid());
+            // Make `ui` a global in this splash's VM so helper `fn`s inside the block can use
+            // `ui.<id>.set_text(...)`, not just inline handlers. It points at the Splash widget
+            // itself (not the wrapper view, which never becomes a widget-tree node since
+            // `children()` forwards through it), so confined subtree lookups resolve.
+            crate::widget_async::inject_splash_ui_handle(cx, self.vm_id, self.uid);
             cx.widget_tree_mark_dirty(self.uid);
         }
     }
@@ -160,10 +178,93 @@ impl Widget for Splash {
     }
 }
 
+impl Splash {
+    /// Calls a top-level `fn` defined in this Splash's script body, if the script
+    /// defines one by that name. Runs inside the isolate under the standard entry
+    /// budget and instruction limit. Returns whether the fn was found: hosts
+    /// broadcasting optional hooks (e.g. size changes) can ignore it, while
+    /// callers expecting the fn to exist can log a missing-hook diagnostic
+    /// (distinguishing "script has no hook" from a typo'd name).
+    pub fn call_script_fn(&mut self, cx: &mut Cx, name: LiveId, args: &[ScriptValue]) -> bool {
+        let Some(scope) = self.body_scope(cx) else {
+            return false;
+        };
+        cx.with_script_vm_id(self.vm_id, |vm| {
+            let fnval = vm.bx.heap.scope_value(scope, name, vm.trap());
+            if fnval.is_nil() || fnval.is_err() {
+                return false;
+            }
+            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                vm.call(fnval, args);
+            });
+            true
+        })
+    }
+
+    /// Sets whether this Splash's isolate gets the networking runtime. Must be
+    /// called before the body is first evaluated (i.e. before `set_text`) — the
+    /// VM is allocated with or without network on that first eval and isn't
+    /// re-allocated afterwards.
+    pub fn set_allow_net(&mut self, allow: bool) {
+        self.allow_net = allow;
+    }
+
+    /// Sets (or replaces) a global visible to this Splash's script, like the
+    /// injected `ui` handle. Useful for handing scripts host-provided context
+    /// (configuration, sizes, capabilities) without re-evaluating the body.
+    pub fn set_script_global(&mut self, cx: &mut Cx, key: LiveId, value: ScriptValue) {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return;
+        }
+        cx.with_script_vm_id(self.vm_id, |vm| {
+            vm.set_injected_global(key, value);
+        });
+    }
+
+    /// The scope object holding this Splash body's top-level definitions, via
+    /// the body id cached at eval time (with a pointer-identity fallback for
+    /// robustness).
+    fn body_scope(&mut self, cx: &mut Cx) -> Option<ScriptObject> {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return None;
+        }
+        let self_id = self.self_id();
+        let body_id = self.body_id;
+        cx.with_script_vm_id(self.vm_id, |vm| {
+            let bodies = vm.bx.code.bodies.borrow();
+            if let Some(body) = body_id.and_then(|i| bodies.get(i as usize)) {
+                return Some(body.scope.as_object());
+            }
+            bodies.iter().find_map(|body| match &body.source {
+                ScriptSource::Mod(m) if m.line == self_id && m.file.is_empty() => {
+                    Some(body.scope.as_object())
+                }
+                _ => None,
+            })
+        })
+    }
+}
+
 impl SplashRef {
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
+        }
+    }
+
+    /// See [`Splash::call_script_fn`].
+    pub fn call_script_fn(&self, cx: &mut Cx, name: LiveId, args: &[ScriptValue]) -> bool {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.call_script_fn(cx, name, args)
+        } else {
+            false
+        }
+    }
+
+    /// See [`Splash::set_script_global`].
+    pub fn set_script_global(&self, cx: &mut Cx, key: LiveId, value: ScriptValue) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_script_global(cx, key, value);
         }
     }
 }

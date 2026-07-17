@@ -6,7 +6,7 @@ use crate::{
     makepad_script::ScriptFnRef,
     view::View,
     widget::*,
-    widget_async::CxWidgetToScriptCallExt,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
 };
 
 script_mod! {
@@ -1763,6 +1763,37 @@ impl Widget for GlassButton {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.set(v);
         self.redraw(cx);
+    }
+
+    // Scripts can read and change the button label (e.g. a play/pause toggle),
+    // mirroring Label's script surface.
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
     }
 }
 
