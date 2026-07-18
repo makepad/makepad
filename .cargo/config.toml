@@ -1,0 +1,12 @@
+# Keep workspace builds free of global rustc flags.
+#
+# libs/box3d/box3d.profdata is valid PGO data for makepad-box3d, trained by
+# libs/box3d/pgo.sh. Do not enable it here with a relative -Cprofile-use path:
+# Cargo applies build.rustflags to every crate in the graph, and rustc resolves
+# that path relative to each crate being compiled. That breaks builds for
+# dependencies and tools such as `cargo install --path=./tools/cargo_makepad`.
+#
+# For local PGO experiments, pass an absolute path explicitly, for example:
+# RUSTFLAGS="-Cprofile-use=$(pwd)/libs/box3d/box3d.profdata" cargo build --release -p makepad-box3d
+[build]
+rustflags = []

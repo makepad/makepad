@@ -10,6 +10,40 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Arc};
 
+    /// Small read adapter so the tests keep their `body.xxx()` shape on top of
+    /// the box3d-backed scene helpers.
+    struct BodyView<'a> {
+        scene: &'a PhysicsScene,
+        handle: RigidBodyHandle,
+    }
+
+    impl BodyView<'_> {
+        fn body_type(&self) -> BodyType {
+            self.scene.body_type(self.handle)
+        }
+        fn is_sleeping(&self) -> bool {
+            self.scene.body_is_sleeping(self.handle)
+        }
+        fn is_enabled(&self) -> bool {
+            self.scene.body_is_enabled(self.handle)
+        }
+        fn linvel(&self) -> Vec3f {
+            self.scene.body_linvel(self.handle)
+        }
+        fn angvel(&self) -> Vec3f {
+            self.scene.body_angvel(self.handle)
+        }
+        fn pose(&self) -> Pose {
+            self.scene.body_pose(self.handle)
+        }
+    }
+
+    fn body_view(scene: &PhysicsScene, handle: RigidBodyHandle) -> Option<BodyView<'_>> {
+        scene
+            .body_is_valid(handle)
+            .then_some(BodyView { scene, handle })
+    }
+
     fn set_normalized_distance(
         chunks: &mut HashMap<ChunkKey, Arc<SparseTsdReadChunk>>,
         chunk_edge: i32,
@@ -117,7 +151,7 @@ mod tests {
 
     #[test]
     fn respawn_body_applies_shadow_contact_dominated_and_sleeping_modes() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(41);
         let pose = Pose::new(Quat::default(), vec3f(0.08, 1.12, -0.44));
         scene.spawn_dynamic_box(
@@ -139,11 +173,9 @@ mod tests {
             vec3f(1.0, 2.0, 3.0),
             vec3f(4.0, 5.0, 6.0),
         );
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("spawned cube body should exist");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
         assert_eq!(
             scene.shadow_body_motion_for_body(cube.body),
             Some((vec3f(1.0, 2.0, 3.0), vec3f(4.0, 5.0, 6.0)))
@@ -160,11 +192,9 @@ mod tests {
             vec3f(0.5, 0.0, -0.5),
             vec3f(0.0, 1.0, 0.0),
         );
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after contact-dominated respawn");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
         assert!(!body.is_sleeping());
 
         scene.respawn_body(
@@ -175,18 +205,16 @@ mod tests {
             vec3f(0.0, 0.0, 0.0),
             vec3f(0.0, 0.0, 0.0),
         );
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after sleeping respawn");
-        assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+        assert_eq!(body.body_type(), BodyType::Dynamic);
         assert_vec3_close(
-            vec3f(body.linvel().x, body.linvel().y, body.linvel().z),
+            body.linvel(),
             vec3f(0.0, 0.0, 0.0),
             0.0001,
         );
         assert_vec3_close(
-            vec3f(body.angvel().x, body.angvel().y, body.angvel().z),
+            body.angvel(),
             vec3f(0.0, 0.0, 0.0),
             0.0001,
         );
@@ -194,7 +222,7 @@ mod tests {
 
     #[test]
     fn shadow_respawn_keeps_projecting_motion_between_corrections() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(410);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.2));
         scene.spawn_dynamic_box(
@@ -218,12 +246,10 @@ mod tests {
         );
         scene.step();
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("shadow body should exist after a step");
-        let stepped_pose = makepad_pose(body.position());
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        let stepped_pose = body.pose();
+        assert_eq!(body.body_type(), BodyType::Kinematic);
         assert!(
             stepped_pose.position.z < pose.position.z - 0.0001,
             "shadow body should keep moving forward between network corrections: {stepped_pose:?}"
@@ -239,7 +265,7 @@ mod tests {
 
     #[test]
     fn shadow_dynamic_body_ignores_local_wall_until_extrapolation_runs_out() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let projectile_uid = WidgetUid(411);
         let wall_uid = WidgetUid(412);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.2));
@@ -274,26 +300,24 @@ mod tests {
             scene.step();
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("shadow projectile should still exist after stepping");
         assert!(
-            makepad_pose(body.position()).position.z <= -0.39,
+            body.pose().position.z <= -0.39,
             "shadow projectile should keep dead-reckoning forward instead of locally bouncing on observer-only walls: {:?}",
-            makepad_pose(body.position()).position
+            body.pose().position
         );
         assert!(
-            makepad_pose(body.position()).position.z >= -0.45,
+            body.pose().position.z >= -0.45,
             "shadow projectile should stop near the extrapolation horizon when no fresh authority samples arrive: {:?}",
-            makepad_pose(body.position()).position
+            body.pose().position
         );
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
     }
 
     #[test]
     fn apply_impulse_only_affects_dynamic_enabled_bodies() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(42);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -308,9 +332,7 @@ mod tests {
         let cube = scene.cubes[0];
 
         assert!(scene.apply_impulse(widget_uid, pose.position, vec3f(0.0, 0.0, -1.0),));
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should exist after impulse");
         assert!(body.linvel().z < 0.0);
 
@@ -336,7 +358,7 @@ mod tests {
 
     #[test]
     fn tsdf_floor_halfspace_catches_falling_body() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.sync_floor_halfspace(Some(-0.25));
         let widget_uid = WidgetUid(4199);
         scene.spawn_dynamic_box(
@@ -359,11 +381,9 @@ mod tests {
             scene.step();
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("body should still exist after settling on the TSDF floor");
-        let position = makepad_pose(body.position()).position;
+        let position = body.pose().position;
         assert!(
             (position.y - (-0.20)).abs() <= 0.04,
             "body should settle on the injected floor half-space near y=-0.20, got {position:?}"
@@ -372,7 +392,7 @@ mod tests {
 
     #[test]
     fn apply_drive_moves_a_resting_supported_body() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 480.0);
 
         scene.spawn_fixed_box(
@@ -421,21 +441,17 @@ mod tests {
                 ),
                 "drive commands should be accepted for a supported dynamic body"
             );
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("driven body should still exist");
             most_negative_z = most_negative_z.min(body.linvel().z);
             most_negative_position_z =
-                most_negative_position_z.min(makepad_pose(body.position()).position.z);
+                most_negative_position_z.min(body.pose().position.z);
         }
         scene.step();
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("driven body should still exist after the final integration step");
         most_negative_position_z =
-            most_negative_position_z.min(makepad_pose(body.position()).position.z);
+            most_negative_position_z.min(body.pose().position.z);
 
         assert!(
             most_negative_z < -0.03,
@@ -449,7 +465,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_creates_four_support_query_sources() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(4202);
         scene.spawn_dynamic_box_with_support(
             widget_uid,
@@ -495,7 +511,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_stays_supported_by_depth_query_floor_planes() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
 
         let widget_uid = WidgetUid(42021);
@@ -523,10 +539,10 @@ mod tests {
             scene.sync_vehicle_query_sources_pre_step();
             let query_sources = scene.cube_depth_query_sources(cube);
             for (slot, source) in query_sources.into_iter().flatten().enumerate() {
-                let Some(body) = scene.bodies.get(source.body) else {
+                let Some(body) = body_view(&scene, source.body) else {
                     continue;
                 };
-                let query_pose = makepad_pose(body.position());
+                let query_pose = body.pose();
                 let plane = DepthQuerySupportPlane {
                     point: vec3f(query_pose.position.x, 0.0, query_pose.position.z),
                     normal: vec3f(0.0, 1.0, 0.0),
@@ -552,22 +568,18 @@ mod tests {
             }
             scene.step();
 
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("four-wheel body should still exist during depth support test");
-            let position = makepad_pose(body.position()).position;
+            let position = body.pose().position;
             assert!(
                 position.y > -0.18,
                 "depth-query wheel support should stop the chassis from falling through the floor plane; frame={frame} position={position:?}"
             );
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("four-wheel body should still exist after depth support test");
-        let position = makepad_pose(body.position()).position;
+        let position = body.pose().position;
         let wheel_contact_count = scene.vehicles[vehicle_index]
             .controller
             .wheels()
@@ -586,7 +598,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_stays_supported_by_flat_tsdf_floor() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         let mut retained_hits = HashMap::new();
         let depth_mesh = XrTsdfStore::default();
@@ -622,22 +634,18 @@ mod tests {
                 None,
             );
             scene.step();
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("four-wheel body should still exist during TSDF support test");
-            let position = makepad_pose(body.position()).position;
+            let position = body.pose().position;
             assert!(
                 position.y > -0.18,
                 "flat-floor TSDF support should stop the chassis from falling through; frame={frame} position={position:?}"
             );
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("four-wheel body should still exist after TSDF support test");
-        let position = makepad_pose(body.position()).position;
+        let position = body.pose().position;
         let wheel_contact_count = scene.vehicles[vehicle_index]
             .controller
             .wheels()
@@ -656,7 +664,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_body_depth_query_planes_provide_hybrid_catch_support() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
 
         let widget_uid = WidgetUid(42023);
@@ -689,10 +697,10 @@ mod tests {
                     continue;
                 };
                 if slot == 0 {
-                    let Some(body) = scene.bodies.get(source.body) else {
+                    let Some(body) = body_view(&scene, source.body) else {
                         continue;
                     };
-                    let query_pose = makepad_pose(body.position());
+                    let query_pose = body.pose();
                     let plane = DepthQuerySupportPlane {
                         point: vec3f(query_pose.position.x, 0.0, query_pose.position.z),
                         normal: vec3f(0.0, 1.0, 0.0),
@@ -721,22 +729,18 @@ mod tests {
             }
             scene.step();
 
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("four-wheel body should still exist during body-catch support test");
-            let position = makepad_pose(body.position()).position;
+            let position = body.pose().position;
             assert!(
                 position.y > -0.18,
                 "body depth-query support should stop the chassis from falling through even without wheel support planes; frame={frame} position={position:?}"
             );
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("four-wheel body should still exist after body-catch support test");
-        let position = makepad_pose(body.position()).position;
+        let position = body.pose().position;
         assert!(
             position.y > -0.05,
             "body depth-query support should keep the chassis near the injected floor plane: {position:?}"
@@ -745,7 +749,7 @@ mod tests {
 
     #[test]
     fn car_control_drives_four_wheel_vehicle_forward() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4203),
@@ -773,10 +777,8 @@ mod tests {
             .find(|cube| cube.widget_uid == widget_uid)
             .copied()
             .expect("four-wheel vehicle should exist");
-        let start_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let start_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should exist at spawn");
         let vehicle_index = scene
             .vehicle_index_for_widget_uid(widget_uid)
@@ -802,15 +804,13 @@ mod tests {
                 .any(|wheel| wheel.raycast_info().is_in_contact);
         }
 
-        let end_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let end_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should still exist after driving");
 
         assert!(
             end_position.z > start_position.z + 0.02,
-            "forward throttle should move the Rapier four-wheel vehicle along +Z: start={start_position:?} end={end_position:?}"
+            "forward throttle should move the four-wheel vehicle along +Z: start={start_position:?} end={end_position:?}"
         );
         assert!(
             saw_ground_contact,
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn four_wheel_chassis_keeps_normal_fixed_world_collisions() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4205),
@@ -856,11 +856,9 @@ mod tests {
             scene.step();
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("rolled four-wheel chassis should still exist");
-        let position = makepad_pose(body.position()).position;
+        let position = body.pose().position;
         assert!(
             position.y > -0.20,
             "rolled four-wheel chassis should still collide with normal fixed bodies instead of falling straight through them: {position:?}"
@@ -869,7 +867,7 @@ mod tests {
 
     #[test]
     fn car_control_steers_four_wheel_vehicle_off_centerline() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4207),
@@ -913,11 +911,9 @@ mod tests {
                 brake: 0.0,
             });
             scene.step();
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("four-wheel body should exist during steering warmup");
-            let pose = makepad_pose(body.position());
+            let pose = body.pose();
             let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
             max_abs_x = max_abs_x.max(pose.position.x.abs());
             max_abs_forward_x = max_abs_forward_x.max(forward.x.abs());
@@ -931,11 +927,9 @@ mod tests {
                 brake: 0.0,
             });
             scene.step();
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("steered four-wheel body should still exist during steering");
-            let pose = makepad_pose(body.position());
+            let pose = body.pose();
             let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
             max_abs_x = max_abs_x.max(pose.position.x.abs());
             max_abs_forward_x = max_abs_forward_x.max(forward.x.abs());
@@ -950,11 +944,9 @@ mod tests {
                     .unwrap_or(false);
         }
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("steered four-wheel body should still exist");
-        let pose = makepad_pose(body.position());
+        let pose = body.pose();
         let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
         let wheel_summary = scene.vehicles[vehicle_index]
             .controller
@@ -988,7 +980,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_rides_on_wheels_instead_of_bottoming_out_on_flat_floor() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         let floor_uid = WidgetUid(4209);
         scene.spawn_fixed_box(
@@ -1046,36 +1038,10 @@ mod tests {
             .enumerate()
             .filter(|(index, _)| *index == 0 || *index == 2)
             .all(|(_, wheel)| wheel.raycast_info().is_in_contact);
-        let chassis_contact_debug = scene
-            .narrow_phase
-            .contact_pairs_with(cube.collider)
-            .filter(|pair| {
-                pair.has_any_active_contact()
-                    && ((pair.collider1 == cube.collider && pair.collider2 == floor.collider)
-                        || (pair.collider2 == cube.collider && pair.collider1 == floor.collider))
-            })
-            .flat_map(|pair| {
-                pair.manifolds.iter().map(|manifold| {
-                    (
-                        manifold.data.normal,
-                        manifold
-                            .data
-                            .solver_contacts
-                            .iter()
-                            .map(|contact| (contact.point, contact.dist))
-                            .collect::<Vec<_>>(),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let deepest_chassis_penetration = chassis_contact_debug
-            .iter()
-            .flat_map(|(_, contacts)| contacts.iter().map(|(_, dist)| (-*dist).max(0.0)))
-            .fold(0.0, f32::max);
-        let chassis_pose = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()))
+        let deepest_chassis_penetration =
+            scene.deepest_contact_penetration_between(cube.body, floor.body);
+        let chassis_pose = body_view(&scene, cube.body)
+            .map(|body| body.pose())
             .expect("four-wheel body should still exist after settling");
 
         assert!(
@@ -1099,15 +1065,14 @@ mod tests {
         );
         assert!(
             deepest_chassis_penetration < 0.001,
-            "the chassis collider should not meaningfully support the vehicle on a flat floor once the wheels settle: deepest_chassis_penetration={deepest_chassis_penetration:.6} pose={:?} chassis_contact_debug={:?}",
+            "the chassis collider should not meaningfully support the vehicle on a flat floor once the wheels settle: deepest_chassis_penetration={deepest_chassis_penetration:.6} pose={:?}",
             chassis_pose,
-            chassis_contact_debug,
         );
     }
 
     #[test]
     fn scaled_four_wheel_vehicle_keeps_suspension_clearance_on_plate_top() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
 
         let scene_scale = vec3f(0.62, 0.62, 0.62);
@@ -1222,7 +1187,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_support_pose_axes_match_controller_wheel_axes() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4213),
@@ -1275,10 +1240,8 @@ mod tests {
             scene.step();
         }
 
-        let owner_pose = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()))
+        let owner_pose = body_view(&scene, cube.body)
+            .map(|body| body.pose())
             .expect("vehicle body should still exist");
         let owner_inverse = owner_pose.orientation.invert();
         let local_pose = scene.cube_linked_support_local_poses(cube)[0]
@@ -1286,7 +1249,7 @@ mod tests {
         let wheel = &scene.vehicles[vehicle_index].controller.wheels()[0];
 
         let expected_axle_local =
-            owner_inverse.rotate_vec3(&makepad_vec3(wheel.axle()).normalize());
+            owner_inverse.rotate_vec3(&wheel.axle().normalize());
         let actual_axle_local = local_pose
             .orientation
             .rotate_vec3(&vec3f(-1.0, 0.0, 0.0))
@@ -1297,7 +1260,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_keeps_moving_when_one_side_climbs_a_ramp() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4215),
@@ -1341,10 +1304,8 @@ mod tests {
             .find(|cube| cube.widget_uid == widget_uid)
             .copied()
             .expect("four-wheel vehicle should exist");
-        let start_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let start_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should exist at spawn");
         let vehicle_index = scene
             .vehicle_index_for_widget_uid(widget_uid)
@@ -1360,11 +1321,9 @@ mod tests {
                 brake: 0.0,
             });
             scene.step();
-            let body = scene
-                .bodies
-                .get(cube.body)
+            let body = body_view(&scene, cube.body)
                 .expect("four-wheel body should still exist while climbing");
-            let _pose = makepad_pose(body.position());
+            let _pose = body.pose();
             for wheel in scene.vehicles[vehicle_index]
                 .controller
                 .wheels()
@@ -1378,10 +1337,8 @@ mod tests {
             }
         }
 
-        let end_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let end_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should still exist after climbing");
 
         assert!(
@@ -1396,7 +1353,7 @@ mod tests {
 
     #[test]
     fn four_wheel_vehicle_resists_stalling_on_a_low_hump() {
-        let mut scene = RapierScene::new(9.81);
+        let mut scene = PhysicsScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
         scene.spawn_fixed_box(
             WidgetUid(4218),
@@ -1432,10 +1389,8 @@ mod tests {
             .find(|cube| cube.widget_uid == widget_uid)
             .copied()
             .expect("four-wheel vehicle should exist");
-        let start_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let start_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should exist at spawn");
 
         for _ in 0..260 {
@@ -1449,10 +1404,8 @@ mod tests {
             scene.step();
         }
 
-        let end_position = scene
-            .bodies
-            .get(cube.body)
-            .map(|body| makepad_pose(body.position()).position)
+        let end_position = body_view(&scene, cube.body)
+            .map(|body| body.pose().position)
             .expect("four-wheel body should still exist after the hump");
 
         assert!(
@@ -1463,16 +1416,14 @@ mod tests {
 
     #[test]
     fn spawn_pool_respawn_reenables_body_and_survives_a_step() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(420);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.4));
         scene.spawn_dynamic_sphere(widget_uid, pose, 0.04, vec3f(1.0, 1.0, 1.0), 1.0, 0.5, 0.0);
         scene.register_spawn_pool_cube(0);
 
         let cube = scene.cubes[0];
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("projectile body should exist before respawn");
         assert!(!body.is_enabled(), "projectile pool bodies start disabled");
 
@@ -1485,21 +1436,17 @@ mod tests {
             vec3f(0.0, 0.0, 0.0),
         );
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("projectile body should still exist after respawn");
         assert!(
             body.is_enabled(),
             "respawn should re-enable the pooled body"
         );
-        assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+        assert_eq!(body.body_type(), BodyType::Dynamic);
 
         scene.step();
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("projectile body should still exist after a step");
         assert!(
             body.is_enabled(),
@@ -1509,7 +1456,7 @@ mod tests {
 
     #[test]
     fn hand_contact_grab_and_release_restores_dynamic_body_velocity() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(43);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -1524,14 +1471,15 @@ mod tests {
         let cube = scene.cubes[0];
         let hand_pose = Pose::new(Quat::default(), pose.position);
 
-        RapierScene::sync_hand_bodies(
-            &scene.left_hand,
+        let dt = scene.simulation_dt();
+        sync_hand_bodies(
+            &mut scene.world,
+            &mut scene.left_hand,
             &[HandCollider::Ball {
                 center: pose.position,
                 radius: 0.09,
             }],
-            &mut scene.bodies,
-            &mut scene.colliders,
+            dt,
         );
         scene.left_hand_grab = HandGrabState {
             shared_hand: XrSharedHand::LeftHand,
@@ -1546,11 +1494,9 @@ mod tests {
 
         scene.step();
         assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should exist after grab");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
         assert_eq!(
             scene.held_by_for_body(cube.body),
             Some(XrSharedHand::LeftHand)
@@ -1562,13 +1508,11 @@ mod tests {
         scene.apply_held_body_targets();
 
         assert_eq!(scene.left_hand_grab.held_body, None);
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after release");
-        assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+        assert_eq!(body.body_type(), BodyType::Dynamic);
         assert_vec3_close(
-            vec3f(body.linvel().x, body.linvel().y, body.linvel().z),
+            body.linvel(),
             release_velocity,
             0.0001,
         );
@@ -1576,7 +1520,7 @@ mod tests {
 
     #[test]
     fn hand_grab_anchors_body_surface_to_hand_pose_instead_of_body_center() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(430);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         let half_extents = vec3f(0.05, 0.05, 0.05);
@@ -1593,14 +1537,15 @@ mod tests {
         let acquire_pose = Pose::new(Quat::default(), pose.position + vec3f(0.0, 0.0, 0.11));
         let moved_pose = Pose::new(Quat::default(), pose.position + vec3f(0.16, 0.0, 0.11));
 
-        RapierScene::sync_hand_bodies(
-            &scene.left_hand,
+        let dt = scene.simulation_dt();
+        sync_hand_bodies(
+            &mut scene.world,
+            &mut scene.left_hand,
             &[HandCollider::Ball {
                 center: acquire_pose.position,
                 radius: 0.09,
             }],
-            &mut scene.bodies,
-            &mut scene.colliders,
+            dt,
         );
         scene.left_hand_grab = HandGrabState {
             shared_hand: XrSharedHand::LeftHand,
@@ -1621,11 +1566,9 @@ mod tests {
         scene.apply_held_body_targets();
         scene.step();
 
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should exist after moving the held hand");
-        let body_pose = makepad_pose(body.position());
+        let body_pose = body.pose();
         let center_distance = (body_pose.position - moved_pose.position).length();
         assert!(
             (center_distance - half_extents.z).abs() <= 0.012,
@@ -1641,7 +1584,7 @@ mod tests {
 
     #[test]
     fn controller_grip_grabs_and_releases_body_as_left_controller() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(431);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -1660,14 +1603,15 @@ mod tests {
         left_controller.grip = 1.0;
         left_controller.grip_pose = Pose::new(Quat::default(), pose.position);
 
-        RapierScene::sync_hand_bodies(
-            &scene.left_hand,
+        let dt = scene.simulation_dt();
+        sync_hand_bodies(
+            &mut scene.world,
+            &mut scene.left_hand,
             &[HandCollider::Box {
                 pose: left_controller.grip_pose,
                 half_extents: vec3f(0.032, 0.030, 0.055),
             }],
-            &mut scene.bodies,
-            &mut scene.colliders,
+            dt,
         );
         scene.sync_tracked_hands(
             &XrHand::default(),
@@ -1682,11 +1626,9 @@ mod tests {
             scene.held_by_for_body(cube.body),
             Some(XrSharedHand::LeftController)
         );
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should exist after controller grab");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
 
         left_controller.grip = 0.0;
         scene.sync_tracked_hands(
@@ -1698,16 +1640,14 @@ mod tests {
         scene.apply_held_body_targets();
 
         assert_eq!(scene.left_hand_grab.held_body, None);
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after controller release");
-        assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+        assert_eq!(body.body_type(), BodyType::Dynamic);
     }
 
     #[test]
     fn secondary_hand_can_join_existing_hold_and_keep_body_kinematic() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(44);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -1723,14 +1663,15 @@ mod tests {
         let left_pose = Pose::new(Quat::default(), pose.position);
         let right_pose = Pose::new(Quat::default(), pose.position + vec3f(0.08, 0.0, 0.0));
 
-        RapierScene::sync_hand_bodies(
-            &scene.left_hand,
+        let dt = scene.simulation_dt();
+        sync_hand_bodies(
+            &mut scene.world,
+            &mut scene.left_hand,
             &[HandCollider::Ball {
                 center: pose.position,
                 radius: 0.09,
             }],
-            &mut scene.bodies,
-            &mut scene.colliders,
+            dt,
         );
         scene.left_hand_grab = HandGrabState {
             shared_hand: XrSharedHand::LeftHand,
@@ -1745,14 +1686,15 @@ mod tests {
         scene.step();
         assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
 
-        RapierScene::sync_hand_bodies(
-            &scene.right_hand,
+        let dt = scene.simulation_dt();
+        sync_hand_bodies(
+            &mut scene.world,
+            &mut scene.right_hand,
             &[HandCollider::Ball {
                 center: pose.position,
                 radius: 0.09,
             }],
-            &mut scene.bodies,
-            &mut scene.colliders,
+            dt,
         );
         scene.right_hand_grab = HandGrabState {
             shared_hand: XrSharedHand::RightHand,
@@ -1768,22 +1710,18 @@ mod tests {
 
         assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
         assert_eq!(scene.right_hand_grab.held_body, Some(cube.body));
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should exist while two hands hold it");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
 
         scene.left_hand_grab.gripping = false;
         scene.apply_held_body_targets();
 
         assert_eq!(scene.left_hand_grab.held_body, None);
         assert_eq!(scene.right_hand_grab.held_body, Some(cube.body));
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after primary hand drops");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
         assert_eq!(
             scene.held_by_for_body(cube.body),
             Some(XrSharedHand::RightHand)
@@ -1792,7 +1730,7 @@ mod tests {
 
     #[test]
     fn sticky_raw_grab_bit_does_not_keep_pointing_hand_in_grab_state() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(45);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -1842,16 +1780,14 @@ mod tests {
         scene.apply_held_body_targets();
 
         assert_eq!(scene.left_hand_grab.held_body, None);
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after sticky-grab release");
-        assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+        assert_eq!(body.body_type(), BodyType::Dynamic);
     }
 
     #[test]
     fn hand_grab_pose_uses_index_tip_when_pinch_midpoint_is_unavailable() {
-        let mut scene = RapierScene::new(0.0);
+        let mut scene = PhysicsScene::new(0.0);
         let widget_uid = WidgetUid(46);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
         scene.spawn_dynamic_box(
@@ -1932,10 +1868,87 @@ mod tests {
             (scene.left_hand_grab.pose.position - palm_pose.position).length() > 0.01,
             "grab pose should stay on the finger anchor, not the palm"
         );
-        let body = scene
-            .bodies
-            .get(cube.body)
+        let body = body_view(&scene, cube.body)
             .expect("cube body should still exist after index-tip hold update");
-        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert_eq!(body.body_type(), BodyType::Kinematic);
+    }
+
+
+
+    #[test]
+    fn block_wall_settles_into_stack_without_exploding() {
+        // Mirrors the example block_scene: a wall of small dynamic cubes
+        // dropped onto a fixed platform must settle into a stack instead of
+        // exploding or tunneling through the platform.
+        let mut scene = PhysicsScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 120.0);
+
+        let platform_top_y = 0.0;
+        scene.spawn_fixed_box(
+            WidgetUid(7000),
+            Pose::new(Quat::default(), vec3f(0.0, platform_top_y - 0.05, 0.0)),
+            vec3f(1.2, 0.05, 1.2),
+            vec3f(1.0, 1.0, 1.0),
+            0.9,
+            0.0,
+        );
+
+        let half = 0.026;
+        let mut uid = 7001u64;
+        for row in 0..20u32 {
+            for col in 0..8u32 {
+                let offset = if row % 2 == 0 { 0.0 } else { 0.05 };
+                scene.spawn_dynamic_box(
+                    WidgetUid(uid),
+                    Pose::new(
+                        Quat::default(),
+                        vec3f(
+                            -0.28 + col as f32 * 0.1 + offset,
+                            platform_top_y + half + 0.001 + row as f32 * (half * 2.0 + 0.001),
+                            -0.06,
+                        ),
+                    ),
+                    vec3f(half, half, half),
+                    vec3f(1.0, 1.0, 1.0),
+                    120.0,
+                    0.9,
+                    0.0,
+                );
+                uid += 1;
+            }
+        }
+
+        for _ in 0..600 {
+            scene.step();
+        }
+
+        let mut max_speed = 0.0f32;
+        let mut min_y = f32::MAX;
+        let mut max_planar = 0.0f32;
+        for cube in &scene.cubes {
+            if cube.body_kind != XrBodyKind::Dynamic {
+                continue;
+            }
+            let pose = scene.body_pose(cube.body);
+            let linvel = scene.body_linvel(cube.body);
+            max_speed = max_speed.max(linvel.length());
+            min_y = min_y.min(pose.position.y);
+            max_planar = max_planar
+                .max(pose.position.x.abs())
+                .max(pose.position.z.abs());
+        }
+
+        assert!(
+            min_y > platform_top_y - 0.01,
+            "blocks should rest on the platform instead of sinking through it: min_y={min_y}"
+        );
+        assert!(
+            max_planar < 1.2,
+            "blocks should stay on the platform instead of exploding outward: max_planar={max_planar}"
+        );
+        assert!(
+            max_speed < 0.5,
+            "blocks should settle to rest after five simulated seconds: max_speed={max_speed}"
+        );
     }
 }

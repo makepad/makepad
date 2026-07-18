@@ -83,7 +83,7 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
         // TODO PERF: implement SIMD gather
         #[cfg(feature = "simd-is-enabled")]
         let force_dir1 =
-            -<SimdReal as ScalarType>::Vector::from(gather![|ii| manifolds[ii].data.normal.into()]);
+            -<SimdReal as ScalarType>::Vector::from(gather![|ii| crate::utils::vector_to_na(manifolds[ii].data.normal)]);
         #[cfg(not(feature = "simd-is-enabled"))]
         let force_dir1 = -manifolds[0].data.normal;
         let num_active_contacts = manifolds[0].data.num_active_contacts();

@@ -267,6 +267,8 @@ script_mod! {
             ripple_age: uniform(1000.0)
             ripple_strength: uniform(0.0)
             diffraction_strength: uniform(4.0)
+            // Lens corner radius (visual radius is 2x this, Sdf2d convention).
+            corner_radius: uniform(9.0)
 
             // Frosted sample (weight the blurred mips) so the button reads as glass and a
             // hard background line doesn't show as a sharp dark bar behind the label.
@@ -282,7 +284,8 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                let r = 9.0
+                // NOTE: Sdf2d.box renders a VISUAL corner radius of 2*r.
+                let r = self.corner_radius
                 // Smooth shrink is the primary press indicator (eased in Rust, no jiggle).
                 let shrink = clamp(self.press, 0.0, 1.0)
                 let ins = 2.0 + shrink * 2.6
@@ -321,19 +324,20 @@ script_mod! {
                 let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
                 let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
                 let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
-                let ripple_surface = ripple_slope * 0.85 + ripple_wave * 0.20
-                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.18, 0.0, 1.55)
-                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.15, 0.0, 2.10)
+                let ripple_surface = ripple_slope * 1.35 + ripple_wave * 0.34
+                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.45, 0.0, 1.85)
+                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.6, 0.0, 2.60)
 
                 // Edge lens + RGB-split diffraction. The base offset bends the background at the rim
                 // (scaled by the flattening wave); the colour offset samples R/G/B at slightly
-                // different positions for the chromatic splice.
+                // different positions for the chromatic splice. The click-ripple displacement is
+                // cranked WAY up here to try out a much stronger lensing pulse.
                 let rim = clamp(1.0 - abs(shape) / 13.0, 0.0, 1.0)
                 let lens = rim * rim * lens_depth
-                let water_offset = ripple_dir * (ripple_surface * 22.0) / src
+                let water_offset = ripple_dir * (ripple_surface * 85.0) / src
                 let base_offset = normal * (lens * 18.0) / src + water_offset
                 let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / src
-                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / src
+                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 14.0) / src
                 let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
@@ -841,8 +845,8 @@ script_mod! {
     mod.widgets.glass.TextInput = mod.widgets.TextInputFlat{
         height: 38
         margin: 0
-        // TextInput pins its text to padding.top (layout align does not move it), so the
-        // vertical padding is what centres the glyphs in the 38px field.
+        // Single-line TextInput centres its glyphs vertically on its own; the
+        // vertical padding only bounds the multiline/scroll clip.
         padding: Inset{left: 14, right: 14, top: 11, bottom: 11}
         empty_text: "Text"
         draw_bg +: {
@@ -864,7 +868,6 @@ script_mod! {
             color_empty: #xd9e2f0aa
             color_empty_hover: #xffffffff
             color_empty_focus: #xffffffff
-            // Tight line spacing so `align: y:0.5` centres the glyphs, not a tall line box.
             text_style: theme.font_regular{font_size: 12, line_spacing: 1.0}
         }
     }

@@ -1,11 +1,12 @@
+use makepad_box3d::body as b3body;
+use makepad_box3d::hull as b3hull;
+use makepad_box3d::id::{BodyId, ShapeId};
+use makepad_box3d::math_functions as b3m;
+use makepad_box3d::physics_world as b3world;
+use makepad_box3d::shape as b3shape;
+use makepad_box3d::types as b3t;
 use makepad_widgets::event::TouchState;
 use makepad_widgets::*;
-use rapier3d::prelude::{
-    BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderSet, ImpulseJointSet, IntegrationParameters,
-    IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryFilter, Ray as RapierRay,
-    Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    Rotation as RapierRotation, SharedShape, Vector as RapierVector,
-};
 
 use crate::util::scene_draw::{
     apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_cx, SceneState3D,
@@ -47,9 +48,7 @@ const KICK_IMPULSE_MAGNITUDE: f32 = 0.01;
 const KICK_UP_BIAS: f32 = 0.35;
 const BODY_LINEAR_DAMPING: f32 = 1.5;
 const BODY_ANGULAR_DAMPING: f32 = 6.0;
-const BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
-const BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
-const BODY_SLEEP_TIME: f32 = 0.35;
+const BODY_SOLVER_SUB_STEPS: i32 = 4;
 const BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
 const BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
 const CUBE_HALF_EXTENT: f32 = 0.020;
@@ -71,74 +70,79 @@ const PBR_CORNER_SEGMENTS: usize = 3;
 
 #[derive(Clone, Copy)]
 struct PhysicsCube {
-    body: RigidBodyHandle,
-    collider: ::rapier3d::prelude::ColliderHandle,
+    body: BodyId,
     half_extents: Vec3f,
     color_index: usize,
 }
 
-struct RapierScene {
-    gravity: RapierVector,
-    integration_parameters: IntegrationParameters,
-    pipeline: PhysicsPipeline,
-    islands: IslandManager,
-    broad_phase: BroadPhaseBvh,
-    narrow_phase: NarrowPhase,
-    bodies: RigidBodySet,
-    colliders: ColliderSet,
-    impulse_joints: ImpulseJointSet,
-    multibody_joints: MultibodyJointSet,
-    ccd_solver: CCDSolver,
+struct PhysicsScene {
+    world: b3world::World,
     cubes: Vec<PhysicsCube>,
     platform_pose: Pose,
 }
 
-impl RapierScene {
-    fn spawn_dynamic_box(&mut self, center: RapierVector, half_extents: Vec3f) {
-        let body = self.bodies.insert(
-            RigidBodyBuilder::dynamic()
-                .translation(center)
-                .linear_damping(BODY_LINEAR_DAMPING)
-                .angular_damping(BODY_ANGULAR_DAMPING)
-                .additional_solver_iterations(BODY_ADDITIONAL_SOLVER_ITERATIONS),
-        );
-        if let Some(rigid_body) = self.bodies.get_mut(body) {
-            let activation = rigid_body.activation_mut();
-            activation.angular_threshold = BODY_SLEEP_ANGULAR_THRESHOLD;
-            activation.time_until_sleep = BODY_SLEEP_TIME;
-        }
-        let collider = self.colliders.insert_with_parent(
-            ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
-                .density(1.0)
-                .friction(0.8)
-                .restitution(0.0),
-            body,
-            &mut self.bodies,
-        );
+fn b3_vec3(v: Vec3f) -> b3m::Vec3 {
+    b3m::vec3(v.x, v.y, v.z)
+}
+
+fn b3_pos(v: Vec3f) -> b3m::Pos {
+    b3m::pos(v.x, v.y, v.z)
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn makepad_pose_from_b3(transform: b3m::WorldTransform) -> Pose {
+    Pose {
+        orientation: Quat {
+            x: transform.q.v.x,
+            y: transform.q.v.y,
+            z: transform.q.v.z,
+            w: transform.q.s,
+        },
+        position: vec3f(
+            transform.p.x as f32,
+            transform.p.y as f32,
+            transform.p.z as f32,
+        ),
+    }
+}
+
+impl PhysicsScene {
+    fn spawn_dynamic_box(&mut self, center: Vec3f, half_extents: Vec3f) {
+        let mut body_def = b3t::default_body_def();
+        body_def.body_type = b3t::BodyType::Dynamic;
+        body_def.position = b3_pos(center);
+        body_def.linear_damping = BODY_LINEAR_DAMPING;
+        body_def.angular_damping = BODY_ANGULAR_DAMPING;
+        let body = b3body::create_body(&mut self.world, &body_def);
+        let mut shape_def = b3t::default_shape_def();
+        shape_def.density = 1.0;
+        shape_def.base_material.friction = 0.8;
+        shape_def.base_material.restitution = 0.0;
+        let hull = b3hull::make_box_hull(half_extents.x, half_extents.y, half_extents.z);
+        b3shape::create_hull_shape(&mut self.world, body, &shape_def, &hull);
         self.cubes.push(PhysicsCube {
             body,
-            collider,
             half_extents,
             color_index: self.cubes.len() % CUBE_COLORS.len(),
         });
     }
 
+    fn spawn_fixed_box(&mut self, center: Vec3f, half_extents: Vec3f, friction: f32) {
+        let mut body_def = b3t::default_body_def();
+        body_def.position = b3_pos(center);
+        let body = b3body::create_body(&mut self.world, &body_def);
+        let mut shape_def = b3t::default_shape_def();
+        shape_def.base_material.friction = friction;
+        let hull = b3hull::make_box_hull(half_extents.x, half_extents.y, half_extents.z);
+        b3shape::create_hull_shape(&mut self.world, body, &shape_def, &hull);
+    }
+
     fn new() -> Self {
+        let mut world_def = b3t::default_world_def();
+        world_def.gravity = b3m::vec3(0.0, -9.81, 0.0);
+        world_def.worker_count = 0;
         let mut scene = Self {
-            gravity: RapierVector::new(0.0, -9.81, 0.0),
-            integration_parameters: IntegrationParameters {
-                dt: 1.0 / 120.0,
-                ..IntegrationParameters::default()
-            },
-            pipeline: PhysicsPipeline::new(),
-            islands: IslandManager::new(),
-            broad_phase: BroadPhaseBvh::new(),
-            narrow_phase: NarrowPhase::new(),
-            bodies: RigidBodySet::new(),
-            colliders: ColliderSet::new(),
-            impulse_joints: ImpulseJointSet::new(),
-            multibody_joints: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
+            world: b3world::create_world(&world_def),
             cubes: Vec::new(),
             platform_pose: Pose::new(
                 Quat::default(),
@@ -146,31 +150,18 @@ impl RapierScene {
             ),
         };
 
-        let ground = scene.bodies.insert(RigidBodyBuilder::fixed().build());
-        scene.colliders.insert_with_parent(
-            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
-                .friction(0.9),
-            ground,
-            &mut scene.bodies,
-        );
+        // Ground plane (box3d has no half-space shape; use a big thin slab
+        // whose top face is at y = 0).
+        scene.spawn_fixed_box(vec3f(0.0, -0.5, 0.0), vec3f(200.0, 0.5, 200.0), 0.9);
 
-        let platform =
-            scene
-                .bodies
-                .insert(RigidBodyBuilder::fixed().translation(RapierVector::new(
-                    0.0,
-                    PLATFORM_TOP_Y - PLATFORM_HALF_HEIGHT,
-                    0.0,
-                )));
-        scene.colliders.insert_with_parent(
-            ColliderBuilder::cuboid(
+        scene.spawn_fixed_box(
+            vec3f(0.0, PLATFORM_TOP_Y - PLATFORM_HALF_HEIGHT, 0.0),
+            vec3f(
                 PLATFORM_HALF_WIDTH,
                 PLATFORM_HALF_HEIGHT,
                 PLATFORM_HALF_DEPTH,
-            )
-            .friction(0.9),
-            platform,
-            &mut scene.bodies,
+            ),
+            0.9,
         );
 
         let brick_half_extents = vec3f(
@@ -188,7 +179,7 @@ impl RapierScene {
             };
             let row_center_offset = (bricks_in_row as f32 - 1.0) * 0.5;
             for brick in 0..bricks_in_row {
-                let center = RapierVector::new(
+                let center = vec3f(
                     (brick as f32 - row_center_offset) * brick_width,
                     PLATFORM_TOP_Y
                         + WALL_BRICK_HALF_HEIGHT
@@ -205,20 +196,7 @@ impl RapierScene {
     }
 
     fn step(&mut self) {
-        self.pipeline.step(
-            self.gravity,
-            &self.integration_parameters,
-            &mut self.islands,
-            &mut self.broad_phase,
-            &mut self.narrow_phase,
-            &mut self.bodies,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            &mut self.ccd_solver,
-            &(),
-            &(),
-        );
+        b3world::world_step(&mut self.world, 1.0 / 120.0, BODY_SOLVER_SUB_STEPS);
         self.settle_resting_bodies();
     }
 
@@ -228,23 +206,17 @@ impl RapierScene {
         let mut to_sleep = Vec::new();
 
         for cube in &self.cubes {
-            let has_active_contact = self
-                .narrow_phase
-                .contact_pairs_with(cube.collider)
-                .any(|pair| pair.has_any_active_contact());
+            let has_active_contact =
+                b3body::body_get_contact_capacity(&self.world, cube.body) > 0;
             if !has_active_contact {
                 continue;
             }
-
-            let Some(body) = self.bodies.get(cube.body) else {
-                continue;
-            };
-            if body.is_sleeping() {
+            if !b3body::body_is_awake(&self.world, cube.body) {
                 continue;
             }
 
-            let linvel = body.linvel();
-            let angvel = body.angvel();
+            let linvel = b3body::body_get_linear_velocity(&self.world, cube.body);
+            let angvel = b3body::body_get_angular_velocity(&self.world, cube.body);
             let linvel_sq = linvel.x * linvel.x + linvel.y * linvel.y + linvel.z * linvel.z;
             let angvel_sq = angvel.x * angvel.x + angvel.y * angvel.y + angvel.z * angvel.z;
             if linvel_sq <= linear_speed_sq && angvel_sq <= angular_speed_sq {
@@ -253,41 +225,56 @@ impl RapierScene {
         }
 
         for handle in to_sleep {
-            if let Some(body) = self.bodies.get_mut(handle) {
-                body.set_linvel(RapierVector::ZERO, false);
-                body.set_angvel(RapierVector::ZERO, false);
-            }
+            b3body::body_set_linear_velocity(&mut self.world, handle, b3m::Vec3::ZERO);
+            b3body::body_set_angular_velocity(&mut self.world, handle, b3m::Vec3::ZERO);
         }
     }
 
     fn apply_kick(&mut self, ray_origin: Vec3f, ray_dir: Vec3f, time: f64) -> bool {
         let hit_body = {
-            let query_pipeline = self.broad_phase.as_query_pipeline(
-                self.narrow_phase.query_dispatcher(),
-                &self.bodies,
-                &self.colliders,
-                QueryFilter::only_dynamic().exclude_sensors(),
-            );
-            let ray = RapierRay::new(rapier_vec3(ray_origin), rapier_vec3(ray_dir.normalize()));
-
-            query_pipeline
-                .cast_ray(&ray, RapierReal::MAX, true)
-                .and_then(|(collider_handle, _)| {
-                    self.colliders
-                        .get(collider_handle)
-                        .and_then(|collider| collider.parent())
-                })
+            let world = &self.world;
+            let mut best: Option<(ShapeId, f32)> = None;
+            {
+                let best = &mut best;
+                let mut callback = |shape_id: ShapeId,
+                                    _point: b3m::Pos,
+                                    _normal: b3m::Vec3,
+                                    fraction: f32,
+                                    _user_material_id: u64,
+                                    _triangle_index: i32,
+                                    _child_index: i32|
+                 -> f32 {
+                    // Only kick dynamic bodies.
+                    let body = b3shape::shape_get_body(world, shape_id);
+                    if b3body::body_get_type(world, body) != b3t::BodyType::Dynamic {
+                        return -1.0;
+                    }
+                    *best = Some((shape_id, fraction));
+                    fraction
+                };
+                b3world::world_cast_ray(
+                    world,
+                    b3_pos(ray_origin),
+                    b3_vec3(ray_dir.normalize() * 1000.0),
+                    b3t::default_query_filter(),
+                    &mut callback,
+                );
+            }
+            best.map(|(shape_id, _)| b3shape::shape_get_body(world, shape_id))
         };
 
         if let Some(body_handle) = hit_body {
-            let seed = (time * 1000.0) as u32 ^ (body_handle.into_raw_parts().0 * 2654435761);
+            let seed = (time * 1000.0) as u32 ^ ((body_handle.index1 as u32) * 2654435761);
             let rx = ((seed & 0xFF) as f32 / 127.5) - 1.0;
             let rz = (((seed >> 8) & 0xFF) as f32 / 127.5) - 1.0;
             let kick_dir = vec3f(rx, KICK_UP_BIAS + 0.5, rz).normalize();
-            if let Some(body) = self.bodies.get_mut(body_handle) {
-                body.apply_impulse(rapier_vec3(kick_dir * KICK_IMPULSE_MAGNITUDE), true);
-                return true;
-            }
+            b3body::body_apply_linear_impulse_to_center(
+                &mut self.world,
+                body_handle,
+                b3_vec3(kick_dir * KICK_IMPULSE_MAGNITUDE),
+                true,
+            );
+            return true;
         }
 
         false
@@ -310,7 +297,7 @@ pub struct PhysicsWorld3D {
     #[rust]
     ground_mesh: Option<usize>,
     #[rust]
-    scene: Option<RapierScene>,
+    scene: Option<PhysicsScene>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -342,7 +329,7 @@ impl PhysicsWorld3D {
             Err(error) => log!("Failed to upload ground mesh: {}", error),
         }
 
-        self.scene = Some(RapierScene::new());
+        self.scene = Some(PhysicsScene::new());
     }
 
     fn kick_cube_at(&mut self, abs: DVec2) -> bool {
@@ -416,21 +403,20 @@ impl PhysicsWorld3D {
         self.draw_pbr.set_metal_roughness(0.0, 0.55);
         if let Some(scene) = &self.scene {
             for cube in &scene.cubes {
-                if let Some(body) = scene.bodies.get(cube.body) {
-                    let color = CUBE_COLORS[cube.color_index];
-                    let pose = makepad_pose_from_rapier(body.translation(), *body.rotation());
-                    self.draw_pbr
-                        .set_transform(pose_scaled_model(&pose, vec3(1.0, 1.0, 1.0)));
-                    self.draw_pbr
-                        .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
-                    let _ = self.draw_pbr.draw_rounded_cube(
-                        cx,
-                        cube.half_extents,
-                        CUBE_ROUND_RADIUS,
-                        PBR_FACE_SUBDIVISIONS,
-                        PBR_CORNER_SEGMENTS,
-                    );
-                }
+                let color = CUBE_COLORS[cube.color_index];
+                let pose =
+                    makepad_pose_from_b3(b3body::body_get_transform(&scene.world, cube.body));
+                self.draw_pbr
+                    .set_transform(pose_scaled_model(&pose, vec3(1.0, 1.0, 1.0)));
+                self.draw_pbr
+                    .set_base_color_factor(vec4(color[0], color[1], color[2], 1.0));
+                let _ = self.draw_pbr.draw_rounded_cube(
+                    cx,
+                    cube.half_extents,
+                    CUBE_ROUND_RADIUS,
+                    PBR_FACE_SUBDIVISIONS,
+                    PBR_CORNER_SEGMENTS,
+                );
             }
         }
     }
@@ -510,22 +496,6 @@ fn pose_scaled_model(pose: &Pose, scale: Vec3f) -> Mat4f {
             pose_mat.v[14],
             pose_mat.v[15],
         ],
-    }
-}
-
-fn rapier_vec3(v: Vec3f) -> RapierVector {
-    RapierVector::new(v.x, v.y, v.z)
-}
-
-fn makepad_pose_from_rapier(translation: RapierVector, rotation: RapierRotation) -> Pose {
-    Pose {
-        orientation: Quat {
-            x: rotation.x,
-            y: rotation.y,
-            z: rotation.z,
-            w: rotation.w,
-        },
-        position: vec3f(translation.x, translation.y, translation.z),
     }
 }
 

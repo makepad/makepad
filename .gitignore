@@ -44,3 +44,11 @@ CLAUDE.md
 /xr/util/dumps/
 .omx/
 
+
+# Voice/TTS model artifacts — fetch with tools/download_tts.sh
+*.mktts
+*.mkvoice
+*.pth
+ggml-*.bin
+/kokoro_voices/
+__pycache__/

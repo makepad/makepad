@@ -51,7 +51,12 @@ pub fn derive_animator_impl(input: TokenStream) -> TokenStream {
             tb.add("        if let Some(value) = self.")
                 .ident(&animator_field.name)
                 .add(".play(cx, state, play){");
-            tb.add("            cx.with_vm(|vm| self.script_apply(vm, &Apply::Animate, scope, value));");
+            // The value lives on the animator's heap, which for a widget inside a
+            // Splash is an isolate VM, not the app VM. Apply it there.
+            tb.add("            let __vm_id = self.")
+                .ident(&animator_field.name)
+                .add(".vm_id();");
+            tb.add("            Animator::apply_value(cx, __vm_id, self, scope, value);");
             tb.add("        }");
             tb.add("    }");
 
@@ -71,7 +76,10 @@ pub fn derive_animator_impl(input: TokenStream) -> TokenStream {
             tb.add("         if let Some(value) = self.")
                 .ident(&animator_field.name)
                 .add(".cut(cx, state){");
-            tb.add("             cx.with_vm(|vm| self.script_apply(vm, &Apply::Animate, scope, value));");
+            tb.add("             let __vm_id = self.")
+                .ident(&animator_field.name)
+                .add(".vm_id();");
+            tb.add("             Animator::apply_value(cx, __vm_id, self, scope, value);");
             tb.add("         }");
             tb.add("    }");
 
@@ -79,15 +87,18 @@ pub fn derive_animator_impl(input: TokenStream) -> TokenStream {
             tb.add("         let mut act = AnimatorAction::None;");
             // Replay any cut/play that was deferred while the VM was held (the VM
             // is free during event handling). A no-op when nothing is queued.
+            tb.add("         let __vm_id = self.")
+                .ident(&animator_field.name)
+                .add(".vm_id();");
             tb.add("         for value in self.")
                 .ident(&animator_field.name)
                 .add(".flush_deferred(cx){");
-            tb.add("             cx.with_vm(|vm| self.script_apply(vm, &Apply::Animate, scope, value));");
+            tb.add("             Animator::apply_value(cx, __vm_id, self, scope, value);");
             tb.add("         }");
             tb.add("         if let Some(value) = self.")
                 .ident(&animator_field.name)
                 .add(".handle_event(cx, event, &mut act){");
-            tb.add("             cx.with_vm(|vm| self.script_apply(vm, &Apply::Animate, scope, value));");
+            tb.add("             Animator::apply_value(cx, __vm_id, self, scope, value);");
             tb.add("         }");
             tb.add("         act");
             tb.add("    }");

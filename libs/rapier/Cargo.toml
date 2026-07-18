@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rapier3d"]
+members = ["crates/rapier3d", "crates/bench"]
 resolver = "2"
 
 [patch.crates-io]
@@ -14,3 +14,5 @@ num-traits = { path = "vendor/num-traits" }
 parry3d = { path = "vendor/parry3d" }
 simba = { path = "vendor/simba" }
 typenum = { path = "vendor/typenum" }
+wide = { path = "vendor/wide" }
+safe_arch = { path = "vendor/safe_arch" }

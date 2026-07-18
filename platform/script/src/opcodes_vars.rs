@@ -530,6 +530,17 @@ impl<'a> ScriptVm<'a> {
                 .bx
                 .heap
                 .value(obj, index, self.bx.threads.cur().trap.pass());
+            // A map lookup with a missing string/object key yields nil (not an error),
+            // matching dynamic-map semantics (e.g. `map[key] != nil` membership checks).
+            // Integer indexing keeps erroring so index-based iteration still terminates.
+            let value = if value.is_err()
+                && (index.is_string_like() || index.is_object() || index.is_color())
+            {
+                self.bx.threads.cur().trap.err.take();
+                NIL
+            } else {
+                value
+            };
             self.bx.threads.cur().push_stack_unchecked(value)
         } else if let Some(arr) = object.as_array() {
             let index = index.as_index();

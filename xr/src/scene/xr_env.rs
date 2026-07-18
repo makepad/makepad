@@ -13,17 +13,15 @@ use makepad_widgets::makepad_platform::{
     permission::{Permission, PermissionStatus},
     video::{VideoFormatId, VideoInputId, VideoInputsEvent, VideoPixelFormat},
 };
-use rapier3d::prelude::{
-    BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, ImpulseJointSet,
-    IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
-    Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    Rotation as RapierRotation, SharedShape, Vector as RapierVector,
-};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::Arc,
 };
+
+/// Physics handle aliases shared by the physics submodules (via `use super::*`).
+pub(crate) type RigidBodyHandle = makepad_box3d::id::BodyId;
+pub(crate) type ColliderHandle = makepad_box3d::id::ShapeId;
 
 const XR_DEPTH_MESH_FOCUS_CUBE_SIZE_METERS: f32 = 0.96;
 const XR_DEPTH_MESH_FOCUS_GRID_METERS: f32 = 0.32;
@@ -46,7 +44,7 @@ mod xr_physics;
 #[path = "xr_physics_worker.rs"]
 mod xr_physics_worker;
 
-pub(crate) use self::xr_physics::RapierScene;
+pub(crate) use self::xr_physics::PhysicsScene;
 use self::{
     xr_depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
     xr_passthrough::{
@@ -231,9 +229,6 @@ const XR_HAND_DUAL_GRAB_MIN_SPAN: f32 = 0.035;
 const XR_HAND_GRAB_RELEASE_LINEAR_VELOCITY_SCALE: f32 = 1.0;
 const XR_BODY_LINEAR_DAMPING: f32 = 1.5;
 const XR_BODY_ANGULAR_DAMPING: f32 = 6.0;
-const XR_BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
-const XR_BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
-const XR_BODY_SLEEP_TIME: f32 = 0.35;
 const XR_BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
 const XR_BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
 const XR_BODY_SNAP_SLEEP_SETTLE_FRAMES: u8 = 4;
@@ -262,7 +257,7 @@ struct CollectedXrCube {
 struct XrPhysicsMetrics {
     compute_ms: f64,
     tsdf_query_ms: f64,
-    rapier_step_ms: f64,
+    engine_step_ms: f64,
     depth_query_surface_count: usize,
     scene_body_count: usize,
     body_spawn_apply_count: usize,
@@ -519,8 +514,8 @@ impl XrEnv {
         self.world.physics.metrics.tsdf_query_ms
     }
 
-    pub(crate) fn physics_rapier_step_ms(&self) -> f64 {
-        self.world.physics.metrics.rapier_step_ms
+    pub(crate) fn physics_engine_step_ms(&self) -> f64 {
+        self.world.physics.metrics.engine_step_ms
     }
 
     pub(crate) fn physics_time_scale(&self) -> f32 {
@@ -973,7 +968,7 @@ impl XrEnv {
         self.world.physics.metrics = XrPhysicsMetrics {
             compute_ms: result.physics_compute_ms,
             tsdf_query_ms: result.physics_tsdf_query_ms,
-            rapier_step_ms: result.physics_rapier_step_ms,
+            engine_step_ms: result.physics_engine_step_ms,
             depth_query_surface_count: result.physics_depth_query_surface_count,
             scene_body_count: result.physics_scene_body_count,
             body_spawn_apply_count: result.physics_body_spawn_apply_count,
@@ -1167,12 +1162,12 @@ impl XrEnv {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn runtime_scene_ref(&self) -> Option<&RapierScene> {
+    pub(crate) fn runtime_scene_ref(&self) -> Option<&PhysicsScene> {
         None
     }
 
     #[allow(dead_code)]
-    pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut RapierScene> {
+    pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut PhysicsScene> {
         None
     }
 
