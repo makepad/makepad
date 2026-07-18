@@ -524,6 +524,11 @@ impl Cx {
                 self.webgl_compile_shaders();
             }
             self.handle_repaint(time);
+            self.with_vm(|vm| {
+                if vm.heap().needs_gc() {
+                    vm.gc();
+                }
+            });
         }
 
         if network_responses.len() != 0 {
