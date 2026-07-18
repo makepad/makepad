@@ -55,6 +55,8 @@ export class WasmWebBrowser extends WasmBridge {
         // Lightweight web perf counters (opt-in overlay via `window.makepad_show_perf_hud = true`).
         this.perf = {
             last_pump_ms: 0,
+            last_wasm_ms: 0,
+            last_dispatch_ms: 0,
             draw_calls: 0,
             last_frame_draw_calls: 0,
             last_snapshot: null,
@@ -74,6 +76,8 @@ export class WasmWebBrowser extends WasmBridge {
         const perf = this.perf || {};
         return perf.last_snapshot || {
             pump_ms: perf.last_pump_ms || 0,
+            wasm_ms: perf.last_wasm_ms || 0,
+            dispatch_ms: perf.last_dispatch_ms || 0,
             draw_calls: perf.last_frame_draw_calls || 0,
             backend: typeof this.get_backend_perf_snapshot === "function"
                 ? this.get_backend_perf_snapshot()
@@ -1332,9 +1336,18 @@ export class WasmWebBrowser extends WasmBridge {
         this.buffer_upload_serial += 1;
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
+        const wasm_started = performance.now();
         let from_wasm = this.wasm_process_msg(to_wasm);
+        const wasm_ms = performance.now() - wasm_started;
+        let dispatch_ms;
         try {
-            from_wasm.dispatch_on_app();
+            const dispatch_started = performance.now();
+            try {
+                from_wasm.dispatch_on_app();
+            }
+            finally {
+                dispatch_ms = performance.now() - dispatch_started;
+            }
         }
         finally {
             from_wasm.free();
@@ -1342,9 +1355,13 @@ export class WasmWebBrowser extends WasmBridge {
             this.update_startup_loader(pump_ms);
             if (this.perf) {
                 this.perf.last_pump_ms = pump_ms;
+                this.perf.last_wasm_ms = wasm_ms;
+                this.perf.last_dispatch_ms = dispatch_ms;
                 this.perf.last_frame_draw_calls = this.perf.draw_calls;
                 const snapshot = {
                     pump_ms: this.perf.last_pump_ms,
+                    wasm_ms: this.perf.last_wasm_ms,
+                    dispatch_ms: this.perf.last_dispatch_ms,
                     draw_calls: this.perf.last_frame_draw_calls,
                     backend: typeof this.get_backend_perf_snapshot === "function"
                         ? this.get_backend_perf_snapshot()
@@ -1354,6 +1371,8 @@ export class WasmWebBrowser extends WasmBridge {
                 if (this.perf_snapshot_is_active(snapshot)) {
                     const active_snapshot = {
                         pump_ms: snapshot.pump_ms,
+                        wasm_ms: snapshot.wasm_ms,
+                        dispatch_ms: snapshot.dispatch_ms,
                         draw_calls: snapshot.draw_calls,
                         backend: snapshot.backend,
                     };
@@ -1406,6 +1425,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.perf_hud.textContent =
             "makepad web\n" +
             "pump: " + this.perf.last_pump_ms.toFixed(2) + "ms\n" +
+            "wasm: " + this.perf.last_wasm_ms.toFixed(2) + "ms\n" +
+            "dispatch: " + this.perf.last_dispatch_ms.toFixed(2) + "ms\n" +
             "draw_calls: " + this.perf.last_frame_draw_calls +
             (typeof this.format_backend_perf_hud === "function"
                 ? this.format_backend_perf_hud()
