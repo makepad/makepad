@@ -377,7 +377,7 @@ pub struct DrawCallUniforms {
 }
 
 impl DrawCallUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>()] {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
     }
     /*
@@ -520,8 +520,26 @@ impl Default for DrawListUniforms {
 }
 
 impl DrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    #[test]
+    fn uniform_slices_match_struct_storage() {
+        assert_eq!(
+            DrawCallUniforms::default().as_slice().len(),
+            size_of::<DrawCallUniforms>() >> 2,
+        );
+        assert_eq!(
+            DrawListUniforms::default().as_slice().len(),
+            size_of::<DrawListUniforms>() >> 2,
+        );
     }
 }
 
