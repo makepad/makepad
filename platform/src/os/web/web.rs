@@ -1125,10 +1125,6 @@ pub struct CxOs {
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
 
-    // Scratch command buffer for the batched render protocol.
-    // Must live in wasm memory across a single pump so JS can read it.
-    pub(crate) render_cmd_buf: Vec<u32>,
-
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
 
@@ -1145,8 +1141,6 @@ impl Default for CxOs {
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
-            render_cmd_buf: Vec::new(),
-
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
 

@@ -363,7 +363,7 @@ impl Cx {
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
-        let mut cmd_buf = std::mem::take(&mut self.os.render_cmd_buf);
+        let mut cmd_buf = std::mem::take(&mut self.passes[draw_pass_id].os.render_cmd_buf);
         cmd_buf.clear();
         self.render_view(
             draw_pass_id,
@@ -372,9 +372,10 @@ impl Cx {
             zbias_step,
             &mut cmd_buf,
         );
-        self.os.render_cmd_buf = cmd_buf;
+        self.passes[draw_pass_id].os.render_cmd_buf = cmd_buf;
+        let words = WasmPtrU32::new(&self.passes[draw_pass_id].os.render_cmd_buf);
         self.os.from_wasm(FromWasmRenderCommandBuffer {
-            words: WasmPtrU32::new(&self.os.render_cmd_buf),
+            words,
         });
     }
 
@@ -449,7 +450,7 @@ impl Cx {
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
-        let mut cmd_buf = std::mem::take(&mut self.os.render_cmd_buf);
+        let mut cmd_buf = std::mem::take(&mut self.passes[draw_pass_id].os.render_cmd_buf);
         cmd_buf.clear();
         self.render_view(
             draw_pass_id,
@@ -458,15 +459,18 @@ impl Cx {
             zbias_step,
             &mut cmd_buf,
         );
-        self.os.render_cmd_buf = cmd_buf;
+        self.passes[draw_pass_id].os.render_cmd_buf = cmd_buf;
+        let words = WasmPtrU32::new(&self.passes[draw_pass_id].os.render_cmd_buf);
         self.os.from_wasm(FromWasmRenderCommandBuffer {
-            words: WasmPtrU32::new(&self.os.render_cmd_buf),
+            words,
         });
     }
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CxOsPass {}
+pub struct CxOsPass {
+    pub(crate) render_cmd_buf: Vec<u32>,
+}
 
 #[derive(Clone, Default)]
 pub struct CxOsDrawList {}
