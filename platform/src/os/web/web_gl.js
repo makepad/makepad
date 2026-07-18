@@ -5,6 +5,7 @@ import { WasmWebBrowser } from "./web.js";
 export class WasmWebGL extends WasmWebBrowser {
   constructor(wasm, dispatch, canvas) {
     super(wasm, dispatch, canvas);
+    this.reset_backend_perf();
     if (wasm === undefined) {
       return;
     }
@@ -37,6 +38,57 @@ export class WasmWebGL extends WasmWebBrowser {
     this.init_webgl_context();
 
     this.load_deps();
+  }
+
+  reset_backend_perf() {
+    let perf = this._backend_perf;
+    if (!perf) {
+      perf = this._backend_perf = {
+        passes: 0,
+        draw_commands: 0,
+        submits: 0,
+        uniform_write_calls: 0,
+        uniform_write_bytes: 0,
+        buffer_write_calls: 0,
+        buffer_write_bytes: 0,
+        texture_write_calls: 0,
+        texture_write_bytes: 0,
+      };
+    }
+    perf.passes = 0;
+    perf.draw_commands = 0;
+    perf.submits = 0;
+    perf.uniform_write_calls = 0;
+    perf.uniform_write_bytes = 0;
+    perf.buffer_write_calls = 0;
+    perf.buffer_write_bytes = 0;
+    perf.texture_write_calls = 0;
+    perf.texture_write_bytes = 0;
+  }
+
+  get_backend_perf_snapshot() {
+    const perf = this._backend_perf || {};
+    return {
+      passes: perf.passes || 0,
+      draw_commands: perf.draw_commands || 0,
+      submits: perf.submits || 0,
+      uniform_write_calls: perf.uniform_write_calls || 0,
+      uniform_write_bytes: perf.uniform_write_bytes || 0,
+      buffer_write_calls: perf.buffer_write_calls || 0,
+      buffer_write_bytes: perf.buffer_write_bytes || 0,
+      texture_write_calls: perf.texture_write_calls || 0,
+      texture_write_bytes: perf.texture_write_bytes || 0,
+    };
+  }
+
+  format_backend_perf_hud() {
+    const perf = this.get_backend_perf_snapshot();
+    return "\npasses: " + perf.passes +
+      "  draw_commands: " + perf.draw_commands +
+      "  submits: " + perf.submits +
+      "\nuniform writes: " + perf.uniform_write_calls + " / " + perf.uniform_write_bytes + "B" +
+      "\nbuffer writes: " + perf.buffer_write_calls + " / " + perf.buffer_write_bytes + "B" +
+      "\ntexture writes: " + perf.texture_write_calls + " / " + perf.texture_write_bytes + "B";
   }
 
   // webGL API
@@ -237,6 +289,8 @@ export class WasmWebGL extends WasmWebBrowser {
     } else {
       gl.bufferSubData(gl.UNIFORM_BUFFER, 0, f32_view, offset, len);
     }
+    this._backend_perf.uniform_write_calls += 1;
+    this._backend_perf.uniform_write_bytes += byte_length;
 
     gl_buf._last_upload_serial = this.buffer_upload_serial;
     gl_buf._last_upload_ptr = ptr_f32.ptr;
@@ -260,6 +314,13 @@ export class WasmWebGL extends WasmWebBrowser {
       gl_buf._buffer_byte_length = byte_length;
     } else {
       gl.bufferSubData(target, 0, data);
+    }
+    if (target === gl.UNIFORM_BUFFER) {
+      this._backend_perf.uniform_write_calls += 1;
+      this._backend_perf.uniform_write_bytes += byte_length;
+    } else {
+      this._backend_perf.buffer_write_calls += 1;
+      this._backend_perf.buffer_write_bytes += byte_length;
     }
   }
 
@@ -930,6 +991,7 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
+      this._backend_perf.submits += 1;
 
       let right = xr.right_eye;
       let rvp = right.viewport;
@@ -952,6 +1014,7 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
+      this._backend_perf.submits += 1;
     } else {
       this.upload_uniform_buffer_from_ptr(
         gl,
@@ -965,6 +1028,7 @@ export class WasmWebGL extends WasmWebBrowser {
         0,
         instances,
       );
+      this._backend_perf.submits += 1;
     }
 
     this.bind_vertex_array(gl, null);
@@ -990,6 +1054,7 @@ export class WasmWebGL extends WasmWebBrowser {
       if (this.perf) {
         this.perf.draw_calls = (this.perf.draw_calls | 0) + 1;
       }
+      this._backend_perf.draw_commands += 1;
 
       const shader_id = words[at++];
       const vao_id = words[at++];
@@ -1095,6 +1160,7 @@ export class WasmWebGL extends WasmWebBrowser {
         for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 32] = mli[i];
         this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms_arr);
         gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        this._backend_perf.submits += 1;
 
         const right = xr.right_eye;
         const rvp = right.viewport;
@@ -1107,9 +1173,11 @@ export class WasmWebGL extends WasmWebBrowser {
         for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 32] = mri[i];
         this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms_arr);
         gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        this._backend_perf.submits += 1;
       } else {
         this.upload_uniform_buffer_from_ptr(gl, shader.pass_uniform_buf, pass_uniforms);
         gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        this._backend_perf.submits += 1;
       }
 
       this.bind_vertex_array(gl, null);
@@ -1144,6 +1212,8 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.UNSIGNED_BYTE,
       data_array,
     );
+    this._backend_perf.texture_write_calls += 1;
+    this._backend_perf.texture_write_bytes += data_array.byteLength;
     this.textures[args.texture_id] = gl_tex;
   }
 
@@ -1174,6 +1244,8 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.UNSIGNED_BYTE,
       data_array,
     );
+    this._backend_perf.texture_write_calls += 1;
+    this._backend_perf.texture_write_bytes += data_array.byteLength;
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     this.textures[args.texture_id] = gl_tex;
   }
@@ -1204,6 +1276,8 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.FLOAT,
       data_array,
     );
+    this._backend_perf.texture_write_calls += 1;
+    this._backend_perf.texture_write_bytes += data_array.byteLength;
     this.textures[args.texture_id] = gl_tex;
   }
 
@@ -1247,11 +1321,14 @@ export class WasmWebGL extends WasmWebBrowser {
         gl.UNSIGNED_BYTE,
         data_array,
       );
+      this._backend_perf.texture_write_calls += 1;
+      this._backend_perf.texture_write_bytes += data_array.byteLength;
     }
     this.textures[args.texture_id] = gl_tex;
   }
 
   FromWasmBeginRenderTexture(args) {
+    this._backend_perf.passes += 1;
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
     }
@@ -1319,6 +1396,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderCanvas(args) {
+    this._backend_perf.passes += 1;
     let gl = this.gl;
     let xr = this.xr;
 
