@@ -2272,6 +2272,60 @@ public class MakepadActivity
         });
     }
 
+    // Stream a URL to a file on a background thread (constant memory: 64 KB
+    // chunks, never buffered whole). Reports progress every ~256 KB and
+    // completion to Rust. Called from Rust via to_java_download_file
+    // (`cx.download_file(call_id, url, dest)`).
+    public void downloadFile(final long callId, final String url, final String dest) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                java.net.HttpURLConnection conn = null;
+                java.io.InputStream in = null;
+                java.io.OutputStream out = null;
+                try {
+                    java.io.File f = new java.io.File(dest);
+                    java.io.File parent = f.getParentFile();
+                    if (parent != null) parent.mkdirs();
+                    java.net.URL u = new java.net.URL(url);
+                    conn = (java.net.HttpURLConnection) u.openConnection();
+                    conn.setInstanceFollowRedirects(true);
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(30000);
+                    conn.connect();
+                    int code = conn.getResponseCode();
+                    if (code < 200 || code >= 300) {
+                        MakepadNative.onDownloadComplete(callId, null, "HTTP " + code);
+                        return;
+                    }
+                    long total = conn.getContentLengthLong();
+                    in = conn.getInputStream();
+                    out = new java.io.FileOutputStream(f);
+                    byte[] buf = new byte[65536];
+                    long done = 0, lastReport = 0;
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        done += n;
+                        if (done - lastReport >= 262144) { // ~every 256 KB
+                            lastReport = done;
+                            MakepadNative.onDownloadProgress(callId, done, total);
+                        }
+                    }
+                    out.flush();
+                    MakepadNative.onDownloadProgress(callId, done, total);
+                    MakepadNative.onDownloadComplete(callId, dest, null);
+                } catch (Throwable t) {
+                    MakepadNative.onDownloadComplete(callId, null, "download failed: " + t.toString());
+                } finally {
+                    try { if (out != null) out.close(); } catch (Throwable ignore) {}
+                    try { if (in != null) in.close(); } catch (Throwable ignore) {}
+                    if (conn != null) conn.disconnect();
+                }
+            }
+        }).start();
+    }
+
     // Fire the system share sheet (ACTION_SEND) for social sharing. Called
     // from Rust via `android_jni::to_java_share_text`.
     public void shareText(String content) {

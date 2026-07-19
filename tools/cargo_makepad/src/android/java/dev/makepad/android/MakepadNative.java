@@ -64,6 +64,10 @@ public class MakepadNative {
     // (ACTION_SEND text) — e.g. a link shared from another app.
     public native static void onDeepLink(String url);
 
+    // Native streaming download (downloadFile): periodic progress, then completion.
+    public native static void onDownloadProgress(long callId, long done, long total);
+    public native static void onDownloadComplete(long callId, String path, String error);
+
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     
