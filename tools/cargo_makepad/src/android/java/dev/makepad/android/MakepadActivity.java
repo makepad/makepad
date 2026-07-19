@@ -9,6 +9,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentCallbacks2;
 import android.content.Context;
+import android.app.NotificationManager;
+import android.app.NotificationChannel;
+import android.app.Notification;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -2230,6 +2234,42 @@ public class MakepadActivity
         String clipLabel = getApplicationName() + " clip";
         ClipData clip = ClipData.newPlainText(clipLabel, content);
         clipboard.setPrimaryClip(clip);
+    }
+
+    // Post a system notification. Called from Rust via
+    // android_jni::to_java_show_notification (`cx.show_notification(title, body)`).
+    // Tapping it re-opens (or foregrounds) this activity.
+    public void showNotification(final String title, final String body) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                    String chId = "makepad_default";
+                    if (android.os.Build.VERSION.SDK_INT >= 26) {
+                        NotificationChannel ch = new NotificationChannel(chId, getApplicationName(),
+                            NotificationManager.IMPORTANCE_DEFAULT);
+                        nm.createNotificationChannel(ch);
+                    }
+                    Intent open = new Intent(MakepadActivity.this, MakepadActivity.this.getClass());
+                    open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+                    if (android.os.Build.VERSION.SDK_INT >= 23) piFlags |= PendingIntent.FLAG_IMMUTABLE;
+                    PendingIntent pi = PendingIntent.getActivity(MakepadActivity.this, 0, open, piFlags);
+                    Notification.Builder b = (android.os.Build.VERSION.SDK_INT >= 26)
+                        ? new Notification.Builder(MakepadActivity.this, chId)
+                        : new Notification.Builder(MakepadActivity.this);
+                    b.setSmallIcon(getApplicationInfo().icon)
+                        .setContentTitle(title == null ? "" : title)
+                        .setContentText(body == null ? "" : body)
+                        .setAutoCancel(true)
+                        .setContentIntent(pi);
+                    nm.notify((int) (System.currentTimeMillis() & 0x7fffffff), b.build());
+                } catch (Throwable t) {
+                    Log.e("Makepad", "showNotification failed: " + t.toString());
+                }
+            }
+        });
     }
 
     // Fire the system share sheet (ACTION_SEND) for social sharing. Called
