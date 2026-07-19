@@ -60,6 +60,10 @@ public class MakepadNative {
     // Called when user presses the action button on the soft keyboard
     public native static void onImeEditorAction(int actionCode);
 
+    // The app was opened/resumed via a deep link (ACTION_VIEW URL) or a share
+    // (ACTION_SEND text) — e.g. a link shared from another app.
+    public native static void onDeepLink(String url);
+
     // midi
     public native static void onMidiDeviceOpened(String name, Object midi_device);
     

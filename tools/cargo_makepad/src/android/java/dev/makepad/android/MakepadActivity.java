@@ -1475,6 +1475,24 @@ public class MakepadActivity
         super.onNewIntent(intent);
         setIntent(intent);
         restoreSurfaceViewForWarmResumeIfNeeded();
+        handleDeepLinkIntent(intent);
+    }
+
+    // Extract a URL from an ACTION_VIEW deep link or an ACTION_SEND share and hand
+    // it to Rust (delivered to the app as an AndroidDeepLink action). E.g. a YouTube
+    // link shared from another app → the youtube card plays it.
+    private void handleDeepLinkIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        String url = null;
+        if (Intent.ACTION_VIEW.equals(action)) {
+            url = intent.getDataString();
+        } else if (Intent.ACTION_SEND.equals(action) && "text/plain".equals(intent.getType())) {
+            url = intent.getStringExtra(Intent.EXTRA_TEXT);
+        }
+        if (url != null && url.length() > 0) {
+            try { MakepadNative.onDeepLink(url); } catch (Throwable t) {}
+        }
     }
 
     @Override
