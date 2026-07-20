@@ -380,6 +380,40 @@ pub enum TextureUpdated {
 }
 
 impl TextureUpdated {
+    pub(crate) fn upload_rect(
+        self,
+        width: usize,
+        height: usize,
+        force_full: bool,
+    ) -> Option<RectUsize> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        match self {
+            Self::Empty => None,
+            Self::Full => Some(RectUsize::new(
+                PointUsize::new(0, 0),
+                SizeUsize::new(width, height),
+            )),
+            Self::Partial(_) if force_full => Some(RectUsize::new(
+                PointUsize::new(0, 0),
+                SizeUsize::new(width, height),
+            )),
+            Self::Partial(rect) => {
+                let x0 = rect.origin.x.min(width);
+                let y0 = rect.origin.y.min(height);
+                let x1 = rect.origin.x.saturating_add(rect.size.width).min(width);
+                let y1 = rect.origin.y.saturating_add(rect.size.height).min(height);
+                (x1 > x0 && y1 > y0).then(|| {
+                    RectUsize::new(
+                        PointUsize::new(x0, y0),
+                        SizeUsize::new(x1 - x0, y1 - y0),
+                    )
+                })
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             TextureUpdated::Empty => true,
@@ -926,4 +960,60 @@ pub struct CxTexture {
     pub(crate) animation: Option<TextureAnimation>,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
+}
+
+#[cfg(test)]
+mod texture_updated_upload_rect_tests {
+    use super::*;
+
+    fn rect(x: usize, y: usize, width: usize, height: usize) -> RectUsize {
+        RectUsize::new(
+            PointUsize::new(x, y),
+            SizeUsize::new(width, height),
+        )
+    }
+
+    fn assert_upload_rect(actual: Option<RectUsize>, expected: Option<RectUsize>) {
+        match (actual, expected) {
+            (Some(actual), Some(expected)) => {
+                assert_eq!(actual.origin.x, expected.origin.x);
+                assert_eq!(actual.origin.y, expected.origin.y);
+                assert_eq!(actual.size.width, expected.size.width);
+                assert_eq!(actual.size.height, expected.size.height);
+            }
+            (None, None) => {}
+            _ => panic!("upload rectangle did not match"),
+        }
+    }
+
+    #[test]
+    fn texture_updated_upload_rect_clamps_partial_regions() {
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(1, 63, 63, 1)).upload_rect(2048, 64, false),
+            Some(rect(1, 63, 63, 1)),
+        );
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(6, 3, usize::MAX, usize::MAX))
+                .upload_rect(8, 4, false),
+            Some(rect(6, 3, 2, 1)),
+        );
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(8, 4, 1, 1)).upload_rect(8, 4, false),
+            None,
+        );
+    }
+
+    #[test]
+    fn texture_updated_upload_rect_handles_full_empty_and_reallocation() {
+        assert_upload_rect(TextureUpdated::Empty.upload_rect(8, 4, false), None);
+        assert_upload_rect(
+            TextureUpdated::Full.upload_rect(8, 4, false),
+            Some(rect(0, 0, 8, 4)),
+        );
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(1, 1, 2, 2)).upload_rect(8, 4, true),
+            Some(rect(0, 0, 8, 4)),
+        );
+        assert_upload_rect(TextureUpdated::Full.upload_rect(0, 4, false), None);
+    }
 }

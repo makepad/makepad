@@ -3626,35 +3626,6 @@ impl CxVulkan {
         }
     }
 
-    fn texture_upload_rect(
-        width: usize,
-        height: usize,
-        updated: TextureUpdated,
-        force_full: bool,
-    ) -> Option<(usize, usize, usize, usize)> {
-        if width == 0 || height == 0 {
-            return None;
-        }
-        if force_full {
-            return Some((0, 0, width, height));
-        }
-        match updated {
-            TextureUpdated::Empty => None,
-            TextureUpdated::Full => Some((0, 0, width, height)),
-            TextureUpdated::Partial(rect) => {
-                let x0 = rect.origin.x.min(width);
-                let y0 = rect.origin.y.min(height);
-                let x1 = rect.origin.x.saturating_add(rect.size.width).min(width);
-                let y1 = rect.origin.y.saturating_add(rect.size.height).min(height);
-                if x1 <= x0 || y1 <= y0 {
-                    None
-                } else {
-                    Some((x0, y0, x1 - x0, y1 - y0))
-                }
-            }
-        }
-    }
-
     fn pack_texture_region_bytes(
         src: &[u8],
         src_row_pixels: usize,
@@ -3698,7 +3669,11 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let x = rect.origin.x;
+                let y = rect.origin.y;
+                let w = rect.size.width;
+                let h = rect.size.height;
                 let out = if let Some(data) = data.as_ref() {
                     let src = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
@@ -3755,7 +3730,11 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let x = rect.origin.x;
+                let y = rect.origin.y;
+                let w = rect.size.width;
+                let h = rect.size.height;
                 let out = if let Some(data) = data.as_ref() {
                     let src = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
@@ -3779,7 +3758,11 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let x = rect.origin.x;
+                let y = rect.origin.y;
+                let w = rect.size.width;
+                let h = rect.size.height;
                 let out = if let Some(data) = data.as_ref() {
                     let src = unsafe {
                         std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
@@ -3804,7 +3787,11 @@ impl CxVulkan {
                 unpack_row_length,
                 ..
             } => {
-                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let x = rect.origin.x;
+                let y = rect.origin.y;
+                let w = rect.size.width;
+                let h = rect.size.height;
                 let row_len = unpack_row_length.unwrap_or(*width);
                 let out = if let Some(data) = data.as_ref() {
                     Self::pack_texture_region_bytes(data, row_len, 1, x, y, w, h)
@@ -3827,7 +3814,11 @@ impl CxVulkan {
                 unpack_row_length,
                 ..
             } => {
-                let (x, y, w, h) = Self::texture_upload_rect(*width, *height, updated, force_full)?;
+                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let x = rect.origin.x;
+                let y = rect.origin.y;
+                let w = rect.size.width;
+                let h = rect.size.height;
                 let row_len = unpack_row_length.unwrap_or(*width);
                 let out = if let Some(data) = data.as_ref() {
                     Self::pack_texture_region_bytes(data, row_len, 2, x, y, w, h)
@@ -5296,7 +5287,7 @@ impl CxVulkan {
             self.textures.insert(texture_key, resource);
         }
 
-        if matches!(updated, TextureUpdated::Empty) && !needs_recreate {
+        if matches!(updated, TextureUpdated::Empty) {
             return Ok(());
         }
 
