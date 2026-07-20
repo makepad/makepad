@@ -2296,6 +2296,46 @@ impl Default for CxOsTexture {
     }
 }
 
+fn partial_texture_updates_supported(format: &TextureFormat, os_type: &OsType) -> bool {
+    if cfg!(ohos_sim) {
+        return false;
+    }
+    !matches!(format, TextureFormat::VecRGBAf32 { .. })
+        || matches!(os_type, OsType::LinuxWindow(_) | OsType::LinuxDirect)
+}
+
+#[cfg(test)]
+mod partial_texture_update_policy_tests {
+    use super::*;
+
+    fn rgba_f32() -> TextureFormat {
+        TextureFormat::VecRGBAf32 {
+            width: 8,
+            height: 4,
+            data: None,
+            updated: TextureUpdated::Empty,
+        }
+    }
+
+    #[test]
+    fn rgba_f32_partial_updates_are_desktop_linux_only() {
+        let format = rgba_f32();
+        assert!(partial_texture_updates_supported(
+            &format,
+            &OsType::LinuxWindow(Default::default()),
+        ));
+        assert!(partial_texture_updates_supported(&format, &OsType::LinuxDirect));
+        assert!(!partial_texture_updates_supported(
+            &format,
+            &OsType::Android(Default::default()),
+        ));
+        assert!(!partial_texture_updates_supported(
+            &format,
+            &OsType::OpenHarmony(Default::default()),
+        ));
+    }
+}
+
 impl CxTexture {
     /// Updates or creates a texture based on the current texture format.
     ///
@@ -2312,7 +2352,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates.
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self, gl: &LibGl, _os_type: &OsType) {
+    pub fn update_vec_texture(&mut self, gl: &LibGl, os_type: &OsType) {
         fn gl_unpack_alignment(bytes_per_pixel: usize) -> i32 {
             if bytes_per_pixel % 8 == 0 {
                 8
@@ -2567,66 +2607,49 @@ impl CxTexture {
                 _ => panic!("Unsupported texture format"),
             };
 
-            // Partial texture uploads are critical for append-only SLUG float atlases on
-            // Linux desktop. OHOS simulators/emulators still need the conservative full
-            // upload path.
-            const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
-            let allow_partial_texture_updates = DO_PARTIAL_TEXTURE_UPDATES
-                && !matches!(self.format, TextureFormat::VecRGBAf32 { .. });
+            let partial_allowed = partial_texture_updates_supported(&self.format, os_type);
+            let force_full = needs_realloc || !partial_allowed;
+            let Some(rect) = updated.upload_rect(width, height, force_full) else {
+                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                return;
+            };
+            let use_partial =
+                partial_allowed && !needs_realloc && matches!(updated, TextureUpdated::Partial(_));
             let unpack_alignment = gl_unpack_alignment(bytes_per_pixel);
 
-            match updated {
-                TextureUpdated::Partial(rect) if allow_partial_texture_updates => {
-                    if needs_realloc {
-                        (gl.glTexImage2D)(
-                            gl_sys::TEXTURE_2D,
-                            0,
-                            internal_format as i32,
-                            width as i32,
-                            height as i32,
-                            0,
-                            format,
-                            data_type,
-                            0 as *const _,
-                        );
-                    }
-
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
-                    (gl.glTexSubImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        rect.origin.x as i32,
-                        rect.origin.y as i32,
-                        rect.size.width as i32,
-                        rect.size.height as i32,
-                        format,
-                        data_type,
-                        data,
-                    );
-                }
-                // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
-                TextureUpdated::Partial(_) | TextureUpdated::Full => {
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
-                    (gl.glTexImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        internal_format as i32,
-                        width as i32,
-                        height as i32,
-                        0,
-                        format,
-                        data_type,
-                        data,
-                    );
-                }
-                TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
-            };
+            if use_partial {
+                (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
+                (gl.glTexSubImage2D)(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    rect.origin.x as i32,
+                    rect.origin.y as i32,
+                    rect.size.width as i32,
+                    rect.size.height as i32,
+                    format,
+                    data_type,
+                    data,
+                );
+            } else {
+                (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+                (gl.glTexImage2D)(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    internal_format as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    format,
+                    data_type,
+                    data,
+                );
+            }
 
             (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
             (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
