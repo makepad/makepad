@@ -39,11 +39,14 @@ APIs need.
 2. The backend allocates or reuses native texture storage.
 3. The existing Vulkan texture_upload_rect logic, moved to the shared texture
    module, resolves the update:
-   - Empty produces no upload.
-   - Full produces the complete texture rectangle.
-   - Partial is clipped to the texture bounds.
-   - A fully clipped or zero-area rectangle produces no upload.
-   - Reallocated storage plus a non-empty update forces a full upload.
+   - Zero logical width or height produces no upload rectangle.
+   - Otherwise, reallocated storage forces the complete texture rectangle,
+     even when the update state is Empty, so recreated native storage is
+     initialized from the retained CPU texture.
+   - Without a forced full upload, Empty produces no upload and Full produces
+     the complete texture rectangle.
+   - Without a forced full upload, Partial is clipped to the texture bounds;
+     a fully clipped or zero-area rectangle produces no upload.
 4. The backend converts the resolved rectangle directly into its native upload
    call. The source pointer is offset to the rectangle origin while the source
    row pitch remains the full CPU texture width.
@@ -57,9 +60,11 @@ handling remains unchanged.
 
 ### Vulkan
 
-Leave the upload path unchanged. It already clips dirty rectangles, packs
-partial rows, preserves stable images, and forces full upload after image
-recreation. Its local rectangle helper becomes the shared implementation.
+Keep the existing upload mechanics. Vulkan clips dirty rectangles, packs
+partial rows, preserves stable images, and forces a full upload after image
+recreation. For zero logical dimensions, it still creates physical image
+storage with max(1) extents while the shared resolver returns no logical upload
+rectangle. Its local rectangle helper becomes the shared implementation.
 
 Staging-buffer reuse is explicitly separate work and requires its own
 benchmark.
@@ -150,7 +155,7 @@ One focused shared test covers:
 - In-bounds partial updates.
 - Clipped and overflow-adjacent rectangles.
 - Zero-area and fully outside rectangles.
-- Reallocation forcing a full upload.
+- Reallocation forcing a full upload, including from Empty update state.
 
 Backend validation covers:
 

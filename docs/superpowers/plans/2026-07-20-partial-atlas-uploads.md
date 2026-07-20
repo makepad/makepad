@@ -18,7 +18,9 @@
 - Launch and validate UI programs only through a fresh Makepad Studio `RunItem` after clearing the prior build.
 - Do not add dependencies, a telemetry subsystem, a benchmark crate, an atlas payload format, or a runtime feature flag.
 - Preserve full uploads on unverified Android GLES and OpenHarmony paths.
-- Leave Vulkan upload behavior and headless rendering behavior unchanged.
+- Preserve Vulkan upload mechanics and headless rendering behavior. Recreated
+  nonzero Vulkan storage receives a forced full upload; zero logical extents
+  only initialize physical max(1) image storage and have no upload rectangle.
 - A backend without native hardware or browser validation remains pending; a cross-compile alone is not a pass.
 - Do not stage or modify the user's untracked `LearningMakepad.md`.
 
@@ -86,6 +88,10 @@ mod texture_updated_upload_rect_tests {
     fn texture_updated_upload_rect_handles_full_empty_and_reallocation() {
         assert_eq!(TextureUpdated::Empty.upload_rect(8, 4, false), None);
         assert_eq!(
+            TextureUpdated::Empty.upload_rect(8, 4, true),
+            Some(rect(0, 0, 8, 4)),
+        );
+        assert_eq!(
             TextureUpdated::Full.upload_rect(8, 4, false),
             Some(rect(0, 0, 8, 4)),
         );
@@ -122,16 +128,16 @@ pub(crate) fn upload_rect(
     if width == 0 || height == 0 {
         return None;
     }
+    let full_rect = RectUsize::new(
+        PointUsize::new(0, 0),
+        SizeUsize::new(width, height),
+    );
+    if force_full {
+        return Some(full_rect);
+    }
     match self {
         Self::Empty => None,
-        Self::Full => Some(RectUsize::new(
-            PointUsize::new(0, 0),
-            SizeUsize::new(width, height),
-        )),
-        Self::Partial(_) if force_full => Some(RectUsize::new(
-            PointUsize::new(0, 0),
-            SizeUsize::new(width, height),
-        )),
+        Self::Full => Some(full_rect),
         Self::Partial(rect) => {
             let x0 = rect.origin.x.min(width);
             let y0 = rect.origin.y.min(height);
@@ -148,6 +154,11 @@ pub(crate) fn upload_rect(
 }
 ```
 
+The zero-dimension check remains first because it describes logical texture
+content. For nonzero dimensions, `force_full` takes precedence over the update
+variant so a backend can initialize recreated native storage from the retained
+CPU texture, including when the update state is `Empty`.
+
 - [ ] **Step 4: Switch Vulkan to the shared method**
 
 Delete `CxVulkan::texture_upload_rect`. At each of the five existing call sites in `vec_texture_upload`, replace the local call with:
@@ -161,6 +172,8 @@ let h = rect.size.height;
 ```
 
 Keep `pack_texture_region_bytes` and every Vulkan staging/copy operation unchanged.
+Vulkan separately allocates physical image extents with `max(1)`; when either
+logical dimension is zero, `upload_rect` returns `None` and no copy is issued.
 
 - [ ] **Step 5: Run shared and producer tests**
 
