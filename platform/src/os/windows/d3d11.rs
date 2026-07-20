@@ -19,7 +19,7 @@ use crate::{
     },
     script::vm::*,
     texture::Texture,
-    texture::{CxTexture, TextureFormat, TextureId, TexturePixel},
+    texture::{CxTexture, TextureFormat, TextureId, TexturePixel, TextureUpdated},
     window::WindowId,
     windows::{
         core::{
@@ -42,7 +42,7 @@ use crate::{
                     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_FLAG,
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
+                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
                     D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_ALWAYS,
                     D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_FLAG,
                     D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC,
@@ -1249,9 +1249,50 @@ pub struct CxOsTexture {
 
 impl CxTexture {
     pub fn update_vec_texture(&mut self, d3d11_cx: &D3d11Cx) {
-        // TODO maybe we can update the data instead of making a new texture?
-        if self.alloc_vec() {}
-        if !self.take_updated().is_empty() {
+        let needs_realloc = self.alloc_vec();
+        let updated = self.take_updated();
+        if updated.is_empty() {
+            return;
+        }
+        if !needs_realloc && matches!(updated, TextureUpdated::Partial(_)) {
+            if let (
+                TextureFormat::VecRGBAf32 {
+                    width,
+                    height,
+                    data,
+                    ..
+                },
+                Some(texture),
+            ) = (&self.format, &self.os.texture)
+            {
+                let Some(rect) = updated.upload_rect(*width, *height, false) else {
+                    return;
+                };
+                let dst_box = D3D11_BOX {
+                    left: rect.origin.x as u32,
+                    top: rect.origin.y as u32,
+                    front: 0,
+                    right: (rect.origin.x + rect.size.width) as u32,
+                    bottom: (rect.origin.y + rect.size.height) as u32,
+                    back: 1,
+                };
+                let data = data.as_ref().unwrap();
+                let float_offset = (rect.origin.y * *width + rect.origin.x) * 4;
+                let resource: ID3D11Resource = texture.cast().unwrap();
+                unsafe {
+                    d3d11_cx.context.UpdateSubresource(
+                        &resource,
+                        0,
+                        Some(&dst_box as *const D3D11_BOX),
+                        data.as_ptr().add(float_offset) as *const std::ffi::c_void,
+                        (*width * 16) as u32,
+                        0,
+                    );
+                }
+                return;
+            }
+        }
+        {
             if let TextureFormat::VecCubeBGRAu8_32 {
                 width,
                 height,
