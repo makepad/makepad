@@ -200,7 +200,12 @@ fn texture_update_requires_upload(updated: TextureUpdated, needs_recreate: bool)
     needs_recreate || !matches!(updated, TextureUpdated::Empty)
 }
 
-fn zero_texture_upload(format: vk::Format, layers: u32) -> Option<VulkanTextureUpload> {
+fn zero_texture_upload(
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    layers: u32,
+) -> Option<VulkanTextureUpload> {
     let bytes_per_pixel = match format {
         vk::Format::B8G8R8A8_UNORM | vk::Format::R32_SFLOAT => 4,
         vk::Format::R32G32B32A32_SFLOAT => 16,
@@ -208,13 +213,19 @@ fn zero_texture_upload(format: vk::Format, layers: u32) -> Option<VulkanTextureU
         vk::Format::R8G8_UNORM => 2,
         _ => return None,
     };
+    let width = width.max(1);
+    let height = height.max(1);
     let layers = layers.max(1);
+    let data_len = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(bytes_per_pixel)?
+        .checked_mul(layers as usize)?;
     Some(VulkanTextureUpload {
-        data: vec![0; bytes_per_pixel * layers as usize],
+        data: vec![0; data_len],
         offset_x: 0,
         offset_y: 0,
-        width: 1,
-        height: 1,
+        width,
+        height,
         layers,
     })
 }
@@ -5331,9 +5342,10 @@ impl CxVulkan {
                 .map_err(|()| format!("texture {} has unsupported upload format", texture_key))?
             {
                 Some(upload) => upload,
-                None if needs_recreate => zero_texture_upload(format, layers).ok_or_else(|| {
-                    format!("texture {} has unsupported upload format", texture_key)
-                })?,
+                None if needs_recreate => zero_texture_upload(format, width, height, layers)
+                    .ok_or_else(|| {
+                        format!("texture {} has unsupported upload format", texture_key)
+                    })?,
                 None => return Ok(()),
             }
         };
@@ -7183,7 +7195,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_texture_upload_matches_format_and_layers() {
+    fn zero_texture_upload_matches_physical_extents_format_and_layers() {
         for (format, bytes_per_pixel) in [
             (vk::Format::B8G8R8A8_UNORM, 4),
             (vk::Format::R32G32B32A32_SFLOAT, 16),
@@ -7191,19 +7203,33 @@ mod tests {
             (vk::Format::R8G8_UNORM, 2),
             (vk::Format::R32_SFLOAT, 4),
         ] {
-            let upload = zero_texture_upload(format, 1).unwrap();
+            let upload = zero_texture_upload(format, 0, 4, 1).unwrap();
             assert_eq!(upload.offset_x, 0);
             assert_eq!(upload.offset_y, 0);
             assert_eq!(upload.width, 1);
-            assert_eq!(upload.height, 1);
+            assert_eq!(upload.height, 4);
             assert_eq!(upload.layers, 1);
-            assert_eq!(upload.data.len(), bytes_per_pixel);
+            assert_eq!(upload.data.len(), bytes_per_pixel * 4);
         }
 
-        let cube = zero_texture_upload(vk::Format::B8G8R8A8_UNORM, 6).unwrap();
+        let row = zero_texture_upload(vk::Format::R8G8_UNORM, 3, 0, 1).unwrap();
+        assert_eq!(row.width, 3);
+        assert_eq!(row.height, 1);
+        assert_eq!(row.data.len(), 6);
+
+        let cube = zero_texture_upload(vk::Format::B8G8R8A8_UNORM, 0, 4, 6).unwrap();
+        assert_eq!(cube.width, 1);
+        assert_eq!(cube.height, 4);
         assert_eq!(cube.layers, 6);
-        assert_eq!(cube.data.len(), 24);
-        assert!(zero_texture_upload(vk::Format::D32_SFLOAT, 1).is_none());
+        assert_eq!(cube.data.len(), 96);
+        assert!(zero_texture_upload(vk::Format::D32_SFLOAT, 0, 4, 1).is_none());
+        assert!(zero_texture_upload(
+            vk::Format::R32G32B32A32_SFLOAT,
+            u32::MAX,
+            u32::MAX,
+            6,
+        )
+        .is_none());
     }
 
     #[test]
