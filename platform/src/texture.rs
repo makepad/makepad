@@ -1001,6 +1001,14 @@ mod texture_updated_upload_rect_tests {
             TextureUpdated::Partial(rect(8, 4, 1, 1)).upload_rect(8, 4, false),
             None,
         );
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(2, 1, 0, 2)).upload_rect(8, 4, false),
+            None,
+        );
+        assert_upload_rect(
+            TextureUpdated::Partial(rect(2, 1, 2, 0)).upload_rect(8, 4, false),
+            None,
+        );
     }
 
     #[test]

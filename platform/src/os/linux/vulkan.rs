@@ -5292,10 +5292,11 @@ impl CxVulkan {
         }
 
         let force_full_upload = needs_recreate;
-        let upload = {
+        let Some(upload) = ({
             let cxtexture = &cx.textures[texture_id];
             Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
-                .ok_or_else(|| format!("texture {} has unsupported upload format", texture_key))?
+        }) else {
+            return Ok(());
         };
         if upload.data.is_empty() || upload.width == 0 || upload.height == 0 {
             return Ok(());
@@ -7105,5 +7106,33 @@ impl Drop for CxVulkan {
             unsafe { ndk_sys::ANativeWindow_release(self.window) };
             self.window = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::makepad_math::{PointUsize, RectUsize, SizeUsize},
+    };
+
+    fn partial(x: usize, y: usize, width: usize, height: usize) -> TextureUpdated {
+        TextureUpdated::Partial(RectUsize::new(
+            PointUsize::new(x, y),
+            SizeUsize::new(width, height),
+        ))
+    }
+
+    #[test]
+    fn vec_texture_upload_skips_empty_partial_regions() {
+        let format = TextureFormat::VecRf32 {
+            width: 8,
+            height: 4,
+            data: Some(vec![0.0; 32]),
+            updated: TextureUpdated::Empty,
+        };
+
+        assert!(CxVulkan::vec_texture_upload(&format, partial(2, 1, 0, 2), false).is_none());
+        assert!(CxVulkan::vec_texture_upload(&format, partial(8, 4, 1, 1), false).is_none());
     }
 }
