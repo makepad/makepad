@@ -2546,13 +2546,8 @@ impl CxTexture {
                     width,
                     height,
                     data,
-                    unpack_row_length,
                     ..
                 } => {
-                    //(gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
-                    if let Some(row_length) = unpack_row_length {
-                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
-                    }
                     (
                         *width,
                         *height,
@@ -2569,13 +2564,8 @@ impl CxTexture {
                     width,
                     height,
                     data,
-                    unpack_row_length,
                     ..
                 } => {
-                    //(gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
-                    if let Some(row_length) = unpack_row_length {
-                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, *row_length as i32);
-                    }
                     (
                         *width,
                         *height,
