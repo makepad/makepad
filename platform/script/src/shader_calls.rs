@@ -15,6 +15,7 @@ use crate::value::*;
 use crate::vm::*;
 use crate::*;
 use makepad_live_id::*;
+use std::borrow::Cow;
 use std::fmt::Write;
 
 impl ShaderFnCompiler {
@@ -877,11 +878,13 @@ impl ShaderFnCompiler {
     ) {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
-        let resolved_arg_types =
-            Self::resolve_script_call_arg_types(vm, fnobj, &args, self.trap.pass());
+        let resolved_arg_types = matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            .then(|| {
+                Self::resolve_script_call_arg_types(vm, fnobj, &args, self.trap.pass())
+            });
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
-        if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
+        if let Some(resolved_arg_types) = resolved_arg_types {
             out = Self::glsl_rewrite_call_args(vm, out, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
@@ -959,7 +962,7 @@ impl ShaderFnCompiler {
             let arg_index = explicit_start + i;
             let value = parts[arg_index].trim();
             if Self::is_simple_int_literal(value) {
-                parts[arg_index] = format!("{}.0", value);
+                parts[arg_index] = Cow::Owned(format!("{}.0", value));
                 changed = true;
             }
         }
@@ -971,7 +974,7 @@ impl ShaderFnCompiler {
         }
     }
 
-    fn split_call_args_top_level(raw_args: &str) -> Vec<String> {
+    fn split_call_args_top_level(raw_args: &str) -> Vec<Cow<'_, str>> {
         if raw_args.trim().is_empty() {
             return Vec::new();
         }
@@ -990,7 +993,7 @@ impl ShaderFnCompiler {
                 '{' => brace_depth += 1,
                 '}' => brace_depth = brace_depth.saturating_sub(1),
                 ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                    out.push(raw_args[start..idx].trim().to_string());
+                    out.push(Cow::Borrowed(raw_args[start..idx].trim()));
                     start = idx + ch.len_utf8();
                 }
                 _ => {}
@@ -998,7 +1001,7 @@ impl ShaderFnCompiler {
         }
 
         if start < raw_args.len() {
-            out.push(raw_args[start..].trim().to_string());
+            out.push(Cow::Borrowed(raw_args[start..].trim()));
         }
         out
     }
