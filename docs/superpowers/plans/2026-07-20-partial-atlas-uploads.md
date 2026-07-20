@@ -200,7 +200,7 @@ rtk git commit -m "Share texture upload rectangle resolution"
 
 **Interfaces:**
 - Consumes: `Texture::new_with_format`, `take_vec_f32`, `put_back_vec_f32`, `NextFrame`, `ImageRef::set_texture`.
-- Produces: a visible `atlas_upload_bench_start` control, `atlas_upload_toggle` correctness control, `atlas_upload_bench_status` result, and paired `ATLAS_BENCH` log line.
+- Produces: a visible `atlas_upload_bench_start` control, `atlas_upload_toggle` correctness control, `atlas_upload_bench_status` result, and paired non-gating `ATLAS_BENCH SCHEDULER_PROXY` log line. Backend acceptance comes from Studio profiler evidence.
 
 - [ ] **Step 1: Add the failing UI test**
 
@@ -217,7 +217,7 @@ fn splash_atlas_upload_bench(app: TestApp) {
     app.locator(Selector::id("atlas_upload_bench_start"))
         .wait_visible()
         .click();
-    app.wait_for_log_contains("ATLAS_BENCH");
+    app.wait_for_log_contains("ATLAS_BENCH SCHEDULER_PROXY");
 }
 ```
 
@@ -420,19 +420,10 @@ impl AtlasUploadBench {
             self.running = false;
             let full_p95 = Self::p95(&self.full_us);
             let partial_p95 = Self::p95(&self.partial_us);
-            let timing_pass =
-                (partial_p95 as u128) * 100 <= (full_p95 as u128) * 102;
-            ui.label(cx, ids!(atlas_upload_bench_status)).set_text(
-                cx,
-                if timing_pass {
-                    "timing passed"
-                } else {
-                    "timing failed"
-                },
-            );
+            ui.label(cx, ids!(atlas_upload_bench_status))
+                .set_text(cx, "scheduler proxy recorded");
             log!(
-                "ATLAS_BENCH {} requested_partial_bytes={} requested_full_bytes={} partial_p95_us={} full_p95_us={}",
-                if timing_pass { "TIMING_PASS" } else { "TIMING_FAIL" },
+                "ATLAS_BENCH SCHEDULER_PROXY requested_partial_bytes={} requested_full_bytes={} partial_scheduler_p95_us={} full_scheduler_p95_us={}",
                 ATLAS_BENCH_REQUESTED_PARTIAL_BYTES,
                 ATLAS_BENCH_REQUESTED_FULL_BYTES,
                 partial_p95,
@@ -523,7 +514,7 @@ Expected: success.
 
 Run the UI test command from Step 2 again.
 
-Expected: the toggle reaches `variant B` and the log contains `ATLAS_BENCH`.
+Expected: the toggle reaches `variant B` and the log contains `ATLAS_BENCH SCHEDULER_PROXY`. These next-frame intervals are observational only; backend timing acceptance comes from Studio profiler evidence.
 
 - [ ] **Step 8: Verify A/B/A rendering through a fresh Studio run**
 

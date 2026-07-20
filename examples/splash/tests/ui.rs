@@ -58,5 +58,5 @@ fn splash_atlas_upload_bench(app: TestApp) {
     app.locator(Selector::id("atlas_upload_bench_start"))
         .wait_visible()
         .click();
-    app.wait_for_log_contains("ATLAS_BENCH");
+    app.wait_for_log_contains("ATLAS_BENCH SCHEDULER_PROXY");
 }

@@ -2217,14 +2217,10 @@ impl AtlasUploadBench {
             self.running = false;
             let full_p95 = Self::p95(&self.full_us);
             let partial_p95 = Self::p95(&self.partial_us);
-            let timing_pass = (partial_p95 as u128) * 100 <= (full_p95 as u128) * 102;
-            ui.label(cx, ids!(atlas_upload_bench_status)).set_text(
-                cx,
-                if timing_pass { "timing passed" } else { "timing failed" },
-            );
+            ui.label(cx, ids!(atlas_upload_bench_status))
+                .set_text(cx, "scheduler proxy recorded");
             log!(
-                "ATLAS_BENCH {} requested_partial_bytes={} requested_full_bytes={} partial_p95_us={} full_p95_us={}",
-                if timing_pass { "TIMING_PASS" } else { "TIMING_FAIL" },
+                "ATLAS_BENCH SCHEDULER_PROXY requested_partial_bytes={} requested_full_bytes={} partial_scheduler_p95_us={} full_scheduler_p95_us={}",
                 ATLAS_BENCH_REQUESTED_PARTIAL_BYTES,
                 ATLAS_BENCH_REQUESTED_FULL_BYTES,
                 partial_p95,
