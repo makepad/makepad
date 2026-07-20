@@ -45,8 +45,8 @@ impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_object(io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -54,8 +54,12 @@ impl DrawVars {
 
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_functions(fnhash, io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -170,8 +174,15 @@ impl DrawVars {
             };
 
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_code(&code, fnhash, io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -249,7 +260,12 @@ impl DrawVars {
 
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
-                .insert_cache_entries(io_self, fnhash, code, shader_id);
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
             if os_shader_id.is_none() {
                 cx.draw_shaders.compile_set.insert(index);
             }
@@ -945,8 +961,6 @@ impl Cx {
 
         for shader_index in compile_set {
             let mapping = self.draw_shaders.shaders[shader_index].mapping.clone();
-            let mut backend_reused = false;
-            let mut backend_compiled = false;
             let os_shader_id = {
                 let cx_shader = &mut self.draw_shaders.shaders[shader_index];
                 if cx_shader.os_shader_id.is_none() {
@@ -964,7 +978,6 @@ impl Cx {
                     for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                         if ds.in_vertex == vertex && ds.in_pixel == pixel {
                             cx_shader.os_shader_id = Some(index);
-                            backend_reused = true;
                             break;
                         }
                     }
@@ -973,17 +986,10 @@ impl Cx {
                         let shp = CxOsDrawShader::new(self.os.gl(), &vertex, &pixel, &self.os_type);
                         cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
                         self.draw_shaders.os_shaders.push(shp);
-                        backend_compiled = true;
                     }
                 }
                 cx_shader.os_shader_id
             };
-            if backend_reused {
-                self.draw_shaders.record_backend_reuse();
-            }
-            if backend_compiled {
-                self.draw_shaders.record_backend_compile();
-            }
 
             if let Some(os_shader_id) = os_shader_id {
                 if !mapping.flags.async_compile {

@@ -101,20 +101,6 @@ pub struct ScriptLoc {
     pub line: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ScriptPerfStats {
-    pub eval_calls: u64,
-    pub eval_with_append_calls: u64,
-    pub parse_full_runs: u64,
-    pub parse_incremental_runs: u64,
-    pub parse_cache_hits: u64,
-    pub gc_runs: u64,
-    pub eval_ms: f64,
-    pub parse_ms: f64,
-    pub run_ms: f64,
-    pub gc_ms: f64,
-}
-
 impl std::fmt::Debug for ScriptLoc {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
@@ -258,11 +244,8 @@ impl<'a> ScriptVm<'a> {
 
     /// Run garbage collection (mark and sweep), only logs if it takes >1ms.
     pub fn gc(&mut self) {
-        let start = Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
         self.bx.heap.sweep(false);
-        self.bx.perf_stats.gc_runs += 1;
-        self.bx.perf_stats.gc_ms += start.elapsed().as_secs_f64() * 1000.0;
         // Return memory held purely for reuse/over-allocation after the sweep (safe: no live
         // slot is moved or removed). gc() is itself gated by `needs_gc()`, so this is rare.
         self.bx.heap.shrink_to_fit();
@@ -270,11 +253,8 @@ impl<'a> ScriptVm<'a> {
 
     /// Run garbage collection with status logging.
     pub fn gc_with_status(&mut self) {
-        let start = Instant::now();
         self.bx.heap.mark(&self.bx.threads, &self.bx.code);
         self.bx.heap.sweep(true);
-        self.bx.perf_stats.gc_runs += 1;
-        self.bx.perf_stats.gc_ms += start.elapsed().as_secs_f64() * 1000.0;
     }
 
     pub fn thread(&self) -> &ScriptThread {
@@ -1186,8 +1166,6 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn eval_with_source(&mut self, script_mod: ScriptMod, source: ScriptObject) -> ScriptValue {
-        let eval_start = Instant::now();
-        self.bx.perf_stats.eval_calls += 1;
         let body_id = self.add_script_mod(script_mod);
 
         // Set __script_source__ on the scope if source is provided
@@ -1214,7 +1192,6 @@ impl<'a> ScriptVm<'a> {
 
         if let ScriptSource::Mod(script_mod) = &body.source {
             if body.source_len == 0 {
-                let parse_start = Instant::now();
                 body.tokenizer.clear();
                 body.parser = ScriptParser::default();
                 body.tokenizer
@@ -1226,25 +1203,17 @@ impl<'a> ScriptVm<'a> {
                     &script_mod.values,
                 );
                 body.source_len = body.effective_code.len();
-                self.bx.perf_stats.parse_full_runs += 1;
-                self.bx.perf_stats.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
-            } else {
-                self.bx.perf_stats.parse_cache_hits += 1;
             }
             drop(bodies);
             // lets point our thread to it
-            let run_start = Instant::now();
             let result = self.run_root(body_id);
-            self.bx.perf_stats.run_ms += run_start.elapsed().as_secs_f64() * 1000.0;
             // Mark the result object with FROM_EVAL flag
             if let Some(result_obj) = result.as_object() {
                 self.bx.heap.set_from_eval(result_obj);
             }
 
-            self.bx.perf_stats.eval_ms += eval_start.elapsed().as_secs_f64() * 1000.0;
             result
         } else {
-            self.bx.perf_stats.eval_ms += eval_start.elapsed().as_secs_f64() * 1000.0;
             NIL
         }
     }
@@ -1262,8 +1231,6 @@ impl<'a> ScriptVm<'a> {
         code: &str,
         source: ScriptObject,
     ) -> ScriptValue {
-        let eval_start = Instant::now();
-        self.bx.perf_stats.eval_with_append_calls += 1;
         // Look for an existing body with matching file/line/column
         let existing_body_id = {
             let bodies = self.bx.code.bodies.borrow();
@@ -1308,7 +1275,6 @@ impl<'a> ScriptVm<'a> {
         let body = &mut bodies[body_id as usize];
 
         if let ScriptSource::Mod(existing_mod) = &body.source {
-            let parse_start = Instant::now();
             // Restore checkpoint (removes auto-close opcodes from previous run)
             if let Some(cp) = body.checkpoint.take() {
                 body.parser.restore_checkpoint(cp);
@@ -1350,25 +1316,19 @@ impl<'a> ScriptVm<'a> {
             );
 
             body.checkpoint = Some(cp);
-            self.bx.perf_stats.parse_incremental_runs += 1;
-            self.bx.perf_stats.parse_ms += parse_start.elapsed().as_secs_f64() * 1000.0;
 
             drop(bodies);
             // Silence runtime errors during incremental eval — incomplete code
             // will inevitably produce errors that are meaningless until the
             // source is fully received.
             self.bx.silence_errors = true;
-            let run_start = Instant::now();
             let result = self.run_root(body_id);
-            self.bx.perf_stats.run_ms += run_start.elapsed().as_secs_f64() * 1000.0;
             self.bx.silence_errors = false;
             if let Some(result_obj) = result.as_object() {
                 self.bx.heap.set_from_eval(result_obj);
             }
-            self.bx.perf_stats.eval_ms += eval_start.elapsed().as_secs_f64() * 1000.0;
             result
         } else {
-            self.bx.perf_stats.eval_ms += eval_start.elapsed().as_secs_f64() * 1000.0;
             NIL
         }
     }
@@ -1383,7 +1343,6 @@ pub struct ScriptVmBase {
     pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
-    pub perf_stats: ScriptPerfStats,
     /// When Some, drained errors are pushed here (formatted) instead of being
     /// logged or dropped — even under `silence_errors`. Install before an
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
@@ -1403,7 +1362,6 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
-            perf_stats: ScriptPerfStats::default(),
             captured_errors: None,
             run_budget: None,
         }
@@ -1437,7 +1395,6 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
-            perf_stats: ScriptPerfStats::default(),
             captured_errors: None,
             run_budget: None,
         }

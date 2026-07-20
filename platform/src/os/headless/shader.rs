@@ -25,8 +25,8 @@ impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_object(io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -34,8 +34,12 @@ impl DrawVars {
 
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_functions(fnhash, io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -109,8 +113,15 @@ impl DrawVars {
             };
 
             {
-                let cx = vm.host.cx_mut();
-                if let Some(shader_id) = cx.draw_shaders.cached_by_code(&code, fnhash, io_self) {
+                let cx = vm.host.cx();
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                    let cx = vm.host.cx_mut();
+                    cx.draw_shaders
+                        .cache_object_id_to_shader
+                        .insert(io_self, shader_id);
+                    cx.draw_shaders
+                        .cache_functions_to_shader
+                        .insert(fnhash, shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -157,7 +168,12 @@ impl DrawVars {
 
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
-                .insert_cache_entries(io_self, fnhash, code, shader_id);
+                .cache_object_id_to_shader
+                .insert(io_self, shader_id);
+            cx.draw_shaders
+                .cache_functions_to_shader
+                .insert(fnhash, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
             cx.draw_shaders.compile_set.insert(index);
 
             self.draw_shader_id = Some(shader_id);
@@ -185,38 +201,28 @@ impl Cx {
             return;
         }
         for shader_index in compile_set {
-            if self.draw_shaders.shaders[shader_index]
-                .os_shader_id
-                .is_some()
-            {
+            let cx_shader = &mut self.draw_shaders.shaders[shader_index];
+            if cx_shader.os_shader_id.is_some() {
                 continue;
             }
 
-            let (source, debug_code) = {
-                let cx_shader = &self.draw_shaders.shaders[shader_index];
-                let source = match &cx_shader.mapping.code {
-                    CxDrawShaderCode::Combined { code } => code.clone(),
-                    CxDrawShaderCode::Separate { vertex, fragment } => {
-                        crate::warning!(
-                            "headless backend expected combined Rust source but got separate shaders; synthesizing module"
-                        );
-                        if vertex.len() > fragment.len() {
-                            vertex.clone()
-                        } else {
-                            fragment.clone()
-                        }
+            let source = match &cx_shader.mapping.code {
+                CxDrawShaderCode::Combined { code } => code.as_str(),
+                CxDrawShaderCode::Separate { vertex, fragment } => {
+                    crate::warning!(
+                        "headless backend expected combined Rust source but got separate shaders; synthesizing module"
+                    );
+                    if vertex.len() > fragment.len() {
+                        vertex.as_str()
+                    } else {
+                        fragment.as_str()
                     }
-                };
-                (source, cx_shader.mapping.flags.debug_code)
+                }
             };
-            let (fallback_instance_slots, fallback_varying_slots) = {
-                let mapping = &self.draw_shaders.shaders[shader_index].mapping;
-                (mapping.instances.total_slots, mapping.varying_total_slots)
-            };
-            if debug_code {
+            if cx_shader.mapping.flags.debug_code {
                 crate::log!("{}", source);
             }
-            let source_hash = hash_string(&source);
+            let source_hash = hash_string(source);
 
             if let Some((existing_index, _)) = self
                 .draw_shaders
@@ -225,18 +231,16 @@ impl Cx {
                 .enumerate()
                 .find(|(_, os_shader)| os_shader.source_hash == source_hash)
             {
-                self.draw_shaders.record_backend_reuse();
-                self.draw_shaders.shaders[shader_index].os_shader_id = Some(existing_index);
+                cx_shader.os_shader_id = Some(existing_index);
                 continue;
             }
 
-            self.draw_shaders.record_backend_compile();
             let mut os_shader = CxOsDrawShader {
                 source_hash,
                 ..Default::default()
             };
             let mut has_derivative_export = false;
-            match self.os.shader_jit.compile_and_load(source_hash, &source) {
+            match self.os.shader_jit.compile_and_load(source_hash, source) {
                 Ok(jit_output) => {
                     os_shader.dylib_path = Some(jit_output.dylib_path);
                     os_shader.shader_version = jit_output.shader_version;
@@ -288,7 +292,11 @@ impl Cx {
             // Back-compat fallback: if an older JIT module is loaded without the
             // flat-varying export, keep previous behavior.
             if os_shader.flat_varying_slots == 0 {
-                os_shader.flat_varying_slots = fallback_instance_slots.min(fallback_varying_slots);
+                os_shader.flat_varying_slots = cx_shader
+                    .mapping
+                    .instances
+                    .total_slots
+                    .min(cx_shader.mapping.varying_total_slots);
             }
             if !has_derivative_export {
                 // Conservative back-compat fallback for older JIT modules without
@@ -298,7 +306,7 @@ impl Cx {
 
             let os_shader_id = self.draw_shaders.os_shaders.len();
             self.draw_shaders.os_shaders.push(os_shader);
-            self.draw_shaders.shaders[shader_index].os_shader_id = Some(os_shader_id);
+            cx_shader.os_shader_id = Some(os_shader_id);
         }
     }
 }

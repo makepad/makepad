@@ -96,25 +96,3 @@ fn reload_missing_object_field_with_type_default_refreshes_from_type_default() {
     assert_eq!(outer.inner.value, 42.0);
     assert_eq!(outer.inner.rust_value, 99);
 }
-
-#[test]
-fn eval_with_source_records_parse_cache_hits() {
-    let vm = &mut test_vm();
-    let script_mod = || ScriptMod {
-        file: "perf_cache_test.script".to_string(),
-        line: 1,
-        column: 1,
-        code: "42".to_string(),
-        ..Default::default()
-    };
-
-    let _ = vm.eval(script_mod());
-    let _ = vm.eval(script_mod());
-
-    assert_eq!(vm.bx.perf_stats.eval_calls, 2);
-    assert_eq!(vm.bx.perf_stats.parse_full_runs, 1);
-    assert_eq!(vm.bx.perf_stats.parse_cache_hits, 1);
-    assert!(vm.bx.perf_stats.eval_ms >= 0.0);
-    assert!(vm.bx.perf_stats.parse_ms >= 0.0);
-    assert!(vm.bx.perf_stats.run_ms >= 0.0);
-}
