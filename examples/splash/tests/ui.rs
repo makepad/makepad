@@ -47,3 +47,16 @@ fn splash_media_scroll_smoke(app: TestApp) {
     app.locator(Selector::all().text_exact("Loading Spinner"))
         .wait_visible();
 }
+
+#[makepad_test]
+fn splash_atlas_upload_bench(app: TestApp) {
+    app.locator(Selector::id("atlas_upload_toggle"))
+        .wait_visible()
+        .click();
+    app.locator(Selector::id("atlas_upload_bench_status"))
+        .wait_text("variant B");
+    app.locator(Selector::id("atlas_upload_bench_start"))
+        .wait_visible()
+        .click();
+    app.wait_for_log_contains("ATLAS_BENCH");
+}
