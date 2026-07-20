@@ -16,6 +16,15 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
+#[inline]
+fn ascii_cluster_index(bytes: &[u8], index: usize) -> usize {
+    if bytes[index] == b'\n' && index > 0 && bytes[index - 1] == b'\r' {
+        index - 1
+    } else {
+        index
+    }
+}
+
 /// Returns `true` if `text` is guaranteed to contain no right-to-left
 /// characters, so that the Unicode Bidirectional Algorithm can be skipped
 /// entirely. False negatives (returning `false` for pure-LTR text containing
@@ -359,7 +368,9 @@ impl Shaper {
         }
         let text_run = &text[start..end];
         if text_run.is_ascii() {
-            for (index, byte) in text_run.bytes().enumerate() {
+            let bytes = text_run.as_bytes();
+            for (index, &byte) in bytes.iter().enumerate() {
+                let index = ascii_cluster_index(bytes, index);
                 unicode_buffer.add(byte as char, (start + index) as u32);
             }
         } else {
@@ -445,4 +456,25 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ascii_cluster_index;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn ascii_crlf_keeps_reference_grapheme_cluster() {
+        let text = "\r\n";
+        let expected: Vec<_> = text
+            .grapheme_indices(true)
+            .flat_map(|(cluster, grapheme)| grapheme.bytes().map(move |_| cluster))
+            .collect();
+        let actual: Vec<_> = (0..text.len())
+            .map(|index| ascii_cluster_index(text.as_bytes(), index))
+            .collect();
+
+        assert_eq!(expected, vec![0, 0]);
+        assert_eq!(actual, expected);
+    }
 }

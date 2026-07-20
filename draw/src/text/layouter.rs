@@ -565,7 +565,6 @@ struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
     font_size_in_lpxs: f32,
-    lens: Vec<usize>,
     prefix_lens: Vec<usize>,
     prefix_widths_in_lpxs: Vec<f32>,
     front: usize,
@@ -600,17 +599,14 @@ impl Fitter {
             prefix_widths_in_lpxs.push(previous + width);
             offset = end;
         }
-        let mut prefix_lens = Vec::with_capacity(lens.len() + 1);
-        prefix_lens.push(0);
-        for len in &lens {
-            let previous = *prefix_lens.last().unwrap();
-            prefix_lens.push(previous + *len);
+        let mut prefix_lens = lens;
+        for index in 1..prefix_lens.len() {
+            prefix_lens[index] += prefix_lens[index - 1];
         }
         Self {
             text,
             font_family,
             font_size_in_lpxs,
-            lens,
             prefix_lens,
             prefix_widths_in_lpxs,
             front: 0,
@@ -622,12 +618,20 @@ impl Fitter {
     }
 
     fn next_len(&self) -> usize {
-        self.lens[self.front]
+        self.prefix_lens[self.front] - self.consumed_len()
+    }
+
+    fn consumed_len(&self) -> usize {
+        if self.front == 0 {
+            0
+        } else {
+            self.prefix_lens[self.front - 1]
+        }
     }
 
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
-        let mut max_count = self.lens.len() - self.front + 1;
+        let mut max_count = self.prefix_lens.len() - self.front + 1;
         let mut best_count = None;
         while min_count < max_count {
             let mid_count = (min_count + max_count) / 2;
@@ -639,9 +643,9 @@ impl Fitter {
             }
         }
         if let Some(mut best_count) = best_count {
+            let consumed_len = self.consumed_len();
             while best_count > 0 {
-                let best_len =
-                    self.prefix_lens[self.front + best_count] - self.prefix_lens[self.front];
+                let best_len = self.prefix_lens[self.front + best_count - 1] - consumed_len;
                 let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
                 if best_text.width_in_ems * self.font_size_in_lpxs <= wrap_width_in_lpxs {
                     self.front += best_count;
@@ -669,7 +673,7 @@ impl Fitter {
     }
 
     fn pop(&mut self) -> usize {
-        let len = self.lens[self.front];
+        let len = self.next_len();
         self.front += 1;
         self.text = self.text.substr(len..);
         len
@@ -1298,8 +1302,8 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, parse_text_atlas_size_value, BorrowedLayoutParams,
-        LayoutOptions, Layouter, Size, Style, LAYOUT_CACHE_MAX_TEXT_LEN,
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, BorrowedLayoutParams, Fitter,
+        LayoutOptions, Layouter, SegmentKind, Size, Style, LAYOUT_CACHE_MAX_TEXT_LEN,
         LAYOUT_CACHE_MULTILINE_LINE_COUNT, LAYOUT_CACHE_MULTILINE_TEXT_LEN,
     };
     use crate::{
@@ -1478,6 +1482,35 @@ mod tests {
             .map(|row| row.text.len() + usize::from(row.newline))
             .sum();
         assert_eq!(consumed_text_len, text.len());
+    }
+
+    #[test]
+    fn fitter_preserves_exact_width_after_advancing_front() {
+        const FONT_SIZE_IN_LPXS: f32 = 16.0;
+        const WRAP_WIDTH_IN_LPXS: f32 = 40.0;
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = "AV AV AV AV AV AV";
+        let mut fitter = Fitter::new(
+            text.into(),
+            layouter.get_or_load_font_family(font_family_id),
+            FONT_SIZE_IN_LPXS,
+            SegmentKind::Word,
+        );
+        let mut consumed_len = 0;
+        let mut fitted_chunks = 0;
+
+        while !fitter.is_empty() {
+            if let Some(shaped) = fitter.fit(WRAP_WIDTH_IN_LPXS) {
+                assert!(shaped.width_in_ems * FONT_SIZE_IN_LPXS <= WRAP_WIDTH_IN_LPXS);
+                consumed_len += shaped.text.len();
+                fitted_chunks += 1;
+            } else {
+                consumed_len += fitter.pop();
+            }
+        }
+
+        assert!(fitted_chunks > 1);
+        assert_eq!(consumed_len, text.len());
     }
 
     #[test]
