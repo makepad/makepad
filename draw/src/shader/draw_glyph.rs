@@ -819,6 +819,8 @@ impl DrawGlyph {
         self.shapes.clear();
         self.curve_data.clear();
         self.band_data.clear();
+        self.curve_uploaded_floats = 0;
+        self.band_uploaded_floats = 0;
         self.curve_dirty = true;
         self.band_dirty = true;
     }
@@ -1405,6 +1407,27 @@ fn cubic_to_quads_recursive(
 #[cfg(test)]
 mod tests {
     use super::DrawGlyph;
+    use crate::makepad_platform::{Cx, ScriptNew};
+
+    #[test]
+    fn clear_shapes_resets_uploaded_prefixes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let mut glyph = DrawGlyph::script_new_with_default(vm);
+            glyph.curve_data = vec![1.0, 2.0, 3.0, 4.0];
+            glyph.band_data = vec![5.0, 6.0, 7.0, 8.0];
+            glyph.curve_uploaded_floats = glyph.curve_data.len();
+            glyph.band_uploaded_floats = glyph.band_data.len();
+
+            glyph.clear_shapes();
+
+            assert!(glyph.curve_data.is_empty());
+            assert!(glyph.band_data.is_empty());
+            assert_eq!(glyph.curve_uploaded_floats, 0);
+            assert_eq!(glyph.band_uploaded_floats, 0);
+        });
+    }
 
     #[test]
     fn appended_dirty_rect_stays_tight_within_one_row() {
