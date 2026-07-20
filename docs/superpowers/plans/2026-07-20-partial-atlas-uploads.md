@@ -20,14 +20,17 @@
 - Preserve full uploads on unverified Android GLES and OpenHarmony paths.
 - Preserve Vulkan upload mechanics and headless rendering behavior. Recreated
   nonzero Vulkan storage receives a forced full upload; zero logical extents
-  only initialize physical max(1) image storage and have no upload rectangle.
+  have no logical upload rectangle but still receive a physical max(1)-extent
+  zero-fill copy and the normal layout transition.
 - A backend without native hardware or browser validation remains pending; a cross-compile alone is not a pass.
 - Do not stage or modify the user's untracked `LearningMakepad.md`.
 
 ## File Map
 
 - `platform/src/texture.rs`: shared upload-rectangle resolution and focused unit tests.
-- `platform/src/os/linux/vulkan.rs`: consume the shared rectangle method without changing Vulkan behavior.
+- `platform/src/os/linux/vulkan.rs`: consume the shared rectangle method while
+  preserving normal uploads and deterministically initializing zero-size
+  recreations.
 - `examples/splash/src/main.rs`: paired full/partial atlas workload and visible correctness probe.
 - `examples/splash/tests/ui.rs`: minimal benchmark wiring/runtime check.
 - `platform/src/os/linux/opengl.rs`: desktop-only RGBAf32 `glTexSubImage2D` path.
@@ -171,9 +174,11 @@ let w = rect.size.width;
 let h = rect.size.height;
 ```
 
-Keep `pack_texture_region_bytes` and every Vulkan staging/copy operation unchanged.
+Keep `pack_texture_region_bytes` and the normal Vulkan staging/copy path.
 Vulkan separately allocates physical image extents with `max(1)`; when either
-logical dimension is zero, `upload_rect` returns `None` and no copy is issued.
+logical dimension is zero, `upload_rect` returns `None`, then Vulkan synthesizes
+a zero-filled copy covering width.max(1) by height.max(1) by layers and performs
+the normal shader-read layout transition before descriptor binding.
 
 - [ ] **Step 5: Run shared and producer tests**
 

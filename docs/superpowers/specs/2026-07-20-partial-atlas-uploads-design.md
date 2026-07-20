@@ -60,11 +60,13 @@ handling remains unchanged.
 
 ### Vulkan
 
-Keep the existing upload mechanics. Vulkan clips dirty rectangles, packs
-partial rows, preserves stable images, and forces a full upload after image
-recreation. For zero logical dimensions, it still creates physical image
-storage with max(1) extents while the shared resolver returns no logical upload
-rectangle. Its local rectangle helper becomes the shared implementation.
+Keep the normal upload mechanics. Vulkan clips dirty rectangles, packs partial
+rows, preserves stable images, and forces a full upload after image recreation.
+For zero logical dimensions, the shared resolver returns no logical upload
+rectangle, but Vulkan still creates physical width.max(1) by height.max(1) by
+layers storage, copies zero-filled data across those physical extents, and
+performs the normal shader-read layout transition before descriptor binding.
+Its local rectangle helper becomes the shared implementation.
 
 Staging-buffer reuse is explicitly separate work and requires its own
 benchmark.
@@ -191,8 +193,10 @@ the measurement. Do not add a runtime feature flag for a failed path.
 3. D3D11 plus the minimal stripped-binding update.
 4. WebGL2 WASM message and JavaScript upload path.
 
-Each backend is a separate review and validation checkpoint. Vulkan and
-headless receive no behavior change.
+Each backend is a separate review and validation checkpoint. Vulkan preserves
+its normal upload mechanics and explicitly initializes zero-size recreations
+with the deterministic zero-fill copy and layout transition described above;
+headless receives no behavior change.
 
 ## Non-Goals
 
