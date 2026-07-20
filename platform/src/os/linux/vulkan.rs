@@ -3655,7 +3655,7 @@ impl CxVulkan {
         format: &TextureFormat,
         updated: TextureUpdated,
         force_full: bool,
-    ) -> Option<VulkanTextureUpload> {
+    ) -> Result<Option<VulkanTextureUpload>, ()> {
         match format {
             TextureFormat::VecBGRAu8_32 {
                 width,
@@ -3669,7 +3669,9 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let Some(rect) = updated.upload_rect(*width, *height, force_full) else {
+                    return Ok(None);
+                };
                 let x = rect.origin.x;
                 let y = rect.origin.y;
                 let w = rect.size.width;
@@ -3682,14 +3684,14 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h).saturating_mul(4)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: x as u32,
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
                     layers: 1,
-                })
+                }))
             }
             TextureFormat::VecCubeBGRAu8_32 {
                 width,
@@ -3700,7 +3702,7 @@ impl CxVulkan {
                 let w = *width;
                 let h = *height;
                 if w == 0 || h == 0 {
-                    return None;
+                    return Ok(None);
                 }
                 let out = if let Some(data) = data.as_ref() {
                     let src = unsafe {
@@ -3715,14 +3717,14 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h).saturating_mul(4).saturating_mul(6)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: 0,
                     offset_y: 0,
                     width: w as u32,
                     height: h as u32,
                     layers: 6,
-                })
+                }))
             }
             TextureFormat::VecRGBAf32 {
                 width,
@@ -3730,7 +3732,9 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let Some(rect) = updated.upload_rect(*width, *height, force_full) else {
+                    return Ok(None);
+                };
                 let x = rect.origin.x;
                 let y = rect.origin.y;
                 let w = rect.size.width;
@@ -3743,14 +3747,14 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h).saturating_mul(16)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: x as u32,
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
                     layers: 1,
-                })
+                }))
             }
             TextureFormat::VecRf32 {
                 width,
@@ -3758,7 +3762,9 @@ impl CxVulkan {
                 data,
                 ..
             } => {
-                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let Some(rect) = updated.upload_rect(*width, *height, force_full) else {
+                    return Ok(None);
+                };
                 let x = rect.origin.x;
                 let y = rect.origin.y;
                 let w = rect.size.width;
@@ -3771,14 +3777,14 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h).saturating_mul(4)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: x as u32,
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
                     layers: 1,
-                })
+                }))
             }
             TextureFormat::VecRu8 {
                 width,
@@ -3787,7 +3793,9 @@ impl CxVulkan {
                 unpack_row_length,
                 ..
             } => {
-                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let Some(rect) = updated.upload_rect(*width, *height, force_full) else {
+                    return Ok(None);
+                };
                 let x = rect.origin.x;
                 let y = rect.origin.y;
                 let w = rect.size.width;
@@ -3798,14 +3806,14 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: x as u32,
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
                     layers: 1,
-                })
+                }))
             }
             TextureFormat::VecRGu8 {
                 width,
@@ -3814,7 +3822,9 @@ impl CxVulkan {
                 unpack_row_length,
                 ..
             } => {
-                let rect = updated.upload_rect(*width, *height, force_full)?;
+                let Some(rect) = updated.upload_rect(*width, *height, force_full) else {
+                    return Ok(None);
+                };
                 let x = rect.origin.x;
                 let y = rect.origin.y;
                 let w = rect.size.width;
@@ -3825,16 +3835,16 @@ impl CxVulkan {
                 } else {
                     vec![0u8; w.saturating_mul(h).saturating_mul(2)]
                 };
-                Some(VulkanTextureUpload {
+                Ok(Some(VulkanTextureUpload {
                     data: out,
                     offset_x: x as u32,
                     offset_y: y as u32,
                     width: w as u32,
                     height: h as u32,
                     layers: 1,
-                })
+                }))
             }
-            _ => None,
+            _ => Err(()),
         }
     }
 
@@ -5295,6 +5305,7 @@ impl CxVulkan {
         let Some(upload) = ({
             let cxtexture = &cx.textures[texture_id];
             Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
+                .map_err(|()| format!("texture {} has unsupported upload format", texture_key))?
         }) else {
             return Ok(());
         };
@@ -7124,7 +7135,7 @@ mod tests {
     }
 
     #[test]
-    fn vec_texture_upload_skips_empty_partial_regions() {
+    fn vec_texture_upload_distinguishes_supported_noop_from_unsupported() {
         let format = TextureFormat::VecRf32 {
             width: 8,
             height: 4,
@@ -7132,7 +7143,19 @@ mod tests {
             updated: TextureUpdated::Empty,
         };
 
-        assert!(CxVulkan::vec_texture_upload(&format, partial(2, 1, 0, 2), false).is_none());
-        assert!(CxVulkan::vec_texture_upload(&format, partial(8, 4, 1, 1), false).is_none());
+        assert!(matches!(
+            CxVulkan::vec_texture_upload(&format, partial(2, 1, 0, 2), false),
+            Ok(None)
+        ));
+        assert!(matches!(
+            CxVulkan::vec_texture_upload(&format, partial(8, 4, 1, 1), false),
+            Ok(None)
+        ));
+        assert!(CxVulkan::vec_texture_upload(
+            &TextureFormat::Unknown,
+            TextureUpdated::Full,
+            false,
+        )
+        .is_err());
     }
 }
