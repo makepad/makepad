@@ -62,6 +62,7 @@ path = "examples/simple_window.rs"
 version = "2"
 
 [dependencies.log]
+path = "../../vulkan/log"
 version = "0.4"
 optional = true
 

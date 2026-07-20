@@ -21,6 +21,19 @@ use {
     std::rc::Rc,
 };
 
+/// File sinks for in-app frame captures (`Cx::capture_next_frame_to_file`).
+/// A static mutex rather than Cx state because the metal completion handler
+/// that produces the PNG runs off the main thread.
+static SCREENSHOT_FILE_SINKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, std::path::PathBuf>>,
+> = std::sync::OnceLock::new();
+static SCREENSHOT_FILE_NEXT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1 << 63);
+
+fn screenshot_file_sinks() -> &'static std::sync::Mutex<HashMap<u64, std::path::PathBuf>> {
+    SCREENSHOT_FILE_SINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 impl Cx {
     #[allow(dead_code)]
     pub(crate) fn repaint_windows(&mut self) {
@@ -145,6 +158,25 @@ impl Cx {
         }
     }
 
+    /// Capture the next presented frame of the main window to a PNG file.
+    /// The readback + write happen on the GPU completion thread after the next
+    /// repaint, so the caller should poll for the file to appear. Piggybacks on
+    /// the studio screenshot pipeline: ids above `SCREENSHOT_FILE_ID_BASE` are
+    /// routed to `SCREENSHOT_FILE_SINKS` instead of the studio connection.
+    /// (Headless builds write frames to files on their own; this is for the
+    /// live GPU-rendered app.)
+    pub fn capture_next_frame_to_file(&mut self, path: std::path::PathBuf) {
+        let request_id = SCREENSHOT_FILE_NEXT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        screenshot_file_sinks().lock().unwrap().insert(request_id, path);
+        self.screenshot_requests
+            .push(makepad_studio_protocol::ScreenshotRequest {
+                request_id,
+                kind_id: 0,
+            });
+        self.redraw_all();
+    }
+
     #[allow(dead_code)]
     pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
         let mut request_ids = Vec::new();
@@ -169,8 +201,33 @@ impl Cx {
         if request_ids.is_empty() {
             return;
         }
+        // Ids registered by capture_next_frame_to_file get written to disk;
+        // the rest (if any) still go to studio.
+        let mut studio_ids = Vec::new();
+        {
+            let mut sinks = screenshot_file_sinks().lock().unwrap();
+            for id in request_ids {
+                if let Some(path) = sinks.remove(&id) {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(err) = std::fs::write(&path, &png) {
+                        crate::error!(
+                            "capture_next_frame_to_file: write {} failed: {}",
+                            path.display(),
+                            err
+                        );
+                    }
+                } else {
+                    studio_ids.push(id);
+                }
+            }
+        }
+        if studio_ids.is_empty() {
+            return;
+        }
         Cx::send_studio_message(AppToStudio::Screenshot(ScreenshotResponse {
-            request_ids,
+            request_ids: studio_ids,
             png,
             width,
             height,
@@ -580,47 +637,74 @@ impl Cx {
     }
 
     pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
-        // Two independent triggers with distinct semantics:
+        // Three independent triggers, fanning out to two events. The
+        // critical distinction between FileChange and Manual is whether
+        // we follow LiveEdit up with an immediate ScriptReapply pass in
+        // the SAME tick — manual triggers (rotation) defer it to the next
+        // tick to keep each tick's work bounded, since rotation can fire
+        // multiple WindowGeomChange events back-to-back during the
+        // animation and each Apply walk over the full widget tree is
+        // non-trivial on mobile hardware.
         //
-        //  1. `handle_live_edit()` returns `true` when the file watcher
-        //     delivered a hot-reloaded `script_mod!` block. We must re-run
-        //     `script_mod` (source-defined module-level assignments) before
-        //     re-applying the widget tree, because the reloaded code may
-        //     have changed those assignments. That's what `Event::LiveEdit`
-        //     signals — the AppMain handler re-runs `script_mod` under
-        //     `vm.with_reload(...)` and then applies the result with
-        //     `Apply::Reload`. Only this path needs `reset_for_live_reload`.
+        // 1. `LiveEditTrigger::FileChange` — file watcher delivered a
+        //    hot-reloaded `script_mod!` block (or studio websocket sent
+        //    a `LiveChange`). The DSL itself changed; shader caches may
+        //    be stale, so `reset_for_live_reload` runs. Any preference
+        //    re-broadcast in the LiveEdit handler propagates immediately
+        //    via the same-tick `ScriptReapply` follow-up — file changes
+        //    are a live-coding scenario where the user wants to see the
+        //    update right away.
         //
-        //  2. `pending_script_reapply` is set by `Cx::request_script_reapply`
-        //     after runtime mutations to the script heap (e.g. `script_eval!`
-        //     overriding a user preference). Re-running `script_mod` would
-        //     clobber those overrides by reasserting source-defined defaults.
-        //     Instead we fire `Event::ScriptReapply`, which the AppMain
-        //     handler services by re-applying the previously-captured app
-        //     value with `Apply::Reload` — no `script_mod` re-run, so the
-        //     overrides stick.
+        // 2. `LiveEditTrigger::Manual` — `cx.request_live_edit()` was
+        //    called (canonical case: safe-area insets changed on iOS
+        //    rotation, where `mod.widgets.SAFE_INSET_PAD_*` heap
+        //    primitives need to be re-baked into `script_mod!` block
+        //    expressions). The DSL did NOT change; we skip
+        //    `reset_for_live_reload` (no shader code changed), and we
+        //    skip the immediate ScriptReapply follow-up — if the
+        //    LiveEdit handler set `pending_script_reapply` (e.g. robrix
+        //    re-broadcasting preferences), it lands on the next event-
+        //    loop tick. Without this split, rotation incurred a visible
+        //    1-2s lag from doing two full Apply walks per geom change.
         //
-        // If a file change just happened AND a user-level handler then
-        // requests a reapply (e.g. an `Event::LiveEdit` handler re-broadcasting
-        // preferences so a fresh source reload doesn't lose them), we follow
-        // up with a single `ScriptReapply` pass. That second pass is bounded
-        // — any further requests settle on the next event-loop tick rather
-        // than looping inside this one.
-        let file_edit_applied = self.handle_live_edit();
-        if file_edit_applied {
-            self.draw_shaders.reset_for_live_reload();
-            self.pending_script_reapply = false;
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-            if self.pending_script_reapply {
+        // 3. `LiveEditTrigger::None` + `pending_script_reapply` — set by
+        //    `cx.request_script_reapply()` after runtime mutations to a
+        //    *shared* heap *object* (`script_eval!` overriding
+        //    `mod.widgets.IMG_MSG_FIT.max`, etc.). Re-running script_mod
+        //    would clobber those overrides; we fire `Event::ScriptReapply`
+        //    which re-applies the captured `app_value` with
+        //    `Apply::ScriptReapply` — no script_mod re-run, runtime
+        //    overrides preserved, imperative-setter fields early-return.
+        use crate::live_reload::LiveEditTrigger;
+        match self.handle_live_edit() {
+            LiveEditTrigger::FileChange => {
+                self.draw_shaders.reset_for_live_reload();
                 self.pending_script_reapply = false;
-                self.call_event_handler(&Event::ScriptReapply);
+                self.call_event_handler(&Event::LiveEdit);
+                self.redraw_all();
+                if self.pending_script_reapply {
+                    self.pending_script_reapply = false;
+                    self.call_event_handler(&Event::ScriptReapply);
+                    self.redraw_all();
+                }
+            }
+            LiveEditTrigger::Manual => {
+                // Clear `pending_script_reapply` defensively — LiveEdit's
+                // script_mod re-run clobbers heap overrides anyway, and an
+                // app-level handler that re-broadcasts (e.g. robrix's
+                // `broadcast_all`) sets a fresh flag that lands on the
+                // next tick.
+                self.pending_script_reapply = false;
+                self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }
-        } else if self.pending_script_reapply {
-            self.pending_script_reapply = false;
-            self.call_event_handler(&Event::ScriptReapply);
-            self.redraw_all();
+            LiveEditTrigger::None => {
+                if self.pending_script_reapply {
+                    self.pending_script_reapply = false;
+                    self.call_event_handler(&Event::ScriptReapply);
+                    self.redraw_all();
+                }
+            }
         }
     }
 
@@ -651,6 +735,14 @@ impl Cx {
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
+        // PerfMonitor "event" channel: time only the OUTERMOST dispatch —
+        // Paint recurses into this from the Timer handler on macos.
+        let perf_timing = self.perf_monitor.enabled();
+        if perf_timing {
+            self.perf_monitor.event_depth += 1;
+        }
+        let perf_t0 = (perf_timing && self.perf_monitor.event_depth == 1)
+            .then(std::time::Instant::now);
         if (Cx::has_studio_web_socket()
             && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
             || Cx::local_profile_capture_enabled()
@@ -674,6 +766,15 @@ impl Cx {
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
+        }
+        if perf_timing {
+            self.perf_monitor.event_depth -= 1;
+            if let Some(t0) = perf_t0 {
+                self.perf_monitor.add(
+                    crate::perf_monitor::PERF_CHANNEL_EVENT,
+                    t0.elapsed().as_micros() as u64,
+                );
+            }
         }
 
         if Cx::has_studio_web_socket() {
@@ -731,11 +832,38 @@ impl Cx {
         }
     }
 
+    /// Dispatch any `WindowGeomChange` events queued by code that ran during
+    /// the current event dispatch (typically `Cx::set_window_dpi_override`
+    /// called from a widget handler). Drained the same way as `handle_actions`
+    /// — swap, dispatch each, repeat until quiescent. Each dispatch is a
+    /// fresh `inner_call_event_handler` call after the previous one's handler
+    /// has been put back, so the `event_handler.take()` is safe.
+    pub fn handle_pending_window_geom_changes(&mut self) {
+        let mut counter = 0;
+        while !self.pending_window_geom_changes.is_empty() {
+            counter += 1;
+            let mut events = Vec::new();
+            std::mem::swap(&mut self.pending_window_geom_changes, &mut events);
+            for event in events {
+                self.inner_call_event_handler(&Event::WindowGeomChange(event));
+                self.inner_key_focus_change();
+            }
+            if counter > 100 {
+                crate::error!("WindowGeomChange feedback loop detected");
+                break;
+            }
+        }
+    }
+
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
         self.inner_call_event_handler(event);
+        // Dispatch any synthetic geom changes queued during the original
+        // handler (e.g. runtime dpi_override updates) before triggers and
+        // actions, so layout-dependent reactions see the new geometry.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
@@ -743,9 +871,22 @@ impl Cx {
         // widget->script calls run immediately instead of waiting for tick/timer paths.
         self.handle_script_tasks();
         // Script callbacks can enqueue actions/triggers; flush them in the same cycle.
+        self.handle_pending_window_geom_changes();
         self.inner_key_focus_change();
         self.handle_triggers();
         self.handle_actions();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_physical_keyboard_state(&mut self, connected: bool) {
+        self.keyboard.set_physical_keyboard_state(connected);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update_physical_keyboard_state(&mut self, connected: bool) {
+        if let Some(event) = self.keyboard.update_physical_keyboard_state(connected) {
+            self.call_event_handler(&Event::PhysicalKeyboard(event));
+        }
     }
 
     // helpers

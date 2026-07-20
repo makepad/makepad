@@ -577,6 +577,12 @@ impl Cx {
         metal_cx: &mut MetalCx,
         mode: DrawPassMode,
     ) {
+        // PerfMonitor "draw" channel: CPU-side pass encode (all passes of a
+        // frame sum), separate from the nextDrawable wait timed by the caller.
+        let perf_t0 = self
+            .perf_monitor
+            .enabled()
+            .then(std::time::Instant::now);
         self.os.bytes_written = 0;
         self.os.draw_calls_done = 0;
         self.os.instances_done = 0;
@@ -594,8 +600,13 @@ impl Cx {
 
         let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
 
-        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = mode {
-            unsafe { msg_send![view, currentRenderPassDescriptor] }
+        let render_pass_descriptor: ObjcId = if let DrawPassMode::MTKView(view) = &mode {
+            let descriptor: ObjcId = unsafe { msg_send![*view, currentRenderPassDescriptor] };
+            if descriptor == nil {
+                let () = unsafe { msg_send![pool, release] };
+                return;
+            }
+            descriptor
         } else {
             unsafe {
                 msg_send![
@@ -622,15 +633,19 @@ impl Cx {
             self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
         }
 
-        self.passes[draw_pass_id].paint_dirty = false;
-
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
+            if !matches!(&mode, DrawPassMode::MTKView(_)) {
+                self.passes[draw_pass_id].paint_dirty = false;
+            }
+            let () = unsafe { msg_send![pool, release] };
             return;
         }
 
+        self.passes[draw_pass_id].paint_dirty = false;
+
         self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
 
-        if let DrawPassMode::MTKView(_) = mode {
+        if matches!(&mode, DrawPassMode::MTKView(_)) {
             let color_attachments: ObjcId =
                 unsafe { msg_send![render_pass_descriptor, colorAttachments] };
             let color_attachment: ObjcId =
@@ -857,6 +872,26 @@ impl Cx {
             (window_id.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id
         });
 
+        // MAKEPAD_GPU_PASS_TRACE=1: log each pass's GPU time to stderr —
+        // per-pass breakdown for chasing frame-budget overruns.
+        if std::env::var_os("MAKEPAD_GPU_PASS_TRACE").is_some() {
+            let name = if self.passes[draw_pass_id].debug_name.is_empty() {
+                "main".to_string()
+            } else {
+                self.passes[draw_pass_id].debug_name.clone()
+            };
+            let () = unsafe {
+                msg_send![
+                    command_buffer,
+                    addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
+                        let start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
+                        let end: f64 = unsafe { msg_send![command_buffer, GPUEndTime] };
+                        eprintln!("[gpu-pass] {} {:.3}ms", name, (end - start) * 1000.0);
+                    })
+                ]
+            };
+        }
+
         match mode {
             DrawPassMode::MTKView(view) => {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
@@ -970,6 +1005,12 @@ impl Cx {
             }
         }
         let () = unsafe { msg_send![pool, release] };
+        if let Some(t0) = perf_t0 {
+            self.perf_monitor.add(
+                crate::perf_monitor::PERF_CHANNEL_DRAW,
+                t0.elapsed().as_micros() as u64,
+            );
+        }
     }
 
     fn build_screenshot_struct(
@@ -1143,6 +1184,11 @@ impl Cx {
                         gpu_counters
                     };
                     if let Some((raw_sample_start, raw_sample_end)) = raw_range {
+                        // PerfMonitor "gpu" channel: one presented frame's
+                        // aggregated GPU interval (no-op unless enabled).
+                        crate::perf_monitor::perf_gpu_frame_completed(
+                            raw_sample_end - raw_sample_start,
+                        );
                         if let Some((start, end)) = map_metal_gpu_times_to_app_timeline(
                             raw_sample_start,
                             raw_sample_end,

@@ -182,6 +182,7 @@ pub struct DrawList2d {
     // draw info per UI element
     pub(crate) draw_list: DrawList,
     pub(crate) dirty_check_rect: Rect,
+    overlay_active: bool,
 }
 
 impl ScriptHook for DrawList2d {}
@@ -210,7 +211,16 @@ impl DrawList2d {
         Self {
             dirty_check_rect: Default::default(),
             draw_list,
+            overlay_active: false,
         }
+    }
+
+    pub fn end(&mut self, cx: &mut Cx2d) {
+        if self.overlay_active {
+            self.overlay_active = false;
+            cx.overlay_draw_depth = cx.overlay_draw_depth.saturating_sub(1);
+        }
+        self.draw_list.end(cx);
     }
 
     pub fn begin_overlay_last(&mut self, cx: &mut Cx2d) {
@@ -222,7 +232,9 @@ impl DrawList2d {
     }
 
     pub fn begin_overlay_inner(&mut self, cx: &mut Cx2d, always_last: bool) {
-        let pass_id = cx.pass_stack.last().unwrap().pass_id;
+        let pass_id = cx
+            .overlay_pass_id
+            .unwrap_or_else(|| cx.pass_stack.last().unwrap().pass_id);
         let redraw_id = cx.cx.redraw_id;
 
         cx.draw_lists[self.draw_list.id()].draw_pass_id = Some(pass_id);
@@ -234,6 +246,11 @@ impl DrawList2d {
             cx.draw_lists[overlay_id].store_sub_list_last(redraw_id, self.draw_list.id());
         } else {
             cx.draw_lists[overlay_id].store_sub_list(redraw_id, self.draw_list.id());
+        }
+
+        if !self.overlay_active {
+            self.overlay_active = true;
+            cx.overlay_draw_depth += 1;
         }
 
         cx.nav_list_item_push(codeflow_parent_id, NavItem::Child(self.draw_list.id()));

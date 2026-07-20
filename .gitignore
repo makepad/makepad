@@ -42,3 +42,12 @@ CLAUDE.md
 /tools/__pycache__/
 **/*.obsidian
 /xr/util/dumps/
+
+
+# Voice/TTS model artifacts — fetch with tools/download_tts.sh
+*.mktts
+*.mkvoice
+*.pth
+ggml-*.bin
+/kokoro_voices/
+__pycache__/

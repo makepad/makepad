@@ -4,13 +4,14 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             video_playback::{
                 CameraPreviewMode, VideoBufferedRangesEvent, VideoDecodingErrorEvent,
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
-            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
-            Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
+            Event, GameInputEventChannel, MouseButton, MouseUpEvent, QuitReason, VideoSource,
+            WindowGeom,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -79,7 +80,12 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
+            // nextDrawable never throttles to compositor consumption (may
+            // tear). Distinguishes "our frames are slow" from "the
+            // compositor returns drawables slowly/unevenly".
+            let () = msg_send![ca_layer, setDisplaySyncEnabled:
+                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
@@ -120,7 +126,12 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
+            // MAKEPAD_NO_VSYNC=1: A/B switch — with display sync off,
+            // nextDrawable never throttles to compositor consumption (may
+            // tear). Distinguishes "our frames are slow" from "the
+            // compositor returns drawables slowly/unevenly".
+            let () = msg_send![ca_layer, setDisplaySyncEnabled:
+                if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() { NO } else { YES }];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
@@ -348,6 +359,7 @@ impl Cx {
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
 
         //let cx = Rc::new(RefCell::new(self));
+        cx.borrow_mut().set_physical_keyboard_state(true);
         if crate::app_main::should_run_stdin_loop_from_env() {
             let mut cx = cx.borrow_mut();
             cx.in_makepad_studio = true;
@@ -400,8 +412,18 @@ impl Cx {
                     {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
+                        // PerfMonitor: a presented window frame starts here;
+                        // nextDrawable is where vsync/pool pressure blocks
+                        // the main thread, so it gets its own channel.
+                        self.perf_monitor
+                            .frame_boundary(with_macos_app(|app| app.time_now()));
+                        let wait_t0 = std::time::Instant::now();
                         let drawable: ObjcId =
                             unsafe { msg_send![metal_window.ca_layer, nextDrawable] };
+                        self.perf_monitor.add(
+                            crate::perf_monitor::PERF_CHANNEL_DRAWABLE_WAIT,
+                            wait_t0.elapsed().as_micros() as u64,
+                        );
                         if drawable == nil {
                             return;
                         }
@@ -463,7 +485,25 @@ impl Cx {
     fn ensure_timer0_started(&mut self) {
         if !self.os.timer0_armed {
             with_macos_app(|app| app.stop_timer(0));
-            with_macos_app(|app| app.start_timer(0, 0.008, true));
+            // Pace the paint clock to the fastest attached display. The old
+            // fixed 8ms beat against an 8.33ms (120Hz) refresh: presents
+            // outran vsync, the drawable pool drifted full and nextDrawable
+            // blocked the main thread in a ~25-frame sawtooth (rough/smooth
+            // phases as the beat drifted through vblank alignment). Matching
+            // the refresh period (+0.2% so NSTimer lateness drains the queue
+            // instead of accumulating) keeps acquisition non-blocking.
+            let interval = unsafe {
+                let screens: ObjcId = msg_send![class!(NSScreen), screens];
+                let count: usize = msg_send![screens, count];
+                let mut max_fps: i64 = 60;
+                for i in 0..count {
+                    let screen: ObjcId = msg_send![screens, objectAtIndex: i];
+                    let fps: i64 = msg_send![screen, maximumFramesPerSecond];
+                    max_fps = max_fps.max(fps);
+                }
+                1.002 / max_fps.max(1) as f64
+            };
+            with_macos_app(|app| app.start_timer(0, interval, true));
             self.os.timer0_armed = true;
             self.os.timer0_idle_since = None;
         }
@@ -502,6 +542,27 @@ impl Cx {
             }
             MacosEvent::Timer(te) => {
                 if te.timer_id == 0 {
+                    // MAKEPAD_TIMER_TRACE=1: catch paint-clock stalls in the
+                    // act — was the gap a LATE FIRE (runloop starved / OS
+                    // deferred the NSTimer) or a SLOW CALLBACK (our work)?
+                    let trace_t0 = if std::env::var_os("MAKEPAD_TIMER_TRACE").is_some() {
+                        thread_local! {
+                            static LAST_FIRE: std::cell::Cell<Option<std::time::Instant>> =
+                                const { std::cell::Cell::new(None) };
+                        }
+                        let now = std::time::Instant::now();
+                        LAST_FIRE.with(|last| {
+                            if let Some(prev) = last.replace(Some(now)) {
+                                let gap_ms = prev.elapsed().as_secs_f64() * 1000.0;
+                                if gap_ms > 20.0 {
+                                    eprintln!("[timer-trace] fire-to-fire gap {:.1}ms", gap_ms);
+                                }
+                            }
+                        });
+                        Some(now)
+                    } else {
+                        None
+                    };
                     let mut needs_timer = false;
 
                     if self.screenshot_requests.len() > 0 {
@@ -515,6 +576,7 @@ impl Cx {
 
                     // check signals
                     if SignalToUI::check_and_clear_ui_signal() {
+                        self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
@@ -550,17 +612,63 @@ impl Cx {
                             self.os.timer0_idle_since = Some(now);
                         }
                     }
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.run_live_edit_if_needed("macos");
+                    let live_edit_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.handle_networking_events();
+                    let net_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let step_t = trace_t0.map(|_| std::time::Instant::now());
                     self.handle_gamepad_events();
-                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
+                    let pad_ms = step_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    let paint_t = trace_t0.map(|_| std::time::Instant::now());
+                    // Propagate Exit from the inner Paint dispatch. The
+                    // signal handling above (Ctrl+C / SIGTERM) calls
+                    // `request_quit`, which queues a `CxOsOp::Quit`; that op
+                    // is drained by `handle_platform_ops` at the top of this
+                    // recursive call and surfaces as `EventFlow::Exit`
+                    // (after `Event::Shutdown` is dispatched). If we ignore
+                    // the return value here and fall through to
+                    // `EventFlow::Wait`, `do_callback` overwrites the just-
+                    // set Exit and the main loop blocks indefinitely on the
+                    // next NSEvent — the symptom being a Ctrl+C that runs
+                    // the user's `QuitRequested` / `Shutdown` handlers but
+                    // never actually exits.
+                    if let EventFlow::Exit = self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows) {
+                        return EventFlow::Exit;
+                    }
+                    let paint_ms = paint_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
                     // Run garbage collection if needed - safe moment after paint, before waiting
+                    let gc_t0 = std::time::Instant::now();
+                    let mut did_gc = false;
                     self.with_vm(|vm| {
                         if vm.heap().needs_gc() {
                             vm.gc();
+                            did_gc = true;
                         }
                     });
+                    if did_gc {
+                        self.perf_monitor.add(
+                            crate::perf_monitor::PERF_CHANNEL_GC,
+                            gc_t0.elapsed().as_micros() as u64,
+                        );
+                    }
+
+                    if let Some(t0) = trace_t0 {
+                        let took_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        if took_ms > 10.0 {
+                            eprintln!(
+                                "[timer-trace] slow callback {:.1}ms (live_edit {:.1} net {:.1} pad {:.1} paint {:.1} gc {:.1})",
+                                took_ms,
+                                live_edit_ms.unwrap_or(0.0),
+                                net_ms.unwrap_or(0.0),
+                                pad_ms.unwrap_or(0.0),
+                                paint_ms.unwrap_or(0.0),
+                                if did_gc { gc_t0.elapsed().as_secs_f64() * 1000.0 } else { 0.0 },
+                            );
+                        }
+                    }
 
                     // block till the next timer
                     return EventFlow::Wait;
@@ -570,6 +678,13 @@ impl Cx {
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
+            MacosEvent::AppQuitRequested => {
+                self.request_quit(QuitReason::App);
+                if let EventFlow::Exit = self.handle_platform_ops(metal_windows, metal_cx) {
+                    self.call_event_handler(&Event::Shutdown);
+                    return EventFlow::Exit;
+                }
+            }
             MacosEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                 for window in metal_windows.iter_mut() {
@@ -601,10 +716,10 @@ impl Cx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
-                    self.windows[re.window_id].os_dpi_factor = Some(re.new_geom.dpi_factor);
-                    if let Some(dpi_override) = self.windows[re.window_id].dpi_override {
-                        re.new_geom.inner_size *= re.new_geom.dpi_factor / dpi_override;
-                        re.new_geom.dpi_factor = dpi_override;
+                    {
+                        let cx_window = &mut self.windows[re.window_id];
+                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
                     window.window_geom = re.new_geom.clone();
                     self.windows[re.window_id].window_geom = re.new_geom.clone();
@@ -860,10 +975,6 @@ impl Cx {
         }
     }
 
-    fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
-        *pos = self.windows[window_id].remap_dpi_override(*pos)
-    }
-
     fn handle_platform_ops(
         &mut self,
         metal_windows: &mut Vec<MetalWindow>,
@@ -1034,17 +1145,29 @@ impl Cx {
                         };
                     }
                 }
-                CxOsOp::ShowTextIME(area, pos, _config) => {
-                    let pos = area.clipped_rect(self).pos + pos;
+                CxOsOp::ShowTextIME(area, cursor_rect, _config) => {
+                    // Convert both corners of the caret line rect (area-relative,
+                    // logical px) into window content-view points so the height is
+                    // scaled correctly along with the position.
+                    let area_pos = area.clipped_rect(self).pos;
+                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let top_left = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos);
+                    let bottom_right = self.windows[window_id]
+                        .layout_vec2d_to_native_points(area_pos + cursor_rect.pos + cursor_rect.size);
+                    let ime_rect = Rect {
+                        pos: top_left,
+                        size: bottom_right - top_left,
+                    };
                     metal_windows.iter_mut().for_each(|w| {
                         w.cocoa_window.set_ime_active(true);
-                        w.cocoa_window.set_ime_spot(pos);
+                        w.cocoa_window.set_ime_rect(ime_rect);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     metal_windows.iter_mut().for_each(|w| {
                         w.cocoa_window.set_ime_active(false);
-                        w.cocoa_window.set_ime_spot(dvec2(0.0, 0.0));
+                        w.cocoa_window.set_ime_rect(Rect::default());
                     });
                 }
                 CxOsOp::SetCursor(cursor) => {

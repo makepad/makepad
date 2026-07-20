@@ -2,7 +2,7 @@ use crate::{
     cx::Cx,
     cx_api::CxOsOp,
     draw_pass::{CxDrawPassParent, DrawPass, DrawPassId},
-    event::WindowGeom,
+    event::{SafeAreaInsets, VirtualKeyboardEvent, WindowGeom},
     id_pool::*,
     makepad_error_log::*,
     makepad_math::*,
@@ -652,6 +652,20 @@ impl Default for CxWindow {
 }
 
 impl CxWindow {
+    pub(crate) fn valid_dpi_factor(dpi_factor: f64) -> Option<f64> {
+        if dpi_factor.is_finite() && dpi_factor > 0.0 {
+            Some(dpi_factor)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn scale_rect(mut rect: Rect, scale: f64) -> Rect {
+        rect.pos *= scale;
+        rect.size *= scale;
+        rect
+    }
+
     pub fn window_visuals(&self) -> WindowVisuals {
         WindowVisuals {
             transparent: self.transparent,
@@ -661,13 +675,138 @@ impl CxWindow {
         .normalized()
     }
 
-    pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
-        if let Some(dpi_override) = self.dpi_override {
-            if let Some(os_dpi_factor) = self.os_dpi_factor {
-                return pos * (os_dpi_factor / dpi_override);
-            }
+    /// Native OS scale factor reported by the platform before `dpi_override`.
+    pub fn native_dpi_factor(&self) -> f64 {
+        self.os_dpi_factor
+            .and_then(Self::valid_dpi_factor)
+            .or_else(|| Self::valid_dpi_factor(self.window_geom.dpi_factor))
+            .unwrap_or(1.0)
+    }
+
+    /// Effective Makepad layout scale factor after applying `dpi_override`.
+    pub fn effective_dpi_factor(&self) -> f64 {
+        self.dpi_override
+            .and_then(Self::valid_dpi_factor)
+            .or_else(|| self.os_dpi_factor.and_then(Self::valid_dpi_factor))
+            .or_else(|| Self::valid_dpi_factor(self.window_geom.dpi_factor))
+            .unwrap_or(1.0)
+    }
+
+    /// Converts native OS logical points into Makepad layout points.
+    ///
+    /// Use this for values reported in UIKit/AppKit/window-system points, such
+    /// as safe-area insets on iOS or OS-native window chrome geometry.
+    pub fn native_points_to_layout(&self, value: f64) -> f64 {
+        value * self.native_dpi_factor() / self.effective_dpi_factor()
+    }
+
+    pub fn native_vec2d_to_layout(&self, value: Vec2d) -> Vec2d {
+        value * (self.native_dpi_factor() / self.effective_dpi_factor())
+    }
+
+    pub fn native_rect_to_layout(&self, rect: Rect) -> Rect {
+        Self::scale_rect(rect, self.native_dpi_factor() / self.effective_dpi_factor())
+    }
+
+    pub fn native_safe_area_insets_to_layout(&self, insets: SafeAreaInsets) -> SafeAreaInsets {
+        insets.scale(self.native_dpi_factor() / self.effective_dpi_factor())
+    }
+
+    /// Converts physical pixels into Makepad layout points.
+    ///
+    /// Use this for Android surface, touch, keyboard, and overlay values that
+    /// arrive from the OS in raw pixels.
+    pub fn physical_pixels_to_layout(&self, value: f64) -> f64 {
+        value / self.effective_dpi_factor()
+    }
+
+    pub fn physical_vec2d_to_layout(&self, value: Vec2d) -> Vec2d {
+        value / self.effective_dpi_factor()
+    }
+
+    pub fn physical_safe_area_insets_to_layout(&self, insets: SafeAreaInsets) -> SafeAreaInsets {
+        insets.scale(1.0 / self.effective_dpi_factor())
+    }
+
+    /// Converts Makepad layout points back into native OS logical points.
+    pub fn layout_points_to_native_points(&self, value: f64) -> f64 {
+        value * self.effective_dpi_factor() / self.native_dpi_factor()
+    }
+
+    pub fn layout_vec2d_to_native_points(&self, value: Vec2d) -> Vec2d {
+        value * (self.effective_dpi_factor() / self.native_dpi_factor())
+    }
+
+    pub fn layout_rect_to_native_points(&self, rect: Rect) -> Rect {
+        Self::scale_rect(rect, self.effective_dpi_factor() / self.native_dpi_factor())
+    }
+
+    /// Converts Makepad layout points into physical pixels.
+    pub fn layout_points_to_physical_pixels(&self, value: f64) -> f64 {
+        value * self.effective_dpi_factor()
+    }
+
+    pub fn layout_vec2d_to_physical_pixels(&self, value: Vec2d) -> Vec2d {
+        value * self.effective_dpi_factor()
+    }
+
+    pub fn layout_rect_to_physical_pixels(&self, rect: Rect) -> Rect {
+        Self::scale_rect(rect, self.effective_dpi_factor())
+    }
+
+    pub fn native_virtual_keyboard_event_to_layout(
+        &self,
+        event: VirtualKeyboardEvent,
+    ) -> VirtualKeyboardEvent {
+        match event {
+            VirtualKeyboardEvent::WillShow {
+                time,
+                height,
+                duration,
+                ease,
+            } => VirtualKeyboardEvent::WillShow {
+                time,
+                height: self.native_points_to_layout(height),
+                duration,
+                ease,
+            },
+            VirtualKeyboardEvent::WillHide {
+                time,
+                height,
+                duration,
+                ease,
+            } => VirtualKeyboardEvent::WillHide {
+                time,
+                height: self.native_points_to_layout(height),
+                duration,
+                ease,
+            },
+            VirtualKeyboardEvent::DidShow { time, height } => VirtualKeyboardEvent::DidShow {
+                time,
+                height: self.native_points_to_layout(height),
+            },
+            VirtualKeyboardEvent::DidHide { time } => VirtualKeyboardEvent::DidHide { time },
         }
-        return pos;
+    }
+
+    /// Converts a `WindowGeom` reported in native OS points into Makepad layout
+    /// points, applying any active `dpi_override` to every in-window metric.
+    pub fn native_window_geom_to_layout(&self, mut geom: WindowGeom) -> WindowGeom {
+        let native_dpi =
+            Self::valid_dpi_factor(geom.dpi_factor).unwrap_or(self.native_dpi_factor());
+        let effective_dpi =
+            Self::valid_dpi_factor(self.dpi_override.unwrap_or(native_dpi)).unwrap_or(native_dpi);
+        let scale = native_dpi / effective_dpi;
+        geom.inner_size *= scale;
+        geom.outer_size *= scale;
+        geom.safe_area_insets = geom.safe_area_insets.scale(scale);
+        geom.window_chrome_buttons = Self::scale_rect(geom.window_chrome_buttons, scale);
+        geom.dpi_factor = effective_dpi;
+        geom
+    }
+
+    pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
+        self.native_vec2d_to_layout(pos)
     }
 
     pub fn get_inner_size(&self) -> Vec2d {
@@ -887,6 +1026,166 @@ mod tests {
             }
         );
         assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
+    }
+
+    #[test]
+    fn dpi_conversion_helpers_keep_native_geometry_physically_fixed() {
+        let window = CxWindow {
+            dpi_override: Some(2.0),
+            os_dpi_factor: Some(3.0),
+            window_geom: WindowGeom {
+                dpi_factor: 3.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(window.native_points_to_layout(30.0), 45.0);
+        assert_eq!(window.physical_pixels_to_layout(90.0), 45.0);
+        assert_eq!(window.layout_points_to_native_points(45.0), 30.0);
+        assert_eq!(window.layout_points_to_physical_pixels(45.0), 90.0);
+        assert_eq!(
+            window.native_safe_area_insets_to_layout(SafeAreaInsets {
+                top: 30.0,
+                right: 10.0,
+                bottom: 12.0,
+                left: 4.0,
+            }),
+            SafeAreaInsets {
+                top: 45.0,
+                right: 15.0,
+                bottom: 18.0,
+                left: 6.0,
+            }
+        );
+    }
+
+    #[test]
+    fn native_window_geom_to_layout_converts_every_in_window_metric() {
+        let window = CxWindow {
+            dpi_override: Some(2.0),
+            os_dpi_factor: Some(3.0),
+            ..Default::default()
+        };
+
+        let geom = window.native_window_geom_to_layout(WindowGeom {
+            dpi_factor: 3.0,
+            inner_size: dvec2(400.0, 300.0),
+            outer_size: dvec2(420.0, 330.0),
+            safe_area_insets: SafeAreaInsets {
+                top: 30.0,
+                right: 10.0,
+                bottom: 12.0,
+                left: 4.0,
+            },
+            window_chrome_buttons: Rect {
+                pos: dvec2(8.0, 6.0),
+                size: dvec2(72.0, 24.0),
+            },
+            ..Default::default()
+        });
+
+        assert_eq!(geom.dpi_factor, 2.0);
+        assert_eq!(geom.inner_size, dvec2(600.0, 450.0));
+        assert_eq!(geom.outer_size, dvec2(630.0, 495.0));
+        assert_eq!(
+            geom.safe_area_insets,
+            SafeAreaInsets {
+                top: 45.0,
+                right: 15.0,
+                bottom: 18.0,
+                left: 6.0,
+            }
+        );
+        assert_eq!(geom.window_chrome_buttons.pos, dvec2(12.0, 9.0));
+        assert_eq!(geom.window_chrome_buttons.size, dvec2(108.0, 36.0));
+    }
+
+    #[test]
+    fn dpi_factor_helpers_fall_back_past_invalid_stored_values() {
+        let window = CxWindow {
+            os_dpi_factor: Some(f64::NAN),
+            dpi_override: None,
+            window_geom: WindowGeom {
+                dpi_factor: 3.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(window.native_dpi_factor(), 3.0);
+        assert_eq!(window.effective_dpi_factor(), 3.0);
+
+        let window = CxWindow {
+            os_dpi_factor: Some(3.0),
+            dpi_override: Some(f64::NAN),
+            ..Default::default()
+        };
+
+        assert_eq!(window.native_dpi_factor(), 3.0);
+        assert_eq!(window.effective_dpi_factor(), 3.0);
+    }
+
+    #[test]
+    fn set_window_dpi_override_converts_every_in_window_metric() {
+        let mut cx = test_cx();
+        let window = WindowHandle::new(&mut cx);
+        let window_id = window.window_id();
+        cx.windows[window_id].os_dpi_factor = Some(3.0);
+        cx.windows[window_id].window_geom = WindowGeom {
+            dpi_factor: 3.0,
+            inner_size: dvec2(400.0, 300.0),
+            outer_size: dvec2(420.0, 330.0),
+            safe_area_insets: SafeAreaInsets {
+                top: 30.0,
+                right: 10.0,
+                bottom: 12.0,
+                left: 4.0,
+            },
+            window_chrome_buttons: Rect {
+                pos: dvec2(8.0, 6.0),
+                size: dvec2(72.0, 24.0),
+            },
+            ..Default::default()
+        };
+
+        cx.set_window_dpi_override(window_id, Some(2.0));
+
+        let geom = &cx.windows[window_id].window_geom;
+        assert_eq!(geom.dpi_factor, 2.0);
+        assert_eq!(geom.inner_size, dvec2(600.0, 450.0));
+        assert_eq!(geom.outer_size, dvec2(630.0, 495.0));
+        assert_eq!(
+            geom.safe_area_insets,
+            SafeAreaInsets {
+                top: 45.0,
+                right: 15.0,
+                bottom: 18.0,
+                left: 6.0,
+            }
+        );
+        assert_eq!(geom.window_chrome_buttons.pos, dvec2(12.0, 9.0));
+        assert_eq!(geom.window_chrome_buttons.size, dvec2(108.0, 36.0));
+        assert_eq!(cx.pending_window_geom_changes.len(), 1);
+
+        cx.set_window_dpi_override(window_id, None);
+
+        let geom = &cx.windows[window_id].window_geom;
+        assert_eq!(geom.dpi_factor, 3.0);
+        assert_eq!(geom.inner_size, dvec2(400.0, 300.0));
+        assert_eq!(geom.outer_size, dvec2(420.0, 330.0));
+        assert_eq!(
+            geom.safe_area_insets,
+            SafeAreaInsets {
+                top: 30.0,
+                right: 10.0,
+                bottom: 12.0,
+                left: 4.0,
+            }
+        );
+        assert_eq!(geom.window_chrome_buttons.pos, dvec2(8.0, 6.0));
+        assert_eq!(geom.window_chrome_buttons.size, dvec2(72.0, 24.0));
+        assert_eq!(cx.pending_window_geom_changes.len(), 2);
     }
 
     #[test]

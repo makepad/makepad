@@ -1427,6 +1427,24 @@ struct SlugHelperPrewarmState {
     requested_redraw_id: u64,
 }
 
+/// Returns true only when `area` still references live GPU instances left over from a
+/// *previous* redraw (`instance_count > 0` and a stale `redraw_id`).
+///
+/// The slug/raster text paths use this to decide whether a draw item must be redrawn to
+/// clear stale glyphs when a run switches rendering path. It must reject two cases that
+/// would otherwise cause a per-frame `redraw_area_in_draw` — i.e. a permanent ~100% CPU
+/// continuous-repaint loop:
+///   - count == 0: an empty batch (e.g. a whitespace-only run, whose glyphs have no
+///     raster image) was begun and finished this frame; there is nothing to clear.
+///   - a *valid* (current-redraw) area: the area was already drawn this frame, either by
+///     this run or by another `draw_text` call sharing the same instance (text is drawn
+///     in resumable chunks), so its draw item is up to date.
+/// `Area::is_valid` returns false for count == 0, so the explicit count check is required.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn area_holds_stale_content(area: &Area, cx: &Cx) -> bool {
+    matches!(area, Area::Instance(inst) if inst.instance_count > 0) && !area.is_valid(cx)
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Default)]
 struct SlugPromotionState {
@@ -1448,12 +1466,7 @@ struct SlugDrawSyncPlan {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl SlugDrawSyncPlan {
-    fn ensure(
-        &mut self,
-        cx: &Cx,
-        source_shader_id: usize,
-        target_shader_id: usize,
-    ) {
+    fn ensure(&mut self, cx: &Cx, source_shader_id: usize, target_shader_id: usize) {
         if self.source_shader_id == Some(source_shader_id)
             && self.target_shader_id == Some(target_shader_id)
         {
@@ -1627,10 +1640,9 @@ impl DrawText {
         let mut pending_slug_generation = 0;
 
         if self.slug_promotion.redraw_id != redraw_id {
-            self.slug_promotion.allow_slug_this_redraw =
-                self.slug_promotion.redraw_id != 0
-                    && self.slug_promotion.saw_slug_candidates_this_redraw
-                    && !self.slug_promotion.saw_unready_this_redraw;
+            self.slug_promotion.allow_slug_this_redraw = self.slug_promotion.redraw_id != 0
+                && self.slug_promotion.saw_slug_candidates_this_redraw
+                && !self.slug_promotion.saw_unready_this_redraw;
             self.slug_promotion.redraw_id = redraw_id;
             self.slug_promotion.saw_slug_candidates_this_redraw = false;
             self.slug_promotion.saw_unready_this_redraw = false;
@@ -1639,7 +1651,10 @@ impl DrawText {
         for row in &text.rows {
             for glyph in &row.glyphs {
                 let font_size_in_dpxs = glyph.font_size_in_lpxs * dpi_factor;
-                if glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs) {
+                if glyph
+                    .font
+                    .has_glyph_raster_image(glyph.id, font_size_in_dpxs)
+                {
                     continue;
                 }
                 if !cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
@@ -1974,7 +1989,8 @@ impl DrawText {
 
         let mut color_2 = [-1.0; 4];
         if self.slug_sync_plan.source_has_color_2 {
-            self.draw_vars.get_uniform(cx.cx, live_id!(color_2), &mut color_2);
+            self.draw_vars
+                .get_uniform(cx.cx, live_id!(color_2), &mut color_2);
         }
         slug_draw.draw_vars.set_uniform(
             cx.cx,
@@ -2122,12 +2138,7 @@ impl DrawText {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
-        let turtle_rect = cx.turtle().inner_rect();
-        let mut max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
+        let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
 
         // For Fit-width containers with a max bound, resolve the bound so that
         // ellipsis truncation and max_lines clamping can work. Without this, Fit
@@ -2148,13 +2159,19 @@ impl DrawText {
             }
         }
 
-        let wrap = matches!(
-            cx.turtle().layout().flow,
-            Flow::Right { wrap: true, .. }
-        );
+        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
+    }
+
+    fn max_layout_width_for_walk(&self, cx: &mut Cx2d, walk: Walk) -> Option<f32> {
+        let width = cx.turtle().max_width(walk).or_else(|| {
+            let turtle_rect = cx.turtle().inner_rect();
+            (!turtle_rect.size.x.is_nan()).then_some(turtle_rect.size.x)
+        })?;
+
+        Some((width.max(0.0) as f32) / self.font_scale.max(0.0001))
     }
 
     pub fn draw_walk_laidout(
@@ -2221,6 +2238,27 @@ impl DrawText {
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
     ) -> (usize, bool) {
+        self.draw_walk_resumable_with_inner(cx, text_str, false, &mut f)
+    }
+
+    /// Like [`Self::draw_walk_resumable_with`], but invokes the callback before
+    /// emitting glyphs. Use this for backgrounds that must sit behind text.
+    pub fn draw_walk_resumable_with_background(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        mut f: impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> (usize, bool) {
+        self.draw_walk_resumable_with_inner(cx, text_str, true, &mut f)
+    }
+
+    fn draw_walk_resumable_with_inner(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        callback_before_text: bool,
+        f: &mut impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> (usize, bool) {
         // ── Layout parameters ──
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
@@ -2232,10 +2270,7 @@ impl DrawText {
         } else {
             None
         };
-        let wrap = matches!(
-            cx.turtle().layout().flow,
-            Flow::Right { wrap: true, .. }
-        );
+        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
 
         // ── Text layout ──
         let text = self.layout(
@@ -2259,7 +2294,9 @@ impl DrawText {
             dvec2(p.x as f64, p.y as f64)
         };
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
-        let shift_y = text.rows.first()
+        let shift_y = text
+            .rows
+            .first()
             .and_then(|r| r.glyphs.first())
             .map(|g| g.font_size_in_lpxs * self.temp_y_shift)
             .unwrap_or(0.0);
@@ -2314,11 +2351,22 @@ impl DrawText {
                 };
                 let row_top_y = (row_origin.y - row.ascender_in_lpxs * self.font_scale) as f64;
 
-                // Draw this row's glyphs as a separate aligned-instance batch.
                 let row_als = cx.align_list_len();
-                if let Some(mut instances) =
-                    cx.begin_many_aligned_instances(&self.draw_vars)
-                {
+                let (sx, ex) =
+                    row_span_x_bounds_in_lpxs(row, row_idx == 0, row_idx + 1 == text.rows.len());
+                let row_rect = rect(
+                    (row_origin.x + sx * self.font_scale) as f64,
+                    row_top_y + shift_y as f64,
+                    ((ex - sx) * self.font_scale) as f64,
+                    row_h,
+                );
+
+                if callback_before_text {
+                    f(cx, row_rect, row.ascender_in_lpxs);
+                }
+
+                // Draw this row's glyphs as a separate aligned-instance batch.
+                if let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) {
                     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                     self.draw_row(cx, row_origin, row, &mut instances.instances);
                     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -2329,53 +2377,32 @@ impl DrawText {
                 // Update turtle allocation for this row.
                 if row_idx == 0 {
                     let turtle = cx.turtle_mut();
-                    turtle.move_to(dvec2(
-                        origin_in_lpxs.x as f64,
-                        origin_in_lpxs.y as f64,
-                    ));
+                    turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
                     turtle.allocate_width(used_size_in_lpxs.width as f64);
                     turtle.allocate_height(row_h);
                 } else {
                     let turtle = cx.turtle_mut();
                     turtle.allocate_height(row_h);
-                    turtle.allocate_width(
-                        (row.width_in_lpxs * self.font_scale) as f64,
-                    );
+                    turtle.allocate_width((row.width_in_lpxs * self.font_scale) as f64);
                 }
 
                 // Set wrap spacing from this row's line-spacing metrics.
                 cx.turtle_mut().set_wrap_spacing(
-                    (row.ascender_in_lpxs * row.line_spacing_scale
-                        - row.ascender_in_lpxs) as f64,
+                    (row.ascender_in_lpxs * row.line_spacing_scale - row.ascender_in_lpxs) as f64,
                 );
 
-                // Call the `f` callback for this row (draws inline-code bg,
-                // strikethrough, underline, or plain area tracking).
-                let (sx, ex) = row_span_x_bounds_in_lpxs(
-                    row,
-                    row_idx == 0,
-                    row_idx + 1 == text.rows.len(),
-                );
-                f(
-                    cx,
-                    rect(
-                        (row_origin.x + sx * self.font_scale) as f64,
-                        row_top_y + shift_y as f64,
-                        ((ex - sx) * self.font_scale) as f64,
-                        row_h,
-                    ),
-                    row.ascender_in_lpxs,
-                );
+                // Call the `f` callback for this row (draws strikethrough,
+                // underline, or plain area tracking).
+                if !callback_before_text {
+                    f(cx, row_rect, row.ascender_in_lpxs);
+                }
 
                 // Emit a per-row FinishedWalk covering this row's glyphs +
                 // callback rect-areas.
                 cx.emit_turtle_walk(
                     Rect {
                         pos: dvec2(row_origin.x as f64, row_top_y),
-                        size: dvec2(
-                            (row.width_in_lpxs * self.font_scale) as f64,
-                            row_h,
-                        ),
+                        size: dvec2((row.width_in_lpxs * self.font_scale) as f64, row_h),
                     },
                     row_als,
                 );
@@ -2385,8 +2412,7 @@ impl DrawText {
             // pos.y is already at the last row's top (from turtle_new_line).
             // Advance pos.x past the last row's text width.
             let last = text.rows.last().unwrap();
-            let end_x = cx.turtle().pos().x
-                + (last.width_in_lpxs * self.font_scale) as f64;
+            let end_x = cx.turtle().pos().x + (last.width_in_lpxs * self.font_scale) as f64;
             let end_y = cx.turtle().pos().y;
             cx.turtle_mut().move_to(dvec2(end_x, end_y));
             self.extend_area = saved_extend_area;
@@ -2394,6 +2420,31 @@ impl DrawText {
         } else {
             // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
             let align_list_start = cx.align_list_len();
+            if callback_before_text {
+                for (row_index, row) in text.rows.iter().enumerate() {
+                    let (sx, ex) = row_span_x_bounds_in_lpxs(
+                        row,
+                        row_index == 0,
+                        row_index + 1 == text.rows.len(),
+                    );
+                    f(
+                        cx,
+                        rect(
+                            (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale)
+                                as f64,
+                            (origin_in_lpxs.y
+                                + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
+                                as f64
+                                + shift_y as f64,
+                            ((ex - sx) * self.font_scale) as f64,
+                            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale)
+                                as f64,
+                        ),
+                        row.ascender_in_lpxs,
+                    );
+                }
+            }
+
             self.draw_text(cx, origin_in_lpxs, &text);
 
             let turtle = cx.turtle_mut();
@@ -2406,6 +2457,31 @@ impl DrawText {
                     - last_row.ascender_in_lpxs) as f64,
             );
 
+            if !callback_before_text {
+                for (row_index, row) in text.rows.iter().enumerate() {
+                    let (sx, ex) = row_span_x_bounds_in_lpxs(
+                        row,
+                        row_index == 0,
+                        row_index + 1 == text.rows.len(),
+                    );
+                    f(
+                        cx,
+                        rect(
+                            (origin_in_lpxs.x + (row.origin_in_lpxs.x + sx) * self.font_scale)
+                                as f64,
+                            (origin_in_lpxs.y
+                                + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale)
+                                as f64
+                                + shift_y as f64,
+                            ((ex - sx) * self.font_scale) as f64,
+                            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale)
+                                as f64,
+                        ),
+                        row.ascender_in_lpxs,
+                    );
+                }
+            }
+
             cx.emit_turtle_walk(
                 Rect {
                     pos: new_turtle_pos,
@@ -2416,30 +2492,6 @@ impl DrawText {
                 },
                 align_list_start,
             );
-
-            for (row_index, row) in text.rows.iter().enumerate() {
-                let (sx, ex) = row_span_x_bounds_in_lpxs(
-                    row,
-                    row_index == 0,
-                    row_index + 1 == text.rows.len(),
-                );
-                f(
-                    cx,
-                    rect(
-                        (origin_in_lpxs.x
-                            + (row.origin_in_lpxs.x + sx) * self.font_scale)
-                            as f64,
-                        (origin_in_lpxs.y
-                            + (row.origin_in_lpxs.y - row.ascender_in_lpxs)
-                                * self.font_scale) as f64
-                            + shift_y as f64,
-                        ((ex - sx) * self.font_scale) as f64,
-                        ((row.ascender_in_lpxs - row.descender_in_lpxs)
-                            * self.font_scale) as f64,
-                    ),
-                    row.ascender_in_lpxs,
-                );
-            }
         }
 
         (text.rows.len(), text.is_truncated)
@@ -2456,9 +2508,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        self.text_style
-            .font_family
-            .ensure_fonts_loaded(cx);
+        self.text_style.font_family.ensure_fonts_loaded(cx);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -2637,20 +2687,20 @@ impl DrawText {
                 }
                 if !drew_slug_this_frame {
                     let old_area = slug_draw.draw_vars.area;
-                    if !old_area.is_empty() {
+                    if area_holds_stale_content(&old_area, cx.cx) {
                         cx.cx.redraw_area_in_draw(old_area);
+                        slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                     }
-                    slug_draw.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
                 self.slug_draw = Some(slug_draw);
             }
             // Don't clobber the outer batch's area if we've handed it back.
             if !drew_raster_this_frame && self.many_instances.is_none() {
                 let old_area = self.draw_vars.area;
-                if !old_area.is_empty() {
+                if area_holds_stale_content(&old_area, cx.cx) {
                     cx.cx.redraw_area_in_draw(old_area);
+                    self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
                 }
-                self.draw_vars.area = cx.update_area_refs(old_area, Area::Empty);
             }
             return;
         }
@@ -2835,8 +2885,11 @@ impl DrawText {
 
     fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<ResolvedGlyph> {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
-        let glyph_prefers_raster_image = glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs);
-        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
+        let glyph_prefers_raster_image = glyph
+            .font
+            .has_glyph_raster_image(glyph.id, font_size_in_dpxs);
+        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs)
+        {
             let slug_lookup = {
                 let mut fonts = cx.fonts.borrow_mut();
                 fonts.get_or_cache_slug_glyph(cx.cx.redraw_id, glyph.font.as_ref(), glyph.id)
@@ -2973,9 +3026,7 @@ impl DrawText {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         let should_use_slug = cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs);
         let fallback_dpxs_per_em = if should_use_slug && font_size_in_dpxs > 0.0 {
-            cx.fonts
-                .borrow()
-                .max_rasterized_glyph_dpxs_per_em()
+            cx.fonts.borrow().max_rasterized_glyph_dpxs_per_em()
         } else {
             0.0
         };
@@ -2985,7 +3036,8 @@ impl DrawText {
             } else {
                 font_size_in_dpxs
             };
-            glyph.font
+            glyph
+                .font
                 .rasterize_glyph_stable_fallback(glyph.id, stable_dpxs_per_em)
         } else {
             glyph.rasterize(font_size_in_dpxs)
@@ -3360,9 +3412,8 @@ mod tests {
             let mut draw_text = DrawText::script_new_with_default(vm);
             draw_text.color = vec4(0.11, 0.22, 0.33, 0.44);
 
-            let packed = vm.with_cx_mut(|cx| {
-                read_instance(&draw_text.draw_vars, cx, live_id!(color))
-            });
+            let packed =
+                vm.with_cx_mut(|cx| read_instance(&draw_text.draw_vars, cx, live_id!(color)));
 
             assert_eq!(packed, [0.11, 0.22, 0.33, 0.44]);
         });
@@ -3379,9 +3430,8 @@ mod tests {
             let mut slug_draw = DrawTextSlug::script_new_with_default(vm);
             slug_draw.color = vec4(0.15, 0.25, 0.35, 0.45);
 
-            let packed = vm.with_cx_mut(|cx| {
-                read_instance(&slug_draw.draw_vars, cx, live_id!(color))
-            });
+            let packed =
+                vm.with_cx_mut(|cx| read_instance(&slug_draw.draw_vars, cx, live_id!(color)));
 
             assert_eq!(packed, [0.15, 0.25, 0.35, 0.45]);
         });

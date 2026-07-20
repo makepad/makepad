@@ -453,8 +453,16 @@ impl CheckBox {
         self.animator_in_state(cx, ids!(active.on))
     }
 
-    pub fn set_active(&mut self, cx: &mut Cx, value: bool) {
-        self.animator_toggle(cx, value, Animate::Yes, ids!(active.on), ids!(active.off));
+    /// Sets the active state.
+    ///
+    /// Pass `Animate::No` for programmatic state restoration (e.g. after an
+    /// `Event::ScriptReapply` reloads the widget tree) — `Animate::Yes`
+    /// routes through `animator_play`, which early-outs when the animator's
+    /// cached `current_state` already matches the target, leaving the
+    /// shader uniform stale. `Animate::No` uses `animator_cut`, which
+    /// always re-merges the state's values and re-applies them.
+    pub fn set_active(&mut self, cx: &mut Cx, value: bool, animate: Animate) {
+        self.animator_toggle(cx, value, animate, ids!(active.on), ids!(active.off));
     }
 
     pub fn debug_dump_animator(&self, heap: &ScriptHeap) -> String {
@@ -581,9 +589,10 @@ impl CheckBoxRef {
         }
     }
 
-    pub fn set_active(&self, cx: &mut Cx, value: bool) {
+    /// See [`CheckBox::set_active()`].
+    pub fn set_active(&self, cx: &mut Cx, value: bool, animate: Animate) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_active(cx, value);
+            inner.set_active(cx, value, animate);
         }
     }
 

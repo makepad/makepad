@@ -1,6 +1,13 @@
+/// Metal backend debug breadcrumbs (init, dispatch choices). Off by default —
+/// set GGML_METAL_TRACE=1 to enable, mirroring MAKEPAD_CUDA_TRACE.
+fn log_metal_trace() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GGML_METAL_TRACE").is_some())
+}
+
 #[allow(dead_code)]
 fn log_mul_mat_requested() -> bool {
-    false
+    log_metal_trace()
 }
 
 pub fn is_available() -> bool {
@@ -44,6 +51,22 @@ pub fn try_matmul_nt_ggml_bytes(
     n: usize,
 ) -> Option<Vec<f32>> {
     imp::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MatmulNtGgmlBytesMatrix<'a> {
+    pub bt_bytes: &'a [u8],
+    pub bt_ggml_type: u32,
+    pub n: usize,
+}
+
+pub fn try_matmul_nt_ggml_bytes_multi(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    matrices: &[MatmulNtGgmlBytesMatrix<'_>],
+) -> Option<Vec<Vec<f32>>> {
+    imp::try_matmul_nt_ggml_bytes_multi(a, m, k, matrices)
 }
 
 pub fn try_matmul_nt_ggml_bytes_add_bias(
@@ -520,6 +543,15 @@ mod imp {
         _k: usize,
         _n: usize,
     ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_multi(
+        _a: &[f32],
+        _m: usize,
+        _k: usize,
+        _matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
+    ) -> Option<Vec<Vec<f32>>> {
         None
     }
 
@@ -1605,6 +1637,36 @@ mod imp {
         pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
     }
 
+    fn matmul_cache_tag(bt_ggml_type: u32) -> u8 {
+        match bt_ggml_type {
+            GGML_TYPE_F32 => 2u8,
+            GGML_TYPE_F16 => 3u8,
+            GGML_TYPE_BF16 => 9u8,
+            GGML_TYPE_Q4_0 => 4u8,
+            GGML_TYPE_Q4_1 => 5u8,
+            GGML_TYPE_Q5_0 => 6u8,
+            GGML_TYPE_Q5_1 => 7u8,
+            GGML_TYPE_Q8_0 => 8u8,
+            GGML_TYPE_Q2_K => 10u8,
+            GGML_TYPE_Q3_K => 11u8,
+            GGML_TYPE_Q4_K => 12u8,
+            GGML_TYPE_Q5_K => 13u8,
+            GGML_TYPE_Q6_K => 14u8,
+            _ => 0u8,
+        }
+    }
+
+    fn matmul_batch_tag(bt_ggml_type: u32, index: usize) -> Result<u8, String> {
+        let base = matmul_cache_tag(bt_ggml_type);
+        let slot = u8::try_from(index).map_err(|_| format!("matmul batch index too large: {}", index))?;
+        if slot >= 8 {
+            return Err(format!("matmul batch supports at most 8 outputs, got {}", index + 1));
+        }
+        Ok(128u8
+            .wrapping_add(base.wrapping_mul(8))
+            .wrapping_add(slot))
+    }
+
     fn flash_attn_ext_extra_pad_bytes(
         n_q: usize,
         n_kv: usize,
@@ -1844,7 +1906,9 @@ mod imp {
                     }
                 };
 
-                eprintln!("[ggml][metal] backend initialized (shared kernels)");
+                if super::log_metal_trace() {
+                    eprintln!("[ggml][metal] backend initialized (shared kernels)");
+                }
 
                 return Ok(Self {
                     device,
@@ -2772,7 +2836,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mv_ext");
             }
 
@@ -2886,7 +2950,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mm");
             }
 
@@ -2988,7 +3052,7 @@ mod imp {
             ne1: i32,
         ) -> Result<(), String> {
             static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if LOG_ONCE.set(()).is_ok() {
+            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
                 eprintln!("[ggml][metal] mul_mat dispatch: mul_mv");
             }
 
@@ -6526,25 +6590,63 @@ mod imp {
             k: usize,
             n: usize,
         ) -> Result<Vec<f32>, String> {
-            let tag = match bt_ggml_type {
-                GGML_TYPE_F32 => 2u8,
-                GGML_TYPE_F16 => 3u8,
-                GGML_TYPE_BF16 => 9u8,
-                GGML_TYPE_Q4_0 => 4u8,
-                GGML_TYPE_Q4_1 => 5u8,
-                GGML_TYPE_Q5_0 => 6u8,
-                GGML_TYPE_Q5_1 => 7u8,
-                GGML_TYPE_Q8_0 => 8u8,
-                GGML_TYPE_Q2_K => 10u8,
-                GGML_TYPE_Q3_K => 11u8,
-                GGML_TYPE_Q4_K => 12u8,
-                GGML_TYPE_Q5_K => 13u8,
-                GGML_TYPE_Q6_K => 14u8,
-                _ => 0u8,
-            };
+            let tag = matmul_cache_tag(bt_ggml_type);
             let (dst, mr, nr) =
                 self.matmul_nt_ggml_bytes_impl(a, bt_bytes, bt_ggml_type, m, k, n, Some(tag))?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
+        }
+
+        fn matmul_nt_ggml_bytes_multi(
+            &mut self,
+            a: &[f32],
+            m: usize,
+            k: usize,
+            matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
+        ) -> Result<Vec<Vec<f32>>, String> {
+            if matrices.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mk = m
+                .checked_mul(k)
+                .ok_or_else(|| "matmul overflow computing m*k".to_string())?;
+            if a.len() != mk {
+                return Err(format!(
+                    "lhs len mismatch: got {}, expected {}",
+                    a.len(),
+                    mk
+                ));
+            }
+
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    a.as_ptr() as *const u8,
+                    a.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let src1_buffer = self.new_buffer_with_bytes(a_bytes)?;
+            let outputs = self.with_batch(|this| {
+                let mut outputs = Vec::with_capacity(matrices.len());
+                for (index, matrix) in matrices.iter().enumerate() {
+                    let tag = matmul_batch_tag(matrix.bt_ggml_type, index)?;
+                    let dst = this.matmul_nt_ggml_from_src1_buffer(
+                        src1_buffer.as_id(),
+                        matrix.bt_bytes,
+                        matrix.bt_ggml_type,
+                        m,
+                        k,
+                        matrix.n,
+                        Some(tag),
+                    )?;
+                    outputs.push((dst, matrix.n));
+                }
+                Ok(outputs)
+            })?;
+            self.wait_queue_idle()?;
+            let mut result = Vec::with_capacity(outputs.len());
+            for (buffer, n_out) in outputs {
+                result.push(self.copy_f32_buffer_contents_readable(buffer.as_id(), m * n_out)?);
+            }
+            Ok(result)
         }
 
         fn vision_mlp_bf16_fused(
@@ -6780,6 +6882,15 @@ mod imp {
         n: usize,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n))
+    }
+
+    pub(super) fn try_matmul_nt_ggml_bytes_multi(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        matrices: &[super::MatmulNtGgmlBytesMatrix<'_>],
+    ) -> Option<Vec<Vec<f32>>> {
+        with_context(|ctx| ctx.matmul_nt_ggml_bytes_multi(a, m, k, matrices))
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes_add_bias(

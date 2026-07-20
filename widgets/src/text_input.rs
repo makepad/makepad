@@ -7,7 +7,7 @@ use {
             event::keyboard::CharOffset,
             ime::{
                 AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
-                TextInputConfig,
+                TextInputConfig, TextInputContentType,
             },
             text::{
                 geom::Point,
@@ -19,7 +19,7 @@ use {
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
         scroll_bar::{ScrollAxis, ScrollBar},
         widget::*,
-        widget_async::ScriptAsyncResult,
+        widget_async::{CxSplashVmExt, ScriptAsyncResult},
     },
     std::rc::Rc,
     unicode_segmentation::{GraphemeCursor, UnicodeSegmentation},
@@ -523,6 +523,8 @@ pub struct TextInput {
     #[live]
     input_mode: InputMode,
     #[live]
+    content_type: TextInputContentType,
+    #[live]
     autocapitalize: AutoCapitalize,
     #[live]
     autocorrect: AutoCorrect,
@@ -587,9 +589,18 @@ pub struct TextInput {
     /// Cached maximum horizontal scroll offset from the last draw pass.
     #[rust]
     cached_max_scroll_x: f64,
+    /// Caret rect relative to the draw_bg box, cached each draw. This offset is
+    /// stable across draw-list spaces, so we add the box's window position later.
+    #[rust]
+    cached_caret_offset: DVec2,
+    #[rust]
+    cached_caret_size: DVec2,
     /// Skip finger move after long press to prevent selection changes
     #[rust]
     ignore_next_move: bool,
+    /// Touch that started outside this input while focused and may blur on release.
+    #[rust]
+    pending_outside_focus_loss_touch: Option<u64>,
     /// IME composition tracking - byte index where composition starts
     #[rust]
     composition_start: usize,
@@ -628,9 +639,15 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Changed(self.text.clone()));
         if let Some(handler) = self.on_change.as_object() {
             let text = self.text.clone();
-            cx.with_vm(|vm| {
+            let vm_id = cx.script_ref_vm_id(&self.source);
+            cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
-                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
             });
         }
     }
@@ -639,9 +656,15 @@ impl TextInput {
         cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
         if let Some(handler) = self.on_return.as_object() {
             let text = self.text.clone();
-            cx.with_vm(|vm| {
+            let vm_id = cx.script_ref_vm_id(&self.source);
+            cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.bx.heap.new_string_from_str(&text);
-                vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                vm.with_instruction_limit(
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    |vm| {
+                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
+                    },
+                );
             });
         }
     }
@@ -694,6 +717,13 @@ impl TextInput {
 
     pub fn set_is_read_only(&mut self, cx: &mut Cx, is_read_only: bool) {
         self.is_read_only = is_read_only;
+        // Flipped to read-only while focused: drop the keyboard now, since the draw
+        // path no longer re-shows it (gated on !is_read_only). Guard against Area::Empty
+        // (a never-drawn/reapplied field) so we don't false-match an Empty key focus.
+        let area = self.draw_bg.area();
+        if is_read_only && !area.is_empty() && cx.has_key_focus(area) {
+            cx.hide_text_ime();
+        }
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
@@ -732,8 +762,18 @@ impl TextInput {
     }
 
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
-        self.selection = selection;
+        self.selection = Selection {
+            anchor: Cursor {
+                index: floor_grapheme_boundary(&self.text, selection.anchor.index),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: floor_grapheme_boundary(&self.text, selection.cursor.index),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
         self.needs_scroll_to_cursor = true;
+        self.clear_composition();
         self.history.force_new_edit_group();
         self.draw_bg.redraw(cx);
     }
@@ -901,6 +941,19 @@ impl TextInput {
         text_rect
     }
 
+    /// The caret's rect (top-left + size, line height included) in window coords:
+    /// the draw_bg box's window position plus the cached box-relative offset. Query
+    /// during events, not draw, or the box position is draw-local. None before first draw.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        if self.cached_caret_size.y <= 0.0 {
+            return None;
+        }
+        Some(Rect {
+            pos: self.draw_bg.area().rect(cx).pos + self.cached_caret_offset,
+            size: self.cached_caret_size,
+        })
+    }
+
     fn draw_cursor(&mut self, cx: &mut Cx2d, text_rect: Rect) -> Rect {
         let CursorPosition {
             row_index,
@@ -931,6 +984,64 @@ impl TextInput {
         self.draw_cursor
             .draw_abs(cx, cursor_rect.translate(text_rect.pos));
         cursor_rect
+    }
+
+    // The caret/composition-line rectangle (top-left + size, line height included)
+    // in IME-area-relative coordinates. Backends forward this to the OS so the
+    // candidate window anchors directly above/below the line near the cursor.
+    fn ime_position_rect(&self, cx: &Cx, text_rect: Rect, position: CursorPosition) -> Rect {
+        let area_rect = self.draw_bg.area().rect(cx);
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
+        let row = &laidout_text.rows[position.row_index];
+        let line_top =
+            ((row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let line_height =
+            ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.draw_text.font_scale) as f64;
+        let top_left = text_rect.pos - area_rect.pos
+            + dvec2(position.x_in_lpxs as f64, line_top)
+            - dvec2(self.scroll_x, self.scroll_y);
+        Rect {
+            pos: top_left,
+            size: dvec2((2.0 * self.draw_text.font_scale) as f64, line_height),
+        }
+    }
+
+    fn ime_cursor_rect(&self, cx: &Cx, text_rect: Rect, cursor_rect: Rect) -> Rect {
+        if !self.has_composition() && self.selection.cursor.index > 0 {
+            let previous_index = prev_grapheme_boundary(&self.text, self.selection.cursor.index);
+            let previous_cursor = Cursor {
+                index: previous_index,
+                prefer_next_row: false,
+            };
+            let end_cursor = Cursor {
+                index: self.selection.cursor.index,
+                prefer_next_row: false,
+            };
+            if let (Ok(previous_position), Ok(end_position)) = (
+                self.cursor_to_position(previous_cursor),
+                self.cursor_to_position(end_cursor),
+            ) {
+                let anchor_position = if previous_position.row_index == end_position.row_index {
+                    CursorPosition {
+                        row_index: previous_position.row_index,
+                        x_in_lpxs: (previous_position.x_in_lpxs + end_position.x_in_lpxs) * 0.5,
+                    }
+                } else {
+                    previous_position
+                };
+                return self.ime_position_rect(cx, text_rect, anchor_position);
+            }
+        }
+
+        let area_rect = self.draw_bg.area().rect(cx);
+        Rect {
+            pos: text_rect.pos - area_rect.pos + cursor_rect.pos
+                - dvec2(self.scroll_x, self.scroll_y),
+            size: cursor_rect.size,
+        }
     }
 
     fn draw_selection(&mut self, cx: &mut Cx2d, text_rect: Rect) {
@@ -1053,10 +1164,8 @@ impl TextInput {
             if self.is_multiline {
                 let position = self.cursor_to_position(self.cursor()).unwrap();
                 let laidout_row = &laidout_text.rows[position.row_index];
-                let y_min =
-                    (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
-                let y_max =
-                    (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+                let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+                let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
 
                 // If the min y of the row is less than the scroll position, scroll up so
                 // that the top of the row appears at the top.
@@ -1071,8 +1180,7 @@ impl TextInput {
                 }
             } else {
                 // Single-line: auto-scroll horizontally to keep the cursor visible.
-                let password_cursor =
-                    self.cursor_to_password_cursor(self.cursor());
+                let password_cursor = self.cursor_to_password_cursor(self.cursor());
                 let cursor_pos = laidout_text.cursor_to_position(password_cursor);
                 let cursor_x = cursor_pos.x_in_lpxs as f64;
 
@@ -1093,9 +1201,25 @@ impl TextInput {
         // (avoiding floating-point mismatch with relative Fit bounds).
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
-        let max_scroll_y = (laidout_text_height - height).max(0.0);
-        self.cached_max_scroll_y = max_scroll_y;
-        self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+        if self.is_multiline {
+            let max_scroll_y = (laidout_text_height - height).max(0.0);
+            self.cached_max_scroll_y = max_scroll_y;
+            self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+        } else {
+            // Single-line: nothing scrolls vertically, so the offset centres the
+            // line box in the inner rect instead. Pinning to padding.top would
+            // ride high in tall fields and, because a font's line box is taller
+            // than its point size suggests, clip descenders in tight ones. Going
+            // through scroll_y keeps every downstream coordinate (hit test, IME,
+            // selection rects) consistent, since they all compensate for it.
+            let text_height =
+                (laidout_text.size_in_lpxs.height * self.draw_text.font_scale) as f64;
+            let centering = (text_height - height) * 0.5;
+            self.cached_max_scroll_y = 0.0;
+            // Guard NaN (an unresolved turtle size), which the old clamp
+            // sanitized implicitly and which would poison the align shift.
+            self.scroll_y = if centering.is_finite() { centering } else { 0.0 };
+        }
 
         let laidout_text_width = laidout_text.size_in_lpxs.width as f64;
         let max_scroll_x = (laidout_text_width - width).max(0.0);
@@ -1114,10 +1238,24 @@ impl TextInput {
         );
 
         // Update the content clip rect AFTER shift_align_range, because the shift
-        // also moves BeginClip entries. By setting the clip to inner_rect here,
-        // we override whatever shift was applied, keeping the clip at the correct
-        // absolute position (the inner area excluding padding).
-        cx.update_clip_rect_at(content_clip_index, inner_rect);
+        // also moves BeginClip entries. By setting the clip here, we override
+        // whatever shift was applied, keeping the clip at the correct absolute
+        // position. Multiline clips to the inner rect (scrolled content must not
+        // bleed into the padding); single-line clips vertically to the whole
+        // padded box, because the centred line box may legitimately overhang the
+        // padding (descenders) and should only be cut by the background box.
+        let content_clip = if self.is_multiline {
+            inner_rect
+        } else {
+            let outer_rect = cx.turtle().rect();
+            rect(
+                inner_rect.pos.x,
+                outer_rect.pos.y,
+                inner_rect.size.x,
+                outer_rect.size.y,
+            )
+        };
+        cx.update_clip_rect_at(content_clip_index, content_clip);
     }
 
     /// Draws the vertical scrollbar when the text content overflows the visible area.
@@ -1141,6 +1279,10 @@ impl TextInput {
     /// Returns `true` if the cursor/selection actually changed.
     pub fn move_cursor_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
         let initial = self.selection;
+        if !keep_selection && self.selection.cursor != self.selection.anchor {
+            self.set_cursor(cx, self.selection.start(), false);
+            return !initial.index_eq(self.selection);
+        }
         self.set_cursor(
             cx,
             Cursor {
@@ -1157,10 +1299,104 @@ impl TextInput {
     /// Returns `true` if the cursor/selection actually changed.
     pub fn move_cursor_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
         let initial = self.selection;
+        if !keep_selection && self.selection.cursor != self.selection.anchor {
+            self.set_cursor(cx, self.selection.end(), false);
+            return !initial.index_eq(self.selection);
+        }
         self.set_cursor(
             cx,
             Cursor {
                 index: next_grapheme_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_word_left(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: prev_word_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: true,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_word_right(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: next_word_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_line_start(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            laidout_text.rows[position.row_index].text.start_in_parent()
+        };
+        let cursor = self.password_cursor_to_cursor(Cursor {
+            index,
+            prefer_next_row: true,
+        });
+        self.set_cursor(cx, cursor, keep_selection);
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_line_end(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            laidout_text.rows[position.row_index].text.end_in_parent()
+        };
+        let cursor = self.password_cursor_to_cursor(Cursor {
+            index,
+            prefer_next_row: false,
+        });
+        self.set_cursor(cx, cursor, keep_selection);
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_text_start(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: 0,
+                prefer_next_row: false,
+            },
+            keep_selection,
+        );
+        !initial.index_eq(self.selection)
+    }
+
+    pub fn move_cursor_text_end(&mut self, cx: &mut Cx, keep_selection: bool) -> bool {
+        let initial = self.selection;
+        self.set_cursor(
+            cx,
+            Cursor {
+                index: self.text.len(),
                 prefer_next_row: false,
             },
             keep_selection,
@@ -1200,7 +1436,7 @@ impl TextInput {
     /// * Returns Err(`()`) if the cursor/selection failed to be calculated due to a prior layout invalidation.
     pub fn move_cursor_down(&mut self, cx: &mut Cx, keep_selection: bool) -> Result<bool, ()> {
         let initial = self.selection;
-        let laidout_text = self.laidout_text.as_ref().unwrap();
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
         let position = self.cursor_to_position(self.selection.cursor)?;
         self.set_cursor(
             cx,
@@ -1215,6 +1451,86 @@ impl TextInput {
             keep_selection,
         );
         Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_page_up(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        if !self.is_multiline {
+            return Ok(self.move_cursor_text_start(cx, keep_selection));
+        }
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let target_row_index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            let view_height = self.page_height_in_lpxs(cx);
+            let target_y = laidout_text.rows[position.row_index].origin_in_lpxs.y - view_height;
+            let mut target_row_index = position.row_index;
+            while target_row_index > 0
+                && laidout_text.rows[target_row_index - 1].origin_in_lpxs.y >= target_y
+            {
+                target_row_index -= 1;
+            }
+            if target_row_index == position.row_index && target_row_index > 0 {
+                target_row_index -= 1;
+            }
+            target_row_index
+        };
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: target_row_index,
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    pub fn move_cursor_page_down(
+        &mut self,
+        cx: &mut Cx,
+        keep_selection: bool,
+    ) -> Result<bool, ()> {
+        if !self.is_multiline {
+            return Ok(self.move_cursor_text_end(cx, keep_selection));
+        }
+        let initial = self.selection;
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let target_row_index = {
+            let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+            let view_height = self.page_height_in_lpxs(cx);
+            let target_y = laidout_text.rows[position.row_index].origin_in_lpxs.y + view_height;
+            let mut target_row_index = position.row_index;
+            while target_row_index + 1 < laidout_text.rows.len()
+                && laidout_text.rows[target_row_index + 1].origin_in_lpxs.y <= target_y
+            {
+                target_row_index += 1;
+            }
+            if target_row_index == position.row_index
+                && target_row_index + 1 < laidout_text.rows.len()
+            {
+                target_row_index += 1;
+            }
+            target_row_index
+        };
+        self.set_cursor(
+            cx,
+            self.position_to_cursor(CursorPosition {
+                row_index: target_row_index,
+                x_in_lpxs: position.x_in_lpxs,
+            })?,
+            keep_selection,
+        );
+        Ok(!initial.index_eq(self.selection))
+    }
+
+    fn page_height_in_lpxs(&self, cx: &Cx) -> f32 {
+        let rect = self.draw_bg.area().rect(cx);
+        let height = rect.size.y - self.layout.padding.top - self.layout.padding.bottom;
+        (height.max(0.0) as f32 / self.draw_text.font_scale.max(0.001)).max(1.0)
     }
 
     pub fn select_all(&mut self, cx: &mut Cx) {
@@ -1280,6 +1596,7 @@ impl TextInput {
         cx.hide_text_ime();
         self.composition_start = 0;
         self.composition_end = 0;
+        self.pending_outside_focus_loss_touch = None;
         // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
@@ -1294,20 +1611,71 @@ impl TextInput {
         self.composition_end > self.composition_start
     }
 
+    fn clear_composition(&mut self) {
+        if self.composition_start == 0 && self.composition_end == 0 {
+            return;
+        }
+        self.composition_start = 0;
+        self.composition_end = 0;
+        // Force the next focused draw to sync `composition: None` to the platform.
+        self.last_sent_ime_sel_start = usize::MAX;
+        self.last_sent_ime_sel_end = usize::MAX;
+    }
+
     fn get_ime_config(&self) -> TextInputConfig {
         TextInputConfig {
             soft_keyboard: SoftKeyboardConfig {
-                input_mode: if self.is_numeric_only && self.input_mode == InputMode::Text {
-                    InputMode::Decimal
+                input_mode: self.effective_input_mode(),
+                // A password must never auto-capitalize or autocorrect.
+                autocapitalize: if self.is_password {
+                    AutoCapitalize::None
                 } else {
-                    self.input_mode
+                    self.autocapitalize
                 },
-                autocapitalize: self.autocapitalize,
-                autocorrect: self.autocorrect,
+                autocorrect: if self.is_password {
+                    AutoCorrect::Disabled
+                } else {
+                    self.autocorrect
+                },
                 return_key_type: self.return_key_type,
             },
             is_multiline: self.is_multiline,
             is_secure: self.is_password,
+            submit_on_enter: self.submit_on_enter,
+            content_type: self.content_type,
+            is_read_only: self.is_read_only,
+        }
+    }
+
+    /// Resolves the soft-keyboard layout for this field.
+    ///
+    /// An explicitly-set `input_mode` always wins. `InputMode::Text` is the
+    /// default ("no preference"), so we treat it as a request to infer a more
+    /// specific layout from the field's other hints: a numeric-only field gets
+    /// the decimal pad, otherwise the keyboard is derived from `content_type`
+    /// (e.g. an email field shows the email keyboard) so callers don't have to
+    /// set both. Inference only ever applies when `input_mode` was left at the
+    /// default, never overriding an explicit choice.
+    fn effective_input_mode(&self) -> InputMode {
+        if self.input_mode != InputMode::Text {
+            return self.input_mode;
+        }
+        if self.is_numeric_only {
+            return InputMode::Decimal;
+        }
+        match self.content_type {
+            TextInputContentType::EmailAddress => InputMode::Email,
+            TextInputContentType::Url => InputMode::Url,
+            TextInputContentType::TelephoneNumber => InputMode::Tel,
+            TextInputContentType::OneTimeCode => InputMode::Numeric,
+            // Username / passwords / street address / unset keep the full
+            // default keyboard (e.g. a password needs every character, and a
+            // username may be either an email or a handle).
+            TextInputContentType::None
+            | TextInputContentType::Username
+            | TextInputContentType::Password
+            | TextInputContentType::NewPassword
+            | TextInputContentType::FullStreetAddress => InputMode::Text,
         }
     }
 
@@ -1400,17 +1768,17 @@ impl TextInput {
     }
 
     fn filter_input(&self, input: &str, is_set_text: bool) -> String {
-        // strip out escape sequences and tabs sometimes sent from the IME
-        if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}' {
-            return String::new();
+        // strip control chars (escape sequences/tabs the IME sometimes sends),
+        // but keep a newline in multiline fields where a soft keyboard inserts it
+        if input.len() == 1 {
+            if let Some(char) = input.chars().next() {
+                if char.is_control() && !(char == '\n' && self.is_multiline) {
+                    return String::new();
+                }
+            }
         }
         // Use input_mode for filtering; fall back to is_numeric_only for backwards compat
-        let effective_mode = if self.is_numeric_only && self.input_mode == InputMode::Text {
-            InputMode::Decimal
-        } else {
-            self.input_mode
-        };
-        match effective_mode {
+        match self.effective_input_mode() {
             InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
             InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
             InputMode::Decimal => {
@@ -1439,9 +1807,11 @@ impl TextInput {
                     c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
                 })
                 .collect(),
-            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
-                input.to_string()
-            }
+            InputMode::None
+            | InputMode::Text
+            | InputMode::Url
+            | InputMode::Email
+            | InputMode::Search => input.to_string(),
         }
     }
 
@@ -1455,6 +1825,117 @@ impl TextInput {
         self.selection.anchor.index = self.selection.cursor.index;
         self.needs_scroll_to_cursor = true;
         self.history.apply_edit(edit, &mut self.text);
+        self.laidout_text = None;
+        self.check_text_is_empty(cx);
+    }
+
+    fn char_range_to_byte_range(&self, start: usize, end: usize) -> (usize, usize) {
+        let byte_start = self
+            .text
+            .char_indices()
+            .nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len());
+        let byte_end = self
+            .text
+            .char_indices()
+            .nth(end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len());
+        (byte_start.min(byte_end), byte_start.max(byte_end))
+    }
+
+    fn find_nearest_text_range(&self, needle: &str, preferred_start: usize) -> Option<(usize, usize)> {
+        if needle.is_empty() {
+            let start = preferred_start.min(self.text.len());
+            return Some((start, start));
+        }
+
+        let cursor = self.selection.cursor.index;
+        self.text
+            .match_indices(needle)
+            .min_by_key(|(start, _)| {
+                let after_cursor_penalty = if *start > cursor { self.text.len() } else { 0 };
+                (
+                    after_cursor_penalty,
+                    start.abs_diff(preferred_start),
+                    start.abs_diff(cursor),
+                )
+            })
+            .map(|(start, text)| (start, start + text.len()))
+    }
+
+    fn resolve_external_replace_range(
+        &self,
+        byte_start: usize,
+        byte_end: usize,
+        replaced_text: Option<&str>,
+    ) -> Option<(usize, usize)> {
+        let byte_start = byte_start.min(self.text.len());
+        let byte_end = byte_end.min(self.text.len()).max(byte_start);
+
+        let Some(replaced_text) = replaced_text else {
+            return Some((byte_start, byte_end));
+        };
+        if replaced_text.is_empty() {
+            return Some((byte_start, byte_end));
+        }
+        if self.text.get(byte_start..byte_end) == Some(replaced_text) {
+            return Some((byte_start, byte_end));
+        }
+
+        self.find_nearest_text_range(replaced_text, byte_start)
+    }
+
+    fn transform_index_after_edit(
+        text: &str,
+        index: usize,
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+    ) -> usize {
+        let transformed = if index <= start {
+            index
+        } else if index >= end {
+            let delta = replacement_len as isize - (end - start) as isize;
+            (index as isize + delta).max(0) as usize
+        } else {
+            start + replacement_len
+        };
+        floor_grapheme_boundary(text, transformed.min(text.len()))
+    }
+
+    fn apply_edit_preserving_selection(&mut self, cx: &mut Cx, edit: Edit) {
+        let selection = self.selection;
+        let start = edit.start;
+        let end = edit.end;
+        let replacement_len = edit.replace_with.len();
+
+        self.history.apply_edit(edit, &mut self.text);
+
+        self.selection = Selection {
+            anchor: Cursor {
+                index: Self::transform_index_after_edit(
+                    &self.text,
+                    selection.anchor.index,
+                    start,
+                    end,
+                    replacement_len,
+                ),
+                prefer_next_row: selection.anchor.prefer_next_row,
+            },
+            cursor: Cursor {
+                index: Self::transform_index_after_edit(
+                    &self.text,
+                    selection.cursor.index,
+                    start,
+                    end,
+                    replacement_len,
+                ),
+                prefer_next_row: selection.cursor.prefer_next_row,
+            },
+        };
+        self.needs_scroll_to_cursor = true;
         self.laidout_text = None;
         self.check_text_is_empty(cx);
     }
@@ -1489,6 +1970,90 @@ impl TextInput {
         } else {
             self.animator_play(cx, ids!(empty.off));
         }
+    }
+
+    fn handle_navigation_key(&mut self, cx: &mut Cx, uid: WidgetUid, event: KeyEvent) -> bool {
+        let Some(navigation) = TextNavigation::from_key_event(event) else {
+            return false;
+        };
+        self.reset_blink_timer(cx);
+        let keep_selection = event.modifiers.shift;
+        let result = match navigation {
+            TextNavigation::Left => Ok(self.move_cursor_left(cx, keep_selection)),
+            TextNavigation::Right => Ok(self.move_cursor_right(cx, keep_selection)),
+            TextNavigation::WordLeft => Ok(self.move_cursor_word_left(cx, keep_selection)),
+            TextNavigation::WordRight => Ok(self.move_cursor_word_right(cx, keep_selection)),
+            TextNavigation::Up => self.move_cursor_up(cx, keep_selection),
+            TextNavigation::Down => self.move_cursor_down(cx, keep_selection),
+            TextNavigation::LineStart => self.move_cursor_line_start(cx, keep_selection),
+            TextNavigation::LineEnd => self.move_cursor_line_end(cx, keep_selection),
+            TextNavigation::TextStart => Ok(self.move_cursor_text_start(cx, keep_selection)),
+            TextNavigation::TextEnd => Ok(self.move_cursor_text_end(cx, keep_selection)),
+            TextNavigation::PageUp => self.move_cursor_page_up(cx, keep_selection),
+            TextNavigation::PageDown => self.move_cursor_page_down(cx, keep_selection),
+        };
+        match result {
+            Ok(true) => {}
+            Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event)),
+            Err(_) => warning!("can't move cursor because layout was invalidated by earlier event"),
+        }
+        true
+    }
+
+    fn backspace_range(&self, modifiers: KeyModifiers) -> (usize, usize) {
+        let mut start = self.selection.start().index;
+        let end = self.selection.end().index;
+        if start != end {
+            return (start, end);
+        }
+        start = if is_line_delete_modifier(modifiers) {
+            self.current_line_start_index().unwrap_or(start)
+        } else if is_word_modifier(modifiers) {
+            prev_word_boundary(&self.text, start)
+        } else {
+            prev_grapheme_boundary(&self.text, start)
+        };
+        (start, end)
+    }
+
+    fn delete_range(&self, modifiers: KeyModifiers) -> (usize, usize) {
+        let start = self.selection.start().index;
+        let mut end = self.selection.end().index;
+        if start != end {
+            return (start, end);
+        }
+        end = if is_line_delete_modifier(modifiers) {
+            self.current_line_end_index().unwrap_or(end)
+        } else if is_word_modifier(modifiers) {
+            next_word_boundary(&self.text, end)
+        } else {
+            next_grapheme_boundary(&self.text, end)
+        };
+        (start, end)
+    }
+
+    fn current_line_start_index(&self) -> Result<usize, ()> {
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+        let index = laidout_text.rows[position.row_index].text.start_in_parent();
+        Ok(self
+            .password_cursor_to_cursor(Cursor {
+                index,
+                prefer_next_row: true,
+            })
+            .index)
+    }
+
+    fn current_line_end_index(&self) -> Result<usize, ()> {
+        let position = self.cursor_to_position(self.selection.cursor)?;
+        let laidout_text = self.laidout_text.as_ref().ok_or(())?;
+        let index = laidout_text.rows[position.row_index].text.end_in_parent();
+        Ok(self
+            .password_cursor_to_cursor(Cursor {
+                index,
+                prefer_next_row: false,
+            })
+            .index)
     }
 }
 
@@ -1532,11 +2097,11 @@ impl Widget for TextInput {
             cx,
             Selection {
                 anchor: Cursor {
-                    index: self.selection.anchor.index.min(self.text.len()),
+                    index: floor_grapheme_boundary(&self.text, self.selection.anchor.index),
                     prefer_next_row: self.selection.anchor.prefer_next_row,
                 },
                 cursor: Cursor {
-                    index: self.selection.cursor.index.min(self.text.len()),
+                    index: floor_grapheme_boundary(&self.text, self.selection.cursor.index),
                     prefer_next_row: self.selection.cursor.prefer_next_row,
                 },
             },
@@ -1558,12 +2123,8 @@ impl Widget for TextInput {
         // scroll_to_cursor will tighten the bounds after compute_final_size
         // determines the actual dimensions.
         let inner_origin = cx.turtle().inner_origin();
-        let content_clip_index = cx.push_clip_rect_tracked(rect(
-            inner_origin.x,
-            inner_origin.y,
-            f64::MAX,
-            f64::MAX,
-        ));
+        let content_clip_index =
+            cx.push_clip_rect_tracked(rect(inner_origin.x, inner_origin.y, f64::MAX, f64::MAX));
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
@@ -1573,16 +2134,28 @@ impl Widget for TextInput {
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
-        if cx.has_key_focus(self.draw_bg.area()) {
+        // A read-only field does no IME work at all (no state push, no keyboard).
+        if cx.has_key_focus(self.draw_bg.area()) && !self.is_read_only {
+            // Cache the caret relative to the draw_bg box (same draw space) so
+            // cursor_rect_in_absolute can add the box's window position at event time.
+            // Only the focused field needs this, so we piggyback on the focus check.
+            // The scroll offset (which for single-line inputs includes the vertical
+            // centering shift) moves the drawn caret, so subtract it here too.
+            self.cached_caret_offset = text_rect.pos + cursor_rect.pos
+                - self.draw_bg.area().rect(cx).pos
+                - dvec2(self.scroll_x, self.scroll_y);
+            self.cached_caret_size = cursor_rect.size;
             if self.ime_update_frame != cx.redraw_id() {
                 self.update_ime_context(cx);
             }
-            let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
-            cx.show_text_ime_with_config(
-                self.draw_bg.area(),
-                dvec2(cursor_bottom_pos.x - self.scroll_x, cursor_bottom_pos.y - self.scroll_y),
-                self.get_ime_config(),
-            );
+            if self.effective_input_mode() != InputMode::None {
+                let ime_cursor_rect = self.ime_cursor_rect(cx, text_rect, cursor_rect);
+                cx.show_text_ime_with_config(
+                    self.draw_bg.area(),
+                    ime_cursor_rect,
+                    self.get_ime_config(),
+                );
+            }
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -1631,10 +2204,26 @@ impl Widget for TextInput {
                 Event::MouseUp(mu) => !rect.contains(mu.abs),
                 // Handle mobile touch events
                 Event::TouchUpdate(tu) => {
-                    // Check if any touch ended outside our area
-                    tu.touches.iter().any(|touch| {
-                        matches!(touch.state, TouchState::Stop) && !rect.contains(touch.abs)
-                    })
+                    let mut should_lose_focus = false;
+                    for touch in &tu.touches {
+                        match touch.state {
+                            TouchState::Start => {
+                                if rect.contains(touch.abs) {
+                                    self.pending_outside_focus_loss_touch = None;
+                                } else {
+                                    self.pending_outside_focus_loss_touch = Some(touch.uid);
+                                }
+                            }
+                            TouchState::Stop => {
+                                if self.pending_outside_focus_loss_touch == Some(touch.uid) {
+                                    should_lose_focus = !rect.contains(touch.abs);
+                                    self.pending_outside_focus_loss_touch = None;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    should_lose_focus
                 }
                 _ => false,
             };
@@ -1741,88 +2330,7 @@ impl Widget for TextInput {
             Hit::KeyFocusLost(_) => {
                 self.handle_focus_lost(cx, uid);
             }
-            Hit::KeyDown(
-                kev @ KeyEvent {
-                    key_code: KeyCode::ArrowLeft,
-                    modifiers:
-                        KeyModifiers {
-                            shift: keep_selection,
-                            logo: false,
-                            alt: false,
-                            control: false,
-                        },
-                    ..
-                },
-            ) => {
-                self.reset_blink_timer(cx);
-                let did_move = self.move_cursor_left(cx, keep_selection);
-                if !did_move {
-                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
-                }
-            }
-            Hit::KeyDown(
-                kev @ KeyEvent {
-                    key_code: KeyCode::ArrowRight,
-                    modifiers:
-                        KeyModifiers {
-                            shift: keep_selection,
-                            logo: false,
-                            alt: false,
-                            control: false,
-                        },
-                    ..
-                },
-            ) => {
-                self.reset_blink_timer(cx);
-                let did_move = self.move_cursor_right(cx, keep_selection);
-                if !did_move {
-                    cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev));
-                }
-            }
-            Hit::KeyDown(
-                kev @ KeyEvent {
-                    key_code: KeyCode::ArrowUp,
-                    modifiers:
-                        KeyModifiers {
-                            shift: keep_selection,
-                            logo: false,
-                            alt: false,
-                            control: false,
-                        },
-                    ..
-                },
-            ) => {
-                self.reset_blink_timer(cx);
-                match self.move_cursor_up(cx, keep_selection) {
-                    Ok(true) => {}
-                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
-                    Err(_) => warning!(
-                        "can't move cursor up because layout was invalidated by earlier event"
-                    ),
-                }
-            }
-            Hit::KeyDown(
-                kev @ KeyEvent {
-                    key_code: KeyCode::ArrowDown,
-                    modifiers:
-                        KeyModifiers {
-                            shift: keep_selection,
-                            logo: false,
-                            alt: false,
-                            control: false,
-                        },
-                    ..
-                },
-            ) => {
-                self.reset_blink_timer(cx);
-                match self.move_cursor_down(cx, keep_selection) {
-                    Ok(true) => {}
-                    Ok(false) => cx.widget_action(uid, TextInputAction::KeyDownUnhandled(kev)),
-                    Err(_) => warning!(
-                        "can't move cursor down because layout was invalidated by earlier event"
-                    ),
-                }
-            }
+            Hit::KeyDown(event) if self.handle_navigation_key(cx, uid, event) => {}
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
                 modifiers,
@@ -1981,23 +2489,24 @@ impl Widget for TextInput {
                 }
             }
             Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
+                key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
                 modifiers: mods @ KeyModifiers { shift: false, .. },
                 ..
             }) => {
-                // Decide whether this Enter press should submit (emit Returned)
-                // or insert a newline:
+                // Decide whether this Enter press should submit or insert a newline:
                 // * Single-line inputs always submit.
-                // * Primary modifier (Cmd on macOS, Ctrl on other platforms)
-                //   + Enter always submits — even in multiline mode.
-                // * When `submit_on_enter` is set, plain (un-modified) Enter
-                //   also submits.
-                // Any other modifier combination (e.g., Alt+Enter, or Ctrl+Enter
-                // on macOS) falls through to the newline-insertion path, which
-                // itself is gated on the input not being read-only.
+                // * Primary modifier (Cmd/Ctrl) + Enter always submits. A modifier
+                //   only comes from a physical keyboard, so this stays ungated and
+                //   keeps working even if keyboard detection lags.
+                // * Plain Enter submits only with a physical keyboard when
+                //   submit_on_enter is set; a soft keyboard's multiline Enter
+                //   always inserts a newline (the user submits via a button).
+                // In multiline mode, other modifier combos (Alt+Enter, or Ctrl+Enter
+                // on macOS) insert a newline below when not read-only.
+                let has_physical_keyboard = cx.keyboard.has_physical_keyboard();
                 let should_submit = !self.is_multiline
                     || mods.is_primary()
-                    || (self.submit_on_enter && !mods.any());
+                    || (has_physical_keyboard && self.submit_on_enter && !mods.any());
                 if should_submit {
                     cx.hide_text_ime();
                     cx.set_key_focus(Area::Empty);
@@ -2025,33 +2534,45 @@ impl Widget for TextInput {
                 cx.widget_action(uid, TextInputAction::Escaped);
             }
             Hit::KeyDown(KeyEvent {
-                key_code: KeyCode::ReturnKey,
-                modifiers: KeyModifiers { shift: true, .. },
+                key_code: KeyCode::Insert,
+                modifiers,
+                ..
+            }) if !modifiers.any() => {
+                self.reset_blink_timer(cx);
+            }
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey | KeyCode::NumpadEnter,
+                modifiers: mods @ KeyModifiers { shift: true, .. },
                 ..
             }) if !self.is_read_only => {
-                self.reset_blink_timer(cx);
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: self.selection.start().index,
-                        end: self.selection.end().index,
-                        replace_with: "\n".to_string(),
-                    },
-                );
-                self.draw_bg.redraw(cx);
-                self.emit_change(cx, uid);
+                if !self.is_multiline {
+                    // Single-line fields submit on Enter regardless of Shift; never embed
+                    // a raw newline.
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                }
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
+                modifiers,
                 ..
             }) if !self.is_read_only => {
                 self.reset_blink_timer(cx);
-                let mut start = self.selection.start().index;
-                let end = self.selection.end().index;
-                if start == end {
-                    start = prev_grapheme_boundary(&self.text, start);
-                }
+                let (start, end) = self.backspace_range(modifiers);
                 self.create_or_extend_edit_group(EditKind::Backspace);
                 self.apply_edit(
                     cx,
@@ -2066,14 +2587,11 @@ impl Widget for TextInput {
             }
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
+                modifiers,
                 ..
             }) if !self.is_read_only => {
                 self.reset_blink_timer(cx);
-                let start = self.selection.start().index;
-                let mut end = self.selection.end().index;
-                if start == end {
-                    end = next_grapheme_boundary(&self.text, end);
-                }
+                let (start, end) = self.delete_range(modifiers);
                 self.create_or_extend_edit_group(EditKind::Delete);
                 self.apply_edit(
                     cx,
@@ -2111,19 +2629,96 @@ impl Widget for TextInput {
             Hit::TextInput(event) if !self.is_read_only => {
                 // Text changes invalidate any preserved cursor from a pending tap gesture
                 self.preserved_selection_cursor = None;
+                self.pending_outside_focus_loss_touch = None;
 
-                // Handle Android full state sync (authoritative from Java InputConnection)
+                // Full state sync (authoritative: Android InputConnection / iOS UITextView)
                 if let Some(full_state) = &event.full_state_sync {
-                    let text_changed = self.text != full_state.text;
-                    if text_changed {
-                        self.history
-                            .create_or_extend_edit_group(EditKind::Other, self.selection);
-                        self.text = full_state.text.clone();
-                        self.laidout_text = None;
-                    }
+                    // The view can deliver characters a restricted field disallows (paste,
+                    // hardware keyboard); filter so iOS/Android match every other platform.
+                    // A selection-only sync (text unchanged) skips the filter pass + its
+                    // per-keystroke allocation.
+                    let (text_changed, rejected) = if self.text == full_state.text {
+                        (false, false)
+                    } else {
+                        let filtered = self.filter_input(&full_state.text, true);
+                        let rejected = filtered != full_state.text;
+                        let changed = self.text != filtered;
+                        if changed {
+                            // Apply only the changed middle span so undo records a small
+                            // delta; a whole-text replace would clone the entire old text
+                            // onto the undo stack on every keystroke.
+                            let common_prefix = self
+                                .text
+                                .chars()
+                                .zip(filtered.chars())
+                                .take_while(|(a, b)| a == b)
+                                .count();
+                            let old_count = self.text.chars().count();
+                            let new_count = filtered.chars().count();
+                            let max_suffix = old_count.min(new_count) - common_prefix;
+                            let common_suffix = self
+                                .text
+                                .chars()
+                                .rev()
+                                .zip(filtered.chars().rev())
+                                .take_while(|(a, b)| a == b)
+                                .count()
+                                .min(max_suffix);
+                            let start = CharOffset(common_prefix).to_byte_index(&self.text);
+                            let old_end =
+                                CharOffset(old_count - common_suffix).to_byte_index(&self.text);
+                            let new_end =
+                                CharOffset(new_count - common_suffix).to_byte_index(&filtered);
+                            self.create_or_extend_edit_group(EditKind::Other);
+                            // history.apply_edit records the inverse + rewrites self.text; the
+                            // selection is set authoritatively below, so skip the wasted
+                            // selection transform apply_edit_preserving_selection would do.
+                            self.history.apply_edit(
+                                Edit {
+                                    start,
+                                    end: old_end,
+                                    replace_with: filtered[start..new_end].to_string(),
+                                },
+                                &mut self.text,
+                            );
+                            self.laidout_text = None;
+                        }
+                        (changed, rejected)
+                    };
 
-                    let sel_start_byte = full_state.selection.start.to_byte_index(&self.text);
-                    let sel_end_byte = full_state.selection.end.to_byte_index(&self.text);
+                    // The view's selection offsets index the UNFILTERED full_state.text.
+                    // When chars were rejected, self.text is now shorter, so map each
+                    // endpoint through the filter (count filtered chars in the prefix)
+                    // before resolving to a byte index; otherwise self.text == the source
+                    // text and the offsets map directly.
+                    let remap_char_offset = |this: &Self, offset: CharOffset| -> usize {
+                        let char_idx = if rejected {
+                            // self.text is the filtered subsequence of full_state.text; count
+                            // the kept chars falling at or before this source offset (greedy
+                            // match), which avoids re-filtering a prefix.
+                            let mut kept = this.text.chars();
+                            let mut next_kept = kept.next();
+                            let mut count = 0;
+                            for (i, c) in full_state.text.chars().enumerate() {
+                                if i >= offset.0 {
+                                    break;
+                                }
+                                if Some(c) == next_kept {
+                                    count += 1;
+                                    next_kept = kept.next();
+                                }
+                            }
+                            count
+                        } else {
+                            offset.0
+                        };
+                        floor_grapheme_boundary(
+                            &this.text,
+                            CharOffset(char_idx).to_byte_index(&this.text),
+                        )
+                    };
+                    let sel_start_byte = remap_char_offset(self, full_state.selection.start);
+                    let sel_end_byte = remap_char_offset(self, full_state.selection.end);
                     self.needs_scroll_to_cursor = true;
                     self.selection = Selection {
                         anchor: Cursor {
@@ -2137,21 +2732,46 @@ impl Widget for TextInput {
                     };
 
                     if let Some(composition_range) = &full_state.composition {
-                        self.composition_start = composition_range.start.to_byte_index(&self.text);
-                        self.composition_end = composition_range.end.to_byte_index(&self.text);
+                        // Same filter remap as the selection: when chars were rejected the
+                        // composition offsets index the unfiltered source, so map them onto
+                        // the filtered self.text (remap_char_offset also grapheme-floors).
+                        self.composition_start = remap_char_offset(self, composition_range.start);
+                        self.composition_end = remap_char_offset(self, composition_range.end);
                     } else {
                         self.composition_start = 0;
                         self.composition_end = 0;
                     }
 
-                    self.last_sent_ime_text = self.text.clone();
-                    self.last_sent_ime_sel_start = sel_start_byte;
-                    self.last_sent_ime_sel_end = sel_end_byte;
-                    self.ime_update_frame = cx.redraw_id();
+                    if rejected && self.has_composition() {
+                        // update_ime_context skips the re-push while composing, so push the
+                        // cleaned text (with the remapped composition) directly so the view
+                        // drops the rejected chars before the composition commits.
+                        let sel = CharOffset(self.text[..sel_start_byte].chars().count())
+                            ..CharOffset(self.text[..sel_end_byte].chars().count());
+                        let comp = CharOffset(self.text[..self.composition_start].chars().count())
+                            ..CharOffset(self.text[..self.composition_end].chars().count());
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                        cx.sync_ime_state(self.text.clone(), sel, Some(comp));
+                    } else if rejected {
+                        // The view still holds the rejected chars; force update_ime_context
+                        // to re-push the cleaned text back to it (sentinel selection).
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.last_sent_ime_sel_end = usize::MAX;
+                    } else {
+                        self.last_sent_ime_text = self.text.clone();
+                        self.last_sent_ime_sel_start = sel_start_byte;
+                        self.last_sent_ime_sel_end = sel_end_byte;
+                        self.ime_update_frame = cx.redraw_id();
+                    }
 
+                    // This path bypasses apply_edit(), so keep placeholder/color state in sync.
+                    self.check_text_is_empty(cx);
                     self.draw_bg.redraw(cx);
-                    self.emit_change(cx, uid);
                     if text_changed {
+                        self.emit_change(cx, uid);
                         cx.hide_clipboard_actions();
                     }
                     return;
@@ -2167,16 +2787,13 @@ impl Widget for TextInput {
 
                     let byte_start = start.to_byte_index(&self.text);
                     let byte_end = end.to_byte_index(&self.text);
+                    let (byte_start, byte_end) =
+                        (byte_start.min(byte_end), byte_start.max(byte_end));
 
-                    if self.has_composition() && byte_start < self.composition_start {
-                        let edit_delta =
-                            filtered_text.len() as isize - (byte_end - byte_start) as isize;
-                        self.composition_start =
-                            (self.composition_start as isize + edit_delta).max(0) as usize;
-                    }
-                    self.composition_end = self.composition_start;
+                    self.composition_start = 0;
+                    self.composition_end = 0;
                     self.create_or_extend_edit_group(EditKind::Other);
-                    self.apply_edit(
+                    self.apply_edit_preserving_selection(
                         cx,
                         Edit {
                             start: byte_start,
@@ -2280,41 +2897,67 @@ impl Widget for TextInput {
                 cx.hide_clipboard_actions();
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
+                self.pending_outside_focus_loss_touch = None;
+
                 // iOS autocorrect sends range replacement events
+                let filtered_text = self.filter_input(&event.text, false);
+                if filtered_text.is_empty() && !event.text.is_empty() {
+                    self.update_ime_context(cx);
+                    return;
+                }
+
                 // Convert character indices to byte indices
-                let byte_start = self
-                    .text
-                    .char_indices()
-                    .nth(event.start)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-                let byte_end = self
-                    .text
-                    .char_indices()
-                    .nth(event.end)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.text.len());
-
-                // Ensure valid range (guard against backwards indices)
-                let (byte_start, byte_end) = (byte_start.min(byte_end), byte_start.max(byte_end));
-
-                // Clear any active composition
-                self.composition_end = self.composition_start;
-
-                // Perform the replacement
-                self.create_or_extend_edit_group(EditKind::Other);
-                self.apply_edit(
-                    cx,
-                    Edit {
-                        start: byte_start,
-                        end: byte_end,
-                        replace_with: event.text.clone(),
-                    },
+                let (byte_start, byte_end) =
+                    self.char_range_to_byte_range(event.start, event.end);
+                let resolved_range = self.resolve_external_replace_range(
+                    byte_start,
+                    byte_end,
+                    event.replaced_text.as_deref(),
                 );
 
+                match resolved_range {
+                    Some((byte_start, byte_end)) => {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit_preserving_selection(
+                            cx,
+                            Edit {
+                                start: byte_start,
+                                end: byte_end,
+                                replace_with: filtered_text,
+                            },
+                        );
+                    }
+                    None if event.fallback_to_insert => {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                        self.create_or_extend_edit_group(if filtered_text.is_empty() {
+                            EditKind::Other
+                        } else {
+                            EditKind::Insert
+                        });
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start: self.selection.start().index,
+                                end: self.selection.end().index,
+                                replace_with: filtered_text,
+                            },
+                        );
+                    }
+                    None => {
+                        self.last_sent_ime_sel_start = usize::MAX;
+                        self.update_ime_context(cx);
+                        return;
+                    }
+                }
+
+                self.ime_update_frame = cx.redraw_id();
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
             }
             Hit::TextCopy(event) => {
                 *event.response.borrow_mut() = Some(self.selected_text().to_string());
@@ -2343,10 +2986,10 @@ impl Widget for TextInput {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
                         cx.hide_text_ime();
                         cx.set_key_focus(Area::Empty);
-                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                        self.emit_return(cx, uid, mods);
                     }
                     ImeAction::Next | ImeAction::Previous => {
-                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                        self.emit_return(cx, uid, mods);
                     }
                     ImeAction::Unspecified | ImeAction::None => {}
                 }
@@ -2377,7 +3020,9 @@ impl TextInputRef {
     /// Returns whether this (multiline) text input emits `Returned` on plain
     /// Enter. See [`TextInput::submit_on_enter`] for details.
     pub fn submit_on_enter(&self) -> bool {
-        self.borrow().map(|inner| inner.submit_on_enter()).unwrap_or(false)
+        self.borrow()
+            .map(|inner| inner.submit_on_enter())
+            .unwrap_or(false)
     }
 
     /// Sets whether this (multiline) text input emits `Returned` on plain
@@ -2482,6 +3127,12 @@ impl TextInputRef {
         } else {
             Default::default()
         }
+    }
+
+    /// The caret's rectangle in absolute screen coordinates, or `None` if the
+    /// text hasn't been laid out yet. Useful for anchoring a popup to the cursor.
+    pub fn cursor_rect_in_absolute(&self, cx: &Cx) -> Option<Rect> {
+        self.borrow().and_then(|inner| inner.cursor_rect_in_absolute(cx))
     }
 
     pub fn set_cursor(&self, cx: &mut Cx, cursor: Cursor, keep_selection: bool) {
@@ -2591,6 +3242,61 @@ pub enum TextInputAction {
     Escaped,
     Changed(String),
     KeyDownUnhandled(KeyEvent),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TextNavigation {
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    TextStart,
+    TextEnd,
+    PageUp,
+    PageDown,
+}
+
+impl TextNavigation {
+    fn from_key_event(event: KeyEvent) -> Option<Self> {
+        let modifiers = event.modifiers;
+        if has_only_selection_modifier(modifiers) {
+            return match event.key_code {
+                KeyCode::ArrowLeft => Some(Self::Left),
+                KeyCode::ArrowRight => Some(Self::Right),
+                KeyCode::ArrowUp => Some(Self::Up),
+                KeyCode::ArrowDown => Some(Self::Down),
+                KeyCode::Home => Some(Self::LineStart),
+                KeyCode::End => Some(Self::LineEnd),
+                KeyCode::PageUp => Some(Self::PageUp),
+                KeyCode::PageDown => Some(Self::PageDown),
+                _ => None,
+            };
+        }
+        if is_word_modifier(modifiers) {
+            match event.key_code {
+                KeyCode::ArrowLeft => return Some(Self::WordLeft),
+                KeyCode::ArrowRight => return Some(Self::WordRight),
+                _ => {}
+            }
+        }
+        if is_text_boundary_modifier(modifiers) {
+            let uses_apple_text_boundary = uses_apple_text_boundary_modifier(modifiers);
+            return match event.key_code {
+                KeyCode::Home => Some(Self::TextStart),
+                KeyCode::End => Some(Self::TextEnd),
+                KeyCode::ArrowUp if uses_apple_text_boundary => Some(Self::TextStart),
+                KeyCode::ArrowDown if uses_apple_text_boundary => Some(Self::TextEnd),
+                KeyCode::ArrowLeft if uses_apple_text_boundary => Some(Self::LineStart),
+                KeyCode::ArrowRight if uses_apple_text_boundary => Some(Self::LineEnd),
+                _ => None,
+            };
+        }
+        None
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2743,11 +3449,126 @@ impl Edit {
 }
 
 fn prev_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let floor = floor_grapheme_boundary(text, index);
+    if floor != index {
+        return floor;
+    }
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.prev_boundary(text, 0).unwrap().unwrap_or(0)
 }
 
 fn next_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let ceil = ceil_grapheme_boundary(text, index);
+    if ceil != index {
+        return ceil;
+    }
     let mut cursor = GraphemeCursor::new(index, text.len(), true);
     cursor.next_boundary(text, 0).unwrap().unwrap_or(text.len())
+}
+
+fn floor_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    if index == text.len() {
+        return index;
+    }
+    let mut boundary = 0;
+    for (next_boundary, _) in text.grapheme_indices(true) {
+        if next_boundary > index {
+            break;
+        }
+        boundary = next_boundary;
+    }
+    boundary
+}
+
+fn ceil_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    if index == text.len() {
+        return index;
+    }
+    for (boundary, _) in text.grapheme_indices(true) {
+        if boundary >= index {
+            return boundary;
+        }
+    }
+    text.len()
+}
+
+fn prev_word_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    let mut previous_word_start = 0;
+    for (start, word) in text.unicode_word_indices() {
+        let end = start + word.len();
+        if end >= index {
+            if start < index {
+                return start;
+            }
+            return previous_word_start;
+        }
+        previous_word_start = start;
+    }
+    previous_word_start
+}
+
+fn next_word_boundary(text: &str, index: usize) -> usize {
+    let index = floor_char_boundary(text, index);
+    for (start, word) in text.unicode_word_indices() {
+        let end = start + word.len();
+        if end > index || start >= index {
+            return end;
+        }
+    }
+    text.len()
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn has_only_selection_modifier(modifiers: KeyModifiers) -> bool {
+    !modifiers.control && !modifiers.alt && !modifiers.logo
+}
+
+fn is_word_modifier(modifiers: KeyModifiers) -> bool {
+    if cfg!(target_arch = "wasm32") {
+        return (modifiers.alt ^ modifiers.control) && !modifiers.logo;
+    }
+    if is_apple_text_platform() {
+        modifiers.alt && !modifiers.control && !modifiers.logo
+    } else {
+        modifiers.control && !modifiers.alt && !modifiers.logo
+    }
+}
+
+fn is_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
+    if cfg!(target_arch = "wasm32") {
+        return !modifiers.alt && (modifiers.logo ^ modifiers.control);
+    }
+    if is_apple_text_platform() {
+        modifiers.logo && !modifiers.control && !modifiers.alt
+    } else {
+        modifiers.control && !modifiers.alt && !modifiers.logo
+    }
+}
+
+fn is_line_delete_modifier(modifiers: KeyModifiers) -> bool {
+    uses_apple_text_boundary_modifier(modifiers)
+}
+
+fn uses_apple_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
+    (is_apple_text_platform() && modifiers.logo && !modifiers.control && !modifiers.alt)
+        || (cfg!(target_arch = "wasm32")
+            && modifiers.logo
+            && !modifiers.control
+            && !modifiers.alt)
+}
+
+fn is_apple_text_platform() -> bool {
+    cfg!(target_vendor = "apple")
 }

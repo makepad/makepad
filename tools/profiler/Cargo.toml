@@ -1,0 +1,11 @@
+[package]
+name = "makepad-profiler"
+version = "0.1.0"
+edition = "2021"
+description = "Out-of-process sampling profiler for Makepad Studio"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }

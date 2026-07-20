@@ -30,6 +30,7 @@ use {
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             video_playback::CameraPreviewMode,
             Event,
@@ -41,7 +42,6 @@ use {
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
-            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
@@ -58,6 +58,7 @@ use {
             WindowGeomChangeEvent,
         },
         gpu_info::GpuPerformance,
+        ime::TextInputConfig,
         makepad_live_id::*,
         makepad_math::*,
         media_api::CxMediaApi,
@@ -285,7 +286,11 @@ impl Cx {
         self.gpu_info.performance = GpuPerformance::Tier1;
         // Populate display_context and script heap with the initial display
         // metrics BEFORE Startup, so app script_mod! definitions can use them.
-        let insets = self.os.safe_area_insets;
+        // No window DPI override exists before Startup creates the first
+        // window, so native Android points are layout points for this initial
+        // script heap population. Window creation will publish converted
+        // values through WindowGeomChange once an override can be known.
+        let insets = self.os.native_safe_area_insets;
         let dpi_factor = if self.os.dpi_factor > 0.0 {
             self.os.dpi_factor
         } else {
@@ -317,7 +322,10 @@ impl Cx {
                     let mut pending_touch_move: Option<FromJavaMessage> = None;
                     while let Ok(msg) = from_java_rx.try_recv() {
                         if let FromJavaMessage::Touch(ref touches) = msg {
-                            if touches.iter().all(|t| t.state == crate::event::finger::TouchState::Move) {
+                            if touches
+                                .iter()
+                                .all(|t| t.state == crate::event::finger::TouchState::Move)
+                            {
                                 // This is a pure move event — defer it; a newer one
                                 // may arrive and supersede it.
                                 pending_touch_move = Some(msg);
@@ -343,12 +351,15 @@ impl Cx {
                         continue;
                     }
                     self.os.openxr.logged_waiting_for_session = false;
-                    // If a script re-apply was requested (e.g., safe area insets
-                    // changed on rotation), fire LiveEdit now.
-                    if self.pending_script_reapply {
-                        self.pending_script_reapply = false;
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
+                    // After every event, drain any pending re-apply. The
+                    // cheap gate (both flags false) keeps the hot path
+                    // zero-cost; everything else — picking the right
+                    // `Event` variant for each flag, skipping shader-cache
+                    // reset for manual triggers, deferring a same-tick
+                    // `ScriptReapply` follow-up to keep rotation light —
+                    // is documented in `run_live_edit_if_needed`.
+                    if self.pending_script_reapply || self.pending_live_edit_request {
+                        self.run_live_edit_if_needed("android");
                     }
                     // Drop the frame entirely if the window surface has been
                     // torn down (typically during background/foreground or a
@@ -458,6 +469,22 @@ impl Cx {
         self.os.refresh_surface_snapshot_after_first_present = false;
         unsafe {
             android_jni::to_java_request_surface_snapshot_refresh();
+        }
+    }
+
+    // Dispatches a copy or cut to the focused widget and writes the widget's
+    // response to the system clipboard. Shared by the keyboard and menu paths.
+    fn copy_or_cut_to_clipboard(&mut self, cut: bool) {
+        let response = Rc::new(RefCell::new(None));
+        let e = if cut {
+            Event::TextCut(TextClipboardEvent { response: response.clone() })
+        } else {
+            Event::TextCopy(TextClipboardEvent { response: response.clone() })
+        };
+        self.call_event_handler(&e);
+        let text = response.borrow().clone();
+        if let Some(text) = text {
+            unsafe { to_java_copy_to_clipboard(text); }
         }
     }
 
@@ -672,10 +699,17 @@ impl Cx {
                 self.os.display_size = dvec2(width as f64, height as f64);
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
+                // Stash the OS-reported scale factor so a later
+                // `set_window_dpi_override(None)` can recover the native scale,
+                // and so `remap_dpi_override` (used by `dpi_override_scale`
+                // on platforms whose touch coords aren't already in
+                // override-points) has a baseline. Android itself converts
+                // touch coords at the source, so the helper is a no-op here.
+                window.os_dpi_factor = Some(self.os.dpi_factor);
                 let old_geom = window.window_geom.clone();
 
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                let size = self.os.display_size / dpi_factor;
+                let dpi_factor = window.effective_dpi_factor();
+                let size = window.physical_vec2d_to_layout(self.os.display_size);
                 window.window_geom = WindowGeom {
                     dpi_factor,
                     can_fullscreen: false,
@@ -685,7 +719,8 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
-                    safe_area_insets: self.os.safe_area_insets,
+                    safe_area_insets: window
+                        .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
                     ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
@@ -706,10 +741,9 @@ impl Cx {
                 pointer_id,
                 time,
             } => {
-                let window = &mut self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let window = &self.windows[CxWindowPool::id_zero()];
                 let e = Event::LongPress(LongPressEvent {
-                    abs: abs / dpi_factor,
+                    abs: window.physical_vec2d_to_layout(abs),
                     uid: pointer_id,
                     window_id: CxWindowPool::id_zero(),
                     time,
@@ -718,11 +752,10 @@ impl Cx {
             }
             FromJavaMessage::Touch(mut touches) => {
                 let time = touches[0].time;
-                let window = &mut self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let window = &self.windows[CxWindowPool::id_zero()];
                 for touch in &mut touches {
-                    touch.abs /= dpi_factor;
-                    touch.radius /= dpi_factor;
+                    touch.abs = window.physical_vec2d_to_layout(touch.abs);
+                    touch.radius = window.physical_vec2d_to_layout(touch.radius);
                 }
 
                 // Check for outside-click popup dismiss on touch start
@@ -754,9 +787,11 @@ impl Cx {
 
                 // Synthesize internal drag-and-drop events from touch gestures.
                 if self.os.internal_drag_items.is_some() {
-                    if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::finger::TouchState::Stop
-                    }) {
+                    if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::finger::TouchState::Stop)
+                    {
                         // Touch lifted: fire Drop + DragEnd
                         if let Some(items) = self.os.internal_drag_items.take() {
                             self.call_event_handler(&Event::Drop(DropEvent {
@@ -769,9 +804,11 @@ impl Cx {
                             self.call_event_handler(&Event::DragEnd);
                             self.drag_drop.cycle_drag();
                         }
-                    } else if let Some(touch) = e.touches.iter().find(|t| {
-                        t.state == crate::event::finger::TouchState::Move
-                    }) {
+                    } else if let Some(touch) = e
+                        .touches
+                        .iter()
+                        .find(|t| t.state == crate::event::finger::TouchState::Move)
+                    {
                         // Finger moving: fire Drag event
                         if let Some(items) = self.os.internal_drag_items.as_ref() {
                             self.call_event_handler(&Event::Drag(DragEvent {
@@ -802,62 +839,51 @@ impl Cx {
             FromJavaMessage::KeyDown {
                 keycode,
                 meta_state,
+                is_repeat,
             } => {
-                let e: Event;
                 let makepad_keycode = android_to_makepad_key_code(keycode);
                 if !makepad_keycode.is_unknown() {
                     let control = meta_state & ANDROID_META_CTRL_MASK != 0;
                     let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                     let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
+                    let key_event = KeyEvent {
+                        key_code: makepad_keycode,
+                        is_repeat,
+                        modifiers: KeyModifiers {
+                            shift,
+                            control,
+                            alt,
+                            ..Default::default()
+                        },
+                        time: self.os.timers.time_now(),
+                    };
+                    self.keyboard.process_key_down(key_event.clone());
                     let is_shortcut = control || alt;
-                    if is_shortcut {
-                        if makepad_keycode == KeyCode::KeyC {
-                            let response = Rc::new(RefCell::new(None));
-                            e = Event::TextCopy(TextClipboardEvent {
-                                response: response.clone(),
-                            });
-                            self.call_event_handler(&e);
-                            // let response = response.borrow();
-                            // if let Some(response) = response.as_ref(){
-                            //     to_java.copy_to_clipboard(response);
-                            // }
-                        } else if makepad_keycode == KeyCode::KeyX {
-                            let response = Rc::new(RefCell::new(None));
-                            let e = Event::TextCut(TextClipboardEvent {
-                                response: response.clone(),
-                            });
-                            self.call_event_handler(&e);
-                        } else if makepad_keycode == KeyCode::KeyV {
-                            let content = unsafe { android_jni::to_java_paste_from_clipboard() };
-                            if !content.is_empty() {
-                                e = Event::TextInput(TextInputEvent {
-                                    input: content,
-                                    replace_last: false,
-                                    was_paste: true,
-                                    ..Default::default()
-                                });
-                                self.call_event_handler(&e);
-                            }
+                    // Clipboard shortcuts are consumed here and never reach the
+                    // widget as a key event.
+                    if is_shortcut && makepad_keycode == KeyCode::KeyC {
+                        self.copy_or_cut_to_clipboard(false);
+                    } else if is_shortcut && makepad_keycode == KeyCode::KeyX {
+                        self.copy_or_cut_to_clipboard(true);
+                    } else if is_shortcut && makepad_keycode == KeyCode::KeyV {
+                        let content = unsafe { android_jni::to_java_paste_from_clipboard() };
+                        if !content.is_empty() {
+                            self.call_event_handler(&Event::TextInput(TextInputEvent {
+                                input: content,
+                                replace_last: false,
+                                was_paste: true,
+                                ..Default::default()
+                            }));
                         }
                     } else {
+                        // Everything else reaches the widget as a KeyDown, including
+                        // other Ctrl/Alt shortcuts like Ctrl+Enter or Ctrl+A.
                         if makepad_keycode == KeyCode::Back {
                             self.call_event_handler(&Event::BackPressed {
                                 handled: Cell::new(false),
                             });
                         }
-
-                        e = Event::KeyDown(KeyEvent {
-                            key_code: makepad_keycode,
-                            is_repeat: false,
-                            modifiers: KeyModifiers {
-                                shift,
-                                control,
-                                alt,
-                                ..Default::default()
-                            },
-                            time: self.os.timers.time_now(),
-                        });
-                        self.call_event_handler(&e);
+                        self.call_event_handler(&Event::KeyDown(key_event));
                     }
                 }
             }
@@ -870,7 +896,7 @@ impl Cx {
                 let alt = meta_state & ANDROID_META_ALT_MASK != 0;
                 let shift = meta_state & ANDROID_META_SHIFT_MASK != 0;
 
-                let e = Event::KeyUp(KeyEvent {
+                let key_event = KeyEvent {
                     key_code: makepad_keycode,
                     is_repeat: false,
                     modifiers: KeyModifiers {
@@ -880,32 +906,65 @@ impl Cx {
                         ..Default::default()
                     },
                     time: self.os.timers.time_now(),
-                });
-                self.call_event_handler(&e);
+                };
+                if !makepad_keycode.is_unknown() {
+                    self.keyboard.process_key_up(key_event.clone());
+                }
+                self.call_event_handler(&Event::KeyUp(key_event));
             }
             FromJavaMessage::ResizeTextIME {
                 keyboard_height,
                 is_open,
             } => {
-                let keyboard_height = (keyboard_height as f64) / self.os.dpi_factor;
-                if !is_open {
-                    self.os.keyboard_closed = keyboard_height;
-                }
+                // Java reports the bottom IME occlusion in physical pixels.
+                // Convert to Makepad layout points and dedup repeated inset/layout
+                // callbacks. A visible IME may still have zero bottom
+                // occlusion (floating keyboard, transient animation frame);
+                // keep it as a visible zero-height keyboard so KeyboardView can
+                // clear any previous bottom shift without treating focus as
+                // dismissed.
+                let height_logical = self.windows[CxWindowPool::id_zero()]
+                    .physical_pixels_to_layout(keyboard_height as f64);
+                let time = self.os.timers.time_now();
                 if is_open {
+                    if self.os.last_ime_visible
+                        && (height_logical - self.os.last_ime_height).abs() < 0.5
+                    {
+                        return;
+                    }
+                    self.os.last_ime_visible = true;
+                    self.os.last_ime_height = height_logical;
                     self.call_event_handler(&Event::VirtualKeyboard(
                         VirtualKeyboardEvent::DidShow {
-                            height: keyboard_height - self.os.keyboard_closed,
-                            time: self.os.timers.time_now(),
+                            height: height_logical,
+                            time,
                         },
                     ))
-                } else {
-                    self.text_ime_was_dismissed();
+                } else if !is_open {
+                    // Java says the keyboard is down; forget the last shown
+                    // config so the next `ShowTextIME` re-issues the request.
+                    self.os.last_ime_config = None;
+                    if !self.os.last_ime_visible {
+                        return;
+                    }
+                    self.os.last_ime_visible = false;
+                    self.os.last_ime_height = 0.0;
+                    // With a physical keyboard attached, Android auto-hides the
+                    // soft keyboard while the focused TextInput stays active.
+                    // Marking the IME dismissed (and re-issuing HideTextIME) would
+                    // stop the IME from composing hardware-key input and freeze the
+                    // IME position. Mirror the iOS guard (see ios.rs handling of
+                    // VirtualKeyboardEvent::DidHide).
+                    if !self.keyboard.has_physical_keyboard() {
+                        self.text_ime_was_dismissed();
+                    }
                     self.call_event_handler(&Event::VirtualKeyboard(
-                        VirtualKeyboardEvent::DidHide {
-                            time: self.os.timers.time_now(),
-                        },
+                        VirtualKeyboardEvent::DidHide { time },
                     ))
                 }
+            }
+            FromJavaMessage::PhysicalKeyboard { connected } => {
+                self.update_physical_keyboard_state(connected);
             }
             FromJavaMessage::HttpResponse {
                 request_id,
@@ -1181,31 +1240,9 @@ impl Cx {
             }
             FromJavaMessage::ClipboardAction { action } => {
                 if action == "copy" {
-                    let response = Rc::new(RefCell::new(None));
-                    let e = Event::TextCopy(TextClipboardEvent {
-                        response: response.clone(),
-                    });
-                    self.call_event_handler(&e);
-                    // Get the copied text from the widget's response
-                    if let Some(text) = response.borrow().as_ref() {
-                        // Copy to clipboard
-                        unsafe {
-                            to_java_copy_to_clipboard(text.clone());
-                        }
-                    };
+                    self.copy_or_cut_to_clipboard(false);
                 } else if action == "cut" {
-                    let response = Rc::new(RefCell::new(None));
-                    let e = Event::TextCut(TextClipboardEvent {
-                        response: response.clone(),
-                    });
-                    self.call_event_handler(&e);
-                    // Get the cut text from the widget's response
-                    if let Some(text) = response.borrow().as_ref() {
-                        // Copy to clipboard
-                        unsafe {
-                            to_java_copy_to_clipboard(text.clone());
-                        }
-                    };
+                    self.copy_or_cut_to_clipboard(true);
                 } else if action == "select_all" {
                     // Simulate Ctrl+A keypress to trigger select_all in widgets
                     let e = Event::KeyDown(KeyEvent {
@@ -1238,11 +1275,10 @@ impl Cx {
                 time,
             } => {
                 let window = &self.windows[CxWindowPool::id_zero()];
-                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                 let e = Event::SelectionHandleDrag(SelectionHandleDragEvent {
                     handle,
                     phase,
-                    abs: abs / dpi_factor,
+                    abs: window.physical_vec2d_to_layout(abs),
                     time,
                 });
                 self.call_event_handler(&e);
@@ -1293,13 +1329,14 @@ impl Cx {
                     bottom,
                     left,
                 };
-                if self.os.safe_area_insets != new_insets {
-                    self.os.safe_area_insets = new_insets;
+                if self.os.native_safe_area_insets != new_insets {
+                    self.os.native_safe_area_insets = new_insets;
                     // Update the WindowGeom with the new safe area insets
                     let window_id = CxWindowPool::id_zero();
                     let window = &mut self.windows[window_id];
                     let old_geom = window.window_geom.clone();
-                    window.window_geom.safe_area_insets = new_insets;
+                    let safe_area_insets = window.native_safe_area_insets_to_layout(new_insets);
+                    window.window_geom.safe_area_insets = safe_area_insets;
                     let new_geom = window.window_geom.clone();
                     if old_geom != new_geom {
                         self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -1770,6 +1807,7 @@ impl Cx {
 
             let mut initial_params: Option<AndroidParams> = None;
             let mut initial_surface: Option<(*mut ndk_sys::ANativeWindow, i32, i32)> = None;
+            let mut initial_physical_keyboard: Option<bool> = None;
 
             let (window, width, height, android_params) = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
@@ -1793,13 +1831,18 @@ impl Cx {
                         width,
                         height,
                     }) => {
-                        if let Some((old_window, _, _)) = initial_surface.replace((window, width, height)) {
+                        if let Some((old_window, _, _)) =
+                            initial_surface.replace((window, width, height))
+                        {
                             unsafe {
                                 if !old_window.is_null() {
                                     ndk_sys::ANativeWindow_release(old_window);
                                 }
                             }
                         }
+                    }
+                    Ok(FromJavaMessage::PhysicalKeyboard { connected }) => {
+                        initial_physical_keyboard = Some(connected);
                     }
                     Ok(FromJavaMessage::SurfaceDestroyed { ack }) => {
                         if let Some((old_window, _, _)) = initial_surface.take() {
@@ -1823,6 +1866,9 @@ impl Cx {
 
             cx.os.dpi_factor = android_params.density;
             cx.os_type = OsType::Android(android_params);
+            if let Some(connected) = initial_physical_keyboard {
+                cx.set_physical_keyboard_state(connected);
+            }
             cx.os.display_size = dvec2(width as f64, height as f64);
 
             // SAFETY:
@@ -2197,8 +2243,9 @@ impl Cx {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
                     let window = &mut self.windows[window_id];
-                    let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
-                    let size = self.os.display_size / dpi_factor;
+                    window.os_dpi_factor = Some(self.os.dpi_factor);
+                    let dpi_factor = window.effective_dpi_factor();
+                    let size = window.physical_vec2d_to_layout(self.os.display_size);
                     window.window_geom = WindowGeom {
                         dpi_factor,
                         can_fullscreen: false,
@@ -2208,12 +2255,18 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
-                        safe_area_insets: self.os.safe_area_insets,
+                        safe_area_insets: window
+                            .native_safe_area_insets_to_layout(self.os.native_safe_area_insets),
                         ..Default::default()
                     };
                     window.is_created = true;
-                    //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
-                    //crate::log!("{}",ret);
+                    // To request a specific surface frame rate here, use
+                    // `ANativeWindow_setFrameRate` — but note it is API 30+.
+                    // It must be `dlsym`-resolved from libandroid.so and gated
+                    // on `sdk_version >= 30` (the same pattern as the
+                    // Choreographer callbacks in `ndk_sys.rs` / `android_jni.rs`),
+                    // never declared as a plain `extern "C"`, or it breaks
+                    // `dlopen` of libmakepad.so on API 26-29 devices.
                     let new_geom = window.window_geom.clone();
                     let old_geom = window.window_geom.clone();
                     self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -2229,10 +2282,9 @@ impl Cx {
                     size,
                     grab_keyboard,
                 } => {
-                    let dpi_factor = self.windows[parent_window_id]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    let dpi_factor = self.windows[parent_window_id].effective_dpi_factor();
                     let window = &mut self.windows[window_id];
+                    window.os_dpi_factor = Some(self.os.dpi_factor);
                     window.window_geom = WindowGeom {
                         dpi_factor,
                         can_fullscreen: false,
@@ -2275,24 +2327,52 @@ impl Cx {
                     self.os.timers.timers.remove(&timer_id);
                 }
                 CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
-                    android_jni::to_java_configure_keyboard(&config);
-                    android_jni::to_java_show_keyboard(true);
+                    // A focused `TextInput` re-issues `ShowTextIME` on every
+                    // draw. Calling into Java each time thrashes the IME:
+                    // `configure_keyboard` can restart the input connection,
+                    // and under the edge-to-edge insets of targetSdk 35 the
+                    // resulting inset change triggers a `redraw_all()`, which
+                    // re-draws the `TextInput`, which re-issues `ShowTextIME`
+                    // — a loop that flickers the soft keyboard open then shut.
+                    // Only touch Java when the requested config actually
+                    // changes; `last_ime_config` is cleared whenever the
+                    // keyboard goes down (here or via `ResizeTextIME`).
+                    if self.os.last_ime_config != Some(config) {
+                        android_jni::to_java_configure_keyboard(&config);
+                        android_jni::to_java_show_keyboard(true);
+                        self.os.last_ime_config = Some(config);
+                    }
                 },
                 CxOsOp::HideTextIME => unsafe {
+                    // Unconditional on purpose: unlike `ShowTextIME` this is not
+                    // issued per-frame, so there is no thrash to dedup — and a
+                    // skipped hide would leave the soft keyboard stuck open.
                     android_jni::to_java_show_keyboard(false);
+                    self.os.last_ime_config = None;
                 },
                 CxOsOp::SyncImeState {
                     text,
                     selection,
-                    composition: _,
+                    composition,
                 } => {
                     let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
                     let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
+                    let (comp_start_utf16, comp_end_utf16) = if let Some(composition) = composition
+                    {
+                        (
+                            composition.start.to_utf16_index(&text) as i32,
+                            composition.end.to_utf16_index(&text) as i32,
+                        )
+                    } else {
+                        (-1, -1)
+                    };
                     unsafe {
                         android_jni::to_java_update_ime_text_state(
                             &text,
                             sel_start_utf16,
                             sel_end_utf16,
+                            comp_start_utf16,
+                            comp_end_utf16,
                         );
                     }
                 }
@@ -2301,22 +2381,18 @@ impl Cx {
                 },
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => unsafe {
-                    // Rust positions are in logical points; Android overlay APIs expect physical pixels.
-                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    // Rust positions are in Makepad layout points; Android overlay APIs expect physical pixels.
+                    let window = &self.windows[CxWindowPool::id_zero()];
                     android_jni::to_java_show_selection_handles(
-                        start * dpi_factor,
-                        end * dpi_factor,
+                        window.layout_vec2d_to_physical_pixels(start),
+                        window.layout_vec2d_to_physical_pixels(end),
                     );
                 },
                 CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
-                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
-                        .dpi_override
-                        .unwrap_or(self.os.dpi_factor);
+                    let window = &self.windows[CxWindowPool::id_zero()];
                     android_jni::to_java_update_selection_handles(
-                        start * dpi_factor,
-                        end * dpi_factor,
+                        window.layout_vec2d_to_physical_pixels(start),
+                        window.layout_vec2d_to_physical_pixels(end),
                     );
                 },
                 CxOsOp::HideSelectionHandles => unsafe {
@@ -2328,11 +2404,12 @@ impl Cx {
                     rect,
                     keyboard_shift,
                 } => unsafe {
+                    let dpi_factor = self.windows[CxWindowPool::id_zero()].effective_dpi_factor();
                     android_jni::to_java_show_clipboard_actions(
                         has_selection,
                         rect,
                         keyboard_shift,
-                        self.os.dpi_factor,
+                        dpi_factor,
                     );
                 },
                 CxOsOp::HideClipboardActions => unsafe {
@@ -2340,10 +2417,12 @@ impl Cx {
                 },
                 CxOsOp::AttachCameraNativePreview { video_id, area } => {
                     let rect = area.clipped_rect(self);
-                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
-                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
-                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
-                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    let rect =
+                        self.windows[CxWindowPool::id_zero()].layout_rect_to_physical_pixels(rect);
+                    let left = rect.pos.x as i32;
+                    let top = rect.pos.y as i32;
+                    let right = (rect.pos.x + rect.size.x) as i32;
+                    let bottom = (rect.pos.y + rect.size.y) as i32;
                     unsafe {
                         android_jni::to_java_attach_camera_preview(
                             video_id, left, top, right, bottom,
@@ -2356,10 +2435,12 @@ impl Cx {
                     visible,
                 } => {
                     let rect = area.clipped_rect(self);
-                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
-                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
-                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
-                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    let rect =
+                        self.windows[CxWindowPool::id_zero()].layout_rect_to_physical_pixels(rect);
+                    let left = rect.pos.x as i32;
+                    let top = rect.pos.y as i32;
+                    let right = (rect.pos.x + rect.size.x) as i32;
+                    let bottom = (rect.pos.y + rect.size.y) as i32;
                     unsafe {
                         android_jni::to_java_update_camera_preview(
                             video_id, left, top, right, bottom, visible,
@@ -2797,6 +2878,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_system_bar_appearance(env, dark_icons);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -3058,8 +3145,10 @@ impl Default for CxOs {
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
-            safe_area_insets: Default::default(),
-            keyboard_closed: 0.0,
+            native_safe_area_insets: Default::default(),
+            last_ime_height: 0.0,
+            last_ime_visible: false,
+            last_ime_config: None,
             media: CxAndroidMedia::default(),
             display: None,
             surface_alive: false,
@@ -3137,8 +3226,24 @@ pub struct CxOs {
     pub refresh_surface_snapshot_after_first_present: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
-    pub safe_area_insets: crate::event::SafeAreaInsets,
-    pub keyboard_closed: f64,
+    /// Safe area insets in native Android logical points (`px / density`).
+    /// Convert through `CxWindow` before exposing them to widgets.
+    pub native_safe_area_insets: crate::event::SafeAreaInsets,
+    /// Last reported soft-keyboard height in Makepad layout points. Used to dedup
+    /// repeated inset notifications from `onApplyWindowInsets` /
+    /// `onGlobalLayout` so we don't re-fire `VirtualKeyboardEvent`s on
+    /// unrelated layout passes.
+    pub last_ime_height: f64,
+    /// Whether the soft keyboard was visible the last time we dispatched a
+    /// `VirtualKeyboardEvent`. Pairs with `last_ime_height` for dedup.
+    pub last_ime_visible: bool,
+    /// The `TextInputConfig` last sent to the Android IME via `ShowTextIME`,
+    /// or `None` while the keyboard is requested-hidden. A focused `TextInput`
+    /// re-issues `ShowTextIME` every draw; this dedups those so the JNI IME
+    /// calls (and the inset-driven redraw loop they trigger) fire only on a
+    /// real change. Reset to `None` on `HideTextIME` and when Java reports the
+    /// keyboard closed.
+    pub last_ime_config: Option<TextInputConfig>,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,

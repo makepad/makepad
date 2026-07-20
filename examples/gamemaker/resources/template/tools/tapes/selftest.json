@@ -1,0 +1,9 @@
+{ "probe": ["player"],
+  "events": [
+    { "f": 5, "press": "right" },
+    { "f": 30, "press": "jump" },
+    { "f": 33, "release": "jump" },
+    { "f": 60, "press": "jump" },
+    { "f": 63, "release": "jump" },
+    { "f": 100, "release": "right" }
+  ] }

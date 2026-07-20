@@ -47,6 +47,7 @@ pub mod ime;
 mod live_reload;
 mod macos_menu;
 mod performance_stats;
+pub mod perf_monitor;
 pub mod permission;
 mod texture;
 mod uniform_buffer;
@@ -107,6 +108,7 @@ pub use {
         cursor::MouseCursor,
         cx::{Cx, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
+        display_context::{DisplayContext, SystemBarAppearance},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
@@ -151,6 +153,8 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            QuitReason,
+            QuitRequestedEvent,
             SafeAreaInsets,
             SelectionHandleDragEvent,
             SelectionHandleKind,
@@ -196,6 +200,7 @@ pub use {
         },
         midi::*,
         os::*,
+        perf_monitor::*,
         playback_session::{
             mix_active_media_audio, register_active_media_audio, register_media_playback_session,
             take_registered_media_playback_session, unregister_active_media_audio,

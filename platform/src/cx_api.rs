@@ -5,13 +5,15 @@ use {
         area::Area,
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType, XrCapabilities},
+        display_context::SystemBarAppearance,
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
         event::{
-            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger, VideoSource,
+            video_playback::CameraPreviewMode, DragItem, Event, NextFrame, QuitReason,
+            QuitRequestedEvent, Timer, Trigger, VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -23,7 +25,7 @@ use {
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
         texture::{Texture, TextureId},
-        window::WindowId,
+        window::{CxWindow, WindowId},
         window::WindowVisuals,
     },
     std::{
@@ -258,8 +260,15 @@ pub enum CxOsOp {
     SetTopmost(WindowId, bool),
     SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
+    /// Tints the system bar (status/navigation bar) icons: `true` requests
+    /// dark icons, `false` requests light icons. Honored on Android and iOS
+    /// (iOS only has a status bar).
+    SetSystemBarDarkIcons(bool),
 
-    ShowTextIME(Area, Vec2d, TextInputConfig),
+    // The `Rect` is the caret/composition line's bounding box (top-left + size,
+    // line height included), so each backend can ask the OS to place the IME
+    // candidate window directly above/below the line instead of over it.
+    ShowTextIME(Area, Rect, TextInputConfig),
     HideTextIME,
     SyncImeState {
         text: String,
@@ -415,6 +424,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
+            Self::SetSystemBarDarkIcons(..) => write!(f, "SetSystemBarDarkIcons"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
@@ -487,14 +497,48 @@ impl Cx {
         self.in_draw_event
     }
 
-    /// Updates the `mod.widgets.SAFE_INSET_PAD_*` values on the script heap
-    /// so that Splash code can reference them in widget definitions.
-    /// Requests a deferred re-application of all script/Splash widget definitions,
-    /// causing widgets to pick up updated values from the script heap.
-    /// The re-apply happens on the next event loop iteration (not synchronously),
-    /// to avoid re-entrancy issues when called from within an event handler.
+    /// Requests a deferred `Event::ScriptReapply` on the next event-loop
+    /// iteration. The captured app value is re-applied with
+    /// `Apply::ScriptReapply` — no `script_mod` re-run, so runtime
+    /// `script_eval!` overrides on the heap are preserved. Widgets that
+    /// reference shared heap objects (e.g. `mod.widgets.IMG_MSG_FIT`) pick
+    /// up in-place mutations on this re-apply walk.
+    ///
+    /// Use this when the change you made is a runtime mutation of a shared
+    /// heap object — typically a `script_eval!` override.
     pub fn request_script_reapply(&mut self) {
         self.pending_script_reapply = true;
+    }
+
+    /// Requests a deferred `Event::LiveEdit` on the next event-loop iteration.
+    /// The handler re-runs `script_mod` (re-evaluating any expressions that
+    /// reference primitive heap values like `mod.widgets.SAFE_INSET_PAD_TOP`)
+    /// and then re-applies the widget tree with `Apply::Reload`.
+    ///
+    /// Use this only when a primitive heap value has changed and that value
+    /// is consumed by `script_mod!` block expressions — those expressions are
+    /// not re-evaluated by `Apply::ScriptReapply`. `Apply::Reload` walks
+    /// clobber runtime widget state (animator values, dynamic instance
+    /// buffers, user-typed text in widgets that don't early-return on
+    /// LiveEdit), so prefer `request_script_reapply` when the change can be
+    /// modeled as a shared-heap-object mutation instead.
+    pub fn request_live_edit(&mut self) {
+        self.pending_live_edit_request = true;
+    }
+
+    /// Remap an absolute coordinate from the OS-reported logical-point space
+    /// into the layout's logical-point space when a `dpi_override` is active
+    /// on the given window. No-op if no override is set or `os_dpi_factor`
+    /// hasn't been recorded yet.
+    ///
+    /// Platform-specific event handlers call this on every `abs` field of
+    /// pointer/touch/scroll events so input still hits the right widget when
+    /// zoom is active. Android/OpenHarmony don't need it because they divide
+    /// raw pixels by the override-aware `dpi_factor` at the source — so this
+    /// helper is dead code on those builds, hence the `allow(dead_code)`.
+    #[allow(dead_code)]
+    pub(crate) fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
+        *pos = self.windows[window_id].remap_dpi_override(*pos);
     }
 
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
@@ -794,6 +838,27 @@ impl Cx {
         self.platform_ops.push(CxOsOp::Quit);
     }
 
+    pub fn request_quit(&mut self, reason: QuitReason) -> bool {
+        let event = Event::QuitRequested(QuitRequestedEvent::new(reason));
+        self.call_event_handler(&event);
+
+        let was_handled = match &event {
+            Event::QuitRequested(e) => e.handled.get(),
+            _ => false,
+        };
+        if !was_handled {
+            self.quit();
+        }
+        was_handled
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    pub(crate) fn handle_termination_signal(&mut self) {
+        if crate::os::termination_signal::take_requested() {
+            self.request_quit(QuitReason::Signal);
+        }
+    }
+
     pub fn browser_update_url(&mut self, url: &str, replace: bool) {
         <Self as CxOsApi>::browser_update_url(self, url, replace);
     }
@@ -814,6 +879,21 @@ impl Cx {
     pub fn show_in_dock(&mut self, show: bool) {
         self.platform_ops.push(CxOsOp::ShowInDock(show));
     }
+
+    /// Controls how the system bars (status bar and navigation bar) icons and
+    /// text are tinted, on platforms that support it (currently Android only).
+    ///
+    /// The default is [`SystemBarAppearance::Auto`], which picks dark or light
+    /// system-bar icons automatically from the luminance of the window's
+    /// background color (`clear_color`): a light background gets dark icons, a
+    /// dark background gets light icons. Pass [`SystemBarAppearance::DarkIcons`]
+    /// or [`SystemBarAppearance::LightIcons`] to override that automatic choice.
+    ///
+    /// The request is resolved and applied by the `Window` widget on its next
+    /// event cycle.
+    pub fn set_system_bar_appearance(&mut self, appearance: SystemBarAppearance) {
+        self.display_context.system_bar_appearance = appearance;
+    }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
             self.platform_ops.push(op);
@@ -821,14 +901,28 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
-        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
+        // No line metrics from this entry point: a zero-height rect anchors the
+        // IME at the bare point (same behavior as before the rect change).
+        self.show_text_ime_with_config(
+            area,
+            Rect {
+                pos,
+                size: Vec2d::default(),
+            },
+            TextInputConfig::default(),
+        );
     }
 
-    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
+    pub fn show_text_ime_with_config(
+        &mut self,
+        area: Area,
+        cursor_rect: Rect,
+        config: TextInputConfig,
+    ) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
             self.platform_ops
-                .push(CxOsOp::ShowTextIME(area, pos, config));
+                .push(CxOsOp::ShowTextIME(area, cursor_rect, config));
         }
     }
 
@@ -855,6 +949,49 @@ impl Cx {
         self.platform_ops.push(CxOsOp::HideTextIME);
     }
 
+    /// Set or clear a window's `dpi_override` at runtime.
+    ///
+    /// This rewrites the stored `WindowGeom` from the previous effective DPI to
+    /// the new effective DPI, including every in-window metric that must remain
+    /// physically fixed: inner/outer size, safe-area insets, and native chrome
+    /// button bounds. The resulting synthetic `WindowGeomChange` is queued so
+    /// this can be called from inside normal event/action handlers.
+    pub fn set_window_dpi_override(
+        &mut self,
+        window_id: WindowId,
+        dpi_override: Option<f64>,
+    ) {
+        let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
+        let window = &mut self.windows[window_id];
+        let current_dpi = window.effective_dpi_factor();
+        let target_dpi = dpi_override.unwrap_or_else(|| window.native_dpi_factor());
+
+        if (target_dpi - current_dpi).abs() < f64::EPSILON {
+            window.dpi_override = dpi_override;
+            window.window_geom.dpi_factor = target_dpi;
+            return;
+        }
+
+        let old_geom = window.window_geom.clone();
+        let scale = current_dpi / target_dpi;
+        window.dpi_override = dpi_override;
+        window.window_geom.inner_size *= scale;
+        window.window_geom.outer_size *= scale;
+        window.window_geom.safe_area_insets = window.window_geom.safe_area_insets.scale(scale);
+        window.window_geom.window_chrome_buttons =
+            CxWindow::scale_rect(window.window_geom.window_chrome_buttons, scale);
+        window.window_geom.dpi_factor = target_dpi;
+        let new_geom = window.window_geom.clone();
+
+        self.pending_window_geom_changes
+            .push(crate::event::WindowGeomChangeEvent {
+                window_id,
+                old_geom,
+                new_geom,
+            });
+        self.redraw_all();
+    }
+
     /// Shows the native clipboard actions menu (Copy/Paste/Cut/Select All).
     ///
     /// Displays a platform-specific floating menu with text editing actions. The menu items
@@ -865,8 +1002,8 @@ impl Cx {
     ///
     /// # Parameters
     /// * `has_selection` - Whether text is currently selected (enables Copy/Cut actions)
-    /// * `rect` - Selection bounding box in logical pixels (for menu positioning)
-    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in logical pixels)
+    /// * `rect` - Selection bounding box in Makepad layout points (for menu positioning)
+    /// * `keyboard_shift` - Vertical offset caused by virtual keyboard (in Makepad layout points)
     ///
     /// # Platform Support
     /// - Android: Uses ActionMode with floating toolbar
@@ -1040,6 +1177,12 @@ impl Cx {
             return self.get_delegated_dpi_factor(draw_pass_id);
         }
         return 1.0;
+    }
+
+    pub fn get_window_id_of(&self, area: &Area) -> Option<WindowId> {
+        let draw_list_id = area.draw_list_id()?;
+        let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id?;
+        self.get_pass_window_id(draw_pass_id)
     }
 
     pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {

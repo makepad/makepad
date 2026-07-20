@@ -6,12 +6,14 @@
 - Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
+- For UI runnable targets, do not prebuild or precheck the app from the shell before launching it in Studio. Let the Studio `RunItem` build be the single build path so Cargo fingerprints, env vars, target dirs, and flags stay identical.
 - Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
 - `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
 - Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
 - Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
+- When adding a new example crate, update both the Cargo workspace and `makepad.splash` so Studio exposes the new example as a runnable item.
 
 ## Assumptions
 - Studio is started manually by the user.
@@ -135,7 +137,7 @@ Use the Studio bridge runnable-item flow instead of launching UI apps directly f
 
 Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
 
-Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations. They are not a substitute for a fresh Studio re-run.
+Use direct shell cargo commands only for non-UI tasks such as library checks, tests, and file/search operations. Do not run shell `cargo check`, `cargo build`, or `cargo run` for UI runnable targets that will be launched via Studio.
 
 When those non-UI tasks are used for runtime behavior or performance measurements, prefer their release variants (`cargo run --release`, `cargo test --release`, `cargo build --release`).
 

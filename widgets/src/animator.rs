@@ -1,4 +1,7 @@
-use crate::makepad_platform::*;
+use crate::{
+    makepad_platform::*,
+    widget_async::{CxSplashVmExt, SplashVmId},
+};
 use makepad_math::Vec4f;
 use std::f64::consts::PI;
 
@@ -261,6 +264,21 @@ struct AnimatorTrack {
     redraw: bool,
 }
 
+/// A `cut`/`play` requested while the script VM was held — e.g. from a widget's
+/// `on_after_apply` during a `ScriptReapply`/`Reload` walk, which runs inside
+/// the app's `cx.with_vm`. Calling `cut`/`play` then would re-enter `cx.with_vm`
+/// and panic ("Script VM swapped off"). Instead we queue the op here and replay
+/// it from `animator_handle_event_scoped` on the next frame, when the VM is free.
+struct DeferredImmediate {
+    state: [LiveId; 2],
+    kind: DeferredKind,
+}
+
+enum DeferredKind {
+    Cut,
+    Play(Option<Play>),
+}
+
 #[derive(Default, Script)]
 pub struct Animator {
     #[rust]
@@ -269,6 +287,8 @@ pub struct Animator {
     pub next_frame: NextFrame,
     #[rust]
     pub groups: LiveIdMap<LiveId, AnimatorGroup>,
+    #[rust]
+    vm_id: SplashVmId,
     /// Runtime: Current state for each state group
     #[rust]
     current_states: LiveIdMap<LiveId, LiveId>,
@@ -280,6 +300,11 @@ pub struct Animator {
     /// Uses ScriptObjectRef to prevent GC from freeing it
     #[rust]
     state_object: Option<ScriptObjectRef>,
+    /// Cut/play ops deferred because the script VM was held when they were
+    /// requested (see `DeferredImmediate`); replayed by `flush_deferred` once
+    /// the VM is free.
+    #[rust]
+    deferred: Vec<DeferredImmediate>,
 }
 
 impl ScriptHook for Animator {
@@ -293,6 +318,8 @@ impl ScriptHook for Animator {
         let Some(obj) = value.as_object() else {
             return false;
         };
+        let obj_ref = vm.bx.heap.new_object_ref(obj);
+        self.vm_id = vm.cx_mut().script_ref_vm_id(&obj_ref);
 
         let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
             for (key, map_value) in map.iter() {
@@ -330,16 +357,26 @@ impl ScriptApplyDefault for Animator {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) -> Option<ScriptValue> {
-        if !apply.is_new() || apply.is_eval() {
+        if apply.is_live_edit_reload() || apply.is_animate() || apply.is_eval() {
             return None;
         }
-        let index = apply.as_default().map_or(0, |x| x + 1);
-        let (_, group) = self.groups.iter().nth(index)?;
-        let state = group.states.get(&group.default)?;
 
-        // Return the apply value from that state
-        let apply = state.apply?.into();
-        Some(apply)
+        if let Some(state_obj_ref) = self.state_object.as_ref() {
+            if apply.as_default().is_none() {
+                return Some(state_obj_ref.as_object().into());
+            }
+            return None;
+        }
+
+        let index = apply.as_default().map_or(0, |x| x + 1);
+        let (group_id, group) = self.groups.iter().nth(index)?;
+        let state_id = self
+            .current_states
+            .get(group_id)
+            .copied()
+            .unwrap_or(group.default);
+        let state = group.states.get(&state_id)?;
+        Some(state.apply?.into())
     }
 }
 
@@ -359,6 +396,56 @@ impl AnimatorAction {
 }
 
 impl Animator {
+    /// The VM that owns this animator's script objects: the isolate VM of the
+    /// `Splash` the widget was built in, or `MAIN_SPLASH_VM_ID` for the app VM.
+    /// Captured from the animator's own object ref in `on_custom_apply`.
+    pub fn vm_id(&self) -> SplashVmId {
+        self.vm_id
+    }
+
+    /// Apply an animator-produced value to `target` in the VM that owns it.
+    ///
+    /// `cut`/`play`/`handle_event`/`flush_deferred` build their apply object on
+    /// the animator's own heap. Applying it under the plain `cx.with_vm` would
+    /// resolve isolate object pointers against the *app* heap — an out-of-bounds
+    /// index at best, silent cross-VM corruption at worst. So the apply has to
+    /// run under the same VM that produced the value. Called by the `Animator`
+    /// derive; for `MAIN_SPLASH_VM_ID` this is exactly `cx.with_vm`.
+    pub fn apply_value<T: ScriptApply>(
+        cx: &mut Cx,
+        vm_id: SplashVmId,
+        target: &mut T,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        cx.with_script_vm_id(vm_id, |vm| {
+            target.script_apply(vm, &Apply::Animate, scope, value);
+        });
+    }
+
+    /// Returns the apply `ScriptObject` for the current state of the given
+    /// state group, falling back to the group's default state if no current
+    /// state is set yet.
+    ///
+    /// Useful from a widget's `on_after_apply` hook on `Apply::ScriptReapply`
+    /// to re-snap animator-driven fields (`walk.height`, `View.visible`,
+    /// shader uniforms, etc.) after a `request_script_reapply` walk has
+    /// clobbered them with the template defaults — the caller can apply
+    /// the returned object via `self.script_apply(vm, &Apply::Animate, ...)`
+    /// directly, without going through `animator_cut` (which calls
+    /// `cx.with_vm` and would panic if the VM is already held by the
+    /// surrounding apply chain).
+    pub fn current_state_apply(&self, group_id: LiveId) -> Option<ScriptObject> {
+        let group = self.groups.get(&group_id)?;
+        let state_id = self
+            .current_states
+            .get(&group_id)
+            .copied()
+            .unwrap_or(group.default);
+        let state = group.states.get(&state_id)?;
+        state.apply
+    }
+
     /// Start animating to a new state
     pub fn play(
         &mut self,
@@ -423,7 +510,8 @@ impl Animator {
             // Update current state
             self.current_states.insert(group_id, target_state_id);
             // Merge target values into state_object
-            cx.with_vm(|vm| {
+            let vm_id = self.vm_id;
+            cx.with_script_vm_id(vm_id, |vm| {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
@@ -448,7 +536,8 @@ impl Animator {
         // once per play() call, NOT during animation frames.
         // The snapshot must be a separate object that won't be mutated during animation.
         // We sample from state_object (current animated values) or fall back to static state apply.
-        let from_snapshot = cx.with_vm(|vm| {
+        let vm_id = self.vm_id;
+        let from_snapshot = cx.with_script_vm_id(vm_id, |vm| {
             let snapshot = vm.bx.heap.new_object();
 
             // Get the default state's apply for fallback values
@@ -547,7 +636,8 @@ impl Animator {
         self.current_states.insert(group_id, target_state_id);
 
         // Merge target values into state_object
-        cx.with_vm(|vm| {
+        let vm_id = self.vm_id;
+        cx.with_script_vm_id(vm_id, |vm| {
             let state_obj = if let Some(ref obj_ref) = self.state_object {
                 obj_ref.as_object()
             } else {
@@ -561,6 +651,52 @@ impl Animator {
 
         // Return the apply object directly
         Some(target_apply.into())
+    }
+
+    /// Queue a `cut` that couldn't run now because the script VM is held (we're
+    /// inside an apply walk's `cx.with_vm`). Schedules a frame so the queued op
+    /// is replayed by `flush_deferred` once the VM is free. See [`DeferredImmediate`].
+    pub fn defer_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
+        self.deferred.push(DeferredImmediate {
+            state: *state,
+            kind: DeferredKind::Cut,
+        });
+        cx.new_next_frame();
+    }
+
+    /// Like [`Self::defer_cut`], but for a deferred `play`.
+    pub fn defer_play(&mut self, cx: &mut Cx, state: &[LiveId; 2], play: Option<Play>) {
+        self.deferred.push(DeferredImmediate {
+            state: *state,
+            kind: DeferredKind::Play(play),
+        });
+        cx.new_next_frame();
+    }
+
+    /// Replay any cut/play ops deferred while the VM was held, now that it's
+    /// free, returning their apply values for the caller to `script_apply`.
+    /// Returns empty (a no-op) when nothing is queued; if the VM is somehow
+    /// still held it keeps the queue and re-arms a frame to retry.
+    pub fn flush_deferred(&mut self, cx: &mut Cx) -> Vec<ScriptValue> {
+        if self.deferred.is_empty() {
+            return Vec::new();
+        }
+        if cx.is_script_vm_held() {
+            cx.new_next_frame();
+            return Vec::new();
+        }
+        let deferred = std::mem::take(&mut self.deferred);
+        let mut values = Vec::with_capacity(deferred.len());
+        for d in deferred {
+            let value = match d.kind {
+                DeferredKind::Cut => self.cut(cx, &d.state),
+                DeferredKind::Play(play) => self.play(cx, &d.state, play),
+            };
+            if let Some(value) = value {
+                values.push(value);
+            }
+        }
+        values
     }
 
     /// Check if the animator is in a specific state
@@ -681,7 +817,8 @@ impl Animator {
             // Process tracks and interpolate into the shared state_object.
             // NOTE: After the first frame, no new objects should be allocated here.
             // The state_object structure is populated on first frame and reused thereafter.
-            let result = cx.with_vm(|vm| {
+            let vm_id = self.vm_id;
+            let result = cx.with_script_vm_id(vm_id, |vm| {
                 // Get or create the shared state object (created once, reused forever)
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()

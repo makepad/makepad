@@ -1,11 +1,3 @@
-/*
- * Copyright (c) 2023.
- *
- * This software is free software;
- *
- * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
- */
-
 use crate::utils::const_min_usize;
 
 /// Number of symbols in each Huffman code.  Note: for the literal/length
@@ -20,7 +12,7 @@ pub const DELFATE_MAX_LENS_OVERRUN: usize = 137;
 
 /// Order which precode lengths are stored
 pub static DEFLATE_PRECODE_LENS_PERMUTATION: [u8; DEFLATE_NUM_PRECODE_SYMS] = [
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 ];
 
 pub const PRECODE_ENOUGH: usize = 128;
@@ -59,11 +51,13 @@ pub const DEFLATE_MAX_PRE_CODEWORD_LEN: u8 = 7;
 /// make_decode_table_entry produces the final results
 pub static PRECODE_DECODE_RESULTS: [u32; 19] = make_precode_static_table();
 
-const fn make_precode_static_table() -> [u32; 19] {
+const fn make_precode_static_table() -> [u32; 19]
+{
     let mut table: [u32; 19] = [0; 19];
     let mut i = 0;
 
-    while i < 19 {
+    while i < 19
+    {
         table[i] = (i as u32) << 16;
         i += 1;
     }
@@ -121,7 +115,8 @@ const fn construct_litlen_decode_table() -> [u32; 288]
     results
 }
 
-const fn entry(base: u32, extra: u32) -> u32 {
+const fn entry(base: u32, extra: u32) -> u32
+{
     base << 16 | extra
 }
 
@@ -159,16 +154,3 @@ pub const FASTCOPY_BYTES: usize = 16;
 /// Worst case maximum number of output bytes writtern during each iteration of the
 /// fastloop.
 pub const FASTLOOP_MAX_BYTES_WRITTEN: usize = 6 + DEFLATE_MAX_MATCH_LEN + (2 * FASTCOPY_BYTES);
-
-/// Max Size of a deflate compressed block
-///
-/// offsets are limited to this length hence it is the maximum allowed
-pub const DEFLATE_MAX_BLOCK_SIZE: usize = 1 << 15;
-/// Minimum supported match length for deflate
-pub const DEFLATE_MIN_LENGTH: usize = 3;
-/// Size for which the match fidner should not try to find matches
-/// if we are this close to the end
-pub const DEFLATE_WINDOW_SIZE: usize = 10;
-
-/// Max sequnces expected to be found in a block
-pub const MAX_SEQ_PER_BLOCK: usize = DEFLATE_MAX_BLOCK_SIZE / 3;

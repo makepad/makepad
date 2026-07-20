@@ -10,6 +10,8 @@ script_mod! {
         ..me.AutoCorrect,
         ReturnKeyType: mod.std.set_type_default() do #(ReturnKeyType::script_api(vm)),
         ..me.ReturnKeyType,
+        TextInputContentType: mod.std.set_type_default() do #(TextInputContentType::script_api(vm)),
+        ..me.TextInputContentType,
     }
 }
 
@@ -18,6 +20,7 @@ script_mod! {
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq)]
 pub enum InputMode {
+    None,
     #[pick]
     Text,
     Ascii,
@@ -59,10 +62,35 @@ pub enum AutoCorrect {
 pub enum ReturnKeyType {
     #[pick]
     Default,
+    None,
     Go,
+    Google,
+    Join,
+    Next,
+    Route,
     Search,
     Send,
+    Yahoo,
     Done,
+    EmergencyCall,
+    Continue,
+    Previous,
+}
+
+/// AutoFill / content-type hint for a text field (maps to iOS UITextContentType).
+/// Independent of whether the text is obscured. iOS/Android only; no-op on desktop.
+#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq)]
+pub enum TextInputContentType {
+    #[pick]
+    None,
+    Username,
+    Password,
+    NewPassword,
+    EmailAddress,
+    Url,
+    FullStreetAddress,
+    TelephoneNumber,
+    OneTimeCode,
 }
 
 impl Default for InputMode {
@@ -89,6 +117,12 @@ impl Default for ReturnKeyType {
     }
 }
 
+impl Default for TextInputContentType {
+    fn default() -> Self {
+        TextInputContentType::None
+    }
+}
+
 /// Soft keyboard configuration for mobile platforms (iOS/Android).
 /// These settings have no effect on desktop platforms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -105,4 +139,22 @@ pub struct TextInputConfig {
     pub soft_keyboard: SoftKeyboardConfig,
     pub is_multiline: bool,
     pub is_secure: bool,
+    pub submit_on_enter: bool,
+    pub content_type: TextInputContentType,
+    pub is_read_only: bool,
+}
+
+impl TextInputConfig {
+    /// True for credential fields (username/password/email) iOS associates with login
+    /// AutoFill, which "taint" a reused text view (so we recreate it when leaving one).
+    pub fn taints_autofill(&self) -> bool {
+        self.is_secure
+            || matches!(
+                self.content_type,
+                TextInputContentType::Username
+                    | TextInputContentType::Password
+                    | TextInputContentType::NewPassword
+                    | TextInputContentType::EmailAddress
+            )
+    }
 }

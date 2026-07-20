@@ -19,6 +19,10 @@ use {
     },
 };
 
+/// Cap on the per-font glyph-outline cache (distinct glyphs). Large enough that typical Latin
+/// usage never reaches it, but bounds CJK/emoji-heavy sessions from growing without limit.
+const MAX_CACHED_GLYPH_OUTLINES: usize = 8192;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontId(u64);
 
@@ -123,9 +127,16 @@ impl Font {
             Some(builder.finish(Rect::new(min, max - min), units_per_em))
         });
 
-        self.cached_glyph_outlines
-            .borrow_mut()
-            .insert(glyph_id, outline.clone());
+        {
+            let mut cache = self.cached_glyph_outlines.borrow_mut();
+            // Bound the per-font outline cache. The cap is generous, so this only triggers
+            // for scripts with thousands of distinct glyphs (e.g. CJK); clearing simply forces
+            // the currently-visible glyphs to be re-extracted from the font face on next use.
+            if cache.len() >= MAX_CACHED_GLYPH_OUTLINES {
+                cache.clear();
+            }
+            cache.insert(glyph_id, outline.clone());
+        }
         outline
     }
 
@@ -168,7 +179,8 @@ impl Font {
     pub fn has_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> bool {
         self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
-            face.glyph_raster_image(glyph_id, dpxs_per_em as u16).is_some()
+            face.glyph_raster_image(glyph_id, dpxs_per_em as u16)
+                .is_some()
         })
     }
 
@@ -187,7 +199,6 @@ impl Font {
             .borrow_mut()
             .rasterize_glyph_stable_fallback(self, glyph_id, dpxs_per_em)
     }
-
 }
 
 impl Eq for Font {}

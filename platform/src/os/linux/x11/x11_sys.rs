@@ -1,6 +1,6 @@
 #![allow(non_upper_case_globals)]
 
-use std::os::raw::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_short, c_uchar, c_uint, c_ulong, c_ushort, c_void};
 
 pub type Display = _XDisplay;
 
@@ -17,6 +17,7 @@ pub type XIM = *mut _XIM;
 pub type Atom = c_ulong;
 pub type XEvent = _XEvent;
 pub type XIC = *mut _XIC;
+pub type XFontSet = *mut _XOC;
 pub type XExtData = _XExtData;
 pub type XPointer = *mut c_char;
 pub type VisualID = c_ulong;
@@ -101,20 +102,78 @@ pub const VisibilityUnobscured: i32 = 0;
 pub const VisibilityPartiallyObscured: i32 = 1;
 pub const VisibilityFullyObscured: i32 = 2;
 
+pub const XIMPreeditCallbacks: u32 = 2;
+pub const XIMPreeditPosition: u32 = 4;
 pub const XIMPreeditNothing: u32 = 8;
 pub const XIMStatusNothing: u32 = 1024;
+pub const XIMStatusNone: u32 = 2048;
+
+pub type XIMStyle = c_ulong;
+
+#[repr(C)]
+pub struct XIMStyles {
+    pub count_styles: c_ushort,
+    pub supported_styles: *mut XIMStyle,
+}
 
 pub const XNInputStyle: &'static [u8; 11usize] = b"inputStyle\0";
+pub const XNQueryInputStyle: &'static [u8; 16usize] = b"queryInputStyle\0";
 pub const XNClientWindow: &'static [u8; 13usize] = b"clientWindow\0";
 pub const XNFocusWindow: &'static [u8; 12usize] = b"focusWindow\0";
 pub const XNPreeditAttributes: &'static [u8; 18usize] = b"preeditAttributes\0";
 pub const XNSpotLocation: &'static [u8; 13usize] = b"spotLocation\0";
 pub const XNArea: &'static [u8; 5usize] = b"area\0";
+pub const XNFontSet: &'static [u8; 8usize] = b"fontSet\0";
+// On-the-spot preedit callback attribute names (sized `&[u8]` slices so we don't
+// have to hand-count the lengths; only `.as_ptr()` is ever used).
+pub const XNPreeditStartCallback: &[u8] = b"preeditStartCallback\0";
+pub const XNPreeditDrawCallback: &[u8] = b"preeditDrawCallback\0";
+pub const XNPreeditDoneCallback: &[u8] = b"preeditDoneCallback\0";
+pub const XNPreeditCaretCallback: &[u8] = b"preeditCaretCallback\0";
+
+// XIM on-the-spot preedit callback structures (see Xlib `XIMText`,
+// `XIMCallback`, `XIMPreeditDrawCallbackStruct`). `#[repr(C)]` reproduces the C
+// field layout (including the padding inserted after `length`/`chg_length`).
+pub type XIMFeedback = c_ulong;
+pub type XIMProc = Option<unsafe extern "C" fn(arg1: XIC, arg2: XPointer, arg3: XPointer)>;
+
+#[repr(C)]
+pub struct XIMCallback {
+    pub client_data: XPointer,
+    pub callback: XIMProc,
+}
+
+#[repr(C)]
+pub struct XIMText {
+    pub length: c_ushort,
+    pub feedback: *mut XIMFeedback,
+    pub encoding_is_wchar: c_int,
+    // C union of `char *multi_byte` / `wchar_t *wide_char`; we only read the
+    // multi-byte form (guarded by `encoding_is_wchar == 0`).
+    pub string: *mut c_char,
+}
+
+#[repr(C)]
+pub struct XIMPreeditDrawCallbackStruct {
+    pub caret: c_int,
+    pub chg_first: c_int,
+    pub chg_length: c_int,
+    pub text: *mut XIMText,
+}
 
 pub const Mod1Mask: u32 = 8;
 pub const ShiftMask: u32 = 1;
 pub const ControlMask: u32 = 4;
 pub const Mod4Mask: u32 = 64;
+
+// XFocusChangeEvent `mode` values, and the `detail` value for pointer focus.
+// Grab-induced focus changes (e.g. an IME grabbing the keyboard to test a Ctrl
+// shortcut) and pointer focus are NOT real keyboard-focus changes.
+pub const NotifyNormal: c_int = 0;
+pub const NotifyGrab: c_int = 1;
+pub const NotifyUngrab: c_int = 2;
+pub const NotifyWhileGrabbed: c_int = 3;
+pub const NotifyPointer: c_int = 5;
 
 pub const XK_A: u32 = 65;
 pub const XK_B: u32 = 66;
@@ -248,6 +307,17 @@ pub const XK_Left: u32 = 65361;
 pub const XK_Right: u32 = 65363;
 pub const XK_Down: u32 = 65364;
 pub const XK_Up: u32 = 65362;
+pub const XK_Insert: u32 = 0xff63;
+pub const XK_KP_Home: u32 = 0xff95;
+pub const XK_KP_Left: u32 = 0xff96;
+pub const XK_KP_Up: u32 = 0xff97;
+pub const XK_KP_Right: u32 = 0xff98;
+pub const XK_KP_Down: u32 = 0xff99;
+pub const XK_KP_Page_Up: u32 = 0xff9a;
+pub const XK_KP_Page_Down: u32 = 0xff9b;
+pub const XK_KP_End: u32 = 0xff9c;
+pub const XK_KP_Insert: u32 = 0xff9e;
+pub const XK_KP_Delete: u32 = 0xff9f;
 
 pub const LC_CTYPE: c_int = 0;
 
@@ -273,6 +343,18 @@ extern "C" {
         arg3: *mut c_char,
         arg4: *mut c_char,
     ) -> XIM;
+
+    pub fn XGetIMValues(arg1: XIM, ...) -> *mut c_char;
+
+    pub fn XCreateFontSet(
+        arg1: *mut Display,
+        arg2: *const c_char,
+        arg3: *mut *mut *mut c_char,
+        arg4: *mut c_int,
+        arg5: *mut *mut c_char,
+    ) -> XFontSet;
+
+    pub fn XFreeStringList(arg1: *mut *mut c_char);
 
     pub fn XInternAtom(arg1: *mut Display, arg2: *const c_char, arg3: c_int) -> Atom;
 
@@ -383,6 +465,8 @@ extern "C" {
 
     pub fn XCreateIC(arg1: XIM, ...) -> XIC;
 
+    pub fn XDestroyIC(arg1: XIC);
+
     pub fn XSetLocaleModifiers(arg1: *const c_char) -> *const c_char;
 
     pub fn XSetICFocus(arg1: XIC);
@@ -390,6 +474,8 @@ extern "C" {
     pub fn XUnsetICFocus(arg1: XIC);
 
     pub fn XSetICValues(arg1: XIC, ...) -> *mut c_char;
+
+    pub fn XGetICValues(arg1: XIC, ...) -> *mut c_char;
 
     pub fn XVaCreateNestedList(arg1: c_int, ...) -> *mut c_void;
 
@@ -403,6 +489,15 @@ extern "C" {
         arg1: *mut Display,
         arg2: Window,
         arg3: *mut XWindowAttributes,
+    ) -> c_int;
+
+    pub fn XQueryTree(
+        display: *mut Display,
+        window: Window,
+        root_return: *mut Window,
+        parent_return: *mut Window,
+        children_return: *mut *mut Window,
+        nchildren_return: *mut c_uint,
     ) -> c_int;
 
     pub fn XTranslateCoordinates(
@@ -523,6 +618,12 @@ pub struct _XIM {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct _XIC {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct _XOC {
     _unused: [u8; 0],
 }
 
