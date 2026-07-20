@@ -196,6 +196,29 @@ struct VulkanTextureUpload {
     layers: u32,
 }
 
+fn texture_update_requires_upload(updated: TextureUpdated, needs_recreate: bool) -> bool {
+    needs_recreate || !matches!(updated, TextureUpdated::Empty)
+}
+
+fn zero_texture_upload(format: vk::Format, layers: u32) -> Option<VulkanTextureUpload> {
+    let bytes_per_pixel = match format {
+        vk::Format::B8G8R8A8_UNORM | vk::Format::R32_SFLOAT => 4,
+        vk::Format::R32G32B32A32_SFLOAT => 16,
+        vk::Format::R8_UNORM => 1,
+        vk::Format::R8G8_UNORM => 2,
+        _ => return None,
+    };
+    let layers = layers.max(1);
+    Some(VulkanTextureUpload {
+        data: vec![0; bytes_per_pixel * layers as usize],
+        offset_x: 0,
+        offset_y: 0,
+        width: 1,
+        height: 1,
+        layers,
+    })
+}
+
 type VulkanTextureKey = usize;
 
 pub(crate) struct CxVulkanOpenXrMultiviewTarget {
@@ -5297,17 +5320,22 @@ impl CxVulkan {
             self.textures.insert(texture_key, resource);
         }
 
-        if matches!(updated, TextureUpdated::Empty) {
+        if !texture_update_requires_upload(updated, needs_recreate) {
             return Ok(());
         }
 
         let force_full_upload = needs_recreate;
-        let Some(upload) = ({
+        let upload = {
             let cxtexture = &cx.textures[texture_id];
-            Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
+            match Self::vec_texture_upload(&cxtexture.format, updated, force_full_upload)
                 .map_err(|()| format!("texture {} has unsupported upload format", texture_key))?
-        }) else {
-            return Ok(());
+            {
+                Some(upload) => upload,
+                None if needs_recreate => zero_texture_upload(format, layers).ok_or_else(|| {
+                    format!("texture {} has unsupported upload format", texture_key)
+                })?,
+                None => return Ok(()),
+            }
         };
         if upload.data.is_empty() || upload.width == 0 || upload.height == 0 {
             return Ok(());
@@ -7135,6 +7163,50 @@ mod tests {
     }
 
     #[test]
+    fn texture_update_requires_upload_when_recreated_or_dirty() {
+        assert!(!texture_update_requires_upload(
+            TextureUpdated::Empty,
+            false
+        ));
+        assert!(texture_update_requires_upload(
+            TextureUpdated::Empty,
+            true
+        ));
+        assert!(texture_update_requires_upload(
+            partial(1, 1, 2, 2),
+            false
+        ));
+        assert!(texture_update_requires_upload(
+            TextureUpdated::Full,
+            false
+        ));
+    }
+
+    #[test]
+    fn zero_texture_upload_matches_format_and_layers() {
+        for (format, bytes_per_pixel) in [
+            (vk::Format::B8G8R8A8_UNORM, 4),
+            (vk::Format::R32G32B32A32_SFLOAT, 16),
+            (vk::Format::R8_UNORM, 1),
+            (vk::Format::R8G8_UNORM, 2),
+            (vk::Format::R32_SFLOAT, 4),
+        ] {
+            let upload = zero_texture_upload(format, 1).unwrap();
+            assert_eq!(upload.offset_x, 0);
+            assert_eq!(upload.offset_y, 0);
+            assert_eq!(upload.width, 1);
+            assert_eq!(upload.height, 1);
+            assert_eq!(upload.layers, 1);
+            assert_eq!(upload.data.len(), bytes_per_pixel);
+        }
+
+        let cube = zero_texture_upload(vk::Format::B8G8R8A8_UNORM, 6).unwrap();
+        assert_eq!(cube.layers, 6);
+        assert_eq!(cube.data.len(), 24);
+        assert!(zero_texture_upload(vk::Format::D32_SFLOAT, 1).is_none());
+    }
+
+    #[test]
     fn vec_texture_upload_distinguishes_supported_noop_from_unsupported() {
         let format = TextureFormat::VecRf32 {
             width: 8,
@@ -7151,6 +7223,13 @@ mod tests {
             CxVulkan::vec_texture_upload(&format, partial(8, 4, 1, 1), false),
             Ok(None)
         ));
+        let upload = CxVulkan::vec_texture_upload(&format, TextureUpdated::Empty, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(upload.offset_x, 0);
+        assert_eq!(upload.offset_y, 0);
+        assert_eq!(upload.width, 8);
+        assert_eq!(upload.height, 4);
         assert!(CxVulkan::vec_texture_upload(
             &TextureFormat::Unknown,
             TextureUpdated::Full,

@@ -389,13 +389,15 @@ impl TextureUpdated {
         if width == 0 || height == 0 {
             return None;
         }
+        if force_full {
+            return Some(RectUsize::new(
+                PointUsize::new(0, 0),
+                SizeUsize::new(width, height),
+            ));
+        }
         match self {
             Self::Empty => None,
             Self::Full => Some(RectUsize::new(
-                PointUsize::new(0, 0),
-                SizeUsize::new(width, height),
-            )),
-            Self::Partial(_) if force_full => Some(RectUsize::new(
                 PointUsize::new(0, 0),
                 SizeUsize::new(width, height),
             )),
@@ -1020,6 +1022,10 @@ mod texture_updated_upload_rect_tests {
         );
         assert_upload_rect(
             TextureUpdated::Partial(rect(1, 1, 2, 2)).upload_rect(8, 4, true),
+            Some(rect(0, 0, 8, 4)),
+        );
+        assert_upload_rect(
+            TextureUpdated::Empty.upload_rect(8, 4, true),
             Some(rect(0, 0, 8, 4)),
         );
         assert_upload_rect(TextureUpdated::Full.upload_rect(0, 4, false), None);
