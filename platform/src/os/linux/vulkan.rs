@@ -3692,6 +3692,8 @@ impl CxVulkan {
                 data,
                 ..
             }
+            // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain). Real mips
+            // (mip_levels>1 + vkCmdBlitImage) are a TODO for Vulkan.
             | TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,

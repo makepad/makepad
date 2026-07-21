@@ -70,6 +70,45 @@ pub struct MouseLeaveEvent {
     pub handled: Cell<Area>,
 }
 
+/// The gesture phase of a scroll event, when the OS provides one.
+///
+/// Trackpad scrolling on some platforms (macOS in particular) is a gesture: the OS reports
+/// when fingers touch the pad (`Began`), each movement while they are down (`Changed`), when
+/// they lift off (`Ended`), and then a stream of decaying momentum deltas
+/// (`Momentum`/`MomentumEnded`).
+///
+/// The scrollable widgets apply the user-driven deltas directly and, on `Ended`, start a fling
+/// that follows the OS momentum stream so the deceleration matches the OS (see
+/// `widgets::scroll_motion`). Widgets that don't track phases can apply every delta directly,
+/// which gives plain OS momentum scrolling.
+///
+/// On platforms and devices with no phase information (classic mouse wheels, X11, Windows),
+/// this is `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollPhase {
+    /// No phase information available (classic mouse wheel, or the platform doesn't report phases).
+    #[default]
+    None,
+    /// Fingers touched the trackpad; a scroll gesture may begin (the delta is usually zero).
+    Began,
+    /// A raw finger contact on the trackpad, sent for every touch with a zero delta
+    /// (macOS only). Unlike `Began`, this fires even for single-finger contacts that never
+    /// become a scroll gesture, so widgets use it to instantly stop kinetic scrolling the
+    /// way a touch natively catches a coast. It must not disturb anything else: any
+    /// tap-to-click press or drag from the same contact arrives separately as mouse events.
+    Touched,
+    /// Fingers moved while on the trackpad: a user-driven scroll delta.
+    Changed,
+    /// Fingers lifted off the trackpad: the last event of the user-driven gesture (the delta
+    /// may be zero). Widgets start their fling here.
+    Ended,
+    /// A momentum delta arriving from the OS after the fingers lifted. Widgets follow these to
+    /// match the OS deceleration rate.
+    Momentum,
+    /// The OS momentum stream finished (the delta is zero).
+    MomentumEnded,
+}
+
 #[derive(Clone, Debug)]
 pub struct ScrollEvent {
     pub window_id: WindowId,
@@ -80,6 +119,7 @@ pub struct ScrollEvent {
     pub handled_y: Cell<bool>,
     pub is_mouse: bool,
     pub time: f64,
+    pub phase: ScrollPhase,
 }
 
 #[derive(Clone, Debug)]
@@ -748,6 +788,7 @@ pub struct FingerScrollEvent {
     pub modifiers: KeyModifiers,
     pub time: f64,
     pub rect: Rect,
+    pub phase: ScrollPhase,
 }
 
 /*
@@ -955,6 +996,7 @@ impl Event {
                         modifiers: e.modifiers,
                         time: e.time,
                         scroll: e.scroll,
+                        phase: e.phase,
                     });
                 }
             }

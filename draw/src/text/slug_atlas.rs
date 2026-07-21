@@ -246,7 +246,13 @@ impl SlugAtlas {
             _ => panic!("expected VecRGBAf32 texture format for SLUG atlas"),
         };
 
-        let dims_changed = *width != new_width || *height != new_height;
+        // Only a WIDTH change requires re-laying-out the whole texture; the atlas is append-only,
+        // so a height GROWTH leaves all existing rows in place and only the appended rows are
+        // dirty. Backends that must physically reallocate on a height change (GL `glTexImage2D`,
+        // Metal `replaceRegion`) re-upload everything regardless of the `Partial` flag; the D3D11
+        // backend keeps spare height capacity and honors `Partial`, uploading only the new rows
+        // via `UpdateSubresource` instead of recreating the (up to ~16 MB) texture every frame.
+        let width_changed = *width != new_width;
         let mut texture_data = data.take().unwrap_or_default();
         let had_texture_data = !texture_data.is_empty();
         let new_capacity = new_width * new_height * RGBA_F32_TEXEL_FLOATS;
@@ -265,7 +271,7 @@ impl SlugAtlas {
         *width = new_width;
         *height = new_height;
         *data = Some(texture_data);
-        *updated = if !had_texture_data || dims_changed || old_uploaded_floats > source.len() {
+        *updated = if !had_texture_data || width_changed || old_uploaded_floats > source.len() {
             TextureUpdated::Full
         } else {
             updated.update(Self::appended_dirty_rect(

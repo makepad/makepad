@@ -70,6 +70,25 @@ thread_local! {
     pub static IOS_APP: RefCell<Option<IosApp>> = RefCell::new(None);
 }
 
+/// Set when a window-geometry change could not be examined or delivered at the
+/// moment it happened: UIKit delivers resize/safe-area notifications synchronously,
+/// sometimes re-entrantly while the app state is borrowed or an event callback is
+/// already on the stack. Dropping such a notification would leave the app laid out
+/// for the old size until something else forces a redraw (or forever, since the
+/// geometry diff gate would see no change afterwards). The flag is drained — by
+/// re-reading the view's real geometry — at the tail of every completed event
+/// callback, which the repeating 8ms timer guarantees runs soon even while the
+/// display link is paused.
+pub static GEOM_CHECK_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True while the pending-geometry re-check is delivering its own event, so the
+/// nested dispatch's tail doesn't recurse into another re-check. If UIKit flags a
+/// new change during that delivery, the next event's tail (the 8ms timer at the
+/// latest) picks it up — every re-check is one bounded step, never a loop.
+static GEOM_DRAIN_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn with_ios_app<R>(f: impl FnOnce(&mut IosApp) -> R) -> R {
     IOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
 }
@@ -455,6 +474,19 @@ impl IosApp {
             })
             .unwrap_or(false);
         if !should_call {
+            // Skipping would lose the resize until the next drawn frame — and no
+            // frame draws while the app is idle (the display link is paused).
+            // Flag the geometry for the re-check that runs when the in-flight
+            // callback finishes (or on the next timer tick).
+            GEOM_CHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        // Before the first frame, only `draw_in_rect` may apply geometry: applying
+        // it from here would run the first-draw path and deliver Init — and then
+        // `draw_in_rect` would deliver Init again (double app startup), since only
+        // it clears `first_draw`. The first draw re-reads the geometry anyway.
+        if with_ios_app(|app| app.first_draw) {
+            GEOM_CHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
 
@@ -566,11 +598,19 @@ impl IosApp {
 
         let old_geom = with_ios_app(|app| app.update_geom(new_geom.clone()));
         if let Some(old_geom) = old_geom {
-            IosApp::do_callback(IosEvent::WindowGeomChange(WindowGeomChangeEvent {
+            let delivered = IosApp::do_callback(IosEvent::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: CxWindowPool::id_zero(),
-                old_geom,
+                old_geom: old_geom.clone(),
                 new_geom,
             }));
+            if !delivered {
+                // An event callback was already on the stack (UIKit re-entered this
+                // path from inside event dispatch), so the change was dropped. Put
+                // the old geometry back so the diff gate re-fires, and flag the
+                // re-check; the in-flight callback delivers it when it finishes.
+                with_ios_app(|app| app.last_window_geom = old_geom);
+                GEOM_CHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -583,7 +623,16 @@ impl IosApp {
         None
     }
 
+    /// Whether the first frame has not yet drawn. Until it has, only
+    /// [`IosApp::draw_in_rect`] may apply window geometry (see the callers).
+    pub fn is_before_first_draw() -> bool {
+        with_ios_app(|app| app.first_draw)
+    }
+
     pub fn draw_in_rect() {
+        // This re-reads the real geometry itself, satisfying any pending re-check
+        // (a notification during the dispatches below re-flags it if needed).
+        GEOM_CHECK_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
         Self::check_window_geom();
         with_ios_app(|app| app.first_draw = false);
         IosApp::do_callback(IosEvent::Paint);
@@ -1023,7 +1072,11 @@ impl IosApp {
         }
     }
 
-    pub fn do_callback(event: IosEvent) {
+    /// Deliver an event to the app. Returns whether the callback actually ran:
+    /// if an event is already being dispatched (the callback is on the stack),
+    /// the event is dropped and this returns false, so callers with an event
+    /// that must not be lost can arrange redelivery.
+    pub fn do_callback(event: IosEvent) -> bool {
         let cb = with_ios_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
@@ -1037,6 +1090,25 @@ impl IosApp {
             }
 
             with_ios_app(|app| app.event_callback = Some(callback));
+            // A geometry change that happened while this callback was on the
+            // stack (see GEOM_CHECK_PENDING) can be examined and delivered now.
+            // Never before the first frame has drawn, though: `draw_in_rect`
+            // re-reads the geometry itself, and running `apply_new_window_geom`
+            // from here while `first_draw` is still set would deliver Init a
+            // second time (double app startup). And never nested inside the
+            // re-check's own delivery (see GEOM_DRAIN_ACTIVE).
+            use std::sync::atomic::Ordering;
+            if GEOM_CHECK_PENDING.load(Ordering::Relaxed)
+                && !with_ios_app(|app| app.first_draw)
+                && !GEOM_DRAIN_ACTIVE.swap(true, Ordering::Relaxed)
+            {
+                GEOM_CHECK_PENDING.store(false, Ordering::Relaxed);
+                Self::check_window_geom();
+                GEOM_DRAIN_ACTIVE.store(false, Ordering::Relaxed);
+            }
+            true
+        } else {
+            false
         }
     }
 

@@ -403,14 +403,15 @@ script_mod! {
                 let p_r = self.pos - vec2(x, y);
                 let p = abs(p_r - size.xy) - size.xy;
 
-                let bp_top = max(p + vec2(2. * r_top, 2. * r_top).xy, vec2(0., 0.));
-                let bp_bottom = max(p + vec2(2. * r_bottom, 2. * r_bottom).xy, vec2(0., 0.));
+                let q_top = p + vec2(2. * r_top, 2. * r_top).xy;
+                let q_bottom = p + vec2(2. * r_bottom, 2. * r_bottom).xy;
 
-                self.dist = mix(
-                    (length(bp_top) - 2. * r_top),
-                    (length(bp_bottom) - 2. * r_bottom),
-                    step(0.5 * h, p_r.y)
-                ) / self.scale_factor;
+                // The min(max(q.x,q.y),0) interior term keeps the field continuous; without it
+                // the interior dist was -2r, so switching radius at the midpoint left a coverage seam.
+                let dist_top = min(max(q_top.x, q_top.y), 0.) + length(max(q_top, vec2(0., 0.))) - 2. * r_top;
+                let dist_bottom = min(max(q_bottom.x, q_bottom.y), 0.) + length(max(q_bottom, vec2(0., 0.))) - 2. * r_bottom;
+
+                self.dist = mix(dist_top, dist_bottom, step(0.5 * h, p_r.y)) / self.scale_factor;
 
                 self.old_shape = self.shape;
                 self.shape = min(self.shape, self.dist);

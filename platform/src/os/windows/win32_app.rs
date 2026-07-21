@@ -19,7 +19,9 @@ use {
             core::PCWSTR,
             //core::IntoParam,
             Win32::{
-                Foundation::{COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK},
+                Foundation::{
+                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK, WPARAM,
+                },
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
                     LOGPIXELSX, MONITOR_DEFAULTTONEAREST,
@@ -45,8 +47,8 @@ use {
                         LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
                         SetTimer, ShowCursor, TranslateMessage, CS_OWNDC, HICON, IDC_ARROW,
                         IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
-                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, PM_REMOVE,
-                        WM_QUIT, WNDCLASSEXW,
+                        IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, MSG,
+                        PM_NOREMOVE, PM_REMOVE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW,
                     },
                 },
             },
@@ -86,6 +88,93 @@ P1: IntoParam<IDropSource>,
     ::windows_targets::link!("ole32.dll" "system" fn DoDragDrop(pdataobj: *mut::core::ffi::c_void, pdropsource: *mut::core::ffi::c_void, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT);
     DoDragDrop(pdataobj.into_param().abi(), pdropsource.into_param().abi(), dwokeffects, pdweffect)
 }*/
+
+/// Coalesce a run of consecutive `WM_MOUSEMOVE` messages for the same window
+/// into just the latest one.
+///
+/// A high-polling-rate mouse (500–1000+ Hz) floods the message queue with
+/// mouse-moves. Dispatching each one separately runs redundant hover
+/// hit-testing across the whole widget tree (and a paint per move), which
+/// steals frame budget from an in-progress fling — producing the visible
+/// scroll judder when the mouse is moved during deceleration. We only merge
+/// *adjacent* moves: we peek the next queued message and stop at the first
+/// non-move, so no button / key / wheel message is ever dropped or reordered.
+///
+/// macOS gets this for free from Cocoa's built-in mouse-move coalescing, and
+/// the Android backend already coalesces consecutive touch-moves explicitly.
+///
+/// This discards the intermediate cursor positions within a run, which is correct
+/// for hover/hit-testing but loses the full pointer path; a widget that needs every
+/// sample (freehand drawing/ink, gesture recognition) would have to read raw input.
+unsafe fn coalesce_mouse_move(mut msg: MSG) -> MSG {
+    if msg.message != WM_MOUSEMOVE {
+        return msg;
+    }
+    loop {
+        // Peek (without removing) the next queued message for this window.
+        let mut peek = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(peek.as_mut_ptr(), Some(msg.hwnd), 0, 0, PM_NOREMOVE) == FALSE {
+            break;
+        }
+        if peek.assume_init().message != WM_MOUSEMOVE {
+            break; // next message isn't a move — don't reorder past it
+        }
+        // It is a move: remove it and let it supersede the current one.
+        let mut taken = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(taken.as_mut_ptr(), Some(msg.hwnd), WM_MOUSEMOVE, WM_MOUSEMOVE, PM_REMOVE)
+            == FALSE
+        {
+            break;
+        }
+        msg = taken.assume_init();
+    }
+    msg
+}
+
+/// Coalesce a run of consecutive `WM_MOUSEWHEEL` messages for the same window
+/// into one message carrying the summed wheel delta.
+///
+/// Free-spinning wheels and precision touchpads can emit wheel messages faster
+/// than the vsync-paced loop consumes them, so without merging, a gesture
+/// builds a queue backlog that keeps replaying deltas after it ends. As with
+/// `coalesce_mouse_move`, only *adjacent* wheel messages are merged: we peek
+/// the next queued message and stop at the first non-wheel, so no other
+/// message is ever dropped or reordered. The wheel delta lives in the signed
+/// high word of `wParam`; the sum saturates to that range instead of wrapping.
+/// Position (`lParam`) and the key-state low word come from the newest message.
+unsafe fn coalesce_mouse_wheel(mut msg: MSG) -> MSG {
+    if msg.message != WM_MOUSEWHEEL {
+        return msg;
+    }
+    let mut delta = (msg.wParam.0 >> 16) as u16 as i16 as i32;
+    loop {
+        // Peek (without removing) the next queued message for this window.
+        let mut peek = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(peek.as_mut_ptr(), Some(msg.hwnd), 0, 0, PM_NOREMOVE) == FALSE {
+            break;
+        }
+        if peek.assume_init().message != WM_MOUSEWHEEL {
+            break; // next message isn't a wheel — don't reorder past it
+        }
+        // It is a wheel: remove it, accumulate its delta and take its position/state.
+        let mut taken = std::mem::MaybeUninit::uninit();
+        if PeekMessageW(
+            taken.as_mut_ptr(),
+            Some(msg.hwnd),
+            WM_MOUSEWHEEL,
+            WM_MOUSEWHEEL,
+            PM_REMOVE,
+        ) == FALSE
+        {
+            break;
+        }
+        msg = taken.assume_init();
+        delta += (msg.wParam.0 >> 16) as u16 as i16 as i32;
+    }
+    let delta = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    msg.wParam = WPARAM(((delta as u16 as usize) << 16) | (msg.wParam.0 & 0xffff));
+    msg
+}
 
 pub struct Win32App {
     event_callback: Option<Box<dyn FnMut(Win32Event) -> EventFlow>>,
@@ -279,6 +368,8 @@ impl Win32App {
                             debug_assert_eq!(msg.message, WM_QUIT);
                             with_win32_app(|app| app.event_flow = EventFlow::Exit);
                         } else {
+                            let msg = coalesce_mouse_move(msg);
+                            let msg = coalesce_mouse_wheel(msg);
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !with_win32_app(|app| app.was_signal_poll()) {
@@ -287,14 +378,54 @@ impl Win32App {
                         }
                     }
                     EventFlow::Poll => {
-                        let mut msg = std::mem::MaybeUninit::uninit();
-                        let ret = PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE);
-                        let msg = msg.assume_init();
-                        if ret == FALSE {
-                            Win32App::do_callback(Win32Event::Paint)
-                        } else {
+                        // Drain pending messages (mouse-moves and wheels coalesced) up to a small
+                        // budget, then ALWAYS paint once per loop pass.
+                        //
+                        // The animation frame-advance (`call_next_frame_event`, e.g. a momentum
+                        // fling) AND the vsync-blocking `Present` both live in the Paint callback.
+                        // A NextFrame is internal Cx state, not a win32 message, so it can only be
+                        // serviced by reaching this Paint. A moving mouse injects WM_MOUSEMOVE at
+                        // 500–1000 Hz, so the queue almost never empties during a fling; painting
+                        // only when it does starves the fling step and its Present, freezing the
+                        // scroll until the mouse pauses, then jumping. That is the "judder when
+                        // moving the mouse during deceleration" bug, and it is a pure scheduling
+                        // effect (independent of per-move CPU cost, which is why coalescing alone
+                        // didn't fix it). Hence the budget: it bounds the time spent dispatching so
+                        // the Paint is never starved, while draining more than one message per pass
+                        // keeps high-rate input (wheel spins, touchpad pans, posted signals) from
+                        // backlogging behind the ~one-per-refresh paint rate and replaying late.
+                        //
+                        // Painting once per pass advances the animation and presents every loop
+                        // iteration; `Present(1,..)` (vsync) still paces us to the display refresh,
+                        // and we only stay in Poll while there is animation/dirty work (otherwise the
+                        // callback returns `Wait` and we sleep in `GetMessageW`), so this does not
+                        // busy-loop.
+                        let drain_start = std::time::Instant::now();
+                        let mut drain_budget = 32;
+                        loop {
+                            let mut msg = std::mem::MaybeUninit::uninit();
+                            if PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE) == FALSE {
+                                break;
+                            }
+                            let msg = coalesce_mouse_move(msg.assume_init());
+                            let msg = coalesce_mouse_wheel(msg);
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
+                            drain_budget -= 1;
+                            if drain_budget == 0
+                                || drain_start.elapsed() >= std::time::Duration::from_millis(2)
+                                || matches!(
+                                    with_win32_app(|app| app.event_flow.clone()),
+                                    EventFlow::Exit
+                                )
+                            {
+                                break;
+                            }
+                        }
+                        // Skip the paint only if a dispatched message asked us to exit, so we
+                        // don't run an extra callback (double shutdown) on the way out.
+                        if !matches!(with_win32_app(|app| app.event_flow.clone()), EventFlow::Exit) {
+                            Win32App::do_callback(Win32Event::Paint);
                         }
                     }
                     EventFlow::Exit => panic!(),

@@ -16,7 +16,7 @@ use {
         makepad_script::{
             apply::Apply,
             shader::{
-                SamplerAddress, SamplerFilter, ShaderFnCompiler, ShaderMode, ShaderOutput,
+                ShaderFnCompiler, ShaderMode, ShaderOutput,
                 ShaderType,
             },
             shader_backend::ShaderBackend,
@@ -1355,6 +1355,20 @@ impl GlShader {
         pixel: &str,
         _os_type: &OsType,
     ) -> PendingGlShader {
+        static GL_INFO_ONCE: std::sync::Once = std::sync::Once::new();
+        GL_INFO_ONCE.call_once(|| {
+            crate::log!(
+                "Makepad GL: vendor={:?} renderer={:?} version={:?} glsl={:?} sampler_objects={}",
+                get_gl_string(gl, gl_sys::VENDOR),
+                get_gl_string(gl, gl_sys::RENDERER),
+                get_gl_string(gl, gl_sys::VERSION),
+                get_gl_string(gl, gl_sys::SHADING_LANGUAGE_VERSION),
+                gl.glGenSamplers.is_some()
+                    && gl.glBindSampler.is_some()
+                    && gl.glSamplerParameteri.is_some(),
+            );
+        });
+
         let vertex_len = Self::shader_source_len(vertex);
         let pixel_len = Self::shader_source_len(pixel);
         #[cfg(target_os = "android")]
@@ -1849,60 +1863,10 @@ impl GlShader {
         gl_texture_slots
     }
 
-    pub fn opengl_create_samplers(gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
-        let mut samplers = Vec::with_capacity(mapping.textures.len());
-        let Some(gl_gen_samplers) = gl.glGenSamplers else {
-            samplers.resize(mapping.textures.len(), OpenglSampler::default());
-            return samplers;
-        };
-        let Some(gl_sampler_parameteri) = gl.glSamplerParameteri else {
-            samplers.resize(mapping.textures.len(), OpenglSampler::default());
-            return samplers;
-        };
-
-        for texture_slot in 0..mapping.textures.len() {
-            let sampler_desc = mapping
-                .texture_sampler_indices
-                .get(texture_slot)
-                .and_then(|sampler_idx| mapping.samplers.get(*sampler_idx))
-                .copied()
-                .unwrap_or_default();
-
-            let mut sampler = 0u32;
-            unsafe {
-                gl_gen_samplers(1, &mut sampler);
-            }
-            if sampler == 0 {
-                samplers.push(OpenglSampler::default());
-                continue;
-            }
-
-            let filter = match sampler_desc.filter {
-                SamplerFilter::Nearest => gl_sys::NEAREST,
-                SamplerFilter::Linear => gl_sys::LINEAR,
-            };
-            let address = match sampler_desc.address {
-                SamplerAddress::Repeat => gl_sys::REPEAT,
-                SamplerAddress::ClampToEdge => gl_sys::CLAMP_TO_EDGE,
-                // CLAMP_TO_BORDER is not universally available on GLES3, keep it edge-safe.
-                SamplerAddress::ClampToZero => gl_sys::CLAMP_TO_EDGE,
-                SamplerAddress::MirroredRepeat => gl_sys::MIRRORED_REPEAT,
-            };
-
-            unsafe {
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MIN_FILTER, filter as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_MAG_FILTER, filter as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_S, address as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_T, address as i32);
-                gl_sampler_parameteri(sampler, gl_sys::TEXTURE_WRAP_R, address as i32);
-            }
-
-            samplers.push(OpenglSampler {
-                sampler: Some(sampler),
-            });
-        }
-
-        samplers
+    pub fn opengl_create_samplers(_gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
+        // Rely on per-texture filter+wrap (set in update_vec_texture) instead of GL sampler objects:
+        // some Mesa drivers ignore the sampler MIN_FILTER and point-sample minified textures.
+        vec![OpenglSampler::default(); mapping.textures.len()]
     }
 
     pub fn free_resources(self, gl: &LibGl) {
@@ -2284,6 +2248,18 @@ pub struct CxOsTexture {
     /// True when Makepad owns the GL texture object and must delete it.
     pub gl_texture_owned: bool,
     pub gl_renderbuffer: Option<u32>,
+    /// Allocated GL storage `(width, height, internal_format)` of `gl_texture` for the append-only
+    /// SLUG glyph atlas (`VecRGBAf32`). The atlas is allocated with spare height capacity so that a
+    /// later height-growth append reuses the same texture via `glTexSubImage2D` instead of
+    /// recreating the (up to ~16 MB) texture with `glTexImage2D` on every change — the same win the
+    /// D3D11 backend gets from `UpdateSubresource`. `gl_cap_width == 0` means "not allocated".
+    gl_cap_width: usize,
+    gl_cap_height: usize,
+    gl_cap_internal_format: i32,
+    /// Number of rows already uploaded into `gl_texture`. In-place sub-rect reuse is only allowed
+    /// for pure appends (rows at/after this frontier), never overwriting rows an in-flight frame may
+    /// still be sampling — overwriting the SDF atlas mid-frame can tear the per-glyph curve data.
+    gl_uploaded_height: usize,
 }
 
 impl Default for CxOsTexture {
@@ -2292,6 +2268,10 @@ impl Default for CxOsTexture {
             gl_texture: None,
             gl_texture_owned: true,
             gl_renderbuffer: None,
+            gl_cap_width: 0,
+            gl_cap_height: 0,
+            gl_cap_internal_format: 0,
+            gl_uploaded_height: 0,
         }
     }
 }
@@ -2571,11 +2551,107 @@ impl CxTexture {
             // Linux desktop. OHOS simulators/emulators still need the conservative full
             // upload path.
             const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
-            let allow_partial_texture_updates = DO_PARTIAL_TEXTURE_UPDATES
-                && !matches!(self.format, TextureFormat::VecRGBAf32 { .. });
+            // The append-only SLUG glyph atlas (`VecRGBAf32`). Unlike the bitmap atlases and images
+            // (sampled by normalized UV, so they must be exact-sized), this one is addressed by
+            // absolute texel index and only ever grows by appending rows, so on desktop Linux GL we
+            // keep spare height capacity and reuse the texture across growth — mirroring the D3D11
+            // `UpdateSubresource` path. `gl.glTexSubImage2D` updates the existing texture in place
+            // instead of recreating and re-uploading the whole (up to ~16 MB) atlas on every change,
+            // which was a per-change scroll hitch.
+            //
+            // This is gated to desktop Linux (X11/Wayland/direct): on Android/OHOS GLES the
+            // float-atlas `glTexSubImage2D` path is unreliable (see the note above about emoji
+            // rendering as black boxes), so those keep the conservative full `glTexImage2D` upload by
+            // excluding the atlas from partial updates entirely.
+            const ATLAS_INPLACE_UPDATES: bool =
+                cfg!(not(any(target_env = "ohos", target_os = "android")));
+            let is_append_atlas = matches!(self.format, TextureFormat::VecRGBAf32 { .. });
+            let allow_partial_texture_updates =
+                DO_PARTIAL_TEXTURE_UPDATES && (!is_append_atlas || ATLAS_INPLACE_UPDATES);
             let unpack_alignment = gl_unpack_alignment(bytes_per_pixel);
 
             match updated {
+                TextureUpdated::Partial(rect)
+                    if allow_partial_texture_updates && is_append_atlas =>
+                {
+                    // ~3x height headroom with a floor, rounded up to a 128-row boundary, so a long
+                    // flick-scroll's worth of glyph-atlas growth reuses this storage instead of
+                    // recreating it (mirrors D3D11's `cap_height`). Rows `height..cap_height` stay
+                    // undefined — the glyph shader addresses by absolute texel index and never
+                    // samples them.
+                    let cap_height = {
+                        let want = (height * 3).max(512);
+                        ((want + 127) / 128) * 128
+                    };
+                    // Only a pure append (the dirty rect's top row is at/after the upload frontier)
+                    // is safe to write in place: overwriting rows an in-flight frame may still be
+                    // sampling can tear the per-glyph curve data and hang the GPU. `slug_atlas` only
+                    // ever reports growth as appended rows, so this holds; the check is defensive.
+                    let safe_append = rect.origin.y + 1 >= self.os.gl_uploaded_height;
+                    // (Re)allocate GL storage only when the texture is new, the width/format changed,
+                    // or the needed height exceeds capacity — NOT merely because the logical alloc
+                    // size grew (that fires on every height append).
+                    let need_storage = self.os.gl_cap_width != width
+                        || self.os.gl_cap_internal_format != internal_format as i32
+                        || self.os.gl_cap_height < height;
+                    if need_storage || !safe_append {
+                        // Allocate (orphaning any old storage) at `cap_height` and upload the full
+                        // logical region `0..height`; the dirty rect alone is insufficient after a
+                        // realloc since the rest of the texture is undefined. The full atlas data is
+                        // retained in `data`, so this is a complete, correct re-upload.
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+                        (gl.glTexImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32,
+                            cap_height as i32,
+                            0,
+                            format,
+                            data_type,
+                            0 as *const _,
+                        );
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+                        (gl.glTexSubImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            width as i32,
+                            height as i32,
+                            format,
+                            data_type,
+                            data,
+                        );
+                        self.os.gl_cap_width = width;
+                        self.os.gl_cap_height = cap_height;
+                        self.os.gl_cap_internal_format = internal_format as i32;
+                        self.os.gl_uploaded_height = height;
+                    } else {
+                        // In-place sub-rect append into the existing (capacity-sufficient) storage —
+                        // the common case while scrolling brings new glyphs into the atlas.
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
+                        (gl.glTexSubImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            rect.origin.x as i32,
+                            rect.origin.y as i32,
+                            rect.size.width as i32,
+                            rect.size.height as i32,
+                            format,
+                            data_type,
+                            data,
+                        );
+                        self.os.gl_uploaded_height =
+                            (rect.origin.y + rect.size.height).max(self.os.gl_uploaded_height);
+                    }
+                }
                 TextureUpdated::Partial(rect) if allow_partial_texture_updates => {
                     if needs_realloc {
                         (gl.glTexImage2D)(
@@ -2607,23 +2683,65 @@ impl CxTexture {
                         data,
                     );
                 }
-                // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
+                // A `Full` update (and any `Partial` when partial updates are disabled, e.g.
+                // ohos_sim) recreates the texture at its exact logical size.
                 TextureUpdated::Partial(_) | TextureUpdated::Full => {
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
-                    (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
-                    (gl.glTexImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        internal_format as i32,
-                        width as i32,
-                        height as i32,
-                        0,
-                        format,
-                        data_type,
-                        data,
-                    );
+                    if is_append_atlas && allow_partial_texture_updates {
+                        // Keep the append-only atlas allocated with height headroom (and its
+                        // capacity tracking in sync) even when the triggering update is `Full`
+                        // (first upload / width change / reset), so the following appends reuse it.
+                        let cap_height = {
+                            let want = (height * 3).max(512);
+                            ((want + 127) / 128) * 128
+                        };
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+                        (gl.glTexImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32,
+                            cap_height as i32,
+                            0,
+                            format,
+                            data_type,
+                            0 as *const _,
+                        );
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+                        (gl.glTexSubImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            width as i32,
+                            height as i32,
+                            format,
+                            data_type,
+                            data,
+                        );
+                        self.os.gl_cap_width = width;
+                        self.os.gl_cap_height = cap_height;
+                        self.os.gl_cap_internal_format = internal_format as i32;
+                        self.os.gl_uploaded_height = height;
+                    } else {
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+                        (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
+                        (gl.glTexImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            internal_format as i32,
+                            width as i32,
+                            height as i32,
+                            0,
+                            format,
+                            data_type,
+                            data,
+                        );
+                    }
                 }
                 TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
             };
@@ -2662,7 +2780,26 @@ impl CxTexture {
                         gl_sys::TEXTURE_MAX_LEVEL,
                         max_level.unwrap_or(1000) as i32,
                     );
+                    // On GLES 3, glGenerateMipmap on the unsized BGRA internal format is
+                    // driver-dependent (modern Mesa allows it; stricter implementations
+                    // raise INVALID_OPERATION and generate nothing). A mipmap-incomplete
+                    // texture samples opaque black, so verify and fall back to plain
+                    // linear filtering if generation failed. Drain any earlier error
+                    // first so it isn't misattributed to glGenerateMipmap.
+                    while (gl.glGetError)() != gl_sys::NO_ERROR {}
                     (gl.glGenerateMipmap)(gl_sys::TEXTURE_2D);
+                    if (gl.glGetError)() != gl_sys::NO_ERROR {
+                        crate::warning!(
+                            "glGenerateMipmap failed for a BGRA image texture; \
+                             falling back to non-mipmapped filtering"
+                        );
+                        (gl.glTexParameteri)(
+                            gl_sys::TEXTURE_2D,
+                            gl_sys::TEXTURE_MIN_FILTER,
+                            gl_sys::LINEAR as i32,
+                        );
+                        (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAX_LEVEL, 0);
+                    }
                 }
             }
 
@@ -2788,15 +2925,18 @@ impl CxTexture {
             unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
                 TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
+                    // LINEAR: render targets are sampled with sample/sample_as_bgra (Linear), e.g. the
+                    // Gaussian blur and CachedView. Since we no longer bind sampler objects, the texture
+                    // object must carry that filter (it was previously supplied by the sampler object).
                     (gl.glTexParameteri)(
                         texture_target,
                         gl_sys::TEXTURE_MIN_FILTER,
-                        gl_sys::NEAREST as i32,
+                        gl_sys::LINEAR as i32,
                     );
                     (gl.glTexParameteri)(
                         texture_target,
                         gl_sys::TEXTURE_MAG_FILTER,
-                        gl_sys::NEAREST as i32,
+                        gl_sys::LINEAR as i32,
                     );
                     (gl.glTexParameteri)(
                         texture_target,

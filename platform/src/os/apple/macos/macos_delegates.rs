@@ -1,7 +1,10 @@
 use {
     crate::{
         cursor::MouseCursor,
-        event::{finger::MouseButton, DragEvent, DragItem, DragResponse, DropEvent},
+        event::{
+            finger::{MouseButton, ScrollPhase},
+            DragEvent, DragItem, DragResponse, DropEvent,
+        },
         makepad_live_id::LiveId,
         makepad_math::Vec2d,
         os::{
@@ -494,6 +497,35 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_mouse_up(MouseButton::SECONDARY, modifiers);
+    }
+
+    extern "C" fn touches_began_with_event(this: &Object, _sel: Sel, event: ObjcId) {
+        // A raw finger contact on the trackpad. This is the only reliable signal for
+        // stopping kinetic scrolling on a tap: the tap's click can be suppressed by
+        // the system's tap rejection, and the OS momentum stream (whose cancellation
+        // would otherwise signal the touch) may have already ended while a widget's
+        // own deceleration tail is still gliding. Requires the view to have its
+        // allowedTouchTypes set to indirect.
+        let cw = get_cocoa_window(this);
+        let touching: ObjcId = unsafe {
+            // NSTouchPhaseTouching = Began | Moved | Stationary = 0b111.
+            msg_send![event, touchesMatchingPhase: 7u64 inView: nil]
+        };
+        let count: u64 = unsafe { msg_send![touching, count] };
+        cw.on_raw_touches_began(count == 1);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_scroll(Vec2d::default(), modifiers, false, ScrollPhase::Touched);
+    }
+
+    extern "C" fn touches_ended_with_event(this: &Object, _sel: Sel, event: ObjcId) {
+        let cw = get_cocoa_window(this);
+        let modifiers = get_event_key_modifier(event);
+        cw.on_raw_touches_ended(modifiers);
+    }
+
+    extern "C" fn touches_cancelled_with_event(this: &Object, _sel: Sel, _event: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.on_raw_touches_began(false);
     }
 
     extern "C" fn other_mouse_down(this: &Object, _sel: Sel, event: ObjcId) {
@@ -1044,6 +1076,18 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(keyUp:), key_up as extern "C" fn(&Object, Sel, ObjcId));
         //decl.add_method(sel!(insertTab:), insert_tab as extern fn(&Object, Sel, id));
         //decl.add_method(sel!(insertBackTab:), insert_back_tab as extern fn(&Object, Sel, id));
+        decl.add_method(
+            sel!(touchesBeganWithEvent:),
+            touches_began_with_event as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(touchesEndedWithEvent:),
+            touches_ended_with_event as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(touchesCancelledWithEvent:),
+            touches_cancelled_with_event as extern "C" fn(&Object, Sel, ObjcId),
+        );
         decl.add_method(
             sel!(mouseDown:),
             mouse_down as extern "C" fn(&Object, Sel, ObjcId),

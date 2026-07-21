@@ -684,7 +684,7 @@ script_mod! {
                 return self.clip_and_transform_vertex(self.rect_pos self.rect_size)
             }
             pixel: fn() {
-                return self.image.sample(self.pos * self.scale + self.shift)
+                return self.image.sample_rt(self.pos * self.scale + self.shift)
             }
         }
     }
@@ -724,7 +724,7 @@ script_mod! {
                     self.rect_size.y - (self.border_inset.y + self.border_inset.w + self.border_size * 2.0)
                     max(1.0 self.border_radius)
                 )
-                let color = self.image.sample(self.pos * self.scale + self.shift)
+                let color = self.image.sample_rt(self.pos * self.scale + self.shift)
                 sdf.fill_keep_premul(color)
                 if self.border_size > 0.0 {
                     sdf.stroke(self.get_border_color() self.border_size)

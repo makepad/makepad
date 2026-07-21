@@ -11,6 +11,10 @@ script_mod! {
         width: Fit
         height: Fit
 
+        // Don't clip: SVGs are fit by content bounds (no stroke extent), so a tight clip squares off round caps.
+        clip_x: false
+        clip_y: false
+
         icon_walk: Walk{
             width: 17.5
             height: Fit

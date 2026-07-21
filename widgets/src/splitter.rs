@@ -330,8 +330,17 @@ impl Widget for Splitter {
                         },
                     );
 
+                    // Redraw both panes' full subtrees. `a`/`b` only cover the
+                    // standalone-widget usage (they are empty in Dock usage, where
+                    // the dock draws the pane contents itself); the pane areas are
+                    // valid in both, and redrawing their children reaches nested
+                    // draw-list-optimized views whose own size-based dirty check
+                    // misses a pure height change (their non-fill sizes are compared
+                    // against the previous frame's measurement).
                     self.a.redraw(cx);
                     self.b.redraw(cx);
+                    cx.redraw_area_and_children(self.area_a);
+                    cx.redraw_area_and_children(self.area_b);
                 }
             }
             _ => {}

@@ -9,7 +9,10 @@ use {
         //turtle::{
         //    Rect
         //},
-        event::{KeyCode, KeyEvent, KeyModifiers, TextClipboardEvent, TextInputEvent, TimerEvent},
+        event::{
+            KeyCode, KeyEvent, KeyModifiers, ScrollPhase, TextClipboardEvent, TextInputEvent,
+            TimerEvent,
+        },
         macos_menu::MacosMenu,
         makepad_live_id::*,
         makepad_math::Vec2d,
@@ -591,11 +594,38 @@ impl MacosApp {
                 let dx: f64 = msg_send![ns_event, scrollingDeltaX];
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
+                // NSEventPhase bitmask values (NSEvent.h): Began = 1<<0, Stationary = 1<<1,
+                // Changed = 1<<2, Ended = 1<<3, Cancelled = 1<<4, MayBegin = 1<<5.
+                // `phase` covers the finger-driven part of a trackpad gesture; `momentumPhase`
+                // covers the momentum stream after lift-off. Classic wheel mice report 0 for
+                // both. See `ScrollPhase` for how widgets use these.
+                let phase_bits: u64 = msg_send![ns_event, phase];
+                let momentum_bits: u64 = msg_send![ns_event, momentumPhase];
+                let phase = if momentum_bits & ((1 << 3) | (1 << 4)) != 0 {
+                    ScrollPhase::MomentumEnded
+                } else if momentum_bits != 0 {
+                    ScrollPhase::Momentum
+                } else if phase_bits & ((1 << 0) | (1 << 5)) != 0 {
+                    ScrollPhase::Began
+                } else if phase_bits & ((1 << 1) | (1 << 2)) != 0 {
+                    ScrollPhase::Changed
+                } else if phase_bits & (1 << 3) != 0 {
+                    ScrollPhase::Ended
+                } else if phase_bits & (1 << 4) != 0 {
+                    // Cancelled: the system took over the gesture, e.g. a system-wide swipe.
+                    // Native behavior is to abort without momentum, so map it to `Began`, which
+                    // widgets treat as a gesture reset (samples cleared, fling stopped), rather
+                    // than `Ended`, which would start a fling.
+                    ScrollPhase::Began
+                } else {
+                    ScrollPhase::None
+                };
                 return if has_prec == YES {
                     cocoa_window.send_scroll(
                         Vec2d { x: -dx, y: -dy },
                         get_event_key_modifier(ns_event),
                         false,
+                        phase,
                     );
                 } else {
                     cocoa_window.send_scroll(
@@ -605,6 +635,7 @@ impl MacosApp {
                         },
                         get_event_key_modifier(ns_event),
                         true,
+                        phase,
                     );
                 };
             }

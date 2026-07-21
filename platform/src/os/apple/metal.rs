@@ -1990,6 +1990,47 @@ impl CxTexture {
             }
         }
 
+        fn update_mip_data_bgra(
+            texture: &Option<RcObjcId>,
+            width: usize,
+            height: usize,
+            max_level: usize,
+            data: &[u32],
+        ) {
+            // `data` is the concatenated mip chain (level 0 first), one u32 (BGRA) per texel,
+            // matching draw/src/image_cache.rs::generate_bgra_mip_chain.
+            let mut offset = 0usize;
+            let mut level_width = width.max(1);
+            let mut level_height = height.max(1);
+            for level in 0..=max_level {
+                let level_len = level_width.saturating_mul(level_height);
+                if offset.saturating_add(level_len) > data.len() {
+                    break;
+                }
+                let region = MTLRegion {
+                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: MTLSize {
+                        width: level_width as u64,
+                        height: level_height as u64,
+                        depth: 1,
+                    },
+                };
+                let level_ptr = unsafe { data.as_ptr().add(offset) };
+                let _: () = unsafe {
+                    msg_send![
+                        texture.as_ref().unwrap().as_id(),
+                        replaceRegion: region
+                        mipmapLevel: level as u64
+                        withBytes: level_ptr as *const std::ffi::c_void
+                        bytesPerRow: (level_width as u64) * 4u64
+                    ]
+                };
+                offset = offset.saturating_add(level_len);
+                level_width = (level_width / 2).max(1);
+                level_height = (level_height / 2).max(1);
+            }
+        }
+
         fn update_cube_data(
             texture: &Option<RcObjcId>,
             width: usize,
@@ -2144,6 +2185,28 @@ impl CxTexture {
                 (*width as u64)
                     .saturating_mul(*height as u64)
                     .saturating_mul(4)
+            }
+            // Mipmapped images: texture is allocated with the full chain above; upload each level
+            // here. TODO: needs a mip-filter sampler to actually help (verify on macOS/iOS).
+            TextureFormat::VecMipBGRAu8_32 {
+                width,
+                height,
+                data,
+                max_level,
+                ..
+            } => {
+                if let Some(data) = data.as_ref() {
+                    update_mip_data_bgra(
+                        &self.os.texture,
+                        *width,
+                        *height,
+                        max_level.unwrap_or(0),
+                        data,
+                    );
+                    (data.len() as u64).saturating_mul(4)
+                } else {
+                    0
+                }
             }
             _ => 0,
         }

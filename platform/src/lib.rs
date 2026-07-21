@@ -209,7 +209,8 @@ pub use {
         script::vm::*,
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         texture::{
-            Texture, TextureAnimation, TextureFormat, TextureId, TextureSize, TextureUpdated,
+            image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
+            TextureSize, TextureUpdated,
         },
         thread::*,
         ui_runner::*,

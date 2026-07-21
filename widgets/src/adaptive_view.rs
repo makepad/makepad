@@ -145,7 +145,10 @@ impl WidgetNode for AdaptiveView {
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
-        self.area.redraw(cx);
+        // We have no area of our own, so just redraw the active widget directly.
+        if let Some(active_widget) = self.active_widget.as_ref() {
+            active_widget.widget_ref.redraw(cx);
+        }
     }
 }
 

@@ -550,7 +550,10 @@ impl Tessellator {
                     verts.push(VVertex::new(
                         px - dlx * ax - dx * ay,
                         py - dly * ax - dy * ay,
-                        u0,
+                        // u=0.5 -> fully-covered (sd=1) so the round cap is a SOLID disc.
+                        // (was u0=0.0 -> sd=0 -> radial fade that vanished at small sizes,
+                        // making round caps look square — robrix #926.)
+                        0.5,
                         1.0,
                     ));
                 }
@@ -654,7 +657,8 @@ impl Tessellator {
                     verts.push(VVertex::new(
                         px - dlx * ax + dx * ay,
                         py - dly * ax + dy * ay,
-                        u0,
+                        // u=0.5 -> solid disc (see emit_cap_start). Was u0 -> square at small sizes.
+                        0.5,
                         1.0,
                     ));
                 }

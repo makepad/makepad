@@ -47,7 +47,7 @@ pub struct Font {
     ascender_in_ems: f32,
     descender_in_ems: f32,
     line_gap_in_ems: f32,
-    cached_glyph_outlines: RefCell<FxHashMap<GlyphId, Option<GlyphOutline>>>,
+    cached_glyph_outlines: RefCell<FxHashMap<GlyphId, Option<Rc<GlyphOutline>>>>,
 }
 
 impl Font {
@@ -113,6 +113,13 @@ impl Font {
     }
 
     pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
+        self.glyph_outline_rc(glyph_id)
+            .map(|outline| (*outline).clone())
+    }
+
+    /// Like [`Self::glyph_outline`], but returns the cache's shared `Rc` so callers
+    /// on hot per-frame paths avoid deep-copying the outline's command list.
+    pub fn glyph_outline_rc(&self, glyph_id: GlyphId) -> Option<Rc<GlyphOutline>> {
         if let Some(outline) = self.cached_glyph_outlines.borrow().get(&glyph_id) {
             return outline.clone();
         }
@@ -124,7 +131,7 @@ impl Font {
             let bounds = face.outline_glyph(glyph_id, &mut builder)?;
             let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
             let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
-            Some(builder.finish(Rect::new(min, max - min), units_per_em))
+            Some(Rc::new(builder.finish(Rect::new(min, max - min), units_per_em)))
         });
 
         {
@@ -143,7 +150,7 @@ impl Font {
     pub fn glyph_outline_bounds_in_ems(
         &self,
         glyph_id: GlyphId,
-        out_outline: &mut Option<GlyphOutline>,
+        out_outline: &mut Option<Rc<GlyphOutline>>,
     ) -> Option<Rect<f32>> {
         // Check the outline cache first — it stores the full outline,
         // from which we can derive bounds.
@@ -152,8 +159,8 @@ impl Font {
             return cached.as_ref().map(|o| o.bounds_in_ems());
         }
 
-        // Not cached yet — compute via glyph_outline() which will populate the cache.
-        if let Some(outline) = self.glyph_outline(glyph_id) {
+        // Not cached yet — compute via glyph_outline_rc() which will populate the cache.
+        if let Some(outline) = self.glyph_outline_rc(glyph_id) {
             let bounds_in_ems = outline.bounds_in_ems();
             *out_outline = Some(outline);
             Some(bounds_in_ems)
