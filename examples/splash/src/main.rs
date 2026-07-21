@@ -7,7 +7,7 @@ use makepad_widgets::text::{
     layouter::{LaidoutGlyph, LaidoutText},
 };
 use makepad_widgets::*;
-use std::{path::Path, time::Instant};
+use std::path::Path;
 
 app_main!(App);
 
@@ -770,22 +770,6 @@ script_mod! {
 
             Label{text: "VarTtf - JetBrains Mono Variable" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Label{text: "Atlas text uses small 10px samples to stay on the SDF path. Glyph samples use the DrawGlyph backend." draw_text.color: #888 draw_text.text_style.font_size: 10}
-
-            View{
-                width: Fill height: Fit flow: Right spacing: 8
-                atlas_upload_bench_start := Button{text: "Run atlas upload benchmark"}
-                atlas_upload_toggle := Button{text: "Toggle atlas pixels"}
-                atlas_upload_bench_status := Label{text: "idle" draw_text.color: #aaa}
-            }
-            View{
-                width: Fill height: 64 flow: Right spacing: 8
-                atlas_upload_full_image := Image{
-                    width: 256 height: 64 fit: ImageFit.Stretch
-                }
-                atlas_upload_partial_image := Image{
-                    width: 256 height: 64 fit: ImageFit.Stretch
-                }
-            }
 
             Hr{}
 
@@ -2074,197 +2058,6 @@ script_mod! {
     }
 }
 
-const ATLAS_BENCH_WIDTH: usize = 2048;
-const ATLAS_BENCH_HEIGHT: usize = 64;
-const ATLAS_BENCH_WARMUP_PAIRS: usize = 30;
-const ATLAS_BENCH_MEASURED_PAIRS: usize = 500;
-const ATLAS_BENCH_REQUESTED_PARTIAL_BYTES: u64 = 63 * 16;
-const ATLAS_BENCH_REQUESTED_FULL_BYTES: u64 =
-    (ATLAS_BENCH_WIDTH * ATLAS_BENCH_HEIGHT * 16) as u64;
-
-#[derive(Clone, Copy)]
-enum AtlasUploadKind {
-    Full,
-    Partial,
-}
-
-#[derive(Default)]
-struct AtlasUploadBench {
-    full_texture: Option<Texture>,
-    partial_texture: Option<Texture>,
-    next_frame: NextFrame,
-    pending_started: Option<Instant>,
-    pending_kind: Option<AtlasUploadKind>,
-    pending_measured: bool,
-    step: usize,
-    running: bool,
-    test_mode: bool,
-    variant_b: bool,
-    full_us: Vec<u64>,
-    partial_us: Vec<u64>,
-}
-
-impl AtlasUploadBench {
-    fn initial_data() -> Vec<f32> {
-        let mut data = vec![0.0; ATLAS_BENCH_WIDTH * ATLAS_BENCH_HEIGHT * 4];
-        for y in 0..ATLAS_BENCH_HEIGHT {
-            for x in 0..ATLAS_BENCH_WIDTH {
-                let offset = (y * ATLAS_BENCH_WIDTH + x) * 4;
-                data[offset] = x as f32 / ATLAS_BENCH_WIDTH as f32;
-                data[offset + 1] = y as f32 / ATLAS_BENCH_HEIGHT as f32;
-                data[offset + 2] = if (x + y) & 1 == 0 { 0.25 } else { 0.75 };
-                data[offset + 3] = 1.0;
-            }
-        }
-        data
-    }
-
-    fn new_texture(cx: &mut Cx) -> Texture {
-        Texture::new_with_format(
-            cx,
-            TextureFormat::VecRGBAf32 {
-                width: ATLAS_BENCH_WIDTH,
-                height: ATLAS_BENCH_HEIGHT,
-                data: Some(Self::initial_data()),
-                updated: TextureUpdated::Full,
-            },
-        )
-    }
-
-    fn dirty_rect() -> RectUsize {
-        RectUsize::new(PointUsize::new(1, 63), SizeUsize::new(63, 1))
-    }
-
-    fn write_tail(cx: &mut Cx, texture: &Texture, variant_b: bool, full: bool) {
-        let mut data = texture.take_vec_f32(cx);
-        for x in 1..64 {
-            let offset = (63 * ATLAS_BENCH_WIDTH + x) * 4;
-            data[offset] = if variant_b { 1.0 } else { 0.0 };
-            data[offset + 1] = if variant_b { 0.0 } else { 1.0 };
-            data[offset + 2] = x as f32 / 63.0;
-            data[offset + 3] = 1.0;
-        }
-        texture.put_back_vec_f32(cx, data, if full { None } else { Some(Self::dirty_rect()) });
-    }
-
-    fn p95(samples: &[u64]) -> u64 {
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        sorted[(sorted.len() * 95 - 1) / 100]
-    }
-
-    fn set_images(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        let full = Self::new_texture(cx);
-        let partial = Self::new_texture(cx);
-        ui.image(cx, ids!(atlas_upload_full_image))
-            .set_texture(cx, Some(full.clone()));
-        ui.image(cx, ids!(atlas_upload_partial_image))
-            .set_texture(cx, Some(partial.clone()));
-        self.full_texture = Some(full);
-        self.partial_texture = Some(partial);
-    }
-
-    fn start(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        self.set_images(cx, ui);
-        self.test_mode = std::env::var("MAKEPAD_TEST").as_deref() == Ok("1");
-        self.pending_started = None;
-        self.pending_kind = None;
-        self.pending_measured = false;
-        self.step = 0;
-        self.running = true;
-        self.variant_b = false;
-        self.full_us.clear();
-        self.partial_us.clear();
-        ui.label(cx, ids!(atlas_upload_bench_status)).set_text(cx, "running");
-        ui.redraw(cx);
-        self.next_frame = cx.new_next_frame();
-    }
-
-    fn toggle(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        if self.running {
-            return;
-        }
-        if self.full_texture.is_none() || self.partial_texture.is_none() {
-            self.set_images(cx, ui);
-        }
-        self.variant_b = !self.variant_b;
-        Self::write_tail(cx, self.full_texture.as_ref().unwrap(), self.variant_b, true);
-        Self::write_tail(cx, self.partial_texture.as_ref().unwrap(), self.variant_b, false);
-        ui.label(cx, ids!(atlas_upload_bench_status)).set_text(
-            cx,
-            if self.variant_b { "variant B" } else { "variant A" },
-        );
-        ui.redraw(cx);
-    }
-
-    fn handle_next_frame(&mut self, cx: &mut Cx, event: &NextFrameEvent, ui: &WidgetRef) {
-        if !self.running || !event.set.contains(&self.next_frame) {
-            return;
-        }
-
-        if let (Some(started), Some(kind)) =
-            (self.pending_started.take(), self.pending_kind.take())
-        {
-            if self.pending_measured {
-                let elapsed = started.elapsed().as_micros() as u64;
-                match kind {
-                    AtlasUploadKind::Full => self.full_us.push(elapsed),
-                    AtlasUploadKind::Partial => self.partial_us.push(elapsed),
-                }
-            }
-        }
-
-        // Automated tests exercise the scheduler, not GPU timing.
-        let (warmup_pairs, measured_pairs) = if self.test_mode
-            || matches!(cx.os_type(), OsType::Unknown)
-        {
-            (1, 4)
-        } else {
-            (ATLAS_BENCH_WARMUP_PAIRS, ATLAS_BENCH_MEASURED_PAIRS)
-        };
-        let total_pairs = warmup_pairs + measured_pairs;
-        if self.step == total_pairs * 2 {
-            self.running = false;
-            let full_p95 = Self::p95(&self.full_us);
-            let partial_p95 = Self::p95(&self.partial_us);
-            ui.label(cx, ids!(atlas_upload_bench_status))
-                .set_text(cx, "scheduler proxy recorded");
-            log!(
-                "ATLAS_BENCH SCHEDULER_PROXY requested_partial_bytes={} requested_full_bytes={} partial_scheduler_p95_us={} full_scheduler_p95_us={}",
-                ATLAS_BENCH_REQUESTED_PARTIAL_BYTES,
-                ATLAS_BENCH_REQUESTED_FULL_BYTES,
-                partial_p95,
-                full_p95,
-            );
-            return;
-        }
-
-        let pair = self.step / 2;
-        let first_in_pair = self.step & 1 == 0;
-        let full_first = pair & 1 == 0;
-        let kind = if first_in_pair == full_first {
-            AtlasUploadKind::Full
-        } else {
-            AtlasUploadKind::Partial
-        };
-        let variant_b = pair & 1 == 0;
-        match kind {
-            AtlasUploadKind::Full => {
-                Self::write_tail(cx, self.full_texture.as_ref().unwrap(), variant_b, true)
-            }
-            AtlasUploadKind::Partial => {
-                Self::write_tail(cx, self.partial_texture.as_ref().unwrap(), variant_b, false)
-            }
-        }
-        self.pending_started = Some(Instant::now());
-        self.pending_kind = Some(kind);
-        self.pending_measured = pair >= warmup_pairs;
-        self.step += 1;
-        ui.redraw(cx);
-        self.next_frame = cx.new_next_frame();
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -2283,8 +2076,6 @@ pub struct App {
     lens_ripple_animating: bool,
     #[rust]
     lens_pending_close: bool,
-    #[rust]
-    atlas_upload_bench: AtlasUploadBench,
 }
 
 impl App {
@@ -2328,8 +2119,6 @@ impl MatchEvent for App {
     }
 
     fn handle_next_frame(&mut self, cx: &mut Cx, e: &NextFrameEvent) {
-        self.atlas_upload_bench.handle_next_frame(cx, e, &self.ui);
-
         if !self.lens_ripple_animating || !e.set.contains(&self.lens_press_next_frame) {
             return;
         }
@@ -2387,20 +2176,6 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self
-            .ui
-            .button(cx, ids!(atlas_upload_bench_start))
-            .clicked(actions)
-        {
-            self.atlas_upload_bench.start(cx, &self.ui);
-        }
-        if self
-            .ui
-            .button(cx, ids!(atlas_upload_toggle))
-            .clicked(actions)
-        {
-            self.atlas_upload_bench.toggle(cx, &self.ui);
-        }
         if self.ui.button(cx, ids!(button)).clicked(actions) {
             log!("Button clicked!");
         }
