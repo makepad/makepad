@@ -434,6 +434,21 @@ impl CxFingers {
         self.captures.iter_mut().find(|v| v.area == area)
     }
 
+    /// Reassign the finger currently captured by `from` to `to` (also updating its
+    /// sweep area). Lets a drag begun on one widget be handed to another mid-press.
+    /// Returns true if a capture on `from` was actually found and switched — false
+    /// means the finger was already released (nothing to hand off).
+    pub(crate) fn switch_capture_area(&mut self, from: Area, to: Area, to_sweep: Area) -> bool {
+        if let Some(cap) = self.captures.iter_mut().find(|v| v.area == from) {
+            cap.area = to;
+            cap.sweep_area = to_sweep;
+            cap.switch_capture = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn is_area_captured(&self, area: Area) -> bool {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
