@@ -449,6 +449,28 @@ impl CxFingers {
         }
     }
 
+    /// Hand a finger that an interactive child grabbed up to a container that
+    /// already co-captures it (via `capture_overload`). Finds the digit `over`
+    /// co-captures, drops every OTHER area's capture of that digit, and leaves
+    /// `over` as the sole capture so it receives the finger's subsequent moves.
+    /// Lets e.g. the home pager start a page-swipe/drag even when the press began
+    /// on a button inside a widget tile. Returns true if a child capture was
+    /// actually dropped (false = nothing was in the way).
+    pub(crate) fn promote_capture_over(&mut self, over: Area) -> bool {
+        let Some(digit) = self
+            .captures
+            .iter()
+            .find(|v| v.area == over)
+            .map(|v| v.digit_id)
+        else {
+            return false;
+        };
+        let before = self.captures.len();
+        self.captures
+            .retain(|v| v.digit_id != digit || v.area == over);
+        self.captures.len() != before
+    }
+
     pub fn is_area_captured(&self, area: Area) -> bool {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
