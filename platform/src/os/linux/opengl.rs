@@ -2300,8 +2300,7 @@ fn partial_texture_updates_supported(format: &TextureFormat, os_type: &OsType) -
     if cfg!(ohos_sim) {
         return false;
     }
-    !matches!(format, TextureFormat::VecRGBAf32 { .. })
-        || matches!(os_type, OsType::LinuxWindow(_) | OsType::LinuxDirect)
+    !matches!(format, TextureFormat::VecRGBAf32 { .. }) || matches!(os_type, OsType::LinuxWindow(_))
 }
 
 #[cfg(test)]
@@ -2324,7 +2323,7 @@ mod partial_texture_update_policy_tests {
             &format,
             &OsType::LinuxWindow(Default::default()),
         ));
-        assert!(partial_texture_updates_supported(&format, &OsType::LinuxDirect));
+        assert!(!partial_texture_updates_supported(&format, &OsType::LinuxDirect));
         assert!(!partial_texture_updates_supported(
             &format,
             &OsType::Android(Default::default()),

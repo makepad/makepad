@@ -1,4 +1,4 @@
-use makepad_test::{makepad_test, Selector, TestApp};
+use makepad_test::{makepad_test, Selector, StudioToApp, TestApp};
 
 #[makepad_test]
 fn splash_modal_smoke(app: TestApp) {
@@ -50,6 +50,8 @@ fn splash_media_scroll_smoke(app: TestApp) {
 
 #[makepad_test]
 fn splash_atlas_upload_bench(app: TestApp) {
+    const ATLAS_BENCH_TICKS: usize = (1 + 4) * 2 + 1;
+
     app.locator(Selector::id("atlas_upload_toggle"))
         .wait_visible()
         .click();
@@ -58,5 +60,6 @@ fn splash_atlas_upload_bench(app: TestApp) {
     app.locator(Selector::id("atlas_upload_bench_start"))
         .wait_visible()
         .click();
+    app.forward(vec![StudioToApp::Tick; ATLAS_BENCH_TICKS]);
     app.wait_for_log_contains("ATLAS_BENCH SCHEDULER_PROXY");
 }

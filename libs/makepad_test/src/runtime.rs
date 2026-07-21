@@ -103,6 +103,7 @@ impl TestConfig {
             .join(sanitize_path_component(&test_name));
 
         let mut env = HashMap::new();
+        env.insert("MAKEPAD_TEST".to_string(), "1".to_string());
         if !visible_mode_enabled() {
             env.insert("MAKEPAD".to_string(), "headless".to_string());
         }
@@ -1593,6 +1594,7 @@ mod tests {
                 .join("ui__test")
         );
         assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+        assert_eq!(config.env.get("MAKEPAD_TEST"), Some(&"1".to_string()));
     }
 
     #[test]
@@ -1609,6 +1611,7 @@ mod tests {
         restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
 
         assert!(!config.env.contains_key("MAKEPAD"));
+        assert_eq!(config.env.get("MAKEPAD_TEST"), Some(&"1".to_string()));
     }
 
     #[test]

@@ -1278,10 +1278,9 @@ impl CxTexture {
                 };
                 let data = data.as_ref().unwrap();
                 let float_offset = (rect.origin.y * *width + rect.origin.x) * 4;
-                let resource: ID3D11Resource = texture.cast().unwrap();
                 unsafe {
                     d3d11_cx.context.UpdateSubresource(
-                        &resource,
+                        texture,
                         0,
                         Some(&dst_box as *const D3D11_BOX),
                         data.as_ptr().add(float_offset) as *const std::ffi::c_void,

@@ -26,7 +26,27 @@ fn ascii_cluster_index(bytes: &[u8], index: usize) -> usize {
 }
 
 fn can_skip_bidi(text: &str, direction: Direction) -> bool {
-    direction == Direction::Ltr && text.is_ascii()
+    if direction != Direction::Ltr {
+        return false;
+    }
+    text.is_ascii()
+        || text.chars().all(|c| {
+            c.is_ascii()
+                || matches!(
+                    unicode_bidi::bidi_class(c),
+                    unicode_bidi::BidiClass::B
+                        | unicode_bidi::BidiClass::BN
+                        | unicode_bidi::BidiClass::CS
+                        | unicode_bidi::BidiClass::EN
+                        | unicode_bidi::BidiClass::ES
+                        | unicode_bidi::BidiClass::ET
+                        | unicode_bidi::BidiClass::L
+                        | unicode_bidi::BidiClass::NSM
+                        | unicode_bidi::BidiClass::ON
+                        | unicode_bidi::BidiClass::S
+                        | unicode_bidi::BidiClass::WS
+                )
+        })
 }
 
 fn can_skip_visual_runs(direction: Direction, is_pure_ltr: bool) -> bool {
@@ -122,8 +142,8 @@ impl Shaper {
             println!("WARNING: encountered empty font family");
         } else {
             let text: &str = &params.text;
-            // Explicitly LTR ASCII cannot contain bidi controls, so it can be
-            // shaped as one LTR run without running the bidi algorithm.
+            // Explicit LTR text whose bidi classes cannot alter embedding
+            // levels or visual run order can be shaped as one LTR run.
             if can_skip_bidi(text, params.direction) {
                 self.shape_recursive(
                     text,
@@ -136,8 +156,8 @@ impl Shaper {
                     &mut glyphs,
                 );
             } else {
-                // Non-ASCII text and explicit RTL direction require the Unicode
-                // Bidirectional Algorithm to resolve embedding levels and runs.
+                // Text with bidi-sensitive classes and explicit RTL direction require
+                // the Unicode Bidirectional Algorithm to resolve levels and runs.
                 let default_level = match params.direction {
                     Direction::Ltr => Some(unicode_bidi::Level::ltr()),
                     Direction::Rtl => Some(unicode_bidi::Level::rtl()),
@@ -476,9 +496,15 @@ mod tests {
     }
 
     #[test]
-    fn bidi_shortcut_only_accepts_plain_ltr_ascii() {
+    fn bidi_shortcut_accepts_ltr_text_without_bidi_controls() {
         assert!(can_skip_bidi("plain ASCII", Direction::Ltr));
+        assert!(can_skip_bidi("caf\u{e9}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{6f22}\u{5b57}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{1f44b}", Direction::Ltr));
         assert!(!can_skip_bidi("plain ASCII", Direction::Rtl));
+        assert!(!can_skip_bidi("\u{5d0}\u{5d1}\u{5d2}", Direction::Ltr));
+        assert!(!can_skip_bidi("\u{645}\u{631}\u{62d}\u{628}\u{627}", Direction::Ltr));
         assert!(!can_skip_bidi("\u{200F}", Direction::Ltr));
         assert!(!can_skip_bidi("\u{202E}", Direction::Ltr));
         assert!(!can_skip_bidi("\u{2067}", Direction::Ltr));

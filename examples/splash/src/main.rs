@@ -2098,6 +2098,7 @@ struct AtlasUploadBench {
     pending_measured: bool,
     step: usize,
     running: bool,
+    test_mode: bool,
     variant_b: bool,
     full_us: Vec<u64>,
     partial_us: Vec<u64>,
@@ -2165,6 +2166,7 @@ impl AtlasUploadBench {
 
     fn start(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         self.set_images(cx, ui);
+        self.test_mode = std::env::var("MAKEPAD_TEST").as_deref() == Ok("1");
         self.pending_started = None;
         self.pending_kind = None;
         self.pending_measured = false;
@@ -2212,7 +2214,15 @@ impl AtlasUploadBench {
             }
         }
 
-        let total_pairs = ATLAS_BENCH_WARMUP_PAIRS + ATLAS_BENCH_MEASURED_PAIRS;
+        // Automated tests exercise the scheduler, not GPU timing.
+        let (warmup_pairs, measured_pairs) = if self.test_mode
+            || matches!(cx.os_type(), OsType::Unknown)
+        {
+            (1, 4)
+        } else {
+            (ATLAS_BENCH_WARMUP_PAIRS, ATLAS_BENCH_MEASURED_PAIRS)
+        };
+        let total_pairs = warmup_pairs + measured_pairs;
         if self.step == total_pairs * 2 {
             self.running = false;
             let full_p95 = Self::p95(&self.full_us);
@@ -2248,7 +2258,7 @@ impl AtlasUploadBench {
         }
         self.pending_started = Some(Instant::now());
         self.pending_kind = Some(kind);
-        self.pending_measured = pair >= ATLAS_BENCH_WARMUP_PAIRS;
+        self.pending_measured = pair >= warmup_pairs;
         self.step += 1;
         ui.redraw(cx);
         self.next_frame = cx.new_next_frame();
