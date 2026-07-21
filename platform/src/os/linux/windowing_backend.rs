@@ -7,6 +7,10 @@ use crate::{cx::Cx, makepad_live_id::LiveId, opengl_cx::OpenglCx, CxOsApi, OpenU
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
+/// Scroll distance in logical pixels for one wheel detent, roughly three lines of
+/// text, matching the common Windows and GTK defaults.
+pub const PIXELS_PER_WHEEL_DETENT: f64 = 60.0;
+
 fn env_var_is_nonempty(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }

@@ -159,6 +159,101 @@ impl<'a> GlyphRasterImage<'a> {
             }
         }
     }
+
+    /// Decode the PNG into a contiguous BGRA buffer at its native size.
+    fn decode_native_bgra(&self) -> Option<(usize, usize, Vec<Bgra>)> {
+        let cursor = ZCursor::new(self.data);
+        let mut decoder = PngDecoder::new(cursor);
+        decoder.decode_headers().ok()?;
+        let (width, height) = decoder.dimensions()?;
+        let colorspace = decoder.colorspace()?;
+        let decoded = decoder.decode().ok()?;
+        let buffer = decoded.u8()?;
+        let num_components = colorspace.num_components();
+        let mut out = Vec::with_capacity(width.saturating_mul(height));
+        match num_components {
+            4 => {
+                for i in (0..width * height * 4).step_by(4) {
+                    out.push(Bgra::new(buffer[i + 2], buffer[i + 1], buffer[i], buffer[i + 3]));
+                }
+            }
+            3 => {
+                for i in (0..width * height * 3).step_by(3) {
+                    out.push(Bgra::new(buffer[i + 2], buffer[i + 1], buffer[i], 255));
+                }
+            }
+            2 => {
+                for i in (0..width * height * 2).step_by(2) {
+                    let gray = buffer[i];
+                    out.push(Bgra::new(gray, gray, gray, buffer[i + 1]));
+                }
+            }
+            1 => {
+                for i in 0..width * height {
+                    let gray = buffer[i];
+                    out.push(Bgra::new(gray, gray, gray, 255));
+                }
+            }
+            _ => return None,
+        }
+        Some((width, height, out))
+    }
+
+    /// Decode the raster image, box-downsampling (alpha-weighted) to fit `image`'s size — so large
+    /// emoji strikes shrink to ~display size here instead of looking blocky when minified at draw time.
+    /// If the destination is >= the source, this is a straight copy.
+    pub fn decode_scaled(&self, image: &mut SubimageMut<Bgra>) {
+        let Some((sw, sh, src)) = self.decode_native_bgra() else {
+            return;
+        };
+        let dst = image.size();
+        let (dw, dh) = (dst.width, dst.height);
+        if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+            return;
+        }
+        if dw >= sw && dh >= sh {
+            for y in 0..sh.min(dh) {
+                for x in 0..sw.min(dw) {
+                    image[Point::new(x, y)] = src[y * sw + x];
+                }
+            }
+            return;
+        }
+        // Alpha-weighted box filter: premultiply RGB by alpha while accumulating so that
+        // fully-transparent texels don't bleed their (undefined) color into the average.
+        for dy in 0..dh {
+            let sy0 = dy * sh / dh;
+            let sy1 = (((dy + 1) * sh / dh).max(sy0 + 1)).min(sh);
+            for dx in 0..dw {
+                let sx0 = dx * sw / dw;
+                let sx1 = (((dx + 1) * sw / dw).max(sx0 + 1)).min(sw);
+                let (mut acc_b, mut acc_g, mut acc_r, mut acc_a, mut count) =
+                    (0u32, 0u32, 0u32, 0u32, 0u32);
+                for sy in sy0..sy1 {
+                    for sx in sx0..sx1 {
+                        let p = src[sy * sw + sx];
+                        let a = p.a() as u32;
+                        acc_b += p.b() as u32 * a;
+                        acc_g += p.g() as u32 * a;
+                        acc_r += p.r() as u32 * a;
+                        acc_a += a;
+                        count += 1;
+                    }
+                }
+                let out = if count == 0 || acc_a == 0 {
+                    Bgra::new(0, 0, 0, (acc_a / count.max(1)) as u8)
+                } else {
+                    Bgra::new(
+                        (acc_b / acc_a) as u8,
+                        (acc_g / acc_a) as u8,
+                        (acc_r / acc_a) as u8,
+                        (acc_a / count) as u8,
+                    )
+                };
+                image[Point::new(dx, dy)] = out;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

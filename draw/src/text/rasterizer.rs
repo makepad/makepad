@@ -2,7 +2,7 @@ use super::{
     font::{Font, GlyphId},
     font_atlas::{ColorAtlas, GlyphImageKey, GlyphImageKind, GrayscaleAtlas, MsdfAtlas},
     geom::{Point, Rect, Size},
-    glyph_outline::{Command, GlyphOutline},
+    glyph_outline::{GlyphOutline, OutlineComplexity},
     image::{Bgra, Image, R},
     msdfer,
     msdfer::Msdfer,
@@ -280,7 +280,7 @@ impl Rasterizer {
         dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
+        let outline = outline.unwrap_or_else(|| font.glyph_outline_rc(glyph_id).unwrap());
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.sdfer.settings().padding;
         let key = GlyphImageKey {
@@ -341,8 +341,8 @@ impl Rasterizer {
         }
         let mut outline = None;
         let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
-        let complexity = estimate_outline_complexity(&outline);
+        let outline = outline.unwrap_or_else(|| font.glyph_outline_rc(glyph_id).unwrap());
+        let complexity = outline.complexity();
         if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
@@ -385,9 +385,12 @@ impl Rasterizer {
             self.seed_msdf_slot_from_sdf(slot, sdf_glyph);
         }
         if self.outline_msdf_pending.insert(key.clone()) {
+            // The job crosses a thread boundary, so it needs an owned copy of the
+            // outline. This deep clone happens at most once per glyph per atlas
+            // epoch, guarded by the pending set above.
             self.queued_msdf_jobs.push(QueuedMsdfJob {
                 key,
-                outline,
+                outline: (*outline).clone(),
                 dpxs_per_em,
                 epoch: self.atlas_epoch,
             });
@@ -402,12 +405,66 @@ impl Rasterizer {
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
         const PADDING: usize = 2;
+        // Keep a little extra resolution above the display size so minor magnification
+        // (line scaling, fractional DPI) stays crisp without re-introducing aliasing.
+        const HEADROOM: f32 = 1.5;
 
         font.with_glyph_raster_image(glyph_id, dpxs_per_em, |raster_image| {
+            let native = raster_image.decode_size();
+            let native_dpxs = raster_image.dpxs_per_em();
+
+            // Color emoji ship at one large native strike; pre-shrink toward display size so it
+            // isn't minified (no mipmaps) into a blocky look. Never upscale.
+            let scale = if native_dpxs > 0.0 {
+                (dpxs_per_em * HEADROOM / native_dpxs).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            // Quantize the scale into coarse buckets (powers of 1.25, rounded up toward
+            // native). The atlas slot and the strike decode below are keyed by the
+            // resulting size, so without this a continuous zoom or a fractional-DPI
+            // change re-decodes the full strike and allocates a fresh slot for every
+            // sub-pixel size step. Rounding up keeps at least the requested resolution,
+            // and the achieved-scale compensation below keeps the on-screen size exact.
+            const SIZE_BUCKET_FACTOR: f32 = 1.25;
+            let scale = if scale > 0.0 && scale < 1.0 {
+                let steps = ((1.0 / scale).ln() / SIZE_BUCKET_FACTOR.ln() + 1.0e-3).floor();
+                (1.0 / SIZE_BUCKET_FACTOR.powf(steps)).min(1.0)
+            } else {
+                scale
+            };
+            let target = if scale < 1.0 {
+                Size::new(
+                    ((native.width as f32 * scale).round() as usize).max(1),
+                    ((native.height as f32 * scale).round() as usize).max(1),
+                )
+            } else {
+                native
+            };
+            // Scale actually achieved after integer rounding. Scaling both origin_in_dpxs
+            // and dpxs_per_em by it keeps the glyph's on-screen size & position invariant
+            // (the draw side works in em units = *_in_dpxs / dpxs_per_em).
+            //
+            // width and height are rounded independently above, so their ratios can differ
+            // slightly; we apply one uniform scale (origin is scaled on both axes and
+            // dpxs_per_em is a scalar), so use the geometric mean of the per-axis ratios to
+            // spread the sub-pixel rounding error evenly instead of distorting one axis.
+            let achieved_w = if native.width > 0 {
+                target.width as f32 / native.width as f32
+            } else {
+                1.0
+            };
+            let achieved_h = if native.height > 0 {
+                target.height as f32 / native.height as f32
+            } else {
+                1.0
+            };
+            let achieved = (achieved_w * achieved_h).sqrt();
+
             let key = GlyphImageKey {
                 font_id: font.id(),
                 glyph_id,
-                size: raster_image.decode_size() + Size::from(2 * PADDING),
+                size: target + Size::from(2 * PADDING),
                 kind: GlyphImageKind::Color,
             };
             let (slot, allocated) = self.allocate_shared_slot(key)?;
@@ -418,7 +475,7 @@ impl Rasterizer {
                 {
                     let size = image.size();
                     image = image.subimage_mut(Rect::from(size).unpad(PADDING));
-                    raster_image.decode(&mut image);
+                    raster_image.decode_scaled(&mut image);
                 }
                 slot.rect
             };
@@ -428,8 +485,8 @@ impl Rasterizer {
                 atlas_image_bounds,
                 atlas_image_padding: PADDING,
                 atlas_plane: AtlasPlane::R.index(),
-                origin_in_dpxs: raster_image.origin_in_dpxs(),
-                dpxs_per_em: raster_image.dpxs_per_em(),
+                origin_in_dpxs: raster_image.origin_in_dpxs() * achieved,
+                dpxs_per_em: native_dpxs * achieved,
             })
         })?
     }
@@ -863,37 +920,6 @@ fn glyph_outline_image_size(size_in_ems: Size<f32>, dpxs_per_em: f32) -> Size<us
         size_in_dpxs.width.ceil() as usize,
         size_in_dpxs.height.ceil() as usize,
     )
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OutlineComplexity {
-    outline_commands: usize,
-    estimated_segments: usize,
-}
-
-fn estimate_outline_complexity(outline: &GlyphOutline) -> OutlineComplexity {
-    const QUAD_COMPLEXITY_SEGMENTS: usize = 8;
-    const CUBIC_COMPLEXITY_SEGMENTS: usize = 12;
-
-    let mut estimated_segments = 0usize;
-    for command in outline.commands().iter().copied() {
-        match command {
-            Command::MoveTo(_) => {}
-            Command::LineTo(_) => estimated_segments = estimated_segments.saturating_add(1),
-            Command::QuadTo(_, _) => {
-                estimated_segments = estimated_segments.saturating_add(QUAD_COMPLEXITY_SEGMENTS);
-            }
-            Command::CurveTo(_, _, _) => {
-                estimated_segments = estimated_segments.saturating_add(CUBIC_COMPLEXITY_SEGMENTS);
-            }
-            Command::Close => estimated_segments = estimated_segments.saturating_add(1),
-        }
-    }
-
-    OutlineComplexity {
-        outline_commands: outline.commands().len(),
-        estimated_segments,
-    }
 }
 
 fn is_msdf_complexity_acceptable(

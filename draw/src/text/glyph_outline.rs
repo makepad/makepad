@@ -13,6 +13,7 @@ pub struct GlyphOutline {
     bounds: Rect<f32>,
     units_per_em: f32,
     commands: Vec<Command>,
+    complexity: OutlineComplexity,
 }
 
 impl GlyphOutline {
@@ -30,6 +31,12 @@ impl GlyphOutline {
 
     pub fn commands(&self) -> &[Command] {
         &self.commands
+    }
+
+    /// Returns the complexity metrics computed when this outline was built, so
+    /// per-frame consumers don't have to rescan the command list.
+    pub fn complexity(&self) -> OutlineComplexity {
+        self.complexity
     }
 
     pub fn rasterize_transform(&self, dpxs_per_em: f32) -> Transform<f32> {
@@ -108,6 +115,39 @@ pub enum Command {
     Close,
 }
 
+/// Rough cost metrics for rasterizing an outline. Curves are weighted by an
+/// estimate of how many line segments they flatten into.
+#[derive(Clone, Copy, Debug)]
+pub struct OutlineComplexity {
+    pub outline_commands: usize,
+    pub estimated_segments: usize,
+}
+
+fn estimate_complexity(commands: &[Command]) -> OutlineComplexity {
+    const QUAD_COMPLEXITY_SEGMENTS: usize = 8;
+    const CUBIC_COMPLEXITY_SEGMENTS: usize = 12;
+
+    let mut estimated_segments = 0usize;
+    for command in commands.iter().copied() {
+        match command {
+            Command::MoveTo(_) => {}
+            Command::LineTo(_) => estimated_segments = estimated_segments.saturating_add(1),
+            Command::QuadTo(_, _) => {
+                estimated_segments = estimated_segments.saturating_add(QUAD_COMPLEXITY_SEGMENTS);
+            }
+            Command::CurveTo(_, _, _) => {
+                estimated_segments = estimated_segments.saturating_add(CUBIC_COMPLEXITY_SEGMENTS);
+            }
+            Command::Close => estimated_segments = estimated_segments.saturating_add(1),
+        }
+    }
+
+    OutlineComplexity {
+        outline_commands: commands.len(),
+        estimated_segments,
+    }
+}
+
 #[derive(Debug)]
 pub struct Builder {
     commands: Vec<Command>,
@@ -127,10 +167,12 @@ impl Builder {
     }
 
     pub fn finish(self, bounds: Rect<f32>, units_per_em: f32) -> GlyphOutline {
+        let complexity = estimate_complexity(&self.commands);
         GlyphOutline {
             bounds,
             units_per_em,
             commands: self.commands,
+            complexity,
         }
     }
 }

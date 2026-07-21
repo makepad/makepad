@@ -16,12 +16,17 @@ pub struct OpenglCx {
     pub egl_platform: egl_sys::EGLenum,
     pub egl_platform_display: *mut c_void,
 
-    /// Buffer swap interval requested on the window surface. `1` (the default) enables
-    /// vsync so `eglSwapBuffers` blocks until the next refresh, capping the render loop
-    /// at the display rate. Without this, content that drives a continuous redraw (e.g.
-    /// any shader whose mapping `uses_time`, which forces `demo_time_repaint`) would spin
-    /// the event loop rendering as fast as possible, pinning a CPU/GPU core. Set the
-    /// `MAKEPAD_NO_VSYNC` env var to request `0` (uncapped) for benchmarking.
+    /// Buffer swap interval requested on the window surface. On X11, `1` enables vsync
+    /// so `eglSwapBuffers` blocks until the next refresh, capping the render loop at the
+    /// display rate. Without this, content that drives a continuous redraw (e.g. any
+    /// shader whose mapping `uses_time`, which forces `demo_time_repaint`) would spin
+    /// the event loop rendering as fast as possible, pinning a CPU/GPU core. On Wayland
+    /// this is `0`: Mesa implements interval `1` by waiting for the previous frame's
+    /// `wl_surface::frame` callback inside `eglSwapBuffers`, and compositors withhold
+    /// those callbacks for occluded or minimized windows, which would block the whole
+    /// event loop; the render loop is capped by explicit frame-callback pacing instead
+    /// (see `linux_wayland.rs`). Set the `MAKEPAD_NO_VSYNC` env var to request `0`
+    /// (uncapped) for benchmarking.
     pub swap_interval: egl_sys::EGLint,
 }
 
@@ -216,7 +221,11 @@ impl OpenglCx {
         })
         .expect("Cant load openGL functions");
 
-        let swap_interval = if std::env::var_os("MAKEPAD_NO_VSYNC").is_some() {
+        // Wayland windows must not block in eglSwapBuffers; see the `swap_interval`
+        // field docs.
+        let swap_interval = if std::env::var_os("MAKEPAD_NO_VSYNC").is_some()
+            || egl_platform == egl_sys::EGL_PLATFORM_WAYLAND_KHR
+        {
             0
         } else {
             1
@@ -248,13 +257,16 @@ impl OpenglCx {
 }
 
 impl Cx {
+    /// Renders the pass and swaps it to the window surface. Returns whether the buffer
+    /// swap succeeded; the Wayland backend uses this to know a commit carrying its
+    /// frame-callback request was actually submitted.
     pub fn draw_pass_to_window(
         &mut self,
         draw_pass_id: DrawPassId,
         egl_surface: egl_sys::EGLSurface,
         pix_width: f64,
         pix_height: f64,
-    ) {
+    ) -> bool {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
         unsafe {
@@ -274,7 +286,7 @@ impl Cx {
                     egl_error as u32,
                     egl_error_name(egl_error)
                 );
-                return;
+                return false;
             }
             // Apply the configured swap interval (vsync) on the now-current window surface.
             // Re-applied per frame because it is surface-scoped and surfaces are recreated
@@ -454,6 +466,7 @@ impl Cx {
                     egl_error_name(egl_error)
                 );
             }
+            swap_ok != 0
         }
     }
 }

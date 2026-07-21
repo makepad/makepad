@@ -402,6 +402,7 @@ pub fn build_tile_buffers_from_body(
                 4.0,
                 1.0,
                 false,
+                DEFAULT_FLATTEN_TOLERANCE,
             );
             append_tessellated_geometry(
                 &tess_verts,
