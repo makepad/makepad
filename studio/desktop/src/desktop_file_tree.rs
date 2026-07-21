@@ -99,7 +99,7 @@ script_mod! {
                 width: Fill
                 height: Fill
                 flow: Down
-                max_pull_down: 0.0
+                bounce_at_start: false
                 capture_overload: false
                 grab_key_focus: false
                 auto_tail: false

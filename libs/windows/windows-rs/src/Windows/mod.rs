@@ -25658,6 +25658,9 @@ impl ID3D11DeviceContext {
     pub unsafe fn DrawIndexedInstanced(&self, indexcountperinstance: u32, instancecount: u32, startindexlocation: u32, basevertexlocation: i32, startinstancelocation: u32) {
         unsafe { (windows_core::Interface::vtable(self).DrawIndexedInstanced)(windows_core::Interface::as_raw(self), indexcountperinstance, instancecount, startindexlocation, basevertexlocation, startinstancelocation) }
     }
+    pub unsafe fn UpdateSubresource(&self, pdstresource: &ID3D11Resource, dstsubresource: u32, pdstbox: *const D3D11_BOX, psrcdata: *const core::ffi::c_void, srcrowpitch: u32, srcdepthpitch: u32) {
+        unsafe { (windows_core::Interface::vtable(self).UpdateSubresource)(windows_core::Interface::as_raw(self), windows_core::Interface::as_raw(pdstresource), dstsubresource, pdstbox, psrcdata, srcrowpitch, srcdepthpitch) }
+    }
     #[cfg(feature = "Win32_Graphics_Direct3D")]
     pub unsafe fn IASetPrimitiveTopology(&self, topology: super::Direct3D::D3D_PRIMITIVE_TOPOLOGY) {
         unsafe { (windows_core::Interface::vtable(self).IASetPrimitiveTopology)(windows_core::Interface::as_raw(self), topology) }
@@ -30054,6 +30057,7 @@ pub struct DXGI_SWAP_CHAIN_FULLSCREEN_DESC {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_SWAP_EFFECT(pub i32);
 pub const DXGI_SWAP_EFFECT_FLIP_DISCARD: DXGI_SWAP_EFFECT = DXGI_SWAP_EFFECT(4i32);
+pub const DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG(0x800i32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DXGI_USAGE(pub u32);
@@ -32645,6 +32649,14 @@ impl core::ops::Deref for IDXGISwapChain2 {
     }
 }
 windows_core::imp::interface_hierarchy!(IDXGISwapChain2, windows_core::IUnknown, IDXGIObject, IDXGIDeviceSubObject, IDXGISwapChain, IDXGISwapChain1);
+impl IDXGISwapChain2 {
+    pub unsafe fn SetMaximumFrameLatency(&self, maxlatency: u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetMaximumFrameLatency)(windows_core::Interface::as_raw(self), maxlatency).ok() }
+    }
+    pub unsafe fn GetFrameLatencyWaitableObject(&self) -> super::super::Foundation::HANDLE {
+        unsafe { (windows_core::Interface::vtable(self).GetFrameLatencyWaitableObject)(windows_core::Interface::as_raw(self)) }
+    }
+}
 #[repr(C)]
 #[doc(hidden)]
 pub struct IDXGISwapChain2_Vtbl {
@@ -45439,6 +45451,7 @@ impl core::ops::Not for PEEK_MESSAGE_REMOVE_TYPE {
         Self(self.0.not())
     }
 }
+pub const PM_NOREMOVE: PEEK_MESSAGE_REMOVE_TYPE = PEEK_MESSAGE_REMOVE_TYPE(0u32);
 pub const PM_REMOVE: PEEK_MESSAGE_REMOVE_TYPE = PEEK_MESSAGE_REMOVE_TYPE(1u32);
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

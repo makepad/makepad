@@ -234,6 +234,8 @@ impl Fonts {
 
     pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         assert!(!self.needs_prepare_atlases);
+        // Frame boundary for the layout cache's working-set protection.
+        self.layouter.advance_cache_generation();
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
         if rasterizer.color_atlas_mut().reset_if_needed() {
             rasterizer.on_atlas_reset();

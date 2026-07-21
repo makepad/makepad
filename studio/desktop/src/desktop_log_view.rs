@@ -176,7 +176,7 @@ script_mod! {
         height: Fill
         width: Fill
         list := PortalList {
-            max_pull_down: 0.0
+            bounce_at_start: false
             capture_overload: false
             grab_key_focus: false
             auto_tail: true

@@ -1,11 +1,18 @@
 use {
     crate::{
         animator::AnimatorImpl,
-        event::{TouchState, TAP_COUNT_DISTANCE},
+        event::{ScrollPhase, TouchState, TAP_COUNT_DISTANCE},
         flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
+        scroll_motion::{
+            estimate_release_velocity, press_settles_finger_scroll, push_sample,
+            rubber_band_bounce, soften_bounce_velocity, stretch_displayed, stretch_raw, Fling,
+            FrameClock, MomentumStream, ScrollSample, CATCH_PRESS_WINDOW, FLING_BOOST_MAX_DWELL,
+            FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA, PER_FRAME_TO_PER_SECOND,
+            RUBBER_BAND_TOUCH_RANGE,
+        },
         widget::*,
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
@@ -31,12 +38,6 @@ script_mod! {
 /// The maximum number of items that will be shown as part of a smooth scroll animation.
 const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 
-#[derive(Clone, Copy)]
-struct ScrollSample {
-    abs: f64,
-    time: f64,
-}
-
 enum ScrollState {
     Stopped,
     Drag {
@@ -48,11 +49,34 @@ enum ScrollState {
         committed: bool,
     },
     Flick {
-        delta: f64,
+        /// The momentum-fling animation state (native iOS-style exponential decay,
+        /// frame-rate-independent). Shared with ScrollBar via [`crate::scroll_motion`]
+        /// so every scrollable widget decelerates identically.
+        fling: Fling,
         next_frame: NextFrame,
+        /// True while the fling is pinned at a non-bouncing edge: it keeps
+        /// decaying silently (no movement, no redraws, presses are ordinary
+        /// clicks), and resumes if content grows past the edge — the same
+        /// contract as `MomentumStream::Pinned`, so a touch flick also
+        /// continues naturally through pagination.
+        parked: bool,
     },
     Pulldown {
         next_frame: NextFrame,
+        /// Overscroll offset when the bounce began.
+        x0: f64,
+        /// Overscroll speed (px/s, positive into the overscroll) when the bounce began,
+        /// carried in from the fling. Softened against the overscroll headroom on the
+        /// bounce's first frame (see `scroll_motion::soften_bounce_velocity`).
+        v0: f64,
+        /// Jitter-smoothed animation time, started on the first bounce frame.
+        clock: FrameClock,
+        /// Whether this bounce is at the start (top) edge or the end (bottom) edge.
+        at_start: bool,
+        /// Whether a finger on the screen caused this bounce (touch/mouse drag or
+        /// the flick it released), which springs back with the stronger iOS curve,
+        /// rather than trackpad momentum (see `scroll_motion`).
+        touch: bool,
     },
     ScrollingTo {
         target_id: usize,
@@ -101,7 +125,19 @@ enum ListDrawState {
 
 #[derive(Clone, Debug, Default)]
 pub enum PortalListAction {
+    /// The viewport position changed since the last completed draw. Emitted at
+    /// most once per frame, from the draw, so every kind of scrolling (events,
+    /// animations, draw-side renormalization) reports identically.
     Scroll,
+    /// The start of the list is now on screen (within `reached_start_margin`
+    /// items). Sent once; not repeated while the start stays on screen. Sent
+    /// again after the start goes off screen and comes back, or after
+    /// [`PortalListRef::forget_reached_edges`]. Infinite lists load more
+    /// history when they get this.
+    ReachedStart,
+    /// The end of the list is now on screen (within `reached_end_margin`
+    /// items); same behavior as [`Self::ReachedStart`].
+    ReachedEnd,
     SmoothScrollReached,
     #[default]
     None,
@@ -221,28 +257,31 @@ impl HeightTree {
         }
     }
 
-    /// Update the height at index i to new_height
-    fn update(&mut self, i: usize, new_height: f64) {
+    /// Update the height at index i to new_height.
+    /// Returns true when this is the item's first measurement or its stored
+    /// height actually changed, so callers can react only to real changes.
+    fn update(&mut self, i: usize, new_height: f64) -> bool {
         if i >= self.size {
-            return;
+            return false;
         }
 
+        let first_measurement = !self.measured[i];
         let old_height = self.point_query(i);
         let delta = new_height - old_height;
 
+        self.measured[i] = true;
+
         if delta.abs() < 0.001 {
             // No significant change
-            self.measured[i] = true;
-            return;
+            return first_measurement;
         }
-
-        self.measured[i] = true;
 
         let mut j = i + 1; // convert to 1-indexed
         while j <= self.size {
             self.tree[j] += delta;
             j += j & j.wrapping_neg(); // add lowest set bit
         }
+        true
     }
 
     /// Get the total sum of all heights
@@ -320,7 +359,10 @@ impl HeightTree {
 
     /// Update the default height for unmeasured items
     fn update_default_height(&mut self, new_default: f64) {
-        if (new_default - self.default_height).abs() < 0.001 {
+        // Re-applying the default walks every unmeasured item, which is costly
+        // on large lists, so only do it once the average has drifted noticeably.
+        // Unmeasured heights are estimates anyway, so sub-pixel drift is fine.
+        if (new_default - self.default_height).abs() < 0.5 {
             return;
         }
 
@@ -363,16 +405,87 @@ pub struct PortalList {
     #[rust(0usize)]
     visible_items: usize,
 
+    /// The minimum release speed for a fling, in per-frame pixels at a nominal 60fps
+    /// (×60 → px/s). Below this a finger lift is a stop, not a flick; an active fling
+    /// also stops once it decays below this speed.
     #[live(0.2)]
     flick_scroll_minimum: f64,
-    #[live(80.0)]
+    /// The maximum fling speed, in per-frame pixels at a nominal 60fps (×60 → px/s).
+    /// 240 → 14,400 px/s. This is the ceiling on how fast a hard flick can throw the
+    /// list; raise it for even faster flicks, lower it to tame them.
+    #[live(240.0)]
     flick_scroll_maximum: f64,
+    /// Deprecated: unused. The fling speed now comes directly from the tracked release
+    /// velocity (see [`crate::scroll_motion`]); kept only so existing DSL doesn't break.
     #[live(0.005)]
     flick_scroll_scaling: f64,
+    /// Deprecated: unused. The deceleration rate is now `fling_decel`; kept so existing DSL
+    /// doesn't break.
     #[live(0.97)]
     flick_scroll_decay: f64,
-    #[live(80.0)]
-    max_pull_down: f64,
+    /// Per-ms velocity decay of a touch-drag flick; lower stops sooner (see `scroll_motion`).
+    #[live(FLING_DECEL_RATE_PER_MS)]
+    fling_decel: f64,
+    /// Where the OS trackpad momentum stream stands for this list (see `scroll_motion`).
+    /// While it is `Live`, deltas move the list even though `scroll_state` stays `Stopped`.
+    #[rust] momentum: MomentumStream,
+    /// Current rubber-band overshoot past the end (bottom) edge, in pixels. Driven by
+    /// the bounce animation and applied by the draw as an extra upward shift.
+    #[rust] bounce_overshoot: f64,
+    /// True while a finger-driven gesture is actively stretching the rubber band at
+    /// either edge, so the draw displays the stretch instead of pinning it flush.
+    #[rust] stretching: bool,
+    /// When a trackpad touch stopped live scroll motion. The press belonging to that
+    /// same tap (arriving separately, at finger lift) is consumed as the stop rather
+    /// than delivered as a click.
+    #[rust] touch_caught_motion_at: Option<f64>,
+    /// Wall-clock time of the last finger-driven scroll delta (trackpad Began/Changed),
+    /// so presses during active scrolling count as stops rather than clicks. `None` until
+    /// a finger has actually scrolled this list — see [`press_settles_finger_scroll`].
+    #[rust] last_finger_scroll_time: Option<f64>,
+    /// The `(velocity, time)` of a fling the user just caught with a press. A quick
+    /// same-direction re-flick adds this speed back (fling boost), so repeated
+    /// flicks build up speed; consumed by the press's release either way.
+    #[rust] caught_fling: Option<(f64, f64)>,
+    /// Viewport position (`first_id`, `first_scroll`, `bounce_overshoot`) of the most
+    /// recent `Scroll` action, compared at the end of each draw. Scrolling of every kind
+    /// funnels through a draw, so this coalesces notification to at most one action per
+    /// frame in which the viewport actually moved, wherever the motion came from
+    /// (events, animations, or draw-side renormalization).
+    #[rust] last_notified_pos: (usize, f64, f64),
+    /// Whether we already told the app the start of the list is on screen
+    /// (so `ReachedStart` is sent once, not on every draw).
+    #[rust] told_reached_start: bool,
+    /// Whether we already told the app the end of the list is on screen.
+    #[rust] told_reached_end: bool,
+    /// Whether the last mouse move was inside the list, so the move that leaves
+    /// is still forwarded to items (their hover-out) before fan-out stops.
+    #[rust] pointer_was_inside: bool,
+    /// Whether content rubber-bands past the start (top) edge. The stretch and the
+    /// bounce follow the incoming gesture's momentum (see `scroll_motion`); there is
+    /// no fixed cap.
+    #[live(true)]
+    bounce_at_start: bool,
+    /// Whether content rubber-bands past the end (bottom) edge.
+    #[live(true)]
+    bounce_at_end: bool,
+    /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves, at
+    /// most once per frame. On by default; lists with no scroll-position consumers
+    /// can disable it to skip the per-frame action. The one-shot edge sentinels
+    /// are controlled separately by [`Self::reached_start_margin`] and
+    /// [`Self::reached_end_margin`].
+    #[live(true)]
+    emit_scroll_actions: bool,
+    /// Whether (and how early) to emit [`PortalListAction::ReachedStart`]:
+    /// `Some(0)` (the default) fires exactly when the first item is drawn; a
+    /// small margin lets an infinite list prefetch (e.g. paginate history)
+    /// shortly before the user actually hits the top; `nil`/`None` never emits.
+    #[live(Some(0u32))]
+    reached_start_margin: Option<u32>,
+    /// Whether (and how early) to emit [`PortalListAction::ReachedEnd`]
+    /// (see [`Self::reached_start_margin`]). `Some(0)` is the default.
+    #[live(Some(0u32))]
+    reached_end_margin: Option<u32>,
     #[live(true)]
     align_top_when_empty: bool,
     #[live(false)]
@@ -602,6 +715,7 @@ impl PortalList {
                 // a zero-size item appears in the middle of the visible range.
                 let drew_last_item = last_drawn_index == Some(self.range_end.saturating_sub(1));
 
+                let mut total_at_start = None;
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
                     for item in list.iter() {
@@ -611,6 +725,7 @@ impl PortalList {
                         total += item.size.index(vi);
                     }
                     self.not_filling_viewport = total < viewport.size.index(vi);
+                    total_at_start = Some(total);
                 }
 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
@@ -618,10 +733,35 @@ impl PortalList {
                     // We're also at the end if all content fits in the viewport.
                     self.at_end = self.not_filling_viewport && drew_last_item;
 
-                    let min = if let ScrollState::Stopped = self.scroll_state {
-                        0.0
-                    } else {
-                        self.max_pull_down
+                    // Content shorter than the viewport with bottom alignment rests
+                    // with a deliberate gap above the first item (the else-branch
+                    // below creates it); that gap is layout, not overscroll, so the
+                    // pin must leave it alone instead of snapping the content back
+                    // to the top on alternating draws.
+                    let resting_gap = match total_at_start {
+                        Some(total) if !self.align_top_when_empty && self.not_filling_viewport => {
+                            (viewport.size.index(vi) - total).max(0.0)
+                        }
+                        _ => 0.0,
+                    };
+
+                    let min = match &self.scroll_state {
+                        // The bounce spring and a live drag own the gap; its size comes
+                        // from the rubber-band math, not a fixed cap. Only when this
+                        // edge bounces, though: every legitimate start gap is created
+                        // under bounce_at_start, so on a non-bouncing start edge any
+                        // gap is renormalization backlog and pins immediately.
+                        ScrollState::Pulldown { .. } | ScrollState::Drag { .. }
+                            if self.bounce_at_start =>
+                        {
+                            f64::INFINITY
+                        }
+                        // A finger-driven stretch (trackpad fingers still down) also
+                        // displays its gap; anything else pins to the edge, because a
+                        // renormalization backlog from a fast coast is a layout artifact,
+                        // not physical travel, and must not show as a giant bounce.
+                        _ if self.stretching && self.bounce_at_start => f64::INFINITY,
+                        _ => resting_gap,
                     };
 
                     let mut pos = first_pos.min(min);
@@ -648,7 +788,21 @@ impl PortalList {
                             // errors across item sizes, and require that the last
                             // item in the range was actually drawn.
                             self.at_end = ret >= -1.0 && drew_last_item;
-                            ret.max(0.0)
+                            if self.bounce_overshoot > 0.0
+                                && self.at_end
+                                && matches!(
+                                    self.scroll_state,
+                                    ScrollState::Pulldown { at_start: false, .. }
+                                        | ScrollState::Stopped
+                                        | ScrollState::Drag { .. }
+                                )
+                            {
+                                // The bottom rubber band shifts the content up past
+                                // flush, opening a gap below the last item.
+                                ret.max(0.0) - self.bounce_overshoot
+                            } else {
+                                ret.max(0.0)
+                            }
                         }
                     } else {
                         self.at_end = false;
@@ -706,12 +860,15 @@ impl PortalList {
                         let height = item.size.index(vi);
                         let idx = item.index - self.range_start;
 
-                        // Record in cache for average calculation
-                        self.height_cache.record_height(height);
-
-                        // Update in tree
                         if let Some(ref mut tree) = self.height_tree {
-                            tree.update(idx, height);
+                            // Fold the height into the running average only on first
+                            // measurement or a real change; re-recording every visible
+                            // item per frame would weight the average by on-screen time.
+                            if tree.update(idx, height) {
+                                self.height_cache.record_height(height);
+                            }
+                        } else {
+                            self.height_cache.record_height(height);
                         }
                     }
                 }
@@ -722,6 +879,20 @@ impl PortalList {
                     tree.update_default_height(new_avg);
                 }
 
+                // An active scroll gesture/animation — a momentum fling, a pulldown bounce, or a
+                // finger drag — owns `first_scroll` directly. The tail auto-scroll below re-asserts
+                // position by subtracting `overflow` from `first_scroll` on every draw; during such
+                // an animation that races and cancels its smooth sub-pixel motion. At the slow end of
+                // a flick (or while dragging near the bottom), where the real per-frame motion is
+                // sub-pixel, this snap-back dominates and the content shakes in place instead of
+                // moving cleanly. So skip computing/applying the tail adjustment while a gesture owns
+                // the scroll position (symmetrical with the scroll-bar guard above); auto-tail
+                // re-evaluates cleanly once the gesture settles.
+                let animation_owns_scroll = matches!(
+                    self.scroll_state,
+                    ScrollState::Flick { .. } | ScrollState::Pulldown { .. } | ScrollState::Drag { .. }
+                );
+
                 // When tail_range is true and we're not already at the end, we need to scroll
                 // down to keep the bottom of the content visible
                 if self.tail_range && !self.at_end {
@@ -731,7 +902,9 @@ impl PortalList {
                     if let Some(last_pos) = last_item_pos {
                         let viewport_height = viewport.size.index(vi);
                         let overflow = last_pos - viewport_height;
-                        if overflow > 0.5 {
+                        // Don't store an adjustment while an animation owns the scroll position —
+                        // applying it would fight the active fling/drag (see note above).
+                        if overflow > 0.5 && !animation_owns_scroll {
                             // Content extends beyond viewport, store the adjustment needed
                             self.tail_adjustment_needed = overflow;
                         }
@@ -740,7 +913,11 @@ impl PortalList {
 
                 // Apply tail scroll adjustment - scroll down to keep bottom visible
                 if self.tail_adjustment_needed > 0.5 {
-                    if self.smooth_tail {
+                    if animation_owns_scroll {
+                        // Discard any pending adjustment so it can't apply mid-fling (or on the
+                        // first post-fling frame), which would fight the momentum animation.
+                        self.tail_adjustment_needed = 0.0;
+                    } else if self.smooth_tail {
                         // Start or continue smooth tailing animation via scroll state
                         if !matches!(self.scroll_state, ScrollState::Tailing { .. }) {
                             // Start new tailing animation with initial velocity
@@ -827,7 +1004,74 @@ impl PortalList {
 
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
-    }
+    
+        // The coast is over the instant the list is drawn at the edge it was headed
+        // toward; the rest of the OS stream (which can outlive the edge by a second
+        // or more) must not keep moving it. A bouncing edge takes the remaining
+        // momentum into the rubber-band spring. A non-bouncing edge pins, with the
+        // stream left running silently: if content grows past the edge (e.g.
+        // pagination prepending items), the same stream resumes moving the list, so
+        // the original flick continues naturally through the load.
+        if let MomentumStream::Live { last_delta_time, velocity, direction } = self.momentum {
+            let reached_end = direction < 0.0 && self.at_end;
+            let reached_start = direction > 0.0
+                && self.first_id == self.range_start
+                && self.first_scroll >= 0.0;
+            if reached_end || reached_start {
+                let edge_bounces = if reached_start {
+                    self.bounce_at_start
+                } else {
+                    self.bounce_at_end
+                };
+                if edge_bounces && velocity.abs() > 0.0 {
+                    self.momentum = MomentumStream::Idle;
+                    if reached_start {
+                        self.first_scroll = 0.0;
+                    }
+                    self.scroll_state = ScrollState::Pulldown {
+                        next_frame: cx.new_next_frame(),
+                        x0: 0.0,
+                        v0: velocity.abs(),
+                        clock: FrameClock::default(),
+                        at_start: reached_start,
+                        touch: false,
+                    };
+                } else {
+                    self.momentum = MomentumStream::Pinned { last_delta_time };
+                }
+            }
+        }
+
+        // Tell the app when an end of the list comes on screen — once, not on
+        // every draw. While it stays on screen we stay quiet; once it goes off
+        // screen, coming back gets announced again.
+        if let Some(margin) = self.reached_start_margin {
+            let start_on_screen = self.first_id <= self.range_start + margin as usize;
+            if start_on_screen && !self.told_reached_start {
+                cx.widget_action(self.widget_uid(), PortalListAction::ReachedStart);
+            }
+            self.told_reached_start = start_on_screen;
+        }
+        if let Some(margin) = self.reached_end_margin {
+            let end_on_screen = self.at_end
+                || self.first_id + self.visible_items + margin as usize >= self.range_end;
+            if end_on_screen && !self.told_reached_end {
+                cx.widget_action(self.widget_uid(), PortalListAction::ReachedEnd);
+            }
+            self.told_reached_end = end_on_screen;
+        }
+
+        // Scrolling of every kind funnels through a draw, so one comparison here
+        // notifies every viewport move — event-driven, animated, or draw-side
+        // renormalization — at most once per frame.
+        if self.emit_scroll_actions {
+            let pos = (self.first_id, self.first_scroll, self.bounce_overshoot);
+            if pos != self.last_notified_pos {
+                self.last_notified_pos = pos;
+                cx.widget_action(self.widget_uid(), PortalListAction::Scroll);
+            }
+        }
+}
 
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
@@ -1254,24 +1498,118 @@ impl PortalList {
         }
     }
 
+    /// Instantly stops every kind of scroll motion — drag/fling/bounce animation,
+    /// rubber-band overshoot, and any OS momentum stream — returning the list to its
+    /// resting state. Explicit navigation (keyboard, programmatic scrolls) calls this
+    /// first, so no leftover motion resumes from wherever the viewport lands.
+    fn stop_all_scroll_motion(&mut self) {
+        self.scroll_state = ScrollState::Stopped;
+        self.momentum = MomentumStream::Idle;
+        self.bounce_overshoot = 0.0;
+        self.stretching = false;
+        self.was_scrolling = false;
+        self.caught_fling = None;
+    }
+
+    /// Whether a press at `time` belongs to a touch that just stopped live motion.
+    fn press_is_catch(&self, time: f64) -> bool {
+        self.touch_caught_motion_at
+            .is_some_and(|at| time - at < CATCH_PRESS_WINDOW)
+    }
+
+    /// Whether anything is moving the list at `time`: an animation state, a live
+    /// coast, or active finger-driven scrolling. Presses during any of these are
+    /// stops, not clicks.
+    fn motion_live(&self, time: f64) -> bool {
+        matches!(
+            self.scroll_state,
+            ScrollState::Flick { parked: false, .. }
+                | ScrollState::Pulldown { .. }
+                | ScrollState::ScrollingTo { .. }
+                | ScrollState::Tailing { .. }
+        ) || self.momentum.is_live(time)
+            || press_settles_finger_scroll(self.last_finger_scroll_time, time)
+    }
+
     fn delta_top_scroll(
         &mut self,
         cx: &mut Cx,
         delta: f64,
         clip_top: bool,
         transition_to_pulldown: bool,
+        bounce_velocity: f64,
+        touch: bool,
     ) {
+        let mut delta = delta;
+        let fingers_down = !clip_top && !transition_to_pulldown;
+        let extent = self.area.rect(cx).size.index(self.vec_index);
+
+        // A finger-driven gesture past the end edge stretches the rubber band
+        // instead of scrolling. A finger on the screen follows the loose iOS
+        // curve, a trackpad finger the stiffer linear one (see `scroll_motion`);
+        // movement back toward the content unwinds along the same curve first.
+        if fingers_down
+            && self.bounce_at_end
+            && self.at_end
+            && (delta < 0.0 || self.bounce_overshoot > 0.0)
+        {
+            let raw = stretch_raw(self.bounce_overshoot, extent, touch) - delta;
+            if raw >= 0.0 {
+                self.bounce_overshoot = stretch_displayed(raw, extent, touch);
+                delta = 0.0;
+            } else {
+                self.bounce_overshoot = 0.0;
+                delta = -raw;
+            }
+        }
+
         if self.range_start == self.range_end {
             self.first_scroll = 0.0;
+        } else if self.first_id == self.range_start
+            && self.bounce_at_start
+            && fingers_down
+            && delta > 0.0
+            && self.first_scroll + delta > 0.0
+        {
+            // Same rubber band past the start edge: split the delta at the edge
+            // and damp only the part beyond it.
+            let into = (-self.first_scroll).max(0.0).min(delta);
+            let over = delta - into;
+            let raw = stretch_raw(self.first_scroll.max(0.0), extent, touch) + over;
+            self.first_scroll =
+                self.first_scroll.min(0.0) + into + stretch_displayed(raw, extent, touch);
+        } else if self.first_id == self.range_start
+            && self.bounce_at_start
+            && fingers_down
+            && touch
+            && delta < 0.0
+            && self.first_scroll > 0.0
+        {
+            // A finger moving back toward the content unwinds the stretch along
+            // the same curve it stretched by, so the content tracks the finger;
+            // only travel beyond the unwind scrolls the content again.
+            let raw = stretch_raw(self.first_scroll, extent, true) + delta;
+            if raw >= 0.0 {
+                self.first_scroll = stretch_displayed(raw, extent, true);
+            } else {
+                self.first_scroll = raw;
+            }
         } else {
             self.first_scroll += delta;
         }
 
         if self.first_id == self.range_start {
-            self.first_scroll = self.first_scroll.min(self.max_pull_down);
-            if transition_to_pulldown && self.first_scroll > 0.0 {
+            if !self.bounce_at_start {
+                self.first_scroll = self.first_scroll.min(0.0);
+            }
+            if transition_to_pulldown && self.bounce_at_start && self.first_scroll > 0.0 {
                 self.scroll_state = ScrollState::Pulldown {
                     next_frame: cx.new_next_frame(),
+                    x0: self.first_scroll,
+                    v0: bounce_velocity,
+                    clock: FrameClock::default(),
+                    at_start: true,
+                    touch,
                 };
             }
         }
@@ -1280,8 +1618,28 @@ impl PortalList {
         }
         if self.at_end && delta < 0.0 {
             self.was_scrolling = false;
-            self.scroll_state = ScrollState::Stopped;
+            if transition_to_pulldown
+                && self.bounce_at_end
+                && bounce_velocity < 0.0
+                && !matches!(self.scroll_state, ScrollState::Pulldown { .. })
+            {
+                // A fling reaching the end bounces there too, seeded with the
+                // remaining momentum.
+                self.scroll_state = ScrollState::Pulldown {
+                    next_frame: cx.new_next_frame(),
+                    x0: 0.0,
+                    v0: -bounce_velocity,
+                    clock: FrameClock::default(),
+                    at_start: false,
+                    touch,
+                };
+            } else {
+                self.scroll_state = ScrollState::Stopped;
+            }
         }
+        self.stretching = fingers_down
+            && ((self.first_id == self.range_start && self.first_scroll > 0.0)
+                || self.bounce_overshoot > 0.0);
         self.update_scroll_bar(cx);
     }
 
@@ -1298,7 +1656,24 @@ impl PortalList {
     /// Sets the first visible item and scroll offset.
     pub fn set_first_id_and_scroll(&mut self, first_id: usize, first_scroll: f64) {
         self.first_id = first_id;
-        self.first_scroll = first_scroll;
+        // A positive offset on the first item means a gap above the start edge;
+        // when that edge doesn't bounce, pin to it rather than letting a
+        // programmatic reposition conjure overscroll no gesture could create.
+        self.first_scroll = if first_id == self.range_start && !self.bounce_at_start {
+            first_scroll.min(0.0)
+        } else {
+            first_scroll
+        };
+        // The list was repositioned by code, so showing the start/end now is
+        // news again (e.g. a list re-purposed for other content).
+        self.forget_reached_edges();
+    }
+
+    /// Forget that we already announced the start/end being on screen, so the
+    /// next draw that shows one announces it again.
+    fn forget_reached_edges(&mut self) {
+        self.told_reached_start = false;
+        self.told_reached_end = false;
     }
 
     /// Returns the number of items that are currently visible in the viewport.
@@ -1399,6 +1774,10 @@ impl PortalList {
         if let Some(start) = starting_id {
             self.first_id = start;
         }
+        // A programmatic scroll stops every other kind of motion first, so a
+        // leftover fling, bounce, or OS momentum stream can't fight or resume
+        // after it finishes.
+        self.stop_all_scroll_motion();
         self.scroll_state = ScrollState::ScrollingTo {
             target_id,
             delta: speed.abs() * scroll_direction,
@@ -1792,25 +2171,44 @@ impl Widget for PortalList {
             });
 
         if let Some((scroll_to, at_end)) = scroll_to {
-            // Set tail_range based on whether we're at the end
-            self.tail_range = at_end && self.auto_tail;
+            // A momentum fling / programmatic scroll owns `first_scroll` directly and updates the
+            // scroll bar only to reflect itself (via `set_scroll_pos_no_action`). The bar can still
+            // emit a Scroll action whose height-tree position is quantized to the nearest item/offset;
+            // honoring it here snaps `first_scroll` back by up to ~1px every frame, fighting the
+            // animation. At the slow end of a flick — where the real per-frame motion is sub-pixel —
+            // that snap-back dominates and the content shakes in place instead of gliding to a stop.
+            // So ignore bar-driven scroll resets while an animation owns the position; honor them only
+            // for genuine user scroll-bar drags (when no such animation is active).
+            let animation_owns_scroll = matches!(
+                self.scroll_state,
+                ScrollState::Flick { parked: false, .. }
+                    | ScrollState::Pulldown { .. }
+                    | ScrollState::ScrollingTo { .. }
+                    | ScrollState::Tailing { .. }
+            );
+            if !animation_owns_scroll {
+                // Set tail_range based on whether we're at the end
+                self.tail_range = at_end && self.auto_tail;
 
-            // Use height_tree to map scroll position to item + offset
-            if let Some(ref tree) = self.height_tree {
-                let (item_idx, offset) = tree.find_position(scroll_to);
-                self.first_id = self.range_start + item_idx;
-                // first_scroll is negative when scrolled into the item
-                self.first_scroll = -offset;
-            } else {
-                // Fallback to old integer-based calculation
-                self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
-                    * self.view_window as f64) as usize;
-                self.first_scroll = 0.0;
+                // Use height_tree to map scroll position to item + offset
+                if let Some(ref tree) = self.height_tree {
+                    let (item_idx, offset) = tree.find_position(scroll_to);
+                    self.first_id = self.range_start + item_idx;
+                    // first_scroll is negative when scrolled into the item
+                    self.first_scroll = -offset;
+                } else {
+                    // Fallback to old integer-based calculation
+                    self.first_id = ((scroll_to / self.scroll_bar.get_scroll_view_visible())
+                        * self.view_window as f64) as usize;
+                    self.first_scroll = 0.0;
+                }
+
+                // A scroll-bar drag stops every other kind of motion, so a leftover
+                // fling, bounce, or OS momentum stream can't resume from wherever
+                // the drag lands.
+                self.stop_all_scroll_motion();
+                self.area.redraw(cx);
             }
-
-            cx.widget_action(uid, PortalListAction::Scroll);
-            self.was_scrolling = false;
-            self.area.redraw(cx);
         }
 
         // When selectable, we handle mouse/touch events at PortalList level for cross-item selection.
@@ -1830,13 +2228,32 @@ impl Widget for PortalList {
         // For down events (MouseDown/TouchStart), we also check whether the scroll
         // is currently animating. This is needed because `suppress_child_events` is
         // set in hit processing which runs *after* child event forwarding.
+        // Catch-suppression lives for exactly one gesture: it is armed by a press that
+        // stops a moving list and must always end with that press, so reset it on the
+        // raw mouse-up rather than relying on a FingerUp hit (which depends on capture
+        // state and can be missed, leaving the flag stuck and eating the next click).
+        if let Event::MouseUp(e) = event {
+            if e.button.is_primary() {
+                self.suppress_child_events = false;
+            }
+        }
+
+        // A live trackpad coast moves the list while `scroll_state` is `Stopped`, so it
+        // counts as animating too. A press during any motion — including the pulldown
+        // bounce, via `motion_live` — only stops the motion, never reaching a child;
+        // the bounce spring itself keeps settling through it.
+        let coasting_now = match event {
+            Event::MouseDown(e) => self.motion_live(e.time) || self.press_is_catch(e.time),
+            Event::MouseMove(e) => self.momentum.is_live(e.time),
+            Event::TouchUpdate(e) => self.momentum.is_live(e.time),
+            _ => false,
+        };
         let is_scroll_animating = matches!(
             self.scroll_state,
-            ScrollState::Flick { .. }
-                | ScrollState::Pulldown { .. }
+            ScrollState::Flick { parked: false, .. }
                 | ScrollState::ScrollingTo { .. }
                 | ScrollState::Tailing { .. }
-        );
+        ) || coasting_now;
         if self.suppress_child_events || is_scroll_animating {
             match event {
                 // Suppress in-progress interactions so children don't react to
@@ -1891,6 +2308,18 @@ impl Widget for PortalList {
             }
         }
 
+        // A pointer move only matters to items when the pointer is over the list,
+        // or just left it (so the last hovered item still sees its hover-out).
+        // One rect test here guards the entire item subtree from high-rate
+        // mouse-move fan-out.
+        if let Event::MouseMove(e) = event {
+            let inside = self.area.clipped_rect(cx).contains(e.abs);
+            if !inside && !self.pointer_was_inside {
+                pass_through_to_children = false;
+            }
+            self.pointer_was_inside = inside;
+        }
+
         if pass_through_to_children {
             // Iterate in visual order (by item_id) for deterministic event handling
             // Use keys().min/max to get actual item range without allocation
@@ -1920,11 +2349,13 @@ impl Widget for PortalList {
                 let mouse_pos = scroll_state.last_abs.index(vi);
 
                 if mouse_pos < top_edge + scroll_margin {
-                    // Mouse above viewport - scroll up (only if not already at top)
+                    // Mouse above viewport - scroll up (only if not already at top).
+                    // Selection auto-scroll clips at the edges instead of stretching
+                    // the rubber band: nothing would spring a selection's stretch back.
                     if self.first_id > self.range_start || self.first_scroll < 0.0 {
                         let distance = (top_edge + scroll_margin - mouse_pos).max(1.0);
                         let scroll_speed = (5.0 + distance * 0.5).clamp(5.0, 50.0);
-                        self.delta_top_scroll(cx, scroll_speed, false, false);
+                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false);
                         self.area.redraw(cx);
                     }
                 } else if mouse_pos > bottom_edge - scroll_margin {
@@ -1932,7 +2363,7 @@ impl Widget for PortalList {
                     if !self.at_end {
                         let distance = (mouse_pos - (bottom_edge - scroll_margin)).max(1.0);
                         let scroll_speed = -(5.0 + distance * 0.5).clamp(5.0, 50.0);
-                        self.delta_top_scroll(cx, scroll_speed, false, false);
+                        self.delta_top_scroll(cx, scroll_speed, true, false, 0.0, false);
                         self.area.redraw(cx);
                     }
                 }
@@ -2004,8 +2435,7 @@ impl Widget for PortalList {
                         {
                             *next_frame = cx.new_next_frame();
                         }
-                        self.delta_top_scroll(cx, delta_val, true, false);
-                        cx.widget_action(uid, PortalListAction::Scroll);
+                        self.delta_top_scroll(cx, delta_val, true, false, 0.0, false);
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
@@ -2014,38 +2444,99 @@ impl Widget for PortalList {
                     }
                 }
             }
-            ScrollState::Flick { delta, next_frame } => {
-                if next_frame.is_event(event).is_some() {
-                    *delta = *delta * self.flick_scroll_decay;
-                    if delta.abs() > self.flick_scroll_minimum {
-                        *next_frame = cx.new_next_frame();
-                        let delta = *delta;
-                        self.delta_top_scroll(cx, delta, false, true);
-                        cx.widget_action(uid, PortalListAction::Scroll);
-                        self.area.redraw(cx);
-                    } else {
-                        self.was_scrolling = false;
-                        self.scroll_state = ScrollState::Stopped;
+            ScrollState::Flick { fling, next_frame, .. } => {
+                if let Some(ne) = next_frame.is_event(event) {
+                    // The scroll animation lives in `scroll_motion::Fling`, shared with
+                    // ScrollBar. Both the touch-drag flick and the trackpad deceleration tail
+                    // self-decay; they differ only in decay rate and edge behavior.
+                    match fling.step(ne.time) {
+                        None => {
+                            // First fling frame: time baseline established, no movement yet.
+                            *next_frame = cx.new_next_frame();
+                        }
+                        Some(displacement) => {
+                            let min_velocity =
+                                self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
+                            if fling.is_active(min_velocity) {
+                                *next_frame = cx.new_next_frame();
+                                // A touch flick may overscroll into the pulldown bounce; a trackpad
+                                // tail clips at the edges like a wheel.
+                                let ov = fling.allows_overscroll();
+                                let fling_velocity = fling.velocity;
+                                let before = (self.first_id, self.first_scroll);
+                                self.delta_top_scroll(cx, displacement, !ov, ov, fling_velocity, true);
+                                let moved = (self.first_id, self.first_scroll) != before;
+                                if let ScrollState::Flick { parked, .. } =
+                                    &mut self.scroll_state
+                                {
+                                    if displacement != 0.0 && !moved {
+                                        // Pinned at a non-bouncing edge: park the fling.
+                                        // It keeps decaying silently and presses are
+                                        // ordinary clicks, but if content grows past the
+                                        // edge (e.g. pagination prepending items), the
+                                        // next step moves the list again and the flick
+                                        // continues naturally.
+                                        if !*parked {
+                                            *parked = true;
+                                            self.was_scrolling = false;
+                                        }
+                                    } else {
+                                        if *parked && moved {
+                                            *parked = false;
+                                        }
+                                        self.area.redraw(cx);
+                                    }
+                                } else {
+                                    // The delta handed the motion to the pulldown bounce.
+                                    self.area.redraw(cx);
+                                }
+                            } else {
+                                self.was_scrolling = false;
+                                self.momentum = MomentumStream::Idle;
+                                self.scroll_state = ScrollState::Stopped;
+                            }
+                        }
                     }
                 }
             }
-            ScrollState::Pulldown { next_frame } => {
-                if next_frame.is_event(event).is_some() {
-                    if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                        self.first_scroll *= 0.85;
-                        if self.first_scroll < 1.0 {
+            ScrollState::Pulldown { next_frame, x0, v0, clock, at_start, touch } => {
+                if let Some(ne) = next_frame.is_event(event) {
+                    // The rubber-band bounce, seeded with the velocity that remained
+                    // when the edge was reached: iOS's spring for a finger on the
+                    // screen, Chrome's macOS curve for trackpad (see `scroll_motion`).
+                    // The bounce may never travel farther than the drag stretch can
+                    // reach, however fast the fling that hit the edge was: the seed
+                    // velocity is softened against the headroom (huge flicks compress,
+                    // gentle ones keep their feel), and the clamp below is a backstop.
+                    let max_overscroll =
+                        self.area.rect(cx).size.index(self.vec_index) * RUBBER_BAND_TOUCH_RANGE;
+                    if clock.not_started() {
+                        *v0 = soften_bounce_velocity(*v0, *x0, max_overscroll, *touch);
+                    }
+                    let t = clock.advance(ne.time);
+                    let (x, past_peak) = rubber_band_bounce(*x0, *v0, t, *touch);
+                    let x = x.min(max_overscroll);
+                    // The overshoot ramps up from zero first, so only settle once the
+                    // spring is past its peak and back near the edge.
+                    let settled = x <= 0.5 && (past_peak || (*v0 <= 0.0 && *x0 <= 0.5));
+                    let at_start_edge = *at_start;
+                    if settled {
+                        if at_start_edge {
                             self.first_scroll = 0.0;
-                            self.was_scrolling = false;
-                            self.scroll_state = ScrollState::Stopped;
-                        } else {
-                            *next_frame = cx.new_next_frame();
-                            cx.widget_action(uid, PortalListAction::Scroll);
                         }
-                        self.area.redraw(cx);
-                    } else {
+                        self.bounce_overshoot = 0.0;
+                        self.stretching = false;
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
+                    } else {
+                        if at_start_edge {
+                            self.first_scroll = x.max(0.0);
+                        } else {
+                            self.bounce_overshoot = x.max(0.0);
+                        }
+                        *next_frame = cx.new_next_frame();
                     }
+                    self.area.redraw(cx);
                 }
             }
             ScrollState::Tailing {
@@ -2091,7 +2582,6 @@ impl Widget for PortalList {
                             *velocity = 0.0;
                             self.scroll_state = ScrollState::Stopped;
                         }
-                        cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
                         self.tail_adjustment_needed = 0.0;
@@ -2112,23 +2602,191 @@ impl Widget for PortalList {
             let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
             match hit {
                 Hit::FingerScroll(e) => {
-                    self.tail_range = false;
-                    self.detect_tail_in_draw = true;
-                    self.was_scrolling = false;
-                    self.scroll_state = ScrollState::Stopped;
-                    // For mouse wheel: clip to top and don't transition to pulldown
-                    // (pulldown/overscroll is only for touch drag/flick)
-                    self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
-                    // Note: we intentionally do NOT reset `at_end` here.
-                    // `at_end` is authoritatively recalculated each draw cycle
-                    // in `end()`, and the redraw is already triggered below.
-                    // Eagerly resetting it here would create a stale `false` value
-                    // visible to any code that checks `is_at_end()` in response
-                    // to the Scroll action before the next draw completes.
-                    cx.widget_action(uid, PortalListAction::Scroll);
-                    self.area.redraw(cx);
+                    // Trackpad scrolling on macOS is a gesture with phases: user-driven deltas
+                    // while the fingers move (`Began`/`Changed`), then the OS's own decaying
+                    // `Momentum` deltas after they lift. Both are applied exactly as delivered,
+                    // so the feel and the deceleration are the native ones, and the OS ending
+                    // its stream on a touch gives the native instant stop. Phase-less events
+                    // (`None`: wheels, X11, Windows) apply their delta directly.
+                    let delta = -e.scroll.index(vi);
+                    match e.phase {
+                        ScrollPhase::Momentum => {
+                            // Only a stream this list is expecting, applying, or riding
+                            // pinned at an edge is processed; a stray stream (e.g. one whose
+                            // coast a press already caught) can't restart motion.
+                            if self.momentum.accepts_deltas(e.time)
+                                && matches!(self.scroll_state, ScrollState::Stopped)
+                                && delta != 0.0
+                            {
+                                self.tail_range = false;
+                                self.detect_tail_in_draw = true;
+                                self.was_scrolling = false;
+                                let before = (self.first_id, self.first_scroll);
+                                // Overscroll at the top enters the pulldown bounce, like a
+                                // touch flick does, seeded with the stream's velocity.
+                                let dt = self
+                                    .momentum
+                                    .prev_delta_time()
+                                    .map_or(1.0 / 240.0, |prev| (e.time - prev).max(1.0 / 240.0));
+                                let max_v = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
+                                let velocity = (delta / dt).clamp(-max_v, max_v);
+                                self.delta_top_scroll(cx, delta, false, true, velocity, false);
+                                if matches!(self.scroll_state, ScrollState::Pulldown { .. }) {
+                                    // The bounce owns the motion now; drop the rest of the
+                                    // stream so it can't fight the spring.
+                                    self.momentum = MomentumStream::Idle;
+                                } else if (self.first_id, self.first_scroll) == before
+                                    || (self.at_end && delta < 0.0)
+                                {
+                                    // Pinned at a non-bouncing edge: the delta had no effect
+                                    // and presses here are ordinary clicks, but the stream
+                                    // stays armed. If content grows past the edge (e.g.
+                                    // pagination prepending items), the next delta moves the
+                                    // list again and the flick continues naturally.
+                                    self.momentum =
+                                        MomentumStream::Pinned { last_delta_time: e.time };
+                                } else {
+                                    self.momentum = MomentumStream::Live {
+                                        last_delta_time: e.time,
+                                        velocity,
+                                        direction: delta.signum(),
+                                    };
+                                }
+                                // A pinned stream's deltas change nothing; skip the redraw
+                                // so a stream outliving the edge doesn't spin no-op frames.
+                                if (self.first_id, self.first_scroll) != before
+                                    || !matches!(self.momentum, MomentumStream::Pinned { .. })
+                                {
+                                    self.area.redraw(cx);
+                                }
+                            }
+                        }
+                        ScrollPhase::MomentumEnded => {
+                            // A stream that ends while still live was cut by a touch (or
+                            // faded on its final delta); one that ends pinned or merely
+                            // expected just goes idle. The cut is kept because the touch
+                            // that caused it can be delivered after this event, and a
+                            // duplicate end event must not erase a fresh cut first.
+                            self.momentum = if self.momentum.is_live(e.time) {
+                                MomentumStream::Cut { at: e.time }
+                            } else if matches!(self.momentum, MomentumStream::Cut { .. }) {
+                                self.momentum
+                            } else {
+                                MomentumStream::Idle
+                            };
+                        }
+                        ScrollPhase::Touched => {
+                            // A finger contacted the trackpad: instantly stop any kinetic
+                            // scrolling, like the native catch. The zero delta is not applied
+                            // and a drag in progress is left alone. If the touch stopped real
+                            // motion — including a stream whose end event already marked it
+                            // cut, in whichever order the two were delivered — its own press
+                            // (arriving separately at finger lift) is the second half of the
+                            // catch, not a click. During the rubber-band bounce the press is
+                            // likewise a catch, and the spring settles on its own.
+                            let was_moving =
+                                self.motion_live(e.time) || self.momentum.cut_near(e.time);
+                            self.momentum = MomentumStream::Idle;
+                            if matches!(self.scroll_state, ScrollState::Flick { .. }) {
+                                self.scroll_state = ScrollState::Stopped;
+                                self.was_scrolling = false;
+                                self.area.redraw(cx);
+                            }
+                            if was_moving {
+                                self.touch_caught_motion_at = Some(e.time);
+                            }
+                        }
+                        ScrollPhase::Ended => {
+                            // Fingers lifted. Apply the final delta; the OS momentum stream
+                            // that may follow is now expected. A stretched rubber band
+                            // springs back from here instead (and takes no momentum).
+                            self.was_scrolling = false;
+                            self.scroll_state = ScrollState::Stopped;
+                            self.momentum = MomentumStream::Expected { since: e.time };
+                            self.stretching = false;
+                            if self.bounce_at_start
+                                && self.first_id == self.range_start
+                                && self.first_scroll > 0.0
+                            {
+                                self.momentum = MomentumStream::Idle;
+                                self.scroll_state = ScrollState::Pulldown {
+                                    next_frame: cx.new_next_frame(),
+                                    x0: self.first_scroll,
+                                    v0: 0.0,
+                                    clock: FrameClock::default(),
+                                    at_start: true,
+                                    touch: false,
+                                };
+                            } else if self.bounce_at_end && self.bounce_overshoot > 0.0 {
+                                self.momentum = MomentumStream::Idle;
+                                self.scroll_state = ScrollState::Pulldown {
+                                    next_frame: cx.new_next_frame(),
+                                    x0: self.bounce_overshoot,
+                                    v0: 0.0,
+                                    clock: FrameClock::default(),
+                                    at_start: false,
+                                    touch: false,
+                                };
+                            }
+                            if delta != 0.0 {
+                                self.tail_range = false;
+                                self.detect_tail_in_draw = true;
+                                self.delta_top_scroll(cx, delta, true, false, 0.0, false);
+                                self.area.redraw(cx);
+                            }
+                        }
+                        // Finger-driven deltas apply directly, stretching the rubber band
+                        // past an edge. A user-driven delta also stops any in-progress
+                        // momentum fling, so putting fingers back on the pad catches the
+                        // scroll.
+                        ScrollPhase::Began | ScrollPhase::Changed => {
+                            self.tail_range = false;
+                            self.detect_tail_in_draw = true;
+                            self.was_scrolling = false;
+                            self.momentum = MomentumStream::Idle;
+                            if delta != 0.0 {
+                                self.last_finger_scroll_time = Some(e.time);
+                            }
+                            self.scroll_state = ScrollState::Stopped;
+                            self.delta_top_scroll(cx, delta, false, false, 0.0, false);
+                            self.area.redraw(cx);
+                        }
+                        // `None` (wheels) applies the delta directly and clips at the edges.
+                        _ => {
+                            self.tail_range = false;
+                            self.detect_tail_in_draw = true;
+                            self.was_scrolling = false;
+                            self.momentum = MomentumStream::Idle;
+                            self.bounce_overshoot = 0.0;
+                            self.scroll_state = ScrollState::Stopped;
+                            // Clip to the top and don't transition to pulldown; overscroll bounce
+                            // is only for touch drag/flick.
+                            self.delta_top_scroll(cx, delta, true, false, 0.0, false);
+                            // Note: we intentionally do NOT reset `at_end` here.
+                            // `at_end` is authoritatively recalculated each draw cycle
+                            // in `end()`, and the redraw is already triggered below.
+                            // Eagerly resetting it here would create a stale `false` value
+                            // visible to any code that checks `is_at_end()` before the
+                            // next draw completes.
+                            self.area.redraw(cx);
+                        }
+                    }
                 }
-                Hit::KeyDown(ke) => match ke.key_code {
+                Hit::KeyDown(ke) => {
+                    // Keyboard navigation instantly stops every kind of scroll
+                    // motion and owns the viewport from a resting state.
+                    if matches!(
+                        ke.key_code,
+                        KeyCode::Home
+                            | KeyCode::End
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
+                            | KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                    ) {
+                        self.stop_all_scroll_motion();
+                    }
+                    match ke.key_code {
                     KeyCode::Home => {
                         self.first_id = 0;
                         self.first_scroll = 0.0;
@@ -2192,7 +2850,8 @@ impl Widget for PortalList {
                         }
                     }
                     _ => (),
-                },
+                    }
+                }
                 Hit::FingerDown(fe) => {
                     if self.grab_key_focus {
                         cx.set_key_focus(self.area);
@@ -2200,15 +2859,40 @@ impl Widget for PortalList {
                     self.tail_range = false;
                     self.was_scrolling = match &self.scroll_state {
                         ScrollState::Drag { samples, .. } => samples.len() > 1,
-                        ScrollState::Stopped => false,
-                        _ => true,
+                        // A press while anything moves the list (a coast, active finger
+                        // scrolling, the bounce) or whose own touch just stopped motion
+                        // is a stop, not a click. The bounce spring itself keeps settling.
+                        _ => self.motion_live(fe.time) || self.press_is_catch(fe.time),
                     };
+                    // One press consumes the catch; later presses are ordinary clicks.
+                    self.touch_caught_motion_at = None;
 
                     // If the list was animating (flick, pulldown, etc.) when the user
                     // tapped/clicked, suppress forwarding this entire gesture to children.
                     // The tap should only stop the scroll, not activate a child widget.
                     // If the list was NOT scrolling, clear any previous suppression.
                     self.suppress_child_events = self.was_scrolling;
+
+                    // A press stops an active momentum fling or pulldown bounce, the "press to
+                    // catch the scroll" behavior that iOS, Android, and macOS all have. It runs
+                    // before the selection and drag branches below so it works even when the
+                    // list is `selectable`: on a selectable list a tap on text takes the
+                    // selection branch, which would otherwise leave the fling running. `Drag`
+                    // below still supersedes `Stopped` for drag-scroll, and `suppress_child_events`
+                    // (set above from `was_scrolling`) keeps this press from also activating a child.
+                    // A press kills the momentum stream outright, so a still-live trackpad
+                    // stream (e.g. a mouse click during a trackpad coast) can't restart
+                    // motion. A pulldown bounce is left running: stopping it would freeze
+                    // the list with an open gap at the top, and it settles on its own.
+                    self.momentum = MomentumStream::Idle;
+                    if let ScrollState::Flick { fling, parked, .. } = &self.scroll_state {
+                        // Remember the caught speed briefly: a quick same-direction
+                        // re-flick adds it back, so repeated flicks build up speed
+                        // the way Chrome and native scrollers allow. A hold, a tap,
+                        // or an opposite-direction flick discards it.
+                        self.caught_fling = (!parked).then_some((fling.velocity, fe.time));
+                        self.scroll_state = ScrollState::Stopped;
+                    }
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
@@ -2287,32 +2971,25 @@ impl Widget for PortalList {
                                     self.suppress_child_events = true;
                                 } else {
                                     // Still under threshold — track samples but don't scroll.
-                                    samples.push(ScrollSample {
-                                        abs: new_abs,
-                                        time: e.time,
-                                    });
-                                    if samples.len() > 4 {
-                                        samples.remove(0);
-                                    }
+                                    push_sample(samples, new_abs, e.time);
                                     // Don't apply scroll delta yet.
                                     return;
                                 }
                             }
 
                             let old_sample = *samples.last().unwrap();
-                            samples.push(ScrollSample {
-                                abs: new_abs,
-                                time: e.time,
-                            });
-                            if samples.len() > 4 {
-                                samples.remove(0);
-                            }
-                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false);
+                            push_sample(samples, new_abs, e.time);
+                            self.delta_top_scroll(cx, new_abs - old_sample.abs, false, false, 0.0, true);
                             self.area.redraw(cx);
                         }
                     }
                 }
                 Hit::FingerUp(fe) if fe.is_primary_hit() => {
+                    // The press's release settles the fate of any fling it caught:
+                    // only a qualifying same-direction flick below adds it back.
+                    // A tap or a slow lift discards it — a catch stays a stop.
+                    let caught_fling = self.caught_fling.take();
+
                     // End selection if we were selecting
                     if self.is_selecting {
                         self.is_selecting = false;
@@ -2331,6 +3008,10 @@ impl Widget for PortalList {
 
                     // Always clear touch drag scrolling active flag on finger up.
                     self.suppress_child_events = false;
+                    // The fingers are off the screen, so no stretch is being held
+                    // (mirrors the trackpad ScrollPhase::Ended clear); the Pulldown
+                    // seeds below own any remaining overscroll from here.
+                    self.stretching = false;
 
                     if let ScrollState::Drag {
                         samples, committed, ..
@@ -2342,31 +3023,66 @@ impl Widget for PortalList {
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                         } else {
-                            let mut last = None;
-                            let mut scaled_delta = 0.0;
-                            let mut total_delta = 0.0;
-                            for sample in samples.iter().rev() {
-                                if last.is_none() {
-                                    last = Some(sample);
-                                } else {
-                                    total_delta += last.unwrap().abs - sample.abs;
-                                    scaled_delta += (last.unwrap().abs - sample.abs)
-                                        / (last.unwrap().time - sample.time);
-                                }
-                            }
-                            scaled_delta *= self.flick_scroll_scaling;
-                            if self.first_id == self.range_start && self.first_scroll > 0.0 {
+                            // Estimate the release velocity (pixels/second) like a native
+                            // VelocityTracker (see `scroll_motion`): oldest→newest of the last
+                            // ~4 finger positions. `abs` is the finger position along the scroll
+                            // axis in the same pixel units as `first_scroll`, so this is
+                            // directly a scroll velocity.
+                            let (release_velocity, total_delta) =
+                                estimate_release_velocity(samples);
+                            // Cap to a sane maximum flick speed (px/s). `flick_scroll_maximum`
+                            // is a per-frame value; ×60 converts it to per-second.
+                            let max_velocity = self.flick_scroll_maximum * PER_FRAME_TO_PER_SECOND;
+                            let release_velocity =
+                                release_velocity.clamp(-max_velocity, max_velocity);
+                            // Minimum release speed (px/s) below which a lift is treated as a stop,
+                            // not a fling. `flick_scroll_minimum` is per-frame; ×60 → per-second.
+                            let min_velocity = self.flick_scroll_minimum * PER_FRAME_TO_PER_SECOND;
+                            if self.bounce_at_start
+                                && self.first_id == self.range_start
+                                && self.first_scroll > 0.0
+                            {
                                 self.scroll_state = ScrollState::Pulldown {
                                     next_frame: cx.new_next_frame(),
+                                    x0: self.first_scroll,
+                                    v0: release_velocity,
+                                    clock: FrameClock::default(),
+                                    at_start: true,
+                                    touch: true,
                                 };
-                            } else if total_delta.abs() > 10.0
-                                && scaled_delta.abs() > self.flick_scroll_minimum
-                            {
-                                self.scroll_state = ScrollState::Flick {
-                                    delta: scaled_delta
-                                        .min(self.flick_scroll_maximum)
-                                        .max(-self.flick_scroll_maximum),
+                            } else if self.bounce_at_end && self.bounce_overshoot > 0.0 {
+                                // The lift velocity carries into the bounce here too:
+                                // positive into the overscroll, so a flick released
+                                // mid-stretch springs farther before returning.
+                                self.scroll_state = ScrollState::Pulldown {
                                     next_frame: cx.new_next_frame(),
+                                    x0: self.bounce_overshoot,
+                                    v0: -release_velocity,
+                                    clock: FrameClock::default(),
+                                    at_start: false,
+                                    touch: true,
+                                };
+                            } else if total_delta.abs() > FLING_MIN_TOTAL_DELTA
+                                && release_velocity.abs() > min_velocity
+                            {
+                                // Fling boost: a quick same-direction re-flick adds the
+                                // speed of the fling this press caught, so repeated
+                                // flicks build up speed like native scrollers allow.
+                                let release_velocity = match caught_fling {
+                                    Some((caught_velocity, caught_at))
+                                        if caught_velocity * release_velocity > 0.0
+                                            && fe.time - caught_at
+                                                < FLING_BOOST_MAX_DWELL =>
+                                    {
+                                        (release_velocity + caught_velocity)
+                                            .clamp(-max_velocity, max_velocity)
+                                    }
+                                    _ => release_velocity,
+                                };
+                                self.scroll_state = ScrollState::Flick {
+                                    fling: Fling::new(release_velocity, self.fling_decel),
+                                    next_frame: cx.new_next_frame(),
+                                    parked: false,
                                 };
                             } else {
                                 self.was_scrolling = false;
@@ -2429,8 +3145,7 @@ impl PortalListRef {
     /// Sets the first item to be shown and its scroll offset.
     pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.first_id = id;
-            inner.first_scroll = s;
+            inner.set_first_id_and_scroll(id, s);
         }
     }
 
@@ -2438,6 +3153,8 @@ impl PortalListRef {
     pub fn set_first_id(&self, id: usize) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.first_id = id;
+            // The list was repositioned by code; announce the edges again.
+            inner.forget_reached_edges();
         }
     }
 
@@ -2476,14 +3193,28 @@ impl PortalListRef {
         self.borrow().is_some_and(|inner| inner.was_scrolling)
     }
 
-    /// Returns whether the given `actions` contain an action indicating that this PortalList was scrolled.
+    /// Returns whether the given `actions` contain an action indicating that this PortalList
+    /// was scrolled. Emitted only when the list opts in via `emit_scroll_actions`.
     pub fn scrolled(&self, actions: &Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let PortalListAction::Scroll = item.cast() {
-                return true;
-            }
-        }
-        false
+        actions
+            .filter_widget_actions(self.widget_uid())
+            .any(|item| matches!(item.cast(), PortalListAction::Scroll))
+    }
+
+    /// Returns whether the given `actions` say the start of this PortalList's range just
+    /// came into view (see [`PortalListAction::ReachedStart`]).
+    pub fn reached_start(&self, actions: &Actions) -> bool {
+        actions
+            .filter_widget_actions(self.widget_uid())
+            .any(|item| matches!(item.cast(), PortalListAction::ReachedStart))
+    }
+
+    /// Returns whether the given `actions` say the end of this PortalList's range just
+    /// came into view (see [`PortalListAction::ReachedEnd`]).
+    pub fn reached_end(&self, actions: &Actions) -> bool {
+        actions
+            .filter_widget_actions(self.widget_uid())
+            .any(|item| matches!(item.cast(), PortalListAction::ReachedEnd))
     }
 
     /// Returns the current scroll offset of this PortalList.
@@ -2512,9 +3243,9 @@ impl PortalListRef {
                 state = "Drag";
                 drag_samples = samples.len();
             }
-            ScrollState::Flick { delta: d, .. } => {
+            ScrollState::Flick { fling, .. } => {
                 state = "Flick";
-                delta = *d;
+                delta = fling.velocity;
             }
             ScrollState::Pulldown { .. } => {
                 state = "Pulldown";
@@ -2671,12 +3402,9 @@ impl PortalListRef {
     /// Returns whether the given `actions` contain an action indicating that this PortalList completed
     /// a smooth scroll, reaching the target.
     pub fn smooth_scroll_reached(&self, actions: &Actions) -> bool {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let PortalListAction::SmoothScrollReached = item.cast() {
-                return true;
-            }
-        }
-        false
+        actions
+            .filter_widget_actions(self.widget_uid())
+            .any(|item| matches!(item.cast(), PortalListAction::SmoothScrollReached))
     }
 
     /// Trigger a scrolling animation to the end of the list.

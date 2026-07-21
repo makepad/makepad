@@ -17,7 +17,7 @@ use {
     std::{
         borrow::Borrow,
         cell::RefCell,
-        collections::VecDeque,
+        collections::BTreeMap,
         env,
         hash::{Hash, Hasher},
         mem,
@@ -28,47 +28,69 @@ use {
 
 const LPXS_PER_INCH: f32 = 96.0;
 const PTS_PER_INCH: f32 = 72.0;
-const LAYOUT_CACHE_MAX_TEXT_LEN: usize = 512;
-const LAYOUT_CACHE_MULTILINE_TEXT_LEN: usize = 192;
-const LAYOUT_CACHE_MULTILINE_LINE_COUNT: usize = 4;
+
+/// Approximate upper bound, in bytes, on the memory retained by the layout cache.
+/// Entry weights are estimates (text bytes plus laid-out row/glyph storage), where a
+/// laid-out glyph is ~64 bytes, so a maximal ~60 KB pasted-wall message weighs about
+/// 4 MB and a typical 2-10 KB code block 130-650 KB. This budget keeps several such
+/// messages warm for scroll-back. Texts drawn in the current frame are never evicted
+/// even over budget (see `evict_lru_to_limits`), and the excess is reclaimed at the
+/// end of the first frame that no longer draws them (see `advance_cache_generation`),
+/// so the true footprint can exceed this only briefly and only by the visible set.
+pub const LAYOUT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// A layout cache entry, tracked with its estimated size, its position in the
+/// least-recently-used order (the tick under which it is registered in
+/// `Layouter::cache_lru_order`), and the frame generation it was last used in.
+#[derive(Debug)]
+struct CachedLayout {
+    result: Rc<LaidoutText>,
+    weight_in_bytes: usize,
+    last_used: u64,
+    generation: u64,
+}
 
 #[derive(Debug)]
 pub struct Layouter {
     pub(crate) loader: Loader,
     cache_size: usize,
-    cached_params: VecDeque<OwnedLayoutParams>,
-    cached_results: FxHashMap<OwnedLayoutParams, Rc<LaidoutText>>,
+    cache_tick: u64,
+    cache_bytes: usize,
+    /// Frame counter for working-set protection: eviction never removes entries
+    /// used in the current generation, so the texts visible in one frame cannot
+    /// evict each other into a permanent every-frame miss cycle when they
+    /// collectively exceed the byte budget. Advanced once per frame via
+    /// [`Self::advance_cache_generation`].
+    cache_generation: u64,
+    cached_results: FxHashMap<OwnedLayoutParams, CachedLayout>,
+    cache_lru_order: BTreeMap<u64, OwnedLayoutParams>,
 }
 
 impl Layouter {
-    fn should_cache_text(text: &str) -> bool {
-        if text.len() > LAYOUT_CACHE_MAX_TEXT_LEN {
-            return false;
-        }
-        if text.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN {
-            let line_count = text
-                .as_bytes()
-                .iter()
-                .filter(|byte| **byte == b'\n')
-                .count()
-                + 1;
-            if line_count >= LAYOUT_CACHE_MULTILINE_LINE_COUNT {
-                return false;
-            }
-        }
-        true
-    }
-
     pub fn new(settings: Settings) -> Self {
         Self {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
-            cached_params: VecDeque::with_capacity(settings.cache_size),
+            cache_tick: 0,
+            cache_bytes: 0,
+            cache_generation: 0,
             cached_results: FxHashMap::with_capacity_and_hasher(
                 settings.cache_size,
                 Default::default(),
             ),
+            cache_lru_order: BTreeMap::new(),
         }
+    }
+
+    /// Marks a frame boundary for the cache's working-set protection; called once
+    /// per frame from the font system's per-frame preparation, which runs after the
+    /// frame's draws. Eviction runs first, while the finished frame's entries are
+    /// still protected: anything older that pushed the cache over its limits (e.g.
+    /// a huge message that just scrolled off screen) is reclaimed here, one frame
+    /// after it was last drawn, rather than lingering until some later insert.
+    pub fn advance_cache_generation(&mut self) {
+        self.evict_lru_to_limits();
+        self.cache_generation += 1;
     }
 
     pub fn rasterizer(&self) -> &Rc<RefCell<Rasterizer>> {
@@ -93,8 +115,9 @@ impl Layouter {
         definition: FontFamilyDefinition,
     ) {
         self.loader.set_font_family_definition(id, definition);
-        self.cached_params.clear();
         self.cached_results.clear();
+        self.cache_lru_order.clear();
+        self.cache_bytes = 0;
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -106,22 +129,91 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
-        if self.cache_size == 0 || !Self::should_cache_text(params.text()) {
+        if self.cache_size == 0 {
             return Rc::new(self.layout(params.to_owned()));
         }
-        if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
-            return result.clone();
-        }
-        if self.cached_params.len() == self.cache_size {
-            let params = self.cached_params.pop_front().unwrap();
-            self.cached_results.remove(&params);
+        if let Some(entry) = self.cached_results.get_mut(&params as &dyn LayoutParams) {
+            // Refresh recency so texts that are drawn every frame (e.g. all the
+            // visible items of a scrolling list) survive eviction.
+            if let Some(key) = self.cache_lru_order.remove(&entry.last_used) {
+                self.cache_tick += 1;
+                entry.last_used = self.cache_tick;
+                entry.generation = self.cache_generation;
+                self.cache_lru_order.insert(entry.last_used, key);
+            }
+            return entry.result.clone();
         }
         let params = params.to_owned();
         let cache_key = params.clone();
         let result = Rc::new(self.layout(params));
-        self.cached_params.push_back(cache_key.clone());
-        self.cached_results.insert(cache_key, result.clone());
+        self.insert_cached_result(cache_key, result.clone());
         result
+    }
+
+    fn insert_cached_result(&mut self, cache_key: OwnedLayoutParams, result: Rc<LaidoutText>) {
+        let weight_in_bytes = Self::entry_weight_in_bytes(&cache_key, &result);
+        self.cache_tick += 1;
+        self.cache_bytes = self.cache_bytes.saturating_add(weight_in_bytes);
+        self.cache_lru_order.insert(self.cache_tick, cache_key.clone());
+        if let Some(old) = self.cached_results.insert(
+            cache_key,
+            CachedLayout {
+                result,
+                weight_in_bytes,
+                last_used: self.cache_tick,
+                generation: self.cache_generation,
+            },
+        ) {
+            // Replacing an existing entry: drop its LRU registration and weight
+            // so the bookkeeping stays consistent.
+            self.cache_lru_order.remove(&old.last_used);
+            self.cache_bytes = self.cache_bytes.saturating_sub(old.weight_in_bytes);
+        }
+        self.evict_lru_to_limits();
+    }
+
+    /// Evicts least-recently-used entries until both the entry-count cap and the
+    /// byte budget are respected, at a cost proportional to the number of entries
+    /// evicted. Entries used in the current frame generation are never evicted:
+    /// once the oldest remaining entry is current-generation, everything newer is
+    /// too, and eviction stops. The budget is therefore soft-exceeded while a
+    /// single frame's visible texts collectively outweigh it (they would otherwise
+    /// evict each other and re-layout every frame); the excess is bounded by the
+    /// visible working set and drains once scrolling moves on.
+    fn evict_lru_to_limits(&mut self) {
+        while self.cached_results.len() > 1
+            && (self.cached_results.len() > self.cache_size
+                || self.cache_bytes > LAYOUT_CACHE_MAX_BYTES)
+        {
+            let Some((tick, key)) = self.cache_lru_order.pop_first() else {
+                break;
+            };
+            if self
+                .cached_results
+                .get(&key)
+                .is_some_and(|entry| entry.generation == self.cache_generation)
+            {
+                self.cache_lru_order.insert(tick, key);
+                break;
+            }
+            if let Some(entry) = self.cached_results.remove(&key) {
+                self.cache_bytes = self.cache_bytes.saturating_sub(entry.weight_in_bytes);
+            }
+        }
+    }
+
+    /// Estimates the memory retained by one cache entry: the text bytes plus the
+    /// laid-out row and glyph storage, plus the key stored in both the result map
+    /// and the LRU order. This intentionally ignores allocator and hash-map
+    /// overhead; the budget is a soft target, not an exact accounting.
+    fn entry_weight_in_bytes(params: &OwnedLayoutParams, result: &LaidoutText) -> usize {
+        let glyph_count: usize = result.rows.iter().map(|row| row.glyphs.len()).sum();
+        params.text.len()
+            + 2 * mem::size_of::<OwnedLayoutParams>()
+            + mem::size_of::<CachedLayout>()
+            + mem::size_of::<LaidoutText>()
+            + result.rows.len() * mem::size_of::<LaidoutRow>()
+            + glyph_count * mem::size_of::<LaidoutGlyph>()
     }
 
     fn layout(&mut self, params: OwnedLayoutParams) -> LaidoutText {
@@ -1231,10 +1323,10 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, parse_text_atlas_size_value, Layouter, Size,
-        LAYOUT_CACHE_MAX_TEXT_LEN, LAYOUT_CACHE_MULTILINE_LINE_COUNT,
-        LAYOUT_CACHE_MULTILINE_TEXT_LEN,
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, LaidoutText, LayoutOptions,
+        Layouter, OwnedLayoutParams, Settings, Size, Style, LAYOUT_CACHE_MAX_BYTES,
     };
+    use std::rc::Rc;
     use unicode_segmentation::UnicodeSegmentation;
 
     #[test]
@@ -1326,18 +1418,174 @@ mod tests {
         assert_eq!(merged_segments(""), Vec::<String>::new());
     }
 
+    fn cache_test_params(text: &str) -> OwnedLayoutParams {
+        OwnedLayoutParams {
+            text: text.into(),
+            style: Style {
+                font_family_id: 0u64.into(),
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions::default(),
+        }
+    }
+
+    /// Builds a synthetic cache entry so cache behavior can be exercised
+    /// without loading real fonts.
+    fn cache_test_result(text: &str) -> Rc<LaidoutText> {
+        Rc::new(LaidoutText {
+            text: text.into(),
+            size_in_lpxs: Size::new(0.0, 0.0),
+            rows: Vec::new(),
+            is_truncated: false,
+        })
+    }
+
     #[test]
-    fn skips_layout_cache_for_large_or_multiline_debug_text() {
-        assert!(Layouter::should_cache_text("fps 90.0"));
-        assert!(!Layouter::should_cache_text(
-            &"x".repeat(LAYOUT_CACHE_MAX_TEXT_LEN + 1)
+    fn layout_cache_admits_long_texts_and_hits_refresh_recency() {
+        let mut settings = Settings::default();
+        settings.cache_size = 3;
+        let mut layouter = Layouter::new(settings);
+
+        // Texts well beyond the old 512-byte admission limit must be cacheable.
+        // Each insert happens in its own frame generation so the working-set
+        // protection doesn't suppress eviction.
+        let long_a = "a".repeat(16 * 1024);
+        let long_b = "b".repeat(16 * 1024);
+        let long_c = "c".repeat(16 * 1024);
+        let long_d = "d".repeat(16 * 1024);
+        layouter.insert_cached_result(cache_test_params(&long_a), cache_test_result(&long_a));
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&long_b), cache_test_result(&long_b));
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&long_c), cache_test_result(&long_c));
+        layouter.advance_cache_generation();
+
+        // A cache hit must not re-layout (which would require loading fonts)
+        // and must refresh the entry's LRU position.
+        let hit = layouter.get_or_layout(cache_test_params(&long_a));
+        assert!(Rc::ptr_eq(
+            &hit,
+            &layouter
+                .cached_results
+                .get(&cache_test_params(&long_a))
+                .unwrap()
+                .result
         ));
 
-        let multiline = (0..LAYOUT_CACHE_MULTILINE_LINE_COUNT)
-            .map(|index| format!("line {index}: {}", "metric ".repeat(8)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(multiline.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN);
-        assert!(!Layouter::should_cache_text(&multiline));
+        // The cache is full, so inserting a fourth entry (in a later frame)
+        // evicts the least recently used one, which is now `long_b` rather
+        // than `long_a`.
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&long_d), cache_test_result(&long_d));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&long_a)));
+        assert!(!layouter
+            .cached_results
+            .contains_key(&cache_test_params(&long_b)));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&long_c)));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&long_d)));
+        assert_eq!(
+            layouter.cached_results.len(),
+            layouter.cache_lru_order.len()
+        );
+    }
+
+    #[test]
+    fn layout_cache_evicts_to_byte_budget() {
+        let mut layouter = Layouter::new(Settings::default());
+
+        // Three entries of ~40% of the budget each, inserted in separate frame
+        // generations: the third insert must push the total over the budget and
+        // evict the oldest entry.
+        let weight = LAYOUT_CACHE_MAX_BYTES * 2 / 5;
+        let text_a = "a".repeat(weight);
+        let text_b = "b".repeat(weight);
+        let text_c = "c".repeat(weight);
+        layouter.insert_cached_result(cache_test_params(&text_a), cache_test_result(&text_a));
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&text_b), cache_test_result(&text_b));
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&text_c), cache_test_result(&text_c));
+
+        assert!(!layouter
+            .cached_results
+            .contains_key(&cache_test_params(&text_a)));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&text_b)));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&text_c)));
+        assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
+
+        // An entry heavier than the whole budget is still kept (as the sole
+        // survivor), so oversized texts don't re-layout on every draw.
+        let huge = "h".repeat(LAYOUT_CACHE_MAX_BYTES + 1);
+        layouter.advance_cache_generation();
+        layouter.insert_cached_result(cache_test_params(&huge), cache_test_result(&huge));
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&huge)));
+        assert_eq!(layouter.cached_results.len(), 1);
+    }
+
+    #[test]
+    fn layout_cache_protects_current_frame_working_set() {
+        let mut layouter = Layouter::new(Settings::default());
+
+        // A single frame whose visible texts collectively exceed the budget must
+        // keep them all cached; evicting them would make each one a guaranteed
+        // miss on every subsequent frame.
+        let weight = LAYOUT_CACHE_MAX_BYTES * 2 / 5;
+        let texts: Vec<String> = (0..4)
+            .map(|i| char::from(b'a' + i as u8).to_string().repeat(weight))
+            .collect();
+        for text in &texts {
+            layouter.insert_cached_result(cache_test_params(text), cache_test_result(text));
+        }
+        for text in &texts {
+            assert!(layouter.cached_results.contains_key(&cache_test_params(text)));
+        }
+
+        // Once a new frame starts without touching them, they become evictable
+        // and the budget is enforced again.
+        layouter.advance_cache_generation();
+        let fresh = "z".repeat(weight);
+        layouter.insert_cached_result(cache_test_params(&fresh), cache_test_result(&fresh));
+        assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
+        assert!(layouter
+            .cached_results
+            .contains_key(&cache_test_params(&fresh)));
+    }
+
+    #[test]
+    fn layout_cache_reclaims_over_budget_memory_at_frame_boundaries() {
+        let mut layouter = Layouter::new(Settings::default());
+
+        // A frame draws texts that collectively exceed the budget; they are all
+        // kept for that frame.
+        let weight = LAYOUT_CACHE_MAX_BYTES * 2 / 5;
+        let texts: Vec<String> = (0..4)
+            .map(|i| char::from(b'a' + i as u8).to_string().repeat(weight))
+            .collect();
+        for text in &texts {
+            layouter.insert_cached_result(cache_test_params(text), cache_test_result(text));
+        }
+        assert!(layouter.cache_bytes > LAYOUT_CACHE_MAX_BYTES);
+
+        // The frame boundary right after that frame still protects its entries.
+        layouter.advance_cache_generation();
+        assert!(layouter.cache_bytes > LAYOUT_CACHE_MAX_BYTES);
+
+        // The boundary after the first frame that no longer draws them reclaims
+        // the excess without waiting for a new insert.
+        layouter.advance_cache_generation();
+        assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
     }
 }

@@ -1,4 +1,4 @@
-use crate::{makepad_draw::*, scroll_bar::*};
+use crate::{event::TouchState, makepad_draw::*, scroll_bar::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -166,6 +166,52 @@ impl ScrollBars {
                 }
             }
         }
+    }
+
+    /// Stop an in-progress momentum fling on either bar when a press lands inside the
+    /// scrollable content, the "press to catch the scroll" behavior that iOS, Android, and
+    /// macOS all have. It applies on any tap, click, or touch, independent of `drag_scrolling`
+    /// or finger count. Returns `true` if a fling was caught, in which case the containing view
+    /// treats the press as consumed and does not forward it to children, so catching a runaway
+    /// scroll never also activates a widget under the finger.
+    ///
+    /// It tests the raw press event against the content rect rather than `event.hits`, so it
+    /// fires even when a child would otherwise capture the press, and it must run before the
+    /// view dispatches the event to its children.
+    pub fn catch_fling_on_press(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let area_rect = self.area.rect(cx);
+        // The press time also gates the coast check below, so a momentum stream that
+        // silently stopped reaching this view can't leave it eating presses.
+        let press_time = match event {
+            Event::MouseDown(e) if area_rect.contains(e.abs) => e.time,
+            Event::TouchUpdate(e)
+                if e.touches
+                    .iter()
+                    .any(|t| matches!(t.state, TouchState::Start) && area_rect.contains(t.abs)) =>
+            {
+                e.time
+            }
+            _ => return false,
+        };
+        // Use `|` so both bars' catch markers are consumed by this one press.
+        let press_catch = (self.show_scroll_x && self.scroll_bar_x.take_press_catch(press_time))
+            | (self.show_scroll_y && self.scroll_bar_y.take_press_catch(press_time));
+        let flinging = press_catch
+            || (self.show_scroll_x && self.scroll_bar_x.is_motion_live(press_time))
+            || (self.show_scroll_y && self.scroll_bar_y.is_motion_live(press_time));
+        if !flinging {
+            return false;
+        }
+        // Stop both axes: a single press catches a 2D fling on both bars. The press
+        // is consumed in every motion case, even ones with nothing to stop (the
+        // bounce spring keeps settling on its own).
+        if self.show_scroll_x {
+            self.scroll_bar_x.stop_fling(press_time);
+        }
+        if self.show_scroll_y {
+            self.scroll_bar_y.stop_fling(press_time);
+        }
+        true
     }
 
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) -> bool {

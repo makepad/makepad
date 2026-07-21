@@ -3,7 +3,7 @@ use {
         area::Area,
         event::{
             finger::MouseButton, DragItem, KeyModifiers, MouseDownEvent, MouseMoveEvent,
-            MouseUpEvent, ScrollEvent, TextInputEvent, WindowCloseRequestedEvent,
+            MouseUpEvent, ScrollEvent, ScrollPhase, TextInputEvent, WindowCloseRequestedEvent,
             WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom,
             WindowGeomChangeEvent,
         },
@@ -43,6 +43,16 @@ pub struct MacosWindow {
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
+    /// Wall-clock time of the most recent OS momentum scroll event. While the momentum
+    /// stream is live, macOS suppresses tap-to-click, so taps in that window have to be
+    /// synthesized from the raw trackpad touches.
+    last_momentum_time: f64,
+    /// Wall-clock time of the current raw trackpad touch sequence's start
+    /// (0.0 = no single-finger touch in progress).
+    touch_began_time: f64,
+    /// Whether a scroll gesture or a real mouse press arrived during the current raw
+    /// touch sequence, which disqualifies it from being a tap.
+    touch_disqualified: bool,
 }
 
 impl MacosWindow {
@@ -67,6 +77,9 @@ impl MacosWindow {
                 window_id: window_id,
                 view: view,
                 last_window_geom: None,
+                last_momentum_time: 0.0,
+                touch_began_time: 0.0,
+                touch_disqualified: false,
                 ime_rect: Rect::default(),
                 last_mouse_pos: Vec2d::default(),
                 ime_active: false,
@@ -181,6 +194,9 @@ impl MacosWindow {
             // set the backpointeers
             (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
+            // Receive raw trackpad touches (NSTouchTypeMaskIndirect), which widgets use
+            // to stop kinetic scrolling the instant a finger contacts the pad.
+            let () = msg_send![self.view, setAllowedTouchTypes: 2u64];
 
             let left_top = if let Some(position) = position {
                 NSPoint {
@@ -291,6 +307,9 @@ impl MacosWindow {
             // set the backpointers
             (*self.window_delegate).set_ivar("macos_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
+            // Receive raw trackpad touches (NSTouchTypeMaskIndirect), which widgets use
+            // to stop kinetic scrolling the instant a finger contacts the pad.
+            let () = msg_send![self.view, setAllowedTouchTypes: 2u64];
 
             // Convert position from parent-client coordinates to screen coordinates.
             // The position is relative to the parent window's content view origin (top-left).
@@ -774,6 +793,8 @@ impl MacosWindow {
     }
 
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
+        // A real press arrived, so the current touch needs no synthesized tap.
+        self.touch_disqualified = true;
         let () = unsafe { msg_send![self.window, makeFirstResponder: self.view] };
         self.do_callback(MacosEvent::MouseDown(MouseDownEvent {
             button,
@@ -795,6 +816,33 @@ impl MacosWindow {
         }));
     }
 
+    /// A raw trackpad touch began. `single` is whether exactly one finger is touching.
+    pub fn on_raw_touches_began(&mut self, single: bool) {
+        if single {
+            self.touch_began_time = self.time_now();
+            // Only a touch that starts while the OS momentum stream is live can have
+            // its tap suppressed by macOS; anywhere else the OS delivers the click
+            // itself and synthesizing one would double it.
+            self.touch_disqualified =
+                self.touch_began_time - self.last_momentum_time > 0.25;
+        } else {
+            self.touch_began_time = 0.0;
+            self.touch_disqualified = true;
+        }
+    }
+
+    /// A raw trackpad touch sequence ended. If it was a short, single-finger,
+    /// gesture-free touch during the OS momentum stream, macOS has suppressed its
+    /// tap-to-click, so deliver the tap ourselves.
+    pub fn on_raw_touches_ended(&mut self, modifiers: KeyModifiers) {
+        let began = self.touch_began_time;
+        self.touch_began_time = 0.0;
+        if began > 0.0 && !self.touch_disqualified && self.time_now() - began < 0.3 {
+            self.send_mouse_down(MouseButton::PRIMARY, modifiers);
+            self.send_mouse_up(MouseButton::PRIMARY, modifiers);
+        }
+    }
+
     pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2d, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
 
@@ -813,7 +861,25 @@ impl MacosWindow {
         //get_macos_app_global().ns_event = ptr::null_mut();
     }
 
-    pub fn send_scroll(&mut self, scroll: Vec2d, modifiers: KeyModifiers, is_mouse: bool) {
+    pub fn send_scroll(
+        &mut self,
+        scroll: Vec2d,
+        modifiers: KeyModifiers,
+        is_mouse: bool,
+        phase: ScrollPhase,
+    ) {
+        match phase {
+            // Only live momentum arms the tap synthesizer: after the stream ends,
+            // macOS delivers taps itself and synthesizing one would double it.
+            ScrollPhase::Momentum => {
+                self.last_momentum_time = self.time_now();
+            }
+            ScrollPhase::Began | ScrollPhase::Changed | ScrollPhase::Ended => {
+                // A scroll gesture means the current touch isn't a tap.
+                self.touch_disqualified = true;
+            }
+            _ => {}
+        }
         self.do_callback(MacosEvent::Scroll(ScrollEvent {
             window_id: self.window_id,
             scroll,
@@ -823,6 +889,7 @@ impl MacosWindow {
             is_mouse,
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
+            phase,
         }));
     }
 

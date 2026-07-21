@@ -6,6 +6,17 @@ use {
     std::rc::Rc,
 };
 
+/// Upload decoded images as mipmapped textures (`VecMipBGRAu8_32`) so minifying them on low-DPI
+/// screens uses a mip chain instead of aliasing into a blocky look. Only helps when the source
+/// has detail over the display size. Default on for OpenGL only; override with `MAKEPAD_IMAGE_MIPMAPS`.
+pub fn image_cache_use_mipmaps() -> bool {
+    if let Ok(v) = std::env::var("MAKEPAD_IMAGE_MIPMAPS") {
+        return matches!(v.trim(), "1" | "true" | "on" | "yes");
+    }
+    // The platform crate can see the `use_vulkan` cfg the draw crate cannot, so the gate lives here.
+    cfg!(all(target_os = "linux", not(use_vulkan)))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Texture(Rc<PoolId>);
 

@@ -107,6 +107,8 @@ impl Cx {
                                         data: WasmPtrU32::new((*data).as_ref().unwrap()),
                                     });
                                 }
+                                // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain).
+                                // Real mips (gl.generateMipmap) are a TODO for the web backend.
                                 TextureFormat::VecMipBGRAu8_32 {
                                     width,
                                     height,
