@@ -42,6 +42,7 @@ CLAUDE.md
 /tools/__pycache__/
 **/*.obsidian
 /xr/util/dumps/
+.omx/
 
 
 # Voice/TTS model artifacts — fetch with tools/download_tts.sh

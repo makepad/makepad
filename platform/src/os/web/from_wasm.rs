@@ -318,6 +318,15 @@ pub struct FromWasmDrawCall {
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }
 
+/// Batched render command buffer (packed u32 words).
+///
+/// This is a stepping stone towards reducing per-draw JS dispatch overhead.
+/// The buffer is owned by `CxOsPass` and referenced by pointer/len.
+#[derive(FromWasm)]
+pub struct FromWasmRenderCommandBuffer {
+    pub words: WasmPtrU32,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmXrStartPresenting {}
 

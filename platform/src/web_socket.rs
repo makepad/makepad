@@ -47,6 +47,10 @@ pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex:
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 const STUDIO_SOCKET_ID: u64 = 0;
 
+fn should_init_studio_websocket_sender(studio_http: &str) -> bool {
+    !studio_http.trim().is_empty()
+}
+
 pub(crate) fn consume_studio_socket_response(
     response: &NetworkResponse,
 ) -> Option<Vec<StudioToApp>> {
@@ -325,6 +329,10 @@ impl Cx {
     }
 
     pub fn init_websockets(&mut self, studio_http: &str) {
+        if !should_init_studio_websocket_sender(studio_http) {
+            self.start_studio_websocket(studio_http);
+            return;
+        }
         self.run_studio_websocket_thread();
         self.start_studio_websocket(studio_http);
     }
@@ -392,5 +400,19 @@ impl Cx {
         } else {
             let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_studio_sender_thread_when_studio_http_is_empty() {
+        assert!(!should_init_studio_websocket_sender(""));
+        assert!(!should_init_studio_websocket_sender("   "));
+        assert!(should_init_studio_websocket_sender(
+            "http://127.0.0.1:8001/app?build=1"
+        ));
     }
 }

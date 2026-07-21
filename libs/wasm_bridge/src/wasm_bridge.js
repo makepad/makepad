@@ -1,3 +1,17 @@
+const TEXT_DECODER = new TextDecoder();
+const TEXT_ENCODER = new TextEncoder();
+
+let DECODE_REQUIRES_UNSHARED_COPY = false;
+if (typeof SharedArrayBuffer !== "undefined") {
+    try {
+        const sab = new SharedArrayBuffer(1);
+        const view = new Uint8Array(sab);
+        TEXT_DECODER.decode(view);
+    } catch (e) {
+        DECODE_REQUIRES_UNSHARED_COPY = true;
+    }
+}
+
 export function init_env(env) {
     let _wasm = null;
 
@@ -116,11 +130,15 @@ export function init_env(env) {
 export class WasmBridge {
     static SPLIT_DATA_VERSION = 2;
     static SPLIT_SLOT_EXPORT_PREFIX = "$s";
+    static SHARED_WASM_MAX_PAGES = 32768;
 
     constructor(wasm, dispatch) {
         this.wasm = wasm;
         if (wasm === undefined) {
             return console.error("Wasm object is undefined, check your URL and build output")
+        }
+        if (wasm instanceof Error) {
+            throw wasm;
         }
         this.wasm._bridge = this;
         this.dispatch = dispatch;
@@ -224,22 +242,12 @@ export class WasmBridge {
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
     }
-    /*
-    chars_to_string(chars_ptr, len) {
-        let out = "";
-        let array = new Uint32Array(this.memory.buffer, chars_ptr, len);
-        for (let i = 0; i < len; i ++) {
-            out += String.fromCharCode(array[i]);
-        }
-        return out
-    }*/
-
     u8_to_string(ptr, len) {
-        let u8 = new Uint8Array(this.memory.buffer, ptr, len);
-        let copy = new Uint8Array(len);
-        copy.set(u8);
-        const decoder = new TextDecoder();
-        return decoder.decode(copy);
+        const view = new Uint8Array(this.memory.buffer, ptr, len);
+        if (DECODE_REQUIRES_UNSHARED_COPY) {
+            return TEXT_DECODER.decode(view.slice());
+        }
+        return TEXT_DECODER.decode(view);
     }
 
     js_console_log(u8_ptr, len) {
@@ -254,13 +262,51 @@ export class WasmBridge {
         return Date.now() / 1000.0;
     }
 
-    static create_shared_memory() {
+    static parse_required_memory_pages(error) {
+        const message = error && error.message ? error.message : `${error}`;
+        const match = message.match(/declared initial of\s+(\d+)/);
+        if (!match) {
+            return null;
+        }
+        const pages = Number.parseInt(match[1], 10);
+        return Number.isFinite(pages) && pages > 0 ? pages : null;
+    }
+
+    static create_shared_memory(initial_pages = 64) {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
-        }, 1000)
-        let mem = new WebAssembly.Memory({ initial: 64, maximum: 16384, shared: true });
-        clearTimeout(timeout);
-        return mem;
+        }, 1000);
+        try {
+            return new WebAssembly.Memory({
+                initial: initial_pages,
+                maximum: this.SHARED_WASM_MAX_PAGES,
+                shared: true,
+            });
+        }
+        catch (error) {
+            throw this.wrap_threaded_wasm_error(
+                error,
+                "Failed to allocate shared WebAssembly memory for threaded wasm"
+            );
+        }
+        finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    static wrap_threaded_wasm_error(error, prefix = "Failed to initialize threaded wasm") {
+        const details = [];
+        if (typeof SharedArrayBuffer === "undefined") {
+            details.push("SharedArrayBuffer is unavailable in this browser context");
+        }
+        if (globalThis.crossOriginIsolated === false) {
+            details.push("crossOriginIsolated is false; threaded wasm requires COOP/COEP isolation");
+        }
+        const error_message = error && error.message ? error.message : `${error}`;
+        const detail_suffix = details.length > 0 ? ` ${details.join(". ")}.` : "";
+        const wrapped = new Error(`${prefix}: ${error_message}.${detail_suffix}`);
+        wrapped.cause = error;
+        return wrapped;
     }
 
     static async supports_simd() {
@@ -306,7 +352,7 @@ export class WasmBridge {
                 kind,
                 memory_index,
                 offset: address,
-                bytes: bytes.slice(offset, offset + len),
+                bytes: bytes.subarray(offset, offset + len),
             });
             offset += len;
         }
@@ -400,14 +446,14 @@ export class WasmBridge {
                 const rebuilt = new Uint8Array(
                     section_start + 1 + encoded_len.length + data_payload.length + (wasm_bytes.length - payload_end)
                 );
-                rebuilt.set(wasm_bytes.slice(0, section_start), 0);
+                rebuilt.set(wasm_bytes.subarray(0, section_start), 0);
                 let out_offset = section_start;
                 rebuilt[out_offset++] = 11;
                 rebuilt.set(encoded_len, out_offset);
                 out_offset += encoded_len.length;
                 rebuilt.set(data_payload, out_offset);
                 out_offset += data_payload.length;
-                rebuilt.set(wasm_bytes.slice(payload_end), out_offset);
+                rebuilt.set(wasm_bytes.subarray(payload_end), out_offset);
                 return rebuilt;
             }
             offset = payload_end;
@@ -479,22 +525,32 @@ export class WasmBridge {
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
-                env.memory = this.create_shared_memory();
-                return WebAssembly.instantiate(module, { env }).then(async wasm => {
-                    set_wasm(wasm);
-                    wasm._has_thread_support = true;
-                    wasm._memory = env.memory;
-                    wasm._module = module;
-                    wasm._env = env;
-                    return wasm
-                }, error => {
-                    console.error(error);
-                    return error
+                let current_initial_pages = 64;
+                const instantiate_with_shared_memory = (initial_pages = 64) => {
+                    current_initial_pages = initial_pages;
+                    env.memory = this.create_shared_memory(initial_pages);
+                    return WebAssembly.instantiate(module, { env }).then(async wasm => {
+                        set_wasm(wasm);
+                        wasm._has_thread_support = true;
+                        wasm._memory = env.memory;
+                        wasm._module = module;
+                        wasm._env = env;
+                        return wasm
+                    });
+                };
+
+                return instantiate_with_shared_memory().catch(error => {
+                    const required_pages = this.parse_required_memory_pages(error);
+                    if (required_pages !== null && required_pages > current_initial_pages) {
+                        return instantiate_with_shared_memory(required_pages).catch(error => {
+                            throw this.wrap_threaded_wasm_error(error);
+                        });
+                    }
+                    throw this.wrap_threaded_wasm_error(error);
                 })
             }
             else {
-                console.error(error);
-                return error
+                throw error;
             }
         })
     }
@@ -526,6 +582,7 @@ export class WasmBridge {
                 return wasm;
             })().catch(error => {
                 console.error(error);
+                throw error;
             });
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
@@ -618,10 +675,41 @@ export class ToWasmMsg {
 
     push_str(str) {
         let app = this.app;
-        this.reserve_u32(str.length + 1);
-        app.u32[this.u32_offset++] = str.length;
-        for (let i = 0; i < str.length; i++) {
-            app.u32[this.u32_offset++] = str.charCodeAt(i)
+        if (typeof SharedArrayBuffer !== "undefined" && app.memory.buffer instanceof SharedArrayBuffer) {
+            const utf8 = TEXT_ENCODER.encode(str);
+            const bytes_len = utf8.length;
+            const u32_len = (bytes_len + 3) >> 2;
+            this.reserve_u32(u32_len + 1);
+
+            const len_offset = this.u32_offset++;
+            app.u32[len_offset] = bytes_len;
+
+            const byte_start_offset = this.u32_offset * 4;
+            const dest_u8 = new Uint8Array(app.memory.buffer, byte_start_offset, bytes_len);
+            dest_u8.set(utf8);
+
+            this.u32_offset += u32_len;
+        } else {
+            const max_bytes = str.length * 4;
+            const max_u32_len = (max_bytes + 3) >> 2;
+            this.reserve_u32(max_u32_len + 1);
+
+            const len_offset = this.u32_offset++;
+            const byte_start_offset = this.u32_offset * 4;
+            const dest_u8 = new Uint8Array(app.memory.buffer, byte_start_offset, max_bytes);
+            const { read, written } = TEXT_ENCODER.encodeInto(str, dest_u8);
+
+            app.u32[len_offset] = written;
+
+            const remainder = written & 3;
+            if (remainder > 0) {
+                const remainder_view = new Uint8Array(app.memory.buffer, byte_start_offset + written, 4 - remainder);
+                remainder_view.fill(0);
+            }
+
+            const actual_u32_len = (written + 3) >> 2;
+            this.u32_offset += actual_u32_len;
+            this.u32_needed_capacity -= (max_u32_len - actual_u32_len);
         }
     }
 }
@@ -646,11 +734,16 @@ export class FromWasmMsg {
     read_str() {
         let app = this.app;
         let len = app.u32[this.u32_offset++];
-        let str = "";
-        for (let i = 0; i < len; i++) {
-            str += String.fromCharCode(app.u32[this.u32_offset++]);
+        let u32_len = (len + 3) >> 2;
+        let u8_view = new Uint8Array(app.memory.buffer, this.u32_offset * 4, len);
+        let str;
+        if (DECODE_REQUIRES_UNSHARED_COPY) {
+            str = TEXT_DECODER.decode(u8_view.slice());
+        } else {
+            str = TEXT_DECODER.decode(u8_view);
         }
-        return str
+        this.u32_offset += u32_len;
+        return str;
     }
 
     dispatch_on_app() {

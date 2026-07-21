@@ -5,18 +5,22 @@ use crate::wasm_types::*;
 #[export_name = "wasm_new_msg_with_u64_capacity"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_new_msg_with_u64_capacity(capacity_u64: u32) -> u32 {
-    FromWasmMsg::new()
-        .reserve_u64(capacity_u64 as usize)
-        .release_ownership()
+    unsafe {
+        FromWasmMsg::new()
+            .reserve_u64(capacity_u64 as usize)
+            .release_ownership()
+    }
 }
 
 #[export_name = "wasm_msg_reserve_u64"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_msg_reserve_u64(ptr: u32, capacity_u64: u32) -> u32 {
-    ToWasmMsg::take_ownership(ptr)
-        .into_from_wasm()
-        .reserve_u64(capacity_u64 as usize)
-        .release_ownership()
+    unsafe {
+        ToWasmMsg::take_ownership(ptr)
+            .into_from_wasm()
+            .reserve_u64(capacity_u64 as usize)
+            .release_ownership()
+    }
 }
 
 #[export_name = "wasm_msg_free"]

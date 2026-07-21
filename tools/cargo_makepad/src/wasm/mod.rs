@@ -1,42 +1,25 @@
 mod compile;
 mod sdk;
-use compile::WasmConfig;
+#[allow(unused_imports)]
+pub use compile::{generate_html, WasmConfig};
 
 fn should_default_to_small_fonts(config: &WasmConfig) -> bool {
-    config.optimize_size || config.brotli || config.split || !config.threads
+    config.optimize_size || config.brotli || !config.threads
 }
 
 fn enable_strip_pipeline(config: &mut WasmConfig) {
-    config.strip = true;
     config.optimize_size = true;
-}
-
-fn enable_split_pipeline(config: &mut WasmConfig, threshold: Option<usize>) {
-    config.split = true;
-    config.split_auto = threshold.is_none();
-    if let Some(threshold) = threshold {
-        config.split_functions_threshold = threshold;
-    }
 }
 
 fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     if let Some(opt) = v.strip_prefix("--port=") {
         config.port = Some(opt.parse::<u16>().unwrap_or(8010));
         true
-    } else if v == "--strip-custom-sections" {
-        config.strip = true;
-        true
     } else if v == "--strip" {
         enable_strip_pipeline(config);
         true
     } else if v == "--wasm-opt" {
         config.wasm_opt = true;
-        true
-    } else if v == "--split" {
-        enable_split_pipeline(config, None);
-        true
-    } else if let Some(threshold) = v.strip_prefix("--split=") {
-        enable_split_pipeline(config, Some(threshold.parse::<usize>().unwrap_or(200)));
         true
     } else if v == "--small-fonts" {
         config.small_fonts = true;
@@ -53,13 +36,6 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--no-threads" {
         config.threads = false;
         true
-    } else if v == "--split-functions" {
-        config.split_functions = true;
-        true
-    } else if let Some(threshold) = v.strip_prefix("--split-functions=") {
-        config.split_functions = true;
-        config.split_functions_threshold = threshold.parse::<usize>().unwrap_or(200);
-        true
     } else {
         false
     }
@@ -75,9 +51,8 @@ fn strip_wasm_options(config: &mut WasmConfig, args: &[String]) -> Vec<String> {
     out
 }
 
-pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
+pub(crate) fn handle_wasm(mut args: &[String]) -> Result<(), String> {
     let mut config = WasmConfig {
-        strip: false,
         lan: false,
         brotli: false,
         port: None,
@@ -86,10 +61,6 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         threads: true,
         optimize_size: false,
         wasm_opt: false,
-        split: false,
-        split_auto: false,
-        split_functions: false,
-        split_functions_threshold: 200,
         hot_reload: false,
     };
 
@@ -138,11 +109,9 @@ mod tests {
         for args in [
             args(&["build", "--strip", "-p", "app"]),
             args(&["build", "--brotli", "-p", "app"]),
-            args(&["build", "--split", "-p", "app"]),
             args(&["build", "--no-threads", "-p", "app"]),
         ] {
             let mut config = WasmConfig {
-                strip: false,
                 lan: false,
                 brotli: false,
                 port: None,
@@ -151,10 +120,6 @@ mod tests {
                 threads: true,
                 optimize_size: false,
                 wasm_opt: false,
-                split: false,
-                split_auto: false,
-                split_functions: false,
-                split_functions_threshold: 200,
                 hot_reload: false,
             };
 
@@ -172,11 +137,9 @@ mod tests {
         for args in [
             args(&["run", "--strip", "-p", "app"]),
             args(&["run", "--brotli", "-p", "app"]),
-            args(&["run", "--split", "-p", "app"]),
             args(&["run", "--no-threads", "-p", "app"]),
         ] {
             let mut config = WasmConfig {
-                strip: false,
                 lan: false,
                 brotli: false,
                 port: None,
@@ -185,10 +148,6 @@ mod tests {
                 threads: true,
                 optimize_size: false,
                 wasm_opt: false,
-                split: false,
-                split_auto: false,
-                split_functions: false,
-                split_functions_threshold: 200,
                 hot_reload: false,
             };
 
@@ -204,7 +163,6 @@ mod tests {
     #[test]
     fn profile_small_alone_keeps_full_fonts() {
         let mut config = WasmConfig {
-            strip: false,
             lan: false,
             brotli: false,
             port: None,
@@ -213,10 +171,6 @@ mod tests {
             threads: true,
             optimize_size: false,
             wasm_opt: false,
-            split: false,
-            split_auto: false,
-            split_functions: false,
-            split_functions_threshold: 200,
             hot_reload: false,
         };
 

@@ -266,9 +266,9 @@ impl NetworkBackend for WasmNetworkShimBackend {
         let metadata_id = request.metadata_id;
         let method = request.method;
         let headers_string = request.get_headers_string();
-        let url = request.url;
-        let body = request.body.unwrap_or_default();
-        let method_string = method.as_str().to_string();
+        let HttpRequest { url, body, .. } = request;
+        let body = body.as_deref().unwrap_or(&[]);
+        let method_string = method.as_str();
 
         unsafe {
             js_network_http_request(

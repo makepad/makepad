@@ -102,13 +102,15 @@ impl Cx {
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
-                    {
+                    if self.windows.len() > 0 {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
+                        self.os.window_geom = new_geom.clone();
+                        self.windows[id_zero].window_geom = new_geom;
+                    } else {
+                        self.os.window_geom = new_geom;
                     }
-                    self.os.window_geom = new_geom.clone();
-                    self.windows[id_zero].window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.set_physical_keyboard_state(true);
@@ -122,20 +124,24 @@ impl Cx {
                     let old_geom = self.os.window_geom.clone();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     let id_zero = CxWindowPool::id_zero();
-                    {
+                    if self.windows.len() > 0 {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
-                    }
-                    if old_geom != new_geom {
-                        self.os.window_geom = new_geom.clone();
-                        self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: id_zero,
-                            old_geom: old_geom,
-                            new_geom: new_geom,
-                        }));
-                        self.redraw_all();
+                        if old_geom != new_geom {
+                            self.os.window_geom = new_geom.clone();
+                            self.windows[id_zero].window_geom = new_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                                window_id: id_zero,
+                                old_geom: old_geom,
+                                new_geom: new_geom,
+                            }));
+                            self.redraw_all();
+                        }
+                    } else {
+                        if old_geom != new_geom {
+                            self.os.window_geom = new_geom;
+                        }
                     }
                 }
 
@@ -518,6 +524,11 @@ impl Cx {
                 self.webgl_compile_shaders();
             }
             self.handle_repaint(time);
+            self.with_vm(|vm| {
+                if vm.heap().needs_gc() {
+                    vm.gc();
+                }
+            });
         }
 
         if network_responses.len() != 0 {
@@ -530,16 +541,12 @@ impl Cx {
         self.handle_platform_ops();
         self.handle_media_signals();
 
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-            || self.demo_time_repaint
-        {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
 
         //return wasm pointer to caller
-        self.os.from_wasm.take().unwrap().release_ownership()
+        unsafe { self.os.from_wasm.take().unwrap().release_ownership() }
     }
 
     pub fn handle_repaint(&mut self, time: f64) {
@@ -588,7 +595,7 @@ impl Cx {
                     // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
                     // freshly-created window's `dpi_override` machinery has
                     // a baseline.
-                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
+                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor.or(Some(self.os.window_geom.dpi_factor));
                     {
                         let window = &mut self.windows[window_id];
                         window.os_dpi_factor = id_zero_os_dpi;
@@ -960,6 +967,7 @@ impl CxOsApi for Cx {
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
+            FromWasmRenderCommandBuffer::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
             FromWasmBrowserUpdateUrl::to_js_code(),
             FromWasmBrowserHistoryGo::to_js_code(),
@@ -1138,7 +1146,6 @@ impl Default for CxOs {
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
-
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
 
@@ -1181,7 +1188,7 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     out.push_str("}\n");
     out.push_str("}");
     msg.push_str(&out);
-    msg.release_ownership()
+    unsafe { msg.release_ownership() }
 }
 
 #[export_name = "wasm_check_signal"]

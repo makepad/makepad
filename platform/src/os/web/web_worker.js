@@ -1,4 +1,20 @@
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const TEXT_DECODER = new TextDecoder();
+const TEXT_ENCODER = new TextEncoder();
+const STRING_CHUNK_SIZE = 8192;
+
+function u32_to_string(u32, offset, len) {
+    if (len === 0) {
+        return "";
+    }
+    let out = "";
+    let end = offset + len;
+    for (let pos = offset; pos < end; pos += STRING_CHUNK_SIZE) {
+        let chunk_end = Math.min(pos + STRING_CHUNK_SIZE, end);
+        out += String.fromCodePoint.apply(null, u32.subarray(pos, chunk_end));
+    }
+    return out;
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -32,12 +48,8 @@ onmessage = async function (e) {
     }
 
     function chars_to_string(chars_ptr, len) {
-        let out = "";
         let array = new Uint32Array(thread_info.memory.buffer, chars_ptr, len);
-        for (let i = 0; i < len; i++) {
-            out += String.fromCharCode(array[i]);
-        }
-        return out
+        return u32_to_string(array, 0, len);
     }
 
     let web_sockets = {}
@@ -172,7 +184,9 @@ onmessage = async function (e) {
                 body,
                 signal: controller.signal,
             }).then(async response => {
-                console.log("[makepad][http][req]", method, url);
+                if (globalThis.makepad_log_http === true) {
+                    console.log("[makepad][http][req]", method, url);
+                }
                 let response_headers = "";
                 response.headers.forEach((value, key) => {
                     response_headers += `${key}: ${value}\r\n`;
@@ -180,7 +194,9 @@ onmessage = async function (e) {
                 let response_body = new Uint8Array(await response.arrayBuffer());
                 let headers_u8 = string_to_u8(response_headers);
                 let body_u8 = array_to_u8(response_body);
-                console.log("[makepad][http][res]", response.status, url, response_body.length);
+                if (globalThis.makepad_log_http === true) {
+                    console.log("[makepad][http][res]", response.status, url, response_body.length);
+                }
                 wasm.exports.wasm_network_http_response(
                     request_id_lo,
                     request_id_hi,
@@ -286,17 +302,12 @@ onmessage = async function (e) {
     };
 
     function string_to_u8(s) {
-        const encoder = new TextEncoder();
-        const u8_in = encoder.encode(s);
+        const u8_in = TEXT_ENCODER.encode(s);
         return array_to_u8(u8_in);
     }
 
     function u8_to_string(ptr, len) {
-        let u8 = new Uint8Array(env.memory.buffer, ptr, len);
-        let copy = new Uint8Array(len);
-        copy.set(u8);
-        const decoder = new TextDecoder();
-        return decoder.decode(copy);
+        return TEXT_DECODER.decode(new Uint8Array(env.memory.buffer, ptr, len));
     }
 
     function u8_to_array(ptr, len) {
@@ -332,9 +343,13 @@ onmessage = async function (e) {
                 wasm.exports.__wbindgen_start();
             }
             if (thread_info.timer > 0) {
-                this.setInterval(() => {
-                    wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
-                }, thread_info.timer);
+                const timer_tick = () => {
+                    this.setTimeout(() => {
+                        wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
+                        timer_tick();
+                    }, thread_info.timer);
+                };
+                timer_tick();
             }
             else {
                 wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);
@@ -342,9 +357,11 @@ onmessage = async function (e) {
             }
         });
     };
+    // Secondary workers use wasm-bindgen's generated init directly; the main
+    // thread adapter owns Makepad env setup before thread creation.
     if (thread_info.wasm_bindgen) {
-        let inner_wasm = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
-        await doit(inner_wasm);
+        const exports = await init({ module_or_path: thread_info.module, memory: env.memory }, env);
+        await doit({ exports });
     } else {
         WebAssembly.instantiate(thread_info.module, { env }).then(doit, error => {
             console.error("Cannot instantiate wasm" + error);

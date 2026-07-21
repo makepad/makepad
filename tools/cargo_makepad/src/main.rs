@@ -75,18 +75,14 @@ fn show_help() {
         "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
     );
     println!(
-        "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
-    );
-    println!(
         "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
-    );
-    println!(
-        "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
     );
     println!(
         "       --brotli                                  Use brotli to compress the wasm file"
     );
-    println!("       --bindgen                                 Enable wasm-bindgen compatibility");
+    println!(
+        "       --bindgen                                 Generate wasm-bindgen glue for browser crate compatibility"
+    );
     println!(
         "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)"
     );

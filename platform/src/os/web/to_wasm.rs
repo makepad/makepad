@@ -104,6 +104,20 @@ pub struct ToWasmInit {
     pub window_info: WWindowInfo,
 }
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webgl_init_gpu_info_matches_to_wasm_field_name() {
+        let web_gl = include_str!("web_gl.js");
+        let web_js = include_str!("web.js");
+        assert!(web_gl.contains("min_uniform_vectors:"));
+        assert!(!web_gl.contains("min_uniforms:"));
+        assert!(web_js.contains("this.window_info.xr_is_presenting ="));
+        assert!(web_js.contains("this.window_info.vr_supported ="));
+        assert!(web_js.contains("this.window_info.ar_supported ="));
+    }
+}
+
 #[derive(ToWasm)]
 pub struct ToWasmResizeWindow {
     pub window_info: WWindowInfo,

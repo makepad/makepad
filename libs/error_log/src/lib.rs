@@ -1,5 +1,8 @@
 use makepad_micro_serde::*;
 use std::fmt::Write;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::{AtomicPtr, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::RwLock;
 
 #[macro_export]
@@ -129,8 +132,26 @@ fn log_with_level_rustc(
     );
 }
 
-pub static LOG_WITH_LEVEL: RwLock<fn(&str, u32, u32, u32, u32, String, LogLevel)> =
-    RwLock::new(log_with_level_rustc);
+pub type LogWithLevelFn = fn(&str, u32, u32, u32, u32, String, LogLevel);
+
+#[cfg(not(target_arch = "wasm32"))]
+pub static LOG_WITH_LEVEL: RwLock<LogWithLevelFn> = RwLock::new(log_with_level_rustc);
+
+#[cfg(target_arch = "wasm32")]
+static LOG_WITH_LEVEL_WASM: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+pub fn set_log_with_level(logger: LogWithLevelFn) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        LOG_WITH_LEVEL_WASM.store(logger as *mut (), Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut current = LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
+        *current = logger;
+    }
+}
 
 pub fn log_with_level(
     file_name: &str,
@@ -141,7 +162,19 @@ pub fn log_with_level(
     message: String,
     level: LogLevel,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    let logger: LogWithLevelFn = {
+        let logger = LOG_WITH_LEVEL_WASM.load(Ordering::Relaxed);
+        if logger.is_null() {
+            log_with_level_rustc
+        } else {
+            unsafe { std::mem::transmute(logger) }
+        }
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
     let logger = LOG_WITH_LEVEL.read().expect("Logger lock poisoned");
+
     logger(
         file_name,
         line_start,

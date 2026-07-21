@@ -106,8 +106,8 @@ impl FromWasm for WasmDataU8 {
 
 #[derive(FromWasm)]
 pub struct WasmPtrF32 {
-    ptr: u32,
-    len: usize,
+    pub ptr: u32,
+    pub len: usize,
 }
 
 impl WasmPtrF32 {

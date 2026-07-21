@@ -7,7 +7,6 @@ use makepad_widgets::text::{
     layouter::{LaidoutGlyph, LaidoutText},
 };
 use makepad_widgets::*;
-use std::path::Path;
 
 app_main!(App);
 
@@ -1465,7 +1464,10 @@ script_mod! {
             Hr{}
 
             Label{text: "Images" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            test_image := Image{width: 180 height: 120 fit: ImageFit.Stretch}
+            test_image := Image{
+                width: 180 height: 120 fit: ImageFit.Stretch
+                src: crate_resource("self:resources/app_icon.png")
+            }
 
             Hr{}
 
@@ -2105,18 +2107,7 @@ impl App {
 }
 
 impl MatchEvent for App {
-    fn handle_startup(&mut self, cx: &mut Cx) {
-        // Load a test image into the Image widget
-        let image_path =
-            Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
-        if let Err(e) = self
-            .ui
-            .image(cx, ids!(test_image))
-            .load_image_file_by_path(cx, image_path)
-        {
-            log!("Failed to load image: {:?}", e);
-        }
-    }
+
 
     fn handle_next_frame(&mut self, cx: &mut Cx, e: &NextFrameEvent) {
         if !self.lens_ripple_animating || !e.set.contains(&self.lens_press_next_frame) {

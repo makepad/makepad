@@ -1,5 +1,19 @@
 const AUDIO_WORKLET_SIGNAL_BATCHING = 8;
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const STRING_CHUNK_SIZE = 8192;
+
+function u32_to_string(u32, offset, len) {
+    if (len === 0) {
+        return "";
+    }
+    let out = "";
+    let end = offset + len;
+    for (let pos = offset; pos < end; pos += STRING_CHUNK_SIZE) {
+        let chunk_end = Math.min(pos + STRING_CHUNK_SIZE, end);
+        out += String.fromCodePoint.apply(null, u32.subarray(pos, chunk_end));
+    }
+    return out;
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -36,12 +50,8 @@ class AudioWorklet extends AudioWorkletProcessor {
         };
 
         function chars_to_string(chars_ptr, len) {
-            let out = "";
             let array = new Uint32Array(thread_info.memory.buffer, chars_ptr, len);
-            for (let i = 0; i < len; i++) {
-                out += String.fromCharCode(array[i]);
-            }
-            return out
+            return u32_to_string(array, 0, len);
         }
 
         let env = {

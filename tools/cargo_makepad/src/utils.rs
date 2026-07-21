@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::makepad_shell::*;
 use makepad_toml_parser::{parse_toml, Toml};
 use std::{
