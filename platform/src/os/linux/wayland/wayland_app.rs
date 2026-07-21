@@ -50,6 +50,23 @@ impl WaylandApp {
                             }));
                         }
                     }
+                    // Send any requests queued during event handling (cursor shapes,
+                    // frame callback requests, etc.) before blocking, so the compositor
+                    // can respond and wake the select below. A WouldBlock just means the
+                    // socket buffer is full; the messages stay queued and the next loop
+                    // iteration retries, so only a dead connection is fatal.
+                    if let Err(err) = self.event_queue.flush() {
+                        let transient = matches!(
+                            &err,
+                            wayland_client::backend::WaylandError::Io(io)
+                                if io.kind() == std::io::ErrorKind::WouldBlock
+                        );
+                        if !transient {
+                            crate::warning!("Wayland flush failed: {}", err);
+                            self.terminate_event_loop();
+                            return;
+                        }
+                    }
                     if let Some(guard) = self.event_queue.prepare_read() {
                         self.state.timers.select(guard.connection_fd().as_raw_fd());
                     }
@@ -93,6 +110,10 @@ impl WaylandApp {
             self.terminate_event_loop();
             return;
         }
+
+        // The whole pointer-event batch is drained; dispatch the single latest coalesced motion
+        // (one hover hit-test instead of one per queued motion) before painting.
+        self.state.flush_pending_motion();
 
         self.do_callback(XlibEvent::Paint);
     }

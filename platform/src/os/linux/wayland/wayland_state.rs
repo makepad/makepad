@@ -18,8 +18,8 @@ use std::{
 use wayland_client::{
     delegate_noop,
     protocol::{
-        wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
-        wl_data_source, wl_keyboard, wl_output,
+        wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
+        wl_data_offer, wl_data_source, wl_keyboard, wl_output,
         wl_pointer::{self, ButtonState},
         wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
     },
@@ -49,13 +49,14 @@ use wayland_protocols::{
 
 use crate::{
     cx_native::EventFlow,
-    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, WindowGeom},
+    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom},
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
     x11::xlib_event::XlibEvent,
     KeyCode, WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
 
+use super::super::windowing_backend::PIXELS_PER_WHEEL_DETENT;
 use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
 /// Reserved timer ID for keyboard repeat. Uses a high value to avoid conflicts with app timers.
@@ -106,6 +107,13 @@ pub(crate) struct WaylandState {
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) popups: Vec<WaylandPopupWindow>,
     pub(crate) pointer_window: Option<WindowId>,
+    /// The latest un-dispatched pointer motion `(window_id, pos)`, coalesced across a whole
+    /// `dispatch_pending` batch. A high-Hz mouse queues many `wl_pointer` motion+frame pairs between
+    /// paints; dispatching each as a `MouseMove` runs a redundant hover hit-test across the whole
+    /// widget tree, stealing frame budget during a fling. We keep only the latest and flush it once
+    /// after the queue is drained (and before any intervening button/leave, to preserve ordering),
+    /// mirroring the Windows `coalesce_mouse_move`. See [`Self::flush_pending_motion`].
+    pub(crate) pending_motion: Option<(WindowId, Vec2d)>,
     pub(crate) keyboard_window: Option<WindowId>,
     pub(crate) modifiers: KeyModifiers,
     pub(crate) timers: SelectTimers,
@@ -132,8 +140,21 @@ pub(crate) struct WaylandState {
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
     pub(crate) scroll_accumulator: Vec2d,
+    /// Wheel detents accumulated over the current pointer frame, from `AxisValue120`
+    /// (fractional detents on high-resolution wheels) or `AxisDiscrete` on pre-v8
+    /// compositors. Same sign convention as `scroll_accumulator`.
+    pub(crate) scroll_detents: Vec2d,
     pub(crate) scroll_is_wheel: bool,
-    pub(crate) last_scroll_time: f64,
+    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame: the fingers
+    /// lifted off the touchpad. The frame's Scroll event is then sent with
+    /// `ScrollPhase::Ended` (even if its delta is zero) so widgets can start their own
+    /// fling — Wayland compositors do not synthesize momentum scrolling for clients.
+    pub(crate) scroll_stopped: bool,
+    /// Windows whose last presented frame's `wl_surface::frame` callback has not fired
+    /// yet. While a window is listed here the compositor is not ready for a new frame
+    /// on that surface, so presenting it is skipped (its pass stays dirty). See the
+    /// frame-callback pacing in `linux_wayland.rs`.
+    frame_callbacks_pending: Vec<WindowId>,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
 
@@ -172,6 +193,7 @@ impl WaylandState {
             windows: Vec::new(),
             popups: Vec::new(),
             pointer_window: None,
+            pending_motion: None,
             keyboard_window: None,
             pointer_serial: None,
             keyboard_serial: None,
@@ -192,8 +214,10 @@ impl WaylandState {
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
             scroll_accumulator: dvec2(0.0, 0.0),
+            scroll_detents: dvec2(0.0, 0.0),
             scroll_is_wheel: false,
-            last_scroll_time: 0.0,
+            scroll_stopped: false,
+            frame_callbacks_pending: Vec::new(),
             event_flow: EventFlow::Wait,
             event_loop_running: true,
             key_repeat_rate: 25,
@@ -260,9 +284,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     state.wm_base = Some(wm_base);
                 }
                 "wl_seat" => {
+                    // Version 8 adds wl_pointer::AxisValue120 for high-resolution wheel
+                    // detents (replacing AxisDiscrete on v8+ compositors). Note the v7+
+                    // requirement that keymap fds be mapped MAP_PRIVATE.
                     let seat = wl_registry.bind::<wl_seat::WlSeat, _, _>(
                         name,
-                        version.min(5),
+                        version.min(9),
                         qhandle,
                         (),
                     );
@@ -1061,12 +1088,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
             }
             wl_keyboard::Event::Keymap { format, fd, size } => match format {
                 WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) => {
+                    // wl_seat v7+ requires keymap fds to be mapped MAP_PRIVATE; it is
+                    // also valid on older versions since the map is read-only.
                     let map_str = unsafe {
                         libc_sys::mmap(
                             std::ptr::null_mut(),
                             size as libc_sys::size_t,
                             libc_sys::PROT_READ,
-                            libc_sys::MAP_SHARED,
+                            libc_sys::MAP_PRIVATE,
                             fd.as_raw_fd(),
                             0,
                         )
@@ -1104,6 +1133,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.pointer_window = state.window_id_for_surface(&surface);
             }
             wl_pointer::Event::Leave { serial, surface: _ } => {
+                // Dispatch any buffered motion before the pointer leaves, so the final hover
+                // position is delivered to the right window first.
+                state.flush_pending_motion();
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
@@ -1190,22 +1222,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         }
                     }
 
-                    state.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
-                        abs: pos,
-                        window_id: window_id,
-                        modifiers: state.modifiers,
-                        time: state.time_now(),
-                        handled: Cell::new(Area::Empty),
-                    }));
-                    if let Some(items) = state.internal_drag_items.as_ref() {
-                        state.do_callback(XlibEvent::Drag(DragEvent {
-                            modifiers: state.modifiers,
-                            handled: Arc::new(Mutex::new(false)),
-                            abs: pos,
-                            items: items.clone(),
-                            response: Arc::new(Mutex::new(DragResponse::None)),
-                        }));
-                    }
+                    // Buffer this motion instead of dispatching immediately; the latest one is
+                    // flushed as a single MouseMove once the whole event batch is drained (or before
+                    // an intervening button/leave). The edge-resize cursor above still updates per
+                    // motion so the resize cursor stays responsive. See `flush_pending_motion`.
+                    state.pending_motion = Some((window_id, pos));
                 }
             }
             wl_pointer::Event::Button {
@@ -1214,6 +1235,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 button,
                 state: key_state,
             } => {
+                // Dispatch any buffered motion first so a MouseMove precedes this button's
+                // down/up (and the WindowDragQuery it triggers) at the correct hover position.
+                state.flush_pending_motion();
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 // Outside-click popup dismissal: if press lands on a
@@ -1338,31 +1362,48 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
             }
             wl_pointer::Event::Frame => {
                 let acc = state.scroll_accumulator;
-                if acc.x != 0.0 || acc.y != 0.0 {
+                let detents = state.scroll_detents;
+                // Dispatch when there is a scroll delta, or when the touchpad gesture just
+                // ended (AxisStop): the `Ended` event may carry a zero delta but is what lets
+                // widgets start their fling animation at finger lift-off.
+                if acc.x != 0.0
+                    || acc.y != 0.0
+                    || detents.x != 0.0
+                    || detents.y != 0.0
+                    || state.scroll_stopped
+                {
                     if let Some(window_id) = state.pointer_window {
+                        // Deliver any buffered motion first so the Scroll event's hover
+                        // position is current (Button and Leave already do this).
+                        state.flush_pending_motion();
                         let time_now = state.time_now();
                         let scroll = if state.scroll_is_wheel {
-                            let last = state.last_scroll_time;
-                            state.last_scroll_time = time_now;
-                            let speed = 1200.0 * (0.2 - 2.0 * (time_now - last)).max(0.01);
-                            // Use 0.0 for axes with no input; signum(0.0) returns
-                            // 1.0 (not 0.0), which would create a phantom scroll
-                            // component that breaks widgets combining both axes
-                            // (e.g. tab bar horizontal scroll via vertical wheel).
-                            dvec2(
-                                if acc.x != 0.0 {
-                                    acc.x.signum() * speed
-                                } else {
-                                    0.0
-                                },
-                                if acc.y != 0.0 {
-                                    acc.y.signum() * speed
-                                } else {
-                                    0.0
-                                },
-                            )
+                            if detents.x != 0.0 || detents.y != 0.0 {
+                                // Scale wheel detents to a fixed distance each so slow,
+                                // deliberate clicks and fast spins both move proportionally.
+                                dvec2(
+                                    detents.x * PIXELS_PER_WHEEL_DETENT,
+                                    detents.y * PIXELS_PER_WHEEL_DETENT,
+                                )
+                            } else {
+                                // Some compositors send wheel frames without discrete or
+                                // value120 information; the accumulated axis value is
+                                // already a real distance in pixels.
+                                acc
+                            }
                         } else {
                             acc
+                        };
+                        // Wheels have no gesture phases. Finger-driven (touchpad) scrolling
+                        // reports `Changed` per frame and `Ended` when the fingers lift
+                        // (AxisStop), letting widgets run their own momentum fling —
+                        // Wayland compositors do not synthesize momentum for clients.
+                        let phase = if state.scroll_is_wheel {
+                            ScrollPhase::None
+                        } else if state.scroll_stopped {
+                            ScrollPhase::Ended
+                        } else {
+                            ScrollPhase::Changed
                         };
                         state.do_callback(XlibEvent::Scroll(ScrollEvent {
                             window_id,
@@ -1373,26 +1414,66 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                             handled_x: Cell::new(false),
                             handled_y: Cell::new(false),
                             time: time_now,
+                            phase,
                         }));
                     }
                 }
                 state.scroll_accumulator = dvec2(0.0, 0.0);
+                state.scroll_detents = dvec2(0.0, 0.0);
                 state.scroll_is_wheel = false;
+                state.scroll_stopped = false;
             }
-            wl_pointer::Event::AxisStop { time: _, axis: _ } => {}
-            wl_pointer::Event::AxisDiscrete {
-                axis: _,
-                discrete: _,
-            } => {}
-            wl_pointer::Event::AxisValue120 {
-                axis: _,
-                value120: _,
-            } => {}
+            wl_pointer::Event::AxisStop { time: _, axis: _ } => {
+                // Fingers lifted off the touchpad: mark the gesture ended so this pointer
+                // frame's Scroll event goes out with `ScrollPhase::Ended`.
+                state.scroll_stopped = true;
+            }
+            // Wheel detent counts, negated to match the Axis sign convention above.
+            // AxisDiscrete is only sent by compositors below seat v8; v8+ compositors
+            // send AxisValue120 instead (120 units per detent, fractional detents
+            // allowed for high-resolution wheels), so the two never double-count.
+            wl_pointer::Event::AxisDiscrete { axis, discrete } => match axis {
+                WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
+                    state.scroll_detents.y -= discrete as f64;
+                }
+                WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
+                    state.scroll_detents.x -= discrete as f64;
+                }
+                _ => {}
+            },
+            wl_pointer::Event::AxisValue120 { axis, value120 } => match axis {
+                WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
+                    state.scroll_detents.y -= value120 as f64 / 120.0;
+                }
+                WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
+                    state.scroll_detents.x -= value120 as f64 / 120.0;
+                }
+                _ => {}
+            },
             wl_pointer::Event::AxisRelativeDirection {
                 axis: _,
                 direction: _,
             } => {}
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, WindowId> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _callback: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        window_id: &WindowId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // The compositor is ready for a new frame on this window's surface. Clear the
+        // pending flag; the Paint that follows event dispatch in the event loop presents
+        // the window's pass if it is still dirty. The window may have been closed while
+        // the callback was in flight, in which case there is nothing left to clear.
+        if let wl_callback::Event::Done { .. } = event {
+            state.clear_frame_callback_pending(*window_id);
         }
     }
 }
@@ -1664,6 +1745,63 @@ impl WaylandState {
             callback(self, event);
             self.event_callback = Some(callback);
         }
+    }
+
+    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove` (plus a `Drag`
+    /// while an internal drag is in flight), then clear it. Called once after the `wl_pointer` event
+    /// batch is drained and before any intervening button/leave, so a high-Hz mouse produces one
+    /// hover hit-test per frame instead of one per queued motion. See [`Self::pending_motion`].
+    pub(crate) fn flush_pending_motion(&mut self) {
+        let Some((window_id, pos)) = self.pending_motion.take() else {
+            return;
+        };
+        // The window may have been closed by an event earlier in this batch;
+        // dispatching a motion for a dead window would hit a stale or recycled
+        // window pool slot downstream.
+        if !self.windows.iter().any(|w| w.window_id == window_id)
+            && !self.popups.iter().any(|w| w.window_id == window_id)
+        {
+            return;
+        }
+        self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
+            abs: pos,
+            window_id,
+            modifiers: self.modifiers,
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+        }));
+        if let Some(items) = self.internal_drag_items.as_ref() {
+            self.do_callback(XlibEvent::Drag(DragEvent {
+                modifiers: self.modifiers,
+                handled: Arc::new(Mutex::new(false)),
+                abs: pos,
+                items: items.clone(),
+                response: Arc::new(Mutex::new(DragResponse::None)),
+            }));
+        }
+    }
+
+    /// True while the given window's last presented frame awaits its `wl_surface::frame`
+    /// callback, meaning the compositor is not ready for another frame on that surface.
+    pub(crate) fn is_frame_callback_pending(&self, window_id: WindowId) -> bool {
+        self.frame_callbacks_pending.contains(&window_id)
+    }
+
+    pub(crate) fn set_frame_callback_pending(&mut self, window_id: WindowId) {
+        if !self.frame_callbacks_pending.contains(&window_id) {
+            self.frame_callbacks_pending.push(window_id);
+        }
+    }
+
+    /// Clear a window's pending frame callback. Called when the callback fires and when
+    /// a window is closed, since the compositor never fires callbacks for a destroyed
+    /// surface and a stale entry would keep the window's presents gated forever.
+    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
+        self.frame_callbacks_pending.retain(|id| *id != window_id);
+    }
+
+    pub(crate) fn any_frame_callback_pending(&self) -> bool {
+        !self.frame_callbacks_pending.is_empty()
     }
 
     /// Called from the event loop when the key repeat timer fires.

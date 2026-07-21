@@ -8,7 +8,7 @@ use {
     rustybuzz,
     rustybuzz::UnicodeBuffer,
     std::{
-        collections::VecDeque,
+        collections::BTreeMap,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -98,8 +98,17 @@ pub struct Shaper {
     cached_features_source: Vec<(u32, u32)>,
     cached_rb_features: Vec<rustybuzz::Feature>,
     cache_size: usize,
-    cached_params: VecDeque<ShapeParams>,
-    cached_results: FxHashMap<ShapeParams, Rc<ShapedText>>,
+    cache_tick: u64,
+    cached_results: FxHashMap<ShapeParams, CachedShape>,
+    cache_lru_order: BTreeMap<u64, ShapeParams>,
+}
+
+/// A shaping cache entry, tracked with its position in the least-recently-used
+/// order (the tick under which it is registered in `Shaper::cache_lru_order`).
+#[derive(Debug)]
+struct CachedShape {
+    result: Rc<ShapedText>,
+    last_used: u64,
 }
 
 impl Shaper {
@@ -110,11 +119,12 @@ impl Shaper {
             cached_features_source: Vec::new(),
             cached_rb_features: Vec::new(),
             cache_size: settings.cache_size,
-            cached_params: VecDeque::with_capacity(settings.cache_size),
+            cache_tick: 0,
             cached_results: FxHashMap::with_capacity_and_hasher(
                 settings.cache_size,
                 Default::default(),
             ),
+            cache_lru_order: BTreeMap::new(),
         }
     }
 
@@ -122,17 +132,33 @@ impl Shaper {
         if self.cache_size == 0 {
             return Rc::new(self.shape(params));
         }
-        if let Some(result) = self.cached_results.get(&params) {
-            return result.clone();
+        if let Some(entry) = self.cached_results.get_mut(&params) {
+            // Refresh recency so the hot working set of words survives
+            // eviction while scrolling through varied text.
+            if let Some(key) = self.cache_lru_order.remove(&entry.last_used) {
+                self.cache_tick += 1;
+                entry.last_used = self.cache_tick;
+                self.cache_lru_order.insert(entry.last_used, key);
+            }
+            return entry.result.clone();
         }
-        if self.cached_params.len() == self.cache_size {
-            let params = self.cached_params.pop_front().unwrap();
-            self.cached_results.remove(&params);
+        while self.cached_results.len() >= self.cache_size {
+            let Some((_, key)) = self.cache_lru_order.pop_first() else {
+                break;
+            };
+            self.cached_results.remove(&key);
         }
         let cache_key = params.clone();
         let result = Rc::new(self.shape(params));
-        self.cached_params.push_back(cache_key.clone());
-        self.cached_results.insert(cache_key, result.clone());
+        self.cache_tick += 1;
+        self.cache_lru_order.insert(self.cache_tick, cache_key.clone());
+        self.cached_results.insert(
+            cache_key,
+            CachedShape {
+                result: result.clone(),
+                last_used: self.cache_tick,
+            },
+        );
         result
     }
 

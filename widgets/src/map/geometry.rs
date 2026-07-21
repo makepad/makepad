@@ -5,6 +5,12 @@ use crate::makepad_draw::vector::{
 };
 use crate::makepad_draw::*;
 
+/// Curve flattening tolerance for map tile geometry, in tile-local units.
+///
+/// Tiles are tessellated once per tile/zoom and cached, so the tolerance is
+/// fixed rather than derived from the device scale the way `DrawVector` does it.
+pub const DEFAULT_FLATTEN_TOLERANCE: f32 = 0.25;
+
 // --- Point/bounds types for geometry operations ---
 
 #[derive(Clone, Copy, Debug)]
@@ -734,6 +740,7 @@ pub fn append_stroke_pass(
         LineJoin::Round,
         4.0,
         1.0,
+        DEFAULT_FLATTEN_TOLERANCE,
     );
     append_tessellated_geometry(
         tess_verts,
@@ -775,6 +782,7 @@ pub fn append_stroke_fill_overlay_pass(
         LineJoin::Round,
         4.0,
         1.0,
+        DEFAULT_FLATTEN_TOLERANCE,
     );
     append_tessellated_geometry(
         tess_verts,

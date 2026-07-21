@@ -1543,16 +1543,22 @@ impl ShaderFnCompiler {
                     s,
                 );
             }
-            id!(sample) | id!(sample_as_bgra) | id!(sample_lod) | id!(sample_nearest) => {
+            id!(sample) | id!(sample_as_bgra) | id!(sample_lod) | id!(sample_nearest)
+            | id!(sample_rt) => {
                 // sample(coord) samples the texture at normalized coordinates.
                 // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
                 // applies a BGRA->RGBA swizzle in the sampler helper.
+                // sample_rt(coord) is for offscreen render targets: on GL-family
+                // backends the FBO is stored bottom-up, so it flips V (1.0 - y); on
+                // Metal/D3D/WGSL/Rust render targets are top-left origin so it's plain sample.
                 let method_name = if method_id == id!(sample_as_bgra) {
                     "sample_as_bgra"
                 } else if method_id == id!(sample_nearest) {
                     "sample_nearest"
                 } else if method_id == id!(sample_lod) {
                     "sample_lod"
+                } else if method_id == id!(sample_rt) {
+                    "sample_rt"
                 } else {
                     "sample"
                 };
@@ -1663,6 +1669,9 @@ impl ShaderFnCompiler {
                                     } else if method_id == id!(sample_as_bgra) {
                                         write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
                                             .ok();
+                                    } else if method_id == id!(sample_rt) {
+                                        write!(s, "sample2d_rt({}, {})", texture_expr, coord)
+                                            .ok();
                                     } else {
                                         write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                                     }
@@ -1761,6 +1770,7 @@ impl ShaderFnCompiler {
                             id!(sample),
                             id!(sample_as_bgra),
                             id!(sample_lod),
+                            id!(sample_rt),
                             id!(sample_video),
                             id!(size)
                         ]

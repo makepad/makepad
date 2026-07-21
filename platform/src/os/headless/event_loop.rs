@@ -315,6 +315,7 @@ impl Cx {
                         handled_y: std::cell::Cell::new(false),
                         is_mouse: e.is_mouse,
                         time: e.time,
+                        phase: crate::event::ScrollPhase::None,
                     }));
                 }
                 StudioToApp::WindowGeomChange {

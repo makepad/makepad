@@ -163,10 +163,24 @@ pub struct Image {
     async_image_size: Option<(usize, usize)>,
     #[rust]
     texture: Option<Texture>,
+    /// The async-load key that produced `texture`, when it came from a completed
+    /// async decode. `None` for textures installed explicitly via `set_texture`
+    /// (the current occupant's own content, e.g. a blurhash placeholder), which
+    /// must survive the start of an async load; only a texture left behind by an
+    /// async load for a different key is stale and gets cleared.
+    #[rust]
+    texture_async_source: Option<PathBuf>,
     /// `Some` only while showing an SVG (and `texture` is then `None`); lazily
     /// allocated, so non-SVG images pay just a pointer, not a whole `DrawSvg`.
     #[rust]
     draw_svg: Option<Box<DrawSvg>>,
+    /// The SVG source currently loaded into `draw_svg`, when the caller supplied it
+    /// as shared bytes (see [`Image::load_svg_from_shared_data`]). Holding a share of
+    /// the caller's bytes costs a pointer, not a copy, and keeps them alive so their
+    /// address stays a valid identity to compare against. `Some` only while `draw_svg`
+    /// is, and only for loads that came through the shared-bytes entry point.
+    #[rust]
+    svg_source: Option<Arc<[u8]>>,
     /// Animation clock (seconds) for animated SVGs, advanced via `next_frame`.
     #[rust]
     svg_time: f64,
@@ -181,6 +195,14 @@ impl ImageCacheImpl for Image {
         self.texture = texture;
         // Keep the invariant that `draw_svg` is `Some` only while showing an SVG.
         self.draw_svg = None;
+        self.svg_source = None;
+        // The texture is now this widget's content: drop any pending async-load
+        // state so the draw path binds it instead of the loading placeholder and
+        // a stale decode result for an older key can no longer replace it. It was
+        // installed explicitly, so it carries no async source.
+        self.async_image_size = None;
+        self.async_image_path = None;
+        self.texture_async_source = None;
     }
 
     fn load_image_from_data(
@@ -319,12 +341,19 @@ impl Widget for Image {
                         // we have a result for the image_cache to load up
                         self.process_async_image_load(cx, image_path, result);
                     }
+                    // Only apply a completed decode for the load this widget is still
+                    // waiting on; results for other keys belong to a previous occupant
+                    // of this (possibly recycled) widget and must be ignored.
                     if self.async_image_size.is_some()
-                        && self.async_image_path.clone() == Some(image_path.to_path_buf())
+                        && self.async_image_path.as_deref() == Some(image_path.as_path())
                     {
                         // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
                         self.async_image_size = None;
+                        self.async_image_path = None;
+                        // Record which async load produced the texture, so a later
+                        // load for a different key knows it is stale.
+                        self.texture_async_source = Some(image_path.to_path_buf());
                         self.animator_play(cx, ids!(async_load.off));
                         self.redraw(cx);
                     }
@@ -489,12 +518,58 @@ impl Image {
         self.texture.is_some()
     }
 
+    /// True if this `Image` currently has displayable content:
+    /// either a raster texture or a loaded SVG.
+    ///
+    /// This distinguishes "the load was accepted" from "there is actually
+    /// something to draw". Note that a pending async load does not imply this
+    /// is false: content deliberately kept visible while the load decodes
+    /// (a `set_texture` placeholder, or a previous load of the same key)
+    /// still counts as content.
+    pub fn has_content(&self) -> bool {
+        self.texture.is_some() || self.draw_svg.is_some()
+    }
+
     /// Loads an SVG into this `Image` by parsing the UTF-8 SVG `data` and drawing
     /// it with makepad's native vector engine instead of a raster texture.
     ///
     /// The `DrawSvg` is allocated on first use, so images that never show an SVG
     /// carry only a null pointer.
     pub fn load_svg_from_data(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
+        self.parse_and_show_svg(cx, data)
+    }
+
+    /// Like [`Image::load_svg_from_data`], but for source the caller holds in shared
+    /// bytes, which lets re-loading the very same source be recognized and skipped.
+    ///
+    /// Prefer this wherever the load is re-issued on every draw (list items are
+    /// repopulated per frame): unlike a raster load, this path is synchronous with no
+    /// cache behind it, so without the check it re-parses the source and re-builds its
+    /// geometry every single frame. The cached raster path gets the same treatment in
+    /// `finish_async_load`.
+    pub fn load_svg_from_shared_data(
+        &mut self,
+        cx: &mut Cx,
+        data: Arc<[u8]>,
+    ) -> Result<(), ImageError> {
+        // Identity of the shared bytes is the check: the same allocation is the same
+        // drawing, and holding a share of it keeps the address meaningful (nothing
+        // else can be freed into it). This costs one pointer comparison, and holding
+        // the source costs a refcount rather than a copy of it.
+        if self.draw_svg.is_some()
+            && self
+                .svg_source
+                .as_ref()
+                .is_some_and(|shown| Arc::ptr_eq(shown, &data))
+        {
+            return Ok(());
+        }
+        self.parse_and_show_svg(cx, &data)?;
+        self.svg_source = Some(data);
+        Ok(())
+    }
+
+    fn parse_and_show_svg(&mut self, cx: &mut Cx, data: &[u8]) -> Result<(), ImageError> {
         if data.len() > MAX_SVG_BYTES {
             return Err(ImageError::DataTooLarge {
                 bytes: data.len(),
@@ -508,7 +583,15 @@ impl Image {
         if let Some(draw_svg) = self.draw_svg.as_mut() {
             draw_svg.load_from_str(svg_str);
         }
+        // Only a caller that shared its bytes leaves an identity behind to skip on;
+        // `load_svg_from_shared_data` records it once this has succeeded.
+        self.svg_source = None;
         self.texture = None;
+        self.texture_async_source = None;
+        // The SVG is now this widget's content: a pending raster load no longer
+        // applies, and its decode result must not replace the SVG when it lands.
+        self.async_image_size = None;
+        self.async_image_path = None;
         self.redraw(cx);
         Ok(())
     }
@@ -533,7 +616,16 @@ impl Image {
         let dpi = cx.current_dpi_factor();
 
         let (width, height) = if let Some((w, h)) = &self.async_image_size {
-            // still loading
+            // Still loading. Any texture present here is legitimate current content
+            // (the occupant's own placeholder, or a previous load of this same
+            // source; begin_async_load already cleared stale ones), so keep showing
+            // it. Otherwise bind the empty texture, never whatever a previous
+            // occupant left in the draw vars.
+            if let Some(image_texture) = &self.texture {
+                self.draw_bg.draw_vars.set_texture(0, image_texture);
+            } else {
+                self.draw_bg.draw_vars.empty_texture(0);
+            }
             (*w as f64, *h as f64)
         } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
@@ -635,40 +727,39 @@ impl Image {
         image_path: &Path,
     ) -> Result<(), ImageError> {
         self.lazy_create_image_cache(cx);
-        if let Ok(result) = self.load_image_file_by_path_async_impl(cx, image_path, 0) {
-            match result {
-                AsyncLoadResult::Loading(w, h) => {
-                    self.async_image_size = Some((w, h));
-                    self.async_image_path = Some(image_path.into());
-                    self.animator_play(cx, ids!(async_load.on));
-                    self.redraw(cx);
-                }
-                AsyncLoadResult::Loaded => {
-                    self.redraw(cx);
-                }
+        match self.load_image_file_by_path_async_impl(cx, image_path, 0) {
+            Ok(AsyncLoadResult::Loading(w, h)) => {
+                self.begin_async_load(cx, image_path, (w, h));
+            }
+            Ok(AsyncLoadResult::Loaded) => {
+                self.finish_async_load(cx, image_path);
+            }
+            Err(_) => {
+                self.cancel_async_load(cx);
             }
         }
         Ok(())
     }
 
-    pub fn load_image_from_data_async(
+    pub fn load_image_from_data_async<D>(
         &mut self,
         cx: &mut Cx,
         image_path: &Path,
-        data: Arc<Vec<u8>>,
-    ) -> Result<(), ImageError> {
+        data: Arc<D>,
+    ) -> Result<(), ImageError>
+    where
+        D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+    {
         self.lazy_create_image_cache(cx);
-        if let Ok(result) = self.load_image_from_data_async_impl(cx, image_path, data, 0) {
-            match result {
-                AsyncLoadResult::Loading(w, h) => {
-                    self.async_image_size = Some((w, h));
-                    self.async_image_path = Some(image_path.into());
-                    self.animator_play(cx, ids!(async_load.on));
-                    self.redraw(cx);
-                }
-                AsyncLoadResult::Loaded => {
-                    self.redraw(cx);
-                }
+        match self.load_image_from_data_async_impl(cx, image_path, data, 0) {
+            Ok(AsyncLoadResult::Loading(w, h)) => {
+                self.begin_async_load(cx, image_path, (w, h));
+            }
+            Ok(AsyncLoadResult::Loaded) => {
+                self.finish_async_load(cx, image_path);
+            }
+            Err(_) => {
+                self.cancel_async_load(cx);
             }
         }
         Ok(())
@@ -680,20 +771,82 @@ impl Image {
         url: &str,
     ) -> Result<(), ImageError> {
         self.lazy_create_image_cache(cx);
-        if let Ok(result) = self.load_image_http_by_url_async_impl(cx, url, 0) {
-            match result {
-                AsyncLoadResult::Loading(w, h) => {
-                    self.async_image_size = Some((w, h));
-                    self.async_image_path = Some(PathBuf::from(url));
-                    self.animator_play(cx, ids!(async_load.on));
-                    self.redraw(cx);
-                }
-                AsyncLoadResult::Loaded => {
-                    self.redraw(cx);
-                }
+        match self.load_image_http_by_url_async_impl(cx, url, 0) {
+            Ok(AsyncLoadResult::Loading(w, h)) => {
+                self.begin_async_load(cx, Path::new(url), (w, h));
+            }
+            Ok(AsyncLoadResult::Loaded) => {
+                self.finish_async_load(cx, Path::new(url));
+            }
+            Err(_) => {
+                self.cancel_async_load(cx);
             }
         }
         Ok(())
+    }
+
+    /// Records `image_path` as this widget's one pending async load, replacing any
+    /// previous request so a decode finishing for an older key is never applied.
+    fn begin_async_load(&mut self, cx: &mut Cx, image_path: &Path, size: (usize, usize)) {
+        // A texture left behind by an async load for a different key belongs to a
+        // previous occupant of this (possibly recycled) widget and must not stay
+        // visible while the new source decodes. A texture installed via
+        // `set_texture` is the current occupant's own content (e.g. a blurhash
+        // placeholder) and stays visible until the decode lands, as does the
+        // result of a previous load of this same key.
+        let texture_is_stale = self
+            .texture_async_source
+            .as_deref()
+            .is_some_and(|source| source != image_path);
+        if texture_is_stale {
+            self.texture = None;
+            self.texture_async_source = None;
+        }
+        // An SVG is always different content from an incoming raster load.
+        self.draw_svg = None;
+        self.svg_source = None;
+        self.async_image_size = Some(size);
+        self.async_image_path = Some(image_path.into());
+        self.animator_play(cx, ids!(async_load.on));
+        self.redraw(cx);
+    }
+
+    /// The requested image was already cached and its texture has been set: clear
+    /// the pending-load state so the draw path binds the texture directly.
+    fn finish_async_load(&mut self, cx: &mut Cx, image_path: &Path) {
+        // Re-loading the image that is already bound changes nothing; skip the
+        // animator and redraw so widgets that re-issue loads on every draw
+        // (e.g. list items repopulated per frame) don't dirty themselves into
+        // an endless redraw loop.
+        if self.async_image_path.is_none()
+            && self.texture_async_source.as_deref() == Some(image_path)
+        {
+            return;
+        }
+        self.async_image_size = None;
+        self.async_image_path = None;
+        // Record which load produced the texture, just like the decode-completion
+        // path does. Without this, a cache-hit texture has no provenance and a
+        // later load for a different key would wrongly keep it visible on a
+        // recycled widget while the new source decodes.
+        self.texture_async_source = Some(image_path.to_path_buf());
+        self.animator_play(cx, ids!(async_load.off));
+        self.redraw(cx);
+    }
+
+    /// A failed load leaves the widget's intended content unknown: clear both the
+    /// pending request (so a decode finishing for a previous key is never applied)
+    /// and any displayed content, which may belong to a previous occupant of a
+    /// recycled widget. Blank is strictly safer than someone else's image.
+    fn cancel_async_load(&mut self, cx: &mut Cx) {
+        self.async_image_size = None;
+        self.async_image_path = None;
+        self.texture = None;
+        self.texture_async_source = None;
+        self.draw_svg = None;
+        self.svg_source = None;
+        self.animator_play(cx, ids!(async_load.off));
+        self.redraw(cx);
     }
 }
 
@@ -740,12 +893,15 @@ impl ImageRef {
     }
 
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
-    pub fn load_image_from_data_async(
+    pub fn load_image_from_data_async<D>(
         &self,
         cx: &mut Cx,
         image_path: &Path,
-        data: Arc<Vec<u8>>,
-    ) -> Result<(), ImageError> {
+        data: Arc<D>,
+    ) -> Result<(), ImageError>
+    where
+        D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+    {
         if let Some(mut inner) = self.borrow_mut() {
             return inner.load_image_from_data_async(cx, image_path, data);
         }
@@ -851,9 +1007,26 @@ impl ImageRef {
         }
     }
 
+    /// See [`Image::load_svg_from_shared_data`]: the same, but re-loading the very
+    /// same source is recognized and skipped, so a caller that re-issues its load on
+    /// every draw doesn't re-parse the SVG every frame.
+    pub fn load_svg_from_shared_data(
+        &self,
+        cx: &mut Cx,
+        data: Arc<[u8]>,
+    ) -> Result<(), ImageError> {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.load_svg_from_shared_data(cx, data)
+        } else {
+            Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+
     pub fn set_texture(&self, cx: &mut Cx, texture: Option<Texture>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.texture = texture;
+            // Route through the trait impl so the content invariants (draw_svg,
+            // async-load state, texture provenance) live in one place.
+            ImageCacheImpl::set_texture(&mut *inner, texture, 0);
             if cx.in_draw_event() {
                 inner.redraw(cx);
             }
@@ -879,6 +1052,15 @@ impl ImageRef {
     pub fn has_texture(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.has_texture()
+        } else {
+            false
+        }
+    }
+
+    /// See [`Image::has_content()`].
+    pub fn has_content(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.has_content()
         } else {
             false
         }

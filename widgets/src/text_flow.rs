@@ -822,6 +822,39 @@ impl TextFlow {
             }
         }
     }
+
+    /// Sets the default font color used for all text.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_font_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.font_color == color {
+            return;
+        }
+        self.font_color = color;
+        self.redraw(cx);
+    }
+
+    /// Sets the background color of inline code and code blocks.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_code_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.draw_block.code_color == color {
+            return;
+        }
+        self.draw_block.code_color = color;
+        self.redraw(cx);
+    }
+
+    /// Sets the background color of quote blocks.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_quote_bg_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.draw_block.quote_bg_color == color {
+            return;
+        }
+        self.draw_block.quote_bg_color = color;
+        self.redraw(cx);
+    }
 }
 
 impl ScriptHook for TextFlow {
@@ -1407,7 +1440,13 @@ impl TextFlow {
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
-        self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
+        // Tolerate unbalanced HTML: a stray close tag with no matching `begin_code`
+        // (untrusted input, e.g. a chat message containing `</pre>`) must not panic
+        // here or unbalance the turtle stack by ending a block that never began.
+        let Some(area) = self.area_stack.pop() else {
+            return;
+        };
+        self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
         if self.selectable {
             self.selection_tracker.push_newline();
@@ -1440,8 +1479,9 @@ impl TextFlow {
         // the text after the marker rather than being over-indented.
         let actual_indent = cx.turtle().pos().x - cx.turtle().origin().x;
         cx.turtle_mut().set_padding_left(actual_indent);
-
-        self.area_stack.push(self.draw_block.draw_vars.area);
+        // Note: deliberately NOT pushed onto `area_stack` — `end_list_item` never pops,
+        // so a push here would leak an entry per list item and let a stray close tag
+        // (unbalanced HTML) pop the wrong block's area in `end_code`/`end_quote`.
     }
 
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
@@ -1493,7 +1533,11 @@ impl TextFlow {
     }
 
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
-        self.draw_block.draw_vars.area = self.area_stack.pop().unwrap();
+        // Tolerate unbalanced HTML (see `end_code`): never panic on a stray close tag.
+        let Some(area) = self.area_stack.pop() else {
+            return;
+        };
+        self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
         if self.selectable {
             self.selection_tracker.push_newline();
@@ -1802,6 +1846,14 @@ impl TextFlow {
                     });
                     (widget, template)
                 });
+            // If the template changed, recreate the widget from the new
+            // template, as item_with does.
+            if entry.1 != template {
+                let widget = cx.with_vm(|vm| {
+                    WidgetRef::script_from_value_scoped(vm, scope, template_value)
+                });
+                *entry = (widget, template);
+            }
             cx.widget_tree_mark_dirty(self.uid);
             return Some(entry.0.clone());
         }
