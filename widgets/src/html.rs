@@ -13,6 +13,12 @@ use crate::{
 
 const BULLET: &str = "•";
 
+/// The default text color of an [`HtmlLink`]: #0000EE, the classic browser link blue.
+pub const HTML_LINK_COLOR: Vec4f = vec4(0.0, 0.0, 238.0 / 255.0, 1.0);
+/// The default text color of an [`HtmlLink`] while pressed: #EE0000, the classic
+/// browser active-link red.
+pub const HTML_LINK_PRESSED_COLOR: Vec4f = vec4(238.0 / 255.0, 0.0, 0.0, 1.0);
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -25,9 +31,9 @@ script_mod! {
         width: Fit height: Fit
         align: Align{x: 0. y: 0.}
 
-        color: #x0000EE
-        hover_color: #x00EE00
-        pressed_color: #xEE0000
+        color: #(HTML_LINK_COLOR)
+        // Standard browsers don't recolor links on hover, so no hover_color here.
+        pressed_color: #(HTML_LINK_PRESSED_COLOR)
 
         animator: Animator{
             hover: {
@@ -706,8 +712,6 @@ impl Widget for Html {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.text_flow.begin(cx, walk);
         let mut node = self.doc.new_walker();
-        let mut auto_id: u64 = 0;
-        let mut details_auto_id: u64 = 0;
         self.details_stack.clear();
         self.skip_details_depth = None;
         self.summary_click_areas.clear();
@@ -745,10 +749,11 @@ impl Widget for Html {
                     let details_id = if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
                         LiveId::from_str(id_str)
                     } else {
-                        details_auto_id += 1;
-                        // Offset into the high bits to avoid colliding with
-                        // HtmlLink's auto_id (small ints) in the items map.
-                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(details_auto_id))
+                        // Key by the node's stable doc index (a visit-order counter
+                        // would renumber when a collapsed <details> hides nodes).
+                        // Offset into the high bits to avoid colliding with the
+                        // custom-widget ids (small ints) in the items map.
+                        LiveId(0xd37a_115_0000_0000u64.wrapping_add(node.index as u64))
                     };
                     let initial_open = node.find_attr_lc(live_id!(open)).is_some();
                     self.details_stack.push(DetailsLevel {
@@ -934,7 +939,7 @@ impl Widget for Html {
                 &self.ol_separator,
             ) {
                 (Some(_), _tws) => {
-                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node, &mut auto_id);
+                    handle_custom_widget(cx, scope, tf, &self.doc, &mut node);
                 }
                 (None, tws) => {
                     trim = tws;
@@ -953,11 +958,25 @@ impl Widget for Html {
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        // Skip the parse entirely when the text is unchanged; callers commonly
+        // re-populate widgets with identical content on every draw frame.
+        if self.body.as_ref() == v {
+            return;
+        }
         self.body.set(v);
         let mut errors = Some(Vec::new());
-        self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
-        self.seen_details.clear();
-        self.summary_area_cache.clear();
+        let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
+        // Rebuild only when the content actually changed, mirroring
+        // on_after_apply. Sub-widgets are keyed by position and capture their
+        // node attributes at creation, so stale items must be dropped when the
+        // doc changes; when it is unchanged, keeping them preserves
+        // user-toggled <details> state across re-populates.
+        if new_doc != self.doc {
+            self.doc = new_doc;
+            self.text_flow.clear_items();
+            self.seen_details.clear();
+            self.summary_area_cache.clear();
+        }
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -971,13 +990,15 @@ fn handle_custom_widget(
     tf: &mut TextFlow,
     doc: &HtmlDoc,
     node: &mut HtmlWalker,
-    auto_id: &mut u64,
 ) {
     let id = if let Some(id) = node.find_attr_lc(live_id!(id)) {
         LiveId::from_str(id)
     } else {
-        *auto_id += 1;
-        LiveId(*auto_id)
+        // Key by the node's stable index in the parsed doc rather than a
+        // visit-order counter: skip mode (a collapsed <details>) doesn't visit
+        // hidden nodes, so a counter would renumber every widget after the
+        // details on toggle, rebinding links and spans to the wrong nodes.
+        LiveId(node.index as u64)
     };
 
     let template = node.open_tag_nc().unwrap();
@@ -1151,22 +1172,20 @@ impl Widget for HtmlLink {
 
         tf.underline.push();
         tf.areas_tracker.push_tracker();
-        let mut pushed_color = false;
-        if self.hovered > 0.0 {
-            if let Some(color) = self.hover_color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
-        } else if self.pressed > 0.0 {
-            if let Some(color) = self.pressed_color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
+        // Pressed wins over hovered (a press also sets `hovered`), and both fall
+        // back to the base color when unset, so a link with no hover_color keeps
+        // its color while hovered instead of dropping to the ambient text color.
+        let state_color = if self.pressed > 0.0 {
+            self.pressed_color.or(self.color)
+        } else if self.hovered > 0.0 {
+            self.hover_color.or(self.color)
         } else {
-            if let Some(color) = self.color {
-                tf.font_colors.push(color);
-                pushed_color = true;
-            }
+            self.color
+        };
+        let mut pushed_color = false;
+        if let Some(color) = state_color {
+            tf.font_colors.push(color);
+            pushed_color = true;
         }
         tf.draw_text(cx, self.text.as_ref());
 
@@ -1208,7 +1227,32 @@ impl HtmlRef {
     }
 }
 
+impl HtmlLink {
+    /// Sets the link's default (non-hovered) font color.
+    /// `None` makes the link inherit the surrounding text's font color.
+    ///
+    /// Does nothing if the color is unchanged.
+    pub fn set_color(&mut self, cx: &mut Cx, color: Option<Vec4f>) {
+        if self.color == color {
+            return;
+        }
+        self.color = color;
+        // This widget is drawn by its parent TextFlow, so redraw the areas
+        // it was actually drawn into.
+        for area in self.drawn_areas.iter() {
+            area.redraw(cx);
+        }
+    }
+}
+
 impl HtmlLinkRef {
+    /// See [`HtmlLink::set_color()`].
+    pub fn set_color(&self, cx: &mut Cx, color: Option<Vec4f>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_color(cx, color);
+        }
+    }
+
     pub fn set_url(&mut self, url: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.url = url.to_string();

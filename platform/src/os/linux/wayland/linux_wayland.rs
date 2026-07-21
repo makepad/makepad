@@ -53,6 +53,13 @@ pub fn wayland_event_loop(cx: Rc<RefCell<Cx>>) {
 pub(crate) struct WaylandCx {
     cx: Rc<RefCell<Cx>>,
     qhandle: Option<wayland_client::QueueHandle<WaylandState>>,
+    /// Pace presents with `wl_surface::frame` callbacks: a window is only presented
+    /// once the callback for its previous frame has fired. The EGL swap interval is 0
+    /// on Wayland (see `OpenglCx::swap_interval`), so this is what caps the render
+    /// loop at the display rate, and it keeps redraws of occluded windows (whose
+    /// callbacks the compositor withholds) from wedging the event loop. Disabled by
+    /// `MAKEPAD_NO_VSYNC` for uncapped benchmarking.
+    frame_pacing: bool,
 }
 
 impl WaylandCx {
@@ -67,6 +74,7 @@ impl WaylandCx {
         let wayland_cx = Rc::new(RefCell::new(WaylandCx {
             cx: cx.clone(),
             qhandle: None,
+            frame_pacing: std::env::var_os("MAKEPAD_NO_VSYNC").is_none(),
         }));
         let conn = Connection::connect_to_env().unwrap();
         let display = conn.display();
@@ -205,19 +213,23 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    // compare in native units, before new_geom is converted below
+                    let geom_changed = re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor;
+
+                    // Keep the wayland geom native (buffer/viewport size + the next resize's dpi come
+                    // from it). Store the zoomed geom here and the next resize reads its dpi back as
+                    // "native", so the zoom drifts/resets and the window flickers on maximize. Only
+                    // the Cx window gets the zoomed geom.
+                    window.window_geom = re.new_geom.clone();
                     {
                         let cx_window = &mut cx.windows[re.window_id];
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-
-                    window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    // Redraw this window root draw list when logical size or
-                    // backing scale changes.
-                    if re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                    {
+                    // redraw when the size or scale changed
+                    if geom_changed {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -227,16 +239,17 @@ impl WaylandCx {
                     .iter_mut()
                     .find(|w| w.window_id == re.window_id)
                 {
+                    let geom_changed = re.old_geom.inner_size != re.new_geom.inner_size
+                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor;
+                    // same deal — keep the wayland geom native
+                    window.window_geom = re.new_geom.clone();
                     {
                         let cx_window = &mut cx.windows[re.window_id];
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-                    window.window_geom = re.new_geom.clone();
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
-                    if re.old_geom.inner_size != re.new_geom.inner_size
-                        || re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                    {
+                    if geom_changed {
                         if let Some(main_pass_id) = cx.windows[re.window_id].main_pass_id {
                             cx.redraw_pass_and_child_passes(main_pass_id);
                         }
@@ -285,6 +298,24 @@ impl WaylandCx {
                         }
                     });
                 }
+
+                // With the swap interval at 0 nothing in the paint path blocks, so after
+                // a paint keep polling only while presenting can make progress. Once a
+                // frame callback is in flight, further presents are gated on it and
+                // poll-spinning would just burn CPU re-running next-frame/draw events;
+                // wait instead. The callback (like any other socket event or timer)
+                // wakes the select loop, which dispatches it and paints again.
+                let cx = self.cx.borrow();
+                let has_work = cx.any_passes_dirty()
+                    || cx.need_redrawing()
+                    || cx.new_next_frames.len() != 0
+                    || cx.screenshot_requests.len() > 0
+                    || cx.demo_time_repaint;
+                return if has_work && !state.any_frame_callback_pending() {
+                    EventFlow::Poll
+                } else {
+                    EventFlow::Wait
+                };
             }
             XlibEvent::MouseMove(mut e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -542,6 +573,8 @@ impl WaylandCx {
         if state.keyboard_window == Some(window_id) {
             state.keyboard_window = None;
         }
+        // A frame callback in flight for a destroyed surface never fires.
+        state.clear_frame_callback_pending(window_id);
         if let Some(index) = state.popups.iter().position(|w| w.window_id == window_id) {
             state.popups.remove(index);
         }
@@ -569,6 +602,8 @@ impl WaylandCx {
         if state.keyboard_window == Some(window_id) {
             state.keyboard_window = None;
         }
+        // A frame callback in flight for a destroyed surface never fires.
+        state.clear_frame_callback_pending(window_id);
         if let Some(index) = state.windows.iter().position(|w| w.window_id == window_id) {
             state.windows.remove(index);
             if state.windows.is_empty() {
@@ -1119,6 +1154,15 @@ impl WaylandCx {
             match parent {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
+                    // Frame-callback pacing: if this surface's previous frame callback
+                    // has not fired yet, the compositor is not ready for a new frame
+                    // (it withholds callbacks entirely while the window is occluded or
+                    // minimized). Skip the present and leave the pass dirty so the
+                    // window repaints when the callback arrives.
+                    if self.frame_pacing && state.is_frame_callback_pending(window_id) {
+                        continue;
+                    }
+                    let mut presented = false;
                     if let Some(window) =
                         state.windows.iter_mut().find(|w| w.window_id == window_id)
                     {
@@ -1149,7 +1193,14 @@ impl WaylandCx {
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
 
-                        cx.draw_pass_to_window(
+                        // Request the next frame callback before the swap; the swap
+                        // performs the commit that carries the request.
+                        if self.frame_pacing {
+                            window
+                                .base_surface
+                                .frame(self.qhandle.as_ref().unwrap(), window_id);
+                        }
+                        presented = cx.draw_pass_to_window(
                             *draw_pass_id,
                             window.egl_surface,
                             pix_width,
@@ -1173,12 +1224,22 @@ impl WaylandCx {
                             window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
-                        cx.draw_pass_to_window(
+                        if self.frame_pacing {
+                            window
+                                .base_surface
+                                .frame(self.qhandle.as_ref().unwrap(), window_id);
+                        }
+                        presented = cx.draw_pass_to_window(
                             *draw_pass_id,
                             window.egl_surface,
                             pix_width,
                             pix_height,
                         );
+                    }
+                    // Only gate on the callback when a commit actually happened; a
+                    // failed swap sends no commit, so its callback would never fire.
+                    if self.frame_pacing && presented {
+                        state.set_frame_callback_pending(window_id);
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {

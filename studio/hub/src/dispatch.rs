@@ -37,6 +37,22 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Wall-clock seconds since the UNIX epoch, for stamping synthesized input events.
+///
+/// Widgets arbitrate a press against recent scroll motion by comparing event
+/// timestamps — `PortalList`, for example, treats a press landing within 0.15s of a
+/// scroll as a gesture that stops that scroll rather than a click on a child. A zero
+/// timestamp therefore reads as "scrolling right now" and the press gets swallowed,
+/// so synthesized input has to carry a real time. This is the same base `makepad_test`
+/// stamps its scroll and drag events with, which keeps every event in a session on one
+/// clock.
+fn now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireFormat {
     Binary,
@@ -1580,7 +1596,7 @@ impl HubCore {
                     key_code: KeyCode::ReturnKey,
                     is_repeat: false,
                     modifiers: KeyModifiers::default(),
-                    time: 0.0,
+                    time: now_seconds(),
                 };
                 if let Err(err) = self.send_app_msgs(
                     build_id,
@@ -1600,18 +1616,19 @@ impl HubCore {
                 }
             }
             ClientToHub::Click { build_id, x, y } => {
+                let time = now_seconds();
                 let mouse_down = RemoteMouseDown {
                     button_raw_bits: MouseButton::PRIMARY.bits(),
                     x: x as f64,
                     y: y as f64,
-                    time: 0.0,
+                    time,
                     modifiers: RemoteKeyModifiers::default(),
                 };
                 let mouse_up = RemoteMouseUp {
                     button_raw_bits: MouseButton::PRIMARY.bits(),
                     x: x as f64,
                     y: y as f64,
-                    time: 0.0,
+                    time,
                     modifiers: RemoteKeyModifiers::default(),
                 };
                 if let Err(err) = self.send_app_msgs(

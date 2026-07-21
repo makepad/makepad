@@ -627,7 +627,12 @@ fn emit_shape(
             let stroke_alpha = style.stroke_opacity * opacity;
             set_paint(dv, paint, defs, stroke_alpha, xf, bbox, grad_map);
             let w = style.stroke_width * xf.scale_factor();
-            let aa = w.min(1.0);
+            // Prefer the device-aware fringe (cur_stroke_aa) so stroke AA lands at ~1 device px; else the old heuristic.
+            let aa = if dv.cur_stroke_aa > 0.0 {
+                dv.cur_stroke_aa
+            } else {
+                w.min(1.0)
+            };
             dv.stroke_opts(
                 w,
                 style.stroke_linecap,

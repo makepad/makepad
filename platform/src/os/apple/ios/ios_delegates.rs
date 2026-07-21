@@ -9,7 +9,7 @@ use crate::{
         apple::apple_util::key_modifiers_from_flags,
         apple::ios::ios_event::IosEvent,
         apple::ios_app::IosApp,
-        apple::ios_app::{with_ios_app, IOS_APP},
+        apple::ios_app::{with_ios_app, GEOM_CHECK_PENDING, IOS_APP},
     },
 };
 use std::ffi::c_void;
@@ -344,7 +344,21 @@ pub fn define_makepad_view_controller() -> *const Class {
             })
             .unwrap_or(false);
         if should_call {
-            IosApp::check_window_geom();
+            // Before the first frame, only `draw_in_rect` may apply geometry:
+            // applying it from here would deliver Init early and then again from
+            // the first draw (double app startup, since only `draw_in_rect`
+            // clears `first_draw`). The first draw re-reads the geometry anyway.
+            if IosApp::is_before_first_draw() {
+                GEOM_CHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                IosApp::check_window_geom();
+            }
+        } else {
+            // The app state is borrowed (this notification re-entered from inside
+            // event dispatch), so the geometry can't be examined right now. Flag it
+            // for the re-check that runs when the in-flight callback finishes;
+            // dropping it would leave the layout stale until some later redraw.
+            GEOM_CHECK_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

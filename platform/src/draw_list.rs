@@ -111,29 +111,33 @@ impl Cx {
             TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,
+                data,
                 updated,
                 ..
             } => {
                 if let TextureUpdated::Empty = updated {
                     0
                 } else {
-                    (*width as u64)
-                        .saturating_mul(*height as u64)
-                        .saturating_mul(4)
+                    // The data buffer holds the full mip chain (~4/3 of level 0), so use its
+                    // actual length when present rather than just level-0 (width*height*4).
+                    data.as_ref()
+                        .map(|d| (d.len() as u64).saturating_mul(4))
+                        .unwrap_or_else(|| (*width as u64).saturating_mul(*height as u64).saturating_mul(4))
                 }
             }
             TextureFormat::VecMipRGBAf32 {
                 width,
                 height,
+                data,
                 updated,
                 ..
             } => {
                 if let TextureUpdated::Empty = updated {
                     0
                 } else {
-                    (*width as u64)
-                        .saturating_mul(*height as u64)
-                        .saturating_mul(16)
+                    data.as_ref()
+                        .map(|d| (d.len() as u64).saturating_mul(16))
+                        .unwrap_or_else(|| (*width as u64).saturating_mul(*height as u64).saturating_mul(16))
                 }
             }
             TextureFormat::VecRGBAf32 {
@@ -377,7 +381,8 @@ pub struct DrawCallUniforms {
 }
 
 impl DrawCallUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>()] {
+    // The array length is in f32 elements, not bytes, hence the >> 2.
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
     }
     /*
@@ -385,8 +390,17 @@ impl DrawCallUniforms {
         self.draw_scroll
     }*/
 
-    pub fn set_zbias(&mut self, zbias: f32) {
+    /// Sets the zbias, returning `true` if it actually changed.
+    ///
+    /// The zbias is recomputed from the global draw order on every frame, so it shifts whenever
+    /// a sibling draw list grows or shrinks -- including for a cached draw call that was not
+    /// redrawn and therefore has `uniforms_dirty` unset. Backends that only upload
+    /// `DrawCallUniforms` when `uniforms_dirty` is set must also upload when this returns `true`,
+    /// or the GPU keeps a stale depth for that draw call and the depth test rejects it.
+    pub fn set_zbias(&mut self, zbias: f32) -> bool {
+        let changed = self.zbias != zbias;
         self.zbias = zbias;
+        changed
     }
     /*
     pub fn set_clip(&mut self, clip: (Vec2f, Vec2f)) {
@@ -520,7 +534,8 @@ impl Default for DrawListUniforms {
 }
 
 impl DrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
+    // The array length is in f32 elements, not bytes, hence the >> 2.
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>() >> 2] {
         unsafe { std::mem::transmute(self) }
     }
 }

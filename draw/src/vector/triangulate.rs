@@ -23,8 +23,9 @@ pub fn tessellate_path_fill(
     miter_limit: f32,
     aa: f32,
     gpu_expand_fill: bool,
+    tolerance: f32,
 ) {
-    tess.flatten(path, 0.25);
+    tess.flatten(path, tolerance);
     tess.fill(
         aa,
         line_join,
@@ -48,8 +49,9 @@ pub fn tessellate_path_stroke(
     line_join: LineJoin,
     miter_limit: f32,
     aa: f32,
+    tolerance: f32,
 ) -> f32 {
-    tess.flatten(path, 0.25);
+    tess.flatten(path, tolerance);
     tess.stroke(
         stroke_width,
         line_cap,

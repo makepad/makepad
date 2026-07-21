@@ -542,6 +542,7 @@ impl Cx {
                     handled_y: Cell::new(false),
                     is_mouse: e.is_mouse,
                     time: e.time,
+                    phase: crate::event::ScrollPhase::None,
                 }));
             }
             StudioToApp::KeyDown(e) => {
@@ -662,7 +663,7 @@ impl Cx {
         //    expressions). The DSL did NOT change; we skip
         //    `reset_for_live_reload` (no shader code changed), and we
         //    skip the immediate ScriptReapply follow-up — if the
-        //    LiveEdit handler set `pending_script_reapply` (e.g. robrix
+        //    LiveEdit handler set `pending_script_reapply` (e.g. an app
         //    re-broadcasting preferences), it lands on the next event-
         //    loop tick. Without this split, rotation incurred a visible
         //    1-2s lag from doing two full Apply walks per geom change.
@@ -691,9 +692,8 @@ impl Cx {
             LiveEditTrigger::Manual => {
                 // Clear `pending_script_reapply` defensively — LiveEdit's
                 // script_mod re-run clobbers heap overrides anyway, and an
-                // app-level handler that re-broadcasts (e.g. robrix's
-                // `broadcast_all`) sets a fresh flag that lands on the
-                // next tick.
+                // app-level handler that re-broadcasts sets a fresh flag
+                // that lands on the next tick.
                 self.pending_script_reapply = false;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();

@@ -29,6 +29,7 @@ pub mod widget_tree;
 pub mod rubber_view;
 pub mod scroll_bar;
 pub mod scroll_bars;
+pub mod scroll_motion;
 pub mod view;
 pub mod view_ui;
 

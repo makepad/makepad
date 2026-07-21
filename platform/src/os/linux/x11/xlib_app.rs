@@ -1,6 +1,7 @@
 use {
     self::super::{
-        super::select_timer::SelectTimers, x11_sys, xlib_event::XlibEvent, xlib_window::*,
+        super::select_timer::SelectTimers, super::windowing_backend::PIXELS_PER_WHEEL_DETENT,
+        x11_sys, xlib_event::XlibEvent, xlib_window::*,
     },
     crate::{cursor::MouseCursor, event::*, makepad_math::Vec2d, os::cx_native::EventFlow},
     std::{
@@ -483,7 +484,6 @@ pub struct XlibApp {
 
     pub timers: SelectTimers,
 
-    pub last_scroll_time: f64,
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
     pub event_callback: Option<Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>>,
@@ -526,7 +526,6 @@ impl XlibApp {
                 //signal_fds,
                 clipboard: String::new(),
                 primary_selection: String::new(),
-                last_scroll_time: 0.0,
                 last_click_time: 0.0,
                 last_click_pos: (0, 0),
                 window_map: HashMap::new(),
@@ -541,6 +540,38 @@ impl XlibApp {
                 active_popup_grabbed_keyboard: false,
             }
         }
+    }
+
+    /// Coalesce a contiguous run of `MotionNotify` events for the same window into just the latest.
+    ///
+    /// A high-polling-rate mouse (500–1000+ Hz) floods the X event queue with motion events.
+    /// Dispatching each one separately runs a redundant `WindowDragQuery` event through the whole
+    /// widget tree plus a hover hit-test (`send_mouse_move`), which steals frame budget from an
+    /// in-progress fling — producing visible scroll judder when the mouse is moved during
+    /// deceleration. We only merge *adjacent* motions for the same window: we peek the next queued
+    /// event and stop at the first non-motion (or a motion for a different window), so no button /
+    /// key / scroll event is ever dropped or reordered. This discards the intermediate cursor
+    /// positions, which is correct for hover/hit-testing but loses the full pointer path; a widget
+    /// that needs every sample (freehand drawing) would have to read raw input.
+    ///
+    /// This mirrors the Windows `coalesce_mouse_move`; macOS gets it for free from Cocoa.
+    unsafe fn coalesce_motion_notify(&mut self, mut motion_event: x11_sys::XEvent) -> x11_sys::XEvent {
+        let window = motion_event.xmotion.window;
+        // `XPending` is non-blocking (it returns 0 rather than waiting), so the guarded `XPeekEvent`
+        // below can never block.
+        while !self.display.is_null() && x11_sys::XPending(self.display) != 0 {
+            let mut peek = mem::MaybeUninit::uninit();
+            x11_sys::XPeekEvent(self.display, peek.as_mut_ptr());
+            let peek = peek.assume_init();
+            if peek.type_ as u32 != x11_sys::MotionNotify || peek.xmotion.window != window {
+                break; // next event isn't a motion for this window — don't reorder past it
+            }
+            // It is a motion for this window: remove it and let it supersede the current one.
+            let mut taken = mem::MaybeUninit::uninit();
+            x11_sys::XNextEvent(self.display, taken.as_mut_ptr());
+            motion_event = taken.assume_init();
+        }
+        motion_event
     }
 
     pub unsafe fn event_loop_poll(&mut self) {
@@ -733,7 +764,10 @@ impl XlibApp {
                     }
                 }
                 x11_sys::MotionNotify => {
-                    // mousemove
+                    // mousemove. Collapse a run of consecutive motions for this window into the
+                    // latest, so a high-Hz mouse doesn't flood per-move WindowDragQuery + hover
+                    // hit-tests during a fling (see `coalesce_motion_notify`).
+                    event = self.coalesce_motion_notify(event);
                     let motion = event.xmotion;
                     if let Some(window_ptr) = self.window_map.get(&motion.window) {
                         let window = &mut (**window_ptr);
@@ -841,26 +875,22 @@ impl XlibApp {
                         );
 
                         if button.button >= 4 && button.button <= 7 {
-                            let last_scroll_time = self.last_scroll_time;
-                            self.last_scroll_time = time_now;
-                            // completely arbitrary scroll acceleration curve.
-                            let speed = 1200.0
-                                * (0.2 - 2. * (self.last_scroll_time - last_scroll_time)).max(0.01);
-
+                            // Core-protocol wheel buttons deliver exactly one press per
+                            // detent with no magnitude, so scroll a fixed distance each.
                             self.do_callback(XlibEvent::Scroll(ScrollEvent {
                                 window_id: window.window_id,
                                 scroll: Vec2d {
                                     x: if button.button == 6 {
-                                        -speed
+                                        -PIXELS_PER_WHEEL_DETENT
                                     } else if button.button == 7 {
-                                        speed
+                                        PIXELS_PER_WHEEL_DETENT
                                     } else {
                                         0.
                                     },
                                     y: if button.button == 4 {
-                                        -speed
+                                        -PIXELS_PER_WHEEL_DETENT
                                     } else if button.button == 5 {
-                                        speed
+                                        PIXELS_PER_WHEEL_DETENT
                                     } else {
                                         0.
                                     },
@@ -870,7 +900,9 @@ impl XlibApp {
                                 is_mouse: true,
                                 handled_x: Cell::new(false),
                                 handled_y: Cell::new(false),
-                                time: self.last_scroll_time,
+                                time: time_now,
+                                // Legacy X11 wheel buttons carry no gesture info.
+                                phase: ScrollPhase::None,
                             }))
                         } else {
                             // do all the 'nonclient' area messaging to the window manager

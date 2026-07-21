@@ -116,6 +116,18 @@ script_mod! {
         }
     }
 
+    set_type_default() do #(DrawSsaaResolve::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        scene_texture: texture_2d(float)
+        source_y_flip: uniform(0.0)
+
+        // Downscale-resolve into the window: one bilinear tap = a 2x2 box average at supersample 2.
+        pixel: fn() {
+            let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
+            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+        }
+    }
+
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
@@ -307,12 +319,18 @@ pub struct Window {
     draw_gauss_upsample: DrawGaussUpsample,
     #[live]
     draw_gauss_scene: DrawGaussScene,
+    #[live]
+    draw_ssaa_resolve: DrawSsaaResolve,
     #[rust]
     use_gauss_capture: bool,
+    #[rust]
+    use_ssaa: bool,
     #[rust]
     last_known_area: Area,
     #[rust(GaussStack::new(vm.cx_mut()))]
     gauss_stack: GaussStack,
+    #[rust(SsaaStack::new(vm.cx_mut()))]
+    ssaa_stack: SsaaStack,
     #[new]
     overlay: Overlay,
     #[new]
@@ -337,6 +355,24 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
+    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. That event
+    /// fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and resolving the
+    /// views + their areas each time runs widget-tree lookups, a real source of scroll jitter when
+    /// the mouse is moved during a fling. These only change on relayout, so we recompute lazily and
+    /// invalidate on `WindowGeomChange`.
+    #[rust]
+    drag_query_cache: Option<(bool, Rect, Rect)>,
+    /// The caption-layout inputs (show_caption_bar, height override, system caption height) that
+    /// `drag_query_cache` was last computed against. When they change without a platform
+    /// `WindowGeomChange` (e.g. a live/DSL reload toggling the caption), we drop the cache in
+    /// `ensure_initialized`.
+    #[rust]
+    caption_query_sig: Option<(bool, Option<f64>, Option<f64>)>,
+    /// The resolved title last pushed to the caption label. `sync_caption_title` runs on
+    /// every event via `ensure_initialized`, so it uses this to skip the widget-tree label
+    /// lookup and `set_text` when the title is unchanged.
+    #[rust]
+    last_synced_title: Option<String>,
     #[deref]
     view: View,
 
@@ -383,6 +419,31 @@ pub struct DrawGaussUpsample {
 pub struct DrawGaussScene {
     #[deref]
     draw_super: DrawQuad,
+}
+
+/// Resolve (downscale) shader for full-window supersampling: samples the supersized scene
+/// texture into the window framebuffer. See `DrawSsaaResolve` shader in the Window script.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSsaaResolve {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+/// Full-window supersampling (SSAA) factor: renders the whole UI at NxN device pixels and
+/// downscales it — clean AA but costly, so it's off by default (the analytic AA covers most of
+/// it for free). Opt in with `MAKEPAD_SUPERSAMPLE` = 2 (clamped <=4).
+fn supersample_factor() -> f64 {
+    // Read the env var once and cache it: begin()/end() query this every frame per window, and
+    // std::env::var allocates a String each call. The factor can't change over a process's life.
+    static FACTOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        std::env::var("MAKEPAD_SUPERSAMPLE")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(1.0)
+            .clamp(1.0, 4.0)
+    })
 }
 
 struct GaussStackLevel {
@@ -618,6 +679,90 @@ impl GaussStack {
     }
 }
 
+/// Full-window supersampling target: render the UI into a `supersample`x offscreen pass, then a resolve quad downscales it.
+struct SsaaStack {
+    scene_pass: DrawPass,
+    scene_draw_list: DrawList2d,
+    scene_texture: Texture,
+    _scene_depth_texture: Texture,
+}
+
+impl SsaaStack {
+    fn new(cx: &mut Cx) -> Self {
+        let scene_pass = DrawPass::new_with_name(cx, "ssaa_scene");
+        let scene_draw_list = DrawList2d::new(cx);
+        let scene_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        let scene_depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        scene_pass.set_color_texture(
+            cx,
+            &scene_texture,
+            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+        );
+        scene_pass.set_depth_texture(cx, &scene_depth_texture, DrawPassClearDepth::ClearWith(1.0));
+        Self {
+            scene_pass,
+            scene_draw_list,
+            scene_texture,
+            _scene_depth_texture: scene_depth_texture,
+        }
+    }
+
+    /// Begin rendering the whole UI into the supersized scene pass. The dpi override
+    /// (dpi * supersample) inflates only the render-target pixel density + viewport; the pass
+    /// rect (logical layout size) is copied from the parent window pass, so layout/hit-testing
+    /// are unchanged — only rasterization happens at higher resolution.
+    fn begin_scene(&mut self, cx: &mut Cx2d, supersample: f64) {
+        let dpi = cx.current_dpi_factor();
+        // Logical size of the window pass. Set it explicitly on the scene pass (like the gauss
+        // mip passes do): begin_pass(Some(dpi)) does NOT auto-inherit the parent rect, so without
+        // set_size get_pass_rect returns None and the GL backend panics. With the dpi override =
+        // dpi*supersample, the same logical size rasterizes into a supersample-x device texture.
+        let size = cx.current_pass_size();
+        self.scene_pass.set_size(cx, size);
+        cx.make_child_pass(&self.scene_pass);
+        cx.begin_pass(&self.scene_pass, Some(dpi * supersample));
+        self.scene_draw_list.begin_always(cx);
+        let pass_size = cx.current_pass_size();
+        cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+    }
+
+    fn end_scene(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.scene_draw_list.end(cx);
+        cx.end_pass(&self.scene_pass);
+    }
+
+    /// Draw the single fullscreen resolve quad into the (now-active) window pass, sampling the
+    /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
+    fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
+        // Scene texture is bottom-up — flip opposite to the gauss compositor or the UI shows upside-down.
+        let source_y_flip = 1.0 - gauss_render_texture_y_flip_for_os(cx.os_type());
+        resolve
+            .draw_vars
+            .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
+        resolve.draw_vars.set_texture(0, &self.scene_texture);
+        resolve.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(0.0, 0.0),
+                size: root_size,
+            },
+        );
+    }
+}
+
 impl Window {
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         match cx.os_type() {
@@ -690,23 +835,38 @@ impl Window {
 
         let caption_label = self.view(cx, ids!(caption_label));
         if let Some(mut inner) = caption_label.borrow_mut() {
-            inner.layout.padding.left = padding_left;
+            // Redraw when the padding actually changes; nothing else re-lays-out
+            // the caption label now that the title sync skips unchanged titles.
+            if (inner.layout.padding.left - padding_left).abs() > 0.1 {
+                inner.layout.padding.left = padding_left;
+                inner.redraw(cx);
+            }
         }
         drop(caption_label);
     }
 
     fn sync_caption_title(&mut self, cx: &mut Cx) {
         let title = if self.window.title.is_empty() {
-            cx.windows[self.window.handle.window_id()]
-                .create_title
-                .clone()
+            &cx.windows[self.window.handle.window_id()].create_title
         } else {
-            self.window.title.clone()
+            &self.window.title
         };
-        if !title.is_empty() {
-            self.label(cx, ids!(caption_label.label))
-                .set_text(cx, &title);
+        // Bail out early when the resolved title was already synced: pushing an
+        // unchanged title through `set_text` every event would still cost a
+        // widget-tree lookup per event.
+        if self.last_synced_title.as_deref() == Some(title.as_str()) {
+            return;
         }
+        let title = title.clone();
+        if !title.is_empty() {
+            let label = self.label(cx, ids!(caption_label.label));
+            if label.borrow().is_none() {
+                // No caption label in the tree yet; retry on a later event.
+                return;
+            }
+            label.set_text(cx, &title);
+        }
+        self.last_synced_title = Some(title);
     }
 
     /// Resolves the desired system-bar (status/navigation bar) icon tint and,
@@ -737,6 +897,19 @@ impl Window {
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
+        // If the inputs that drive caption layout changed without a platform WindowGeomChange
+        // (e.g. a live/DSL reload toggling the caption bar or changing its height), the cached
+        // WindowDragQuery geometry is stale — drop it so the next hit-test recomputes.
+        let caption_sig = (
+            self.show_caption_bar,
+            self.window.caption_bar_height_override,
+            self.system_caption_bar_height,
+        );
+        if self.caption_query_sig != Some(caption_sig) {
+            self.caption_query_sig = Some(caption_sig);
+            self.drag_query_cache = None;
+        }
+
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
@@ -795,10 +968,19 @@ impl Window {
         };
         begin_window_gauss_frame(cx, window_id, self.use_gauss_capture, gauss_snapshot);
 
+        // Full-window supersampling: render everything (incl. the overlay = tooltips/modals/
+        // context-menus) into the supersized scene pass, then downscale in end(). Skip when
+        // gauss capture is active for this window (avoid nesting the two scene mechanisms).
+        self.use_ssaa = !self.use_gauss_capture && supersample_factor() > 1.0;
+
         if self.use_gauss_capture {
             self.gauss_stack.begin_scene(cx);
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
+        } else if self.use_ssaa {
+            self.ssaa_stack.begin_scene(cx, supersample_factor());
+            self.overlay
+                .begin_for_pass(cx, self.ssaa_stack.scene_pass.draw_pass_id());
         } else {
             self.overlay.begin(cx);
         }
@@ -834,8 +1016,20 @@ impl Window {
                 self.gauss_stack
                     .draw_scene(cx, &mut self.draw_gauss_scene, root_size);
             }
+            self.overlay.end(cx);
+        } else if self.use_ssaa {
+            // The overlay was begun for the scene pass, so finalize it BEFORE ending that pass.
+            self.overlay.end(cx);
+            self.ssaa_stack.end_scene(cx);
+            // Now the window pass is active again; downscale the supersized scene into it.
+            let root_size = cx.current_pass_size();
+            if root_size.x >= 0.5 && root_size.y >= 0.5 {
+                self.ssaa_stack
+                    .draw_resolve(cx, &mut self.draw_ssaa_resolve, root_size);
+            }
+        } else {
+            self.overlay.end(cx);
         }
-        self.overlay.end(cx);
         let window_id = self.window.handle.window_id();
         if finish_window_gauss_frame(cx, window_id) {
             cx.repaint_pass_and_child_passes(self.pass.handle.draw_pass_id());
@@ -1016,6 +1210,11 @@ impl Widget for Window {
             self.draw_all(cx, scope);
             return;
         }
+        if matches!(event, Event::LiveEdit) {
+            // A live reload can re-apply DSL text over the caption label, so
+            // force the next sync to push the title again.
+            self.last_synced_title = None;
+        }
         self.ensure_initialized(cx);
 
         let uid = self.widget_uid();
@@ -1044,6 +1243,9 @@ impl Widget for Window {
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
+                    // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
+                    // geometry cache so it is recomputed on the next hit-test.
+                    self.drag_query_cache = None;
                     match cx.os_type() {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
@@ -1068,15 +1270,17 @@ impl Widget for Window {
                     // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
                     cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
 
-                    // If the platform reports native chrome button geometry, derive
-                    // the caption bar height so the buttons are vertically centered:
-                    // height = top_margin * 2 + button_height = pos.y * 2 + size.y.
-                    let new_buttons = ev.new_geom.window_chrome_buttons;
-                    if new_buttons != Rect::default() {
-                        let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
-                        if self.system_caption_bar_height != Some(h) {
-                            self.system_caption_bar_height = Some(h);
-                            self.view(cx, ids!(caption_bar)).redraw(cx);
+                    // Only pin the caption height on macOS: the buttons there are OS traffic lights
+                    // (fixed size, don't zoom) that the title lines up with. Elsewhere we draw the
+                    // buttons ourselves, so height: Fit lets the bar zoom along with them instead.
+                    if matches!(cx.os_type(), OsType::Macos) {
+                        let new_buttons = ev.new_geom.window_chrome_buttons;
+                        if new_buttons != Rect::default() {
+                            let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
+                            if self.system_caption_bar_height != Some(h) {
+                                self.system_caption_bar_height = Some(h);
+                                self.view(cx, ids!(caption_bar)).redraw(cx);
+                            }
                         }
                     }
 
@@ -1098,10 +1302,32 @@ impl Widget for Window {
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    if self.view(cx, ids!(caption_bar)).visible() {
-                        let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
-                        let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
-
+                    // Resolve the caption / buttons geometry at most once per relayout; this event
+                    // arrives per mouse-move (per WM_NCHITTEST) and the view lookups are not free.
+                    let (visible, caption_rect, buttons_rect) = match self.drag_query_cache {
+                        Some(c) => c,
+                        None => {
+                            let visible = self.view(cx, ids!(caption_bar)).visible();
+                            let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
+                            let buttons_view = self.view(cx, ids!(windows_buttons));
+                            let buttons_visible = buttons_view.visible();
+                            let buttons_rect = buttons_view.area().rect(cx);
+                            // Only cache once the caption bar AND its (visible) buttons have actually
+                            // been laid out, so an early query doesn't pin a stale rect. Pinning a
+                            // zero buttons_rect while the buttons are visible-but-not-yet-laid-out
+                            // would make the min/max/close strip respond as draggable Caption (a
+                            // click on Close would drag the window) until the next geometry change. A
+                            // window with no (hidden) buttons keeps a zero buttons_rect, which is fine.
+                            let caption_ready = caption_rect.size != Vec2d::default();
+                            let buttons_ready =
+                                !buttons_visible || buttons_rect.size != Vec2d::default();
+                            if !visible || (caption_ready && buttons_ready) {
+                                self.drag_query_cache = Some((visible, caption_rect, buttons_rect));
+                            }
+                            (visible, caption_rect, buttons_rect)
+                        }
+                    };
+                    if visible {
                         if caption_rect.contains(dq.abs) {
                             if buttons_rect.size != Vec2d::default()
                                 && buttons_rect.contains(dq.abs)
