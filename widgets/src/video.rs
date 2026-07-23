@@ -599,6 +599,40 @@ impl VideoRef {
         }
     }
 
+    /// Returns the total duration of the video in milliseconds, or 0 if not yet known
+    /// (the duration is reported by the platform once playback has been prepared).
+    pub fn total_duration_ms(&self) -> u128 {
+        if let Some(inner) = self.borrow() {
+            inner.total_duration
+        } else {
+            0
+        }
+    }
+
+    /// Sets the playback volume, where `volume` is clamped to the `0.0..=1.0` range.
+    /// A volume of `0.0` mutes the audio; any value above `0.0` unmutes it. The audio
+    /// state is kept in sync so [`is_muted`] reflects the change.
+    pub fn set_volume(&self, cx: &mut Cx, volume: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            let volume = volume.clamp(0.0, 1.0);
+            cx.set_video_volume(inner.id, volume);
+            inner.audio_state = if volume <= 0.0 {
+                AudioState::Muted
+            } else {
+                AudioState::Playing
+            };
+        }
+    }
+
+    /// Sets the playback rate (speed), where `1.0` is normal speed. Common values are
+    /// `0.5`, `0.75`, `1.0`, `1.25`, `1.5`, `1.75`, and `2.0`. The value is forwarded to
+    /// the platform player; unsupported rates may be clamped by the backend.
+    pub fn set_playback_rate(&self, cx: &mut Cx, rate: f64) {
+        if let Some(inner) = self.borrow() {
+            cx.set_video_playback_rate(inner.id, rate);
+        }
+    }
+
     /// Updates the source of the video data. Currently it only proceeds if the video is in Unprepared state.
     pub fn set_source(&self, source: VideoDataSource) {
         if let Some(mut inner) = self.borrow_mut() {

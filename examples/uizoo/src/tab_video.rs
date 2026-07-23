@@ -11,7 +11,7 @@ script_mod! {
         demos +: {
             H4{text: "Network Video (autoplay, looping)"}
             Video{
-                source: VideoDataSource.Network { url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"}
+                source: VideoDataSource.Network { url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"}
                 height: 240
                 width: 426
                 show_idle_thumbnail: true
