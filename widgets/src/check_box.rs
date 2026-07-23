@@ -564,6 +564,7 @@ impl Widget for CheckBox {
     }
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.text.as_ref() == v { return }
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
