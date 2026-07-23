@@ -1272,6 +1272,40 @@ pub struct FinishedWalk {
     metrics: Metrics,
 }
 
+/// The horizontal shift that centers a `Flow::Right` row's actually-drawn content
+/// within its inner width, per `align.x`.
+///
+/// Deferred fills are given all the slack up front, so the normal align path skips
+/// align.x when any exist. But a fill that draws narrower than its slot (an image
+/// that aspect-fits, say) leaves genuine slack, and this reclaims it. Returns 0 when
+/// the content fills the row or the inner width is unknown.
+fn row_align_x_shift(turtle: &Turtle, walks: &[FinishedWalk]) -> f64 {
+    let align_x = turtle.align().x;
+    let inner_width = turtle.inner_width();
+    if align_x == 0.0 || walks.is_empty() || inner_width.is_nan() {
+        return 0.0;
+    }
+    let spacing = turtle.spacing() * walks.len().saturating_sub(1) as f64;
+    let used: f64 = walks.iter().map(|w| w.outer_size.x).sum::<f64>() + spacing;
+    align_x * (inner_width - used).max(0.0)
+}
+
+/// The vertical counterpart of [`row_align_x_shift`] for a `Flow::Down` column.
+///
+/// A `height: Fill` child that draws shorter than its slot leaves genuine slack;
+/// this reclaims it for `align.y`. Returns 0 when the column fills, `align.y` is 0,
+/// or the inner height is unknown.
+fn col_align_y_shift(turtle: &Turtle, walks: &[FinishedWalk]) -> f64 {
+    let align_y = turtle.align().y;
+    let inner_height = turtle.inner_height();
+    if align_y == 0.0 || walks.is_empty() || inner_height.is_nan() {
+        return 0.0;
+    }
+    let spacing = turtle.spacing() * walks.len().saturating_sub(1) as f64;
+    let used: f64 = walks.iter().map(|w| w.outer_size.y).sum::<f64>() + spacing;
+    align_y * (inner_height - used).max(0.0)
+}
+
 impl<'a, 'b> Cx2d<'a, 'b> {
     /// Returns a reference to the current turtle.
     pub fn turtle(&self) -> &Turtle {
@@ -1518,14 +1552,23 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     // vertical alignment is applied to each walk individually.
                     let inner_effective_height = turtle.inner_effective_height();
 
+                    // A fill normally eats all the horizontal slack, but one that draws
+                    // narrower than its slot (e.g. an image that aspect-fits) leaves real
+                    // slack. Honor align.x over whatever's genuinely left after drawing.
+                    let extra_dx = row_align_x_shift(
+                        turtle,
+                        &self.finished_walks[turtle_walks_start..],
+                    );
+
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                         let finished_walk = &self.finished_walks[finished_walk_index];
 
                         let inner_unused_height =
                             (inner_effective_height - finished_walk.outer_size.y).max(0.0);
 
-                        let dx =
-                            turtle.total_resolved_length_to(finished_walk.deferred_before_count);
+                        let dx = turtle
+                            .total_resolved_length_to(finished_walk.deferred_before_count)
+                            + extra_dx;
                         let dy = turtle.align().y * inner_unused_height;
 
                         let align_list_start = finished_walk.align_list_start;
@@ -1620,6 +1663,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     // unused height is distributed over the deferred walks.
                     let inner_effective_width = turtle.effective_inner_width();
 
+                    // Mirror of the Flow::Right case: a height:Fill child that draws
+                    // shorter than its slot leaves slack that align.y should still honor.
+                    let extra_dy = col_align_y_shift(
+                        turtle,
+                        &self.finished_walks[turtle_walks_start..],
+                    );
+
                     for finished_walk_index in turtle_walks_start..self.finished_walks.len() {
                         let finished_walk = &self.finished_walks[finished_walk_index];
 
@@ -1627,8 +1677,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                             (inner_effective_width - finished_walk.outer_size.x).max(0.0);
 
                         let dx = turtle.align().x * inner_unused_width;
-                        let dy =
-                            turtle.total_resolved_length_to(finished_walk.deferred_before_count);
+                        let dy = turtle
+                            .total_resolved_length_to(finished_walk.deferred_before_count)
+                            + extra_dy;
 
                         let align_list_start = finished_walk.align_list_start;
                         let align_list_end = self.finished_walk_align_list_end(finished_walk_index);
