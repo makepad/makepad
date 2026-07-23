@@ -81,6 +81,21 @@ impl VideoSource {
     pub fn is_session(&self) -> bool {
         matches!(self, Self::PlaybackSession(..) | Self::Session(..))
     }
+
+    /// Returns true for a network HLS/DASH streaming manifest. Such sources are served only by
+    /// the native platform player (AVPlayer / ExoPlayer); the software decoder downloads the URL
+    /// as a single container and cannot parse a `.m3u8` / `.mpd` playlist, so callers must not
+    /// fall back to software for these.
+    pub fn is_network_stream(&self) -> bool {
+        if let Self::Network(url) = self {
+            // Strip any query string before matching the extension.
+            let path = url.split(['?', '#']).next().unwrap_or(url);
+            let lower = path.to_ascii_lowercase();
+            lower.ends_with(".m3u8") || lower.ends_with(".mpd")
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
