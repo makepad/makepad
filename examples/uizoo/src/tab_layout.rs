@@ -21,6 +21,10 @@ script_mod! {
         align: Align{x: 0.5}
     }
 
+    let RedBox = Box{ draw_bg +: { color: #xD8483C } }
+    let GreenBox = Box{ draw_bg +: { color: #x3CA83C } }
+    let BlueBox = Box{ draw_bg +: { color: #x4A6ED8 } }
+
     mod.widgets.DemoLayout = UIZooTabLayout_B{
         desc +: {
             Markdown{body: "# Layout\n\nLayout demos show width, height, margin, padding, spacing, flow, and alignment."}
@@ -162,6 +166,58 @@ script_mod! {
                 Box{height: 100 width: 50.}
                 Box{height: 20 width: 50.}
                 Box{height: 50 width: 50.}
+            }
+
+            Hr{}
+            H4{text: "Align x of an under-filling Fill child"}
+            // A `width: Fill{max}` child that caps below the row width leaves slack.
+            // align.x must position that slack. These three should read left / center /
+            // right; before the Flow::Right deferred-fill fix they all anchored left.
+            Pbold{text: "flow: Right, align: {x: 0.},  child width: Fill{max: 120.}"}
+            UIZooRowH{
+                align: Align{x: 0. y: 0.5}
+                RedBox{height: 50 width: Fill{max: 120.}
+                    BoxLabel{text: "Fill{max: 120.}"}
+                }
+            }
+            Pbold{text: "flow: Right, align: {x: 0.5}, child width: Fill{max: 120.}"}
+            UIZooRowH{
+                align: Align{x: 0.5 y: 0.5}
+                GreenBox{height: 50 width: Fill{max: 120.}
+                    BoxLabel{text: "Fill{max: 120.}"}
+                }
+            }
+            Pbold{text: "flow: Right, align: {x: 1.0}, child width: Fill{max: 120.}"}
+            UIZooRowH{
+                align: Align{x: 1.0 y: 0.5}
+                BlueBox{height: 50 width: Fill{max: 120.}
+                    BoxLabel{text: "Fill{max: 120.}"}
+                }
+            }
+
+            Hr{}
+            H4{text: "Align y of an under-filling Fill child"}
+            // The Flow::Down mirror: a `height: Fill{max}` child caps below the column
+            // height, and align.y positions the slack. These read top / center / bottom.
+            // The faint outer box is the full column; the colored box is the Fill child.
+            UIZooRowH{
+                height: 180.
+                spacing: 20.
+                Box{width: 140. height: Fill flow: Down align: Align{y: 0.}
+                    RedBox{width: Fill height: Fill{max: 60.}
+                        BoxLabel{text: "align y: 0."}
+                    }
+                }
+                Box{width: 140. height: Fill flow: Down align: Align{y: 0.5}
+                    GreenBox{width: Fill height: Fill{max: 60.}
+                        BoxLabel{text: "align y: 0.5"}
+                    }
+                }
+                Box{width: 140. height: Fill flow: Down align: Align{y: 1.0}
+                    BlueBox{width: Fill height: Fill{max: 60.}
+                        BoxLabel{text: "align y: 1.0"}
+                    }
+                }
             }
         }
     }
