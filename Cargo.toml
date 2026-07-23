@@ -10,6 +10,7 @@ workspace.members = [
     "examples/slides",
     "examples/isolate",
     "examples/uizoo",
+    "examples/video_player",
     "examples/charts",
     "examples/scratchpad",
     "examples/ddgo",

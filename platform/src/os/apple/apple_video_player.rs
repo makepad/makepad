@@ -130,6 +130,12 @@ impl AppleUnifiedVideoPlayer {
                     return true;
                 }
                 self.null_frame_count += 1;
+                // HLS/DASH network streams can take a while to buffer their first segment after
+                // becoming "ready to play". The software decoder cannot parse a playlist, so never
+                // fall back for them — just keep polling the native player.
+                if self.source.is_network_stream() {
+                    return false;
+                }
                 if self.null_frame_count >= 60 {
                     self.switch_to_software("native player produced no frames after 60 polls");
                     self.null_frame_count = 0;
