@@ -368,17 +368,27 @@ script_mod! {
                 self.shape = min(self.shape, self.dist);
             }
 
-            arc2: fn(x: float, y: float, r: float, s:float, e:float)->vec4{
+            // A circular arc segment of the current path. Unlike arc_round_caps/
+            // arc_flat_caps, this adds the distance to the bare arc centerline
+            // (no baked thickness), so it chains after move_to/line_to and is
+            // covered by a single stroke. Angles are in radians, 0 = +x axis;
+            // end_angle may be less than start_angle (sweep follows the sign) and
+            // last_pos advances to the arc end so a following line_to connects.
+            arc_to: fn(x: float, y: float, r: float, start_angle: float, end_angle: float) {
                 let c = self.pos - vec2(x, y);
-                let pi = 3.141592653589793; // FIX THIS BUG
-
-                //let circle = (sqrt(c.x * c.x + c.y * c.y) - r)*ang;
-
-                // ok lets do atan2
-                let ang = (atan(c.y,c.x)+pi)/(2.0*pi);
-                let ces = (e-s)*0.5;
-                let ang2 = 1.0 - abs(ang - ces)+ces
-                return mix(vec4(0.,0.,0.,1.0),vec4(1.0),ang2);
+                let ring = abs(length(c) - r);
+                let ang = atan2(c.y, c.x);
+                let sweep = end_angle - start_angle;
+                // rel = angular distance from start_angle along the sweep, 0..TAU
+                let rel = fract((ang - start_angle) * sign(sweep) / TAU) * TAU;
+                let on = step(rel, abs(sweep));
+                let ps = vec2(x, y) + r * vec2(cos(start_angle), sin(start_angle));
+                let pe = vec2(x, y) + r * vec2(cos(end_angle), sin(end_angle));
+                let ends = min(length(self.pos - ps), length(self.pos - pe));
+                self.dist = mix(ends, ring, on) / self.scale_factor;
+                self.old_shape = self.shape;
+                self.shape = min(self.shape, self.dist);
+                self.last_pos = pe;
             }
 
 
