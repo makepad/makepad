@@ -148,12 +148,23 @@ impl Splash {
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
     let vm_id = cx.alloc_splash_vm_with_network(allow_net);
     // Give the dry run a throwaway storage jail so top-level `fs.read` boot
-    // loads validate instead of erroring "storage not available". Cleaned up
-    // below; keyed per-vm so parallel validations can't collide.
-    let scratch = std::env::temp_dir().join(format!("splash_validate_{}", vm_id.0));
-    let _ = std::fs::create_dir_all(&scratch);
+    // loads validate instead of erroring "storage not available". The path is
+    // unpredictable and created with an EXCLUSIVE mkdir (fails EEXIST on any
+    // pre-existing entry incl. a planted symlink, so it never follows one out
+    // of temp); on failure the jail is simply left unset (fs calls error, same
+    // as a preview). Reclaimed below; per-vm so concurrent validations differ.
+    let scratch = std::env::temp_dir().join(format!(
+        "splash_validate_{}_{}",
+        std::process::id(),
+        vm_id.0,
+    ));
     let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
-    crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.clone()));
+    // Clear a leftover from a crashed run (we own this exact name), then take
+    // it exclusively.
+    let _ = std::fs::remove_dir_all(&scratch);
+    if std::fs::create_dir(&scratch).is_ok() {
+        crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.clone()));
+    }
     let prefix = if allow_net {
         SPLASH_NET_PREFIX
     } else {
@@ -190,7 +201,10 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
         errors
     });
     crate::widget_async::mark_splash_isolate_dead(vm_id);
-    // The GC will drop the root binding; the scratch files go now.
+    // Reclaim NOW (stops the isolate's top-level timers and drops its sandbox
+    // root binding) so nothing can re-create the scratch dir after we remove
+    // it; then delete last, and it stays deleted.
+    crate::widget_async::gc_dead_splash_isolates(cx);
     let _ = std::fs::remove_dir_all(&scratch);
     errors
 }

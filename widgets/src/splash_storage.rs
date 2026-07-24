@@ -157,6 +157,22 @@ fn jail_usage(root: &Path) -> (u64, usize) {
     (bytes, entries)
 }
 
+/// How many path components between `root` and `real` don't exist yet — what
+/// `create_dir_all` would newly materialize (plus the leaf if absent). Used
+/// to charge directory creation against the entry cap, so `mkdir` and deep
+/// writes can't sprawl inodes past `MAX_ENTRIES` unbounded.
+fn missing_entries(root: &Path, real: &Path) -> usize {
+    let mut n = 0;
+    let mut cursor = real.to_path_buf();
+    while cursor != *root && !cursor.exists() {
+        n += 1;
+        if !cursor.pop() {
+            break;
+        }
+    }
+    n
+}
+
 /// A resolved, symlink-checked target ready for I/O, or a script error string.
 fn target(vm: &mut ScriptVm, path_value: ScriptValue) -> Result<(PathBuf, PathBuf), String> {
     let Some(root) = root_for_vm(vm) else {
@@ -202,6 +218,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     Ok(t) => t,
                     Err(e) => return script_err_io!(vm.trap(), "{}", e),
                 };
+                // The root is a directory; writing "/" (or "" / "/x/..") must
+                // not reach create_dir_all(root.parent()) below, which lands
+                // OUTSIDE the jail. Reject it like `remove` does.
+                if real == root {
+                    return script_err_io!(vm.trap(), "cannot write the storage root");
+                }
                 let mut text = None;
                 vm.string_with(data, |_vm, s| text = Some(s.to_string()));
                 let Some(text) = text else {
@@ -221,7 +243,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 if total - existing.min(total) + new_len > MAX_TOTAL_BYTES {
                     return script_err_io!(vm.trap(), "app storage is full");
                 }
-                if existing == 0 && entries >= MAX_ENTRIES {
+                // Charge the file AND any parent dirs create_dir_all would make,
+                // so a deep write can't overshoot the entry cap.
+                if entries + missing_entries(&root, &real) > MAX_ENTRIES {
                     return script_err_io!(vm.trap(), "too many files");
                 }
                 if let Some(parent) = real.parent() {
@@ -277,10 +301,21 @@ pub fn script_mod(vm: &mut ScriptVm) {
     vm.add_method(fs, id_lut!(mkdir), script_args_def!(path = NIL), |vm, args| {
         let path = script_value!(vm, args.path);
         match target(vm, path) {
-            Ok((_root, real)) => match std::fs::create_dir_all(&real) {
-                Ok(()) => NIL,
-                Err(_) => script_err_io!(vm.trap(), "mkdir failed"),
-            },
+            Ok((root, real)) => {
+                // Charge new dirs against the entry cap — otherwise mkdir is an
+                // unbounded inode-exhaustion hole (it never touched jail_usage).
+                let missing = missing_entries(&root, &real);
+                if missing > 0 {
+                    let (_bytes, entries) = jail_usage(&root);
+                    if entries + missing > MAX_ENTRIES {
+                        return script_err_io!(vm.trap(), "too many files");
+                    }
+                }
+                match std::fs::create_dir_all(&real) {
+                    Ok(()) => NIL,
+                    Err(_) => script_err_io!(vm.trap(), "mkdir failed"),
+                }
+            }
             Err(e) => script_err_io!(vm.trap(), "{}", e),
         }
     });
@@ -360,5 +395,19 @@ mod tests {
         }
         let real = resolve_jailed(&dir, "/sub/file.txt").unwrap();
         assert!(verify_no_symlinks(&dir, &real).is_ok());
+    }
+
+    #[test]
+    fn missing_entries_counts_new_components() {
+        let dir = std::env::temp_dir().join("mp_jail_missing_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        // a/ exists; a/b and a/b/c.txt do not → 2 new components.
+        assert_eq!(missing_entries(&dir, &dir.join("a/b/c.txt")), 2);
+        // fully existing → 0.
+        std::fs::write(dir.join("a/x.txt"), b"hi").unwrap();
+        assert_eq!(missing_entries(&dir, &dir.join("a/x.txt")), 0);
+        // the root itself is never counted.
+        assert_eq!(missing_entries(&dir, &dir), 0);
     }
 }
