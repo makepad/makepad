@@ -1653,6 +1653,18 @@ impl PortalList {
         self.tail_range = tail_range;
     }
 
+    /// Sets the flow direction, e.g. to switch a list between a vertical
+    /// (`Flow::Down`) and horizontal (`Flow::right()`) layout at runtime.
+    pub fn set_flow(&mut self, cx: &mut Cx, flow: Flow) {
+        if self.layout.flow != flow {
+            self.layout.flow = flow;
+            // `vec_index` is the axis the list actually lays out along; it's normally
+            // derived from `flow` in `on_after_apply`, so keep it in sync here too.
+            self.vec_index = if let Flow::Down = flow { Vec2Index::Y } else { Vec2Index::X };
+            self.redraw(cx);
+        }
+    }
+
     /// Sets the first visible item and scroll offset.
     pub fn set_first_id_and_scroll(&mut self, first_id: usize, first_scroll: f64) {
         self.first_id = first_id;
@@ -3171,6 +3183,13 @@ impl PortalListRef {
     pub fn set_tail_range(&self, tail_range: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.tail_range = tail_range;
+        }
+    }
+
+    /// See [`PortalList::set_flow`].
+    pub fn set_flow(&self, cx: &mut Cx, flow: Flow) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_flow(cx, flow);
         }
     }
 
