@@ -47,8 +47,13 @@ pub struct Splash {
     body_id: Option<u16>,
 }
 
-const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nView{height:Fit, ";
-const SPLASH_NET_PREFIX: &str = "use mod.prelude.widgets.*\nuse mod.net\nView{height:Fit, ";
+// `let fs = mod.fs` puts the jailed storage module (splash_storage.rs) in
+// scope as a bare name — app scripts say `fs.read("/x")`, not `mod.fs.read`.
+// A script reassigning `fs` only sabotages its own binding; the jail itself
+// lives host-side.
+const SPLASH_PREFIX: &str = "use mod.prelude.widgets.*\nlet fs = mod.fs\nView{height:Fit, ";
+const SPLASH_NET_PREFIX: &str =
+    "use mod.prelude.widgets.*\nuse mod.net\nlet fs = mod.fs\nView{height:Fit, ";
 const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
 
 impl Splash {
