@@ -127,6 +127,26 @@ impl Splash {
             cx.widget_tree_mark_dirty(self.uid);
         }
     }
+
+    /// Tears down this Splash's isolate (if any), returning it to the empty
+    /// state a freshly-created Splash has. The isolate-minted view holds refs
+    /// into the isolate heap, so it is REPLACED with a fresh empty view built
+    /// in the main VM BEFORE the isolate is reclaimed; the reclamation then
+    /// stops the isolate's timers and drops its storage-jail binding. A later
+    /// non-empty `set_text` allocates a fresh isolate as usual.
+    fn stop(&mut self, cx: &mut Cx) {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return; // nothing running
+        }
+        self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
+        self.body_id = None;
+        crate::widget_async::mark_splash_isolate_dead(self.vm_id);
+        self.vm_id = MAIN_SPLASH_VM_ID;
+        // Reclaim now (Cx is in hand and nothing runs in the isolate) so the
+        // timers stop immediately rather than lingering to the next pump.
+        crate::widget_async::gc_dead_splash_isolates(cx);
+        cx.widget_tree_mark_dirty(self.uid);
+    }
 }
 
 /// Evaluates a Splash body in a throwaway isolate — the same prelude prefix,
@@ -266,7 +286,15 @@ impl Widget for Splash {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if self.body.as_ref() != v {
             self.body.set(v);
-            self.eval_body(cx);
+            // Empty body = tear down the app: reclaim its isolate (stopping its
+            // timers and dropping its storage jail) rather than leaving it
+            // running behind a blank view. A reused Splash (e.g. a live-preview
+            // widget) that goes back to empty must not leak its old isolate.
+            if v.is_empty() {
+                self.stop(cx);
+            } else {
+                self.eval_body(cx);
+            }
             self.redraw(cx);
         }
     }
