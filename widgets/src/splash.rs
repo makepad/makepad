@@ -115,6 +115,57 @@ impl Splash {
     }
 }
 
+/// Evaluates a Splash body in a throwaway isolate — the same prelude prefix,
+/// instruction limit, and network gating the `Splash` widget itself uses — and
+/// returns the formatted script errors, freeing the isolate afterwards. An
+/// empty result means the body parses and its root expression evaluates to a
+/// widget tree; runtime errors inside handlers can of course still occur later.
+///
+/// This is the widget's `eval_body` as a checked dry run: hosts that install
+/// script source from outside (downloads, AI generation, user input) can
+/// validate it — with real errors to show or feed back — before committing it
+/// to a live `Splash`, whose own eval silently keeps the old view on failure.
+pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
+    let vm_id = cx.alloc_splash_vm_with_network(allow_net);
+    let prefix = if allow_net {
+        SPLASH_NET_PREFIX
+    } else {
+        SPLASH_PREFIX
+    };
+    let code = format!("{}{}", prefix, body);
+    let script_mod = ScriptMod {
+        cargo_manifest_path: String::new(),
+        module_path: String::new(),
+        file: String::new(),
+        line: vm_id.0 as usize,
+        column: 0,
+        code: String::new(),
+        values: vec![],
+    };
+    let errors = cx.with_script_vm_id(vm_id, |vm| {
+        // Capture instead of logging: mid-eval errors otherwise go straight to
+        // the error log (see `ScriptVm::take_errors`) and can't be returned.
+        vm.bx.captured_errors = Some(Vec::new());
+        let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+            vm.eval_with_append_source(script_mod, &code, NIL.into())
+        });
+        let mut errors = vm.take_errors();
+        if errors.is_empty() {
+            if value.is_err() {
+                errors.push("script evaluated to an error".to_string());
+            } else if value.as_object().is_none() {
+                errors.push(
+                    "script has no root widget (e.g. View{...}) as its final expression"
+                        .to_string(),
+                );
+            }
+        }
+        errors
+    });
+    crate::widget_async::mark_splash_isolate_dead(vm_id);
+    errors
+}
+
 impl WidgetNode for Splash {
     fn widget_uid(&self) -> WidgetUid {
         self.uid
