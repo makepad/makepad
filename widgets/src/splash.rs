@@ -125,6 +125,12 @@ impl Splash {
 /// script source from outside (downloads, AI generation, user input) can
 /// validate it — with real errors to show or feed back — before committing it
 /// to a live `Splash`, whose own eval silently keeps the old view on failure.
+///
+/// Caveats (identical to installing the same source in a real `Splash`, so
+/// validation adds no NEW exposure): the instruction limit bounds compute but
+/// not heap growth, so a hostile script can still allocate aggressively within
+/// its budget; and top-level side effects (e.g. `start_interval`) run and live
+/// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
     let vm_id = cx.alloc_splash_vm_with_network(allow_net);
     let prefix = if allow_net {

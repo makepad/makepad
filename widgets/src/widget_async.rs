@@ -346,13 +346,17 @@ impl CxSplashVmExt for Cx {
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
             crate::script_mod(&mut vm);
             // Splash isolates run untrusted-ish mini-app script; strip the
-            // ambient-authority modules (filesystem access, child processes) from the
-            // isolate's namespace entirely. Raw sockets are gated separately: the
-            // stdlib's `net.socket_stream` errors when no net runtime is configured,
-            // same as `net.http_request`.
+            // ambient-authority modules from the isolate's namespace entirely:
+            // filesystem access (`fs`), child processes (`run`), and the resource
+            // loader (`res`), whose handles reach BOTH the filesystem (abs_path
+            // loads) and the network (web_url/http resources) without going
+            // through the gated net runtime. Raw sockets are gated separately:
+            // the stdlib's `net.socket_stream` errors when no net runtime is
+            // configured, same as `net.http_request`.
             let strip = crate::makepad_script::script! {
                 mod.fs = nil
                 mod.run = nil
+                mod.res = nil
             };
             vm.eval(strip);
             vm.bx
