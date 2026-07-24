@@ -32,6 +32,11 @@ pub struct Splash {
     body: ArcStringMut,
     #[live]
     allow_net: bool,
+    /// The app's private storage directory — the root of its jailed `fs`
+    /// module (see splash_storage.rs). None (the default) = every storage
+    /// call errors, which is right for previews/validation-less contexts.
+    #[rust]
+    sandbox_dir: Option<std::path::PathBuf>,
     #[rust]
     vm_id: SplashVmId,
     /// Index of this Splash's script body in its isolate's bodies list, cached
@@ -61,6 +66,10 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
         }
+        // (Re)bind this isolate's storage jail. Keyed by heap so the script
+        // can neither read nor retarget it.
+        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+        crate::splash_storage::set_root_for_heap(heap_key, self.sandbox_dir.clone());
 
         let self_id = self.self_id();
         // Full code string: prefix + body (no closing - parser auto-closes)
@@ -133,6 +142,13 @@ impl Splash {
 /// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
     let vm_id = cx.alloc_splash_vm_with_network(allow_net);
+    // Give the dry run a throwaway storage jail so top-level `fs.read` boot
+    // loads validate instead of erroring "storage not available". Cleaned up
+    // below; keyed per-vm so parallel validations can't collide.
+    let scratch = std::env::temp_dir().join(format!("splash_validate_{}", vm_id.0));
+    let _ = std::fs::create_dir_all(&scratch);
+    let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
+    crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.clone()));
     let prefix = if allow_net {
         SPLASH_NET_PREFIX
     } else {
@@ -169,6 +185,8 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
         errors
     });
     crate::widget_async::mark_splash_isolate_dead(vm_id);
+    // The GC will drop the root binding; the scratch files go now.
+    let _ = std::fs::remove_dir_all(&scratch);
     errors
 }
 
@@ -266,6 +284,18 @@ impl Splash {
         self.allow_net = allow;
     }
 
+    /// Assigns this app's private storage directory — the root its jailed
+    /// `fs` module resolves against. Takes effect immediately when the
+    /// isolate is live, and on the next eval otherwise; call BEFORE set_text
+    /// so top-level `fs.read` boot loads see it.
+    pub fn set_sandbox_dir(&mut self, cx: &mut Cx, dir: Option<std::path::PathBuf>) {
+        self.sandbox_dir = dir.clone();
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            crate::splash_storage::set_root_for_heap(heap_key, dir);
+        }
+    }
+
     /// Sets (or replaces) a global visible to this Splash's script, like the
     /// injected `ui` handle. Useful for handing scripts host-provided context
     /// (configuration, sizes, capabilities) without re-evaluating the body.
@@ -306,6 +336,13 @@ impl SplashRef {
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
+        }
+    }
+
+    /// See [`Splash::set_sandbox_dir`].
+    pub fn set_sandbox_dir(&self, cx: &mut Cx, dir: Option<std::path::PathBuf>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_sandbox_dir(cx, dir);
         }
     }
 

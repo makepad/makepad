@@ -89,6 +89,8 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         cx.stop_timer(timer);
         cx.script_data.timers.timers.retain(|t| t.id != id);
     }
+    // Sandbox roots die with their isolates.
+    crate::splash_storage::gc_roots(&dead_heaps);
     let state = cx.global::<CxWidgetAsync>();
     for vm_id in dead {
         state.isolated_vms.vms.remove(&vm_id);
@@ -359,6 +361,11 @@ impl CxSplashVmExt for Cx {
                 mod.res = nil
             };
             vm.eval(strip);
+            // Re-register `fs` as the JAILED per-app storage module: inside an
+            // isolate, "the filesystem" is the app's private sandbox directory
+            // (assigned by the host via Splash::set_sandbox_dir; without one,
+            // every call errors). See splash_storage.rs for the containment.
+            crate::splash_storage::script_mod(&mut vm);
             vm.bx
         };
 
