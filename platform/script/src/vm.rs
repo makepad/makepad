@@ -1091,15 +1091,19 @@ impl<'a> ScriptVm<'a> {
         self.bx.code.native.borrow_mut().add_apply_transform_fn(f)
     }
 
+    pub fn register_crate_manifest(&mut self, crate_name: &str, cargo_manifest_path: &str) {
+        if !crate_name.is_empty() && !cargo_manifest_path.is_empty() {
+            self.bx.code.crate_manifests.borrow_mut().insert(
+                crate_name.replace('-', "_"),
+                cargo_manifest_path.to_string(),
+            );
+        }
+    }
+
     pub fn add_script_mod(&mut self, new_mod: ScriptMod) -> u16 {
         // Register this crate's manifest path for crate path resolution
         let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
-        if !crate_name.is_empty() && !new_mod.cargo_manifest_path.is_empty() {
-            self.bx.code.crate_manifests.borrow_mut().insert(
-                crate_name.replace('-', "_"),
-                new_mod.cargo_manifest_path.clone(),
-            );
-        }
+        self.register_crate_manifest(crate_name, &new_mod.cargo_manifest_path);
 
         let scope_obj = self.bx.heap.new_with_proto(id!(scope).into());
         self.bx.heap.set_object_deep(scope_obj);

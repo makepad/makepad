@@ -244,6 +244,11 @@ pub use crate::perf_graph::*;
 pub use crate::video::*;
 
 pub fn theme_mod(vm: &mut ScriptVm) {
+    #[cfg(not(target_arch = "wasm32"))]
+    vm.register_crate_manifest(
+        module_path!().split("::").next().unwrap_or(""),
+        env!("CARGO_MANIFEST_DIR").trim_start_matches("\\\\?\\"),
+    );
     makepad_draw::script_mod(vm);
     if !vm.is_reload() {
         makepad_platform::ime::script_mod(vm);
@@ -647,6 +652,28 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
 pub fn script_mod(vm: &mut ScriptVm) {
     theme_mod(vm);
     widgets_mod(vm);
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_resource_registration_tests {
+    use super::*;
+
+    #[test]
+    fn theme_mod_resolves_explicit_widget_resources_during_draw_evaluation() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        let errors = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            theme_mod(vm);
+            vm.take_errors()
+        });
+
+        assert!(
+            errors.is_empty(),
+            "widget theme initialization produced script errors:\n{}",
+            errors.join("\n")
+        );
+    }
 }
 
 #[cfg(test)]
