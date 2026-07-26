@@ -60,6 +60,21 @@ pub fn script_apply_eval_impl(input: TokenStream) -> TokenStream {
     tb.end()
 }
 
+fn script_mod_manifest_metadata() -> &'static str {
+    r#"{
+        #[cfg(target_arch = "wasm32")]
+        {
+            String::new()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            env!("CARGO_MANIFEST_DIR")
+                .trim_start_matches("\\\\?\\")
+                .to_string()
+        }
+    }"#
+}
+
 pub fn script_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
@@ -68,11 +83,9 @@ pub fn script_impl(input: TokenStream) -> TokenStream {
         let (s, values) = token_parser_to_whitespace_matching_string(&mut parser, span);
 
         tb.add("ScriptMod {");
-        tb.add("    cargo_manifest_path: env!(")
-            .string("CARGO_MANIFEST_DIR")
-            .add(").trim_start_matches(")
-            .string("\\\\?\\")
-            .add(").to_string(),");
+        tb.add("    cargo_manifest_path:")
+            .add(script_mod_manifest_metadata())
+            .add(",");
         tb.add("    module_path :")
             .ident_with_span("module_path", span)
             .add("!().to_string(),");
@@ -230,3 +243,26 @@ fn token_parser_to_whitespace_matching_string(
 }
 
 use proc_macro::TokenTree;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_mod_uses_target_specific_manifest_metadata() {
+        let expanded = script_mod_manifest_metadata();
+        let normalized: String = expanded
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .collect();
+
+        assert!(
+            normalized.contains("#[cfg(target_arch=\"wasm32\")]{String::new()}"),
+            "WASM script modules must omit build-host manifest directories: {expanded}"
+        );
+        assert!(
+            normalized.contains("#[cfg(not(target_arch=\"wasm32\"))]{env!(\"CARGO_MANIFEST_DIR\")"),
+            "native script modules must retain their manifest directory: {expanded}"
+        );
+    }
+}

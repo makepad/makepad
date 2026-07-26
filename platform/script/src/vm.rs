@@ -1094,7 +1094,7 @@ impl<'a> ScriptVm<'a> {
     pub fn add_script_mod(&mut self, new_mod: ScriptMod) -> u16 {
         // Register this crate's manifest path for crate path resolution
         let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
-        if !crate_name.is_empty() {
+        if !crate_name.is_empty() && !new_mod.cargo_manifest_path.is_empty() {
             self.bx.code.crate_manifests.borrow_mut().insert(
                 crate_name.replace('-', "_"),
                 new_mod.cargo_manifest_path.clone(),
