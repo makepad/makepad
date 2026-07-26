@@ -9,9 +9,11 @@ use std::collections::HashMap;
 use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
-#[cfg(target_arch = "wasm32")]
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+#[cfg(any(target_arch = "wasm32", test))]
+const WASM_FILE_RESOURCE_ERROR: &str =
+    "res.file is unavailable on wasm; use res.crate or res.http_resource";
 
 #[derive(Clone, Debug)]
 pub enum CxScriptResourceData {
@@ -264,7 +266,13 @@ fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
     )
 }
 
-fn is_widgets_resources_path(path: &str) -> bool {
+#[cfg(any(target_arch = "wasm32", test))]
+fn is_wasm_widgets_resources_path(path: &str) -> bool {
+    path.starts_with("crate://makepad_widgets/resources/")
+}
+
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn is_native_widgets_resources_path(path: &str) -> bool {
     let mut prev_is_widgets = false;
     for component in path.split(['/', '\\']) {
         let is_resources = component.eq_ignore_ascii_case("resources");
@@ -276,6 +284,18 @@ fn is_widgets_resources_path(path: &str) -> bool {
     false
 }
 
+fn is_widgets_resources_path(path: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        is_wasm_widgets_resources_path(path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        is_native_widgets_resources_path(path)
+    }
+}
+
 fn resource_basename(path: &str) -> Option<&str> {
     path.rsplit(['/', '\\']).next()
 }
@@ -284,7 +304,6 @@ impl Cx {
     fn load_script_resource_impl(
         &mut self,
         handle: ScriptHandle,
-        #[cfg(target_arch = "wasm32")] crate_manifests: &HashMap<String, String>,
     ) {
         // On wasm, skip loading if we haven't received ToWasmInit yet (os_type is Unknown).
         #[cfg(target_arch = "wasm32")]
@@ -305,18 +324,6 @@ impl Cx {
 
             if !matches!(res.data, CxScriptResourceData::NotLoaded) {
                 return;
-            }
-
-            #[cfg(target_arch = "wasm32")]
-            if res.dependency_path.is_none() {
-                if let Some(dep_path) = resolve_dependency_path_from_manifests(
-                    &res.abs_path,
-                    None,
-                    None,
-                    crate_manifests,
-                ) {
-                    res.dependency_path = Some(dep_path);
-                }
             }
 
             #[cfg(target_arch = "wasm32")]
@@ -386,14 +393,7 @@ impl Cx {
     }
 
     pub fn load_script_resource(&mut self, handle: ScriptHandle) {
-        #[cfg(target_arch = "wasm32")]
-        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
-
-        self.load_script_resource_impl(
-            handle,
-            #[cfg(target_arch = "wasm32")]
-            &crate_manifests,
-        );
+        self.load_script_resource_impl(handle);
     }
 
     /// Load all script resources that are still pending.
@@ -411,10 +411,6 @@ impl Cx {
             return;
         }
 
-        // On wasm, resolve web_url for resources that don't have one yet.
-        #[cfg(target_arch = "wasm32")]
-        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
-
         let handles = {
             let resources = self.script_data.resources.resources.borrow();
             resources
@@ -425,11 +421,7 @@ impl Cx {
         };
 
         for handle in handles {
-            self.load_script_resource_impl(
-                handle,
-                #[cfg(target_arch = "wasm32")]
-                &crate_manifests,
-            );
+            self.load_script_resource_impl(handle);
         }
     }
 }
@@ -437,8 +429,9 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::{
-        remapped_small_font_dependency_path, should_skip_eager_resource_load,
-        web_resource_base_path,
+        is_wasm_widgets_resources_path, remapped_small_font_dependency_path,
+        should_skip_eager_resource_load, wasm_crate_resource_identity, wasm_resource_crate_name,
+        web_resource_base_path, WASM_FILE_RESOURCE_ERROR,
     };
 
     #[test]
@@ -458,6 +451,17 @@ mod tests {
         assert!(!should_skip_eager_resource_load(
             "/tmp/app/resources/LXGWWenKaiRegular.ttf"
         ));
+    }
+
+    #[test]
+    fn recognizes_logical_widgets_resource_paths() {
+        for path in [
+            "crate://makepad_widgets/resources/LXGWWenKaiRegular.ttf",
+            "crate://makepad_widgets/resources/LXGWWenKaiBold.ttf",
+            "crate://makepad_widgets/resources/NotoColorEmoji.ttf",
+        ] {
+            assert!(is_wasm_widgets_resources_path(path), "{path}");
+        }
     }
 
     #[test]
@@ -499,6 +503,73 @@ mod tests {
         assert_eq!(
             web_resource_base_path("/examples/splash/index.html"),
             "examples/splash"
+        );
+    }
+
+    #[test]
+    fn wasm_self_resource_uses_the_module_crate() {
+        assert_eq!(
+            wasm_resource_crate_name("self", "makepad_widgets::theme"),
+            Some("makepad_widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn wasm_explicit_resource_uses_the_named_crate() {
+        assert_eq!(
+            wasm_resource_crate_name("makepad-widgets", "ignored::module"),
+            Some("makepad_widgets".to_string())
+        );
+    }
+
+    #[test]
+    fn wasm_resource_identity_is_logical_and_crate_relative() {
+        assert_eq!(
+            wasm_crate_resource_identity(
+                "makepad_widgets",
+                r"draw\..\resources/./IBMPlexSans-Text.ttf",
+            ),
+            Some((
+                "crate://makepad_widgets/resources/IBMPlexSans-Text.ttf".to_string(),
+                "makepad_widgets/resources/IBMPlexSans-Text.ttf".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn wasm_resource_identity_rejects_invalid_crates_and_escape() {
+        for crate_name in [
+            "",
+            ".",
+            "..",
+            "makepad/widgets",
+            "makepad\\widgets",
+            "makepad widgets",
+            "makepad?widgets",
+            "makepad#widgets",
+            "makepad%widgets",
+        ] {
+            assert_eq!(
+                wasm_crate_resource_identity(crate_name, "resources/font.ttf"),
+                None,
+                "{crate_name:?}"
+            );
+        }
+        assert_eq!(
+            wasm_crate_resource_identity("makepad_widgets", "../../widgets/resources/font.ttf"),
+            None
+        );
+        assert_eq!(
+            wasm_crate_resource_identity("makepad_widgets", ""),
+            None
+        );
+    }
+
+    #[test]
+    fn wasm_file_resource_error_points_to_portable_apis() {
+        assert_eq!(
+            WASM_FILE_RESOURCE_ERROR,
+            "res.file is unavailable on wasm; use res.crate or res.http_resource"
         );
     }
 }
@@ -569,84 +640,51 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
     Some(stack.join("/"))
 }
 
-#[cfg(target_arch = "wasm32")]
-fn normalize_path(path: &Path) -> Option<PathBuf> {
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            std::path::Component::RootDir => out.push(comp.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !out.pop() {
-                    return None;
-                }
-            }
-            std::path::Component::Normal(part) => out.push(part),
-        }
+#[cfg(any(target_arch = "wasm32", test))]
+fn wasm_normalize_resource_crate_name(crate_name: &str) -> Option<String> {
+    if crate_name.is_empty()
+        || !crate_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
     }
-    Some(out)
+    Some(crate_name.replace('-', "_"))
 }
 
-#[cfg(target_arch = "wasm32")]
-fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
-    normalize_dependency_file_path(&path.to_string_lossy().replace('\\', "/"))
+#[cfg(any(target_arch = "wasm32", test))]
+fn wasm_resource_crate_name(crate_part: &str, module_path: &str) -> Option<String> {
+    let crate_name = if crate_part == "self" {
+        module_path.split("::").next()?
+    } else {
+        crate_part
+    };
+    wasm_normalize_resource_crate_name(crate_name)
 }
 
-#[cfg(target_arch = "wasm32")]
-fn resolve_dependency_path_from_manifests(
-    abs_path: &str,
-    default_crate_name: Option<&str>,
-    default_manifest_path: Option<&str>,
-    manifests: &HashMap<String, String>,
-) -> Option<String> {
-    let abs_norm = normalize_path(Path::new(abs_path))?;
-    let mut best: Option<(usize, String)> = None;
-
-    let mut candidates = Vec::<(String, String)>::new();
-    if let (Some(crate_name), Some(manifest_path)) = (default_crate_name, default_manifest_path) {
-        candidates.push((crate_name.to_string(), manifest_path.to_string()));
+#[cfg(any(target_arch = "wasm32", test))]
+fn wasm_crate_resource_identity(crate_name: &str, file_path: &str) -> Option<(String, String)> {
+    let crate_name = wasm_normalize_resource_crate_name(crate_name)?;
+    let file_path = normalize_dependency_file_path(strip_crate_resource_leading_slashes(file_path))?;
+    if file_path.is_empty() {
+        return None;
     }
-    for (crate_name, manifest_path) in manifests {
-        candidates.push((crate_name.clone(), manifest_path.clone()));
-    }
-
-    for (crate_name, manifest_path) in candidates {
-        let Some(manifest_norm) = normalize_path(Path::new(&manifest_path)) else {
-            continue;
-        };
-        let Ok(rel) = abs_norm.strip_prefix(&manifest_norm) else {
-            continue;
-        };
-        let Some(rel_norm) = normalize_manifest_relative_path(rel) else {
-            continue;
-        };
-        let dep_path = format!("{}/{}", crate_name, rel_norm);
-        let manifest_len = manifest_norm.to_string_lossy().len();
-        match &best {
-            Some((best_len, _)) if *best_len >= manifest_len => {}
-            _ => best = Some((manifest_len, dep_path)),
-        }
-    }
-
-    best.map(|(_, dep_path)| dep_path)
+    let dependency_path = format!("{crate_name}/{file_path}");
+    Some((format!("crate://{dependency_path}"), dependency_path))
 }
 
 // ---------------------------------------------------------------------------
 // Crate resource path resolution (wasm vs native)
 // ---------------------------------------------------------------------------
 
-/// On wasm, resolve crate resource paths and compute the web_url for HTTP fetching.
-/// The abs_path uses normalized Path joining to handle .. segments correctly.
+/// On wasm, resolve crate resource paths to logical crate-relative identities.
 #[cfg(target_arch = "wasm32")]
 fn resolve_crate_resource_paths(
     vm: &mut ScriptVm,
     crate_part: &str,
     file_path: &str,
 ) -> Option<(String, Option<String>, Option<String>)> {
-    let file_path = strip_crate_resource_leading_slashes(file_path);
-    let manifests = vm.bx.code.crate_manifests.borrow().clone();
-    let (abs_path, default_crate_name, default_manifest_path) = if crate_part == "self" {
+    let module_path = if crate_part == "self" {
         let bodies = vm.bx.code.bodies.borrow();
         let body_id = vm.thread().trap.ip.body as usize;
         let body = bodies.get(body_id)?;
@@ -654,55 +692,13 @@ fn resolve_crate_resource_paths(
             ScriptSource::Mod(script_mod) => script_mod,
             _ => return None,
         };
-        let abs_path = normalize_path(&Path::new(&script_mod.cargo_manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|| {
-                let mut fallback = script_mod.cargo_manifest_path.clone();
-                fallback.push('/');
-                fallback.push_str(file_path);
-                fallback
-            });
-        let crate_name = script_mod
-            .module_path
-            .split("::")
-            .next()
-            .unwrap_or("")
-            .replace('-', "_");
-        (
-            abs_path,
-            Some(crate_name),
-            Some(script_mod.cargo_manifest_path.clone()),
-        )
+        script_mod.module_path.clone()
     } else {
-        let crate_name = crate_part.replace('-', "_");
-        let manifest_path = manifests.get(&crate_name)?.clone();
-        let abs_path = normalize_path(&Path::new(&manifest_path).join(file_path))
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|| {
-                let mut fallback = manifest_path.clone();
-                fallback.push('/');
-                fallback.push_str(file_path);
-                fallback
-            });
-        (abs_path, Some(crate_name), Some(manifest_path))
+        String::new()
     };
-
-    let dependency_path = resolve_dependency_path_from_manifests(
-        &abs_path,
-        default_crate_name.as_deref(),
-        default_manifest_path.as_deref(),
-        &manifests,
-    );
-    let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
-    if web_url.is_none() {
-        crate::log!(
-            "crate_resource_unmapped crate_part={} file_path={} abs_path={}",
-            crate_part,
-            file_path,
-            abs_path
-        );
-    }
-    Some((abs_path, dependency_path, web_url))
+    let crate_name = wasm_resource_crate_name(crate_part, &module_path)?;
+    let (logical_key, dependency_path) = wasm_crate_resource_identity(&crate_name, file_path)?;
+    Some((logical_key, Some(dependency_path), None))
 }
 
 /// On native platforms, resolve crate resource paths.
@@ -829,36 +825,45 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(file_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
-            let path = script_value!(vm, args.path);
-            if !path.is_string_like() {
-                return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = args;
+                return script_err_type_mismatch!(vm.trap(), "{}", WASM_FILE_RESOURCE_ERROR);
             }
 
-            if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
-                let cx = vm.host.cx_mut();
-                if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&abs_path) {
-                    return existing.into();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = script_value!(vm, args.path);
+                if !path.is_string_like() {
+                    return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
                 }
 
-                let handle_gc = CxScriptResourceGc {
-                    resources: cx.script_data.resources.resources.clone(),
-                    handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
-                    handle: ScriptHandle::ZERO,
-                };
-                let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+                if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
+                    let cx = vm.host.cx_mut();
+                    if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&abs_path) {
+                        return existing.into();
+                    }
 
-                cx.script_data.resources.insert_resource(CxScriptResource {
-                    abs_path,
-                    dependency_path: None,
-                    web_url: None,
-                    data: CxScriptResourceData::NotLoaded,
-                    handle,
-                });
+                    let handle_gc = CxScriptResourceGc {
+                        resources: cx.script_data.resources.resources.clone(),
+                        handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
+                        handle: ScriptHandle::ZERO,
+                    };
+                    let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
-                return handle.into();
+                    cx.script_data.resources.insert_resource(CxScriptResource {
+                        abs_path,
+                        dependency_path: None,
+                        web_url: None,
+                        data: CxScriptResourceData::NotLoaded,
+                        handle,
+                    });
+
+                    return handle.into();
+                }
+
+                script_err_type_mismatch!(vm.trap(), "invalid res arg type")
             }
-
-            script_err_type_mismatch!(vm.trap(), "invalid res arg type")
         },
     );
 
