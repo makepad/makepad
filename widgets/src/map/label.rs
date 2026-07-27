@@ -34,6 +34,7 @@ pub const LABEL_CLASS_AMENITY: u8 = 1;
 pub const LABEL_CLASS_SHOP: u8 = 2;
 pub const LABEL_CLASS_CULTURE: u8 = 3;
 pub const LABEL_CLASS_MUTED: u8 = 4;
+pub const LABEL_CLASS_HEALTH: u8 = 5;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -120,6 +121,19 @@ pub fn extract_way_label(
     })
 }
 
+/// Solid label-class colors (light theme values), for geometry like icons
+/// that bakes the color into vertices.
+pub fn poi_class_hex(color_class: u8) -> u32 {
+    match color_class {
+        LABEL_CLASS_AMENITY => 0xc77400,
+        LABEL_CLASS_SHOP => 0xac39ac,
+        LABEL_CLASS_CULTURE => 0x734a08,
+        LABEL_CLASS_MUTED => 0x66768d,
+        LABEL_CLASS_HEALTH => 0xbf0000,
+        _ => 0x444444,
+    }
+}
+
 /// Carto-style POI color grouping from shortbread poi attributes.
 pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
     if tags.contains_key("shop") {
@@ -131,6 +145,9 @@ pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
             | "ice_cream" | "nightclub" => LABEL_CLASS_AMENITY,
             "theatre" | "cinema" | "arts_centre" | "library" | "museum" | "place_of_worship" => {
                 LABEL_CLASS_CULTURE
+            }
+            "pharmacy" | "doctors" | "dentist" | "clinic" | "hospital" | "veterinary" => {
+                LABEL_CLASS_HEALTH
             }
             _ => LABEL_CLASS_DEFAULT,
         };
