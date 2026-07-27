@@ -16,3 +16,4 @@ pub mod geo;
 pub mod graph;
 pub mod nav;
 pub mod search;
+pub mod searchdb;
