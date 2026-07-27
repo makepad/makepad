@@ -5,7 +5,7 @@ use super::style::*;
 use super::tile::*;
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
-    PathGlyphInstance, PathTextPlacement, WidgetMatchEvent,
+    PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -241,6 +241,10 @@ script_mod! {
 /// (~0.3s at 60fps).
 const ZOOM_SETTLE_FRAMES: u64 = 18;
 
+/// Accumulated pan (screen px) before labels are re-placed; must stay under
+/// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
+const LABEL_REPLACE_PAN_PX: f64 = 48.0;
+
 // --- Draw shaders ---
 
 #[derive(Script, ScriptHook, Debug)]
@@ -398,6 +402,25 @@ pub struct MapView {
     // the gesture settles so widths don't flicker mid-zoom.
     #[rust]
     last_zoom_change_frame: u64,
+    // Label placement cache: while panning at the same zoom over the same
+    // tiles, last placement's glyphs are redrawn shifted by the pan delta
+    // instead of re-scanning/re-shaping/re-colliding thousands of labels.
+    #[rust]
+    label_cache_valid: bool,
+    #[rust]
+    label_cache_offset: Vec2d,
+    #[rust]
+    label_cache_zoom: f64,
+    #[rust]
+    label_cache_tiles: Vec<TileKey>,
+    #[rust]
+    label_cache_generation: u64,
+    #[rust]
+    tiles_generation: u64,
+    // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
+    // shaping dominates label placement cost.
+    #[rust]
+    shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
     #[rust]
     scratch_screen_path: Vec<Vec2d>,
     #[rust]
@@ -737,6 +760,8 @@ impl MapView {
         self.tiles.clear();
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
+        self.tiles_generation = self.tiles_generation.wrapping_add(1);
+        self.label_cache_valid = false;
     }
 
     fn apply_theme_palette(&mut self) {
@@ -806,6 +831,7 @@ impl MapView {
                 bucket: buffers.render_zoom,
             },
         );
+        self.tiles_generation = self.tiles_generation.wrapping_add(1);
     }
 
     fn handle_tile_worker_messages(&mut self, cx: &mut Cx) {
@@ -1361,9 +1387,31 @@ impl MapView {
         map_offset: Vec2d,
         rect: Rect,
     ) {
+        // Pan-only frames: redraw the cached placement shifted by the pan
+        // delta instead of re-scanning/re-shaping/re-colliding every label.
+        let pan_delta = map_offset - self.label_cache_offset;
+        if self.label_cache_valid
+            && self.label_cache_zoom == view_zoom
+            && self.label_cache_generation == self.tiles_generation
+            && self.label_cache_tiles.as_slice() == draw_tiles
+            && pan_delta.x.abs().max(pan_delta.y.abs()) < LABEL_REPLACE_PAN_PX
+        {
+            self.draw_label_plans(
+                cx,
+                Vec2f {
+                    x: pan_delta.x as f32,
+                    y: pan_delta.y as f32,
+                },
+            );
+            return;
+        }
+
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
         if self.scratch_candidates.is_empty() {
+            self.path_glyphs.clear();
+            self.scratch_accepted_plans.clear();
+            self.store_label_cache(draw_tiles, view_zoom, map_offset);
             self.label_perf = label_perf;
             return;
         }
@@ -1474,11 +1522,15 @@ impl MapView {
 
         self.scratch_accepted_plans
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        let dark_theme = self.dark_theme;
-        let (label_color, halo_color) = {
-            let style = self.active_style();
-            (style.label, style.label_halo)
-        };
+        self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
+        self.store_label_cache(draw_tiles, view_zoom, map_offset);
+        self.label_perf = label_perf;
+    }
+
+    /// Draw the current accepted label plans (halo underdraw + colored text)
+    /// as one glyph instance batch, optionally shifted by a screen offset
+    /// (used to redraw the cached placement while panning).
+    fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
         const HALO_OFFSETS: [(f32, f32); 8] = [
             (-1.0, 0.0),
             (1.0, 0.0),
@@ -1489,6 +1541,12 @@ impl MapView {
             (-0.7, 0.7),
             (0.7, 0.7),
         ];
+        let dark_theme = self.dark_theme;
+        let (label_color, halo_color) = {
+            let style = self.active_style();
+            (style.label, style.label_halo)
+        };
+        self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
             let (_, start, end, color_class) = self.scratch_accepted_plans[i];
             self.draw_label.draw_super.color = halo_color;
@@ -1497,17 +1555,26 @@ impl MapView {
                     cx,
                     &self.path_glyphs[start..end],
                     Vec2f {
-                        x: offset.0,
-                        y: offset.1,
+                        x: offset.0 + extra_offset.x,
+                        y: offset.1 + extra_offset.y,
                     },
                 );
             }
             self.draw_label.draw_super.color =
                 label_class_color(color_class, label_color, dark_theme);
             self.draw_label
-                .draw_path_glyphs(cx, &self.path_glyphs[start..end]);
+                .draw_path_glyphs_offset(cx, &self.path_glyphs[start..end], extra_offset);
         }
-        self.label_perf = label_perf;
+        self.draw_label.end_glyph_batch(cx);
+    }
+
+    fn store_label_cache(&mut self, draw_tiles: &[TileKey], view_zoom: f64, map_offset: Vec2d) {
+        self.label_cache_valid = true;
+        self.label_cache_offset = map_offset;
+        self.label_cache_zoom = view_zoom;
+        self.label_cache_tiles.clear();
+        self.label_cache_tiles.extend_from_slice(draw_tiles);
+        self.label_cache_generation = self.tiles_generation;
     }
 
     fn collect_label_candidates(
@@ -1622,6 +1689,8 @@ impl MapView {
                 } else if is_poi {
                     font_scale = 0.72;
                 }
+                // quantize so the shaped-run cache hits during continuous zoom
+                font_scale = (font_scale * 32.0).round() / 32.0;
 
                 let mut score = source_rank as f64 * 1000.0
                     + (4_u8.saturating_sub(label.priority) as f64) * 120.0
@@ -1701,13 +1770,31 @@ impl MapView {
             return None;
         }
 
-        self.draw_label.draw_super.font_scale = candidate.font_scale;
-        let run = self
-            .draw_label
-            .draw_super
-            .prepare_single_line_run(cx, candidate.text.as_str());
-        let run = match run {
-            Some(r) if !r.glyphs.is_empty() => r,
+        // Shaping dominates placement cost; cache runs by (text, font_scale).
+        let run_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            candidate.text.hash(&mut hasher);
+            (
+                hasher.finish(),
+                candidate.text.len() as u32,
+                candidate.font_scale.to_bits(),
+            )
+        };
+        if !self.shaped_runs.contains_key(&run_key) {
+            if self.shaped_runs.len() > 4096 {
+                self.shaped_runs.clear();
+            }
+            self.draw_label.draw_super.font_scale = candidate.font_scale;
+            let shaped = self
+                .draw_label
+                .draw_super
+                .prepare_single_line_run(cx, candidate.text.as_str())
+                .filter(|run| !run.glyphs.is_empty());
+            self.shaped_runs.insert(run_key, shaped);
+        }
+        let run = match self.shaped_runs.get(&run_key) {
+            Some(Some(run)) => run.clone(),
             _ => {
                 self.scratch_smooth_a = smooth_a;
                 self.scratch_smooth_b = smooth_b;
