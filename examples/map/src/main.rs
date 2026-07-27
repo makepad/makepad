@@ -23,6 +23,9 @@ use std::sync::mpsc;
 app_main!(App);
 
 const NAV_DATA_BASENAME: &str = "local/maps/noord-holland";
+/// Continent-wide settlement index (cities/towns/villages) merged into
+/// search so any European place is a fly-to target.
+const EUROPE_PLACES_PATH: &str = "local/maps/europe-places.search";
 /// Simulated drive runs this much faster than real time.
 const SIM_SPEED_MULT: f64 = 6.0;
 const MAX_RESULTS: usize = 8;
@@ -393,11 +396,42 @@ impl App {
                     return;
                 }
             };
+            let places_index = std::fs::read(EUROPE_PLACES_PATH)
+                .ok()
+                .and_then(|data| SearchIndex::deserialize(&data).ok());
             while let Ok(request) = rx.recv() {
                 match request {
                     NavRequest::Search { id, query, near } => {
-                        let results = index.query(&query, near, MAX_RESULTS);
-                        let _ = sender.send(NavResponse::SearchDone { id, results });
+                        let mut results = index.query(&query, near, MAX_RESULTS);
+                        if let Some(places) = &places_index {
+                            results.extend(places.query(&query, near, MAX_RESULTS));
+                        }
+                        // Merge the regional and continental hits: best score
+                        // first, drop same-name near-duplicates (cities live
+                        // in both indexes).
+                        results.sort_by(|a, b| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let mut merged: Vec<SearchResult> = Vec::new();
+                        for result in results {
+                            let duplicate = merged.iter().any(|kept| {
+                                kept.name.eq_ignore_ascii_case(&result.name)
+                                    && makepad_map_nav::geo::haversine_m(kept.pos, result.pos)
+                                        < 2_000.0
+                            });
+                            if !duplicate {
+                                merged.push(result);
+                            }
+                            if merged.len() >= MAX_RESULTS {
+                                break;
+                            }
+                        }
+                        let _ = sender.send(NavResponse::SearchDone {
+                            id,
+                            results: merged,
+                        });
                     }
                     NavRequest::Route { id, from, to, mode } => {
                         let route = graph.route(from, to, mode);
