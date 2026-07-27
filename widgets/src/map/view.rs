@@ -239,11 +239,19 @@ script_mod! {
 
 /// Frames after the last zoom change before stale-bucket tiles restyle
 /// (~0.3s at 60fps).
-const ZOOM_SETTLE_FRAMES: u64 = 18;
+const ZOOM_SETTLE_FRAMES: u64 = 10;
 
 /// Accumulated pan (screen px) before labels are re-placed; must stay under
 /// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
 const LABEL_REPLACE_PAN_PX: f64 = 48.0;
+/// Minimum frames between full label re-placements while the cached
+/// placement is still usable (a full place costs up to ~20ms — 2-3 dropped
+/// frames at 120Hz — and tile arrivals during panning invalidated the cache
+/// almost every other frame).
+const LABEL_REPLACE_MIN_FRAMES: u64 = 15;
+/// Hard time budget for one placement pass; labels that don't make it are
+/// picked up by the next re-place.
+const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
 
 // --- Draw shaders ---
 
@@ -417,6 +425,8 @@ pub struct MapView {
     label_cache_generation: u64,
     #[rust]
     tiles_generation: u64,
+    #[rust]
+    last_full_place_frame: u64,
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
@@ -445,6 +455,12 @@ pub struct MapView {
     perf_last_frame: Option<std::time::Instant>,
     #[rust]
     perf_ms_gap_max: f64,
+    #[rust]
+    perf_gap_sum: f64,
+    #[rust]
+    perf_gap_count: u32,
+    #[rust]
+    perf_gaps_over_12ms: u32,
     #[rust]
     scratch_screen_path: Vec<Vec2d>,
     #[rust]
@@ -554,9 +570,16 @@ impl Widget for MapView {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let perf_start = std::time::Instant::now();
         if let Some(last_frame) = self.perf_last_frame {
-            self.perf_ms_gap_max = self
-                .perf_ms_gap_max
-                .max(last_frame.elapsed().as_secs_f64() * 1000.0);
+            let gap_ms = last_frame.elapsed().as_secs_f64() * 1000.0;
+            self.perf_ms_gap_max = self.perf_ms_gap_max.max(gap_ms);
+            // only count gaps from continuous animation, not idle pauses
+            if gap_ms < 100.0 {
+                self.perf_gap_sum += gap_ms;
+                self.perf_gap_count += 1;
+                if gap_ms > 12.0 {
+                    self.perf_gaps_over_12ms += 1;
+                }
+            }
         }
         self.perf_last_frame = Some(perf_start);
 
@@ -668,15 +691,23 @@ impl Widget for MapView {
                 .open("local/map_perf.log")
             {
                 let frames = self.perf_frames as f64;
+                let gap_avg = if self.perf_gap_count > 0 {
+                    self.perf_gap_sum / self.perf_gap_count as f64
+                } else {
+                    0.0
+                };
                 let _ = writeln!(
                     file,
-                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} max_ms:{:.2} gap_max_ms:{:.2} full_places:{} glyphs:{} z:{:.2}",
+                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} max_ms:{:.2} gap_avg_ms:{:.2} gap_max_ms:{:.2} gaps>12ms:{}/{} full_places:{} glyphs:{} z:{:.2}",
                     self.perf_frames,
                     self.perf_ms_total / frames,
                     self.perf_ms_geo / frames,
                     self.perf_ms_labels / frames,
                     self.perf_ms_max,
+                    gap_avg,
                     self.perf_ms_gap_max,
+                    self.perf_gaps_over_12ms,
+                    self.perf_gap_count,
                     self.perf_label_full_places,
                     self.label_perf.drawn_glyphs,
                     view_zoom,
@@ -688,6 +719,9 @@ impl Widget for MapView {
             self.perf_ms_labels = 0.0;
             self.perf_ms_max = 0.0;
             self.perf_ms_gap_max = 0.0;
+            self.perf_gap_sum = 0.0;
+            self.perf_gap_count = 0;
+            self.perf_gaps_over_12ms = 0;
             self.perf_label_full_places = 0;
         }
 
@@ -1503,12 +1537,24 @@ impl MapView {
         // Pan-only frames: redraw the cached placement shifted by the pan
         // delta instead of re-scanning/re-shaping/re-colliding every label.
         let pan_delta = map_offset - self.label_cache_offset;
-        if self.label_cache_valid
+        let pan_dist = pan_delta.x.abs().max(pan_delta.y.abs());
+        let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
-            && pan_delta.x.abs().max(pan_delta.y.abs()) < LABEL_REPLACE_PAN_PX
-        {
+            && pan_dist < LABEL_REPLACE_PAN_PX;
+        // Softly-stale cache is still fine to show briefly; rate-limit the
+        // expensive full re-place. This covers active zooming too — labels
+        // stay pinned in screen space for up to ~125ms during the gesture
+        // (pinch behavior a la Google Maps) instead of re-placing every
+        // frame, which was 5-20ms/frame at label-dense zooms.
+        let cache_soft = self.label_cache_valid
+            && (self.label_cache_zoom - view_zoom).abs() < 0.5
+            && self
+                .frame_counter
+                .saturating_sub(self.last_full_place_frame)
+                < LABEL_REPLACE_MIN_FRAMES;
+        if cache_strict || cache_soft {
             self.draw_label_plans(
                 cx,
                 Vec2f {
@@ -1518,6 +1564,7 @@ impl MapView {
             );
             return false;
         }
+        self.last_full_place_frame = self.frame_counter;
 
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
@@ -1549,7 +1596,13 @@ impl MapView {
         self.scratch_accepted_bounds.clear();
         self.scratch_accepted_plans.clear();
 
+        let place_start = std::time::Instant::now();
         for candidate_index in 0..self.scratch_candidates.len() {
+            if place_start.elapsed().as_secs_f64() * 1000.0 > LABEL_PLACE_BUDGET_MS {
+                label_perf.rejected_budget +=
+                    label_perf.candidates_kept.saturating_sub(candidate_index);
+                break;
+            }
             let candidate = &self.scratch_candidates[candidate_index];
             let close_repeat = self
                 .scratch_accepted_centers

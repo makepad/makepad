@@ -24,7 +24,10 @@ pub const TILE_QUERY_PAD: f64 = 0.05;
 pub const LOCAL_MBTILES_PATH: &str = "noord-holland-shortbread-1.0.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
-pub const MAX_LOCAL_TILE_BATCH: usize = 10;
+// One tile per worker job: a batch runs sequentially inside one closure, so
+// 10-tile batches took 2-3s to restyle after a zoom while single-tile jobs
+// spread across the thread pool.
+pub const MAX_LOCAL_TILE_BATCH: usize = 1;
 // Stroke clip padding must stay below the MVT generator's tile buffer (~4
 // world px) so cross-boundary ways are cut by OUR clip (detectable, butt-
 // capped) rather than ending mid-buffer with a rogue round cap.
