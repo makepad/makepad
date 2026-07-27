@@ -778,7 +778,7 @@ pub fn append_stroke_pass(
                 color: hex_to_premul_rgba(pass.color, 1.0),
                 stroke_mult,
                 shape_id: pass.shape_id,
-                params: [0.0; 6],
+                params: [0.0, 0.0, 0.0, 0.0, 0.0, pass.depth_micro],
                 zbias: *stroke_zbias,
             },
             pass.expand_class,
