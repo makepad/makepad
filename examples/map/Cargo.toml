@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
 makepad-map-nav = { path = "../../libs/map_nav" }
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }

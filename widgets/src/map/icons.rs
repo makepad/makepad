@@ -78,7 +78,7 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         }
         // Trees render as plain canopy discs (carto draws them as circles,
         // not glyphs).
-        if let Some(mesh) = build_disc_mesh(4.4) {
+        if let Some(mesh) = build_disc_mesh(3.4) {
             out.insert("tree", mesh);
         }
         out

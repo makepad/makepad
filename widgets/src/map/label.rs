@@ -43,6 +43,8 @@ pub const LABEL_CLASS_GREEN: u8 = 6;
 pub const LABEL_CLASS_TRANSPORT: u8 = 7;
 /// Tree canopy green discs.
 pub const LABEL_CLASS_TREE: u8 = 8;
+/// Water body / waterway names (steel blue, carto-style).
+pub const LABEL_CLASS_WATER: u8 = 9;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -105,10 +107,28 @@ pub fn extract_way_label(
     if points.len() < 2 {
         return None;
     }
+    let source_layer = tags.get("layer").cloned().unwrap_or_default();
+    // Waterway names follow their line like street names do.
+    if source_layer == "water_lines_labels" {
+        let name = select_label_text(tags)?;
+        let path_points = simplify_label_path(points);
+        if path_points.len() < 2 {
+            return None;
+        }
+        return Some(TileLabel {
+            text: name,
+            priority: 3,
+            source_layer,
+            road_kind: "waterway".to_string(),
+            color_class: LABEL_CLASS_WATER,
+            path_points,
+            name_key: String::new(),
+            bbox: (0.0, 0.0, 0.0, 0.0),
+        });
+    }
     if !tags.contains_key("highway") {
         return None;
     }
-    let source_layer = tags.get("layer").cloned().unwrap_or_default();
     if is_road_polygon_layer(&source_layer) {
         return None;
     }
@@ -149,6 +169,7 @@ pub fn poi_class_hex(color_class: u8) -> u32 {
         LABEL_CLASS_GREEN => 0x267d3f,
         LABEL_CLASS_TRANSPORT => 0x0092da,
         LABEL_CLASS_TREE => 0x69a05f,
+        LABEL_CLASS_WATER => 0x39688f,
         _ => 0x444444,
     }
 }
@@ -219,6 +240,21 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 // unique per point so per-tile compaction keeps every number
                 road_kind: format!("addr{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
                 color_class: LABEL_CLASS_MUTED,
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+        // Water body names (lakes, the IJ, canals-as-polygons) come as
+        // centroid points in their own shortbread layer.
+        "water_polygons_labels" => {
+            let name = select_label_text(tags)?;
+            return Some(TileLabel {
+                text: name,
+                priority: 2,
+                source_layer,
+                road_kind: format!("water{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                color_class: LABEL_CLASS_WATER,
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
@@ -358,6 +394,9 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "street_labels" | "street_labels_points" => 7,
         "streets_polygons_labels" => 6,
         "transportation_name" => 6,
+        // Water names sit just under street names in prominence.
+        "water_polygons_labels" => 5,
+        "water_lines_labels" => 4,
         "pois" => 3,
         "green_area" => 3,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
@@ -619,9 +658,13 @@ pub fn choose_label_reverse(mid_angle: f32) -> bool {
     if cos.abs() > LABEL_VERTICAL_AXIS_EPSILON {
         cos < 0.0
     } else {
-        // Near vertical, keep a deterministic reading direction.
-        // Screen-space y grows downward; prefer bottom-to-top labels.
-        sin < 0.0
+        // Near vertical, keep a deterministic reading direction: bottom-to-
+        // top (carto convention). Screen-space y grows downward, so the
+        // final advance direction must have sin < 0; a downward-pointing
+        // tangent (sin > 0) needs the flip. The previous `sin < 0.0` was
+        // inverted and rendered near-vertical words top-to-bottom — read
+        // "upside down" once camera rotation swept streets through vertical.
+        sin > 0.0
     }
 }
 

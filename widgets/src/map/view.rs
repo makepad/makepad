@@ -183,6 +183,9 @@ script_mod! {
             if self.v_shape_id > 10.5 && self.v_shape_id < 11.5 {
                 return self.dash(2.0, 3.0)
             }
+            if self.v_shape_id > 11.5 && self.v_shape_id < 12.5 {
+                return self.dash(7.0, 5.0)
+            }
             return 1.0
         }
     }
@@ -3196,6 +3199,8 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_MUTED, true) => Vec4f::from_u32(0x8899aaff),
         (LABEL_CLASS_HEALTH, true) => Vec4f::from_u32(0xe06666ff),
         (LABEL_CLASS_GREEN, true) => Vec4f::from_u32(0x7fc98fff),
+        (LABEL_CLASS_WATER, false) => Vec4f::from_u32(0x39688fff),
+        (LABEL_CLASS_WATER, true) => Vec4f::from_u32(0x7fb2d9ff),
         _ => default_color,
     }
 }

@@ -13,6 +13,9 @@
 
 pub use makepad_widgets;
 
+pub mod dem;
+pub mod elev_graph;
+
 use makepad_map_nav::geo::{bearing_deg, bearing_delta_deg, LonLat};
 use makepad_map_nav::graph::{Route, RouteGraph, TravelMode};
 use makepad_map_nav::nav::{NavSession, NavState};
@@ -26,12 +29,14 @@ const NAV_DATA_BASENAME: &str = "local/maps/noord-holland";
 /// Continent-wide settlement index (cities/towns/villages) merged into
 /// search so any European place is a fly-to target.
 const EUROPE_PLACES_PATH: &str = "local/maps/europe-places.search";
+const EUROPE_SEARCHDB_PATH: &str = "local/maps/europe.searchdb";
 /// Simulated drive runs this much faster than real time.
 const SIM_SPEED_MULT: f64 = 6.0;
 const MAX_RESULTS: usize = 8;
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.widgets.*
 
     let ResultButton = ButtonFlat{
         width: Fill
@@ -168,6 +173,9 @@ script_mod! {
                             }
                         }
 
+                        // --- Route elevation profile (self-pinned above the route bar) ---
+                        elevation_graph := ElevationGraph{}
+
                         // --- Route / nav bar (bottom-center) ---
                         View{
                             width: Fill
@@ -271,6 +279,10 @@ enum NavRequest {
         to: LonLat,
         mode: TravelMode,
     },
+    Elevation {
+        id: u64,
+        points: Vec<LonLat>,
+    },
 }
 
 enum NavResponse {
@@ -288,6 +300,10 @@ enum NavResponse {
     RouteDone {
         id: u64,
         route: Box<Option<Route>>,
+    },
+    ElevationDone {
+        id: u64,
+        profile: Box<Option<dem::ElevationProfile>>,
     },
 }
 
@@ -351,6 +367,8 @@ pub struct App {
     sim_started: Option<std::time::Instant>,
     #[rust]
     mode: TravelMode,
+    #[rust]
+    active_elevation_id: u64,
 }
 
 impl App {
@@ -396,14 +414,31 @@ impl App {
                     return;
                 }
             };
-            let places_index = std::fs::read(EUROPE_PLACES_PATH)
-                .ok()
-                .and_then(|data| SearchIndex::deserialize(&data).ok());
+            // The disk-backed all-of-Europe database supersedes the
+            // settlements-only places index when it exists on disk.
+            let searchdb = makepad_map_nav::searchdb::SearchDb::open(
+                std::path::Path::new(EUROPE_SEARCHDB_PATH),
+            )
+            .ok();
+            let places_index = if searchdb.is_some() {
+                None
+            } else {
+                std::fs::read(EUROPE_PLACES_PATH)
+                    .ok()
+                    .and_then(|data| SearchIndex::deserialize(&data).ok())
+            };
+            let dem_cache = std::sync::Arc::new(std::sync::Mutex::new(dem::DemCache::new(
+                "local/maps/dem",
+            )));
             while let Ok(request) = rx.recv() {
                 match request {
                     NavRequest::Search { id, query, near } => {
                         let mut results = index.query(&query, near, MAX_RESULTS);
-                        if let Some(places) = &places_index {
+                        if let Some(db) = &searchdb {
+                            if let Ok(more) = db.query(&query, near, MAX_RESULTS) {
+                                results.extend(more);
+                            }
+                        } else if let Some(places) = &places_index {
                             results.extend(places.query(&query, near, MAX_RESULTS));
                         }
                         // Merge the regional and continental hits: best score
@@ -438,6 +473,20 @@ impl App {
                         let _ = sender.send(NavResponse::RouteDone {
                             id,
                             route: Box::new(route),
+                        });
+                    }
+                    NavRequest::Elevation { id, points } => {
+                        // Own thread: the first request may download DEM
+                        // tiles and must not stall search/route requests.
+                        let dem_cache = dem_cache.clone();
+                        let sender = sender.clone();
+                        std::thread::spawn(move || {
+                            let mut cache = dem_cache.lock().unwrap();
+                            let profile = dem::route_profile(&mut cache, &points, 200);
+                            let _ = sender.send(NavResponse::ElevationDone {
+                                id,
+                                profile: Box::new(profile),
+                            });
                         });
                     }
                 }
@@ -600,6 +649,14 @@ impl App {
             self.session = Some(NavSession::new(route.clone()));
             self.sim_progress_m = 0.0;
         }
+        let id = self.request_id();
+        self.active_elevation_id = id;
+        if let Some(tx) = &self.nav_tx {
+            let _ = tx.send(NavRequest::Elevation {
+                id,
+                points: route.points.clone(),
+            });
+        }
         self.route = Some(route);
     }
 
@@ -637,6 +694,13 @@ impl App {
         map.set_markers(cx, Vec::new());
         self.ui.view(cx, ids!(banner)).set_visible(cx, false);
         self.ui.view(cx, ids!(route_bar)).set_visible(cx, false);
+        if let Some(mut graph) = self
+            .ui
+            .widget(cx, ids!(elevation_graph))
+            .borrow_mut::<crate::elev_graph::ElevationGraph>()
+        {
+            graph.set_profile(cx, None);
+        }
         self.ui.button(cx, ids!(go_button)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(recenter_button))
@@ -896,6 +960,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        crate::elev_graph::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -935,6 +1000,17 @@ impl AppMain for App {
                         match *route {
                             Some(route) => self.apply_route(cx, route),
                             None => self.set_status(cx, "No route found for this mode"),
+                        }
+                    }
+                }
+                NavResponse::ElevationDone { id, profile } => {
+                    if id == self.active_elevation_id && self.route.is_some() {
+                        if let Some(mut graph) = self
+                            .ui
+                            .widget(cx, ids!(elevation_graph))
+                            .borrow_mut::<crate::elev_graph::ElevationGraph>()
+                        {
+                            graph.set_profile(cx, *profile);
                         }
                     }
                 }

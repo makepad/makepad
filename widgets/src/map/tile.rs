@@ -1119,8 +1119,8 @@ fn build_tile_buffers_from_features(
 
     // Oneway arrows: zoom-constant glyphs spaced along the way, offsets
     // pre-rotated into the travel direction (carto-style).
-    let arrow_color = hex_to_premul_rgba(0x555555, 1.0);
-    let arrow_interval = 130.0 / render_scale;
+    let arrow_color = hex_to_premul_rgba(0x8a8a8a, 1.0);
+    let arrow_interval = 170.0 / render_scale;
     for (points, reverse) in &arrow_jobs {
         for part in build_polyline_parts(points, clip_bounds, false, 0.0) {
             let mut cumulative = Vec::<f32>::with_capacity(part.len());
@@ -1944,6 +1944,7 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
         // All-tag detail archive points pass through; the micro-POI
         // whitelist decides downstream what actually draws.
         "osm_points" => true,
+        "water_polygons_labels" => select_label_text(tags).is_some(),
         _ => {
             is_road_point_label_layer(layer)
                 && tags.contains_key("highway")
