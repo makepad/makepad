@@ -38,6 +38,7 @@ pub const LABEL_CLASS_SHOP: u8 = 2;
 pub const LABEL_CLASS_CULTURE: u8 = 3;
 pub const LABEL_CLASS_MUTED: u8 = 4;
 pub const LABEL_CLASS_HEALTH: u8 = 5;
+pub const LABEL_CLASS_GREEN: u8 = 6;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -141,6 +142,7 @@ pub fn poi_class_hex(color_class: u8) -> u32 {
         LABEL_CLASS_CULTURE => 0x734a08,
         LABEL_CLASS_MUTED => 0x66768d,
         LABEL_CLASS_HEALTH => 0xbf0000,
+        LABEL_CLASS_GREEN => 0x267d3f,
         _ => 0x444444,
     }
 }
@@ -167,6 +169,32 @@ pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
         return LABEL_CLASS_CULTURE;
     }
     LABEL_CLASS_DEFAULT
+}
+
+/// Name label for a named green area (park/garden), placed at its centroid.
+pub fn extract_area_label(
+    tags: &HashMap<String, String>,
+    centroid: (f32, f32),
+) -> Option<TileLabel> {
+    let is_green = tags.contains_key("leisure")
+        || matches!(
+            tags.get("landuse").map(|value| value.as_str()),
+            Some("grass" | "forest" | "meadow" | "village_green" | "recreation_ground" | "cemetery")
+        );
+    if !is_green {
+        return None;
+    }
+    let name = select_label_text(tags)?;
+    Some(TileLabel {
+        text: name,
+        priority: 3,
+        source_layer: "green_area".to_string(),
+        road_kind: format!("area{:.0}x{:.0}", centroid.0 * 4.0, centroid.1 * 4.0),
+        color_class: LABEL_CLASS_GREEN,
+        path_points: point_label_path(centroid),
+        name_key: String::new(),
+        bbox: (0.0, 0.0, 0.0, 0.0),
+    })
 }
 
 pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) -> Option<TileLabel> {
@@ -325,6 +353,7 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "streets_polygons_labels" => 6,
         "transportation_name" => 6,
         "pois" => 3,
+        "green_area" => 3,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
         | "public_transport" => 2,
         "addresses" => 1,
