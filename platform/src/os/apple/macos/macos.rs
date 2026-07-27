@@ -58,6 +58,11 @@ pub struct MetalWindow {
     pub ca_layer: ObjcId,
     pub cocoa_window: Box<MacosWindow>,
     pub is_resizing: bool,
+    /// Frames acquired but not yet on glass. Present-gated pacing skips a
+    /// paint beat instead of letting `nextDrawable` block the main thread
+    /// when the compositor consumes frames unevenly (mirrored/scaled
+    /// displays throttle in 10-25ms phases).
+    pub in_flight_presents: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl MetalWindow {
@@ -106,6 +111,7 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -152,6 +158,7 @@ impl MetalWindow {
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,
+            in_flight_presents: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -412,6 +419,19 @@ impl Cx {
                     {
                         //let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);
+                        // Present-gated pacing: with display sync on, a full
+                        // drawable pool makes nextDrawable BLOCK the main
+                        // thread until the compositor consumes a frame
+                        // (10-25ms phases on mirrored/scaled displays). If
+                        // two of the three pool drawables haven't reached
+                        // glass yet, skip this beat and keep the pass dirty —
+                        // the next timer beat retries with the pool drained
+                        // and event handling never stalls behind vsync.
+                        use std::sync::atomic::Ordering;
+                        if metal_window.in_flight_presents.load(Ordering::Acquire) >= 2 {
+                            self.repaint_pass(*draw_pass_id);
+                            continue;
+                        }
                         // PerfMonitor: a presented window frame starts here;
                         // nextDrawable is where vsync/pool pressure blocks
                         // the main thread, so it gets its own channel.
@@ -425,8 +445,25 @@ impl Cx {
                             wait_t0.elapsed().as_micros() as u64,
                         );
                         if drawable == nil {
+                            self.repaint_pass(*draw_pass_id);
                             return;
                         }
+                        metal_window
+                            .in_flight_presents
+                            .fetch_add(1, Ordering::AcqRel);
+                        let in_flight = metal_window.in_flight_presents.clone();
+                        let () = unsafe {
+                            msg_send![
+                                drawable,
+                                addPresentedHandler: &objc_block!(move | _drawable: ObjcId | {
+                                    let _ = in_flight.fetch_update(
+                                        std::sync::atomic::Ordering::AcqRel,
+                                        std::sync::atomic::Ordering::Acquire,
+                                        |count| Some(count.saturating_sub(1)),
+                                    );
+                                })
+                            ]
+                        };
                         self.passes[*draw_pass_id].set_time(time_now);
                         if metal_window.is_resizing {
                             self.draw_pass(
