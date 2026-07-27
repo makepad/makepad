@@ -1,9 +1,10 @@
 use super::geometry::*;
+use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
     append_tessellated_geometry, tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
-    VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
+    VectorPath, VectorRenderParams, VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
@@ -20,7 +21,7 @@ pub const RETRY_BASE_FRAMES: u64 = 30;
 pub const RETRY_MAX_FRAMES: u64 = 300;
 pub const TILE_CACHE_DIR: &str = "local/tilecache_v4";
 pub const TILE_QUERY_PAD: f64 = 0.05;
-pub const LOCAL_MBTILES_PATH: &str = "noord-holland-shortbread-1.0.mbtiles";
+pub const LOCAL_MBTILES_PATH: &str = "local/maps/europe-shortbread.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
 pub const MAX_LOCAL_TILE_BATCH: usize = 10;
@@ -49,6 +50,7 @@ pub enum TileLoadState {
         fill_geometry: Option<Geometry>,
         casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
+        icon_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
     },
@@ -120,6 +122,8 @@ pub struct TileBuffers {
     pub casing_vertices: Vec<f32>,
     pub stroke_indices: Vec<u32>,
     pub stroke_vertices: Vec<f32>,
+    pub icon_indices: Vec<u32>,
+    pub icon_vertices: Vec<f32>,
     pub feature_count: usize,
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
@@ -312,6 +316,8 @@ pub fn build_tile_buffers_from_body(
     let mut ways = Vec::<WayData>::new();
     let mut labels = Vec::<TileLabel>::new();
 
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8)>::new();
+
     for element in parsed.elements {
         match element.kind.as_str() {
             "node" => {
@@ -319,9 +325,18 @@ pub fn build_tile_buffers_from_body(
                     nodes.insert(element.id, (lon, lat));
                     if let Some(tags) = element.tags {
                         let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
-                        if let Some(label) =
-                            extract_point_label(&tags, (world.x as f32, world.y as f32))
-                        {
+                        let point = (world.x as f32, world.y as f32);
+                        let mut label_point = point;
+                        if render_zoom >= ICON_MIN_ZOOM {
+                            if let Some((icon_name, color_class)) = icon_for_tags(&tags) {
+                                if let Some(mesh) = icon_mesh(icon_name) {
+                                    icon_jobs.push((point, mesh, color_class));
+                                    // text sits below the symbol, carto-style
+                                    label_point.1 += 11.0 / render_scale;
+                                }
+                            }
+                        }
+                        if let Some(label) = extract_point_label(&tags, label_point) {
                             labels.push(label);
                         }
                     }
@@ -353,9 +368,12 @@ pub fn build_tile_buffers_from_body(
     let mut casing_vertices = Vec::<f32>::new();
     let mut stroke_indices = Vec::<u32>::new();
     let mut stroke_vertices = Vec::<f32>::new();
+    let mut icon_indices = Vec::<u32>::new();
+    let mut icon_vertices = Vec::<f32>::new();
     let mut fill_zbias = 0.0_f32;
     let mut casing_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
+    let mut icon_zbias = 0.0_f32;
     let mut feature_count = 0usize;
 
     let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
@@ -642,6 +660,19 @@ pub fn build_tile_buffers_from_body(
         }
     }
 
+    // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
+    for (anchor, mesh, color_class) in &icon_jobs {
+        append_icon_mesh(
+            mesh,
+            *anchor,
+            hex_to_premul_rgba(poi_class_hex(*color_class), 1.0),
+            &mut icon_vertices,
+            &mut icon_indices,
+            &mut icon_zbias,
+        );
+        feature_count += 1;
+    }
+
     compact_tile_labels(&mut labels);
 
     Ok(TileBuffers {
@@ -651,10 +682,54 @@ pub fn build_tile_buffers_from_body(
         casing_vertices,
         stroke_indices,
         stroke_vertices,
+        icon_indices,
+        icon_vertices,
         feature_count,
         labels,
         render_zoom,
     })
+}
+
+/// Shape id telling the map vertex shader to treat (param1, param2) as a
+/// screen-px offset added AFTER the map transform (zoom-constant symbols).
+pub const ICON_SHAPE_ID: f32 = 20.0;
+
+fn append_icon_mesh(
+    mesh: &IconMesh,
+    anchor: (f32, f32),
+    color: [f32; 4],
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    for vertex in &mesh.verts {
+        out_vertices.extend_from_slice(&[
+            anchor.0,
+            anchor.1,
+            vertex.u,
+            vertex.v,
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            1e6, // stroke_mult: fill
+            vertex.stroke_dist,
+            ICON_SHAPE_ID,
+            0.0,      // param0: solid color
+            vertex.x, // param1/2: screen-px offset from the anchor
+            vertex.y,
+            0.0,
+            0.0,
+            0.0,
+            24.0, // clip_radius: generous, avoids pop-in at view edges
+            *zbias,
+        ]);
+    }
+    for index in &mesh.indices {
+        out_indices.push(base + index);
+    }
+    *zbias += VECTOR_ZBIAS_STEP;
 }
 
 fn project_way_points_with_nodes(
@@ -729,8 +804,18 @@ pub fn load_local_tile_batch(
         return Ok(loaded);
     }
 
-    let mut reader = MbtilesReader::open(mbtiles_path)
-        .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
+    // Cache-only mode: when the mbtiles source is absent (e.g. still being
+    // downloaded), serve whatever the disk cache had instead of failing the
+    // whole batch; uncached keys become "missing" and stop re-requesting.
+    let mut reader = match MbtilesReader::open(mbtiles_path) {
+        Ok(reader) => reader,
+        Err(err) => {
+            if loaded.is_empty() {
+                return Err(format!("open {}: {}", mbtiles_path.display(), err));
+            }
+            return Ok(loaded);
+        }
+    };
 
     let mut by_zoom = HashMap::<u32, Vec<TileKey>>::new();
     for key in &missing {
@@ -741,6 +826,69 @@ pub fn load_local_tile_batch(
 
     for (zoom, keys) in by_zoom {
         let tile_count = 1_i64 << zoom;
+
+        if reader.supports_direct_tile_lookup() {
+            let mut unavailable = Vec::new();
+            for tile_key in keys {
+                let tms_row = tile_count - 1 - tile_key.y as i64;
+                let raw = reader
+                    .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                    .map_err(|err| {
+                        format!(
+                            "read tile z{} x{} y{} from {}: {}",
+                            tile_key.z,
+                            tile_key.x,
+                            tile_key.y,
+                            mbtiles_path.display(),
+                            err
+                        )
+                    })?;
+                let Some(raw) = raw else {
+                    unavailable.push(tile_key);
+                    continue;
+                };
+
+                match mbtiles_tile_to_overpass_json(tile_key, &raw) {
+                    Ok(body) => {
+                        match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
+                            Ok(buffers) => {
+                                store_tile_data_cache_on_disk(tile_key, &body);
+                                loaded.push(LoadedLocalTile { tile_key, buffers });
+                            }
+                            Err(err) => {
+                                log!(
+                                    "MapView: failed to triangulate local mbtile z{} x{} y{}: {}",
+                                    tile_key.z,
+                                    tile_key.x,
+                                    tile_key.y,
+                                    err
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log!(
+                            "MapView: failed to decode local mbtile z{} x{} y{}: {}",
+                            tile_key.z,
+                            tile_key.x,
+                            tile_key.y,
+                            err
+                        );
+                    }
+                }
+            }
+            if !unavailable.is_empty() {
+                unavailable.sort_unstable();
+                log!(
+                    "MapView: local mbtiles missing {} tile(s) at z{} sample:{}",
+                    unavailable.len(),
+                    zoom,
+                    format_tile_key_sample(&unavailable, 8)
+                );
+            }
+            continue;
+        }
+
         let mut needed_tms = HashMap::<(i64, i64), TileKey>::new();
         let mut needed_xyz = HashMap::<(i64, i64), TileKey>::new();
         for key in keys {

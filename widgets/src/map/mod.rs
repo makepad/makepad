@@ -1,4 +1,5 @@
 pub(crate) mod geometry;
+pub(crate) mod icons;
 pub(crate) mod label;
 pub mod style;
 pub(crate) mod tile;
