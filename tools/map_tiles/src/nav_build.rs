@@ -36,6 +36,9 @@ pub struct NavBuildOptions {
     /// village…) — one fast pass, no routing graph. Continent-scale fly-to
     /// search next to a regional full index.
     pub places_only: bool,
+    /// Build a `<basename>.searchdb` disk-backed index of EVERY searchable
+    /// string (all named features + addresses) instead of the RAM formats.
+    pub searchdb: bool,
 }
 
 /// Way tags that matter for routing or search; everything else is dropped
@@ -196,6 +199,9 @@ fn collect_all_tags<'a>(
 pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     if options.places_only {
         return build_places_index(&options);
+    }
+    if options.searchdb {
+        return build_searchdb(&options);
     }
     let total_start = Instant::now();
     let bbox = options.bbox;
@@ -539,12 +545,233 @@ fn build_places_index(options: &NavBuildOptions) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the disk-backed all-strings search database: two pbf passes. Pass
+/// A records the first node id of every searchable way (streets, address /
+/// POI ways). Pass B streams every doc — tagged nodes directly, ways via
+/// their first-node coordinate — into the external-sorting builder.
+fn build_searchdb(options: &NavBuildOptions) -> Result<(), String> {
+    use makepad_map_nav::searchdb::SearchDbBuilder;
+    let start = Instant::now();
+    let bbox = options.bbox;
+
+    eprintln!("searchdb: pass A (way anchors) over {}", options.source.display());
+    let reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    let way_doc_matters = |tags: &HashMap<String, String>| -> bool {
+        doc_from_tags(tags, 0.0, 0.0, false).is_some()
+            || (tags.contains_key("highway") && tags.contains_key("name"))
+    };
+    let mut anchor_ids = reader
+        .par_map_reduce(
+            |element| {
+                let mut out: Vec<i64> = Vec::new();
+                if let Element::Way(way) = &element {
+                    let tags = collect_all_tags(way.tags());
+                    if !tags.is_empty() && way_doc_matters(&tags) {
+                        if let Some(first) = way.refs().next() {
+                            out.push(first);
+                        }
+                    }
+                }
+                out
+            },
+            Vec::new,
+            |mut a, mut b| {
+                if b.len() > a.len() {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                a.append(&mut b);
+                a
+            },
+        )
+        .map_err(|err| format!("pass A: {err}"))?;
+    anchor_ids.sort_unstable();
+    anchor_ids.dedup();
+    let mut anchor_coords = vec![(f32::NAN, f32::NAN); anchor_ids.len()];
+    eprintln!(
+        "searchdb: pass A done in {:.0}s — {} way anchors",
+        start.elapsed().as_secs_f64(),
+        anchor_ids.len()
+    );
+
+    // Pass B: parallel extraction, sequential builder consumer.
+    eprintln!("searchdb: pass B (streaming docs)");
+    let out_path = options.output_basename.with_extension("searchdb");
+    let mut builder = SearchDbBuilder::create(&out_path)?;
+    let (doc_tx, doc_rx) =
+        std::sync::mpsc::sync_channel::<(String, String, f64, f64, u16, u8)>(65536);
+
+    // Node-coordinate resolution happens in the SAME pass because sorted
+    // pbfs put all nodes before all ways: the reduce order isn't guaranteed,
+    // so anchors resolve in a first sequential node scan instead.
+    let node_reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    {
+        let anchor_ids_ref = &anchor_ids;
+        let coords_cell = std::sync::Mutex::new(&mut anchor_coords);
+        node_reader
+            .par_map_reduce(
+                |element| {
+                    let mut out: Vec<(usize, f32, f32)> = Vec::new();
+                    let (id, lon, lat) = match &element {
+                        Element::Node(node) => (node.id(), node.lon(), node.lat()),
+                        Element::DenseNode(node) => (node.id(), node.lon(), node.lat()),
+                        _ => return out,
+                    };
+                    if let Ok(index) = anchor_ids_ref.binary_search(&id) {
+                        out.push((index, lon as f32, lat as f32));
+                    }
+                    out
+                },
+                Vec::new,
+                |mut a: Vec<(usize, f32, f32)>, mut b| {
+                    // Write through immediately to bound memory.
+                    let mut coords = coords_cell.lock().unwrap();
+                    for (index, lon, lat) in a.drain(..).chain(b.drain(..)) {
+                        coords[index] = (lon, lat);
+                    }
+                    a
+                },
+            )
+            .map_err(|err| format!("pass B nodes: {err}"))?;
+    }
+    eprintln!(
+        "searchdb: anchors resolved in {:.0}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    let consumer = std::thread::spawn(move || -> Result<(SearchDbBuilder, u64), String> {
+        let mut received: u64 = 0;
+        while let Ok((name, secondary, lon, lat, category, rank)) = doc_rx.recv() {
+            builder.add_doc(
+                &name,
+                &secondary,
+                LonLat::new(lon, lat),
+                Category::from_u16(category),
+                rank,
+            )?;
+            received += 1;
+            if received % 20_000_000 == 0 {
+                eprintln!("searchdb: {}M docs ingested", received / 1_000_000);
+            }
+        }
+        Ok((builder, received))
+    });
+
+    let doc_reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    {
+        let anchor_ids_ref = &anchor_ids;
+        let anchor_coords_ref = &anchor_coords;
+        let tx = doc_tx;
+        doc_reader
+            .par_map_reduce(
+                |element| {
+                    match &element {
+                        Element::Node(node) => {
+                            emit_node_doc(node.id(), node.lon(), node.lat(), collect_all_tags(node.tags()), &bbox, &tx);
+                        }
+                        Element::DenseNode(node) => {
+                            emit_node_doc(node.id(), node.lon(), node.lat(), collect_all_tags(node.tags()), &bbox, &tx);
+                        }
+                        Element::Way(way) => {
+                            let tags = collect_all_tags(way.tags());
+                            if tags.is_empty() {
+                                return 0u64;
+                            }
+                            let Some(first) = way.refs().next() else {
+                                return 0;
+                            };
+                            let Ok(index) = anchor_ids_ref.binary_search(&first) else {
+                                return 0;
+                            };
+                            let (lon, lat) = anchor_coords_ref[index];
+                            if lon.is_nan() {
+                                return 0;
+                            }
+                            let (lon, lat) = (lon as f64, lat as f64);
+                            if let Some(bbox) = &bbox {
+                                if !bbox.contains(lon, lat) {
+                                    return 0;
+                                }
+                            }
+                            if let Some(doc) = doc_from_tags(&tags, lon, lat, false) {
+                                let _ = tx.send((
+                                    doc.name, doc.secondary, lon, lat, doc.category, doc.rank,
+                                ));
+                            } else if tags.contains_key("highway") {
+                                if let Some(name) = tags.get("name") {
+                                    let _ = tx.send((
+                                        name.clone(),
+                                        String::new(),
+                                        lon,
+                                        lat,
+                                        Category::Street as u16,
+                                        Category::Street.base_rank(),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    0u64
+                },
+                || 0u64,
+                |a, b| a + b,
+            )
+            .map_err(|err| format!("pass B docs: {err}"))?;
+        // tx dropped here; consumer drains and finishes.
+    }
+    let (builder, received) = consumer
+        .join()
+        .map_err(|_| "searchdb consumer panicked".to_string())??;
+    eprintln!(
+        "searchdb: {} docs ingested in {:.0}s; building index…",
+        received,
+        start.elapsed().as_secs_f64()
+    );
+    drop(anchor_coords);
+    drop(anchor_ids);
+    let stats = builder.finish()?;
+    eprintln!(
+        "searchdb: DONE — {} docs, {} tokens, {:.2} GB at {} in {:.0}s",
+        stats.docs,
+        stats.tokens,
+        stats.file_bytes as f64 / 1e9,
+        out_path.display(),
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_node_doc(
+    _id: i64,
+    lon: f64,
+    lat: f64,
+    tags: HashMap<String, String>,
+    bbox: &Option<BboxFilter>,
+    tx: &std::sync::mpsc::SyncSender<(String, String, f64, f64, u16, u8)>,
+) {
+    if tags.is_empty() {
+        return;
+    }
+    if let Some(bbox) = bbox {
+        if !bbox.contains(lon, lat) {
+            return;
+        }
+    }
+    if let Some(doc) = doc_from_tags(&tags, lon, lat, false) {
+        let _ = tx.send((doc.name, doc.secondary, lon, lat, doc.category, doc.rank));
+    }
+}
+
 // --- nav-probe ---
 
 pub fn nav_probe(args: &[String]) -> Result<(), String> {
     if args.len() < 3 {
         return Err(
-            "Usage: nav-probe <basename> search <query...> [--near lon,lat]\n       nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]"
+            "Usage: nav-probe <basename> search|dbsearch <query...> [--near lon,lat]\n       nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]"
                 .to_string(),
         );
     }
@@ -590,6 +817,57 @@ pub fn nav_probe(args: &[String]) -> Result<(), String> {
                     String::new()
                 } else {
                     format!(" — {}", r.secondary)
+                };
+                println!(
+                    "  {:>6.1}  {} ({}){}{}  @ {:.5},{:.5}",
+                    r.score,
+                    r.name,
+                    r.category.label(),
+                    secondary,
+                    dist,
+                    r.pos.lon,
+                    r.pos.lat
+                );
+            }
+        }
+        "dbsearch" => {
+            let mut near = None;
+            let mut terms = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                if args[i] == "--near" {
+                    i += 1;
+                    near = Some(parse_lon_lat(args.get(i).ok_or("--near needs lon,lat")?)?);
+                } else {
+                    terms.push(args[i].clone());
+                }
+                i += 1;
+            }
+            let query = terms.join(" ");
+            let path = basename.with_extension("searchdb");
+            let load_start = Instant::now();
+            let db = makepad_map_nav::searchdb::SearchDb::open(&path)?;
+            let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+            let query_start = Instant::now();
+            let results = db.query(&query, near, 10)?;
+            let query_ms = query_start.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "searchdb: {} docs, opened in {:.2}ms; query {:?} in {:.2}ms \u{2014} {} results",
+                db.doc_count(),
+                load_ms,
+                query,
+                query_ms,
+                results.len()
+            );
+            for r in results {
+                let dist = r
+                    .distance_m
+                    .map(|d| format!(" [{:.1}km]", d / 1000.0))
+                    .unwrap_or_default();
+                let secondary = if r.secondary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \u{2014} {}", r.secondary)
                 };
                 println!(
                     "  {:>6.1}  {} ({}){}{}  @ {:.5},{:.5}",
@@ -689,6 +967,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
     let mut bbox = None;
     let mut skip_addresses = false;
     let mut places_only = false;
+    let mut searchdb = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -712,6 +991,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
             }
             "--skip-addresses" => skip_addresses = true,
             "--places-only" => places_only = true,
+            "--searchdb" => searchdb = true,
             other => return Err(format!("unknown nav-build option {:?}", other)),
         }
         i += 1;
@@ -722,5 +1002,6 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
         bbox,
         skip_addresses,
         places_only,
+        searchdb,
     })
 }

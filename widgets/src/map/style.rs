@@ -642,6 +642,11 @@ pub fn stroke_style_for_tags(
     if matches!(layer, "street_labels_points" | "streets_polygons_labels") {
         return None;
     }
+    // Water label layers carry name geometry only; the water_lines /
+    // water_polygons layers own the visible geometry.
+    if matches!(layer, "water_lines_labels" | "water_polygons_labels") {
+        return None;
+    }
 
     let mut width_scale = zoom_mult * px_to_units;
     let mut rank_bias = 0_i16;
@@ -670,7 +675,21 @@ pub fn stroke_style_for_tags(
         {
             let template = theme.railway_rule?;
             let rail_scale = zoom_mult.max(1.0).powf(0.35) * px_to_units;
-            return Some(scaled_style(template, rank_bias, rail_scale));
+            // shortbread sets rail=true on ALL railways including trams;
+            // the kind decides tram/metro vs heavy rail.
+            let heavy = matches!(
+                key.as_str(),
+                "rail" | "narrow_gauge" | "funicular" | "monorail"
+            ) || (tag_is_truthy(tags, "rail")
+                && !matches!(key.as_str(), "tram" | "light_rail" | "subway"));
+            return Some(rail_stroke_style(
+                template,
+                heavy,
+                render_zoom,
+                tags,
+                rank_bias,
+                rail_scale,
+            ));
         }
         let template = theme.road_rules.get(&key).copied().or(theme.road_default)?;
         // Carto hides footways/paths well before roads; clutter at city
@@ -746,10 +765,73 @@ pub fn stroke_style_for_tags(
         return Some(scaled_style(template, rank_bias, water_scale));
     }
 
-    if tags.contains_key("railway") {
+    if let Some(railway) = tags.get("railway") {
+        let key = railway.trim().to_ascii_lowercase();
+        // Non-track railway features (platforms, stations, dead lines) are
+        // not linework.
+        if matches!(
+            key.as_str(),
+            "platform" | "station" | "razed" | "abandoned" | "proposed" | "disused"
+        ) {
+            return None;
+        }
         let template = theme.railway_rule?;
-        return Some(scaled_style(template, rank_bias, width_scale));
+        let rail_scale = zoom_mult.max(1.0).powf(0.35) * px_to_units;
+        let heavy = matches!(key.as_str(), "rail" | "narrow_gauge" | "funicular" | "monorail");
+        return Some(rail_stroke_style(
+            template,
+            heavy,
+            render_zoom,
+            tags,
+            rank_bias,
+            rail_scale,
+        ));
     }
 
     None
+}
+
+/// Zoom from which heavy rail draws the carto sleeper look (solid dark
+/// casing + even light dash core); below it, and for tram/metro always,
+/// rails stay the theme's single thin line.
+const RAIL_SLEEPER_MIN_ZOOM: u32 = 14;
+
+fn rail_stroke_style(
+    template: StrokeTemplate,
+    heavy: bool,
+    render_zoom: u32,
+    tags: &HashMap<String, String>,
+    rank_bias: i16,
+    width_scale: f32,
+) -> StrokeStyle {
+    let mut template = template;
+    if !heavy && render_zoom >= RAIL_SLEEPER_MIN_ZOOM {
+        // Trams/metro draw as a solid near-black line at street zooms in
+        // carto. Only darken light-theme grays; the dark palette stays.
+        let c = template.center.color;
+        let avg = ((c >> 16 & 0xff) + (c >> 8 & 0xff) + (c & 0xff)) / 3;
+        if avg < 0x90 {
+            template.center.color = 0x474747;
+        }
+        template.center.width = template.center.width.max(1.2);
+    }
+    if heavy && render_zoom >= RAIL_SLEEPER_MIN_ZOOM && !tag_is_truthy(tags, "tunnel") {
+        let rank = template.sort_rank as f32;
+        template.casing = Some(StrokePassStyle {
+            // The theme's rail line color becomes the casing band.
+            color: template.center.color,
+            width: 3.4,
+            shape_id: 0.0,
+            expand_class: EXPAND_CLASS_THIN,
+            depth_micro: rank * DEPTH_MICRO_PER_RANK,
+        });
+        template.center = StrokePassStyle {
+            color: 0xf7f7f7,
+            width: 1.5,
+            shape_id: 12.0,
+            expand_class: EXPAND_CLASS_THIN,
+            depth_micro: rank * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
+        };
+    }
+    scaled_style(template, rank_bias, width_scale)
 }
