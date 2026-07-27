@@ -378,7 +378,8 @@ pub fn build_tile_buffers_from_body(
 
     let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
     for (way_index, way) in ways.iter().enumerate() {
-        let projected = project_way_points_with_nodes(&way.nodes, &nodes, tile_key, tile_origin);
+        let projected =
+            project_way_points_with_nodes(&way.nodes, &nodes, tile_key, tile_origin, render_scale);
         if projected.len() < 2 {
             continue;
         }
@@ -533,6 +534,7 @@ pub fn build_tile_buffers_from_body(
                             outline_style,
                             LineCap::Butt,
                             LineCap::Butt,
+                            LineJoin::Miter,
                             aa_units,
                             tolerance,
                             &mut fill_zbias,
@@ -617,6 +619,7 @@ pub fn build_tile_buffers_from_body(
                 casing,
                 LineCap::Butt,
                 LineCap::Butt,
+                LineJoin::Round,
                 aa_units,
                 tolerance,
                 &mut casing_zbias,
@@ -657,6 +660,7 @@ pub fn build_tile_buffers_from_body(
                 style.center,
                 start_cap,
                 end_cap,
+                LineJoin::Round,
                 aa_units,
                 tolerance,
                 &mut stroke_zbias,
@@ -742,9 +746,16 @@ fn project_way_points_with_nodes(
     nodes: &HashMap<i64, (f64, f64)>,
     tile_key: TileKey,
     tile_origin: Vec2d,
+    render_scale: f32,
 ) -> Vec<(i64, (f32, f32))> {
     let mut out = Vec::with_capacity(node_ids.len());
     let mut last: Option<(f32, f32)> = None;
+    // Drop detail below ~a third of a screen pixel AT THE STYLED ZOOM —
+    // invisible, but it dominates vertex volume at low buckets (a z14 tile
+    // holds ~60K building ring points). Scale-aware, unlike the old fixed
+    // source-zoom filter that ate visible corners when overzoomed.
+    let min_dist = 0.35 / render_scale.max(0.001);
+    let min_dist_sq = min_dist * min_dist;
 
     for node_id in node_ids {
         let Some((lon, lat)) = nodes.get(node_id).copied() else {
@@ -753,10 +764,12 @@ fn project_way_points_with_nodes(
         let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
         let point = (world.x as f32, world.y as f32);
 
-        // Only drop exact duplicates; sub-pixel detail at source zoom is
-        // visible detail after overzoom.
-        if last == Some(point) {
-            continue;
+        if let Some(prev) = last {
+            let dx = point.0 - prev.0;
+            let dy = point.1 - prev.1;
+            if dx * dx + dy * dy < min_dist_sq {
+                continue;
+            }
         }
 
         out.push((*node_id, point));
