@@ -1,7 +1,7 @@
 use super::style::StrokePassStyle;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, tessellate_path_stroke_ends, LineCap, LineJoin, Tessellator,
-    VVertex, VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
+    append_expanded_stroke_geometry, tessellate_path_stroke_ends_anchored, LineCap, LineJoin,
+    Tessellator, VVertex, VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_draw::*;
 
@@ -733,33 +733,46 @@ pub fn append_stroke_pass(
     tolerance: f32,
     stroke_zbias: &mut f32,
 ) {
+    // Baked in GPU re-expandable form: the vertex shader re-derives the
+    // stroke width the current view zoom calls for, so stale-bucket tiles
+    // keep correct screen widths through the whole zoom gesture.
+    thread_local! {
+        static STROKE_ANCHORS: std::cell::RefCell<Vec<[f32; 2]>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
     emit_path(path, points, closed);
-    let stroke_mult = tessellate_path_stroke_ends(
-        path,
-        tess,
-        tess_verts,
-        tess_indices,
-        pass.width,
-        start_cap,
-        end_cap,
-        line_join,
-        4.0,
-        aa,
-        tolerance,
-    );
-    append_tessellated_geometry(
-        tess_verts,
-        tess_indices,
-        stroke_vertices,
-        stroke_indices,
-        VectorRenderParams {
-            color: hex_to_premul_rgba(pass.color, 1.0),
-            stroke_mult,
-            shape_id: pass.shape_id,
-            params: [0.0; 6],
-            zbias: *stroke_zbias,
-        },
-    );
+    STROKE_ANCHORS.with(|anchors| {
+        let mut anchors = anchors.borrow_mut();
+        let stroke_mult = tessellate_path_stroke_ends_anchored(
+            path,
+            tess,
+            tess_verts,
+            tess_indices,
+            &mut anchors,
+            pass.width,
+            start_cap,
+            end_cap,
+            line_join,
+            4.0,
+            aa,
+            tolerance,
+        );
+        append_expanded_stroke_geometry(
+            tess_verts,
+            &anchors,
+            tess_indices,
+            stroke_vertices,
+            stroke_indices,
+            VectorRenderParams {
+                color: hex_to_premul_rgba(pass.color, 1.0),
+                stroke_mult,
+                shape_id: pass.shape_id,
+                params: [0.0; 6],
+                zbias: *stroke_zbias,
+            },
+            pass.expand_class,
+        );
+    });
     *stroke_zbias += VECTOR_ZBIAS_STEP;
 }
 
