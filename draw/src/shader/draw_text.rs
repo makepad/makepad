@@ -2780,7 +2780,7 @@ impl DrawText {
         }
     }
 
-    fn update_draw_vars(&mut self, cx: &mut Cx2d) {
+    pub(crate) fn update_draw_vars(&mut self, cx: &mut Cx2d) {
         self.draw_vars.append_group_id = cx.draw_call_group_content().0;
         let fonts = cx.fonts.borrow();
         let rasterizer = fonts.rasterizer().borrow();

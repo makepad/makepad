@@ -39,8 +39,8 @@ pub use crate::{
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,
         draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
-        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::TextStyle,
-        draw_text_3d::DrawText3d, draw_vector::DrawVector,
+        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::PreparedTextRun,
+        draw_text::TextStyle, draw_text_3d::DrawText3d, draw_vector::DrawVector,
     },
     /*
     geometry::{
