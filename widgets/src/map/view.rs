@@ -1591,7 +1591,9 @@ impl MapView {
             let requested = vec![key];
             let mbtiles_path = active_path.clone();
             let detail_path = self.detail_mbtiles_path.clone();
-            let buildings_3d = self.buildings_3d;
+            // Extruded buildings only bake while the camera is tilted; flat
+            // mode keeps the classic 2D building style with outlines.
+            let buildings_3d = self.buildings_3d && self.tilt > 0.0;
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
@@ -2890,12 +2892,38 @@ impl MapView {
     }
 
     /// Axonometric camera tilt (degrees, 0 = top-down, clamped to 65).
+    /// Crossing between flat and tilted rebakes tiles: flat mode uses the
+    /// true 2D building style (base fills + outlines), tilted mode the
+    /// extruded detail buildings.
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
         let tilt = tilt_deg.clamp(0.0, 65.0);
         if (tilt - self.tilt).abs() < 1e-9 {
             return;
         }
+        let was_3d = self.tilt > 0.0;
         self.tilt = tilt;
+        if was_3d != (self.tilt > 0.0) {
+            self.restyle_tiles_keep_stale(cx);
+        }
+        self.redraw(cx);
+    }
+
+    /// Rebuild every resident tile under the current style/mode while its
+    /// previous geometry stays on screen (bucket sentinel → the normal
+    /// stale-bucket restyle path picks it up and cross-fades).
+    fn restyle_tiles_keep_stale(&mut self, cx: &mut Cx) {
+        self.style_epoch = self.style_epoch.wrapping_add(1);
+        if self.style_epoch == 0 {
+            self.style_epoch = 1;
+        }
+        for entry in self.tiles.values_mut() {
+            if matches!(entry.state, TileLoadState::Ready { .. }) {
+                entry.bucket = u32::MAX;
+            }
+        }
+        self.local_requested_tiles.clear();
+        self.pending_ready_tiles.clear();
+        self.label_cache_valid = false;
         self.redraw(cx);
     }
 
