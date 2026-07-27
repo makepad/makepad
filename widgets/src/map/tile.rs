@@ -24,7 +24,13 @@ pub const LOCAL_MBTILES_PATH: &str = "noord-holland-shortbread-1.0.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
 pub const MAX_LOCAL_TILE_BATCH: usize = 10;
-pub const ROAD_CLIP_PADDING: f32 = 8.0;
+// Stroke clip padding must stay below the MVT generator's tile buffer (~4
+// world px) so cross-boundary ways are cut by OUR clip (detectable, butt-
+// capped) rather than ending mid-buffer with a rogue round cap.
+pub const ROAD_CLIP_PADDING: f32 = 3.0;
+// Fills are clipped to their own tile square (+ tiny overlap against AA
+// hairlines) so a tile's buffer fragments never overpaint the neighbor.
+pub const FILL_CLIP_OVERLAP: f32 = 0.25;
 pub const ROAD_SMOOTH_FACTOR: f32 = 0.0;
 pub const BUILDING_OUTLINE_MIN_ZOOM: u32 = 15;
 pub const BUILDING_OUTLINE_WIDTH_PX: f32 = 0.9;
@@ -373,9 +379,16 @@ pub fn build_tile_buffers_from_body(
         let Some(color) = fill_color_for_tags(theme, &way.tags, way.closed) else {
             continue;
         };
-        let Some(ring_points) = normalize_polygon_ring(&prepared_way.points) else {
+        let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
             continue;
         };
+        let fill_clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
+        if !ring_inside_bounds(&ring_points, fill_clip_bounds) {
+            ring_points = clip_ring_to_rect(&ring_points, fill_clip_bounds);
+            if ring_points.len() < 3 {
+                continue;
+            }
+        }
 
         let feature_key = way
             .tags
@@ -463,26 +476,45 @@ pub fn build_tile_buffers_from_body(
             feature_count += 1;
 
             if let (true, Some(outline)) = (group.is_building, building_outline) {
+                // Outline the ring but drop segments that run along the tile
+                // cut, so clipped buildings don't get a fake wall at the seam.
+                let outline_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP - 0.2);
+                let outline_style = StrokePassStyle {
+                    color: outline,
+                    width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
+                    shape_id: 0.0,
+                };
                 for ring in &polygon {
-                    append_stroke_pass(
-                        &mut path,
-                        ring,
-                        true,
-                        &mut tess,
-                        &mut tess_verts,
-                        &mut tess_indices,
-                        &mut fill_vertices,
-                        &mut fill_indices,
-                        StrokePassStyle {
-                            color: outline,
-                            width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
-                            shape_id: 0.0,
-                        },
-                        LineCap::Butt,
-                        aa_units,
-                        tolerance,
-                        &mut fill_zbias,
-                    );
+                    let mut closed_points = ring.clone();
+                    if closed_points.first() != closed_points.last() {
+                        if let Some(first) = closed_points.first().copied() {
+                            closed_points.push(first);
+                        }
+                    }
+                    for part in clip_polyline_parts(&closed_points, outline_bounds, false) {
+                        if part.len() < 2 {
+                            continue;
+                        }
+                        let full_loop = part.len() == closed_points.len()
+                            && part.first() == part.last();
+                        let points = if full_loop { &part[..part.len() - 1] } else { &part[..] };
+                        append_stroke_pass(
+                            &mut path,
+                            points,
+                            full_loop,
+                            &mut tess,
+                            &mut tess_verts,
+                            &mut tess_indices,
+                            &mut fill_vertices,
+                            &mut fill_indices,
+                            outline_style,
+                            LineCap::Butt,
+                            LineCap::Butt,
+                            aa_units,
+                            tolerance,
+                            &mut fill_zbias,
+                        );
+                    }
                 }
             }
         }
@@ -561,6 +593,7 @@ pub fn build_tile_buffers_from_body(
                 &mut casing_indices,
                 casing,
                 LineCap::Butt,
+                LineCap::Butt,
                 aa_units,
                 tolerance,
                 &mut casing_zbias,
@@ -569,13 +602,26 @@ pub fn build_tile_buffers_from_body(
         }
     }
 
-    // Pass 2: centers. Round caps so same-color segments blend at junctions
-    // and dead ends get the carto-style rounded nub.
+    // Pass 2: centers. Round caps blend same-color segments at junctions and
+    // give dead ends the carto nub — but ends produced by the tile clip must
+    // stay butt, or the cap disc overpaints the neighbor tile's content
+    // (e.g. white road caps stamped over the tram tracks at seams).
+    let cap_eps = 0.05_f32;
     for (style, parts) in &merged_stroke_parts {
         for part in parts {
             if part.len() < 2 {
                 continue;
             }
+            let start_cap = if point_on_bounds(part[0], clip_bounds, cap_eps) {
+                LineCap::Butt
+            } else {
+                LineCap::Round
+            };
+            let end_cap = if point_on_bounds(part[part.len() - 1], clip_bounds, cap_eps) {
+                LineCap::Butt
+            } else {
+                LineCap::Round
+            };
             append_stroke_pass(
                 &mut path,
                 part,
@@ -586,7 +632,8 @@ pub fn build_tile_buffers_from_body(
                 &mut stroke_vertices,
                 &mut stroke_indices,
                 style.center,
-                LineCap::Round,
+                start_cap,
+                end_cap,
                 aa_units,
                 tolerance,
                 &mut stroke_zbias,

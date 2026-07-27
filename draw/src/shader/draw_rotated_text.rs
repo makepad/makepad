@@ -133,6 +133,17 @@ impl DrawRotatedText {
 
     /// Draw a sequence of pre-placed glyphs from a buffer slice.
     pub fn draw_path_glyphs(&mut self, cx: &mut Cx2d, glyphs: &[PathGlyphInstance]) {
+        self.draw_path_glyphs_offset(cx, glyphs, Vec2f { x: 0.0, y: 0.0 });
+    }
+
+    /// Draw pre-placed glyphs shifted by a screen-space offset (used for
+    /// halo/outline underdraws).
+    pub fn draw_path_glyphs_offset(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[PathGlyphInstance],
+        offset: Vec2f,
+    ) {
         // Instances bake their font_scale into font_size_in_lpxs at placement
         // time; the ambient font_scale (left over from whatever run was shaped
         // last) must not rescale them here or glyphs shrink under their pen
@@ -142,8 +153,14 @@ impl DrawRotatedText {
         for glyph in glyphs {
             self.draw_glyph_at(
                 cx,
-                glyph.glyph_origin,
-                glyph.rotation_origin,
+                Point::new(
+                    glyph.glyph_origin.x + offset.x,
+                    glyph.glyph_origin.y + offset.y,
+                ),
+                Point::new(
+                    glyph.rotation_origin.x + offset.x,
+                    glyph.rotation_origin.y + offset.y,
+                ),
                 glyph.font_size_in_lpxs,
                 glyph.rasterized,
                 glyph.angle,

@@ -51,10 +51,40 @@ pub fn tessellate_path_stroke(
     aa: f32,
     tolerance: f32,
 ) -> f32 {
-    tess.flatten(path, tolerance);
-    tess.stroke(
+    tessellate_path_stroke_ends(
+        path,
+        tess,
+        tess_verts,
+        tess_indices,
         stroke_width,
         line_cap,
+        line_cap,
+        line_join,
+        miter_limit,
+        aa,
+        tolerance,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tessellate_path_stroke_ends(
+    path: &mut VectorPath,
+    tess: &mut Tessellator,
+    tess_verts: &mut Vec<VVertex>,
+    tess_indices: &mut Vec<u32>,
+    stroke_width: f32,
+    start_cap: LineCap,
+    end_cap: LineCap,
+    line_join: LineJoin,
+    miter_limit: f32,
+    aa: f32,
+    tolerance: f32,
+) -> f32 {
+    tess.flatten(path, tolerance);
+    tess.stroke_ends(
+        stroke_width,
+        start_cap,
+        end_cap,
         line_join,
         miter_limit,
         aa,

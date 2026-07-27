@@ -1,7 +1,7 @@
 use super::style::StrokePassStyle;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, tessellate_path_stroke, LineCap, LineJoin, Tessellator, VVertex,
-    VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
+    append_tessellated_geometry, tessellate_path_stroke_ends, LineCap, LineJoin, Tessellator,
+    VVertex, VectorPath, VectorRenderParams, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_draw::*;
 
@@ -726,19 +726,21 @@ pub fn append_stroke_pass(
     stroke_vertices: &mut Vec<f32>,
     stroke_indices: &mut Vec<u32>,
     pass: StrokePassStyle,
-    line_cap: LineCap,
+    start_cap: LineCap,
+    end_cap: LineCap,
     aa: f32,
     tolerance: f32,
     stroke_zbias: &mut f32,
 ) {
     emit_path(path, points, closed);
-    let stroke_mult = tessellate_path_stroke(
+    let stroke_mult = tessellate_path_stroke_ends(
         path,
         tess,
         tess_verts,
         tess_indices,
         pass.width,
-        line_cap,
+        start_cap,
+        end_cap,
         LineJoin::Round,
         4.0,
         aa,
@@ -841,6 +843,85 @@ pub fn is_descendant_tile(child: TileKey, parent: TileKey) -> bool {
     let cx = child.x as i64;
     let cy = child.y as i64;
     cx >= min_x && cx <= max_x && cy >= min_y && cy <= max_y
+}
+
+/// True if the point lies on (within eps of) any edge of the bounds rect —
+/// used to tell tile-clip cuts apart from true polyline endpoints.
+pub fn point_on_bounds(point: (f32, f32), bounds: GeoBounds, eps: f32) -> bool {
+    (point.0 - bounds.min.x).abs() <= eps
+        || (point.0 - bounds.max.x).abs() <= eps
+        || (point.1 - bounds.min.y).abs() <= eps
+        || (point.1 - bounds.max.y).abs() <= eps
+}
+
+/// Sutherland-Hodgman clip of a (possibly concave) ring against a rect.
+/// Returns an empty vec when the ring lies fully outside.
+pub fn clip_ring_to_rect(ring: &[(f32, f32)], bounds: GeoBounds) -> Vec<(f32, f32)> {
+    fn inside(p: (f32, f32), edge: u8, b: GeoBounds) -> bool {
+        match edge {
+            0 => p.0 >= b.min.x,
+            1 => p.0 <= b.max.x,
+            2 => p.1 >= b.min.y,
+            _ => p.1 <= b.max.y,
+        }
+    }
+    fn intersect(a: (f32, f32), b: (f32, f32), edge: u8, r: GeoBounds) -> (f32, f32) {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        match edge {
+            0 | 1 => {
+                let x = if edge == 0 { r.min.x } else { r.max.x };
+                let t = if dx.abs() > f32::EPSILON {
+                    (x - a.0) / dx
+                } else {
+                    0.0
+                };
+                (x, a.1 + dy * t)
+            }
+            _ => {
+                let y = if edge == 2 { r.min.y } else { r.max.y };
+                let t = if dy.abs() > f32::EPSILON {
+                    (y - a.1) / dy
+                } else {
+                    0.0
+                };
+                (a.0 + dx * t, y)
+            }
+        }
+    }
+
+    let mut current = ring.to_vec();
+    for edge in 0..4u8 {
+        if current.len() < 3 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(current.len() + 4);
+        for i in 0..current.len() {
+            let a = current[i];
+            let b = current[(i + 1) % current.len()];
+            let a_in = inside(a, edge, bounds);
+            let b_in = inside(b, edge, bounds);
+            if a_in {
+                out.push(a);
+                if !b_in {
+                    out.push(intersect(a, b, edge, bounds));
+                }
+            } else if b_in {
+                out.push(intersect(a, b, edge, bounds));
+            }
+        }
+        current = out;
+    }
+    if current.len() < 3 {
+        return Vec::new();
+    }
+    current
+}
+
+/// Ring bbox fully inside the bounds rect (no clipping needed).
+pub fn ring_inside_bounds(ring: &[(f32, f32)], bounds: GeoBounds) -> bool {
+    ring.iter().all(|p| {
+        p.0 >= bounds.min.x && p.0 <= bounds.max.x && p.1 >= bounds.min.y && p.1 <= bounds.max.y
+    })
 }
 
 /// Clip rect in tile-local coordinates (tile origin at 0,0).
