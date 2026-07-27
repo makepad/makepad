@@ -19,8 +19,10 @@ pub const LABEL_CURVE_SMOOTH_PASSES: usize = 2;
 pub const LABEL_BASELINE_SHIFT_FACTOR: f64 = 1.0;
 pub const LABEL_LAYOUT_MAX_CURVATURE: f32 = 1.0;
 pub const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.22;
-pub const MAX_TILE_LABELS: usize = 512;
+pub const MAX_TILE_LABELS: usize = 4096;
 pub const POINT_LABEL_HALF_SPAN_PIXELS: f32 = 96.0;
+pub const ADDRESS_LABEL_MIN_ZOOM: f64 = 16.5;
+pub const POI_LABEL_MIN_ZOOM: f64 = 16.0;
 
 // --- Types ---
 
@@ -108,10 +110,38 @@ pub fn extract_way_label(
 }
 
 pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) -> Option<TileLabel> {
+    let source_layer = tags.get("layer").cloned().unwrap_or_default();
+    match source_layer.as_str() {
+        "addresses" => {
+            let number = tags
+                .get("housenumber")
+                .or_else(|| tags.get("housename"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value.len() <= 8)?;
+            return Some(TileLabel {
+                text: number,
+                priority: 4,
+                source_layer,
+                // unique per point so per-tile compaction keeps every number
+                road_kind: format!("addr{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                path_points: point_label_path(point),
+            });
+        }
+        "pois" => {
+            let name = select_label_text(tags)?;
+            return Some(TileLabel {
+                text: name,
+                priority: 3,
+                source_layer,
+                road_kind: format!("poi{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                path_points: point_label_path(point),
+            });
+        }
+        _ => {}
+    }
     if !tags.contains_key("highway") {
         return None;
     }
-    let source_layer = tags.get("layer").cloned().unwrap_or_default();
     if !is_road_point_label_layer(&source_layer) {
         return None;
     }
@@ -143,7 +173,9 @@ pub fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
             continue;
         }
         let name_key = normalize_label_key(&label.text);
-        if name_key.len() < 2 {
+        // single-character texts are valid house numbers
+        let min_len = if label.source_layer == "addresses" { 1 } else { 2 };
+        if name_key.len() < min_len {
             continue;
         }
         let key = (name_key, label.road_kind.clone());
@@ -213,8 +245,10 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "street_labels" | "street_labels_points" => 7,
         "streets_polygons_labels" => 6,
         "transportation_name" => 6,
+        "pois" => 3,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
         | "public_transport" => 2,
+        "addresses" => 1,
         _ => return None,
     })
 }
