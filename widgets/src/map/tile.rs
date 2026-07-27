@@ -386,6 +386,7 @@ pub fn build_tile_buffers_from_body(
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
     raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
     theme: &CompiledMapTheme,
     render_zoom: u32,
 ) -> Result<TileBuffers, String> {
@@ -395,6 +396,27 @@ pub fn build_tile_buffers_from_mvt(
         .max(1e-3) as f32;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    // Compose micro-POIs (trees, benches, bins…) from the all-tag detail
+    // archive over the shortbread base — they only draw as symbols, so skip
+    // the extra decode entirely below the icon zoom.
+    if render_zoom >= ICON_MIN_ZOOM {
+        if let Some(detail_data) = detail_tile_data {
+            if let Err(err) = merge_detail_micro_points(
+                detail_data,
+                tile_key,
+                render_scale,
+                &mut collector.points,
+            ) {
+                log!(
+                    "MapView: detail tile z{} x{} y{} decode failed: {}",
+                    tile_key.z,
+                    tile_key.x,
+                    tile_key.y,
+                    err
+                );
+            }
+        }
+    }
     Ok(build_tile_buffers_from_features(
         tile_key,
         collector.ways,
@@ -402,6 +424,31 @@ pub fn build_tile_buffers_from_mvt(
         theme,
         render_zoom,
     ))
+}
+
+/// Keep only whitelisted micro-POI points from a detail-archive tile and
+/// retag them into the synthetic `micro_pois` layer (icons only — the label
+/// extractor ignores that layer, so base-poi labels are never duplicated).
+fn merge_detail_micro_points(
+    detail_data: &[u8],
+    tile_key: TileKey,
+    render_scale: f32,
+    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+) -> Result<(), String> {
+    let pbf_data = decode_vector_tile_payload(detail_data)?;
+    let mut collector = MvtLocalCollector::new(render_scale);
+    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    for (point, mut tags) in collector.points {
+        if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
+            continue;
+        }
+        if micro_icon_for_tags(&tags).is_none() {
+            continue;
+        }
+        tags.insert("layer".to_string(), "micro_pois".to_string());
+        points.push((point, tags));
+    }
+    Ok(())
 }
 
 /// A way in tile-local coordinates ready for styling/tessellation.
@@ -912,9 +959,11 @@ fn append_oneway_arrow(
     for (x, y) in SHAPE {
         let ox = x * dir_x - y * dir_y;
         let oy = x * dir_y + y * dir_x;
+        // param3 = 1.0: the offset is map-aligned (road direction) and must
+        // rotate with the camera, unlike upright billboard POI symbols.
         out_vertices.extend_from_slice(&[
             anchor.0, anchor.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0,
-            ICON_SHAPE_ID, 0.0, ox, oy, 0.0, 0.0, 0.0, 16.0, *zbias,
+            ICON_SHAPE_ID, 0.0, ox, oy, 1.0, 0.0, 0.0, 16.0, *zbias,
         ]);
     }
     for index in INDICES {
@@ -1003,6 +1052,7 @@ fn project_way_points_with_nodes(
 
 pub fn load_local_tile_batch(
     mbtiles_path: &Path,
+    detail_mbtiles_path: Option<&Path>,
     requested: &[TileKey],
     theme: &CompiledMapTheme,
     render_zoom: u32,
@@ -1018,6 +1068,16 @@ pub fn load_local_tile_batch(
 
     let mut reader = MbtilesReader::open(mbtiles_path)
         .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
+
+    // Optional all-tag detail overlay (micro-POIs); only consulted at icon
+    // zooms and only for its single detail zoom level.
+    let mut detail_reader = if render_zoom >= ICON_MIN_ZOOM {
+        detail_mbtiles_path
+            .filter(|path| path.is_file())
+            .and_then(|path| MbtilesReader::open(path).ok())
+    } else {
+        None
+    };
 
     let mut by_zoom = HashMap::<u32, Vec<TileKey>>::new();
     for key in missing {
@@ -1054,8 +1114,18 @@ pub fn load_local_tile_batch(
                     unavailable.push(tile_key);
                     continue;
                 };
+                let detail_raw = detail_reader
+                    .as_mut()
+                    .and_then(|reader| reader.get_tile(zoom as i64, tile_key.x as i64, tms_row).ok())
+                    .flatten();
 
-                match build_tile_buffers_from_mvt(tile_key, &raw, theme, render_zoom) {
+                match build_tile_buffers_from_mvt(
+                    tile_key,
+                    &raw,
+                    detail_raw.as_deref(),
+                    theme,
+                    render_zoom,
+                ) {
                     Ok(buffers) => {
                         loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
@@ -1125,7 +1195,22 @@ pub fn load_local_tile_batch(
                 logged_xyz_row_scheme = true;
             }
 
-            match build_tile_buffers_from_mvt(tile_key, &tile.tile_data, theme, render_zoom) {
+            let detail_raw = detail_reader
+                .as_mut()
+                .and_then(|reader| {
+                    let tms_row = tile_count - 1 - tile_key.y as i64;
+                    reader
+                        .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                        .ok()
+                })
+                .flatten();
+            match build_tile_buffers_from_mvt(
+                tile_key,
+                &tile.tile_data,
+                detail_raw.as_deref(),
+                theme,
+                render_zoom,
+            ) {
                 Ok(buffers) => {
                     loaded.push(LoadedLocalTile { tile_key, buffers });
                 }

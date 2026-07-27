@@ -13,7 +13,7 @@
 
 pub use makepad_widgets;
 
-use makepad_map_nav::geo::{bearing_deg, LonLat};
+use makepad_map_nav::geo::{bearing_deg, bearing_delta_deg, LonLat};
 use makepad_map_nav::graph::{Route, RouteGraph, TravelMode};
 use makepad_map_nav::nav::{NavSession, NavState};
 use makepad_map_nav::search::{SearchIndex, SearchResult};
@@ -77,6 +77,7 @@ script_mod! {
                             zoom: 13.0
                             min_zoom: 3.0
                             mbtiles_path: "local/maps/europe-shortbread.mbtiles"
+                            detail_mbtiles_path: "local/maps/noord-holland-detail.mbtiles"
                         }
 
                         // --- Search panel (top-left) ---
@@ -314,10 +315,15 @@ pub struct App {
     program_moves: u32,
     #[rust]
     sim_progress_m: f64,
+    /// Per-frame tick: the sim advances on NextFrame, not a timer, so the
+    /// follow camera moves once per rendered frame instead of at 20 Hz.
     #[rust]
-    sim_timer: Timer,
+    sim_next_frame: NextFrame,
     #[rust]
     sim_last_tick: Option<std::time::Instant>,
+    /// Smoothed heading-up camera rotation during nav.
+    #[rust]
+    map_rotation: f64,
     #[rust]
     sim_started: Option<std::time::Instant>,
     #[rust]
@@ -559,8 +565,7 @@ impl App {
             self.program_moves += 1;
             self.map(cx).fly_to(cx, start.lon, start.lat, 17.0);
         }
-        cx.stop_timer(self.sim_timer);
-        self.sim_timer = cx.start_timeout(0.05);
+        self.sim_next_frame = cx.new_next_frame();
     }
 
     fn end_nav(&mut self, cx: &mut Cx) {
@@ -568,8 +573,9 @@ impl App {
         self.session = None;
         self.route = None;
         self.dest = None;
-        cx.stop_timer(self.sim_timer);
+        self.map_rotation = 0.0;
         let map = self.map(cx);
+        map.set_rotation(cx, 0.0);
         map.clear_route(cx);
         map.set_markers(cx, Vec::new());
         self.ui.view(cx, ids!(banner)).set_visible(cx, false);
@@ -624,6 +630,14 @@ impl App {
         map.set_puck(cx, Some(MapPuck::new(pos.lon, pos.lat, heading, 12.0)));
         if self.follow {
             map.set_center(cx, pos.lon, pos.lat);
+            // Heading-up: ease the camera onto the travel bearing with a
+            // shortest-arc exponential so curves sweep instead of snapping.
+            if let Some(target) = heading {
+                let delta = bearing_delta_deg(self.map_rotation, target);
+                let blend = 1.0 - (-dt * 3.0).exp();
+                self.map_rotation = (self.map_rotation + delta * blend).rem_euclid(360.0);
+                map.set_rotation(cx, self.map_rotation);
+            }
         }
 
         if let Some(status) = status {
@@ -637,7 +651,6 @@ impl App {
                         .set_text(cx, "You have arrived");
                     self.ui.label(cx, ids!(banner_dist)).set_text(cx, "");
                     self.navigating = false;
-                    cx.stop_timer(self.sim_timer);
                     return;
                 }
                 _ => {
@@ -662,7 +675,7 @@ impl App {
                 }
             }
         }
-        self.sim_timer = cx.start_timeout(0.05);
+        self.sim_next_frame = cx.new_next_frame();
     }
 }
 
@@ -870,7 +883,7 @@ impl AppMain for App {
         if self.search_debounce.is_event(event).is_some() {
             self.send_search(cx);
         }
-        if self.sim_timer.is_event(event).is_some() {
+        if self.sim_next_frame.is_event(event).is_some() {
             self.tick_sim(cx);
         }
 

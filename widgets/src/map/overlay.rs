@@ -12,16 +12,30 @@ use crate::DrawVector;
 pub struct OverlayCamera {
     /// Pixels per normalized-mercator unit at the current view zoom.
     pub world_size: f64,
-    /// Screen offset: `screen = norm * world_size + offset`.
+    /// Screen offset: `screen = norm * world_size + offset` (before rotation).
     pub offset: Vec2d,
     pub rect: Rect,
     /// Ground meters per screen pixel at the view center latitude.
     pub meters_per_px: f64,
+    /// (cos, sin) of the heading-up screen rotation; identity = north-up.
+    pub rot: (f64, f64),
+    pub rot_pivot: Vec2d,
+    /// Map bearing pointing up, degrees (for billboard heading math).
+    pub rotation_deg: f64,
 }
 
 impl OverlayCamera {
     pub fn norm_to_screen(&self, p: Vec2d) -> Vec2d {
-        p * self.world_size + self.offset
+        let s = p * self.world_size + self.offset;
+        if self.rot == (1.0, 0.0) {
+            return s;
+        }
+        let rel = s - self.rot_pivot;
+        self.rot_pivot
+            + dvec2(
+                rel.x * self.rot.0 - rel.y * self.rot.1,
+                rel.x * self.rot.1 + rel.y * self.rot.0,
+            )
     }
 }
 
@@ -307,9 +321,10 @@ fn draw_puck(dv: &mut DrawVector, camera: &OverlayCamera, puck: &MapPuck) {
         }
     }
 
-    // Heading wedge behind the dot.
+    // Heading wedge behind the dot; under a heading-up camera the wedge
+    // shows the heading relative to the rotated map.
     if let Some(heading) = puck.heading_deg {
-        let rad = heading.to_radians();
+        let rad = (heading - camera.rotation_deg).to_radians();
         let (dir_x, dir_y) = (rad.sin() as f32, -(rad.cos()) as f32);
         let (side_x, side_y) = (-dir_y, dir_x);
         let tip = 20.0f32;
