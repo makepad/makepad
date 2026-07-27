@@ -449,6 +449,12 @@ fn vec4_to_rgb_hex(color: Vec4f) -> u32 {
     color.to_u32() >> 8
 }
 
+impl CompiledMapTheme {
+    pub fn building_fill_color(&self) -> Option<u32> {
+        self.building_fill
+    }
+}
+
 pub fn fill_color_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
