@@ -21,7 +21,7 @@ pub const RETRY_BASE_FRAMES: u64 = 30;
 pub const RETRY_MAX_FRAMES: u64 = 300;
 pub const TILE_CACHE_DIR: &str = "local/tilecache_v4";
 pub const TILE_QUERY_PAD: f64 = 0.05;
-pub const LOCAL_MBTILES_PATH: &str = "local/maps/europe-shortbread.mbtiles";
+pub const LOCAL_MBTILES_PATH: &str = "noord-holland-shortbread-1.0.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
 pub const MAX_LOCAL_TILE_BATCH: usize = 10;
@@ -400,7 +400,11 @@ pub fn build_tile_buffers_from_body(
         let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
             continue;
         };
-        let fill_clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
+        // Overlap only needs to cover the AA fringe (~1 screen px). Any wider
+        // and the double-drawn strip shows the later tile's LAND painting over
+        // the earlier tile's BUILDINGS (per-tile rank order doesn't hold
+        // across tiles), visible as a pale band at high zoom.
+        let fill_clip_bounds = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
         if !ring_inside_bounds(&ring_points, fill_clip_bounds) {
             ring_points = clip_ring_to_rect(&ring_points, fill_clip_bounds);
             if ring_points.len() < 3 {
@@ -496,7 +500,8 @@ pub fn build_tile_buffers_from_body(
             if let (true, Some(outline)) = (group.is_building, building_outline) {
                 // Outline the ring but drop segments that run along the tile
                 // cut, so clipped buildings don't get a fake wall at the seam.
-                let outline_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP - 0.2);
+                let outline_bounds =
+                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP) * 0.2);
                 let outline_style = StrokePassStyle {
                     color: outline,
                     width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
@@ -765,7 +770,6 @@ fn project_way_points_with_nodes(
 
 pub fn load_local_tile_batch(
     mbtiles_path: &Path,
-    cache_dir: &Path,
     requested: &[TileKey],
     theme: &CompiledMapTheme,
     render_zoom: u32,
@@ -774,60 +778,30 @@ pub fn load_local_tile_batch(
         return Ok(Vec::new());
     }
 
+    // The MBTiles archive is already the local, seekable tile cache. Do not
+    // duplicate it into millions of generated JSON files.
     let mut loaded = Vec::<LoadedLocalTile>::new();
-    let mut missing = Vec::<TileKey>::new();
-    for key in requested {
-        let cache_path = cache_dir.join(format!("z{}_x{}_y{}.json", key.z, key.x, key.y));
-        match fs::read_to_string(&cache_path) {
-            Ok(body) => match build_tile_buffers_from_body(*key, &body, theme, render_zoom) {
-                Ok(buffers) => loaded.push(LoadedLocalTile {
-                    tile_key: *key,
-                    buffers,
-                }),
-                Err(err) => {
-                    log!(
-                        "MapView: cache parse failed for tile z{} x{} y{}: {}",
-                        key.z,
-                        key.x,
-                        key.y,
-                        err
-                    );
-                    let _ = fs::remove_file(cache_path);
-                    missing.push(*key);
-                }
-            },
-            Err(_) => missing.push(*key),
-        }
-    }
+    let missing = requested;
 
-    if missing.is_empty() {
-        return Ok(loaded);
-    }
-
-    // Cache-only mode: when the mbtiles source is absent (e.g. still being
-    // downloaded), serve whatever the disk cache had instead of failing the
-    // whole batch; uncached keys become "missing" and stop re-requesting.
-    let mut reader = match MbtilesReader::open(mbtiles_path) {
-        Ok(reader) => reader,
-        Err(err) => {
-            if loaded.is_empty() {
-                return Err(format!("open {}: {}", mbtiles_path.display(), err));
-            }
-            return Ok(loaded);
-        }
-    };
+    let mut reader = MbtilesReader::open(mbtiles_path)
+        .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
 
     let mut by_zoom = HashMap::<u32, Vec<TileKey>>::new();
-    for key in &missing {
+    for key in missing {
         by_zoom.entry(key.z).or_default().push(*key);
     }
 
     let mut logged_xyz_row_scheme = false;
 
-    for (zoom, keys) in by_zoom {
+    for (zoom, mut keys) in by_zoom {
         let tile_count = 1_i64 << zoom;
 
         if reader.supports_direct_tile_lookup() {
+            // Match the writer's block-major rowid order to keep visible-tile
+            // reads close together on disk.
+            keys.sort_unstable_by_key(|key| {
+                (key.y >> 8, key.x >> 8, key.y & 255, key.x & 255)
+            });
             let mut unavailable = Vec::new();
             for tile_key in keys {
                 let tms_row = tile_count - 1 - tile_key.y as i64;
@@ -852,7 +826,6 @@ pub fn load_local_tile_batch(
                     Ok(body) => {
                         match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
                             Ok(buffers) => {
-                                store_tile_data_cache_on_disk(tile_key, &body);
                                 loaded.push(LoadedLocalTile { tile_key, buffers });
                             }
                             Err(err) => {
@@ -935,7 +908,6 @@ pub fn load_local_tile_batch(
             match mbtiles_tile_to_overpass_json(tile_key, &tile.tile_data) {
                 Ok(body) => match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
                     Ok(buffers) => {
-                        store_tile_data_cache_on_disk(tile_key, &body);
                         loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
                     Err(err) => {
