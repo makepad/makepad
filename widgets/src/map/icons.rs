@@ -67,6 +67,9 @@ const ICON_SVGS: &[(&str, &str)] = &[
     ("statue", include_str!("icons/statue.svg")),
     ("entrance", include_str!("icons/entrance.svg")),
     ("information", include_str!("icons/information.svg")),
+    ("traffic_signals", include_str!("icons/traffic_signals.svg")),
+    ("parking", include_str!("icons/parking.svg")),
+    ("charger", include_str!("icons/charger.svg")),
 ];
 
 fn icons() -> &'static HashMap<&'static str, IconMesh> {
@@ -82,6 +85,10 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         // not glyphs).
         if let Some(mesh) = build_disc_mesh(3.4) {
             out.insert("tree", mesh);
+        }
+        // Generic small dot for named POIs with no dedicated symbol.
+        if let Some(mesh) = build_disc_mesh(2.4) {
+            out.insert("dot", mesh);
         }
         out
     })
@@ -209,8 +216,18 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
             "waste_basket" | "waste_disposal" => Some(("waste_basket", LABEL_CLASS_MUTED)),
             "recycling" => Some(("recycling", LABEL_CLASS_MUTED)),
             "bicycle_parking" => Some(("bicycle", LABEL_CLASS_TRANSPORT)),
+            "parking" => Some(("parking", LABEL_CLASS_TRANSPORT)),
+            "charging_station" => Some(("charger", LABEL_CLASS_TRANSPORT)),
             _ => None,
         };
+    }
+    if tags.get("highway").map(|v| v.as_str()) == Some("traffic_signals") {
+        return Some(("traffic_signals", LABEL_CLASS_MUTED));
+    }
+    // Offices (TomTom etc.) only exist in the detail archive; carto shows
+    // them as a small dot + name from street-level zoom.
+    if tags.contains_key("office") && tags.contains_key("name") {
+        return Some(("dot", LABEL_CLASS_MUTED));
     }
     if let Some(leisure) = tags.get("leisure") {
         return match leisure.as_str() {
@@ -282,6 +299,8 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
             "pharmacy" => Some(("pharmacy", LABEL_CLASS_DEFAULT)),
             "bank" => Some(("bank", LABEL_CLASS_DEFAULT)),
             "atm" => Some(("atm", LABEL_CLASS_DEFAULT)),
+            "parking" => Some(("parking", LABEL_CLASS_TRANSPORT)),
+            "charging_station" => Some(("charger", LABEL_CLASS_TRANSPORT)),
             "place_of_worship" => Some(("place_of_worship", LABEL_CLASS_CULTURE)),
             "cinema" => Some(("cinema", LABEL_CLASS_CULTURE)),
             "theatre" => Some(("theatre", LABEL_CLASS_CULTURE)),
@@ -294,8 +313,18 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
             "hotel" | "guest_house" | "hostel" => Some(("hotel", LABEL_CLASS_CULTURE)),
             "museum" | "gallery" => Some(("museum", LABEL_CLASS_CULTURE)),
             "information" => Some(("information", LABEL_CLASS_CULTURE)),
-            _ => None,
+            _ => Some(("dot", LABEL_CLASS_CULTURE)),
         };
+    }
+    if tags.contains_key("leisure") {
+        return Some(("dot", LABEL_CLASS_GREEN));
+    }
+    // Named POI with no matched symbol: carto's small colored dot, so the
+    // place still shows up (and its label gets the class color).
+    if tags.contains_key("name")
+        && (tags.contains_key("amenity") || tags.contains_key("office") || tags.contains_key("craft"))
+    {
+        return Some(("dot", LABEL_CLASS_DEFAULT));
     }
     None
 }

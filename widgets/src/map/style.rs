@@ -487,8 +487,19 @@ pub fn fill_color_for_tags(
     if matches!(layer, "bridges" | "pier_polygons" | "dam_polygons") {
         return theme.bridge_area_fill;
     }
+    // Station platforms: carto draws them as calm gray slabs.
+    if layer == "platforms" {
+        return theme.bridge_area_fill;
+    }
     if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
         return theme.water_fill;
+    }
+    if matches!(
+        tags.get("natural").map(|value| value.as_str()),
+        Some("scrub" | "heath" | "shrubbery")
+    ) {
+        // carto scrub green; the detail archive routes these as natural=*.
+        return theme.landuse_fills.get("grass").copied().or(theme.landuse_default);
     }
     if let Some(landuse) = tags.get("landuse") {
         let key = landuse.trim().to_ascii_lowercase();
@@ -520,6 +531,9 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
         // Bellamyplein must not paint over the park inside them
         return 12;
     }
+    if layer == "platforms" {
+        return 13;
+    }
     // Green areas (parks/gardens/grass) rank above generic landuse and sites:
     // they share the `land` layer with huge residential polygons and would
     // otherwise lose to protobuf feature order (Bellamyplein rendered gray).
@@ -539,7 +553,7 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
         );
     match layer {
         "ocean" => 5,
-        "land" | "landuse" | "landcover" => {
+        "land" | "landuse" | "landcover" | "detail_land" => {
             if is_green {
                 // Distinct sub-ranks: nested greens (grass patches or a
                 // playground inside a park) must never tie — equal ranks
@@ -646,6 +660,20 @@ pub fn stroke_style_for_tags(
     // water_polygons layers own the visible geometry.
     if matches!(layer, "water_lines_labels" | "water_polygons_labels") {
         return None;
+    }
+    // Platform slabs get a thin constant-px edge like carto.
+    if layer == "platforms" {
+        return Some(StrokeStyle {
+            sort_rank: 140,
+            casing: None,
+            center: StrokePassStyle {
+                color: 0x9a938b,
+                width: 0.8 * px_to_units,
+                shape_id: 0.0,
+                expand_class: EXPAND_CLASS_CONST_PX,
+                depth_micro: 140.0 * DEPTH_MICRO_PER_RANK,
+            },
+        });
     }
 
     let mut width_scale = zoom_mult * px_to_units;
@@ -821,17 +849,27 @@ fn rail_stroke_style(
     }
     if heavy && render_zoom >= RAIL_SLEEPER_MIN_ZOOM && !tag_is_truthy(tags, "tunnel") {
         let rank = template.sort_rank as f32;
+        // Sidings/yards/spurs (dead-end service tracks) fade toward the
+        // background like carto's lighter service rail.
+        let service = tags.contains_key("service");
+        let casing_color = if service {
+            let c = template.center.color;
+            let lighten = |v: u32| v + (0xff - v) * 45 / 100;
+            (lighten(c >> 16 & 0xff) << 16) | (lighten(c >> 8 & 0xff) << 8) | lighten(c & 0xff)
+        } else {
+            template.center.color
+        };
         template.casing = Some(StrokePassStyle {
             // The theme's rail line color becomes the casing band.
-            color: template.center.color,
-            width: 2.4,
+            color: casing_color,
+            width: if service { 2.0 } else { 2.4 },
             shape_id: 0.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK,
         });
         template.center = StrokePassStyle {
             color: 0xf7f7f7,
-            width: 1.2,
+            width: if service { 1.0 } else { 1.2 },
             shape_id: 12.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
