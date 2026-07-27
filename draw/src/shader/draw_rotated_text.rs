@@ -107,6 +107,25 @@ pub struct PathTextPlacement {
 }
 
 impl DrawRotatedText {
+    /// Open one shared instance batch so many draw_path_glyphs* calls append
+    /// to a single draw call instead of one begin/finish per glyph.
+    pub fn begin_glyph_batch(&mut self, cx: &mut Cx2d) {
+        if self.draw_super.many_instances.is_some() {
+            return;
+        }
+        self.draw_super.update_draw_vars(cx);
+        self.draw_super.many_instances =
+            cx.begin_many_aligned_instances(&self.draw_super.draw_vars);
+    }
+
+    pub fn end_glyph_batch(&mut self, cx: &mut Cx2d) {
+        if let Some(instances) = self.draw_super.many_instances.take() {
+            let new_area = cx.end_many_instances(instances);
+            let old_area = self.draw_super.draw_vars.area;
+            self.draw_super.draw_vars.area = cx.update_area_refs(old_area, new_area);
+        }
+    }
+
     /// Draw a single glyph at an arbitrary position with rotation.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_glyph_at(
