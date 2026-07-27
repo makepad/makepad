@@ -30,7 +30,8 @@ script_mod! {
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
             self.v_stroke_mult = self.geom.stroke_mult;
-            self.v_stroke_dist = self.geom.stroke_dist;
+            // stroke distances are tile-local; scale so dash patterns stay in screen px
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
             self.v_shape_id = self.geom.shape_id;
             self.v_param0 = self.geom.param0;
             self.v_param5 = self.geom.param5;
@@ -106,59 +107,64 @@ script_mod! {
     mod.widgets.MapView = set_type_default() do mod.widgets.MapViewBase{
         width: Fill
         height: Fill
-        center_lon: 4.9041
-        center_lat: 52.3676
-        zoom: 14.0
+        center_lon: 4.8779
+        center_lat: 52.3757
+        zoom: 17.0
         min_zoom: 11.0
         max_zoom: 17.0
         dark_theme: false
         use_network: false
         use_local_mbtiles: true
+        // openstreetmap-carto palette; road widths are carto's z14 stops in
+        // screen px, scaled per view-zoom bucket by zoom_width_mult().
         style_light: MapThemeStyle{
-            background: #xddd7cc
-            status_text: #xdee9f4
+            background: #xf2efe9
+            status_text: #x444444
             label: #x000000
 
-            MapFillRule{group: "building" color: #xc6c0b5}
-            MapFillRule{group: "water" color: #x9ecff2}
-            MapFillRule{group: "landuse" value: "residential" color: #xe9e4dc}
-            MapFillRule{group: "landuse" value: "commercial" color: #xe1dbd2}
-            MapFillRule{group: "landuse" value: "retail" color: #xe1dbd2}
-            MapFillRule{group: "landuse" value: "industrial" color: #xd6d1cb}
-            MapFillRule{group: "landuse" value: "forest" color: #xc4deb0}
-            MapFillRule{group: "landuse" value: "grass" color: #xd4e5bf}
-            MapFillRule{group: "landuse" value: "meadow" color: #xd4e5bf}
-            MapFillRule{group: "landuse" value: "farmland" color: #xd4e5bf}
-            MapFillRule{group: "landuse" value: "*" color: #xe5dfd6}
-            MapFillRule{group: "leisure" value: "park" color: #xc5e2b6}
-            MapFillRule{group: "leisure" value: "garden" color: #xc5e2b6}
-            MapFillRule{group: "leisure" value: "golf_course" color: #xc5e2b6}
-            MapFillRule{group: "leisure" value: "pitch" color: #xb8db9f}
-            MapFillRule{group: "leisure" value: "*" color: #xd1e8bf}
+            MapFillRule{group: "building" color: #xd9d0c9}
+            MapFillRule{group: "building_outline" color: #xb5aa9b}
+            MapFillRule{group: "street_area" color: #xdddde8}
+            MapFillRule{group: "bridge_area" color: #xb8b8b8}
+            MapFillRule{group: "water" color: #xaad3df}
+            MapFillRule{group: "landuse" value: "residential" color: #xe0dfdf}
+            MapFillRule{group: "landuse" value: "commercial" color: #xf2dad9}
+            MapFillRule{group: "landuse" value: "retail" color: #xffd6d1}
+            MapFillRule{group: "landuse" value: "industrial" color: #xebdbe8}
+            MapFillRule{group: "landuse" value: "forest" color: #xadd19e}
+            MapFillRule{group: "landuse" value: "grass" color: #xcdebb0}
+            MapFillRule{group: "landuse" value: "meadow" color: #xcdebb0}
+            MapFillRule{group: "landuse" value: "farmland" color: #xeef0d5}
+            MapFillRule{group: "landuse" value: "*" color: #xe8e7e2}
+            MapFillRule{group: "leisure" value: "park" color: #xc8facc}
+            MapFillRule{group: "leisure" value: "garden" color: #xcdebb0}
+            MapFillRule{group: "leisure" value: "golf_course" color: #xdef6c0}
+            MapFillRule{group: "leisure" value: "pitch" color: #x88e0be}
+            MapFillRule{group: "leisure" value: "*" color: #xc8facc}
 
-            MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #xc38d49 casing_width: 3.9 center_color: #xe2ad65 center_width: 3.0}
-            MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #xc59f5f casing_width: 3.5 center_color: #xe8c17e center_width: 2.7}
-            MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #xc6b181 casing_width: 3.1 center_color: #xf0d39c center_width: 2.35}
-            MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #xd0c8b6 casing_width: 2.75 center_color: #xf4e4c4 center_width: 2.0}
-            MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #xd0c8b6 casing_width: 2.75 center_color: #xf4e4c4 center_width: 2.0}
-            MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #xc6c0b3 casing_width: 2.4 center_color: #xf5ebd8 center_width: 1.7}
-            MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
-            MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
-            MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #xc2bcae casing_width: 2.0 center_color: #xfefefd center_width: 1.35}
-            MapRoadRule{kind: "service" sort_rank: 240 casing_color: #xc5bfb2 casing_width: 1.75 center_color: #xf6f2ea center_width: 1.1}
-            MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #xc5bfb2 casing_width: 1.75 center_color: #xf6f2ea center_width: 1.1}
-            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
-            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
-            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
-            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
-            MapRoadRule{kind: "track" sort_rank: 160 center_color: #xb6afa1 center_width: 0.82}
-            MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xc3bcaf casing_width: 1.9 center_color: #xf5f1e9 center_width: 1.2}
+            MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #xdc2a67 casing_width: 7.2 center_color: #xe892a2 center_width: 6.0}
+            MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #xc84e2f casing_width: 7.2 center_color: #xf9b29c center_width: 6.0}
+            MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #xa06b00 casing_width: 6.4 center_color: #xfcd6a4 center_width: 5.0}
+            MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #x707d05 casing_width: 6.4 center_color: #xf7fabf center_width: 5.0}
+            MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #x707d05 casing_width: 6.4 center_color: #xf7fabf center_width: 5.0}
+            MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #x8f8f8f casing_width: 6.2 center_color: #xffffff center_width: 5.0}
+            MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #xbbbbbb casing_width: 4.2 center_color: #xffffff center_width: 3.0}
+            MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #xbbbbbb casing_width: 4.2 center_color: #xffffff center_width: 3.0}
+            MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #xbbbbbb casing_width: 4.0 center_color: #xededed center_width: 3.0}
+            MapRoadRule{kind: "service" sort_rank: 240 casing_color: #xbbbbbb casing_width: 3.0 center_color: #xffffff center_width: 2.0}
+            MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x999999 casing_width: 4.0 center_color: #xdddde8 center_width: 3.0}
+            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x6262ff center_width: 0.9 center_shape_id: 10.0}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xfa8072 center_width: 0.9 center_shape_id: 10.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xfa8072 center_width: 0.8 center_shape_id: 10.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xfa8072 center_width: 2.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x996600 center_width: 1.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xbbbbbb casing_width: 3.6 center_color: #xffffff center_width: 2.5}
 
-            MapWaterwayRule{kind: "river" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.83 center_color: #x73b5e4 center_width: 1.55}
-            MapWaterwayRule{kind: "canal" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.5 center_color: #x73b5e4 center_width: 1.22}
-            MapWaterwayRule{kind: "stream" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.18 center_color: #x73b5e4 center_width: 0.9}
-            MapWaterwayRule{kind: "*" sort_rank: 140 casing_color: #x4a8fc3 casing_width: 1.1 center_color: #x73b5e4 center_width: 0.82}
-            MapRailRule{sort_rank: 180 casing_color: #xb7b2a9 casing_width: 0.96 center_color: #x8f8a81 center_width: 0.62 center_shape_id: 10.0}
+            MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #xaad3df center_width: 4.0}
+            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #xaad3df center_width: 3.0}
+            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #xaad3df center_width: 1.4}
+            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #xaad3df center_width: 1.2}
+            MapRailRule{sort_rank: 710 center_color: #x6e6e6e center_width: 1.0}
         }
         style_dark: MapThemeStyle{
             background: #x161b22
@@ -166,6 +172,9 @@ script_mod! {
             label: #xe5eaf1
 
             MapFillRule{group: "building" color: #x383d46}
+            MapFillRule{group: "building_outline" color: #x262a31}
+            MapFillRule{group: "street_area" color: #x3a3f4a}
+            MapFillRule{group: "bridge_area" color: #x3a3f47}
             MapFillRule{group: "water" color: #x204f74}
             MapFillRule{group: "landuse" value: "residential" color: #x2a2f36}
             MapFillRule{group: "landuse" value: "commercial" color: #x30343b}
@@ -182,33 +191,33 @@ script_mod! {
             MapFillRule{group: "leisure" value: "pitch" color: #x32553a}
             MapFillRule{group: "leisure" value: "*" color: #x2b4230}
 
-            MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #x8f6937 casing_width: 3.9 center_color: #xd29b54 center_width: 3.0}
-            MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #x8c7141 casing_width: 3.5 center_color: #xc8a561 center_width: 2.7}
-            MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #x706857 casing_width: 3.1 center_color: #xb9aa86 center_width: 2.35}
-            MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #x556170 casing_width: 2.75 center_color: #x95a1b1 center_width: 2.0}
-            MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #x556170 casing_width: 2.75 center_color: #x95a1b1 center_width: 2.0}
-            MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #x4b5765 casing_width: 2.4 center_color: #x7d899a center_width: 1.7}
-            MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
-            MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
-            MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #x404a57 casing_width: 2.0 center_color: #x677383 center_width: 1.35}
-            MapRoadRule{kind: "service" sort_rank: 240 casing_color: #x3e4753 casing_width: 1.75 center_color: #x5e6a79 center_width: 1.1}
-            MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x3e4753 casing_width: 1.75 center_color: #x5e6a79 center_width: 1.1}
-            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
-            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
-            MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
-            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
-            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x4f5966 center_width: 0.82}
-            MapRoadRule{kind: "*" sort_rank: 280 casing_color: #x404a57 casing_width: 1.9 center_color: #x606c7b center_width: 1.2}
+            MapRoadRule{kind: "motorway" sort_rank: 700 casing_color: #x8f6937 casing_width: 7.2 center_color: #xd29b54 center_width: 6.0}
+            MapRoadRule{kind: "trunk" sort_rank: 640 casing_color: #x8c7141 casing_width: 7.2 center_color: #xc8a561 center_width: 6.0}
+            MapRoadRule{kind: "primary" sort_rank: 560 casing_color: #x706857 casing_width: 6.4 center_color: #xb9aa86 center_width: 5.0}
+            MapRoadRule{kind: "secondary" sort_rank: 470 casing_color: #x556170 casing_width: 6.4 center_color: #x95a1b1 center_width: 5.0}
+            MapRoadRule{kind: "busway" sort_rank: 470 casing_color: #x556170 casing_width: 6.4 center_color: #x95a1b1 center_width: 5.0}
+            MapRoadRule{kind: "tertiary" sort_rank: 390 casing_color: #x4b5765 casing_width: 6.2 center_color: #x7d899a center_width: 5.0}
+            MapRoadRule{kind: "residential" sort_rank: 310 casing_color: #x404a57 casing_width: 4.2 center_color: #x677383 center_width: 3.0}
+            MapRoadRule{kind: "unclassified" sort_rank: 310 casing_color: #x404a57 casing_width: 4.2 center_color: #x677383 center_width: 3.0}
+            MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #x404a57 casing_width: 4.0 center_color: #x677383 center_width: 3.0}
+            MapRoadRule{kind: "service" sort_rank: 240 casing_color: #x3e4753 casing_width: 3.0 center_color: #x5e6a79 center_width: 2.0}
+            MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x3e4753 casing_width: 4.0 center_color: #x5e6a79 center_width: 3.0}
+            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.8 center_shape_id: 10.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x4f5966 center_width: 2.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x4f5966 center_width: 1.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "*" sort_rank: 280 casing_color: #x404a57 casing_width: 3.6 center_color: #x606c7b center_width: 2.5}
 
-            MapWaterwayRule{kind: "river" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.83 center_color: #x4f93c8 center_width: 1.55}
-            MapWaterwayRule{kind: "canal" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.5 center_color: #x4f93c8 center_width: 1.22}
-            MapWaterwayRule{kind: "stream" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.18 center_color: #x4f93c8 center_width: 0.9}
-            MapWaterwayRule{kind: "*" sort_rank: 140 casing_color: #x2f6188 casing_width: 1.1 center_color: #x4f93c8 center_width: 0.82}
-            MapRailRule{sort_rank: 180 casing_color: #x3f4650 casing_width: 0.96 center_color: #x707783 center_width: 0.62 center_shape_id: 10.0}
+            MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #x204f74 center_width: 4.0}
+            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #x204f74 center_width: 3.0}
+            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #x204f74 center_width: 1.4}
+            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #x204f74 center_width: 1.2}
+            MapRailRule{sort_rank: 710 center_color: #x8a919d center_width: 1.0}
         }
 
         draw_bg +: {
-            color: #xddd7cc
+            color: #xf2efe9
         }
         draw_label +: {
             color: #x000000
@@ -483,10 +492,13 @@ impl Widget for MapView {
         let view_zoom = self.view_zoom();
         let world_size = tile_world_size_zoom(view_zoom);
         let center_world = self.center_norm * world_size;
-        let map_offset = Vec2f {
-            x: (rect.pos.x + rect.size.x * 0.5 - center_world.x) as f32,
-            y: (rect.pos.y + rect.size.y * 0.5 - center_world.y) as f32,
-        };
+        // Keep the global offset in f64; geometry is tile-local, so the only
+        // f32 quantities the GPU sees are small (tile-local coords and a
+        // screen-magnitude per-tile offset).
+        let map_offset = dvec2(
+            rect.pos.x + rect.size.x * 0.5 - center_world.x,
+            rect.pos.y + rect.size.y * 0.5 - center_world.y,
+        );
 
         self.fill_draw_tile_keys();
         self.scratch_draw_tiles
@@ -494,43 +506,49 @@ impl Widget for MapView {
         // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
         let draw_tiles = std::mem::take(&mut self.scratch_draw_tiles);
 
-        // Fill pass
-        for key in &draw_tiles {
-            let Some(entry) = self.tiles.get(key) else {
-                continue;
-            };
-            if let TileLoadState::Ready { fill_geometry, .. } = &entry.state {
-                let Some(fill_geometry) = fill_geometry else {
+        // Three global passes (carto layer order): every tile's fills, then
+        // every tile's road casings, then every tile's road centers. Casings
+        // interleaved per tile would stamp over neighbor tiles' road interiors
+        // in the clip-padding overlap at tile seams.
+        for pass in 0..3 {
+            for key in &draw_tiles {
+                let Some(entry) = self.tiles.get(key) else {
                     continue;
                 };
-                let scale = 2.0_f64.powf(view_zoom - key.z as f64) as f32;
-                self.draw_map.draw_geometry(
-                    cx,
-                    fill_geometry.geometry_id(),
-                    Vec2f { x: scale, y: scale },
-                    map_offset,
-                );
-            }
-        }
-
-        // Stroke pass
-        for key in &draw_tiles {
-            let Some(entry) = self.tiles.get(key) else {
-                continue;
-            };
-            if let TileLoadState::Ready {
-                stroke_geometry, ..
-            } = &entry.state
-            {
-                let Some(stroke_geometry) = stroke_geometry else {
+                let TileLoadState::Ready {
+                    fill_geometry,
+                    casing_geometry,
+                    stroke_geometry,
+                    ..
+                } = &entry.state
+                else {
                     continue;
                 };
-                let scale = 2.0_f64.powf(view_zoom - key.z as f64) as f32;
+                let geometry = match pass {
+                    0 => fill_geometry,
+                    1 => casing_geometry,
+                    _ => stroke_geometry,
+                };
+                let Some(geometry) = geometry else {
+                    continue;
+                };
+                let scale = 2.0_f64.powf(view_zoom - key.z as f64);
+                let tile_offset = map_offset
+                    + dvec2(
+                        key.x as f64 * TILE_SIZE * scale,
+                        key.y as f64 * TILE_SIZE * scale,
+                    );
                 self.draw_map.draw_geometry(
                     cx,
-                    stroke_geometry.geometry_id(),
-                    Vec2f { x: scale, y: scale },
-                    map_offset,
+                    geometry.geometry_id(),
+                    Vec2f {
+                        x: scale as f32,
+                        y: scale as f32,
+                    },
+                    Vec2f {
+                        x: tile_offset.x as f32,
+                        y: tile_offset.y as f32,
+                    },
                 );
             }
         }
@@ -600,9 +618,10 @@ impl WidgetMatchEvent for MapView {
         let sender = self.tile_worker_rx.sender();
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
+        let bucket = self.render_bucket();
 
         pool.execute_rev(tile_key, move |_tag| {
-            match build_tile_buffers_from_body(tile_key, &body, &theme_style) {
+            match build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket) {
                 Ok(buffers) => {
                     store_tile_data_cache_on_disk(tile_key, &body);
                     let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
@@ -716,6 +735,15 @@ impl MapView {
             None
         };
 
+        let casing_geometry =
+            if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
+                let geometry = Geometry::new(cx);
+                geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
+                Some(geometry)
+            } else {
+                None
+            };
+
         let stroke_geometry =
             if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
@@ -730,12 +758,14 @@ impl MapView {
             TileEntry {
                 state: TileLoadState::Ready {
                     fill_geometry,
+                    casing_geometry,
                     stroke_geometry,
                     feature_count: buffers.feature_count,
                     labels: buffers.labels,
                 },
                 last_used: self.frame_counter,
                 attempts: 0,
+                bucket: buffers.render_zoom,
             },
         );
     }
@@ -844,13 +874,18 @@ impl MapView {
             return;
         }
 
+        let bucket = self.render_bucket();
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
-            if self.tiles.contains_key(key)
-                || self.local_requested_tiles.contains(key)
-                || self.local_missing_tiles.contains(key)
-            {
+            if self.local_requested_tiles.contains(key) || self.local_missing_tiles.contains(key) {
                 continue;
+            }
+            if let Some(entry) = self.tiles.get(key) {
+                match &entry.state {
+                    // Stale zoom-bucket geometry stays drawable but gets rebuilt
+                    TileLoadState::Ready { .. } if entry.bucket != bucket => {}
+                    _ => continue,
+                }
             }
             missing.push(*key);
         }
@@ -863,14 +898,21 @@ impl MapView {
 
         for key in &missing {
             self.local_requested_tiles.insert(*key);
-            self.tiles.insert(
-                *key,
-                TileEntry {
-                    state: TileLoadState::LoadingLocal,
-                    last_used: self.frame_counter,
-                    attempts: 0,
-                },
-            );
+            let keep_stale = self
+                .tiles
+                .get(key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::Ready { .. }));
+            if !keep_stale {
+                self.tiles.insert(
+                    *key,
+                    TileEntry {
+                        state: TileLoadState::LoadingLocal,
+                        last_used: self.frame_counter,
+                        attempts: 0,
+                        bucket,
+                    },
+                );
+            }
         }
 
         let pool = self.tile_thread_pool.as_ref().unwrap();
@@ -888,6 +930,7 @@ impl MapView {
                 Path::new(&cache_dir),
                 &requested,
                 &theme_style,
+                bucket,
             );
             match result {
                 Ok(loaded) => {
@@ -915,12 +958,14 @@ impl MapView {
             .map_or(1, |entry| entry.attempts.saturating_add(1));
         let retry_delay = retry_delay_frames(attempts);
         let retry_after = self.frame_counter.saturating_add(retry_delay);
+        let bucket = self.render_bucket();
         self.tiles.insert(
             tile_key,
             TileEntry {
                 state: TileLoadState::Failed { retry_after },
                 last_used: self.frame_counter,
                 attempts,
+                bucket,
             },
         );
         log!(
@@ -1061,7 +1106,14 @@ impl MapView {
         let zoom = self.request_zoom_level();
         let world_size = tile_world_size(zoom);
         let center_world = self.center_norm * world_size;
-        let half_size = dvec2(rect.size.x * 0.5, rect.size.y * 0.5);
+        // Screen pixels cover 2^(view-zoom) request-zoom world pixels when
+        // overzoomed; without this the viewport requests up to 64x too many
+        // source tiles at view z17.
+        let overzoom = 2.0_f64.powf(self.view_zoom() - zoom as f64).max(1.0);
+        let half_size = dvec2(
+            rect.size.x * 0.5 / overzoom,
+            rect.size.y * 0.5 / overzoom,
+        );
         let top_left = center_world - half_size;
         let bottom_right = center_world + half_size;
         let tile_count = 1_i32 << zoom;
@@ -1183,16 +1235,19 @@ impl MapView {
                 let sender = self.tile_worker_rx.sender();
                 let style_epoch = self.style_epoch;
                 let theme_style = self.active_style().clone();
+                let bucket = self.render_bucket();
                 self.tiles.insert(
                     tile_key,
                     TileEntry {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
                         attempts: 0,
+                        bucket,
                     },
                 );
                 pool.execute_rev(tile_key, move |_tag| {
-                    match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style) {
+                    match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style, bucket)
+                    {
                         Ok(buffers) => {
                             let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
                                 style_epoch,
@@ -1234,12 +1289,14 @@ impl MapView {
 
         self.request_to_tile
             .insert(request_id, PendingTileRequest { tile_key, endpoint });
+        let bucket = self.render_bucket();
         self.tiles.insert(
             tile_key,
             TileEntry {
                 state: TileLoadState::LoadingNetwork,
                 last_used: self.frame_counter,
                 attempts,
+                bucket,
             },
         );
         cx.http_request(request_id, request);
@@ -1251,7 +1308,7 @@ impl MapView {
         cx: &mut Cx2d,
         draw_tiles: &[TileKey],
         view_zoom: f64,
-        map_offset: Vec2f,
+        map_offset: Vec2d,
         rect: Rect,
     ) {
         let mut label_perf = LabelPerfStats::default();
@@ -1365,7 +1422,7 @@ impl MapView {
         &mut self,
         draw_tiles: &[TileKey],
         view_zoom: f64,
-        map_offset: Vec2f,
+        map_offset: Vec2d,
         rect: Rect,
         label_perf: &mut LabelPerfStats,
     ) {
@@ -1392,7 +1449,14 @@ impl MapView {
             }
             label_perf.tiles_with_labels += 1;
             label_perf.labels_in_tiles += labels.len();
-            let scale = 2.0_f64.powf(view_zoom - key.z as f64) as f32;
+            let scale64 = 2.0_f64.powf(view_zoom - key.z as f64);
+            let scale = scale64 as f32;
+            // Label paths are tile-local; add this tile's screen offset.
+            let tile_offset = map_offset
+                + dvec2(
+                    key.x as f64 * TILE_SIZE * scale64,
+                    key.y as f64 * TILE_SIZE * scale64,
+                );
             let zoom_delta = (view_zoom - key.z as f64).abs();
 
             for label in labels {
@@ -1400,8 +1464,16 @@ impl MapView {
                 let Some(source_rank) = label_source_rank(&label.source_layer) else {
                     continue;
                 };
+                let is_address = label.source_layer == "addresses";
+                let is_poi = label.source_layer == "pois";
+                if is_address && view_zoom < ADDRESS_LABEL_MIN_ZOOM {
+                    continue;
+                }
+                if is_poi && view_zoom < POI_LABEL_MIN_ZOOM {
+                    continue;
+                }
                 let name_key = normalize_label_key(label.text.as_str());
-                if name_key.len() < 2 {
+                if name_key.len() < if is_address { 1 } else { 2 } {
                     continue;
                 }
 
@@ -1410,7 +1482,7 @@ impl MapView {
                 build_screen_polyline_into(
                     &label.path_points,
                     scale,
-                    map_offset,
+                    tile_offset,
                     &mut self.scratch_screen_path,
                 );
                 if self.scratch_screen_path.len() < 2
@@ -1438,15 +1510,26 @@ impl MapView {
                     continue;
                 }
 
-                let repeat_distance = repeat_distance_for_label(label.priority, source_rank);
+                let repeat_distance = if is_address {
+                    20.0
+                } else {
+                    repeat_distance_for_label(label.priority, source_rank)
+                };
                 // Use a fixed font_scale per tile zoom level so that labels
                 // don't shift along the path during continuous zoom.
-                let mut font_scale = 0.92_f32;
+                // Grow street text with zoom the way carto does (~9px z14 -> ~12px z17).
+                let mut font_scale =
+                    0.92_f32 * (1.0 + 0.14 * (view_zoom - 14.0).clamp(0.0, 3.0) as f32);
                 font_scale *= match label.priority {
                     1 => 1.08,
                     2 => 1.0,
                     _ => 0.92,
                 };
+                if is_address {
+                    font_scale = 0.60;
+                } else if is_poi {
+                    font_scale = 0.72;
+                }
 
                 let score = source_rank as f64 * 1000.0
                     + (4_u8.saturating_sub(label.priority) as f64) * 120.0
@@ -1651,6 +1734,12 @@ impl MapView {
             zoom = zoom.clamp(LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM);
         }
         zoom
+    }
+
+    /// View-zoom bucket the tile styling (widths, AA, outlines) is built for.
+    /// Beyond the source max zoom the same z14 tiles are re-styled per bucket.
+    fn render_bucket(&self) -> u32 {
+        self.view_zoom().round() as u32
     }
 
     fn source_mode_label(&self) -> &'static str {
