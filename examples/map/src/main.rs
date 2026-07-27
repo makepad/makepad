@@ -78,6 +78,7 @@ script_mod! {
                             min_zoom: 3.0
                             mbtiles_path: "local/maps/europe-shortbread.mbtiles"
                             detail_mbtiles_path: "local/maps/noord-holland-detail.mbtiles"
+                            buildings_3d: true
                         }
 
                         // --- Search panel (top-left) ---
@@ -214,6 +215,10 @@ script_mod! {
                                 margin: Inset{right: 6, bottom: 18}
                                 text: "Recenter"
                             }
+                            tilt_button := AppButton{
+                                margin: Inset{right: 4, bottom: 18}
+                                text: "3D"
+                            }
                             zoom_in_button := AppButton{
                                 margin: Inset{right: 4, bottom: 18}
                                 text: " + "
@@ -324,6 +329,13 @@ pub struct App {
     /// Smoothed heading-up camera rotation during nav.
     #[rust]
     map_rotation: f64,
+    /// Eased 2.5D tilt animation: (current, target).
+    #[rust]
+    tilt_current: f64,
+    #[rust]
+    tilt_target: f64,
+    #[rust]
+    tilt_next_frame: NextFrame,
     #[rust]
     sim_started: Option<std::time::Instant>,
     #[rust]
@@ -810,6 +822,10 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(end_button)).clicked(actions) {
             self.end_nav(cx);
         }
+        if self.ui.button(cx, ids!(tilt_button)).clicked(actions) {
+            self.tilt_target = if self.tilt_target > 0.0 { 0.0 } else { 42.0 };
+            self.tilt_next_frame = cx.new_next_frame();
+        }
         if self.ui.button(cx, ids!(zoom_in_button)).clicked(actions) {
             if let Some(zoom) = self.map(cx).map_zoom() {
                 self.map(cx).set_map_zoom(cx, zoom + 1.0);
@@ -885,6 +901,16 @@ impl AppMain for App {
         }
         if self.sim_next_frame.is_event(event).is_some() {
             self.tick_sim(cx);
+        }
+        if self.tilt_next_frame.is_event(event).is_some() {
+            let delta = self.tilt_target - self.tilt_current;
+            if delta.abs() < 0.1 {
+                self.tilt_current = self.tilt_target;
+            } else {
+                self.tilt_current += delta * 0.12;
+                self.tilt_next_frame = cx.new_next_frame();
+            }
+            self.map(cx).set_tilt(cx, self.tilt_current);
         }
 
         self.match_event(cx, event);
