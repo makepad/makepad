@@ -1,4 +1,5 @@
 use super::geometry::*;
+use super::icons::ICON_MIN_ZOOM;
 use super::label::*;
 use super::style::*;
 use super::tile::*;
@@ -25,7 +26,12 @@ script_mod! {
 
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
-            let transformed = pos * self.map_scale + self.map_offset;
+            var transformed = pos * self.map_scale + self.map_offset;
+            // shape 20: zoom-constant symbol — position is the anchor point,
+            // param1/2 the vertex offset in screen px added after the transform
+            if self.geom.shape_id > 19.5 && self.geom.shape_id < 20.5 {
+                transformed = transformed + vec2(self.geom.param1, self.geom.param2);
+            }
 
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
@@ -50,7 +56,7 @@ script_mod! {
                 self.v_param2 = center.y;
                 self.v_param3 = self.geom.param3 * self.map_scale.x;
                 self.v_param4 = self.geom.param4 * self.map_scale.y;
-            } else if self.geom.shape_id > 0.5 {
+            } else if self.geom.shape_id > 0.5 && self.geom.shape_id < 19.5 {
                 let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
                 let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = bbox_min.x;
@@ -513,11 +519,11 @@ impl Widget for MapView {
         // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
         let draw_tiles = std::mem::take(&mut self.scratch_draw_tiles);
 
-        // Three global passes (carto layer order): every tile's fills, then
-        // every tile's road casings, then every tile's road centers. Casings
-        // interleaved per tile would stamp over neighbor tiles' road interiors
-        // in the clip-padding overlap at tile seams.
-        for pass in 0..3 {
+        // Four global passes (carto layer order): every tile's fills, then
+        // every tile's road casings, then road centers, then POI symbols.
+        // Casings interleaved per tile would stamp over neighbor tiles' road
+        // interiors in the clip-padding overlap at tile seams.
+        for pass in 0..4 {
             for key in &draw_tiles {
                 let Some(entry) = self.tiles.get(key) else {
                     continue;
@@ -526,15 +532,22 @@ impl Widget for MapView {
                     fill_geometry,
                     casing_geometry,
                     stroke_geometry,
+                    icon_geometry,
                     ..
                 } = &entry.state
                 else {
                     continue;
                 };
+                // Stale higher-bucket tiles keep their baked symbols until the
+                // rebuild lands; hide the pass immediately on zoom-out instead.
+                if pass == 3 && view_zoom < ICON_MIN_ZOOM as f64 - 0.25 {
+                    continue;
+                }
                 let geometry = match pass {
                     0 => fill_geometry,
                     1 => casing_geometry,
-                    _ => stroke_geometry,
+                    2 => stroke_geometry,
+                    _ => icon_geometry,
                 };
                 let Some(geometry) = geometry else {
                     continue;
@@ -760,6 +773,15 @@ impl MapView {
                 None
             };
 
+        let icon_geometry = if !buffers.icon_indices.is_empty() && !buffers.icon_vertices.is_empty()
+        {
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, buffers.icon_indices, buffers.icon_vertices);
+            Some(geometry)
+        } else {
+            None
+        };
+
         self.tiles.insert(
             tile_key,
             TileEntry {
@@ -767,6 +789,7 @@ impl MapView {
                     fill_geometry,
                     casing_geometry,
                     stroke_geometry,
+                    icon_geometry,
                     feature_count: buffers.feature_count,
                     labels: buffers.labels,
                 },
@@ -873,12 +896,9 @@ impl MapView {
         }
 
         let mbtiles_path = Path::new(LOCAL_MBTILES_PATH);
-        if !mbtiles_path.is_file() {
-            if !self.local_source_missing_logged {
-                log!("MapView: local mbtiles source missing at {} (set use_local_mbtiles: false to disable)", LOCAL_MBTILES_PATH);
-                self.local_source_missing_logged = true;
-            }
-            return;
+        if !mbtiles_path.is_file() && !self.local_source_missing_logged {
+            log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", LOCAL_MBTILES_PATH);
+            self.local_source_missing_logged = true;
         }
 
         let bucket = self.render_bucket();

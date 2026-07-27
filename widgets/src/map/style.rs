@@ -442,9 +442,32 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
         // Bellamyplein must not paint over the park inside them
         return 12;
     }
+    // Green areas (parks/gardens/grass) rank above generic landuse and sites:
+    // they share the `land` layer with huge residential polygons and would
+    // otherwise lose to protobuf feature order (Bellamyplein rendered gray).
+    let is_green = tags.contains_key("leisure")
+        || matches!(
+            tags.get("landuse").map(|value| value.as_str()),
+            Some(
+                "grass"
+                    | "forest"
+                    | "meadow"
+                    | "farmland"
+                    | "allotments"
+                    | "village_green"
+                    | "recreation_ground"
+                    | "cemetery"
+            )
+        );
     match layer {
         "ocean" => 5,
-        "land" | "landuse" | "landcover" => 10,
+        "land" | "landuse" | "landcover" => {
+            if is_green {
+                16
+            } else {
+                10
+            }
+        }
         "sites" | "park" | "pois" => 15,
         "water" | "water_polygons" | "water_polygons_labels" => 20,
         "dam_polygons" | "pier_polygons" => 25,
@@ -452,8 +475,8 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
         _ => {
             if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
                 20
-            } else if tags.contains_key("leisure") {
-                15
+            } else if is_green {
+                16
             } else {
                 10
             }
