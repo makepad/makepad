@@ -357,6 +357,32 @@ impl Tessellator {
         verts: &mut Vec<VVertex>,
         indices: &mut Vec<u32>,
     ) {
+        self.stroke_ends(
+            w,
+            line_cap,
+            line_cap,
+            line_join,
+            miter_limit,
+            aa,
+            verts,
+            indices,
+        );
+    }
+
+    /// Like `stroke` but with independent start/end caps, e.g. a butt cap at a
+    /// clipped cut and a round cap at the true end of the same polyline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_ends(
+        &mut self,
+        w: f32,
+        start_cap: LineCap,
+        end_cap: LineCap,
+        line_join: LineJoin,
+        miter_limit: f32,
+        aa: f32,
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+    ) {
         let hw = w * 0.5 + aa * 0.5;
         self.calculate_joins(hw, line_join, miter_limit);
         verts.clear();
@@ -400,7 +426,7 @@ impl Tessellator {
                 };
                 let p0 = self.points[first];
                 self.emit_cap_start(
-                    verts, indices, p0.x, p0.y, ndx, ndy, hw, aa, u0, u1, line_cap,
+                    verts, indices, p0.x, p0.y, ndx, ndy, hw, aa, u0, u1, start_cap,
                 );
                 // stamp stroke_dist=0 on cap verts
                 let cap_end = verts.len();
@@ -466,7 +492,7 @@ impl Tessellator {
                 };
                 let vi_before = verts.len();
                 self.emit_cap_end(
-                    verts, indices, p1.x, p1.y, ndx, ndy, hw, aa, u0, u1, line_cap,
+                    verts, indices, p1.x, p1.y, ndx, ndy, hw, aa, u0, u1, end_cap,
                 );
                 let total_dist = self.cum_dists[count - 1];
                 for v in &mut verts[vi_before..] {
