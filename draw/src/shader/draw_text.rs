@@ -2051,7 +2051,8 @@ impl DrawText {
         if glyphs.is_empty() {
             return;
         }
-        self.update_draw_vars(cx);
+        // An already-open batch ran update_draw_vars when it began; running it
+        // again per call dominates CPU when thousands of glyphs share a batch.
         if let Some(mut instances) = self.many_instances.take() {
             self.glyph_depth = self.draw_depth;
             self.color = color;
@@ -2068,6 +2069,7 @@ impl DrawText {
             return;
         }
 
+        self.update_draw_vars(cx);
         let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
             return;
         };

@@ -47,6 +47,12 @@ pub struct TileLabel {
     pub road_kind: String,
     pub color_class: u8,
     pub path_points: Vec<(f32, f32)>,
+    /// Precomputed at tile build (compact_tile_labels): normalized text key
+    /// and tile-local path bbox, so the per-frame scan over thousands of
+    /// labels does no allocation and can reject offscreen labels with two
+    /// point transforms.
+    pub name_key: String,
+    pub bbox: (f32, f32, f32, f32),
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +127,8 @@ pub fn extract_way_label(
         road_kind,
         color_class: LABEL_CLASS_DEFAULT,
         path_points,
+        name_key: String::new(),
+        bbox: (0.0, 0.0, 0.0, 0.0),
     })
 }
 
@@ -178,6 +186,8 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 road_kind: format!("addr{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
                 color_class: LABEL_CLASS_MUTED,
                 path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
         "pois" => {
@@ -190,6 +200,8 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 road_kind: format!("poi{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
                 color_class,
                 path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
         _ => {}
@@ -219,12 +231,14 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         road_kind,
         color_class: LABEL_CLASS_DEFAULT,
         path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
     })
 }
 
 pub fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
     let mut by_street = HashMap::<(String, String), (f32, TileLabel)>::new();
-    for label in labels.drain(..) {
+    for mut label in labels.drain(..) {
         if label.path_points.len() < 2 {
             continue;
         }
@@ -234,6 +248,15 @@ pub fn compact_tile_labels(labels: &mut Vec<TileLabel>) {
         if name_key.len() < min_len {
             continue;
         }
+        label.name_key = name_key.clone();
+        let mut bbox = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for point in &label.path_points {
+            bbox.0 = bbox.0.min(point.0);
+            bbox.1 = bbox.1.min(point.1);
+            bbox.2 = bbox.2.max(point.0);
+            bbox.3 = bbox.3.max(point.1);
+        }
+        label.bbox = bbox;
         let key = (name_key, label.road_kind.clone());
         let length = polyline_length_f32(&label.path_points);
         let replace = match by_street.get(&key) {
