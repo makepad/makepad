@@ -627,6 +627,7 @@ fn build_tile_buffers_from_features(
 
     // Stroke pass
     let mut stroke_jobs = Vec::<StrokeDrawJob>::new();
+    let mut arrow_jobs = Vec::<(Vec<(f32, f32)>, bool)>::new();
     for prepared_way in &prepared {
         let way = &tile_ways[prepared_way.way_index];
         if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
@@ -635,6 +636,16 @@ fn build_tile_buffers_from_features(
         if let Some(style) =
             stroke_style_for_tags(theme, &way.tags, tile_key.z, zoom_mult, px_to_units)
         {
+            if render_zoom >= ICON_MIN_ZOOM
+                && tag_is_truthy(&way.tags, "oneway")
+                && way.tags.contains_key("highway")
+                && !tag_is_truthy(&way.tags, "rail")
+            {
+                arrow_jobs.push((
+                    prepared_way.points.clone(),
+                    tag_is_truthy(&way.tags, "oneway_reverse"),
+                ));
+            }
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
@@ -762,6 +773,56 @@ fn build_tile_buffers_from_features(
         feature_count += 1;
     }
 
+    // Oneway arrows: zoom-constant glyphs spaced along the way, offsets
+    // pre-rotated into the travel direction (carto-style).
+    let arrow_color = hex_to_premul_rgba(0x555555, 1.0);
+    let arrow_interval = 130.0 / render_scale;
+    for (points, reverse) in &arrow_jobs {
+        for part in build_polyline_parts(points, clip_bounds, false, 0.0) {
+            let mut cumulative = Vec::<f32>::with_capacity(part.len());
+            let mut total = 0.0_f32;
+            cumulative.push(0.0);
+            for pair in part.windows(2) {
+                let dx = pair[1].0 - pair[0].0;
+                let dy = pair[1].1 - pair[0].1;
+                total += (dx * dx + dy * dy).sqrt();
+                cumulative.push(total);
+            }
+            if total < arrow_interval * 0.6 {
+                continue;
+            }
+            let mut distance = arrow_interval * 0.5;
+            while distance < total {
+                // find segment containing this distance
+                let mut segment = 0;
+                while segment + 2 < cumulative.len() && cumulative[segment + 1] < distance {
+                    segment += 1;
+                }
+                let seg_len = (cumulative[segment + 1] - cumulative[segment]).max(1e-6);
+                let t = ((distance - cumulative[segment]) / seg_len).clamp(0.0, 1.0);
+                let a = part[segment];
+                let b = part[segment + 1];
+                let anchor = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                let mut dir_x = (b.0 - a.0) / seg_len;
+                let mut dir_y = (b.1 - a.1) / seg_len;
+                if *reverse {
+                    dir_x = -dir_x;
+                    dir_y = -dir_y;
+                }
+                append_oneway_arrow(
+                    anchor,
+                    dir_x,
+                    dir_y,
+                    arrow_color,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+                distance += arrow_interval;
+            }
+        }
+    }
+
     compact_tile_labels(&mut labels);
 
     TileBuffers {
@@ -782,6 +843,42 @@ fn build_tile_buffers_from_features(
 /// Shape id telling the map vertex shader to treat (param1, param2) as a
 /// screen-px offset added AFTER the map transform (zoom-constant symbols).
 pub const ICON_SHAPE_ID: f32 = 20.0;
+
+/// Screen-px arrow glyph (shaft + head, +x = travel direction) as
+/// zoom-constant anchor+offset vertices like the POI symbols.
+fn append_oneway_arrow(
+    anchor: (f32, f32),
+    dir_x: f32,
+    dir_y: f32,
+    color: [f32; 4],
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    const SHAPE: [(f32, f32); 7] = [
+        (-6.0, -0.9),
+        (0.5, -0.9),
+        (0.5, 0.9),
+        (-6.0, 0.9),
+        (0.5, -3.0),
+        (6.0, 0.0),
+        (0.5, 3.0),
+    ];
+    const INDICES: [u32; 9] = [0, 1, 2, 0, 2, 3, 4, 5, 6];
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    for (x, y) in SHAPE {
+        let ox = x * dir_x - y * dir_y;
+        let oy = x * dir_y + y * dir_x;
+        out_vertices.extend_from_slice(&[
+            anchor.0, anchor.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0,
+            ICON_SHAPE_ID, 0.0, ox, oy, 0.0, 0.0, 0.0, 16.0, *zbias,
+        ]);
+    }
+    for index in INDICES {
+        out_indices.push(base + index);
+    }
+    *zbias += VECTOR_ZBIAS_STEP;
+}
 
 fn append_icon_mesh(
     mesh: &IconMesh,
