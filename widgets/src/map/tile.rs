@@ -460,15 +460,7 @@ fn merge_detail_features(
             let Some((icon, _)) = micro_icon_for_tags(&tags) else {
                 continue;
             };
-            // Per-icon zoom gates, carto-style: doors only when you could
-            // walk through one, signals/chargers at street level.
-            let icon_min_zoom = match icon {
-                "entrance" => 17.5,
-                "traffic_signals" | "charger" | "dot" => 16.5,
-                "parking" => 15.5,
-                _ => 0.0,
-            };
-            if render_zoom < icon_min_zoom {
+            if render_zoom < micro_icon_min_zoom(icon) {
                 continue;
             }
             tags.insert("layer".to_string(), "micro_pois".to_string());
@@ -478,15 +470,47 @@ fn merge_detail_features(
     // Station/stop platforms render as gray polygons from z15.5 in both
     // 2D and 3D modes; buildings only when the 3D pass wants them.
     let want_platforms = render_zoom >= 15.5;
-    if want_buildings || want_platforms {
+    if want_buildings || want_platforms || want_points {
         for mut way in collector.ways {
+            // Polygon-anchored POIs (parking lots and garages, shops and
+            // offices mapped on their building) icon at the centroid like
+            // carto; the icon-collision pass dedups against any base node.
+            if want_points && way.closed {
+                // Underground garages span whole blocks; carto shows their
+                // entrance node, not a centroid P in the middle of nowhere.
+                let underground =
+                    way.tags.get("parking").map(|v| v.as_str()) == Some("underground");
+                if let Some((icon, _)) = micro_icon_for_tags(&way.tags).filter(|_| !underground) {
+                    if render_zoom >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
+                        let mut tags = way.tags.clone();
+                        tags.insert("layer".to_string(), "micro_pois".to_string());
+                        points.push((ring_centroid(&way.points), tags));
+                    }
+                }
+            }
             // Plain building ways AND assembled multipolygon relations
             // (palaces, courtyarded blocks) both carry building geometry.
             let from_polygons = matches!(
                 way.tags.get("layer").map(|value| value.as_str()),
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
-            if !way.closed || !from_polygons {
+            if !way.closed {
+                continue;
+            }
+            // Pedestrian squares mapped as highway=pedestrian + area=yes
+            // stay in osm_lines (highway ways don't classify as polygons
+            // at conversion) — admit the closed ones here too.
+            if !from_polygons {
+                let is_ped_area = tag_is_truthy(&way.tags, "area")
+                    && matches!(
+                        way.tags.get("highway").map(|v| v.as_str()),
+                        Some("pedestrian" | "footway")
+                    );
+                if is_ped_area && want_platforms {
+                    way.tags
+                        .insert("layer".to_string(), "street_polygons".to_string());
+                    ways.push(way);
+                }
                 continue;
             }
             let is_platform = way.tags.get("railway").map(|v| v.as_str()) == Some("platform")
@@ -518,6 +542,21 @@ fn merge_detail_features(
                 }
                 continue;
             }
+            // Pedestrian squares (Hella Haasseplein) are polygons the z14
+            // base generalizes away; route them into the existing street-
+            // area pipeline so fill, rank and labels all apply.
+            let is_pedestrian_area = matches!(
+                way.tags.get("highway").map(|v| v.as_str()),
+                Some("pedestrian" | "footway")
+            ) || way.tags.get("place").map(|v| v.as_str()) == Some("square");
+            if is_pedestrian_area {
+                if want_platforms {
+                    way.tags
+                        .insert("layer".to_string(), "street_polygons".to_string());
+                    ways.push(way);
+                }
+                continue;
+            }
             if !want_buildings {
                 continue;
             }
@@ -534,6 +573,17 @@ fn merge_detail_features(
         }
     }
     Ok(())
+}
+
+/// Per-icon zoom gates, carto-style: doors only when you could walk
+/// through one, signals/chargers at street level.
+fn micro_icon_min_zoom(icon: &str) -> f32 {
+    match icon {
+        "entrance" => 17.5,
+        "traffic_signals" | "charger" | "dot" => 16.5,
+        "parking" => 15.5,
+        _ => 0.0,
+    }
 }
 
 /// Chaikin corner-cutting; endpoints stay pinned (open) or the seam joins

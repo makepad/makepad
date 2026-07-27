@@ -198,7 +198,8 @@ pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
     LABEL_CLASS_DEFAULT
 }
 
-/// Name label for a named green area (park/garden), placed at its centroid.
+/// Name label for a named area — greens (parks/gardens) and pedestrian
+/// squares — placed at its centroid.
 pub fn extract_area_label(
     tags: &HashMap<String, String>,
     centroid: (f32, f32),
@@ -208,7 +209,11 @@ pub fn extract_area_label(
             tags.get("landuse").map(|value| value.as_str()),
             Some("grass" | "forest" | "meadow" | "village_green" | "recreation_ground" | "cemetery")
         );
-    if !is_green {
+    let is_square = matches!(
+        tags.get("highway").map(|value| value.as_str()),
+        Some("pedestrian" | "footway")
+    ) || tags.get("place").map(|value| value.as_str()) == Some("square");
+    if !is_green && !is_square {
         return None;
     }
     let name = select_label_text(tags)?;
@@ -217,7 +222,11 @@ pub fn extract_area_label(
         priority: 3,
         source_layer: "green_area".to_string(),
         road_kind: format!("area{:.0}x{:.0}", centroid.0 * 4.0, centroid.1 * 4.0),
-        color_class: LABEL_CLASS_GREEN,
+        color_class: if is_green {
+            LABEL_CLASS_GREEN
+        } else {
+            LABEL_CLASS_DEFAULT
+        },
         path_points: point_label_path(centroid),
         name_key: String::new(),
         bbox: (0.0, 0.0, 0.0, 0.0),
@@ -245,11 +254,14 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
-        // Detail-layer offices carry their name (base pois don't have
-        // them, so no duplicate risk); everything else in micro_pois
-        // stays icon-only.
+        // Detail-layer offices and named parkings carry their name (base
+        // pois don't have them, so no duplicate risk); everything else in
+        // micro_pois stays icon-only.
         "micro_pois" => {
-            if !tags.contains_key("office") {
+            let is_office = tags.contains_key("office");
+            let is_named_parking =
+                tags.get("amenity").map(|v| v.as_str()) == Some("parking");
+            if !is_office && !is_named_parking {
                 return None;
             }
             let name = select_label_text(tags)?;
@@ -258,7 +270,11 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 priority: 3,
                 source_layer,
                 road_kind: format!("office{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
-                color_class: LABEL_CLASS_MUTED,
+                color_class: if is_named_parking {
+                    LABEL_CLASS_TRANSPORT
+                } else {
+                    LABEL_CLASS_MUTED
+                },
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
@@ -678,13 +694,11 @@ pub fn choose_label_reverse(mid_angle: f32) -> bool {
     if cos.abs() > LABEL_VERTICAL_AXIS_EPSILON {
         cos < 0.0
     } else {
-        // Near vertical, keep a deterministic reading direction: bottom-to-
-        // top (carto convention). Screen-space y grows downward, so the
-        // final advance direction must have sin < 0; a downward-pointing
-        // tangent (sin > 0) needs the flip. The previous `sin < 0.0` was
-        // inverted and rendered near-vertical words top-to-bottom — read
-        // "upside down" once camera rotation swept streets through vertical.
-        sin > 0.0
+        // Near vertical, keep a deterministic reading direction: TOP-TO-
+        // BOTTOM, matching osm.org (user preference — never bottom-to-top).
+        // Screen-space y grows downward, so the final advance direction
+        // must have sin > 0; an upward-pointing tangent needs the flip.
+        sin < 0.0
     }
 }
 
