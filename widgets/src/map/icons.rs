@@ -65,6 +65,8 @@ const ICON_SVGS: &[(&str, &str)] = &[
     ("recycling", include_str!("icons/recycling.svg")),
     ("playground", include_str!("icons/playground.svg")),
     ("statue", include_str!("icons/statue.svg")),
+    ("entrance", include_str!("icons/entrance.svg")),
+    ("information", include_str!("icons/information.svg")),
 ];
 
 fn icons() -> &'static HashMap<&'static str, IconMesh> {
@@ -217,8 +219,23 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
             _ => None,
         };
     }
-    if tags.get("tourism").map(|v| v.as_str()) == Some("artwork") {
-        return Some(("statue", LABEL_CLASS_CULTURE));
+    if let Some(tourism) = tags.get("tourism") {
+        return match tourism.as_str() {
+            "artwork" => Some(("statue", LABEL_CLASS_CULTURE)),
+            "information" => Some(("information", LABEL_CLASS_CULTURE)),
+            _ => None,
+        };
+    }
+    // Building/station entrances (door icon, high zoom only — the caller
+    // gates the zoom).
+    if tags.get("railway").map(|v| v.as_str()) == Some("subway_entrance") {
+        return Some(("entrance", LABEL_CLASS_TRANSPORT));
+    }
+    if let Some(entrance) = tags.get("entrance") {
+        return match entrance.as_str() {
+            "no" => None,
+            _ => Some(("entrance", LABEL_CLASS_MUTED)),
+        };
     }
     if let Some(historic) = tags.get("historic") {
         return match historic.as_str() {
@@ -276,6 +293,7 @@ pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8
         return match tourism.as_str() {
             "hotel" | "guest_house" | "hostel" => Some(("hotel", LABEL_CLASS_CULTURE)),
             "museum" | "gallery" => Some(("museum", LABEL_CLASS_CULTURE)),
+            "information" => Some(("information", LABEL_CLASS_CULTURE)),
             _ => None,
         };
     }
