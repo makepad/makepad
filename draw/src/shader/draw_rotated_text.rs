@@ -163,6 +163,19 @@ impl DrawRotatedText {
         glyphs: &[PathGlyphInstance],
         offset: Vec2f,
     ) {
+        self.draw_path_glyphs_scaled(cx, glyphs, 1.0, offset);
+    }
+
+    /// Draw pre-placed glyphs through an affine screen transform
+    /// (p*scale + offset, glyph size scaled too) — lets a cached label
+    /// placement track the map during a zoom gesture.
+    pub fn draw_path_glyphs_scaled(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[PathGlyphInstance],
+        scale: f32,
+        offset: Vec2f,
+    ) {
         // Instances bake their font_scale into font_size_in_lpxs at placement
         // time; the ambient font_scale (left over from whatever run was shaped
         // last) must not rescale them here or glyphs shrink under their pen
@@ -173,14 +186,14 @@ impl DrawRotatedText {
             self.draw_glyph_at(
                 cx,
                 Point::new(
-                    glyph.glyph_origin.x + offset.x,
-                    glyph.glyph_origin.y + offset.y,
+                    glyph.glyph_origin.x * scale + offset.x,
+                    glyph.glyph_origin.y * scale + offset.y,
                 ),
                 Point::new(
-                    glyph.rotation_origin.x + offset.x,
-                    glyph.rotation_origin.y + offset.y,
+                    glyph.rotation_origin.x * scale + offset.x,
+                    glyph.rotation_origin.y * scale + offset.y,
                 ),
-                glyph.font_size_in_lpxs,
+                glyph.font_size_in_lpxs * scale,
                 glyph.rasterized,
                 glyph.angle,
                 1.0,
