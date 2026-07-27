@@ -2112,7 +2112,10 @@ impl DrawText {
         let dpx_factor = cx.current_dpi_factor() as f32;
         let mut glyphs = Vec::with_capacity(row.glyphs.len());
         for glyph in &row.glyphs {
-            let dpx_per_em = glyph.font_size_in_lpxs * dpx_factor;
+            // font_scale must scale the drawn glyph size together with the pen
+            // advances below, or scaled runs render letter-spaced/overlapped;
+            // rasterize at the scaled size so scaled-up text stays crisp
+            let dpx_per_em = glyph.font_size_in_lpxs * dpx_factor * self.font_scale;
             let Some(rasterized) = glyph.rasterize(dpx_per_em) else {
                 continue;
             };
@@ -2121,7 +2124,7 @@ impl DrawText {
                 pen_x_in_lpxs: glyph.origin_in_lpxs.x * self.font_scale,
                 offset_x_in_lpxs: glyph.offset_in_lpxs() * self.font_scale,
                 advance_in_lpxs: glyph.advance_in_lpxs() * self.font_scale,
-                font_size_in_lpxs: glyph.font_size_in_lpxs,
+                font_size_in_lpxs: glyph.font_size_in_lpxs * self.font_scale,
                 rasterized,
             });
         }
