@@ -26,12 +26,22 @@ pub const POI_LABEL_MIN_ZOOM: f64 = 16.0;
 
 // --- Types ---
 
+/// Label draw-color classes (carto-style): 0 default text, 1 food/drink
+/// amenity (orange), 2 shop (purple), 3 culture/tourism (brown), 4 muted
+/// (house numbers).
+pub const LABEL_CLASS_DEFAULT: u8 = 0;
+pub const LABEL_CLASS_AMENITY: u8 = 1;
+pub const LABEL_CLASS_SHOP: u8 = 2;
+pub const LABEL_CLASS_CULTURE: u8 = 3;
+pub const LABEL_CLASS_MUTED: u8 = 4;
+
 #[derive(Clone, Debug)]
 pub struct TileLabel {
     pub text: String,
     pub priority: u8,
     pub source_layer: String,
     pub road_kind: String,
+    pub color_class: u8,
     pub path_points: Vec<(f32, f32)>,
 }
 
@@ -39,8 +49,8 @@ pub struct TileLabel {
 pub struct LabelCandidate {
     pub text: String,
     pub name_key: String,
-    #[allow(dead_code)]
     pub road_kind: String,
+    pub color_class: u8,
     pub source_rank: u8,
     pub score: f64,
     pub path_length: f64,
@@ -105,8 +115,30 @@ pub fn extract_way_label(
         priority,
         source_layer,
         road_kind,
+        color_class: LABEL_CLASS_DEFAULT,
         path_points,
     })
+}
+
+/// Carto-style POI color grouping from shortbread poi attributes.
+pub fn poi_color_class(tags: &HashMap<String, String>) -> u8 {
+    if tags.contains_key("shop") {
+        return LABEL_CLASS_SHOP;
+    }
+    if let Some(amenity) = tags.get("amenity") {
+        return match amenity.as_str() {
+            "restaurant" | "cafe" | "fast_food" | "bar" | "pub" | "biergarten" | "food_court"
+            | "ice_cream" | "nightclub" => LABEL_CLASS_AMENITY,
+            "theatre" | "cinema" | "arts_centre" | "library" | "museum" | "place_of_worship" => {
+                LABEL_CLASS_CULTURE
+            }
+            _ => LABEL_CLASS_DEFAULT,
+        };
+    }
+    if tags.contains_key("tourism") || tags.contains_key("historic") {
+        return LABEL_CLASS_CULTURE;
+    }
+    LABEL_CLASS_DEFAULT
 }
 
 pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) -> Option<TileLabel> {
@@ -124,16 +156,19 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 source_layer,
                 // unique per point so per-tile compaction keeps every number
                 road_kind: format!("addr{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                color_class: LABEL_CLASS_MUTED,
                 path_points: point_label_path(point),
             });
         }
         "pois" => {
             let name = select_label_text(tags)?;
+            let color_class = poi_color_class(tags);
             return Some(TileLabel {
                 text: name,
                 priority: 3,
                 source_layer,
                 road_kind: format!("poi{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                color_class,
                 path_points: point_label_path(point),
             });
         }
@@ -162,6 +197,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         priority,
         source_layer,
         road_kind,
+        color_class: LABEL_CLASS_DEFAULT,
         path_points: point_label_path(point),
     })
 }
