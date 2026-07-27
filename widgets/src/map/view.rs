@@ -32,8 +32,10 @@ script_mod! {
         view_rot: uniform(vec2(1.0, 0.0))
         rot_pivot: uniform(vec2(0.0, 0.0))
         // 2.5D camera: x = cos(tilt) screen-y compression, y = screen px of
-        // lift per meter of building height (sin(tilt) baked in).
-        tilt_params: uniform(vec2(1.0, 0.0))
+        // lift per meter of building height (sin(tilt) baked in), z = depth
+        // per screen-y of view-space ground position (hardware occlusion
+        // for extruded geometry, rotation-proof), w unused.
+        tilt_params: uniform(vec4(1.0, 0.0, 0.0, 0.0))
 
         fragment: fn(){
             self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade, self.depth_clip)
@@ -74,9 +76,11 @@ script_mod! {
             );
             // 2.5D: axonometric tilt compresses screen y about the pivot;
             // building vertices carry their height in meters in param4 and
-            // extrude toward screen-top.
+            // extrude toward screen-top. The pre-tilt (ground) y doubles as
+            // the view depth so the depth buffer resolves occlusion.
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
             transformed.y = self.rot_pivot.y
-                + (transformed.y - self.rot_pivot.y) * self.tilt_params.x
+                + ground_rel_y * self.tilt_params.x
                 - self.geom.param4 * self.tilt_params.y;
             // shape 20: zoom-constant symbol — position is the anchor point,
             // param1/2 the vertex offset in screen px added after the
@@ -155,7 +159,17 @@ script_mod! {
             let world = self.draw_list.view_transform * vec4(
                 shifted.x
                 shifted.y
-                self.draw_depth + self.draw_call.zbias + self.geom.zbias
+                // Flat: classic call-order painting. Tilted: self-contained
+                // depth — view-ground y dominates, per-pass offset (in w)
+                // keeps casing/center/icon layering, baked feature order
+                // shrinks to the smallest scale. draw_call.zbias would
+                // otherwise grow with call count and beat small lifts.
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.geom.zbias,
+                        self.geom.param5 + ground_rel_y * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
                 1.
             );
             self.v_world_clip = world;
@@ -389,7 +403,7 @@ impl DrawMapVector {
         width_correction: [f32; 4],
         view_rot: [f32; 2],
         rot_pivot: [f32; 2],
-        tilt_params: [f32; 2],
+        tilt_params: [f32; 4],
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
@@ -662,6 +676,10 @@ pub struct MapView {
     fly_timer: Timer,
     #[rust]
     gesture_panned: bool,
+    /// Right-button / Option-drag camera gesture: (start abs, start
+    /// rotation, start tilt).
+    #[rust]
+    rotate_drag: Option<(Vec2d, f64, f64)>,
     #[rust]
     pending_viewport_changed: bool,
 }
@@ -749,15 +767,32 @@ impl Widget for MapView {
         // drawn on top of the map must win the hit test (EventOrder::Up
         // dispatches them first).
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.fly = None;
-                self.gesture_panned = false;
-                self.drag_start_abs = Some(fe.abs);
-                self.drag_start_center_norm = self.center_norm;
-                cx.set_cursor(MouseCursor::Grabbing);
+            Hit::FingerDown(fe) => {
+                let rotate_gesture = fe
+                    .device
+                    .mouse_button()
+                    .is_some_and(|button| button.is_secondary())
+                    || (fe.is_primary_hit() && fe.modifiers.alt);
+                if rotate_gesture {
+                    // Right-drag (or Option-drag): horizontal rotates the
+                    // camera, vertical tilts it.
+                    self.fly = None;
+                    self.rotate_drag = Some((fe.abs, self.rotation, self.tilt));
+                } else if fe.is_primary_hit() {
+                    self.fly = None;
+                    self.gesture_panned = false;
+                    self.drag_start_abs = Some(fe.abs);
+                    self.drag_start_center_norm = self.center_norm;
+                    cx.set_cursor(MouseCursor::Grabbing);
+                }
             }
             Hit::FingerMove(fe) => {
-                if let Some(start_abs) = self.drag_start_abs {
+                if let Some((start_abs, start_rotation, start_tilt)) = self.rotate_drag {
+                    let delta = fe.abs - start_abs;
+                    self.rotation = (start_rotation - delta.x * 0.35).rem_euclid(360.0);
+                    self.tilt = (start_tilt + delta.y * 0.25).clamp(0.0, 65.0);
+                    self.redraw(cx);
+                } else if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
                     if delta.length() > 6.0 {
                         self.gesture_panned = true;
@@ -779,6 +814,11 @@ impl Widget for MapView {
                 cx.widget_action(self.uid, MapViewAction::LongPressed { lon, lat, abs: lp.abs });
             }
             Hit::FingerUp(fe) => {
+                if self.rotate_drag.take().is_some() {
+                    self.sync_camera_fields();
+                    self.emit_viewport_changed(cx);
+                    return;
+                }
                 self.drag_start_abs = None;
                 cx.set_cursor(MouseCursor::Grab);
                 if fe.is_primary_hit() && fe.was_tap() {
@@ -851,10 +891,22 @@ impl Widget for MapView {
             let (_, lat) = normalized_to_lon_lat(self.center_norm);
             world_size / (40_075_016.686 * lat.to_radians().cos())
         };
-        let tilt_uniform = [
-            tilt_rad.cos() as f32,
-            (px_per_meter * tilt_rad.sin()) as f32,
-        ];
+        // Tilted map depth lives in a negative domain well below every UI
+        // element, so panels/labels/overlay drawn later always win by call
+        // order. Within the map, view-ground y dominates for occlusion and
+        // the baked sort-rank micro-depth (param5) resolves overlapping
+        // layers at the same ground pixel without depth-precision flicker.
+        let tilt_uniform = if tilt_rad > 1e-4 {
+            [
+                tilt_rad.cos() as f32,
+                (px_per_meter * tilt_rad.sin()) as f32,
+                0.01,
+                -24.0,
+            ]
+        } else {
+            // Flat mode stays byte-identical to the classic paint order.
+            [tilt_rad.cos() as f32, 0.0, 0.0, 0.0]
+        };
 
         self.fill_draw_tile_keys();
         // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
@@ -1206,6 +1258,10 @@ impl MapView {
         self.draw_bg.color = background;
         self.draw_label.draw_super.color = label;
         self.draw_text.color = vec4(0.0, 0.0, 0.0, 1.0);
+        // The background floor sits below the tilted map's negative depth
+        // domain; everything drawn later (labels, panels, overlay) keeps
+        // winning by ordinary call order.
+        self.draw_bg.draw_depth = -50.0;
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
