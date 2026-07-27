@@ -7,7 +7,10 @@
 //! zoom — pure vector, no raster atlas. (The same encoding can later back a
 //! single-quad fragment-side curve evaluator without changing the tile data.)
 
-use super::label::{LABEL_CLASS_AMENITY, LABEL_CLASS_CULTURE, LABEL_CLASS_DEFAULT, LABEL_CLASS_SHOP};
+use super::label::{
+    LABEL_CLASS_AMENITY, LABEL_CLASS_CULTURE, LABEL_CLASS_DEFAULT, LABEL_CLASS_GREEN,
+    LABEL_CLASS_MUTED, LABEL_CLASS_SHOP, LABEL_CLASS_TRANSPORT, LABEL_CLASS_TREE,
+};
 use crate::makepad_draw::vector::{
     document::SvgNode, parse::parse_svg, LineJoin, PathCmd, Tessellator, VVertex, VectorPath,
 };
@@ -56,6 +59,12 @@ const ICON_SVGS: &[(&str, &str)] = &[
     ("restaurant", include_str!("icons/restaurant.svg")),
     ("supermarket", include_str!("icons/supermarket.svg")),
     ("theatre", include_str!("icons/theatre.svg")),
+    // Micro-POIs from the all-tag detail archive
+    ("bench", include_str!("icons/bench.svg")),
+    ("waste_basket", include_str!("icons/waste_basket.svg")),
+    ("recycling", include_str!("icons/recycling.svg")),
+    ("playground", include_str!("icons/playground.svg")),
+    ("statue", include_str!("icons/statue.svg")),
 ];
 
 fn icons() -> &'static HashMap<&'static str, IconMesh> {
@@ -66,6 +75,11 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
             if let Some(mesh) = build_icon_mesh(svg) {
                 out.insert(*name, mesh);
             }
+        }
+        // Trees render as plain canopy discs (carto draws them as circles,
+        // not glyphs).
+        if let Some(mesh) = build_disc_mesh(4.4) {
+            out.insert("tree", mesh);
         }
         out
     })
@@ -156,8 +170,70 @@ fn build_icon_mesh(svg: &str) -> Option<IconMesh> {
     Some(IconMesh { verts, indices })
 }
 
+/// Circle mesh for canopy/dot symbols, centered on the origin like the SVG
+/// icons (vertices double as screen-px offsets from the anchor).
+fn build_disc_mesh(radius: f32) -> Option<IconMesh> {
+    const K: f32 = 0.552_284_75;
+    let r = radius;
+    let k = r * K;
+    let mut path = VectorPath::new();
+    path.cmds.push(PathCmd::MoveTo(r, 0.0));
+    path.cmds.push(PathCmd::BezierTo(r, k, k, r, 0.0, r));
+    path.cmds.push(PathCmd::BezierTo(-k, r, -r, k, -r, 0.0));
+    path.cmds.push(PathCmd::BezierTo(-r, -k, -k, -r, 0.0, -r));
+    path.cmds.push(PathCmd::BezierTo(k, -r, r, -k, r, 0.0));
+    path.cmds.push(PathCmd::Close);
+
+    let mut tess = Tessellator::default();
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+    tess.flatten(&path, 0.05);
+    tess.fill(1.0, LineJoin::Miter, 4.0, false, &mut verts, &mut indices);
+    if verts.is_empty() || indices.is_empty() {
+        return None;
+    }
+    Some(IconMesh { verts, indices })
+}
+
+/// Micro-POI symbols sourced from the all-tag detail archive (not present in
+/// shortbread pois): trees, benches, bins, recycling, playgrounds, artwork.
+pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
+    if tags.get("natural").map(|v| v.as_str()) == Some("tree") {
+        return Some(("tree", LABEL_CLASS_TREE));
+    }
+    if let Some(amenity) = tags.get("amenity") {
+        return match amenity.as_str() {
+            "bench" => Some(("bench", LABEL_CLASS_MUTED)),
+            "waste_basket" | "waste_disposal" => Some(("waste_basket", LABEL_CLASS_MUTED)),
+            "recycling" => Some(("recycling", LABEL_CLASS_MUTED)),
+            "bicycle_parking" => Some(("bicycle", LABEL_CLASS_TRANSPORT)),
+            _ => None,
+        };
+    }
+    if let Some(leisure) = tags.get("leisure") {
+        return match leisure.as_str() {
+            "playground" => Some(("playground", LABEL_CLASS_GREEN)),
+            "picnic_table" => Some(("bench", LABEL_CLASS_GREEN)),
+            _ => None,
+        };
+    }
+    if tags.get("tourism").map(|v| v.as_str()) == Some("artwork") {
+        return Some(("statue", LABEL_CLASS_CULTURE));
+    }
+    if let Some(historic) = tags.get("historic") {
+        return match historic.as_str() {
+            "memorial" | "monument" | "statue" => Some(("statue", LABEL_CLASS_CULTURE)),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Map shortbread poi attributes to a symbol + label color class.
 pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
+    if tags.get("layer").map(|v| v.as_str()) == Some("micro_pois") {
+        return micro_icon_for_tags(tags);
+    }
     if let Some(shop) = tags.get("shop") {
         let name = match shop.as_str() {
             "supermarket" => "supermarket",

@@ -39,6 +39,10 @@ pub const LABEL_CLASS_CULTURE: u8 = 3;
 pub const LABEL_CLASS_MUTED: u8 = 4;
 pub const LABEL_CLASS_HEALTH: u8 = 5;
 pub const LABEL_CLASS_GREEN: u8 = 6;
+/// Transport-blue symbols (bicycle parking etc.), carto 0x0092da.
+pub const LABEL_CLASS_TRANSPORT: u8 = 7;
+/// Tree canopy green discs.
+pub const LABEL_CLASS_TREE: u8 = 8;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -143,6 +147,8 @@ pub fn poi_class_hex(color_class: u8) -> u32 {
         LABEL_CLASS_MUTED => 0x66768d,
         LABEL_CLASS_HEALTH => 0xbf0000,
         LABEL_CLASS_GREEN => 0x267d3f,
+        LABEL_CLASS_TRANSPORT => 0x0092da,
+        LABEL_CLASS_TREE => 0x69a05f,
         _ => 0x444444,
     }
 }
