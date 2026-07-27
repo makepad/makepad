@@ -237,6 +237,10 @@ script_mod! {
     }
 }
 
+/// Frames after the last zoom change before stale-bucket tiles restyle
+/// (~0.3s at 60fps).
+const ZOOM_SETTLE_FRAMES: u64 = 18;
+
 // --- Draw shaders ---
 
 #[derive(Script, ScriptHook, Debug)]
@@ -390,6 +394,10 @@ pub struct MapView {
     prev_label_keys: HashSet<u64>,
     #[rust]
     scratch_accepted_hashes: Vec<u64>,
+    // Frame of the last zoom change; zoom-bucket restyles are deferred until
+    // the gesture settles so widths don't flicker mid-zoom.
+    #[rust]
+    last_zoom_change_frame: u64,
     #[rust]
     scratch_screen_path: Vec<Vec2d>,
     #[rust]
@@ -902,6 +910,11 @@ impl MapView {
         }
 
         let bucket = self.render_bucket();
+        // Mid-gesture the baked geometry scales geometrically (smooth); only
+        // restyle stale buckets once the zoom has settled, or widths flicker
+        // tile-batch by tile-batch under the gesture.
+        let zoom_settling =
+            self.frame_counter.saturating_sub(self.last_zoom_change_frame) < ZOOM_SETTLE_FRAMES;
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
             if self.local_requested_tiles.contains(key) || self.local_missing_tiles.contains(key) {
@@ -910,7 +923,11 @@ impl MapView {
             if let Some(entry) = self.tiles.get(key) {
                 match &entry.state {
                     // Stale zoom-bucket geometry stays drawable but gets rebuilt
-                    TileLoadState::Ready { .. } if entry.bucket != bucket => {}
+                    TileLoadState::Ready { .. } if entry.bucket != bucket => {
+                        if zoom_settling {
+                            continue;
+                        }
+                    }
                     _ => continue,
                 }
             }
@@ -1040,6 +1057,7 @@ impl MapView {
         self.zoom = new_zoom;
         self.center_norm = new_center_world / new_world_size;
         self.wrap_and_clamp_center();
+        self.last_zoom_change_frame = self.frame_counter;
         self.redraw(cx);
     }
 
@@ -1054,6 +1072,11 @@ impl MapView {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         self.visible_tiles = self.visible_tile_keys(rect);
         let target_zoom = self.request_zoom_level();
+        // Keep frames coming briefly after a zoom change so the deferred
+        // bucket restyle actually fires once the gesture settles.
+        if self.frame_counter.saturating_sub(self.last_zoom_change_frame) <= ZOOM_SETTLE_FRAMES {
+            self.redraw(cx);
+        }
 
         self.ensure_tile_thread_pool(cx);
         self.request_visible_tiles_from_local_source(cx);
