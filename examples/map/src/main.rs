@@ -34,9 +34,17 @@ script_mod! {
         width: Fill
         height: Fit
         align: Align{x: 0.0 y: 0.5}
-        padding: Inset{left: 8, right: 8, top: 5, bottom: 5}
+        label_walk: Walk{width: Fill, height: Fit}
+        padding: Inset{left: 10, right: 10, top: 6, bottom: 6}
         visible: false
         text: ""
+        draw_text +: {
+            color: #x223038
+            color_hover: #x000000
+            color_focus: #x223038
+            color_down: #x000000
+            text_style: theme.font_regular{font_size: 9.5}
+        }
     }
 
     let PanelText = Label{
@@ -406,6 +414,11 @@ impl App {
     // --- Search ---
 
     fn send_search(&mut self, cx: &mut Cx) {
+        // A script hot-reload wipes #[rust] state including the worker
+        // channel; bring it back on demand.
+        if self.nav_tx.is_none() {
+            self.start_worker();
+        }
         if !self.data_ready || self.pending_query.trim().is_empty() {
             self.hide_results(cx);
             return;
@@ -441,25 +454,17 @@ impl App {
         for i in 0..MAX_RESULTS {
             let button = self.result_button(cx, i);
             if let Some(result) = self.search_results.get(i) {
-                let dist = result
-                    .distance_m
-                    .map(|d| format!("  ·  {}", fmt_dist(d)))
-                    .unwrap_or_default();
-                let secondary = if result.secondary.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", result.secondary)
-                };
-                button.set_text(
-                    cx,
-                    &format!(
-                        "{}  ({}){}{}",
-                        result.name,
-                        result.category.label(),
-                        secondary,
-                        dist
-                    ),
-                );
+                // Two lines: prominent name, then category · address · distance.
+                let mut sub = result.category.label().to_string();
+                if !result.secondary.is_empty() {
+                    sub.push_str(" · ");
+                    sub.push_str(&result.secondary);
+                }
+                if let Some(d) = result.distance_m {
+                    sub.push_str(" · ");
+                    sub.push_str(&fmt_dist(d));
+                }
+                button.set_text(cx, &format!("{}\n{}", result.name, sub));
                 button.set_visible(cx, true);
             } else {
                 button.set_visible(cx, false);
@@ -480,6 +485,9 @@ impl App {
             return;
         };
         self.hide_results(cx);
+        // A fresh search must start from an empty box, not append.
+        self.ui.text_input(cx, ids!(search_input)).set_text(cx, "");
+        self.pending_query.clear();
         self.set_destination(cx, result.pos, &result.name, true);
     }
 
@@ -501,7 +509,7 @@ impl App {
         } else {
             self.set_status(
                 cx,
-                &format!("{} — long-press the map to set your position first", name),
+                &format!("{} — double-click the map to set your position first", name),
             );
         }
     }
@@ -510,6 +518,9 @@ impl App {
         let (Some(from), Some((to, name))) = (self.position, self.dest.clone()) else {
             return;
         };
+        if self.nav_tx.is_none() {
+            self.start_worker();
+        }
         if !self.data_ready {
             return;
         }
@@ -596,7 +607,7 @@ impl App {
         self.ui
             .button(cx, ids!(recenter_button))
             .set_visible(cx, false);
-        self.set_status(cx, "Search a place or long-press the map to route");
+        self.set_status(cx, "Search a place or double-click the map to route");
     }
 
     fn tick_sim(&mut self, cx: &mut Cx) {
@@ -768,7 +779,7 @@ impl MatchEvent for App {
                 } else {
                     self.set_status(
                         cx,
-                        "Position set — search a place or long-press to route there",
+                        "Position set — search a place or double-click to route there",
                     );
                 }
             } else if !self.navigating {
@@ -811,7 +822,7 @@ impl MatchEvent for App {
                 } else {
                     self.set_status(
                         cx,
-                        "Position set — search a place or long-press to route there",
+                        "Position set — search a place or double-click to route there",
                     );
                 }
             }
@@ -863,7 +874,7 @@ impl AppMain for App {
                     self.set_status(
                         cx,
                         &format!(
-                            "{} places · {} road edges — search, or long-press to set position",
+                            "{} places · {} road edges — search, or double-click to set position",
                             group_thousands(docs),
                             group_thousands(edges)
                         ),
