@@ -372,7 +372,7 @@ pub struct MapView {
     #[rust]
     tile_thread_pool: Option<TagThreadPool<TileKey>>,
     #[rust]
-    local_requested_tiles: HashSet<TileKey>,
+    local_requested_tiles: HashMap<TileKey, u64>,
     #[rust]
     local_missing_tiles: HashSet<TileKey>,
     #[rust]
@@ -1083,6 +1083,26 @@ impl MapView {
         }
 
         let bucket = self.render_bucket();
+        // Watchdog: a worker job that dies (or a lost message) would leak its
+        // key here forever and choke the 12-slot in-flight cap; time out and
+        // retry, clearing any stuck Loading placeholder so it can re-request.
+        let now = self.frame_counter;
+        let timed_out: Vec<TileKey> = self
+            .local_requested_tiles
+            .iter()
+            .filter(|(_, started)| now.saturating_sub(**started) > 600)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in timed_out {
+            self.local_requested_tiles.remove(&key);
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
+            }
+        }
         // Mid-gesture the baked geometry scales geometrically (smooth); only
         // restyle stale buckets once the zoom has settled, or widths flicker
         // tile-batch by tile-batch under the gesture.
@@ -1090,7 +1110,7 @@ impl MapView {
             self.frame_counter.saturating_sub(self.last_zoom_change_frame) < ZOOM_SETTLE_FRAMES;
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
-            if self.local_requested_tiles.contains(key) || self.local_missing_tiles.contains(key) {
+            if self.local_requested_tiles.contains_key(key) || self.local_missing_tiles.contains(key) {
                 continue;
             }
             if let Some(entry) = self.tiles.get(key) {
@@ -1120,7 +1140,7 @@ impl MapView {
         }
 
         for key in &missing {
-            self.local_requested_tiles.insert(*key);
+            self.local_requested_tiles.insert(*key, self.frame_counter);
             let keep_stale = self
                 .tiles
                 .get(key)
@@ -1602,9 +1622,19 @@ impl MapView {
         self.scratch_accepted_bounds.clear();
         self.scratch_accepted_plans.clear();
 
+        // During gestures the budget keeps re-places to ~a frame; at rest run
+        // a full pass, otherwise the tail (house numbers) would never place —
+        // each pass restarts from the same highest-scored candidates.
+        let at_rest = pan_dist < 1.0
+            && (self.label_cache_zoom - view_zoom).abs() < 1e-9
+            && self
+                .frame_counter
+                .saturating_sub(self.last_zoom_change_frame)
+                > 30;
+        let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
         let place_start = std::time::Instant::now();
         for candidate_index in 0..self.scratch_candidates.len() {
-            if place_start.elapsed().as_secs_f64() * 1000.0 > LABEL_PLACE_BUDGET_MS {
+            if place_start.elapsed().as_secs_f64() * 1000.0 > place_budget_ms {
                 label_perf.rejected_budget +=
                     label_perf.candidates_kept.saturating_sub(candidate_index);
                 break;
