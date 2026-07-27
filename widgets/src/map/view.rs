@@ -248,7 +248,7 @@ const LABEL_REPLACE_PAN_PX: f64 = 48.0;
 /// placement is still usable (a full place costs up to ~20ms — 2-3 dropped
 /// frames at 120Hz — and tile arrivals during panning invalidated the cache
 /// almost every other frame).
-const LABEL_REPLACE_MIN_FRAMES: u64 = 15;
+const LABEL_REPLACE_MIN_SECONDS: f64 = 0.12;
 /// Hard time budget for one placement pass; labels that don't make it are
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
@@ -430,7 +430,9 @@ pub struct MapView {
     #[rust]
     tiles_generation: u64,
     #[rust]
-    last_full_place_frame: u64,
+    last_full_place_time: Option<std::time::Instant>,
+    #[rust]
+    needs_label_followup: bool,
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
@@ -532,6 +534,9 @@ impl Widget for MapView {
 
         if self.zoom_settle_timer.is_event(event).is_some() {
             self.redraw(cx);
+            if self.needs_label_followup || !self.pending_ready_tiles.is_empty() {
+                self.zoom_settle_timer = cx.start_timeout(0.08);
+            }
         }
 
         if let Event::KeyDown(ke) = event {
@@ -1595,20 +1600,25 @@ impl MapView {
         let cache_soft = self.label_cache_valid
             && (self.label_cache_zoom - view_zoom).abs() < 0.5
             && self
-                .frame_counter
-                .saturating_sub(self.last_full_place_frame)
-                < LABEL_REPLACE_MIN_FRAMES;
+                .last_full_place_time
+                .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_REPLACE_MIN_SECONDS);
         if cache_strict || cache_soft {
-            self.draw_label_plans(
+            // Screen positions transform affinely under zoom-about-cursor:
+            // s_new = s_old * k + (off_new - off_old * k). A plain offset
+            // during zoom flung cached labels thousands of px off-screen.
+            let k = 2.0_f64.powf(view_zoom - self.label_cache_zoom);
+            let shift = map_offset - self.label_cache_offset * k;
+            self.draw_label_plans_scaled(
                 cx,
+                k as f32,
                 Vec2f {
-                    x: pan_delta.x as f32,
-                    y: pan_delta.y as f32,
+                    x: shift.x as f32,
+                    y: shift.y as f32,
                 },
             );
             return false;
         }
-        self.last_full_place_frame = self.frame_counter;
+        self.last_full_place_time = Some(std::time::Instant::now());
 
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
@@ -1743,6 +1753,8 @@ impl MapView {
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
         self.store_label_cache(draw_tiles, view_zoom, map_offset);
+        // budget-truncated passes need another wake to place the tail
+        self.needs_label_followup = label_perf.rejected_budget > 0;
         self.label_perf = label_perf;
         true
     }
@@ -1751,6 +1763,10 @@ impl MapView {
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
+        self.draw_label_plans_scaled(cx, 1.0, extra_offset);
+    }
+
+    fn draw_label_plans_scaled(&mut self, cx: &mut Cx2d, scale: f32, extra_offset: Vec2f) {
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -1769,9 +1785,10 @@ impl MapView {
             let (_, start, end, color_class) = self.scratch_accepted_plans[i];
             self.draw_label.draw_super.color = halo_color;
             for offset in HALO_OFFSETS {
-                self.draw_label.draw_path_glyphs_offset(
+                self.draw_label.draw_path_glyphs_scaled(
                     cx,
                     &self.path_glyphs[start..end],
+                    scale,
                     Vec2f {
                         x: offset.0 + extra_offset.x,
                         y: offset.1 + extra_offset.y,
@@ -1780,8 +1797,12 @@ impl MapView {
             }
             self.draw_label.draw_super.color =
                 label_class_color(color_class, label_color, dark_theme);
-            self.draw_label
-                .draw_path_glyphs_offset(cx, &self.path_glyphs[start..end], extra_offset);
+            self.draw_label.draw_path_glyphs_scaled(
+                cx,
+                &self.path_glyphs[start..end],
+                scale,
+                extra_offset,
+            );
         }
         self.draw_label.end_glyph_batch(cx);
     }
