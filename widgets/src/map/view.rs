@@ -26,6 +26,7 @@ script_mod! {
         map_scale: uniform(vec2(1.0, 1.0))
         map_offset: uniform(vec2(0.0, 0.0))
         tile_fade: uniform(1.0)
+        width_correction: uniform(vec4(1.0, 1.0, 1.0, 1.0))
 
         fragment: fn(){
             self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade, self.depth_clip)
@@ -34,9 +35,32 @@ script_mod! {
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
             var transformed = pos * self.map_scale + self.map_offset;
+            var shape_id = self.geom.shape_id;
+            var expanded = 0.0;
+            var expand_slack = 0.0;
+            // shape >= 100: GPU re-expandable stroke — the position is the
+            // centerline anchor, param1/2 the baked half-width offset and
+            // param3 the width-growth class. The per-class correction turns
+            // the baked width into the width the current view zoom calls
+            // for, so stale-bucket tiles stay correct through a zoom.
+            if shape_id > 99.5 {
+                shape_id = shape_id - 100.0;
+                expanded = 1.0;
+                var corr = self.width_correction.x;
+                if self.geom.param3 > 2.5 {
+                    corr = self.width_correction.w;
+                } else if self.geom.param3 > 1.5 {
+                    corr = self.width_correction.z;
+                } else if self.geom.param3 > 0.5 {
+                    corr = self.width_correction.y;
+                }
+                let off = vec2(self.geom.param1, self.geom.param2);
+                transformed = transformed + off * self.map_scale * corr;
+                expand_slack = length(off) * (corr + 1.0);
+            }
             // shape 20: zoom-constant symbol — position is the anchor point,
             // param1/2 the vertex offset in screen px added after the transform
-            if self.geom.shape_id > 19.5 && self.geom.shape_id < 20.5 {
+            if shape_id > 19.5 && shape_id < 20.5 {
                 transformed = transformed + vec2(self.geom.param1, self.geom.param2);
             }
 
@@ -45,12 +69,17 @@ script_mod! {
             self.v_stroke_mult = self.geom.stroke_mult;
             // stroke distances are tile-local; scale so dash patterns stay in screen px
             self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
-            self.v_shape_id = self.geom.shape_id;
+            self.v_shape_id = shape_id;
             self.v_param0 = self.geom.param0;
             self.v_param5 = self.geom.param5;
 
             let grad_type = self.geom.param0;
-            if grad_type > 0.5 && grad_type < 1.5 {
+            if expanded > 0.5 {
+                self.v_param1 = 0.0;
+                self.v_param2 = 0.0;
+                self.v_param3 = 0.0;
+                self.v_param4 = 0.0;
+            } else if grad_type > 0.5 && grad_type < 1.5 {
                 let p0 = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
                 let p1 = vec2(self.geom.param3, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = p0.x;
@@ -63,7 +92,7 @@ script_mod! {
                 self.v_param2 = center.y;
                 self.v_param3 = self.geom.param3 * self.map_scale.x;
                 self.v_param4 = self.geom.param4 * self.map_scale.y;
-            } else if self.geom.shape_id > 0.5 && self.geom.shape_id < 19.5 {
+            } else if shape_id > 0.5 && shape_id < 19.5 {
                 let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
                 let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = bbox_min.x;
@@ -80,7 +109,7 @@ script_mod! {
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            let cr = self.geom.clip_radius * max(self.map_scale.x, self.map_scale.y);
+            let cr = (self.geom.clip_radius + expand_slack) * max(self.map_scale.x, self.map_scale.y);
             let clip = vec4(
                 max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
                 max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
@@ -320,6 +349,7 @@ pub struct DrawMapVector {
 }
 
 impl DrawMapVector {
+    #[allow(clippy::too_many_arguments)]
     fn draw_geometry(
         &mut self,
         cx: &mut Cx2d,
@@ -327,6 +357,7 @@ impl DrawMapVector {
         map_scale: Vec2f,
         map_offset: Vec2f,
         fade: f32,
+        width_correction: [f32; 4],
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
@@ -343,6 +374,11 @@ impl DrawMapVector {
             cx.cx,
             live_id!(map_offset),
             &[map_offset.x, map_offset.y],
+        );
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(width_correction),
+            &width_correction,
         );
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
@@ -815,16 +851,28 @@ impl Widget for MapView {
                     };
                     if let Some(outgoing) = outgoing {
                         let outgoing_id = outgoing.geometry_id();
-                        self.draw_map
-                            .draw_geometry(cx, outgoing_id, map_scale, screen_offset, 1.0);
+                        self.draw_map.draw_geometry(
+                            cx,
+                            outgoing_id,
+                            map_scale,
+                            screen_offset,
+                            1.0,
+                            stroke_width_correction(fade.bucket, view_zoom),
+                        );
                     }
                 }
                 let Some(geometry) = geometry else {
                     continue;
                 };
                 let geometry_id = geometry.geometry_id();
-                self.draw_map
-                    .draw_geometry(cx, geometry_id, map_scale, screen_offset, fade_alpha);
+                self.draw_map.draw_geometry(
+                    cx,
+                    geometry_id,
+                    map_scale,
+                    screen_offset,
+                    fade_alpha,
+                    stroke_width_correction(entry.bucket, view_zoom),
+                );
             }
         }
 
@@ -1125,9 +1173,11 @@ impl MapView {
                         icon_geometry: old_icon,
                         ..
                     },
+                bucket: old_bucket,
                 ..
             }) => Some(TileFade {
                 started: std::time::Instant::now(),
+                bucket: old_bucket,
                 fill_geometry: old_fill,
                 casing_geometry: old_casing,
                 stroke_geometry: old_stroke,
@@ -1135,6 +1185,7 @@ impl MapView {
             }),
             _ => Some(TileFade {
                 started: std::time::Instant::now(),
+                bucket: buffers.render_zoom,
                 fill_geometry: None,
                 casing_geometry: None,
                 stroke_geometry: None,

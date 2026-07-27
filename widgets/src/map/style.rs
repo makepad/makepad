@@ -18,6 +18,47 @@ pub struct StrokePassStyle {
     pub color: u32,
     pub width: f32,
     pub shape_id: f32,
+    /// Width-growth class for GPU stroke re-expansion: which zoom curve the
+    /// baked width follows, so stale-bucket tiles can be corrected to the
+    /// width the current view zoom calls for.
+    pub expand_class: f32,
+}
+
+/// Regular roads: widths follow `zoom_width_mult` directly.
+pub const EXPAND_CLASS_ROAD: f32 = 0.0;
+/// Thin uncased paths + rails: grow as `max(1, mult)^0.35`.
+pub const EXPAND_CLASS_THIN: f32 = 1.0;
+/// Waterway centerlines: shrink as `mult^1.6` below z14, linear above.
+pub const EXPAND_CLASS_WATER: f32 = 2.0;
+/// Constant screen-px strokes (building outlines).
+pub const EXPAND_CLASS_CONST_PX: f32 = 3.0;
+
+/// Per-class width correction for drawing geometry baked at `bucket` while
+/// the camera sits at (fractional) `view_zoom`: multiplying the baked stroke
+/// offsets by this factor yields the width a fresh restyle at `view_zoom`
+/// would bake. x=road, y=thin, z=water, w=constant-px.
+pub fn stroke_width_correction(bucket: u32, view_zoom: f64) -> [f32; 4] {
+    let geom_scale = 2.0_f64.powf(view_zoom - bucket as f64);
+    let s_view = zoom_width_mult_continuous(view_zoom);
+    let s_bucket = zoom_width_mult(bucket) as f64;
+    let thin = |s: f64| s.max(1.0).powf(0.35);
+    let water = |s: f64| if s < 1.0 { s.powf(1.6) } else { s };
+    [
+        (s_view / (s_bucket * geom_scale)) as f32,
+        (thin(s_view) / (thin(s_bucket) * geom_scale)) as f32,
+        (water(s_view) / (water(s_bucket) * geom_scale)) as f32,
+        (1.0 / geom_scale) as f32,
+    ]
+}
+
+/// `zoom_width_mult` interpolated between integer buckets so corrections
+/// stay smooth through a zoom gesture.
+fn zoom_width_mult_continuous(view_zoom: f64) -> f64 {
+    let floor = view_zoom.floor().max(0.0);
+    let frac = (view_zoom - floor).clamp(0.0, 1.0);
+    let a = zoom_width_mult(floor as u32) as f64;
+    let b = zoom_width_mult(floor as u32 + 1) as f64;
+    a + (b - a) * frac
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -335,6 +376,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
+                expand_class: EXPAND_CLASS_ROAD,
             })
         } else {
             None
@@ -343,6 +385,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
+            expand_class: EXPAND_CLASS_ROAD,
         },
         min_zoom: rule.min_zoom,
     }
@@ -356,6 +399,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
+                expand_class: EXPAND_CLASS_WATER,
             })
         } else {
             None
@@ -364,6 +408,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
+            expand_class: EXPAND_CLASS_WATER,
         },
         min_zoom: rule.min_zoom,
     }
@@ -377,6 +422,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
+                expand_class: EXPAND_CLASS_THIN,
             })
         } else {
             None
@@ -385,6 +431,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
+            expand_class: EXPAND_CLASS_THIN,
         },
         min_zoom: 0.0,
     }
@@ -599,13 +646,18 @@ pub fn stroke_style_for_tags(
         }
         // Paths/footways/cycleways (thin, uncased) barely grow with zoom in
         // carto (~1px at z15 and z17 alike) while regular roads grow steeply.
+        let mut thin_growth = false;
         if template.casing.is_none() && template.center.width <= 2.0 {
             width_scale = zoom_mult.max(1.0).powf(0.35) * px_to_units;
             if tag_is_truthy(tags, "link") {
                 width_scale *= 0.7;
             }
+            thin_growth = true;
         }
         let mut style = scaled_style(template, rank_bias, width_scale);
+        if thin_growth {
+            style.center.expand_class = EXPAND_CLASS_THIN;
+        }
         // carto draws bridge roads with a dark casing edge
         if tag_is_truthy(tags, "bridge") {
             let width = style
@@ -615,6 +667,7 @@ pub fn stroke_style_for_tags(
                 color: 0x4a4a4a,
                 width,
                 shape_id: 0.0,
+                expand_class: EXPAND_CLASS_ROAD,
             });
         }
         if tag_is_truthy(tags, "tunnel") {

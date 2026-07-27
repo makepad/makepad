@@ -383,6 +383,55 @@ impl Tessellator {
         verts: &mut Vec<VVertex>,
         indices: &mut Vec<u32>,
     ) {
+        self.stroke_ends_impl(
+            w, start_cap, end_cap, line_join, miter_limit, aa, verts, indices, None,
+        );
+    }
+
+    /// `stroke_ends` that also records, per emitted vertex, the centerline
+    /// anchor point it was expanded from. Consumers can rebuild the offset
+    /// (`vertex - anchor`) and re-expand strokes in a vertex shader at a
+    /// different width than the one baked here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_ends_anchored(
+        &mut self,
+        w: f32,
+        start_cap: LineCap,
+        end_cap: LineCap,
+        line_join: LineJoin,
+        miter_limit: f32,
+        aa: f32,
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+        anchors: &mut Vec<[f32; 2]>,
+    ) {
+        anchors.clear();
+        self.stroke_ends_impl(
+            w,
+            start_cap,
+            end_cap,
+            line_join,
+            miter_limit,
+            aa,
+            verts,
+            indices,
+            Some(anchors),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_ends_impl(
+        &mut self,
+        w: f32,
+        start_cap: LineCap,
+        end_cap: LineCap,
+        line_join: LineJoin,
+        miter_limit: f32,
+        aa: f32,
+        verts: &mut Vec<VVertex>,
+        indices: &mut Vec<u32>,
+        mut anchors: Option<&mut Vec<[f32; 2]>>,
+    ) {
         let hw = w * 0.5 + aa * 0.5;
         self.calculate_joins(hw, line_join, miter_limit);
         verts.clear();
@@ -433,6 +482,9 @@ impl Tessellator {
                 for v in &mut verts[base as usize..cap_end] {
                     v.stroke_dist = 0.0;
                 }
+                if let Some(anchors) = anchors.as_deref_mut() {
+                    anchors.resize(verts.len(), [p0.x, p0.y]);
+                }
             }
             // body
             let (s, e) = if is_loop { (0, count) } else { (1, count - 1) };
@@ -447,6 +499,9 @@ impl Tessellator {
                     self.emit_bevel_join(verts, indices, p0, p1, hw, hw, u0, u1);
                     for v in &mut verts[vi_before..] {
                         v.stroke_dist = dist;
+                    }
+                    if let Some(anchors) = anchors.as_deref_mut() {
+                        anchors.resize(verts.len(), [p1.x, p1.y]);
                     }
                 } else {
                     let vi = verts.len() as u32;
@@ -464,6 +519,9 @@ impl Tessellator {
                         1.0,
                         dist,
                     ));
+                    if let Some(anchors) = anchors.as_deref_mut() {
+                        anchors.resize(verts.len(), [p1.x, p1.y]);
+                    }
                     if vi >= base + 2 {
                         indices.push(vi - 2);
                         indices.push(vi - 1);
@@ -497,6 +555,9 @@ impl Tessellator {
                 let total_dist = self.cum_dists[count - 1];
                 for v in &mut verts[vi_before..] {
                     v.stroke_dist = total_dist;
+                }
+                if let Some(anchors) = anchors.as_deref_mut() {
+                    anchors.resize(verts.len(), [p1.x, p1.y]);
                 }
             } else {
                 // close loop: connect last pair to first pair

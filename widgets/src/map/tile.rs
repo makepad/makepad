@@ -81,6 +81,9 @@ pub struct TileEntry {
 #[derive(Debug)]
 pub struct TileFade {
     pub started: std::time::Instant,
+    /// Render bucket the outgoing geometry was styled for, so its stroke
+    /// widths can be corrected while it fades out.
+    pub bucket: u32,
     pub fill_geometry: Option<Geometry>,
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
@@ -614,6 +617,7 @@ fn build_tile_buffers_from_features(
                     color: outline,
                     width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
                     shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
                 };
                 for ring in &polygon {
                     let mut closed_points = ring.clone();
