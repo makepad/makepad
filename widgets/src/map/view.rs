@@ -223,6 +223,7 @@ script_mod! {
             MapFillRule{group: "landuse" value: "grass" color: #xcdebb0}
             MapFillRule{group: "landuse" value: "meadow" color: #xcdebb0}
             MapFillRule{group: "landuse" value: "farmland" color: #xeef0d5}
+            MapFillRule{group: "landuse" value: "railway" color: #xece7f1}
             MapFillRule{group: "landuse" value: "*" color: #xe8e7e2}
             MapFillRule{group: "leisure" value: "park" color: #xc8facc}
             MapFillRule{group: "leisure" value: "garden" color: #xcdebb0}
@@ -273,6 +274,7 @@ script_mod! {
             MapFillRule{group: "landuse" value: "grass" color: #x2a3c2d}
             MapFillRule{group: "landuse" value: "meadow" color: #x2a3c2d}
             MapFillRule{group: "landuse" value: "farmland" color: #x2a3c2d}
+            MapFillRule{group: "landuse" value: "railway" color: #x2f2b36}
             MapFillRule{group: "landuse" value: "*" color: #x2d3239}
             MapFillRule{group: "leisure" value: "park" color: #x2f4a34}
             MapFillRule{group: "leisure" value: "garden" color: #x2f4a34}
@@ -2084,9 +2086,10 @@ impl MapView {
         // delta instead of re-scanning/re-shaping/re-colliding every label.
         let pan_delta = map_offset - self.label_cache_offset;
         let pan_dist = pan_delta.x.abs().max(pan_delta.y.abs());
+        let rot_delta = self.rotation - self.label_cache_rotation;
         let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
-            && self.label_cache_rotation == self.rotation
+            && rot_delta == 0.0
             && self.label_cache_tilt == self.tilt
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
@@ -2095,9 +2098,14 @@ impl MapView {
         // expensive full re-place. This covers active zooming too — labels
         // stay pinned in screen space for up to ~125ms during the gesture
         // (pinch behavior a la Google Maps) instead of re-placing every
-        // frame, which was 5-20ms/frame at label-dense zooms.
+        // frame, which was 5-20ms/frame at label-dense zooms. Small
+        // rotation deltas reuse the cache RIGIDLY rotated about the pivot —
+        // that's what keeps labels from wiggling during heading-up nav —
+        // but only at identical zoom (rotation+zoom compose non-affinely
+        // with the cached-screen transform below).
         let cache_soft = self.label_cache_valid
-            && self.label_cache_rotation == self.rotation
+            && (rot_delta == 0.0
+                || (rot_delta.abs() <= 15.0 && self.label_cache_zoom == view_zoom))
             && self.label_cache_tilt == self.tilt
             && (self.label_cache_zoom - view_zoom).abs() < 0.5
             && self
@@ -2119,12 +2127,20 @@ impl MapView {
                 let pivot = rect.pos + rect.size * 0.5;
                 shift += (pivot - camera_vec(pivot)) * (1.0 - k);
             }
+            // Screen-space delta rotation about the view pivot (phi = -rotation).
+            let rot_rad = (-rot_delta).to_radians() as f32;
+            let pivot = rect.pos + rect.size * 0.5;
             self.draw_label_plans_scaled(
                 cx,
                 k as f32,
                 Vec2f {
                     x: shift.x as f32,
                     y: shift.y as f32,
+                },
+                rot_rad,
+                Vec2f {
+                    x: pivot.x as f32,
+                    y: pivot.y as f32,
                 },
             );
             return false;
@@ -2274,10 +2290,17 @@ impl MapView {
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        self.draw_label_plans_scaled(cx, 1.0, extra_offset);
+        self.draw_label_plans_scaled(cx, 1.0, extra_offset, 0.0, Vec2f { x: 0.0, y: 0.0 });
     }
 
-    fn draw_label_plans_scaled(&mut self, cx: &mut Cx2d, scale: f32, extra_offset: Vec2f) {
+    fn draw_label_plans_scaled(
+        &mut self,
+        cx: &mut Cx2d,
+        scale: f32,
+        extra_offset: Vec2f,
+        rot: f32,
+        pivot: Vec2f,
+    ) {
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -2291,14 +2314,44 @@ impl MapView {
             let style = self.active_style();
             (style.label, style.label_halo)
         };
+        // Rigid delta-rotation of the cached placement about the pivot
+        // (heading-up nav): transform a copy once, draw slices from it.
+        let rotated: Vec<PathGlyphInstance> = if rot != 0.0 {
+            let (c, s) = (rot.cos(), rot.sin());
+            self.path_glyphs
+                .iter()
+                .map(|glyph| {
+                    let mut glyph = glyph.clone();
+                    let spin = |p: crate::makepad_draw::text::geom::Point<f32>| {
+                        let dx = p.x - pivot.x;
+                        let dy = p.y - pivot.y;
+                        crate::makepad_draw::text::geom::Point::new(
+                            pivot.x + dx * c - dy * s,
+                            pivot.y + dx * s + dy * c,
+                        )
+                    };
+                    glyph.glyph_origin = spin(glyph.glyph_origin);
+                    glyph.rotation_origin = spin(glyph.rotation_origin);
+                    glyph.angle += rot;
+                    glyph
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
             let (_, start, end, color_class) = self.scratch_accepted_plans[i];
+            let glyphs = if rot != 0.0 {
+                &rotated[start..end]
+            } else {
+                &self.path_glyphs[start..end]
+            };
             self.draw_label.draw_super.color = halo_color;
             for offset in HALO_OFFSETS {
                 self.draw_label.draw_path_glyphs_scaled(
                     cx,
-                    &self.path_glyphs[start..end],
+                    glyphs,
                     scale,
                     Vec2f {
                         x: offset.0 + extra_offset.x,
@@ -2308,12 +2361,7 @@ impl MapView {
             }
             self.draw_label.draw_super.color =
                 label_class_color(color_class, label_color, dark_theme);
-            self.draw_label.draw_path_glyphs_scaled(
-                cx,
-                &self.path_glyphs[start..end],
-                scale,
-                extra_offset,
-            );
+            self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, extra_offset);
         }
         self.draw_label.end_glyph_batch(cx);
     }
@@ -2623,7 +2671,21 @@ impl MapView {
                 return None;
             }
         };
-        let reverse = choose_label_reverse(mid_tangent_angle);
+        // Reading direction from the chord across the whole text span: a
+        // single mid-point tangent can point 180 degrees off on zigzag
+        // segments (rail-yard paths), flipping the label upside down.
+        let span_a = sample_polyline_point_at_distance(&smooth_a, &cum, start_distance);
+        let span_b = sample_polyline_point_at_distance(
+            &smooth_a,
+            &cum,
+            start_distance + text_width as f64,
+        );
+        let reverse = match (span_a, span_b) {
+            (Some(a), Some(b)) if (b.x - a.x).abs() + (b.y - a.y).abs() > 6.0 => {
+                choose_label_reverse(((b.y - a.y) as f32).atan2((b.x - a.x) as f32))
+            }
+            _ => choose_label_reverse(mid_tangent_angle),
+        };
         let label_angle_bias = if reverse { std::f32::consts::PI } else { 0.0 };
 
         let baseline_shift = (run.ascender_in_lpxs + run.descender_in_lpxs)
