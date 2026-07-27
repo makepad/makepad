@@ -19,7 +19,10 @@ pub const LABEL_CURVE_SMOOTH_PASSES: usize = 2;
 pub const LABEL_BASELINE_SHIFT_FACTOR: f64 = 1.0;
 pub const LABEL_LAYOUT_MAX_CURVATURE: f32 = 1.0;
 pub const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.22;
-pub const MAX_TILE_LABELS: usize = 4096;
+// One overzoomed z14 tile can hold a whole city's addresses; house numbers
+// are lowest-priority and must survive this per-tile cap to ever reach the
+// viewport filter.
+pub const MAX_TILE_LABELS: usize = 16384;
 pub const POINT_LABEL_HALF_SPAN_PIXELS: f32 = 96.0;
 pub const ADDRESS_LABEL_MIN_ZOOM: f64 = 16.5;
 pub const POI_LABEL_MIN_ZOOM: f64 = 16.0;
@@ -320,8 +323,12 @@ pub fn label_candidate_budget(view_zoom: f64) -> usize {
         LABEL_MAX_CANDIDATES_ZOOMED_OUT
     } else if view_zoom < 15.0 {
         LABEL_MAX_CANDIDATES_MID_ZOOM
-    } else {
+    } else if view_zoom < 16.5 {
         LABEL_MAX_CANDIDATES_DEFAULT
+    } else {
+        // house-number zooms: few labels survive the viewport filter, so a
+        // large budget costs little and shows every number
+        2400
     }
 }
 
@@ -330,8 +337,10 @@ pub fn label_shape_attempt_budget(view_zoom: f64) -> usize {
         LABEL_MAX_SHAPE_ATTEMPTS_ZOOMED_OUT
     } else if view_zoom < 15.0 {
         LABEL_MAX_SHAPE_ATTEMPTS_MID_ZOOM
-    } else {
+    } else if view_zoom < 16.5 {
         LABEL_MAX_SHAPE_ATTEMPTS_DEFAULT
+    } else {
+        2400
     }
 }
 
