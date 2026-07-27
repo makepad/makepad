@@ -421,6 +421,13 @@ pub struct MapView {
     // shaping dominates label placement cost.
     #[rust]
     shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
+    // Finished tile buffers waiting for GPU upload; drained a couple per
+    // frame so a 10-tile rebuild batch doesn't stall a single frame with
+    // hundreds of MB of buffer creation/upload.
+    #[rust]
+    pending_ready_tiles: Vec<(TileKey, TileBuffers)>,
+    #[rust]
+    last_tile_upload_frame: u64,
     // Frame-time instrumentation, aggregated to local/map_perf.log.
     #[rust]
     perf_frames: u32,
@@ -830,6 +837,7 @@ impl MapView {
         self.tiles.clear();
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
+        self.pending_ready_tiles.clear();
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
         self.label_cache_valid = false;
     }
@@ -931,7 +939,9 @@ impl MapView {
                         if tile.buffers.feature_count == 0 {
                             empty_feature_tiles.push(tile.tile_key);
                         }
-                        self.insert_ready_tile(cx, tile.tile_key, tile.buffers);
+                        self.pending_ready_tiles
+                            .retain(|(key, _)| *key != tile.tile_key);
+                        self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
                     }
                     if !empty_feature_tiles.is_empty() {
                         empty_feature_tiles.sort_unstable();
@@ -972,7 +982,8 @@ impl MapView {
                     if style_epoch != self.style_epoch {
                         continue;
                     }
-                    self.insert_ready_tile(cx, tile_key, buffers);
+                    self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
+                    self.pending_ready_tiles.push((tile_key, buffers));
                     redraw = true;
                 }
                 TileWorkerMessage::NetworkTileParseFailed {
@@ -987,6 +998,38 @@ impl MapView {
                     redraw = true;
                 }
             }
+        }
+        // Drain at most two pending uploads per frame; a bucket-17+ tile can
+        // carry tens of MB of vertex data, and creating/uploading a whole
+        // 10-tile batch in one frame showed up as 200-550ms frame gaps.
+        if !self.pending_ready_tiles.is_empty()
+            && self.last_tile_upload_frame != self.frame_counter
+        {
+            self.last_tile_upload_frame = self.frame_counter;
+            let upload_start = std::time::Instant::now();
+            let count = self.pending_ready_tiles.len().min(2);
+            let batch = self
+                .pending_ready_tiles
+                .drain(..count)
+                .collect::<Vec<_>>();
+            for (tile_key, buffers) in batch {
+                self.insert_ready_tile(cx, tile_key, buffers);
+            }
+            let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
+            if upload_ms > 4.0 {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("local/map_perf.log")
+                {
+                    let _ = writeln!(file, "upload_ms:{:.2} tiles:{}", upload_ms, count);
+                }
+            }
+            redraw = true;
+        }
+        if !self.pending_ready_tiles.is_empty() {
+            redraw = true;
         }
         if redraw {
             self.update_status_text();
@@ -1221,7 +1264,9 @@ impl MapView {
             }
         }
 
-        if self.tiles.len() > 640 {
+        // Tiles at high buckets carry tens of MB of GPU buffers each; keeping
+        // hundreds resident causes GPU memory pressure (frame-gap stutter).
+        if self.tiles.len() > 48 {
             let frame_counter = self.frame_counter;
             let min_keep_zoom = target_zoom.saturating_sub(2);
             let max_keep_zoom = target_zoom.saturating_add(1);
@@ -1237,7 +1282,7 @@ impl MapView {
                 if key.z < min_keep_zoom || key.z > max_keep_zoom {
                     return false;
                 }
-                frame_counter.saturating_sub(entry.last_used) <= 240
+                frame_counter.saturating_sub(entry.last_used) <= 120
             });
         }
         self.update_status_text();
