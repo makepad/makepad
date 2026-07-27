@@ -1670,6 +1670,9 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
             .or_else(|| tags.get("housename"))
             .is_some_and(|value| !value.trim().is_empty()),
         "pois" => select_label_text(tags).is_some(),
+        // All-tag detail archive points pass through; the micro-POI
+        // whitelist decides downstream what actually draws.
+        "osm_points" => true,
         _ => {
             is_road_point_label_layer(layer)
                 && tags.contains_key("highway")
