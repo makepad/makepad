@@ -133,6 +133,12 @@ impl DrawRotatedText {
 
     /// Draw a sequence of pre-placed glyphs from a buffer slice.
     pub fn draw_path_glyphs(&mut self, cx: &mut Cx2d, glyphs: &[PathGlyphInstance]) {
+        // Instances bake their font_scale into font_size_in_lpxs at placement
+        // time; the ambient font_scale (left over from whatever run was shaped
+        // last) must not rescale them here or glyphs shrink under their pen
+        // advances and labels render letter-spaced.
+        let saved_font_scale = self.draw_super.font_scale;
+        self.draw_super.font_scale = 1.0;
         for glyph in glyphs {
             self.draw_glyph_at(
                 cx,
@@ -144,6 +150,7 @@ impl DrawRotatedText {
                 1.0,
             );
         }
+        self.draw_super.font_scale = saved_font_scale;
     }
 
     /// Place glyphs from a `PreparedTextRun` along a polyline path.

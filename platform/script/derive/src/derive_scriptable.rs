@@ -324,7 +324,23 @@ fn derive_script_impl_inner(
                         tb.add("Default::default()");
                     }
                 } else {
-                    tb.add("(").stream(attr.args.clone()).add(").into()");
+                    // for primitive numeric fields, cast instead of .into() -
+                    // unsuffixed literals like #[live(1.0)] on an f32 field
+                    // otherwise hit the deprecated f64->f32 inference fallback
+                    let ty = field.ty.to_string().replace(' ', "");
+                    if matches!(
+                        ty.as_str(),
+                        "f32" | "f64"
+                            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                    ) {
+                        tb.add("(")
+                            .stream(attr.args.clone())
+                            .add(") as ")
+                            .stream(Some(field.ty.clone()));
+                    } else {
+                        tb.add("(").stream(attr.args.clone()).add(").into()");
+                    }
                 }
             } else {
                 tb.add("Default::default()");
