@@ -26,10 +26,8 @@ pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
 pub const MAX_LOCAL_TILE_BATCH: usize = 10;
 pub const ROAD_CLIP_PADDING: f32 = 8.0;
 pub const ROAD_SMOOTH_FACTOR: f32 = 0.0;
-pub const ROAD_CENTER_OVERLAY_WIDTH_SCALE: f32 = 1.2;
-pub const ROAD_CENTER_OVERLAY_CASING_SCALE: f32 = 0.80;
-pub const ROAD_CENTER_OVERLAY_CASING_EPSILON: f32 = 0.02;
-pub const ROAD_CENTER_OVERLAY_MIN_WIDTH: f32 = 0.45;
+pub const BUILDING_OUTLINE_MIN_ZOOM: u32 = 15;
+pub const BUILDING_OUTLINE_WIDTH_PX: f32 = 0.9;
 pub const EARCUT_MAX_RINGS: usize = 500;
 
 const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
@@ -43,6 +41,7 @@ pub enum TileLoadState {
     LoadingLocal,
     Ready {
         fill_geometry: Option<Geometry>,
+        casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
@@ -57,6 +56,9 @@ pub struct TileEntry {
     pub state: TileLoadState,
     pub last_used: u64,
     pub attempts: u8,
+    /// View-zoom bucket the geometry was styled for; stale buckets stay
+    /// drawable while a rebuild is in flight.
+    pub bucket: u32,
 }
 
 #[derive(Debug)]
@@ -108,17 +110,20 @@ struct WayData {
 pub struct TileBuffers {
     pub fill_indices: Vec<u32>,
     pub fill_vertices: Vec<f32>,
+    pub casing_indices: Vec<u32>,
+    pub casing_vertices: Vec<f32>,
     pub stroke_indices: Vec<u32>,
     pub stroke_vertices: Vec<f32>,
     pub feature_count: usize,
     pub labels: Vec<TileLabel>,
+    /// View-zoom bucket this tile's styling was built for.
+    pub render_zoom: u32,
 }
 
 #[derive(Clone, Debug)]
 struct StrokeDrawJob {
     sort_rank: i16,
     style: StrokeStyle,
-    center_overlay: bool,
     points: Vec<(f32, f32)>,
 }
 
@@ -165,6 +170,8 @@ struct PreparedWay {
 #[derive(Debug)]
 struct FillFeatureGroup {
     color: u32,
+    layer_rank: u8,
+    is_building: bool,
     rings: Vec<FillRing>,
 }
 
@@ -274,9 +281,26 @@ pub fn build_tile_buffers_from_body(
     tile_key: TileKey,
     body: &str,
     theme: &CompiledMapTheme,
+    render_zoom: u32,
 ) -> Result<TileBuffers, String> {
     let parsed = OverpassResponse::deserialize_json_lenient(body)
         .map_err(|e| format!("json error at line {} col {}: {}", e.line, e.col, e.msg))?;
+
+    // All geometry is tile-local: world px at tile zoom minus the tile origin.
+    // Keeps f32 precision (world coords at z14 have 0.25px ULP around Amsterdam).
+    let tile_origin = dvec2(
+        tile_key.x as f64 * TILE_SIZE,
+        tile_key.y as f64 * TILE_SIZE,
+    );
+    // How much this tile gets magnified on screen at the styled view zoom.
+    let render_scale = 2.0_f64
+        .powi(render_zoom as i32 - tile_key.z as i32)
+        .max(1e-3) as f32;
+    // Converts "screen px at render_zoom" into tile-local units.
+    let zoom_mult = zoom_width_mult(render_zoom);
+    let px_to_units = 1.0 / render_scale;
+    let aa_units = 1.0 / render_scale;
+    let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut nodes = HashMap::<i64, (f64, f64)>::new();
     let mut ways = Vec::<WayData>::new();
@@ -288,7 +312,7 @@ pub fn build_tile_buffers_from_body(
                 if let (Some(lat), Some(lon)) = (element.lat, element.lon) {
                     nodes.insert(element.id, (lon, lat));
                     if let Some(tags) = element.tags {
-                        let world = lon_lat_to_world(lon, lat, tile_key.z);
+                        let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
                         if let Some(label) =
                             extract_point_label(&tags, (world.x as f32, world.y as f32))
                         {
@@ -319,15 +343,18 @@ pub fn build_tile_buffers_from_body(
 
     let mut fill_indices = Vec::<u32>::new();
     let mut fill_vertices = Vec::<f32>::new();
+    let mut casing_indices = Vec::<u32>::new();
+    let mut casing_vertices = Vec::<f32>::new();
     let mut stroke_indices = Vec::<u32>::new();
     let mut stroke_vertices = Vec::<f32>::new();
     let mut fill_zbias = 0.0_f32;
+    let mut casing_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
     let mut feature_count = 0usize;
 
     let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
     for (way_index, way) in ways.iter().enumerate() {
-        let projected = project_way_points_with_nodes(&way.nodes, &nodes, tile_key.z);
+        let projected = project_way_points_with_nodes(&way.nodes, &nodes, tile_key, tile_origin);
         if projected.len() < 2 {
             continue;
         }
@@ -363,6 +390,8 @@ pub fn build_tile_buffers_from_body(
             fill_group_lookup.insert(group_key, index);
             fill_groups.push(FillFeatureGroup {
                 color,
+                layer_rank: fill_layer_rank(&way.tags),
+                is_building: way.tags.contains_key("building"),
                 rings: Vec::new(),
             });
             index
@@ -384,7 +413,20 @@ pub fn build_tile_buffers_from_body(
         });
     }
 
-    for group in fill_groups {
+    // Paint fills in semantic order (land -> sites -> water -> buildings ->
+    // street areas), not raw MVT layer order which puts land/sites on top of
+    // the buildings. Stable within each rank to preserve source order.
+    let mut fill_order = (0..fill_groups.len()).collect::<Vec<_>>();
+    fill_order.sort_by_key(|&index| fill_groups[index].layer_rank);
+
+    let building_outline = if render_zoom >= BUILDING_OUTLINE_MIN_ZOOM {
+        theme.building_outline
+    } else {
+        None
+    };
+
+    for group_index in fill_order {
+        let group = &fill_groups[group_index];
         let polygons = classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS);
         for polygon in polygons {
             if polygon.is_empty() {
@@ -400,9 +442,9 @@ pub fn build_tile_buffers_from_body(
                 &mut tess_indices,
                 LineJoin::Miter,
                 4.0,
-                1.0,
+                aa_units,
                 false,
-                DEFAULT_FLATTEN_TOLERANCE,
+                tolerance,
             );
             append_tessellated_geometry(
                 &tess_verts,
@@ -419,6 +461,30 @@ pub fn build_tile_buffers_from_body(
             );
             fill_zbias += VECTOR_ZBIAS_STEP;
             feature_count += 1;
+
+            if let (true, Some(outline)) = (group.is_building, building_outline) {
+                for ring in &polygon {
+                    append_stroke_pass(
+                        &mut path,
+                        ring,
+                        true,
+                        &mut tess,
+                        &mut tess_verts,
+                        &mut tess_indices,
+                        &mut fill_vertices,
+                        &mut fill_indices,
+                        StrokePassStyle {
+                            color: outline,
+                            width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
+                            shape_id: 0.0,
+                        },
+                        LineCap::Butt,
+                        aa_units,
+                        tolerance,
+                        &mut fill_zbias,
+                    );
+                }
+            }
         }
     }
 
@@ -429,50 +495,54 @@ pub fn build_tile_buffers_from_body(
         if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
             labels.push(label);
         }
-        if let Some(style) = stroke_style_for_tags(theme, &way.tags, tile_key.z) {
-            let center_overlay = way.tags.contains_key("highway");
+        if let Some(style) =
+            stroke_style_for_tags(theme, &way.tags, tile_key.z, zoom_mult, px_to_units)
+        {
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
-                center_overlay,
                 points: prepared_way.points.clone(),
             });
         }
     }
 
-    let mut grouped_strokes =
-        HashMap::<(StrokeStyleKey, bool), (StrokeStyle, bool, Vec<Vec<(f32, f32)>>)>::new();
+    let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in stroke_jobs {
-        let key = (StrokeStyleKey::from(job.style), job.center_overlay);
-        let entry =
-            grouped_strokes
-                .entry(key)
-                .or_insert((job.style, job.center_overlay, Vec::new()));
-        entry.2.push(job.points);
+        let key = StrokeStyleKey::from(job.style);
+        let entry = grouped_strokes.entry(key).or_insert((job.style, Vec::new()));
+        entry.1.push(job.points);
     }
 
     let mut merged_stroke_jobs = Vec::<StrokeDrawJob>::new();
-    for (_key, (style, center_overlay, polylines)) in grouped_strokes {
+    for (_key, (style, polylines)) in grouped_strokes {
         for points in merge_stroke_polylines(&polylines) {
             merged_stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
-                center_overlay,
                 points,
             });
         }
     }
 
-    merged_stroke_jobs.sort_unstable_by_key(|job| job.sort_rank);
-    let clip_bounds = tile_clip_bounds(tile_key, ROAD_CLIP_PADDING);
-    let mut merged_stroke_parts = Vec::<(StrokeStyle, bool, Vec<Vec<(f32, f32)>>)>::new();
+    // Deterministic paint order: rank, then style bits (HashMap iteration
+    // order must not leak into the render).
+    merged_stroke_jobs.sort_unstable_by_key(|job| {
+        (
+            job.sort_rank,
+            job.style.center.color,
+            job.style.center.width.to_bits(),
+        )
+    });
+    let clip_bounds = tile_clip_bounds(ROAD_CLIP_PADDING);
+    let mut merged_stroke_parts = Vec::<(StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in merged_stroke_jobs {
         let parts = build_polyline_parts(&job.points, clip_bounds, false, ROAD_SMOOTH_FACTOR);
-        merged_stroke_parts.push((job.style, job.center_overlay, parts));
+        merged_stroke_parts.push((job.style, parts));
     }
 
-    // Pass 1: casings
-    for (style, _center_overlay, parts) in &merged_stroke_parts {
+    // Pass 1: all casings into their own buffer so the view can draw every
+    // tile's casings before any tile's centers (carto roads-casing layer).
+    for (style, parts) in &merged_stroke_parts {
         let Some(casing) = style.casing else {
             continue;
         };
@@ -483,67 +553,45 @@ pub fn build_tile_buffers_from_body(
             append_stroke_pass(
                 &mut path,
                 part,
+                false,
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
-                &mut stroke_vertices,
-                &mut stroke_indices,
+                &mut casing_vertices,
+                &mut casing_indices,
                 casing,
                 LineCap::Butt,
-                &mut stroke_zbias,
+                aa_units,
+                tolerance,
+                &mut casing_zbias,
             );
             feature_count += 1;
         }
     }
 
-    // Pass 2: centers/overlays
-    for (style, center_overlay, parts) in &merged_stroke_parts {
+    // Pass 2: centers. Round caps so same-color segments blend at junctions
+    // and dead ends get the carto-style rounded nub.
+    for (style, parts) in &merged_stroke_parts {
         for part in parts {
             if part.len() < 2 {
                 continue;
             }
-            if *center_overlay {
-                let overlay_width = if let Some(casing) = style.casing {
-                    let casing_limit = (casing.width - ROAD_CENTER_OVERLAY_CASING_EPSILON).max(0.0);
-                    (casing.width * ROAD_CENTER_OVERLAY_CASING_SCALE).min(casing_limit)
-                } else {
-                    style.center.width * ROAD_CENTER_OVERLAY_WIDTH_SCALE
-                }
-                .max(ROAD_CENTER_OVERLAY_MIN_WIDTH);
-                if overlay_width > 0.0 {
-                    append_stroke_fill_overlay_pass(
-                        &mut path,
-                        part,
-                        &mut tess,
-                        &mut tess_verts,
-                        &mut tess_indices,
-                        &mut stroke_vertices,
-                        &mut stroke_indices,
-                        StrokePassStyle {
-                            color: style.center.color,
-                            width: overlay_width,
-                            ..style.center
-                        },
-                        LineCap::Butt,
-                        &mut stroke_zbias,
-                    );
-                    feature_count += 1;
-                }
-            } else {
-                append_stroke_pass(
-                    &mut path,
-                    part,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut stroke_vertices,
-                    &mut stroke_indices,
-                    style.center,
-                    LineCap::Butt,
-                    &mut stroke_zbias,
-                );
-                feature_count += 1;
-            }
+            append_stroke_pass(
+                &mut path,
+                part,
+                false,
+                &mut tess,
+                &mut tess_verts,
+                &mut tess_indices,
+                &mut stroke_vertices,
+                &mut stroke_indices,
+                style.center,
+                LineCap::Round,
+                aa_units,
+                tolerance,
+                &mut stroke_zbias,
+            );
+            feature_count += 1;
         }
     }
 
@@ -552,17 +600,21 @@ pub fn build_tile_buffers_from_body(
     Ok(TileBuffers {
         fill_indices,
         fill_vertices,
+        casing_indices,
+        casing_vertices,
         stroke_indices,
         stroke_vertices,
         feature_count,
         labels,
+        render_zoom,
     })
 }
 
 fn project_way_points_with_nodes(
     node_ids: &[i64],
     nodes: &HashMap<i64, (f64, f64)>,
-    zoom: u32,
+    tile_key: TileKey,
+    tile_origin: Vec2d,
 ) -> Vec<(i64, (f32, f32))> {
     let mut out = Vec::with_capacity(node_ids.len());
     let mut last: Option<(f32, f32)> = None;
@@ -571,15 +623,13 @@ fn project_way_points_with_nodes(
         let Some((lon, lat)) = nodes.get(node_id).copied() else {
             continue;
         };
-        let world = lon_lat_to_world(lon, lat, zoom);
+        let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
         let point = (world.x as f32, world.y as f32);
 
-        if let Some(prev) = last {
-            let dx = point.0 - prev.0;
-            let dy = point.1 - prev.1;
-            if dx * dx + dy * dy < 0.25 {
-                continue;
-            }
+        // Only drop exact duplicates; sub-pixel detail at source zoom is
+        // visible detail after overzoom.
+        if last == Some(point) {
+            continue;
         }
 
         out.push((*node_id, point));
@@ -596,6 +646,7 @@ pub fn load_local_tile_batch(
     cache_dir: &Path,
     requested: &[TileKey],
     theme: &CompiledMapTheme,
+    render_zoom: u32,
 ) -> Result<Vec<LoadedLocalTile>, String> {
     if requested.is_empty() {
         return Ok(Vec::new());
@@ -606,7 +657,7 @@ pub fn load_local_tile_batch(
     for key in requested {
         let cache_path = cache_dir.join(format!("z{}_x{}_y{}.json", key.z, key.x, key.y));
         match fs::read_to_string(&cache_path) {
-            Ok(body) => match build_tile_buffers_from_body(*key, &body, theme) {
+            Ok(body) => match build_tile_buffers_from_body(*key, &body, theme, render_zoom) {
                 Ok(buffers) => loaded.push(LoadedLocalTile {
                     tile_key: *key,
                     buffers,
@@ -687,7 +738,7 @@ pub fn load_local_tile_batch(
             }
 
             match mbtiles_tile_to_overpass_json(tile_key, &tile.tile_data) {
-                Ok(body) => match build_tile_buffers_from_body(tile_key, &body, theme) {
+                Ok(body) => match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
                     Ok(buffers) => {
                         store_tile_data_cache_on_disk(tile_key, &body);
                         loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -1218,13 +1269,18 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
     let Some(layer) = tags.get("layer") else {
         return false;
     };
-    if !is_road_point_label_layer(layer) {
-        return false;
+    match layer.as_str() {
+        "addresses" => tags
+            .get("housenumber")
+            .or_else(|| tags.get("housename"))
+            .is_some_and(|value| !value.trim().is_empty()),
+        "pois" => select_label_text(tags).is_some(),
+        _ => {
+            is_road_point_label_layer(layer)
+                && tags.contains_key("highway")
+                && select_label_text(tags).is_some()
+        }
     }
-    if !tags.contains_key("highway") {
-        return false;
-    }
-    select_label_text(tags).is_some()
 }
 
 fn normalize_highway_kind(kind: &str) -> String {

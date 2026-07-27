@@ -378,21 +378,20 @@ pub fn classify_polygon_rings(rings: &[FillRing], max_rings: usize) -> Vec<Vec<V
 
     let mut polygons = Vec::<Vec<Vec<(f32, f32)>>>::new();
     let mut current = Vec::<Vec<(f32, f32)>>::new();
-    let mut ccw: Option<bool> = None;
 
     for ring in selected {
-        let is_ccw = ring.signed_area < 0.0;
-        if ccw.is_none() {
-            ccw = Some(is_ccw);
-        }
-
-        if ccw == Some(is_ccw) {
+        // MVT winding rule (absolute, not first-ring-relative): in y-down tile
+        // coordinates an exterior ring has positive shoelace area, a hole
+        // negative. A leading hole (clipped-away exterior or arbitrary-winding
+        // source) starts its own polygon rather than being dropped.
+        let is_exterior = ring.signed_area > 0.0;
+        if is_exterior || current.is_empty() {
             if !current.is_empty() {
                 polygons.push(current);
                 current = Vec::new();
             }
             current.push(ring.points.clone());
-        } else if !current.is_empty() {
+        } else {
             current.push(ring.points.clone());
         }
     }
@@ -409,13 +408,13 @@ pub fn classify_polygon_rings(rings: &[FillRing], max_rings: usize) -> Vec<Vec<V
 pub fn build_screen_polyline_into(
     path_points: &[(f32, f32)],
     scale: f32,
-    map_offset: Vec2f,
+    offset: Vec2d,
     out: &mut Vec<Vec2d>,
 ) {
     for &(x, y) in path_points {
         out.push(dvec2(
-            x as f64 * scale as f64 + map_offset.x as f64,
-            y as f64 * scale as f64 + map_offset.y as f64,
+            x as f64 * scale as f64 + offset.x,
+            y as f64 * scale as f64 + offset.y,
         ));
     }
 }
@@ -716,9 +715,11 @@ pub fn merge_stroke_polylines(polylines: &[Vec<(f32, f32)>]) -> Vec<Vec<(f32, f3
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn append_stroke_pass(
     path: &mut VectorPath,
     points: &[(f32, f32)],
+    closed: bool,
     tess: &mut Tessellator,
     tess_verts: &mut Vec<VVertex>,
     tess_indices: &mut Vec<u32>,
@@ -726,10 +727,11 @@ pub fn append_stroke_pass(
     stroke_indices: &mut Vec<u32>,
     pass: StrokePassStyle,
     line_cap: LineCap,
+    aa: f32,
+    tolerance: f32,
     stroke_zbias: &mut f32,
 ) {
-    let stroke_points = expand_polyline_endpoints(points, pass.width);
-    emit_path(path, &stroke_points, false);
+    emit_path(path, points, closed);
     let stroke_mult = tessellate_path_stroke(
         path,
         tess,
@@ -739,8 +741,8 @@ pub fn append_stroke_pass(
         line_cap,
         LineJoin::Round,
         4.0,
-        1.0,
-        DEFAULT_FLATTEN_TOLERANCE,
+        aa,
+        tolerance,
     );
     append_tessellated_geometry(
         tess_verts,
@@ -756,52 +758,6 @@ pub fn append_stroke_pass(
         },
     );
     *stroke_zbias += VECTOR_ZBIAS_STEP;
-}
-
-pub fn append_stroke_fill_overlay_pass(
-    path: &mut VectorPath,
-    points: &[(f32, f32)],
-    tess: &mut Tessellator,
-    tess_verts: &mut Vec<VVertex>,
-    tess_indices: &mut Vec<u32>,
-    stroke_vertices: &mut Vec<f32>,
-    stroke_indices: &mut Vec<u32>,
-    pass: StrokePassStyle,
-    line_cap: LineCap,
-    stroke_zbias: &mut f32,
-) {
-    let stroke_points = expand_polyline_endpoints(points, pass.width);
-    emit_path(path, &stroke_points, false);
-    let stroke_mult = tessellate_path_stroke(
-        path,
-        tess,
-        tess_verts,
-        tess_indices,
-        pass.width,
-        line_cap,
-        LineJoin::Round,
-        4.0,
-        1.0,
-        DEFAULT_FLATTEN_TOLERANCE,
-    );
-    append_tessellated_geometry(
-        tess_verts,
-        tess_indices,
-        stroke_vertices,
-        stroke_indices,
-        VectorRenderParams {
-            color: hex_to_premul_rgba(pass.color, 1.0),
-            stroke_mult,
-            shape_id: 0.0,
-            params: [0.0; 6],
-            zbias: *stroke_zbias,
-        },
-    );
-    *stroke_zbias += VECTOR_ZBIAS_STEP;
-}
-
-fn expand_polyline_endpoints(points: &[(f32, f32)], _stroke_width: f32) -> Vec<(f32, f32)> {
-    points.to_vec()
 }
 
 // --- Coordinate projection ---
@@ -887,18 +843,14 @@ pub fn is_descendant_tile(child: TileKey, parent: TileKey) -> bool {
     cx >= min_x && cx <= max_x && cy >= min_y && cy <= max_y
 }
 
-pub fn tile_clip_rect(tile_key: TileKey, padding: f32) -> (f32, f32, f32, f32) {
+/// Clip rect in tile-local coordinates (tile origin at 0,0).
+pub fn tile_clip_rect(padding: f32) -> (f32, f32, f32, f32) {
     let tile_size = TILE_SIZE as f32;
-    (
-        tile_key.x as f32 * tile_size - padding,
-        tile_key.y as f32 * tile_size - padding,
-        (tile_key.x as f32 + 1.0) * tile_size + padding,
-        (tile_key.y as f32 + 1.0) * tile_size + padding,
-    )
+    (-padding, -padding, tile_size + padding, tile_size + padding)
 }
 
-pub fn tile_clip_bounds(tile_key: TileKey, padding: f32) -> GeoBounds {
-    let (min_x, min_y, max_x, max_y) = tile_clip_rect(tile_key, padding);
+pub fn tile_clip_bounds(padding: f32) -> GeoBounds {
+    let (min_x, min_y, max_x, max_y) = tile_clip_rect(padding);
     GeoBounds {
         min: GeoPoint { x: min_x, y: min_y },
         max: GeoPoint { x: max_x, y: max_y },
