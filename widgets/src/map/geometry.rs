@@ -777,6 +777,16 @@ pub fn lon_lat_to_world(lon: f64, lat: f64, zoom: u32) -> Vec2d {
     lon_lat_to_normalized(lon, lat) * tile_world_size(zoom)
 }
 
+/// Inverse of `lon_lat_to_normalized`: normalized web mercator -> (lon, lat).
+pub fn normalized_to_lon_lat(p: Vec2d) -> (f64, f64) {
+    let lon = p.x * 360.0 - 180.0;
+    let lat = (std::f64::consts::PI * (1.0 - 2.0 * p.y))
+        .sinh()
+        .atan()
+        .to_degrees();
+    (lon, lat)
+}
+
 pub const TILE_SIZE: f64 = 256.0;
 
 pub fn tile_world_size(zoom: u32) -> f64 {
