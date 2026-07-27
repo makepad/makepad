@@ -31,6 +31,9 @@ script_mod! {
         // (the view center). Identity when north-up.
         view_rot: uniform(vec2(1.0, 0.0))
         rot_pivot: uniform(vec2(0.0, 0.0))
+        // 2.5D camera: x = cos(tilt) screen-y compression, y = screen px of
+        // lift per meter of building height (sin(tilt) baked in).
+        tilt_params: uniform(vec2(1.0, 0.0))
 
         fragment: fn(){
             self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade, self.depth_clip)
@@ -69,6 +72,12 @@ script_mod! {
                 rel.x * self.view_rot.x - rel.y * self.view_rot.y,
                 rel.x * self.view_rot.y + rel.y * self.view_rot.x
             );
+            // 2.5D: axonometric tilt compresses screen y about the pivot;
+            // building vertices carry their height in meters in param4 and
+            // extrude toward screen-top.
+            transformed.y = self.rot_pivot.y
+                + (transformed.y - self.rot_pivot.y) * self.tilt_params.x
+                - self.geom.param4 * self.tilt_params.y;
             // shape 20: zoom-constant symbol — position is the anchor point,
             // param1/2 the vertex offset in screen px added after the
             // transform. POI symbols stay upright; map-aligned glyphs like
@@ -380,6 +389,7 @@ impl DrawMapVector {
         width_correction: [f32; 4],
         view_rot: [f32; 2],
         rot_pivot: [f32; 2],
+        tilt_params: [f32; 2],
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
@@ -408,6 +418,9 @@ impl DrawMapVector {
         self.draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(rot_pivot), &rot_pivot);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(tilt_params), &tilt_params);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -458,6 +471,14 @@ pub struct MapView {
     /// heading-up navigation camera.
     #[live(0.0)]
     rotation: f64,
+    /// Axonometric camera tilt in degrees (0 = top-down). Compresses the
+    /// screen y about the view center and lifts 2.5D building geometry.
+    #[live(0.0)]
+    tilt: f64,
+    /// Bake extruded, shaded buildings from the detail archive (needs
+    /// `detail_mbtiles_path`).
+    #[live(false)]
+    buildings_3d: bool,
     #[live(false)]
     dark_theme: bool,
     #[live]
@@ -571,6 +592,8 @@ pub struct MapView {
     label_cache_zoom: f64,
     #[rust]
     label_cache_rotation: f64,
+    #[rust]
+    label_cache_tilt: f64,
     #[rust]
     label_cache_tiles: Vec<TileKey>,
     #[rust]
@@ -740,8 +763,8 @@ impl Widget for MapView {
                         self.gesture_panned = true;
                     }
                     // Screen drag maps to a world pan through the inverse of
-                    // the heading-up rotation.
-                    let world_delta = self.unrotate_screen_vec(delta);
+                    // the heading-up rotation and camera tilt.
+                    let world_delta = self.screen_delta_to_world(delta);
                     let world_size = tile_world_size_zoom(self.view_zoom());
                     self.center_norm = self.drag_start_center_norm
                         - dvec2(world_delta.x / world_size, world_delta.y / world_size);
@@ -823,6 +846,15 @@ impl Widget for MapView {
         let rot_pivot = rect.pos + rect.size * 0.5;
         let view_rot_uniform = [rot_cos as f32, rot_sin as f32];
         let rot_pivot_uniform = [rot_pivot.x as f32, rot_pivot.y as f32];
+        let tilt_rad = self.tilt.clamp(0.0, 65.0).to_radians();
+        let px_per_meter = {
+            let (_, lat) = normalized_to_lon_lat(self.center_norm);
+            world_size / (40_075_016.686 * lat.to_radians().cos())
+        };
+        let tilt_uniform = [
+            tilt_rad.cos() as f32,
+            (px_per_meter * tilt_rad.sin()) as f32,
+        ];
 
         self.fill_draw_tile_keys();
         // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
@@ -906,6 +938,7 @@ impl Widget for MapView {
                             stroke_width_correction(fade.bucket, view_zoom),
                             view_rot_uniform,
                             rot_pivot_uniform,
+                            tilt_uniform,
                         );
                     }
                 }
@@ -922,6 +955,7 @@ impl Widget for MapView {
                     stroke_width_correction(entry.bucket, view_zoom),
                     view_rot_uniform,
                     rot_pivot_uniform,
+                    tilt_uniform,
                 );
             }
         }
@@ -955,6 +989,7 @@ impl Widget for MapView {
                 rot: (rot_cos, rot_sin),
                 rot_pivot,
                 rotation_deg: self.rotation,
+                tilt_cos: tilt_rad.cos(),
             };
             let mut overlay = std::mem::take(&mut self.overlay);
             draw_map_overlay(cx, &mut self.draw_overlay, &camera, &mut overlay);
@@ -1500,6 +1535,7 @@ impl MapView {
             let requested = vec![key];
             let mbtiles_path = active_path.clone();
             let detail_path = self.detail_mbtiles_path.clone();
+            let buildings_3d = self.buildings_3d;
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
@@ -1509,6 +1545,7 @@ impl MapView {
                     &requested,
                     &theme_style,
                     bucket,
+                    buildings_3d,
                 );
             match result {
                 Ok(loaded) => {
@@ -1585,8 +1622,8 @@ impl MapView {
         let old_world_size = tile_world_size_zoom(current_zoom);
         let new_world_size = tile_world_size_zoom(new_zoom);
         let rect_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        // Anchor into world-aligned space (undo the heading-up rotation).
-        let anchor_rel = self.unrotate_screen_vec(anchor_abs - rect_center);
+        // Anchor into world-aligned space (undo rotation + tilt).
+        let anchor_rel = self.screen_delta_to_world(anchor_abs - rect_center);
         let old_center_world = self.center_norm * old_world_size;
         let anchor_world = old_center_world + anchor_rel;
         let anchor_norm = anchor_world / old_world_size;
@@ -1730,7 +1767,8 @@ impl MapView {
         // world space.
         let (rot_cos, rot_sin) = self.screen_rotation();
         let half_w = rect.size.x * 0.5;
-        let half_h = rect.size.y * 0.5;
+        // Tilt compression means the screen shows more world vertically.
+        let half_h = rect.size.y * 0.5 / self.tilt_cos().max(1e-3);
         let half_size = dvec2(
             (half_w * rot_cos.abs() + half_h * rot_sin.abs()) / overzoom,
             (half_w * rot_sin.abs() + half_h * rot_cos.abs()) / overzoom,
@@ -1976,6 +2014,7 @@ impl MapView {
         let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
             && self.label_cache_rotation == self.rotation
+            && self.label_cache_tilt == self.tilt
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
             && pan_dist < LABEL_REPLACE_PAN_PX;
@@ -1986,6 +2025,7 @@ impl MapView {
         // frame, which was 5-20ms/frame at label-dense zooms.
         let cache_soft = self.label_cache_valid
             && self.label_cache_rotation == self.rotation
+            && self.label_cache_tilt == self.tilt
             && (self.label_cache_zoom - view_zoom).abs() < 0.5
             && self
                 .last_full_place_time
@@ -1997,11 +2037,14 @@ impl MapView {
             // offset during zoom flung cached labels thousands of px away.
             let k = 2.0_f64.powf(view_zoom - self.label_cache_zoom);
             let raw_shift = map_offset - self.label_cache_offset * k;
-            let mut shift = self.rotate_screen_vec(raw_shift);
+            let camera_vec = |v: Vec2d| {
+                let r = self.rotate_screen_vec(v);
+                dvec2(r.x, r.y * self.tilt_cos())
+            };
+            let mut shift = camera_vec(raw_shift);
             if k != 1.0 {
                 let pivot = rect.pos + rect.size * 0.5;
-                let rotated_pivot = self.rotate_screen_vec(pivot);
-                shift += (pivot - rotated_pivot) * (1.0 - k);
+                shift += (pivot - camera_vec(pivot)) * (1.0 - k);
             }
             self.draw_label_plans_scaled(
                 cx,
@@ -2207,6 +2250,7 @@ impl MapView {
         self.label_cache_offset = map_offset;
         self.label_cache_zoom = view_zoom;
         self.label_cache_rotation = self.rotation;
+        self.label_cache_tilt = self.tilt;
         self.label_cache_tiles.clear();
         self.label_cache_tiles.extend_from_slice(draw_tiles);
         self.label_cache_generation = self.tiles_generation;
@@ -2232,7 +2276,8 @@ impl MapView {
 
         let rot = self.screen_rotation();
         let rot_pivot = rect.pos + rect.size * 0.5;
-        let rotated = rot != (1.0, 0.0);
+        let tilt_cos = self.tilt_cos();
+        let rotated = rot != (1.0, 0.0) || tilt_cos != 1.0;
 
         for key in draw_tiles {
             label_perf.draw_tiles += 1;
@@ -2303,6 +2348,7 @@ impl MapView {
                     scale,
                     tile_offset,
                     rot,
+                    tilt_cos,
                     rot_pivot,
                     &mut self.scratch_screen_path,
                 );
@@ -2612,6 +2658,17 @@ impl MapView {
         dvec2(v.x * cos + v.y * sin, -v.x * sin + v.y * cos)
     }
 
+    fn tilt_cos(&self) -> f64 {
+        self.tilt.clamp(0.0, 65.0).to_radians().cos()
+    }
+
+    /// Screen-space vector (relative to the view pivot) back into
+    /// world-aligned space: undo the tilt compression, then the rotation.
+    fn screen_delta_to_world(&self, v: Vec2d) -> Vec2d {
+        let tilt_cos = self.tilt_cos().max(1e-3);
+        self.unrotate_screen_vec(dvec2(v.x, v.y / tilt_cos))
+    }
+
     fn request_zoom_level(&self) -> u32 {
         let mut zoom = self.view_zoom().round() as u32;
         if self.use_local_mbtiles {
@@ -2712,6 +2769,7 @@ impl MapView {
             rot: self.screen_rotation(),
             rot_pivot: rect.pos + rect.size * 0.5,
             rotation_deg: self.rotation,
+            tilt_cos: self.tilt_cos(),
         }
     }
 
@@ -2735,7 +2793,7 @@ impl MapView {
     pub fn screen_to_lon_lat(&self, abs: Vec2d) -> (f64, f64) {
         let camera = self.overlay_camera();
         let pivot = camera.rot_pivot;
-        let unrotated = self.unrotate_screen_vec(abs - pivot) + pivot;
+        let unrotated = self.screen_delta_to_world(abs - pivot) + pivot;
         let norm = (unrotated - camera.offset) / camera.world_size;
         normalized_to_lon_lat(norm)
     }
@@ -2773,6 +2831,20 @@ impl MapView {
 
     pub fn rotation(&self) -> f64 {
         self.rotation
+    }
+
+    /// Axonometric camera tilt (degrees, 0 = top-down, clamped to 65).
+    pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
+        let tilt = tilt_deg.clamp(0.0, 65.0);
+        if (tilt - self.tilt).abs() < 1e-9 {
+            return;
+        }
+        self.tilt = tilt;
+        self.redraw(cx);
+    }
+
+    pub fn tilt(&self) -> f64 {
+        self.tilt
     }
 
     pub fn set_map_zoom(&mut self, cx: &mut Cx, zoom: f64) {
@@ -2953,6 +3025,16 @@ impl MapViewRef {
 
     pub fn rotation(&self) -> f64 {
         self.borrow().map(|inner| inner.rotation()).unwrap_or(0.0)
+    }
+
+    pub fn set_tilt(&self, cx: &mut Cx, tilt_deg: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_tilt(cx, tilt_deg);
+        }
+    }
+
+    pub fn tilt(&self) -> f64 {
+        self.borrow().map(|inner| inner.tilt()).unwrap_or(0.0)
     }
 
     pub fn fly_to(&self, cx: &mut Cx, lon: f64, lat: f64, zoom: f64) {

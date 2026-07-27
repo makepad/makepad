@@ -383,12 +383,16 @@ pub fn build_tile_buffers_from_body(
 
 /// Local mbtiles path: decode the MVT protobuf STRAIGHT into tile-local
 /// coordinates — no lon/lat round trip, no generated-JSON detour.
+/// Render buckets from which 2.5D buildings are baked.
+pub const BUILDING_3D_MIN_ZOOM: u32 = 16;
+
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
     raw_tile_data: &[u8],
     detail_tile_data: Option<&[u8]>,
     theme: &CompiledMapTheme,
     render_zoom: u32,
+    buildings_3d: bool,
 ) -> Result<TileBuffers, String> {
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
     let render_scale = 2.0_f64
@@ -396,16 +400,20 @@ pub fn build_tile_buffers_from_mvt(
         .max(1e-3) as f32;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
-    // Compose micro-POIs (trees, benches, bins…) from the all-tag detail
-    // archive over the shortbread base — they only draw as symbols, so skip
-    // the extra decode entirely below the icon zoom.
-    if render_zoom >= ICON_MIN_ZOOM {
+    // Compose micro-POIs (trees, benches, bins…) and, in 2.5D mode, building
+    // footprints with real heights from the all-tag detail archive over the
+    // shortbread base — skip the extra decode below the zooms that use them.
+    let want_buildings = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
+    if render_zoom >= ICON_MIN_ZOOM.min(BUILDING_3D_MIN_ZOOM) || want_buildings {
         if let Some(detail_data) = detail_tile_data {
-            if let Err(err) = merge_detail_micro_points(
+            if let Err(err) = merge_detail_features(
                 detail_data,
                 tile_key,
                 render_scale,
+                render_zoom >= ICON_MIN_ZOOM,
+                want_buildings,
                 &mut collector.points,
+                &mut collector.ways,
             ) {
                 log!(
                     "MapView: detail tile z{} x{} y{} decode failed: {}",
@@ -426,29 +434,98 @@ pub fn build_tile_buffers_from_mvt(
     ))
 }
 
-/// Keep only whitelisted micro-POI points from a detail-archive tile and
-/// retag them into the synthetic `micro_pois` layer (icons only — the label
-/// extractor ignores that layer, so base-poi labels are never duplicated).
-fn merge_detail_micro_points(
+/// Merge whitelisted features from a detail-archive tile: micro-POI points
+/// retagged into the synthetic `micro_pois` layer (icons only — the label
+/// extractor ignores that layer, so base-poi labels are never duplicated),
+/// and in 2.5D mode building polygons retagged `detail_buildings`.
+#[allow(clippy::too_many_arguments)]
+fn merge_detail_features(
     detail_data: &[u8],
     tile_key: TileKey,
     render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
     points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    ways: &mut Vec<TileWay>,
 ) -> Result<(), String> {
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
-    for (point, mut tags) in collector.points {
-        if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
-            continue;
+    if want_points {
+        for (point, mut tags) in collector.points {
+            if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
+                continue;
+            }
+            if micro_icon_for_tags(&tags).is_none() {
+                continue;
+            }
+            tags.insert("layer".to_string(), "micro_pois".to_string());
+            points.push((point, tags));
         }
-        if micro_icon_for_tags(&tags).is_none() {
-            continue;
+    }
+    if want_buildings {
+        for mut way in collector.ways {
+            if !way.closed
+                || way.tags.get("layer").map(|value| value.as_str()) != Some("osm_polygons")
+            {
+                continue;
+            }
+            let is_building = way
+                .tags
+                .get("building")
+                .is_some_and(|value| value != "no");
+            if !is_building {
+                continue;
+            }
+            way.tags
+                .insert("layer".to_string(), "detail_buildings".to_string());
+            ways.push(way);
         }
-        tags.insert("layer".to_string(), "micro_pois".to_string());
-        points.push((point, tags));
     }
     Ok(())
+}
+
+/// Building height in meters from OSM tags: explicit `height`, else
+/// `building:levels` × 3m + roof allowance, else a modest default.
+fn building_height_m(tags: &HashMap<String, String>) -> f32 {
+    if let Some(height) = tags.get("height") {
+        let digits: String = height
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if let Ok(h) = digits.parse::<f32>() {
+            return h.clamp(2.0, 220.0);
+        }
+    }
+    if let Some(levels) = tags.get("building:levels") {
+        if let Ok(n) = levels.trim().parse::<f32>() {
+            return (n * 3.0 + 2.0).clamp(3.0, 220.0);
+        }
+    }
+    8.0
+}
+
+/// One flat-shaded wall quad: two ground vertices and two roof vertices
+/// whose height rides in param4 for the tilt shader to lift.
+fn append_wall_quad(
+    a: (f32, f32),
+    b: (f32, f32),
+    height_m: f32,
+    color: [f32; 4],
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    for (p, h) in [(a, 0.0), (b, 0.0), (b, height_m), (a, height_m)] {
+        out_vertices.extend_from_slice(&[
+            p.0, p.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, h, 0.0, 90.0, *zbias,
+        ]);
+    }
+    out_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    *zbias += VECTOR_ZBIAS_STEP;
 }
 
 /// A way in tile-local coordinates ready for styling/tessellation.
@@ -542,11 +619,48 @@ fn build_tile_buffers_from_features(
         });
     }
 
+    // 2.5D: when the detail archive supplied building footprints with real
+    // heights, they replace the base building fills entirely.
+    let has_detail_buildings = tile_ways
+        .iter()
+        .any(|way| way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings"));
+    struct BuildingJob {
+        ring: Vec<(f32, f32)>,
+        height_m: f32,
+        min_y: f32,
+    }
+    let mut building_jobs = Vec::<BuildingJob>::new();
+
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut fill_group_lookup = HashMap::<(String, u32), usize>::new();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
+        if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
+            let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
+                continue;
+            };
+            let clip = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+            if !ring_inside_bounds(&ring_points, clip) {
+                ring_points = clip_ring_to_rect(&ring_points, clip);
+                if ring_points.len() < 3 {
+                    continue;
+                }
+            }
+            let min_y = ring_points
+                .iter()
+                .fold(f32::MAX, |acc, p| acc.min(p.1));
+            building_jobs.push(BuildingJob {
+                ring: ring_points,
+                height_m: building_height_m(&way.tags),
+                min_y,
+            });
+            continue;
+        }
+        if has_detail_buildings && way.tags.contains_key("building") {
+            // Base buildings are replaced by the extruded detail set.
+            continue;
+        }
         let Some(color) = fill_color_for_tags(theme, &way.tags, way.closed) else {
             continue;
         };
@@ -700,6 +814,96 @@ fn build_tile_buffers_from_features(
                     }
                 }
             }
+        }
+    }
+
+    // 2.5D building extrusion: per-edge flat-shaded walls, then the roof
+    // lifted by height (the tilt shader does the lifting per frame, so tilt
+    // animates without rebuilding tiles). North-first paint order is the
+    // painter's approximation of occlusion under the screen-top extrusion.
+    if !building_jobs.is_empty() {
+        building_jobs.sort_by(|a, b| {
+            a.min_y
+                .partial_cmp(&b.min_y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let base_color = theme
+            .building_fill_color()
+            .unwrap_or(0xd9d0c9);
+        let roof_color = hex_to_premul_rgba(base_color, 1.0);
+        // Light from the north-west; walls shade by their outward normal.
+        let (light_x, light_y) = (-0.55_f32, -0.835_f32);
+        for job in &building_jobs {
+            let ring = &job.ring;
+            // Outward normal needs ring orientation; positive shoelace in
+            // y-down tile space = clockwise on screen.
+            let clockwise = polygon_signed_area(ring) > 0.0;
+            let n = ring.len();
+            // South-most edges last so they paint over the northern walls.
+            let mut edge_order: Vec<usize> = (0..n).collect();
+            edge_order.sort_by(|&i, &j| {
+                let yi = ring[i].1 + ring[(i + 1) % n].1;
+                let yj = ring[j].1 + ring[(j + 1) % n].1;
+                yi.partial_cmp(&yj).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &i in &edge_order {
+                let a = ring[i];
+                let b = ring[(i + 1) % n];
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 1e-4 {
+                    continue;
+                }
+                let (mut nx, mut ny) = (dy / len, -dx / len);
+                if !clockwise {
+                    nx = -nx;
+                    ny = -ny;
+                }
+                let facing = (nx * light_x + ny * light_y).clamp(-1.0, 1.0);
+                let shade = 0.62 + 0.20 * (facing + 1.0);
+                let wall_color = [
+                    roof_color[0] * shade,
+                    roof_color[1] * shade,
+                    roof_color[2] * shade,
+                    1.0,
+                ];
+                append_wall_quad(
+                    a,
+                    b,
+                    job.height_m,
+                    wall_color,
+                    &mut fill_vertices,
+                    &mut fill_indices,
+                    &mut fill_zbias,
+                );
+            }
+            emit_path(&mut path, ring, true);
+            tessellate_path_fill(
+                &mut path,
+                &mut tess,
+                &mut tess_verts,
+                &mut tess_indices,
+                LineJoin::Miter,
+                4.0,
+                aa_units,
+                false,
+                tolerance,
+            );
+            append_tessellated_geometry(
+                &tess_verts,
+                &tess_indices,
+                &mut fill_vertices,
+                &mut fill_indices,
+                VectorRenderParams {
+                    color: roof_color,
+                    stroke_mult: 1e6,
+                    shape_id: 0.0,
+                    params: [0.0, 0.0, 0.0, 0.0, job.height_m, 0.0],
+                    zbias: fill_zbias,
+                },
+            );
+            fill_zbias += VECTOR_ZBIAS_STEP;
+            feature_count += 1;
         }
     }
 
@@ -1056,6 +1260,7 @@ pub fn load_local_tile_batch(
     requested: &[TileKey],
     theme: &CompiledMapTheme,
     render_zoom: u32,
+    buildings_3d: bool,
 ) -> Result<Vec<LoadedLocalTile>, String> {
     if requested.is_empty() {
         return Ok(Vec::new());
@@ -1069,9 +1274,11 @@ pub fn load_local_tile_batch(
     let mut reader = MbtilesReader::open(mbtiles_path)
         .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
 
-    // Optional all-tag detail overlay (micro-POIs); only consulted at icon
-    // zooms and only for its single detail zoom level.
-    let mut detail_reader = if render_zoom >= ICON_MIN_ZOOM {
+    // Optional all-tag detail overlay (micro-POIs + 2.5D buildings); only
+    // consulted at the zooms that use it.
+    let want_detail = render_zoom >= ICON_MIN_ZOOM
+        || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM);
+    let mut detail_reader = if want_detail {
         detail_mbtiles_path
             .filter(|path| path.is_file())
             .and_then(|path| MbtilesReader::open(path).ok())
@@ -1125,6 +1332,7 @@ pub fn load_local_tile_batch(
                     detail_raw.as_deref(),
                     theme,
                     render_zoom,
+                    buildings_3d,
                 ) {
                     Ok(buffers) => {
                         loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -1210,6 +1418,7 @@ pub fn load_local_tile_batch(
                 detail_raw.as_deref(),
                 theme,
                 render_zoom,
+                buildings_3d,
             ) {
                 Ok(buffers) => {
                     loaded.push(LoadedLocalTile { tile_key, buffers });

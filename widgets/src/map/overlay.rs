@@ -22,20 +22,22 @@ pub struct OverlayCamera {
     pub rot_pivot: Vec2d,
     /// Map bearing pointing up, degrees (for billboard heading math).
     pub rotation_deg: f64,
+    /// cos(tilt) of the 2.5D camera; 1.0 = top-down.
+    pub tilt_cos: f64,
 }
 
 impl OverlayCamera {
     pub fn norm_to_screen(&self, p: Vec2d) -> Vec2d {
         let s = p * self.world_size + self.offset;
-        if self.rot == (1.0, 0.0) {
+        if self.rot == (1.0, 0.0) && self.tilt_cos == 1.0 {
             return s;
         }
         let rel = s - self.rot_pivot;
-        self.rot_pivot
-            + dvec2(
-                rel.x * self.rot.0 - rel.y * self.rot.1,
-                rel.x * self.rot.1 + rel.y * self.rot.0,
-            )
+        let rotated = dvec2(
+            rel.x * self.rot.0 - rel.y * self.rot.1,
+            rel.x * self.rot.1 + rel.y * self.rot.0,
+        );
+        self.rot_pivot + dvec2(rotated.x, rotated.y * self.tilt_cos)
     }
 }
 
