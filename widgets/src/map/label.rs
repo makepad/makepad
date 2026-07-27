@@ -22,7 +22,7 @@ pub const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.22;
 // One overzoomed z14 tile can hold a whole city's addresses; house numbers
 // are lowest-priority and must survive this per-tile cap to ever reach the
 // viewport filter.
-pub const MAX_TILE_LABELS: usize = 16384;
+pub const MAX_TILE_LABELS: usize = 32768;
 pub const POINT_LABEL_HALF_SPAN_PIXELS: f32 = 96.0;
 pub const ADDRESS_LABEL_MIN_ZOOM: f64 = 16.5;
 pub const POI_LABEL_MIN_ZOOM: f64 = 16.0;
