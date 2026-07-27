@@ -39,6 +39,7 @@ pub struct CompiledMapTheme {
     pub background: Vec4f,
     pub status_text: Vec4f,
     pub label: Vec4f,
+    pub label_halo: Vec4f,
     building_fill: Option<u32>,
     pub building_outline: Option<u32>,
     street_area_fill: Option<u32>,
@@ -61,6 +62,7 @@ impl Default for CompiledMapTheme {
             background: Vec4f::from_u32(0xddd7ccff),
             status_text: Vec4f::from_u32(0xdee9f4ff),
             label: Vec4f::from_u32(0x000000ff),
+            label_halo: Vec4f::from_u32(0xffffffff),
             building_fill: None,
             building_outline: None,
             street_area_fill: None,
@@ -165,6 +167,8 @@ pub struct MapThemeStyle {
     pub status_text: Vec4f,
     #[live]
     pub label: Vec4f,
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    pub label_halo: Vec4f,
     #[rust]
     fill_rules: Vec<MapFillRule>,
     #[rust]
@@ -182,6 +186,7 @@ impl Default for MapThemeStyle {
             background: Vec4f::from_u32(0xddd7ccff),
             status_text: Vec4f::from_u32(0xdee9f4ff),
             label: Vec4f::from_u32(0x000000ff),
+            label_halo: Vec4f::from_u32(0xffffffff),
             fill_rules: Vec::new(),
             road_rules: Vec::new(),
             waterway_rules: Vec::new(),
@@ -249,6 +254,7 @@ impl MapThemeStyle {
             background: self.background,
             status_text: self.status_text,
             label: self.label,
+            label_halo: self.label_halo,
             ..CompiledMapTheme::default()
         };
 
@@ -432,7 +438,9 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
     }
     let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
     if is_road_polygon_layer(layer) {
-        return 50;
+        // above base land, but below sites/parks — pedestrian plazas like
+        // Bellamyplein must not paint over the park inside them
+        return 12;
     }
     match layer {
         "ocean" => 5,
@@ -465,7 +473,8 @@ pub fn zoom_width_mult(render_zoom: u32) -> f32 {
         15 => 1.7,
         16 => 2.1,
         17 => 3.6,
-        _ => 4.2,
+        18 => 4.2,
+        _ => 5.0,
     }
 }
 

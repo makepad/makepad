@@ -111,7 +111,7 @@ script_mod! {
         center_lat: 52.3757
         zoom: 17.0
         min_zoom: 11.0
-        max_zoom: 17.0
+        max_zoom: 19.0
         dark_theme: false
         use_network: false
         use_local_mbtiles: true
@@ -170,6 +170,7 @@ script_mod! {
             background: #x161b22
             status_text: #xb2c7d8
             label: #xe5eaf1
+            label_halo: #x161b22
 
             MapFillRule{group: "building" color: #x383d46}
             MapFillRule{group: "building_outline" color: #x262a31}
@@ -307,7 +308,7 @@ pub struct MapView {
     zoom: f64,
     #[live(11.0)]
     min_zoom: f64,
-    #[live(17.0)]
+    #[live(19.0)]
     max_zoom: f64,
     #[live(false)]
     dark_theme: bool,
@@ -376,7 +377,13 @@ pub struct MapView {
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize)>,
+    scratch_accepted_plans: Vec<(f64, usize, usize, u8)>,
+    // Labels drawn last frame (hashed name+position key); kept to stabilize
+    // placement while panning instead of flickering between candidates.
+    #[rust]
+    prev_label_keys: HashSet<u64>,
+    #[rust]
+    scratch_accepted_hashes: Vec<u64>,
     #[rust]
     scratch_screen_path: Vec<Vec2d>,
     #[rust]
@@ -1318,7 +1325,11 @@ impl MapView {
             return;
         }
         self.scratch_candidates
-            .sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+            .sort_unstable_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.name_key.cmp(&b.name_key))
+            });
         let candidate_budget = label_candidate_budget(view_zoom);
         if self.scratch_candidates.len() > candidate_budget {
             self.scratch_candidates.truncate(candidate_budget);
@@ -1404,14 +1415,52 @@ impl MapView {
             label_perf.drawn_labels += 1;
             label_perf.drawn_glyphs += glyph_count;
             let score = candidate.score + candidate.source_rank as f64 * 2.0;
-            self.scratch_accepted_plans
-                .push((score, placement.glyph_start, placement.glyph_end));
+            self.scratch_accepted_hashes
+                .push(stable_label_key(&candidate.name_key, &candidate.road_kind));
+            self.scratch_accepted_plans.push((
+                score,
+                placement.glyph_start,
+                placement.glyph_end,
+                candidate.color_class,
+            ));
         }
+
+        self.prev_label_keys.clear();
+        self.prev_label_keys
+            .extend(self.scratch_accepted_hashes.drain(..));
 
         self.scratch_accepted_plans
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let dark_theme = self.dark_theme;
+        let (label_color, halo_color) = {
+            let style = self.active_style();
+            (style.label, style.label_halo)
+        };
+        const HALO_OFFSETS: [(f32, f32); 8] = [
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+            (-0.7, -0.7),
+            (0.7, -0.7),
+            (-0.7, 0.7),
+            (0.7, 0.7),
+        ];
         for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end) = self.scratch_accepted_plans[i];
+            let (_, start, end, color_class) = self.scratch_accepted_plans[i];
+            self.draw_label.draw_super.color = halo_color;
+            for offset in HALO_OFFSETS {
+                self.draw_label.draw_path_glyphs_offset(
+                    cx,
+                    &self.path_glyphs[start..end],
+                    Vec2f {
+                        x: offset.0,
+                        y: offset.1,
+                    },
+                );
+            }
+            self.draw_label.draw_super.color =
+                label_class_color(color_class, label_color, dark_theme);
             self.draw_label
                 .draw_path_glyphs(cx, &self.path_glyphs[start..end]);
         }
@@ -1531,10 +1580,18 @@ impl MapView {
                     font_scale = 0.72;
                 }
 
-                let score = source_rank as f64 * 1000.0
+                let mut score = source_rank as f64 * 1000.0
                     + (4_u8.saturating_sub(label.priority) as f64) * 120.0
                     + (220.0 - zoom_delta * 65.0)
                     + path_length.min(640.0) * 0.35;
+                // Hysteresis: prefer labels that were visible last frame so
+                // panning doesn't flicker between competing candidates.
+                if self
+                    .prev_label_keys
+                    .contains(&stable_label_key(&name_key, &label.road_kind))
+                {
+                    score += 350.0;
+                }
 
                 // Reuse existing candidate slot or push a new one
                 if write_idx < self.scratch_candidates.len() {
@@ -1542,6 +1599,7 @@ impl MapView {
                     c.text.push_str(&label.text);
                     c.name_key.push_str(&name_key);
                     c.road_kind.push_str(&label.road_kind);
+                    c.color_class = label.color_class;
                     c.source_rank = source_rank;
                     c.score = score;
                     c.path_length = path_length;
@@ -1554,6 +1612,7 @@ impl MapView {
                         text: label.text.clone(),
                         name_key,
                         road_kind: label.road_kind.clone(),
+                        color_class: label.color_class,
                         source_rank,
                         score,
                         path_length,
@@ -1758,5 +1817,31 @@ impl MapView {
         } else {
             "light"
         }
+    }
+}
+
+/// Viewport-independent identity for a label, used for frame-to-frame
+/// placement hysteresis (road_kind embeds the tile-local position for points).
+fn stable_label_key(name_key: &str, road_kind: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name_key.hash(&mut hasher);
+    road_kind.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Carto-style label colors per POI class (orange food, purple shops,
+/// brown culture, muted house numbers).
+fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) -> Vec4f {
+    match (color_class, dark_theme) {
+        (LABEL_CLASS_AMENITY, false) => Vec4f::from_u32(0xc77400ff),
+        (LABEL_CLASS_SHOP, false) => Vec4f::from_u32(0xac39acff),
+        (LABEL_CLASS_CULTURE, false) => Vec4f::from_u32(0x734a08ff),
+        (LABEL_CLASS_MUTED, false) => Vec4f::from_u32(0x66768dff),
+        (LABEL_CLASS_AMENITY, true) => Vec4f::from_u32(0xe09a4aff),
+        (LABEL_CLASS_SHOP, true) => Vec4f::from_u32(0xcf7fcfff),
+        (LABEL_CLASS_CULTURE, true) => Vec4f::from_u32(0xc9a36cff),
+        (LABEL_CLASS_MUTED, true) => Vec4f::from_u32(0x8899aaff),
+        _ => default_color,
     }
 }
