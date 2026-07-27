@@ -217,6 +217,7 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
             "recycling" => Some(("recycling", LABEL_CLASS_MUTED)),
             "bicycle_parking" => Some(("bicycle", LABEL_CLASS_TRANSPORT)),
             "parking" => Some(("parking", LABEL_CLASS_TRANSPORT)),
+            "parking_entrance" => Some(("parking", LABEL_CLASS_TRANSPORT)),
             "charging_station" => Some(("charger", LABEL_CLASS_TRANSPORT)),
             _ => None,
         };
