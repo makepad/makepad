@@ -8,6 +8,9 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 const PAGE_SIZE: usize = 65_536;
+/// Page containing file byte offset 1 GiB (1-based); reserved by SQLite for
+/// file locks and never allocatable.
+const LOCK_BYTE_PAGE: u32 = (1 << 30) / PAGE_SIZE as u32 + 1;
 const SQLITE_APPLICATION_ID_MBTILES: u32 = 0x4d50_4258;
 const MAKEPAD_ROWID_SCHEME_KEY: &str = "makepad_rowid_scheme";
 const MAKEPAD_ROWID_SCHEME_VALUE: &str = "block-v1-xyz";
@@ -147,6 +150,17 @@ impl RawDbWriter {
             .page_count
             .checked_add(1)
             .ok_or(Error::InvalidWriterState("SQLite page number overflow"))?;
+        // The page spanning byte offset 1 GiB is SQLite's lock-byte page: it
+        // must exist in the file but can never be referenced by any b-tree.
+        // Skipping it here leaves it zero-filled and unreferenced; without
+        // this, every database larger than 1 GiB fails integrity checks with
+        // "2nd reference to page 16385".
+        if self.page_count == LOCK_BYTE_PAGE {
+            self.page_count = self
+                .page_count
+                .checked_add(1)
+                .ok_or(Error::InvalidWriterState("SQLite page number overflow"))?;
+        }
         Ok(self.page_count)
     }
 
