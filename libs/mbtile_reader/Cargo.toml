@@ -2,7 +2,7 @@
 name = "makepad-mbtile-reader"
 version = "1.0.0"
 edition = "2021"
-description = "Minimal read-only SQLite parser for extracting tiles from MBTiles files"
+description = "Minimal pure-Rust SQLite reader and streaming writer for MBTiles files"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
