@@ -239,7 +239,7 @@ script_mod! {
 
 /// Frames after the last zoom change before stale-bucket tiles restyle
 /// (~0.3s at 60fps).
-const ZOOM_SETTLE_FRAMES: u64 = 10;
+const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 
 /// Accumulated pan (screen px) before labels are re-placed; must stay under
 /// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
@@ -410,6 +410,10 @@ pub struct MapView {
     // the gesture settles so widths don't flicker mid-zoom.
     #[rust]
     last_zoom_change_frame: u64,
+    #[rust]
+    last_zoom_change_time: Option<std::time::Instant>,
+    #[rust]
+    zoom_settle_timer: Timer,
     // Label placement cache: while panning at the same zoom over the same
     // tiles, last placement's glyphs are redrawn shifted by the pan delta
     // instead of re-scanning/re-shaping/re-colliding thousands of labels.
@@ -525,6 +529,10 @@ impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.handle_tile_worker_messages(cx);
         self.widget_match_event(cx, event, scope);
+
+        if self.zoom_settle_timer.is_event(event).is_some() {
+            self.redraw(cx);
+        }
 
         if let Event::KeyDown(ke) = event {
             if ke.key_code == KeyCode::KeyT {
@@ -1106,8 +1114,9 @@ impl MapView {
         // Mid-gesture the baked geometry scales geometrically (smooth); only
         // restyle stale buckets once the zoom has settled, or widths flicker
         // tile-batch by tile-batch under the gesture.
-        let zoom_settling =
-            self.frame_counter.saturating_sub(self.last_zoom_change_frame) < ZOOM_SETTLE_FRAMES;
+        let zoom_settling = self
+            .last_zoom_change_time
+            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS);
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
             if self.local_requested_tiles.contains_key(key) || self.local_missing_tiles.contains(key) {
@@ -1255,6 +1264,12 @@ impl MapView {
         self.center_norm = new_center_world / new_world_size;
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
+        self.last_zoom_change_time = Some(std::time::Instant::now());
+        // The paint beat idles when input stops; without a timer wake the
+        // settle window would never elapse and stale-bucket restyles only
+        // fired once the user wiggled the map again.
+        cx.stop_timer(self.zoom_settle_timer);
+        self.zoom_settle_timer = cx.start_timeout(0.15);
         self.redraw(cx);
     }
 
@@ -1271,7 +1286,10 @@ impl MapView {
         let target_zoom = self.request_zoom_level();
         // Keep frames coming briefly after a zoom change so the deferred
         // bucket restyle actually fires once the gesture settles.
-        if self.frame_counter.saturating_sub(self.last_zoom_change_frame) <= ZOOM_SETTLE_FRAMES {
+        if self
+            .last_zoom_change_time
+            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS + 0.05)
+        {
             self.redraw(cx);
         }
 
@@ -1628,9 +1646,8 @@ impl MapView {
         let at_rest = pan_dist < 1.0
             && (self.label_cache_zoom - view_zoom).abs() < 1e-9
             && self
-                .frame_counter
-                .saturating_sub(self.last_zoom_change_frame)
-                > 30;
+                .last_zoom_change_time
+                .is_none_or(|at| at.elapsed().as_secs_f64() > 0.25);
         let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
         let place_start = std::time::Instant::now();
         for candidate_index in 0..self.scratch_candidates.len() {
