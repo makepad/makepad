@@ -681,6 +681,8 @@ pub struct MapView {
     #[rust]
     rotate_drag: Option<(Vec2d, f64, f64)>,
     #[rust]
+    last_tap_count: u32,
+    #[rust]
     pending_viewport_changed: bool,
 }
 
@@ -783,6 +785,7 @@ impl Widget for MapView {
                     self.gesture_panned = false;
                     self.drag_start_abs = Some(fe.abs);
                     self.drag_start_center_norm = self.center_norm;
+                    self.last_tap_count = fe.tap_count;
                     cx.set_cursor(MouseCursor::Grabbing);
                 }
             }
@@ -822,7 +825,16 @@ impl Widget for MapView {
                 self.drag_start_abs = None;
                 cx.set_cursor(MouseCursor::Grab);
                 if fe.is_primary_hit() && fe.was_tap() {
-                    if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), fe.abs) {
+                    if self.last_tap_count >= 2 {
+                        // Double-click acts as the long-press (mouse holds
+                        // don't synthesize FingerLongPress on desktop).
+                        let (lon, lat) = self.screen_to_lon_lat(fe.abs);
+                        cx.widget_action(
+                            self.uid,
+                            MapViewAction::LongPressed { lon, lat, abs: fe.abs },
+                        );
+                    } else if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), fe.abs)
+                    {
                         cx.widget_action(self.uid, MapViewAction::MarkerClicked { id });
                     } else {
                         let (lon, lat) = self.screen_to_lon_lat(fe.abs);
