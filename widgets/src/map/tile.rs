@@ -440,6 +440,25 @@ fn build_tile_buffers_from_features(
         }
     }
 
+    // Icon-vs-icon collision: keep the first symbol in any ~icon-sized
+    // neighborhood (dense shopping streets otherwise stack into a carpet).
+    let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
+    let icon_min_dist_sq = icon_min_dist * icon_min_dist;
+    let mut accepted_icons = Vec::<(f32, f32)>::new();
+    icon_jobs.retain(|(point, _, _)| {
+        let collides = accepted_icons.iter().any(|other| {
+            let dx = other.0 - point.0;
+            let dy = other.1 - point.1;
+            dx * dx + dy * dy < icon_min_dist_sq
+        });
+        if collides {
+            false
+        } else {
+            accepted_icons.push(*point);
+            true
+        }
+    });
+
     let mut path = VectorPath::new();
     let mut tess = Tessellator::default();
     let mut tess_verts = Vec::<VVertex>::new();
@@ -493,6 +512,11 @@ fn build_tile_buffers_from_features(
             }
         }
 
+        if render_zoom >= 15 {
+            if let Some(label) = extract_area_label(&way.tags, ring_centroid(&ring_points)) {
+                labels.push(label);
+            }
+        }
         let feature_key = way
             .tags
             .get(MVT_INTERNAL_FEATURE_KEY)
@@ -843,6 +867,18 @@ fn build_tile_buffers_from_features(
 /// Shape id telling the map vertex shader to treat (param1, param2) as a
 /// screen-px offset added AFTER the map transform (zoom-constant symbols).
 pub const ICON_SHAPE_ID: f32 = 20.0;
+
+fn ring_centroid(ring: &[(f32, f32)]) -> (f32, f32) {
+    if ring.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut sum = (0.0_f32, 0.0_f32);
+    for point in ring {
+        sum.0 += point.0;
+        sum.1 += point.1;
+    }
+    (sum.0 / ring.len() as f32, sum.1 / ring.len() as f32)
+}
 
 /// Screen-px arrow glyph (shaft + head, +x = travel direction) as
 /// zoom-constant anchor+offset vertices like the POI symbols.
