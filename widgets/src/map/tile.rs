@@ -452,11 +452,17 @@ fn merge_detail_features(
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     if want_points {
+        let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
         for (point, mut tags) in collector.points {
             if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
                 continue;
             }
-            if micro_icon_for_tags(&tags).is_none() {
+            let Some((icon, _)) = micro_icon_for_tags(&tags) else {
+                continue;
+            };
+            // Door-level detail: carto shows entrances only when you're
+            // close enough to walk through one.
+            if icon == "entrance" && render_zoom < 17.5 {
                 continue;
             }
             tags.insert("layer".to_string(), "micro_pois".to_string());

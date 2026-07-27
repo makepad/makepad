@@ -184,7 +184,7 @@ script_mod! {
                 return self.dash(2.0, 3.0)
             }
             if self.v_shape_id > 11.5 && self.v_shape_id < 12.5 {
-                return self.dash(7.0, 5.0)
+                return self.dash(8.0, 8.0)
             }
             return 1.0
         }
