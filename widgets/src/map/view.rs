@@ -23,6 +23,11 @@ script_mod! {
         ..mod.draw.DrawVector
         map_scale: uniform(vec2(1.0, 1.0))
         map_offset: uniform(vec2(0.0, 0.0))
+        tile_fade: uniform(1.0)
+
+        fragment: fn(){
+            self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade, self.depth_clip)
+        }
 
         vertex: fn() {
             let pos = vec2(self.geom.x, self.geom.y);
@@ -249,6 +254,8 @@ const LABEL_REPLACE_PAN_PX: f64 = 48.0;
 /// frames at 120Hz — and tile arrivals during panning invalidated the cache
 /// almost every other frame).
 const LABEL_REPLACE_MIN_SECONDS: f64 = 0.12;
+/// Cross-fade duration when a tile's new geometry replaces the old.
+const TILE_FADE_SECONDS: f64 = 0.25;
 /// Hard time budget for one placement pass; labels that don't make it are
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
@@ -264,6 +271,8 @@ pub struct DrawMapVector {
     pub map_scale: Vec2f,
     #[rust(vec2(0.0, 0.0))]
     pub map_offset: Vec2f,
+    #[rust(1.0)]
+    pub tile_fade: f32,
 }
 
 impl DrawMapVector {
@@ -273,9 +282,14 @@ impl DrawMapVector {
         geometry_id: GeometryId,
         map_scale: Vec2f,
         map_offset: Vec2f,
+        fade: f32,
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
+        self.tile_fade = fade;
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(tile_fade), &[fade]);
         self.draw_super.draw_vars.set_uniform(
             cx.cx,
             live_id!(map_scale),
@@ -414,6 +428,8 @@ pub struct MapView {
     last_zoom_change_time: Option<std::time::Instant>,
     #[rust]
     zoom_settle_timer: Timer,
+    #[rust]
+    tile_fade_timer: Timer,
     // Label placement cache: while panning at the same zoom over the same
     // tiles, last placement's glyphs are redrawn shifted by the pan delta
     // instead of re-scanning/re-shaping/re-colliding thousands of labels.
@@ -532,6 +548,12 @@ impl Widget for MapView {
         self.handle_tile_worker_messages(cx);
         self.widget_match_event(cx, event, scope);
 
+        if self.tile_fade_timer.is_event(event).is_some() {
+            self.redraw(cx);
+            if self.tiles.values().any(|entry| entry.fade.is_some()) {
+                self.tile_fade_timer = cx.start_timeout(0.016);
+            }
+        }
         if self.zoom_settle_timer.is_event(event).is_some() {
             self.redraw(cx);
             if self.needs_label_followup || !self.pending_ready_tiles.is_empty() {
@@ -648,27 +670,43 @@ impl Widget for MapView {
                     2 => stroke_geometry,
                     _ => icon_geometry,
                 };
-                let Some(geometry) = geometry else {
-                    continue;
-                };
                 let scale = 2.0_f64.powf(view_zoom - key.z as f64);
                 let tile_offset = map_offset
                     + dvec2(
                         key.x as f64 * TILE_SIZE * scale,
                         key.y as f64 * TILE_SIZE * scale,
                     );
-                self.draw_map.draw_geometry(
-                    cx,
-                    geometry.geometry_id(),
-                    Vec2f {
-                        x: scale as f32,
-                        y: scale as f32,
-                    },
-                    Vec2f {
-                        x: tile_offset.x as f32,
-                        y: tile_offset.y as f32,
-                    },
-                );
+                let map_scale = Vec2f {
+                    x: scale as f32,
+                    y: scale as f32,
+                };
+                let screen_offset = Vec2f {
+                    x: tile_offset.x as f32,
+                    y: tile_offset.y as f32,
+                };
+                let mut fade_alpha = 1.0_f32;
+                if let Some(fade) = &entry.fade {
+                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
+                        as f32)
+                        .clamp(0.0, 1.0);
+                    let outgoing = match pass {
+                        0 => &fade.fill_geometry,
+                        1 => &fade.casing_geometry,
+                        2 => &fade.stroke_geometry,
+                        _ => &fade.icon_geometry,
+                    };
+                    if let Some(outgoing) = outgoing {
+                        let outgoing_id = outgoing.geometry_id();
+                        self.draw_map
+                            .draw_geometry(cx, outgoing_id, map_scale, screen_offset, 1.0);
+                    }
+                }
+                let Some(geometry) = geometry else {
+                    continue;
+                };
+                let geometry_id = geometry.geometry_id();
+                self.draw_map
+                    .draw_geometry(cx, geometry_id, map_scale, screen_offset, fade_alpha);
             }
         }
 
@@ -940,6 +978,37 @@ impl MapView {
             None
         };
 
+        // Cross-fade: keep the replaced generation's geometry under the new
+        // one for TILE_FADE_SECONDS instead of popping.
+        let fade = match self.tiles.remove(&tile_key) {
+            Some(TileEntry {
+                state:
+                    TileLoadState::Ready {
+                        fill_geometry: old_fill,
+                        casing_geometry: old_casing,
+                        stroke_geometry: old_stroke,
+                        icon_geometry: old_icon,
+                        ..
+                    },
+                ..
+            }) => Some(TileFade {
+                started: std::time::Instant::now(),
+                fill_geometry: old_fill,
+                casing_geometry: old_casing,
+                stroke_geometry: old_stroke,
+                icon_geometry: old_icon,
+            }),
+            _ => Some(TileFade {
+                started: std::time::Instant::now(),
+                fill_geometry: None,
+                casing_geometry: None,
+                stroke_geometry: None,
+                icon_geometry: None,
+            }),
+        };
+        cx.stop_timer(self.tile_fade_timer);
+        self.tile_fade_timer = cx.start_timeout(0.016);
+
         self.tiles.insert(
             tile_key,
             TileEntry {
@@ -954,6 +1023,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts: 0,
                 bucket: buffers.render_zoom,
+                fade,
             },
         );
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
@@ -1167,6 +1237,7 @@ impl MapView {
                         last_used: self.frame_counter,
                         attempts: 0,
                         bucket,
+                        fade: None,
                     },
                 );
             }
@@ -1221,6 +1292,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts,
                 bucket,
+                fade: None,
             },
         );
         log!(
@@ -1287,6 +1359,15 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+        for entry in self.tiles.values_mut() {
+            if entry
+                .fade
+                .as_ref()
+                .is_some_and(|fade| fade.started.elapsed().as_secs_f64() > TILE_FADE_SECONDS)
+            {
+                entry.fade = None;
+            }
+        }
         self.visible_tiles = self.visible_tile_keys(rect);
         let target_zoom = self.request_zoom_level();
         // Keep frames coming briefly after a zoom change so the deferred
@@ -1515,6 +1596,7 @@ impl MapView {
                         last_used: self.frame_counter,
                         attempts: 0,
                         bucket,
+                        fade: None,
                     },
                 );
                 pool.execute_rev(tile_key, move |_tag| {
@@ -1569,6 +1651,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts,
                 bucket,
+                fade: None,
             },
         );
         cx.http_request(request_id, request);
