@@ -302,6 +302,8 @@ pub fn format_tile_key_sample(keys: &[TileKey], limit: usize) -> String {
 
 // --- Tile buffer building ---
 
+/// Network/Overpass path: parse the JSON body, project lon/lat to tile-local
+/// coordinates, then hand off to the shared feature builder.
 pub fn build_tile_buffers_from_body(
     tile_key: TileKey,
     body: &str,
@@ -311,27 +313,17 @@ pub fn build_tile_buffers_from_body(
     let parsed = OverpassResponse::deserialize_json_lenient(body)
         .map_err(|e| format!("json error at line {} col {}: {}", e.line, e.col, e.msg))?;
 
-    // All geometry is tile-local: world px at tile zoom minus the tile origin.
-    // Keeps f32 precision (world coords at z14 have 0.25px ULP around Amsterdam).
     let tile_origin = dvec2(
         tile_key.x as f64 * TILE_SIZE,
         tile_key.y as f64 * TILE_SIZE,
     );
-    // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
-    // Converts "screen px at render_zoom" into tile-local units.
-    let zoom_mult = zoom_width_mult(render_zoom);
-    let px_to_units = 1.0 / render_scale;
-    let aa_units = 1.0 / render_scale;
-    let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut nodes = HashMap::<i64, (f64, f64)>::new();
     let mut ways = Vec::<WayData>::new();
-    let mut labels = Vec::<TileLabel>::new();
-
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8)>::new();
+    let mut tagged_points = Vec::<((f32, f32), HashMap<String, String>)>::new();
 
     for element in parsed.elements {
         match element.kind.as_str() {
@@ -340,20 +332,7 @@ pub fn build_tile_buffers_from_body(
                     nodes.insert(element.id, (lon, lat));
                     if let Some(tags) = element.tags {
                         let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
-                        let point = (world.x as f32, world.y as f32);
-                        let mut label_point = point;
-                        if render_zoom >= ICON_MIN_ZOOM {
-                            if let Some((icon_name, color_class)) = icon_for_tags(&tags) {
-                                if let Some(mesh) = icon_mesh(icon_name) {
-                                    icon_jobs.push((point, mesh, color_class));
-                                    // text sits below the symbol, carto-style
-                                    label_point.1 += 11.0 / render_scale;
-                                }
-                            }
-                        }
-                        if let Some(label) = extract_point_label(&tags, label_point) {
-                            labels.push(label);
-                        }
+                        tagged_points.push(((world.x as f32, world.y as f32), tags));
                     }
                 }
             }
@@ -369,6 +348,95 @@ pub fn build_tile_buffers_from_body(
                 }
             }
             _ => {}
+        }
+    }
+
+    let mut tile_ways = Vec::<TileWay>::with_capacity(ways.len());
+    for way in ways {
+        let projected =
+            project_way_points_with_nodes(&way.nodes, &nodes, tile_key, tile_origin, render_scale);
+        if projected.len() < 2 {
+            continue;
+        }
+        let points = projected.into_iter().map(|(_, point)| point).collect();
+        tile_ways.push(TileWay {
+            points,
+            tags: way.tags,
+            closed: way.closed,
+        });
+    }
+
+    Ok(build_tile_buffers_from_features(
+        tile_key,
+        tile_ways,
+        tagged_points,
+        theme,
+        render_zoom,
+    ))
+}
+
+/// Local mbtiles path: decode the MVT protobuf STRAIGHT into tile-local
+/// coordinates — no lon/lat round trip, no generated-JSON detour.
+pub fn build_tile_buffers_from_mvt(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+) -> Result<TileBuffers, String> {
+    let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
+    let render_scale = 2.0_f64
+        .powi(render_zoom as i32 - tile_key.z as i32)
+        .max(1e-3) as f32;
+    let mut collector = MvtLocalCollector::new(render_scale);
+    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    Ok(build_tile_buffers_from_features(
+        tile_key,
+        collector.ways,
+        collector.points,
+        theme,
+        render_zoom,
+    ))
+}
+
+/// A way in tile-local coordinates ready for styling/tessellation.
+pub struct TileWay {
+    pub points: Vec<(f32, f32)>,
+    pub tags: HashMap<String, String>,
+    pub closed: bool,
+}
+
+fn build_tile_buffers_from_features(
+    tile_key: TileKey,
+    tile_ways: Vec<TileWay>,
+    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+) -> TileBuffers {
+    // How much this tile gets magnified on screen at the styled view zoom.
+    let render_scale = 2.0_f64
+        .powi(render_zoom as i32 - tile_key.z as i32)
+        .max(1e-3) as f32;
+    // Converts "screen px at render_zoom" into tile-local units.
+    let zoom_mult = zoom_width_mult(render_zoom);
+    let px_to_units = 1.0 / render_scale;
+    let aa_units = 1.0 / render_scale;
+    let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
+
+    let mut labels = Vec::<TileLabel>::new();
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8)>::new();
+    for (point, tags) in &tagged_points {
+        let mut label_point = *point;
+        if render_zoom >= ICON_MIN_ZOOM {
+            if let Some((icon_name, color_class)) = icon_for_tags(tags) {
+                if let Some(mesh) = icon_mesh(icon_name) {
+                    icon_jobs.push((*point, mesh, color_class));
+                    // text sits below the symbol, carto-style
+                    label_point.1 += 11.0 / render_scale;
+                }
+            }
+        }
+        if let Some(label) = extract_point_label(tags, label_point) {
+            labels.push(label);
         }
     }
 
@@ -391,25 +459,22 @@ pub fn build_tile_buffers_from_body(
     let mut icon_zbias = 0.0_f32;
     let mut feature_count = 0usize;
 
-    let mut prepared = Vec::<PreparedWay>::with_capacity(ways.len());
-    for (way_index, way) in ways.iter().enumerate() {
-        let projected =
-            project_way_points_with_nodes(&way.nodes, &nodes, tile_key, tile_origin, render_scale);
-        if projected.len() < 2 {
+    let mut prepared = Vec::<PreparedWay>::with_capacity(tile_ways.len());
+    for (way_index, way) in tile_ways.iter().enumerate() {
+        if way.points.len() < 2 {
             continue;
         }
-        let mut points = Vec::<(f32, f32)>::with_capacity(projected.len());
-        for (_node_id, point) in projected {
-            points.push(point);
-        }
-        prepared.push(PreparedWay { way_index, points });
+        prepared.push(PreparedWay {
+            way_index,
+            points: way.points.clone(),
+        });
     }
 
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut fill_group_lookup = HashMap::<(String, u32), usize>::new();
     for (order, prepared_way) in prepared.iter().enumerate() {
-        let way = &ways[prepared_way.way_index];
+        let way = &tile_ways[prepared_way.way_index];
         let Some(color) = fill_color_for_tags(theme, &way.tags, way.closed) else {
             continue;
         };
@@ -563,7 +628,7 @@ pub fn build_tile_buffers_from_body(
     // Stroke pass
     let mut stroke_jobs = Vec::<StrokeDrawJob>::new();
     for prepared_way in &prepared {
-        let way = &ways[prepared_way.way_index];
+        let way = &tile_ways[prepared_way.way_index];
         if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
             labels.push(label);
         }
@@ -699,7 +764,7 @@ pub fn build_tile_buffers_from_body(
 
     compact_tile_labels(&mut labels);
 
-    Ok(TileBuffers {
+    TileBuffers {
         fill_indices,
         fill_vertices,
         casing_indices,
@@ -711,7 +776,7 @@ pub fn build_tile_buffers_from_body(
         feature_count,
         labels,
         render_zoom,
-    })
+    }
 }
 
 /// Shape id telling the map vertex shader to treat (param1, param2) as a
@@ -850,22 +915,9 @@ pub fn load_local_tile_batch(
                     continue;
                 };
 
-                match mbtiles_tile_to_overpass_json(tile_key, &raw) {
-                    Ok(body) => {
-                        match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
-                            Ok(buffers) => {
-                                loaded.push(LoadedLocalTile { tile_key, buffers });
-                            }
-                            Err(err) => {
-                                log!(
-                                    "MapView: failed to triangulate local mbtile z{} x{} y{}: {}",
-                                    tile_key.z,
-                                    tile_key.x,
-                                    tile_key.y,
-                                    err
-                                );
-                            }
-                        }
+                match build_tile_buffers_from_mvt(tile_key, &raw, theme, render_zoom) {
+                    Ok(buffers) => {
+                        loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
                     Err(err) => {
                         log!(
@@ -933,21 +985,10 @@ pub fn load_local_tile_batch(
                 logged_xyz_row_scheme = true;
             }
 
-            match mbtiles_tile_to_overpass_json(tile_key, &tile.tile_data) {
-                Ok(body) => match build_tile_buffers_from_body(tile_key, &body, theme, render_zoom) {
-                    Ok(buffers) => {
-                        loaded.push(LoadedLocalTile { tile_key, buffers });
-                    }
-                    Err(err) => {
-                        log!(
-                            "MapView: failed to triangulate local mbtile z{} x{} y{}: {}",
-                            tile_key.z,
-                            tile_key.x,
-                            tile_key.y,
-                            err
-                        );
-                    }
-                },
+            match build_tile_buffers_from_mvt(tile_key, &tile.tile_data, theme, render_zoom) {
+                Ok(buffers) => {
+                    loaded.push(LoadedLocalTile { tile_key, buffers });
+                }
                 Err(err) => {
                     log!(
                         "MapView: failed to decode local mbtile z{} x{} y{}: {}",
@@ -977,14 +1018,110 @@ pub fn load_local_tile_batch(
 
 // --- MVT (Mapbox Vector Tile) parsing ---
 
-fn mbtiles_tile_to_overpass_json(
-    tile_key: TileKey,
-    raw_tile_data: &[u8],
-) -> Result<String, String> {
-    let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
-    let mut builder = MvtTileJsonBuilder::default();
-    parse_mvt_tile(&pbf_data, tile_key, &mut builder)?;
-    Ok(builder.to_json())
+/// Receives decoded MVT features (tile-local integer geometry + tags).
+trait MvtSink {
+    fn alloc_feature_id(&mut self) -> u64;
+    fn add_path(
+        &mut self,
+        tile_key: TileKey,
+        extent: u32,
+        points: &[(i32, i32)],
+        tags: HashMap<String, String>,
+        close: bool,
+    );
+    fn add_point(
+        &mut self,
+        tile_key: TileKey,
+        extent: u32,
+        point: (i32, i32),
+        tags: HashMap<String, String>,
+    );
+}
+
+/// Collects MVT features directly in tile-local f32 coordinates with
+/// scale-aware vertex thinning — the typed replacement for the old
+/// MVT -> Overpass-JSON -> parse round trip.
+struct MvtLocalCollector {
+    min_dist_sq: f32,
+    next_feature_id: u64,
+    ways: Vec<TileWay>,
+    points: Vec<((f32, f32), HashMap<String, String>)>,
+}
+
+impl MvtLocalCollector {
+    fn new(render_scale: f32) -> Self {
+        let min_dist = 0.35 / render_scale.max(0.001);
+        Self {
+            min_dist_sq: min_dist * min_dist,
+            next_feature_id: 1,
+            ways: Vec::new(),
+            points: Vec::new(),
+        }
+    }
+}
+
+impl MvtSink for MvtLocalCollector {
+    fn alloc_feature_id(&mut self) -> u64 {
+        let id = self.next_feature_id;
+        self.next_feature_id = self.next_feature_id.wrapping_add(1).max(1);
+        id
+    }
+
+    fn add_path(
+        &mut self,
+        _tile_key: TileKey,
+        extent: u32,
+        points: &[(i32, i32)],
+        tags: HashMap<String, String>,
+        close: bool,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        let scale = TILE_SIZE as f32 / extent.max(1) as f32;
+        let mut out = Vec::<(f32, f32)>::with_capacity(points.len() + 1);
+        let mut last: Option<(f32, f32)> = None;
+        for &(x, y) in points {
+            let point = (x as f32 * scale, y as f32 * scale);
+            if let Some(prev) = last {
+                let dx = point.0 - prev.0;
+                let dy = point.1 - prev.1;
+                if dx * dx + dy * dy < self.min_dist_sq {
+                    continue;
+                }
+            }
+            out.push(point);
+            last = Some(point);
+        }
+        if out.len() < 2 {
+            return;
+        }
+        if close {
+            if out.first() != out.last() {
+                out.push(out[0]);
+            }
+            if out.len() < 4 {
+                return;
+            }
+        }
+        self.ways.push(TileWay {
+            points: out,
+            tags,
+            closed: close,
+        });
+    }
+
+    fn add_point(
+        &mut self,
+        _tile_key: TileKey,
+        extent: u32,
+        point: (i32, i32),
+        tags: HashMap<String, String>,
+    ) {
+        let scale = TILE_SIZE as f32 / extent.max(1) as f32;
+        self.points
+            .push(((point.0 as f32 * scale, point.1 as f32 * scale), tags));
+    }
 }
 
 fn decode_vector_tile_payload(raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -1049,172 +1186,10 @@ impl MvtValue {
     }
 }
 
-#[derive(Debug)]
-struct MvtTileJsonBuilder {
-    nodes: Vec<(i64, f64, f64)>,
-    tagged_nodes: Vec<(i64, f64, f64, HashMap<String, String>)>,
-    ways: Vec<(i64, Vec<i64>, HashMap<String, String>)>,
-    next_node_id: i64,
-    next_way_id: i64,
-    next_generated_feature_id: u64,
-}
-
-impl Default for MvtTileJsonBuilder {
-    fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            tagged_nodes: Vec::new(),
-            ways: Vec::new(),
-            next_node_id: 1,
-            next_way_id: 1,
-            next_generated_feature_id: 1,
-        }
-    }
-}
-
-impl MvtTileJsonBuilder {
-    fn alloc_feature_id(&mut self) -> u64 {
-        let id = self.next_generated_feature_id;
-        self.next_generated_feature_id = self.next_generated_feature_id.wrapping_add(1);
-        if self.next_generated_feature_id == 0 {
-            self.next_generated_feature_id = 1;
-        }
-        id
-    }
-
-    fn add_path(
-        &mut self,
-        tile_key: TileKey,
-        extent: u32,
-        points: &[(i32, i32)],
-        tags: HashMap<String, String>,
-        close: bool,
-    ) {
-        if points.len() < 2 {
-            return;
-        }
-        let mut node_ids = Vec::with_capacity(points.len() + 1);
-        for &(x, y) in points {
-            let node_id = self.next_node_id;
-            self.next_node_id += 1;
-            let (lon, lat) = local_tile_to_lon_lat(tile_key, extent, x, y);
-            self.nodes.push((node_id, lon, lat));
-            if node_ids.last().copied() != Some(node_id) {
-                node_ids.push(node_id);
-            }
-        }
-        if node_ids.len() < 2 {
-            return;
-        }
-        if close && node_ids.first().copied() != node_ids.last().copied() {
-            if let Some(first) = node_ids.first().copied() {
-                node_ids.push(first);
-            }
-        }
-        if node_ids.len() < 2 {
-            return;
-        }
-        let way_id = self.next_way_id;
-        self.next_way_id += 1;
-        self.ways.push((way_id, node_ids, tags));
-    }
-
-    fn add_point(
-        &mut self,
-        tile_key: TileKey,
-        extent: u32,
-        point: (i32, i32),
-        tags: HashMap<String, String>,
-    ) {
-        let node_id = self.next_node_id;
-        self.next_node_id += 1;
-        let (lon, lat) = local_tile_to_lon_lat(tile_key, extent, point.0, point.1);
-        self.tagged_nodes.push((node_id, lon, lat, tags));
-    }
-
-    fn to_json(&self) -> String {
-        let mut out = String::with_capacity(
-            32 + self.nodes.len() * 64 + self.tagged_nodes.len() * 192 + self.ways.len() * 192,
-        );
-        out.push_str("{\"elements\":[");
-        let mut first = true;
-
-        for &(id, lon, lat) in &self.nodes {
-            if !first {
-                out.push(',');
-            }
-            first = false;
-            out.push_str("{\"type\":\"node\",\"id\":");
-            out.push_str(&id.to_string());
-            out.push_str(",\"lat\":");
-            out.push_str(&format!("{:.8}", lat));
-            out.push_str(",\"lon\":");
-            out.push_str(&format!("{:.8}", lon));
-            out.push('}');
-        }
-
-        for (id, lon, lat, tags) in &self.tagged_nodes {
-            if !first {
-                out.push(',');
-            }
-            first = false;
-            out.push_str("{\"type\":\"node\",\"id\":");
-            out.push_str(&id.to_string());
-            out.push_str(",\"lat\":");
-            out.push_str(&format!("{:.8}", lat));
-            out.push_str(",\"lon\":");
-            out.push_str(&format!("{:.8}", lon));
-            out.push_str(",\"tags\":{");
-            let mut tag_first = true;
-            for (key, value) in tags {
-                if !tag_first {
-                    out.push(',');
-                }
-                tag_first = false;
-                append_json_string(&mut out, key);
-                out.push(':');
-                append_json_string(&mut out, value);
-            }
-            out.push_str("}}");
-        }
-
-        for (id, node_ids, tags) in &self.ways {
-            if !first {
-                out.push(',');
-            }
-            first = false;
-            out.push_str("{\"type\":\"way\",\"id\":");
-            out.push_str(&id.to_string());
-            out.push_str(",\"nodes\":[");
-            for (index, node_id) in node_ids.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                out.push_str(&node_id.to_string());
-            }
-            out.push_str("],\"tags\":{");
-            let mut tag_first = true;
-            for (key, value) in tags {
-                if !tag_first {
-                    out.push(',');
-                }
-                tag_first = false;
-                append_json_string(&mut out, key);
-                out.push(':');
-                append_json_string(&mut out, value);
-            }
-            out.push_str("}}");
-        }
-
-        out.push_str("]}");
-        out
-    }
-}
-
 fn parse_mvt_tile(
     tile_data: &[u8],
     tile_key: TileKey,
-    builder: &mut MvtTileJsonBuilder,
+    builder: &mut impl MvtSink,
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     while pos < tile_data.len() {
@@ -1235,7 +1210,7 @@ fn parse_mvt_tile(
 fn parse_mvt_layer(
     layer_data: &[u8],
     tile_key: TileKey,
-    builder: &mut MvtTileJsonBuilder,
+    builder: &mut impl MvtSink,
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     let mut layer_name = String::new();
@@ -1289,7 +1264,7 @@ fn parse_mvt_feature(
     values: &[MvtValue],
     extent: u32,
     tile_key: TileKey,
-    builder: &mut MvtTileJsonBuilder,
+    builder: &mut impl MvtSink,
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     let mut feature_id: Option<u64> = None;
@@ -1695,21 +1670,3 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
     }
 }
 
-fn append_json_string(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c <= '\u{1f}' => {
-                out.push_str("\\u");
-                out.push_str(&format!("{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
