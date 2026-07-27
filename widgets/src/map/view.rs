@@ -421,6 +421,23 @@ pub struct MapView {
     // shaping dominates label placement cost.
     #[rust]
     shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
+    // Frame-time instrumentation, aggregated to local/map_perf.log.
+    #[rust]
+    perf_frames: u32,
+    #[rust]
+    perf_ms_total: f64,
+    #[rust]
+    perf_ms_geo: f64,
+    #[rust]
+    perf_ms_labels: f64,
+    #[rust]
+    perf_ms_max: f64,
+    #[rust]
+    perf_label_full_places: u32,
+    #[rust]
+    perf_last_frame: Option<std::time::Instant>,
+    #[rust]
+    perf_ms_gap_max: f64,
     #[rust]
     scratch_screen_path: Vec<Vec2d>,
     #[rust]
@@ -528,6 +545,14 @@ impl Widget for MapView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let perf_start = std::time::Instant::now();
+        if let Some(last_frame) = self.perf_last_frame {
+            self.perf_ms_gap_max = self
+                .perf_ms_gap_max
+                .max(last_frame.elapsed().as_secs_f64() * 1000.0);
+        }
+        self.perf_last_frame = Some(perf_start);
+
         let rect = cx.walk_turtle(walk);
         self.view_rect = rect;
         self.draw_bg.draw_abs(cx, rect);
@@ -604,15 +629,60 @@ impl Widget for MapView {
             }
         }
 
+        let geo_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+
         // Labels
+        let labels_start = std::time::Instant::now();
+        let mut full_place = false;
         if view_zoom >= 13.0 {
-            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
+            full_place = self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
         } else {
             self.label_perf = LabelPerfStats::default();
         }
+        let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
 
         // Put draw_tiles back into scratch buffer (preserves allocation)
         self.scratch_draw_tiles = draw_tiles;
+
+        let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        self.perf_frames += 1;
+        self.perf_ms_total += total_ms;
+        self.perf_ms_geo += geo_ms;
+        self.perf_ms_labels += labels_ms;
+        self.perf_ms_max = self.perf_ms_max.max(total_ms);
+        if full_place {
+            self.perf_label_full_places += 1;
+        }
+        if self.perf_frames >= 240 {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("local/map_perf.log")
+            {
+                let frames = self.perf_frames as f64;
+                let _ = writeln!(
+                    file,
+                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} max_ms:{:.2} gap_max_ms:{:.2} full_places:{} glyphs:{} z:{:.2}",
+                    self.perf_frames,
+                    self.perf_ms_total / frames,
+                    self.perf_ms_geo / frames,
+                    self.perf_ms_labels / frames,
+                    self.perf_ms_max,
+                    self.perf_ms_gap_max,
+                    self.perf_label_full_places,
+                    self.label_perf.drawn_glyphs,
+                    view_zoom,
+                );
+            }
+            self.perf_frames = 0;
+            self.perf_ms_total = 0.0;
+            self.perf_ms_geo = 0.0;
+            self.perf_ms_labels = 0.0;
+            self.perf_ms_max = 0.0;
+            self.perf_ms_gap_max = 0.0;
+            self.perf_label_full_places = 0;
+        }
 
         self.update_status_text();
         // self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 10.0, rect.pos.y + 16.0), &self.status);
@@ -989,7 +1059,6 @@ impl MapView {
         let sender = self.tile_worker_rx.sender();
         let requested = missing.clone();
         let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
-        let cache_dir = TILE_CACHE_DIR.to_string();
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
         let batch_tag = missing[0];
@@ -997,7 +1066,6 @@ impl MapView {
         pool.execute_rev(batch_tag, move |_tag| {
             let result = load_local_tile_batch(
                 Path::new(&mbtiles_path),
-                Path::new(&cache_dir),
                 &requested,
                 &theme_style,
                 bucket,
@@ -1386,7 +1454,7 @@ impl MapView {
         view_zoom: f64,
         map_offset: Vec2d,
         rect: Rect,
-    ) {
+    ) -> bool {
         // Pan-only frames: redraw the cached placement shifted by the pan
         // delta instead of re-scanning/re-shaping/re-colliding every label.
         let pan_delta = map_offset - self.label_cache_offset;
@@ -1403,7 +1471,7 @@ impl MapView {
                     y: pan_delta.y as f32,
                 },
             );
-            return;
+            return false;
         }
 
         let mut label_perf = LabelPerfStats::default();
@@ -1413,7 +1481,7 @@ impl MapView {
             self.scratch_accepted_plans.clear();
             self.store_label_cache(draw_tiles, view_zoom, map_offset);
             self.label_perf = label_perf;
-            return;
+            return true;
         }
         self.scratch_candidates
             .sort_unstable_by(|a, b| {
@@ -1525,21 +1593,20 @@ impl MapView {
         self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
         self.store_label_cache(draw_tiles, view_zoom, map_offset);
         self.label_perf = label_perf;
+        true
     }
 
     /// Draw the current accepted label plans (halo underdraw + colored text)
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        const HALO_OFFSETS: [(f32, f32); 8] = [
-            (-1.0, 0.0),
-            (1.0, 0.0),
-            (0.0, -1.0),
-            (0.0, 1.0),
-            (-0.7, -0.7),
-            (0.7, -0.7),
-            (-0.7, 0.7),
-            (0.7, 0.7),
+        // 4 diagonal offsets read as a solid halo at map label sizes and
+        // halve the glyph volume vs an 8-direction ring
+        const HALO_OFFSETS: [(f32, f32); 4] = [
+            (-0.8, -0.8),
+            (0.8, -0.8),
+            (-0.8, 0.8),
+            (0.8, 0.8),
         ];
         let dark_theme = self.dark_theme;
         let (label_color, halo_color) = {
@@ -1631,7 +1698,20 @@ impl MapView {
                 if is_poi && view_zoom < POI_LABEL_MIN_ZOOM {
                     continue;
                 }
-                let name_key = normalize_label_key(label.text.as_str());
+                // Cheap precomputed-bbox viewport reject before any path work;
+                // most of an overzoomed tile's labels are far offscreen.
+                let bbox = label.bbox;
+                if (bbox.2 as f64 * scale64 + tile_offset.x) < rect.pos.x - LABEL_VIEW_MARGIN
+                    || (bbox.3 as f64 * scale64 + tile_offset.y) < rect.pos.y - LABEL_VIEW_MARGIN
+                    || (bbox.0 as f64 * scale64 + tile_offset.x)
+                        > rect.pos.x + rect.size.x + LABEL_VIEW_MARGIN
+                    || (bbox.1 as f64 * scale64 + tile_offset.y)
+                        > rect.pos.y + rect.size.y + LABEL_VIEW_MARGIN
+                {
+                    continue;
+                }
+                // precomputed at tile build; no per-frame allocation
+                let name_key = &label.name_key;
                 if name_key.len() < if is_address { 1 } else { 2 } {
                     continue;
                 }
@@ -1700,7 +1780,7 @@ impl MapView {
                 // panning doesn't flicker between competing candidates.
                 if self
                     .prev_label_keys
-                    .contains(&stable_label_key(&name_key, &label.road_kind))
+                    .contains(&stable_label_key(name_key, &label.road_kind))
                 {
                     score += 350.0;
                 }
@@ -1709,7 +1789,7 @@ impl MapView {
                 if write_idx < self.scratch_candidates.len() {
                     let c = &mut self.scratch_candidates[write_idx];
                     c.text.push_str(&label.text);
-                    c.name_key.push_str(&name_key);
+                    c.name_key.push_str(name_key);
                     c.road_kind.push_str(&label.road_kind);
                     c.color_class = label.color_class;
                     c.source_rank = source_rank;
@@ -1722,7 +1802,7 @@ impl MapView {
                 } else {
                     self.scratch_candidates.push(LabelCandidate {
                         text: label.text.clone(),
-                        name_key,
+                        name_key: name_key.clone(),
                         road_kind: label.road_kind.clone(),
                         color_class: label.color_class,
                         source_rank,
