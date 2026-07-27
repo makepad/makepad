@@ -1,12 +1,14 @@
 use super::geometry::*;
 use super::icons::ICON_MIN_ZOOM;
 use super::label::*;
+use super::overlay::*;
 use super::style::*;
 use super::tile::*;
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
+use makepad_mbtile_reader::MbtilesReader;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -260,6 +262,48 @@ const TILE_FADE_SECONDS: f64 = 0.25;
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
 
+// --- Actions ---
+
+/// Widget actions emitted by MapView; the app layer builds search, routing
+/// and navigation UX on top of these plus the camera/overlay API.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum MapViewAction {
+    /// Camera settled after a gesture, fly-to or programmatic move.
+    ViewportChanged {
+        lon: f64,
+        lat: f64,
+        zoom: f64,
+    },
+    /// Finger up without drag or long-press, not on a marker.
+    Tapped {
+        lon: f64,
+        lat: f64,
+        abs: Vec2d,
+    },
+    LongPressed {
+        lon: f64,
+        lat: f64,
+        abs: Vec2d,
+    },
+    MarkerClicked {
+        id: u64,
+    },
+    #[default]
+    None,
+}
+
+/// Animated camera flight (zoom-out-then-in arc when the target is far).
+#[derive(Clone, Copy)]
+struct FlyTo {
+    started: std::time::Instant,
+    duration: f64,
+    from_center: Vec2d,
+    to_center: Vec2d,
+    from_zoom: f64,
+    to_zoom: f64,
+    arc: f64,
+}
+
 // --- Draw shaders ---
 
 #[derive(Script, ScriptHook, Debug)]
@@ -356,6 +400,20 @@ pub struct MapView {
     use_network: bool,
     #[live(true)]
     use_local_mbtiles: bool,
+    /// Overrides the built-in LOCAL_MBTILES_PATH when non-empty, so each app
+    /// can point its MapView at its own tile archive.
+    #[live]
+    mbtiles_path: String,
+    /// Declared minzoom/maxzoom of the active archive (from its metadata
+    /// table). Single-zoom detail archives (minzoom=maxzoom=14) must not be
+    /// probed at z13/z12 — those tiles cannot exist.
+    #[rust]
+    local_source_zoom_range: Option<(u32, u32)>,
+    #[rust]
+    local_source_zoom_range_path: Option<String>,
+    /// True when the metadata read ran while the archive file existed.
+    #[rust]
+    local_source_zoom_range_checked: bool,
 
     #[rust]
     center_norm: Vec2d,
@@ -495,6 +553,20 @@ pub struct MapView {
     prev_status_label_perf: LabelPerfStats,
     #[rust]
     prev_status_counters: (usize, usize, usize, usize, usize, usize),
+
+    // --- Interaction layer (overlay + camera API) ---
+    #[live]
+    draw_overlay: DrawVector,
+    #[rust]
+    overlay: MapOverlayState,
+    #[rust]
+    fly: Option<FlyTo>,
+    #[rust]
+    fly_timer: Timer,
+    #[rust]
+    gesture_panned: bool,
+    #[rust]
+    pending_viewport_changed: bool,
 }
 
 impl ScriptHook for MapView {
@@ -556,6 +628,11 @@ impl Widget for MapView {
         }
         if self.zoom_settle_timer.is_event(event).is_some() {
             self.redraw(cx);
+            if self.pending_viewport_changed {
+                self.pending_viewport_changed = false;
+                self.sync_camera_fields();
+                self.emit_viewport_changed(cx);
+            }
             if self.needs_label_followup || !self.pending_ready_tiles.is_empty() {
                 self.zoom_settle_timer = cx.start_timeout(0.08);
             }
@@ -567,8 +644,17 @@ impl Widget for MapView {
             }
         }
 
-        match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
+        if self.fly_timer.is_event(event).is_some() {
+            self.tick_fly(cx);
+        }
+
+        // Respect the handled flag (no capture overload): floating UI panels
+        // drawn on top of the map must win the hit test (EventOrder::Up
+        // dispatches them first).
+        match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                self.fly = None;
+                self.gesture_panned = false;
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_center_norm = self.center_norm;
                 cx.set_cursor(MouseCursor::Grabbing);
@@ -576,6 +662,9 @@ impl Widget for MapView {
             Hit::FingerMove(fe) => {
                 if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
+                    if delta.length() > 6.0 {
+                        self.gesture_panned = true;
+                    }
                     let world_size = tile_world_size_zoom(self.view_zoom());
                     self.center_norm = self.drag_start_center_norm
                         - dvec2(delta.x / world_size, delta.y / world_size);
@@ -583,9 +672,27 @@ impl Widget for MapView {
                     self.redraw(cx);
                 }
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerLongPress(lp) => {
+                // Long press cancels the pan gesture and reports map coords.
+                self.drag_start_abs = None;
+                let (lon, lat) = self.screen_to_lon_lat(lp.abs);
+                cx.widget_action(self.uid, MapViewAction::LongPressed { lon, lat, abs: lp.abs });
+            }
+            Hit::FingerUp(fe) => {
                 self.drag_start_abs = None;
                 cx.set_cursor(MouseCursor::Grab);
+                if fe.is_primary_hit() && fe.was_tap() {
+                    if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), fe.abs) {
+                        cx.widget_action(self.uid, MapViewAction::MarkerClicked { id });
+                    } else {
+                        let (lon, lat) = self.screen_to_lon_lat(fe.abs);
+                        cx.widget_action(self.uid, MapViewAction::Tapped { lon, lat, abs: fe.abs });
+                    }
+                } else if self.gesture_panned {
+                    self.gesture_panned = false;
+                    self.sync_camera_fields();
+                    self.emit_viewport_changed(cx);
+                }
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Grab);
@@ -596,6 +703,7 @@ impl Widget for MapView {
                 } else {
                     fs.scroll.x
                 };
+                self.fly = None;
                 self.zoom_with_anchor(cx, scroll, fs.abs);
             }
             _ => {}
@@ -635,10 +743,20 @@ impl Widget for MapView {
         );
 
         self.fill_draw_tile_keys();
-        self.scratch_draw_tiles
-            .sort_unstable_by_key(|key| (key.z, key.y, key.x));
         // Take draw_tiles out so we can pass &[TileKey] while mutating self for labels
-        let draw_tiles = std::mem::take(&mut self.scratch_draw_tiles);
+        let mut draw_tiles = std::mem::take(&mut self.scratch_draw_tiles);
+        // Tiles still fading in from empty draw LAST (on top): their old-zoom
+        // stand-ins painted beneath them make zoom transitions a real
+        // cross-fade instead of a flash of background color.
+        draw_tiles.sort_unstable_by_key(|key| {
+            (
+                self.tile_fading_from_empty(*key) as u8,
+                key.z,
+                key.y,
+                key.x,
+            )
+        });
+        let draw_tiles = draw_tiles;
 
         // Four global passes (carto layer order): every tile's fills, then
         // every tile's road casings, then road centers, then POI symbols.
@@ -724,6 +842,23 @@ impl Widget for MapView {
 
         // Put draw_tiles back into scratch buffer (preserves allocation)
         self.scratch_draw_tiles = draw_tiles;
+
+        // Interaction overlay: route polyline, markers, position puck —
+        // always on top of tiles and labels.
+        if !self.overlay.is_empty() {
+            let camera = OverlayCamera {
+                world_size,
+                offset: map_offset,
+                rect,
+                meters_per_px: {
+                    let (_, lat) = normalized_to_lon_lat(self.center_norm);
+                    40_075_016.686 * lat.to_radians().cos() / world_size
+                },
+            };
+            let mut overlay = std::mem::take(&mut self.overlay);
+            draw_map_overlay(cx, &mut self.draw_overlay, &camera, &mut overlay);
+            self.overlay = overlay;
+        }
 
         let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
         self.perf_frames += 1;
@@ -1154,14 +1289,25 @@ impl MapView {
         }
     }
 
+    /// The active mbtiles source: the widget's `mbtiles_path` property when
+    /// set, else the compiled-in default.
+    fn active_mbtiles_path(&self) -> &str {
+        if self.mbtiles_path.is_empty() {
+            LOCAL_MBTILES_PATH
+        } else {
+            &self.mbtiles_path
+        }
+    }
+
     fn request_visible_tiles_from_local_source(&mut self, _cx: &mut Cx) {
         if !self.use_local_mbtiles {
             return;
         }
 
-        let mbtiles_path = Path::new(LOCAL_MBTILES_PATH);
+        let active_path = self.active_mbtiles_path().to_string();
+        let mbtiles_path = Path::new(&active_path);
         if !mbtiles_path.is_file() && !self.local_source_missing_logged {
-            log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", LOCAL_MBTILES_PATH);
+            log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", active_path);
             self.local_source_missing_logged = true;
         }
 
@@ -1248,7 +1394,7 @@ impl MapView {
         for key in missing {
             let sender = self.tile_worker_rx.sender();
             let requested = vec![key];
-            let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
+            let mbtiles_path = active_path.clone();
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
                 let result = load_local_tile_batch(
@@ -1342,6 +1488,7 @@ impl MapView {
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
         self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.pending_viewport_changed = true;
         // The paint beat idles when input stops; without a timer wake the
         // settle window would never elapse and stale-bucket restyles only
         // fired once the user wiggled the map again.
@@ -1359,6 +1506,13 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+        // Read the archive's declared zoom range BEFORE computing visible
+        // tile keys — request_zoom_level clamps to it, and reading it after
+        // meant the very first frame requested impossible zoom levels.
+        if self.use_local_mbtiles {
+            let active_path = self.active_mbtiles_path().to_string();
+            self.ensure_local_zoom_range(&active_path, Path::new(&active_path));
+        }
         for entry in self.tiles.values_mut() {
             if entry
                 .fade
@@ -1502,6 +1656,20 @@ impl MapView {
         out
     }
 
+    /// A ready tile whose cross-fade started from no previous geometry —
+    /// i.e. it is fading in over whatever was on screen before, not over an
+    /// older restyle of itself.
+    fn tile_fading_from_empty(&self, key: TileKey) -> bool {
+        self.tiles.get(&key).is_some_and(|entry| {
+            entry.fade.as_ref().is_some_and(|fade| {
+                fade.fill_geometry.is_none()
+                    && fade.casing_geometry.is_none()
+                    && fade.stroke_geometry.is_none()
+                    && fade.icon_geometry.is_none()
+            })
+        })
+    }
+
     fn fill_draw_tile_keys(&mut self) {
         self.scratch_draw_tiles.clear();
         self.scratch_draw_seen.clear();
@@ -1509,6 +1677,27 @@ impl MapView {
         for i in 0..self.visible_tiles.len() {
             let key = self.visible_tiles[i];
             if self.tile_is_ready(key) {
+                // While this tile fades in from empty (fresh zoom level),
+                // keep the previous zoom level's imagery painted beneath it
+                // so the transition cross-fades instead of flashing the
+                // background: prefer the ready ancestor, else descendants.
+                if self.tile_fading_from_empty(key) {
+                    if let Some(under) = self.find_ready_ancestor(key) {
+                        if self.scratch_draw_seen.insert(under) {
+                            self.scratch_draw_tiles.push(under);
+                        }
+                    } else {
+                        self.fill_ready_descendants(key);
+                        for j in 0..self.scratch_descendant_tiles.len() {
+                            let under = self.scratch_descendant_tiles[j];
+                            if !self.tile_fading_from_empty(under)
+                                && self.scratch_draw_seen.insert(under)
+                            {
+                                self.scratch_draw_tiles.push(under);
+                            }
+                        }
+                    }
+                }
                 if self.scratch_draw_seen.insert(key) {
                     self.scratch_draw_tiles.push(key);
                 }
@@ -2255,9 +2444,56 @@ impl MapView {
     fn request_zoom_level(&self) -> u32 {
         let mut zoom = self.view_zoom().round() as u32;
         if self.use_local_mbtiles {
-            zoom = zoom.clamp(LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM);
+            // Honor the archive's declared zoom range: a single-zoom detail
+            // archive (minzoom=maxzoom=14) must never be asked for z13/z12 —
+            // those rows cannot exist and only produce missing-tile spam.
+            let (min_zoom, max_zoom) = self
+                .local_source_zoom_range
+                .unwrap_or((LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM));
+            zoom = zoom.clamp(min_zoom, max_zoom);
         }
         zoom
+    }
+
+    /// Read the active archive's declared minzoom/maxzoom once per path.
+    /// Opening is cheap (metadata B-tree only); absent/invalid metadata
+    /// falls back to the compiled-in range.
+    fn ensure_local_zoom_range(&mut self, active_path: &str, mbtiles_path: &Path) {
+        let file_exists = mbtiles_path.is_file();
+        let same_path = self
+            .local_source_zoom_range_path
+            .as_deref()
+            .is_some_and(|p| p == active_path);
+        // Re-attempt only on a path change, or when the archive appears after
+        // a missing-file attempt (e.g. a conversion finishing mid-session).
+        if same_path && (self.local_source_zoom_range_checked || !file_exists) {
+            return;
+        }
+        self.local_source_zoom_range_path = Some(active_path.to_string());
+        self.local_source_zoom_range = None;
+        self.local_source_zoom_range_checked = file_exists;
+        if !file_exists {
+            return;
+        }
+        let range = MbtilesReader::open(mbtiles_path)
+            .ok()
+            .and_then(|mut reader| reader.get_metadata().ok())
+            .and_then(|metadata| {
+                let min = metadata.get("minzoom")?.trim().parse::<u32>().ok()?;
+                let max = metadata.get("maxzoom")?.trim().parse::<u32>().ok()?;
+                (min <= max).then_some((min, max))
+            });
+        if let Some((min, max)) = range {
+            self.local_source_zoom_range = Some((min, max));
+            if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
+                log!(
+                    "MapView: {} declares zoom range z{}-z{}; clamping tile requests",
+                    active_path,
+                    min,
+                    max
+                );
+            }
+        }
     }
 
     /// View-zoom bucket the tile styling (widths, AA, outlines) is built for.
@@ -2281,6 +2517,277 @@ impl MapView {
             "dark"
         } else {
             "light"
+        }
+    }
+}
+
+// --- Camera + overlay public API (the M0 interaction surface) ---
+
+impl MapView {
+    fn overlay_camera(&self) -> OverlayCamera {
+        let world_size = tile_world_size_zoom(self.view_zoom());
+        let center_world = self.center_norm * world_size;
+        let rect = self.view_rect;
+        let offset = dvec2(
+            rect.pos.x + rect.size.x * 0.5 - center_world.x,
+            rect.pos.y + rect.size.y * 0.5 - center_world.y,
+        );
+        let (_, lat) = normalized_to_lon_lat(self.center_norm);
+        OverlayCamera {
+            world_size,
+            offset,
+            rect,
+            meters_per_px: 40_075_016.686 * lat.to_radians().cos() / world_size,
+        }
+    }
+
+    fn sync_camera_fields(&mut self) {
+        let (lon, lat) = normalized_to_lon_lat(self.center_norm);
+        self.center_lon = lon;
+        self.center_lat = lat;
+    }
+
+    fn emit_viewport_changed(&mut self, cx: &mut Cx) {
+        cx.widget_action(
+            self.uid,
+            MapViewAction::ViewportChanged {
+                lon: self.center_lon,
+                lat: self.center_lat,
+                zoom: self.view_zoom(),
+            },
+        );
+    }
+
+    pub fn screen_to_lon_lat(&self, abs: Vec2d) -> (f64, f64) {
+        let camera = self.overlay_camera();
+        let norm = (abs - camera.offset) / camera.world_size;
+        normalized_to_lon_lat(norm)
+    }
+
+    pub fn lon_lat_to_screen(&self, lon: f64, lat: f64) -> Vec2d {
+        let camera = self.overlay_camera();
+        camera.norm_to_screen(lon_lat_to_normalized(lon, lat))
+    }
+
+    pub fn center(&self) -> (f64, f64) {
+        normalized_to_lon_lat(self.center_norm)
+    }
+
+    pub fn map_zoom(&self) -> f64 {
+        self.view_zoom()
+    }
+
+    pub fn set_center(&mut self, cx: &mut Cx, lon: f64, lat: f64) {
+        self.fly = None;
+        self.center_norm = lon_lat_to_normalized(lon, lat);
+        self.wrap_and_clamp_center();
+        self.sync_camera_fields();
+        self.redraw(cx);
+    }
+
+    pub fn set_map_zoom(&mut self, cx: &mut Cx, zoom: f64) {
+        let min_zoom = self.min_zoom.max(0.0);
+        let max_zoom = self.max_zoom.max(min_zoom);
+        self.fly = None;
+        self.zoom = zoom.clamp(min_zoom, max_zoom);
+        self.last_zoom_change_frame = self.frame_counter;
+        self.last_zoom_change_time = Some(std::time::Instant::now());
+        cx.stop_timer(self.zoom_settle_timer);
+        self.zoom_settle_timer = cx.start_timeout(0.15);
+        self.redraw(cx);
+    }
+
+    /// Animated camera flight; far targets get a zoom-out-then-in arc so
+    /// tiles stay loadable mid-flight and the motion reads like every
+    /// mapping app.
+    pub fn fly_to(&mut self, cx: &mut Cx, lon: f64, lat: f64, zoom: f64) {
+        let min_zoom = self.min_zoom.max(0.0);
+        let max_zoom = self.max_zoom.max(min_zoom);
+        let to_zoom = zoom.clamp(min_zoom, max_zoom);
+        let from_zoom = self.view_zoom();
+        let to_center = lon_lat_to_normalized(lon, lat);
+        let dist_px = (to_center - self.center_norm).length() * tile_world_size_zoom(from_zoom);
+        let viewport = self.view_rect.size.length().max(400.0);
+        let arc = if dist_px > viewport * 0.5 {
+            ((dist_px / viewport).log2() * 0.9).clamp(0.4, 4.5)
+        } else {
+            0.0
+        };
+        let duration = (0.55 + 0.22 * arc + (dist_px / 6000.0).min(0.6)).min(2.4);
+        self.fly = Some(FlyTo {
+            started: std::time::Instant::now(),
+            duration,
+            from_center: self.center_norm,
+            to_center,
+            from_zoom,
+            to_zoom,
+            arc,
+        });
+        cx.stop_timer(self.fly_timer);
+        self.fly_timer = cx.start_timeout(0.016);
+        self.redraw(cx);
+    }
+
+    fn tick_fly(&mut self, cx: &mut Cx) {
+        let Some(fly) = self.fly else {
+            return;
+        };
+        let min_zoom = self.min_zoom.max(0.0);
+        let max_zoom = self.max_zoom.max(min_zoom);
+        let t = (fly.started.elapsed().as_secs_f64() / fly.duration).clamp(0.0, 1.0);
+        let e = t * t * (3.0 - 2.0 * t);
+        self.center_norm = fly.from_center + (fly.to_center - fly.from_center) * e;
+        let zoom = fly.from_zoom + (fly.to_zoom - fly.from_zoom) * e
+            - fly.arc * (std::f64::consts::PI * e).sin();
+        self.zoom = zoom.clamp(min_zoom, max_zoom);
+        self.wrap_and_clamp_center();
+        self.last_zoom_change_frame = self.frame_counter;
+        self.last_zoom_change_time = Some(std::time::Instant::now());
+        if t >= 1.0 {
+            self.fly = None;
+            self.center_norm = fly.to_center;
+            self.zoom = fly.to_zoom;
+            self.wrap_and_clamp_center();
+            self.sync_camera_fields();
+            self.emit_viewport_changed(cx);
+            cx.stop_timer(self.zoom_settle_timer);
+            self.zoom_settle_timer = cx.start_timeout(0.15);
+        } else {
+            self.fly_timer = cx.start_timeout(0.016);
+        }
+        self.redraw(cx);
+    }
+
+    // --- Overlay content ---
+
+    pub fn set_markers(&mut self, cx: &mut Cx, markers: Vec<MapMarker>) {
+        self.overlay.markers = markers;
+        self.redraw(cx);
+    }
+
+    /// Route polyline as (lon, lat) pairs; resets travel progress.
+    pub fn set_route(&mut self, cx: &mut Cx, points: &[(f64, f64)]) {
+        self.overlay.route = Some(MapRouteOverlay {
+            points_norm: points
+                .iter()
+                .map(|&(lon, lat)| lon_lat_to_normalized(lon, lat))
+                .collect(),
+            traveled_index: 0,
+        });
+        self.redraw(cx);
+    }
+
+    pub fn clear_route(&mut self, cx: &mut Cx) {
+        self.overlay.route = None;
+        self.redraw(cx);
+    }
+
+    /// Points before `index` draw dimmed (the already-driven part).
+    pub fn set_route_progress(&mut self, cx: &mut Cx, index: usize) {
+        if let Some(route) = &mut self.overlay.route {
+            if route.traveled_index != index {
+                route.traveled_index = index;
+                self.redraw(cx);
+            }
+        }
+    }
+
+    pub fn set_puck(&mut self, cx: &mut Cx, puck: Option<MapPuck>) {
+        self.overlay.puck = puck;
+        self.redraw(cx);
+    }
+}
+
+impl MapViewRef {
+    pub fn tapped(&self, actions: &Actions) -> Option<(f64, f64)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::Tapped { lon, lat, .. } = item.cast() {
+                return Some((lon, lat));
+            }
+        }
+        None
+    }
+
+    pub fn long_pressed(&self, actions: &Actions) -> Option<(f64, f64)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::LongPressed { lon, lat, .. } = item.cast() {
+                return Some((lon, lat));
+            }
+        }
+        None
+    }
+
+    pub fn viewport_changed(&self, actions: &Actions) -> Option<(f64, f64, f64)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::ViewportChanged { lon, lat, zoom } = item.cast() {
+                return Some((lon, lat, zoom));
+            }
+        }
+        None
+    }
+
+    pub fn marker_clicked(&self, actions: &Actions) -> Option<u64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::MarkerClicked { id } = item.cast() {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    pub fn center(&self) -> Option<(f64, f64)> {
+        self.borrow().map(|inner| inner.center())
+    }
+
+    pub fn map_zoom(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.map_zoom())
+    }
+
+    pub fn set_center(&self, cx: &mut Cx, lon: f64, lat: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_center(cx, lon, lat);
+        }
+    }
+
+    pub fn set_map_zoom(&self, cx: &mut Cx, zoom: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_map_zoom(cx, zoom);
+        }
+    }
+
+    pub fn fly_to(&self, cx: &mut Cx, lon: f64, lat: f64, zoom: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.fly_to(cx, lon, lat, zoom);
+        }
+    }
+
+    pub fn set_markers(&self, cx: &mut Cx, markers: Vec<MapMarker>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_markers(cx, markers);
+        }
+    }
+
+    pub fn set_route(&self, cx: &mut Cx, points: &[(f64, f64)]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_route(cx, points);
+        }
+    }
+
+    pub fn clear_route(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.clear_route(cx);
+        }
+    }
+
+    pub fn set_route_progress(&self, cx: &mut Cx, index: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_route_progress(cx, index);
+        }
+    }
+
+    pub fn set_puck(&self, cx: &mut Cx, puck: Option<MapPuck>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_puck(cx, puck);
         }
     }
 }
