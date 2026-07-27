@@ -465,9 +465,13 @@ fn merge_detail_features(
     }
     if want_buildings {
         for mut way in collector.ways {
-            if !way.closed
-                || way.tags.get("layer").map(|value| value.as_str()) != Some("osm_polygons")
-            {
+            // Plain building ways AND assembled multipolygon relations
+            // (palaces, courtyarded blocks) both carry building geometry.
+            let from_polygons = matches!(
+                way.tags.get("layer").map(|value| value.as_str()),
+                Some("osm_polygons") | Some("osm_relation_polygons")
+            );
+            if !way.closed || !from_polygons {
                 continue;
             }
             let is_building = way
@@ -521,7 +525,7 @@ fn append_wall_quad(
     for (p, h) in [(a, 0.0), (b, 0.0), (b, height_m), (a, height_m)] {
         out_vertices.extend_from_slice(&[
             p.0, p.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, h, 0.0, 90.0, *zbias,
+            0.0, 0.0, 0.0, h, 0.05, 90.0, *zbias,
         ]);
     }
     out_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -620,16 +624,18 @@ fn build_tile_buffers_from_features(
     }
 
     // 2.5D: when the detail archive supplied building footprints with real
-    // heights, they replace the base building fills entirely.
+    // heights, they replace the base building fills entirely. Rings group
+    // per source feature so multipolygon buildings (palaces, courtyarded
+    // blocks) keep their holes.
     let has_detail_buildings = tile_ways
         .iter()
         .any(|way| way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings"));
-    struct BuildingJob {
-        ring: Vec<(f32, f32)>,
+    struct BuildingGroup {
+        rings: Vec<FillRing>,
         height_m: f32,
-        min_y: f32,
     }
-    let mut building_jobs = Vec::<BuildingJob>::new();
+    let mut building_groups = Vec::<BuildingGroup>::new();
+    let mut building_group_lookup = HashMap::<String, usize>::new();
 
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
@@ -647,13 +653,36 @@ fn build_tile_buffers_from_features(
                     continue;
                 }
             }
-            let min_y = ring_points
-                .iter()
-                .fold(f32::MAX, |acc, p| acc.min(p.1));
-            building_jobs.push(BuildingJob {
-                ring: ring_points,
-                height_m: building_height_m(&way.tags),
-                min_y,
+            let signed_area = polygon_signed_area(&ring_points);
+            if signed_area.abs() <= POLYGON_AREA_EPSILON {
+                continue;
+            }
+            let feature_key = way
+                .tags
+                .get(MVT_INTERNAL_FEATURE_KEY)
+                .cloned()
+                .unwrap_or_else(|| format!("bldg:{}", prepared_way.way_index));
+            let group_index =
+                if let Some(index) = building_group_lookup.get(&feature_key).copied() {
+                    index
+                } else {
+                    let index = building_groups.len();
+                    building_group_lookup.insert(feature_key, index);
+                    building_groups.push(BuildingGroup {
+                        rings: Vec::new(),
+                        height_m: building_height_m(&way.tags),
+                    });
+                    index
+                };
+            let ring_order = way
+                .tags
+                .get(MVT_INTERNAL_RING_INDEX_KEY)
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(order);
+            building_groups[group_index].rings.push(FillRing {
+                order: ring_order,
+                points: ring_points,
+                signed_area,
             });
             continue;
         }
@@ -762,7 +791,14 @@ fn build_tile_buffers_from_features(
                     color: hex_to_premul_rgba(group.color, 1.0),
                     stroke_mult: 1e6,
                     shape_id: 0.0,
-                    params: [0.0; 6],
+                    params: [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        group.layer_rank as f32 * DEPTH_MICRO_PER_RANK,
+                    ],
                     zbias: fill_zbias,
                 },
             );
@@ -779,6 +815,7 @@ fn build_tile_buffers_from_features(
                     width: BUILDING_OUTLINE_WIDTH_PX / render_scale,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 46.0 * DEPTH_MICRO_PER_RANK,
                 };
                 for ring in &polygon {
                     let mut closed_points = ring.clone();
@@ -817,67 +854,92 @@ fn build_tile_buffers_from_features(
         }
     }
 
-    // 2.5D building extrusion: per-edge flat-shaded walls, then the roof
-    // lifted by height (the tilt shader does the lifting per frame, so tilt
-    // animates without rebuilding tiles). North-first paint order is the
-    // painter's approximation of occlusion under the screen-top extrusion.
-    if !building_jobs.is_empty() {
+    // 2.5D building extrusion: per-edge flat-shaded walls (exterior rings
+    // AND courtyard holes), then the roof with holes preserved, lifted by
+    // height (the tilt shader does the lifting per frame, so tilt animates
+    // without rebuilding tiles). North-first paint order is the painter's
+    // approximation of occlusion under the screen-top extrusion.
+    if !building_groups.is_empty() {
+        struct BuildingJob {
+            polygon: Vec<Vec<(f32, f32)>>,
+            height_m: f32,
+            min_y: f32,
+        }
+        let mut building_jobs = Vec::<BuildingJob>::new();
+        for group in &building_groups {
+            for polygon in classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS) {
+                if polygon.is_empty() {
+                    continue;
+                }
+                let min_y = polygon
+                    .iter()
+                    .flat_map(|ring| ring.iter())
+                    .fold(f32::MAX, |acc, p| acc.min(p.1));
+                building_jobs.push(BuildingJob {
+                    polygon,
+                    height_m: group.height_m,
+                    min_y,
+                });
+            }
+        }
         building_jobs.sort_by(|a, b| {
             a.min_y
                 .partial_cmp(&b.min_y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let base_color = theme
-            .building_fill_color()
-            .unwrap_or(0xd9d0c9);
+        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
         let roof_color = hex_to_premul_rgba(base_color, 1.0);
         // Light from the north-west; walls shade by their outward normal.
         let (light_x, light_y) = (-0.55_f32, -0.835_f32);
         for job in &building_jobs {
-            let ring = &job.ring;
-            // Outward normal needs ring orientation; positive shoelace in
-            // y-down tile space = clockwise on screen.
-            let clockwise = polygon_signed_area(ring) > 0.0;
-            let n = ring.len();
-            // South-most edges last so they paint over the northern walls.
-            let mut edge_order: Vec<usize> = (0..n).collect();
-            edge_order.sort_by(|&i, &j| {
-                let yi = ring[i].1 + ring[(i + 1) % n].1;
-                let yj = ring[j].1 + ring[(j + 1) % n].1;
-                yi.partial_cmp(&yj).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            for &i in &edge_order {
-                let a = ring[i];
-                let b = ring[(i + 1) % n];
-                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                let len = (dx * dx + dy * dy).sqrt();
-                if len < 1e-4 {
-                    continue;
+            for ring in &job.polygon {
+                // Outward normal needs ring orientation; positive shoelace
+                // in y-down tile space = exterior winding, holes come
+                // opposite so their normals flip into the courtyard.
+                let clockwise = polygon_signed_area(ring) > 0.0;
+                let n = ring.len();
+                // South-most edges last so they paint over northern walls.
+                let mut edge_order: Vec<usize> = (0..n).collect();
+                edge_order.sort_by(|&i, &j| {
+                    let yi = ring[i].1 + ring[(i + 1) % n].1;
+                    let yj = ring[j].1 + ring[(j + 1) % n].1;
+                    yi.partial_cmp(&yj).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for &i in &edge_order {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % n];
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len < 1e-4 {
+                        continue;
+                    }
+                    let (mut nx, mut ny) = (dy / len, -dx / len);
+                    if !clockwise {
+                        nx = -nx;
+                        ny = -ny;
+                    }
+                    let facing = (nx * light_x + ny * light_y).clamp(-1.0, 1.0);
+                    let shade = 0.62 + 0.20 * (facing + 1.0);
+                    let wall_color = [
+                        roof_color[0] * shade,
+                        roof_color[1] * shade,
+                        roof_color[2] * shade,
+                        1.0,
+                    ];
+                    append_wall_quad(
+                        a,
+                        b,
+                        job.height_m,
+                        wall_color,
+                        &mut fill_vertices,
+                        &mut fill_indices,
+                        &mut fill_zbias,
+                    );
                 }
-                let (mut nx, mut ny) = (dy / len, -dx / len);
-                if !clockwise {
-                    nx = -nx;
-                    ny = -ny;
-                }
-                let facing = (nx * light_x + ny * light_y).clamp(-1.0, 1.0);
-                let shade = 0.62 + 0.20 * (facing + 1.0);
-                let wall_color = [
-                    roof_color[0] * shade,
-                    roof_color[1] * shade,
-                    roof_color[2] * shade,
-                    1.0,
-                ];
-                append_wall_quad(
-                    a,
-                    b,
-                    job.height_m,
-                    wall_color,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
             }
-            emit_path(&mut path, ring, true);
+            for ring in &job.polygon {
+                emit_path(&mut path, ring, true);
+            }
             tessellate_path_fill(
                 &mut path,
                 &mut tess,
@@ -898,7 +960,7 @@ fn build_tile_buffers_from_features(
                     color: roof_color,
                     stroke_mult: 1e6,
                     shape_id: 0.0,
-                    params: [0.0, 0.0, 0.0, 0.0, job.height_m, 0.0],
+                    params: [0.0, 0.0, 0.0, 0.0, job.height_m, 0.05],
                     zbias: fill_zbias,
                 },
             );
@@ -1167,7 +1229,7 @@ fn append_oneway_arrow(
         // rotate with the camera, unlike upright billboard POI symbols.
         out_vertices.extend_from_slice(&[
             anchor.0, anchor.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0,
-            ICON_SHAPE_ID, 0.0, ox, oy, 1.0, 0.0, 0.0, 16.0, *zbias,
+            ICON_SHAPE_ID, 0.0, ox, oy, 1.0, 0.0, 0.04, 16.0, *zbias,
         ]);
     }
     for index in INDICES {
@@ -1203,7 +1265,7 @@ fn append_icon_mesh(
             vertex.y,
             0.0,
             0.0,
-            0.0,
+            0.04, // tilt micro-depth: symbols above every ground stroke
             24.0, // clip_radius: generous, avoids pop-in at view edges
             *zbias,
         ]);

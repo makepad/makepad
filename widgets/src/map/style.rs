@@ -22,7 +22,14 @@ pub struct StrokePassStyle {
     /// baked width follows, so stale-bucket tiles can be corrected to the
     /// width the current view zoom calls for.
     pub expand_class: f32,
+    /// Tilt-mode micro-depth (sort-rank scaled): separates overlapping
+    /// strokes (rail over road) by more than the depth-buffer quantum while
+    /// staying far below one ground pixel of view depth.
+    pub depth_micro: f32,
 }
+
+/// Micro-depth per unit of sort rank (rank 710 rail → 0.0014).
+pub const DEPTH_MICRO_PER_RANK: f32 = 4e-5;
 
 /// Regular roads: widths follow `zoom_width_mult` directly.
 pub const EXPAND_CLASS_ROAD: f32 = 0.0;
@@ -377,6 +384,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_ROAD,
+                depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
             })
         } else {
             None
@@ -386,6 +394,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
             width: rule.center_width,
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_ROAD,
+            depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
         },
         min_zoom: rule.min_zoom,
     }
@@ -400,6 +409,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_WATER,
+                depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
             })
         } else {
             None
@@ -409,6 +419,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
             width: rule.center_width,
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_WATER,
+            depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
         },
         min_zoom: rule.min_zoom,
     }
@@ -423,6 +434,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_THIN,
+                depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
             })
         } else {
             None
@@ -432,6 +444,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
             width: rule.center_width,
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_THIN,
+            depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
         },
         min_zoom: 0.0,
     }
@@ -528,7 +541,22 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
         "ocean" => 5,
         "land" | "landuse" | "landcover" => {
             if is_green {
-                16
+                // Distinct sub-ranks: nested greens (grass patches or a
+                // playground inside a park) must never tie — equal ranks
+                // shimmer in the tilt-mode micro-depth.
+                if let Some(leisure) = tags.get("leisure") {
+                    match leisure.as_str() {
+                        "park" | "nature_reserve" => 16,
+                        "garden" | "golf_course" => 17,
+                        "pitch" | "playground" => 19,
+                        _ => 16,
+                    }
+                } else {
+                    match tags.get("landuse").map(|value| value.as_str()) {
+                        Some("grass") => 18,
+                        _ => 17,
+                    }
+                }
             } else {
                 10
             }
@@ -664,6 +692,15 @@ pub fn stroke_style_for_tags(
         if thin_growth {
             style.center.expand_class = EXPAND_CLASS_THIN;
         }
+        // Bridges float above (and tunnels below) their base rank in the
+        // tilt-mode micro-depth as well, so crossings resolve stably.
+        if rank_bias != 0 {
+            let micro_bias = rank_bias as f32 * DEPTH_MICRO_PER_RANK;
+            style.center.depth_micro += micro_bias;
+            if let Some(casing) = style.casing.as_mut() {
+                casing.depth_micro += micro_bias;
+            }
+        }
         // carto draws bridge roads with a dark casing edge
         if tag_is_truthy(tags, "bridge") {
             let width = style
@@ -674,6 +711,9 @@ pub fn stroke_style_for_tags(
                 width,
                 shape_id: 0.0,
                 expand_class: EXPAND_CLASS_ROAD,
+                // One step under the center: a tie would let the dark edge
+                // noise-win over the road fill (black bridges).
+                depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
             });
         }
         if tag_is_truthy(tags, "tunnel") {
