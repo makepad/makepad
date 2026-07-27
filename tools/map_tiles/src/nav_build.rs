@@ -32,6 +32,10 @@ pub struct NavBuildOptions {
     pub output_basename: PathBuf,
     pub bbox: Option<BboxFilter>,
     pub skip_addresses: bool,
+    /// Only build a `<basename>.search` of settlement places (city/town/
+    /// village…) — one fast pass, no routing graph. Continent-scale fly-to
+    /// search next to a regional full index.
+    pub places_only: bool,
 }
 
 /// Way tags that matter for routing or search; everything else is dropped
@@ -190,6 +194,9 @@ fn collect_all_tags<'a>(
 }
 
 pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
+    if options.places_only {
+        return build_places_index(&options);
+    }
     let total_start = Instant::now();
     let bbox = options.bbox;
     let skip_addresses = options.skip_addresses;
@@ -438,6 +445,100 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
     Ok(())
 }
 
+/// One parallel pass collecting settlement place nodes into a search index:
+/// city/town/village/suburb/hamlet with a name. ~500k docs for Europe.
+fn build_places_index(options: &NavBuildOptions) -> Result<(), String> {
+    let start = Instant::now();
+    let bbox = options.bbox;
+    eprintln!(
+        "nav-build --places-only: scanning {}",
+        options.source.display()
+    );
+    let reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    let docs = reader
+        .par_map_reduce(
+            |element| {
+                let mut out: Vec<RawDoc> = Vec::new();
+                let (lon, lat, tags) = match &element {
+                    Element::Node(node) => (node.lon(), node.lat(), collect_all_tags(node.tags())),
+                    Element::DenseNode(node) => {
+                        (node.lon(), node.lat(), collect_all_tags(node.tags()))
+                    }
+                    _ => return out,
+                };
+                if tags.is_empty() || !tags.contains_key("place") {
+                    return out;
+                }
+                if let Some(bbox) = &bbox {
+                    if !bbox.contains(lon, lat) {
+                        return out;
+                    }
+                }
+                let Some(category) = category_from_osm_tags(&tags) else {
+                    return out;
+                };
+                if !matches!(
+                    category,
+                    Category::City
+                        | Category::Town
+                        | Category::Village
+                        | Category::Suburb
+                        | Category::Neighbourhood
+                        | Category::Hamlet
+                ) {
+                    return out;
+                }
+                let Some(name) = tags.get("name") else {
+                    return out;
+                };
+                out.push(RawDoc {
+                    name: name.clone(),
+                    secondary: String::new(),
+                    lon,
+                    lat,
+                    category: category as u16,
+                    rank: place_rank(category, &tags),
+                });
+                out
+            },
+            Vec::new,
+            |mut a, mut b| {
+                if b.len() > a.len() {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                a.append(&mut b);
+                a
+            },
+        )
+        .map_err(|err| format!("pbf places pass: {err}"))?;
+
+    let mut builder = SearchIndexBuilder::new();
+    for doc in &docs {
+        builder.add(
+            &doc.name,
+            &doc.secondary,
+            LonLat::new(doc.lon, doc.lat),
+            Category::from_u16(doc.category),
+            doc.rank,
+        );
+    }
+    let raw = builder.len();
+    let index = builder.build();
+    let path = options.output_basename.with_extension("search");
+    let bytes = index.serialize();
+    std::fs::write(&path, &bytes).map_err(|err| format!("write {}: {err}", path.display()))?;
+    eprintln!(
+        "nav-build --places-only: {} places ({} raw) in {:.1}s → {} ({:.1} MB)",
+        index.doc_count(),
+        raw,
+        start.elapsed().as_secs_f64(),
+        path.display(),
+        bytes.len() as f64 / 1e6
+    );
+    Ok(())
+}
+
 // --- nav-probe ---
 
 pub fn nav_probe(args: &[String]) -> Result<(), String> {
@@ -587,6 +688,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
     let output_basename = PathBuf::from(&args[2]);
     let mut bbox = None;
     let mut skip_addresses = false;
+    let mut places_only = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -609,6 +711,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
                 });
             }
             "--skip-addresses" => skip_addresses = true,
+            "--places-only" => places_only = true,
             other => return Err(format!("unknown nav-build option {:?}", other)),
         }
         i += 1;
@@ -618,5 +721,6 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
         output_basename,
         bbox,
         skip_addresses,
+        places_only,
     })
 }

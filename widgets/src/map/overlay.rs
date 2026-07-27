@@ -222,16 +222,19 @@ fn draw_route(
             }
             dv.set_color(color.x, color.y, color.z, color.w * alpha);
             let mut pen_down = false;
+            let mut last_drawn = dvec2(0.0, 0.0);
             let start = range.start;
             let end = range.end;
             for i in start..end - 1 {
                 let a = screen[i];
                 let b = screen[i + 1];
-                // Thin sub-pixel steps while keeping corners.
-                if pen_down && (b - a).length() < 1.5 && i + 2 < end {
+                // Decimate against the last DRAWN point so error stays
+                // bounded (~1.5px) — neighbor-pairwise skipping compounded
+                // and visibly reshaped the route when zoomed out.
+                if pen_down && (b - last_drawn).length() < 1.5 && i + 2 < end {
                     continue;
                 }
-                if !seg_visible(a, b) {
+                if !seg_visible(last_drawn, b) && !seg_visible(a, b) {
                     if pen_down {
                         dv.stroke_opts(width, LineCap::Round, LineJoin::Round, 4.0, 1.0);
                         dv.clear();
@@ -241,9 +244,11 @@ fn draw_route(
                 }
                 if !pen_down {
                     dv.move_to(a.x as f32, a.y as f32);
+                    last_drawn = a;
                     pen_down = true;
                 }
                 dv.line_to(b.x as f32, b.y as f32);
+                last_drawn = b;
             }
             if pen_down {
                 dv.stroke_opts(width, LineCap::Round, LineJoin::Round, 4.0, 1.0);

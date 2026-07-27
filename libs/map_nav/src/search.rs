@@ -819,34 +819,29 @@ impl SearchIndex {
         }
 
         let normalized_query = tokens.join(" ");
+        let query_has_number = tokens.iter().any(|t| t.chars().all(|c| c.is_ascii_digit()));
         let mut results: Vec<SearchResult> = Vec::new();
         let push_result = |doc_id: u32, via_category: bool, results: &mut Vec<SearchResult>| {
             let doc = &self.docs[doc_id as usize];
             let pos = fixed_to_lon_lat(doc.x, doc.y);
             let name = self.doc_name(doc);
             let name_norm = normalize_tokens(name).join(" ");
-            let mut score = doc.rank as f64 * 0.3;
-            if via_category {
-                // Category hits rank on prominence + proximity only; small
-                // deficit so an exact name match wins over a category match.
-                score += 6.0;
-            } else if name_norm == normalized_query {
-                score += 46.0;
-            } else if name_norm.starts_with(&normalized_query) {
-                score += 26.0;
-            } else {
-                score += 12.0;
-            }
+            let category = Category::from_u16(doc.category);
             let distance_m = near.map(|n| haversine_m(n, pos));
-            if let Some(d) = distance_m {
-                // log2 falloff: being 10x closer is worth a constant bonus.
-                score -= 7.0 * (1.0 + d / 30.0).log2();
-            }
+            let score = score_search_hit(
+                category,
+                doc.rank,
+                &name_norm,
+                &normalized_query,
+                via_category,
+                query_has_number,
+                distance_m,
+            );
             results.push(SearchResult {
                 doc_id,
                 name: name.to_string(),
                 secondary: self.doc_secondary(doc).to_string(),
-                category: Category::from_u16(doc.category),
+                category,
                 pos,
                 distance_m,
                 score,
@@ -964,6 +959,57 @@ impl SearchIndex {
             category_docs,
         })
     }
+}
+
+/// Google-style tiered ranking. Settlements are near-immune to distance
+/// ("brussels" from Amsterdam means Brussels, not the closest
+/// Brusselsestraat), POIs and streets stay locally biased, and a number in
+/// the query signals address intent.
+#[allow(clippy::too_many_arguments)]
+pub fn score_search_hit(
+    category: Category,
+    rank: u8,
+    name_norm: &str,
+    normalized_query: &str,
+    via_category: bool,
+    query_has_number: bool,
+    distance_m: Option<f64>,
+) -> f64 {
+    // Entity tier: what KIND of thing dominates what the name looks like.
+    let (tier, locality) = match category {
+        Category::City => (5.0, 0.10),
+        Category::Town => (4.6, 0.15),
+        Category::Airport => (4.3, 0.25),
+        Category::Village | Category::Suburb | Category::Hamlet | Category::Neighbourhood => {
+            (4.0, 0.35)
+        }
+        Category::Station => (3.8, 0.5),
+        Category::Street => (2.0, 1.0),
+        Category::Address => (1.6, 1.0),
+        _ => (3.0, 1.0),
+    };
+    let mut score = tier * 30.0 + rank as f64 * 0.15;
+    if via_category {
+        // Category hits rank on prominence + proximity only; a small match
+        // deficit so an exact name match wins over a category expansion.
+        score += 6.0;
+    } else if name_norm == normalized_query {
+        score += 40.0;
+    } else if name_norm.starts_with(normalized_query) {
+        score += 18.0;
+    } else {
+        score += 8.0;
+    }
+    if query_has_number && category == Category::Address {
+        // "prinsengracht 263" — the number token is address intent.
+        score += 55.0;
+    }
+    if let Some(d) = distance_m {
+        // log2 falloff: being 10x closer is worth a constant bonus; scaled
+        // by how inherently local the entity kind is.
+        score -= 7.0 * (1.0 + d / 30.0).log2() * locality;
+    }
+    score
 }
 
 fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
