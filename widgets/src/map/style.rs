@@ -793,8 +793,12 @@ pub fn stroke_style_for_tags(
 
 /// Zoom from which heavy rail draws the carto sleeper look (solid dark
 /// casing + even light dash core); below it, and for tram/metro always,
-/// rails stay the theme's single thin line.
-const RAIL_SLEEPER_MIN_ZOOM: u32 = 14;
+/// rails stay the theme's single thin line. z14 and out, parallel station
+/// tracks merge into a striped blob — stay thin there.
+const RAIL_SLEEPER_MIN_ZOOM: u32 = 15;
+/// Trams darken toward carto's near-black only at street level; at city
+/// scale they stay the theme's faint gray so they don't dominate.
+const TRAM_DARK_MIN_ZOOM: u32 = 16;
 
 fn rail_stroke_style(
     template: StrokeTemplate,
@@ -805,13 +809,13 @@ fn rail_stroke_style(
     width_scale: f32,
 ) -> StrokeStyle {
     let mut template = template;
-    if !heavy && render_zoom >= RAIL_SLEEPER_MIN_ZOOM {
+    if !heavy && render_zoom >= TRAM_DARK_MIN_ZOOM {
         // Trams/metro draw as a solid near-black line at street zooms in
         // carto. Only darken light-theme grays; the dark palette stays.
         let c = template.center.color;
         let avg = ((c >> 16 & 0xff) + (c >> 8 & 0xff) + (c & 0xff)) / 3;
         if avg < 0x90 {
-            template.center.color = 0x474747;
+            template.center.color = 0x505050;
         }
         template.center.width = template.center.width.max(1.2);
     }
@@ -820,14 +824,14 @@ fn rail_stroke_style(
         template.casing = Some(StrokePassStyle {
             // The theme's rail line color becomes the casing band.
             color: template.center.color,
-            width: 3.4,
+            width: 2.4,
             shape_id: 0.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK,
         });
         template.center = StrokePassStyle {
             color: 0xf7f7f7,
-            width: 1.5,
+            width: 1.2,
             shape_id: 12.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
