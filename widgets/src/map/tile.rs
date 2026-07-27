@@ -70,6 +70,18 @@ pub struct TileEntry {
     /// View-zoom bucket the geometry was styled for; stale buckets stay
     /// drawable while a rebuild is in flight.
     pub bucket: u32,
+    /// Cross-fade state: the replaced generation's geometry stays drawable
+    /// underneath while the new one fades in.
+    pub fade: Option<TileFade>,
+}
+
+#[derive(Debug)]
+pub struct TileFade {
+    pub started: std::time::Instant,
+    pub fill_geometry: Option<Geometry>,
+    pub casing_geometry: Option<Geometry>,
+    pub stroke_geometry: Option<Geometry>,
+    pub icon_geometry: Option<Geometry>,
 }
 
 #[derive(Debug)]
