@@ -410,19 +410,21 @@ pub fn build_screen_polyline_into(
     scale: f32,
     offset: Vec2d,
     rot: (f64, f64),
+    tilt_cos: f64,
     pivot: Vec2d,
     out: &mut Vec<Vec2d>,
 ) {
     let (cos, sin) = rot;
-    let rotated = sin != 0.0 || cos != 1.0;
+    let transformed = sin != 0.0 || cos != 1.0 || tilt_cos != 1.0;
     for &(x, y) in path_points {
         let mut p = dvec2(
             x as f64 * scale as f64 + offset.x,
             y as f64 * scale as f64 + offset.y,
         );
-        if rotated {
+        if transformed {
             let rel = p - pivot;
-            p = pivot + dvec2(rel.x * cos - rel.y * sin, rel.x * sin + rel.y * cos);
+            let rotated = dvec2(rel.x * cos - rel.y * sin, rel.x * sin + rel.y * cos);
+            p = pivot + dvec2(rotated.x, rotated.y * tilt_cos);
         }
         out.push(p);
     }
