@@ -32,6 +32,9 @@ struct StrokeTemplate {
     sort_rank: i16,
     casing: Option<StrokePassStyle>,
     center: StrokePassStyle,
+    /// Lowest render bucket this rule draws at (carto hides paths and small
+    /// waterways well before roads).
+    min_zoom: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +116,9 @@ pub struct MapRoadRule {
     pub center_width: f32,
     #[live]
     pub center_shape_id: f32,
+    /// Hidden below this render zoom (0 = always visible).
+    #[live]
+    pub min_zoom: f32,
 }
 
 #[derive(Script, ScriptHook, Clone, Default)]
@@ -135,6 +141,9 @@ pub struct MapWaterwayRule {
     pub center_width: f32,
     #[live]
     pub center_shape_id: f32,
+    /// Hidden below this render zoom (0 = always visible).
+    #[live]
+    pub min_zoom: f32,
 }
 
 #[derive(Script, ScriptHook, Clone, Default)]
@@ -335,6 +344,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
             width: rule.center_width,
             shape_id: rule.center_shape_id,
         },
+        min_zoom: rule.min_zoom,
     }
 }
 
@@ -355,6 +365,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
             width: rule.center_width,
             shape_id: rule.center_shape_id,
         },
+        min_zoom: rule.min_zoom,
     }
 }
 
@@ -375,6 +386,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
             width: rule.center_width,
             shape_id: rule.center_shape_id,
         },
+        min_zoom: 0.0,
     }
 }
 
@@ -521,6 +533,7 @@ pub fn stroke_style_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
     tile_zoom: u32,
+    render_zoom: u32,
     zoom_mult: f32,
     px_to_units: f32,
 ) -> Option<StrokeStyle> {
@@ -579,6 +592,11 @@ pub fn stroke_style_for_tags(
             return Some(scaled_style(template, rank_bias, rail_scale));
         }
         let template = theme.road_rules.get(&key).copied().or(theme.road_default)?;
+        // Carto hides footways/paths well before roads; clutter at city
+        // scale otherwise (salmon dot confetti over every block).
+        if (render_zoom as f32) < template.min_zoom {
+            return None;
+        }
         // Paths/footways/cycleways (thin, uncased) barely grow with zoom in
         // carto (~1px at z15 and z17 alike) while regular roads grow steeply.
         if template.casing.is_none() && template.center.width <= 2.0 {
@@ -615,7 +633,18 @@ pub fn stroke_style_for_tags(
             .get(&key)
             .copied()
             .or(theme.waterway_default)?;
-        return Some(scaled_style(template, rank_bias, width_scale));
+        if (render_zoom as f32) < template.min_zoom {
+            return None;
+        }
+        // Waterway centerlines shrink faster than roads below z14 — carto
+        // keeps canals at ~1px at z12/z13, letting the water polygons carry
+        // the visual weight; linear scaling read as "the city is all water".
+        let water_scale = if zoom_mult < 1.0 {
+            zoom_mult.powf(1.6) * px_to_units
+        } else {
+            width_scale
+        };
+        return Some(scaled_style(template, rank_bias, water_scale));
     }
 
     if tags.contains_key("railway") {
