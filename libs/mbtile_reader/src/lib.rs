@@ -1,4 +1,4 @@
-//! Minimal read-only SQLite file format parser for MBTiles tile extraction.
+//! Minimal SQLite file format reader and writer for MBTiles tile extraction.
 //!
 //! Implements just enough of the SQLite on-disk format to:
 //! - Parse the 100-byte database header
@@ -7,14 +7,19 @@
 //! - Follow overflow page chains for large blobs
 //! - Scan the sqlite_master table to find table root pages
 //! - Scan the tiles table and look up tiles by (zoom, column, row)
+//! - Stream a sorted set of tiles into a new MBTiles database
 //!
 //! Reference: <https://www.sqlite.org/fileformat.html>
 //! Reference implementation studied: turso/libsql core/storage/sqlite3_ondisk.rs
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+mod writer;
+pub use writer::{MbtilesWriter, MbtilesWriterStats};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -31,6 +36,8 @@ pub enum Error {
     CorruptRecord(&'static str),
     TableNotFound(&'static str),
     Utf16Decode,
+    InvalidInput(String),
+    InvalidWriterState(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -45,6 +52,8 @@ impl std::fmt::Display for Error {
             Error::CorruptRecord(msg) => write!(f, "corrupt record: {msg}"),
             Error::TableNotFound(name) => write!(f, "table not found: {name}"),
             Error::Utf16Decode => write!(f, "invalid UTF-16 text"),
+            Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            Error::InvalidWriterState(msg) => write!(f, "invalid writer state: {msg}"),
         }
     }
 }
@@ -408,9 +417,17 @@ pub struct MbtilesReader {
     tiles_root_page: u32,
     /// Root page number of the `metadata` table (1-based)
     metadata_root_page: u32,
-    /// Root page number of the `tile_index` index (1-based), if present
+    /// Root page number of the standard `(zoom_level, tile_column, tile_row)`
+    /// tile index (1-based), if present.
     tile_index_root_page: Option<u32>,
+    /// Makepad-authored files use deterministic rowids for direct B-tree lookup.
+    makepad_block_rowids: bool,
+    /// Small, bounded cache for table B-tree pages reused by adjacent lookups.
+    btree_page_cache: HashMap<u32, Vec<u8>>,
+    btree_page_cache_order: VecDeque<u32>,
 }
+
+const BTREE_PAGE_CACHE_CAPACITY: usize = 32;
 
 /// A single tile from the mbtiles database.
 #[derive(Debug, Clone)]
@@ -439,6 +456,9 @@ impl MbtilesReader {
             tiles_root_page: 0,
             metadata_root_page: 0,
             tile_index_root_page: None,
+            makepad_block_rowids: false,
+            btree_page_cache: HashMap::new(),
+            btree_page_cache_order: VecDeque::new(),
         };
 
         // Scan sqlite_master (always rooted at page 1) to find our tables
@@ -447,6 +467,11 @@ impl MbtilesReader {
         if reader.tiles_root_page == 0 {
             return Err(Error::TableNotFound("tiles"));
         }
+
+        reader.makepad_block_rowids = reader
+            .get_metadata()?
+            .get("makepad_rowid_scheme")
+            .is_some_and(|value| value == "block-v1-xyz");
 
         Ok(reader)
     }
@@ -459,6 +484,21 @@ impl MbtilesReader {
         let mut buf = vec![0u8; page_size as usize];
         self.file.read_exact(&mut buf)?;
         Ok(buf)
+    }
+
+    fn read_btree_page(&mut self, page_num: u32) -> Result<Vec<u8>> {
+        if let Some(page) = self.btree_page_cache.get(&page_num) {
+            return Ok(page.clone());
+        }
+        let page = self.read_page(page_num)?;
+        if self.btree_page_cache.len() == BTREE_PAGE_CACHE_CAPACITY {
+            if let Some(evicted) = self.btree_page_cache_order.pop_front() {
+                self.btree_page_cache.remove(&evicted);
+            }
+        }
+        self.btree_page_cache.insert(page_num, page.clone());
+        self.btree_page_cache_order.push_back(page_num);
+        Ok(page)
     }
 
     /// Assemble full payload from a cell, following overflow pages if necessary.
@@ -580,14 +620,29 @@ impl MbtilesReader {
                 }
                 let obj_type = record[0].as_text().unwrap_or("");
                 let name = record[1].as_text().unwrap_or("");
+                let table_name = record[2].as_text().unwrap_or("");
                 let root_page = record[3].as_integer().unwrap_or(0) as u32;
+                let sql = record[4].as_text().unwrap_or("");
 
                 let _ = rowid;
                 match (obj_type, name) {
                     ("table", "tiles") => reader.tiles_root_page = root_page,
                     ("table", "metadata") => reader.metadata_root_page = root_page,
-                    ("index", "tile_index") => reader.tile_index_root_page = Some(root_page),
                     _ => {}
+                }
+                // `tile_index` is the conventional MBTiles spelling. Also
+                // accept SQLite's automatic index for a UNIQUE constraint on
+                // the tiles table. The latter has a NULL SQL field, hence the
+                // name/table checks rather than SQL parsing.
+                if obj_type == "index"
+                    && table_name == "tiles"
+                    && (name == "tile_index"
+                        || name.starts_with("sqlite_autoindex_tiles_")
+                        || (sql.contains("zoom_level")
+                            && sql.contains("tile_column")
+                            && sql.contains("tile_row")))
+                {
+                    reader.tile_index_root_page = Some(root_page);
                 }
                 Ok(())
             },
@@ -637,6 +692,195 @@ impl MbtilesReader {
         Ok(())
     }
 
+    /// Find a table row by integer rowid using the table B-tree separators.
+    fn find_table_row(&mut self, root_page_num: u32, target: i64) -> Result<Option<Vec<u8>>> {
+        let mut page_num = root_page_num;
+        loop {
+            let page = self.read_btree_page(page_num)?;
+            let header_offset = if page_num == 1 { 100 } else { 0 };
+            let (page_type, cell_ptrs, rightmost_ptr) =
+                self.cell_pointers(&page, header_offset)?;
+
+            match page_type {
+                PageType::TableInterior => {
+                    let mut child = rightmost_ptr.ok_or(Error::CorruptCell(
+                        "table interior page has no rightmost child",
+                    ))?;
+                    for ptr in cell_ptrs {
+                        let (left_child, separator) =
+                            self.parse_table_interior_cell(&page, ptr)?;
+                        if target <= separator {
+                            child = left_child;
+                            break;
+                        }
+                    }
+                    page_num = child;
+                }
+                PageType::TableLeaf => {
+                    for ptr in cell_ptrs {
+                        let (rowid, local, total, overflow) =
+                            self.parse_table_leaf_cell(&page, ptr)?;
+                        if rowid == target {
+                            return self
+                                .assemble_payload(local, total, overflow)
+                                .map(Some);
+                        }
+                        if rowid > target {
+                            return Ok(None);
+                        }
+                    }
+                    return Ok(None);
+                }
+                _ => {
+                    return Err(Error::CorruptCell(
+                        "table root points at an index B-tree page",
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Parse an index B-tree cell and assemble its record payload.
+    ///
+    /// Index interior cells begin with a four-byte left-child page number;
+    /// index leaf cells begin directly with the payload-size varint.
+    fn parse_index_cell(
+        &mut self,
+        page: &[u8],
+        page_type: PageType,
+        pos: usize,
+    ) -> Result<(Option<u32>, Vec<u8>)> {
+        if !matches!(page_type, PageType::IndexInterior | PageType::IndexLeaf) {
+            return Err(Error::CorruptCell("expected an index B-tree cell"));
+        }
+
+        let (left_child, mut offset) = if page_type == PageType::IndexInterior {
+            let end = pos
+                .checked_add(4)
+                .ok_or(Error::CorruptCell("index cell offset overflow"))?;
+            let bytes = page
+                .get(pos..end)
+                .ok_or(Error::CorruptCell("truncated index interior cell"))?;
+            (Some(read_be_u32(bytes)), end)
+        } else {
+            (None, pos)
+        };
+
+        let (payload_size, varint_len) = read_varint(
+            page.get(offset..)
+                .ok_or(Error::CorruptCell("index cell starts past page"))?,
+        )?;
+        offset = offset
+            .checked_add(varint_len)
+            .ok_or(Error::CorruptCell("index payload offset overflow"))?;
+        let payload_size = usize::try_from(payload_size)
+            .map_err(|_| Error::CorruptCell("index payload exceeds address space"))?;
+        let max_local = payload_overflow_threshold_max(page_type, self.usable_size);
+        let min_local = payload_overflow_threshold_min(page_type, self.usable_size);
+        let (overflows, local_size) =
+            payload_overflows(payload_size, max_local, min_local, self.usable_size);
+        let end = offset
+            .checked_add(local_size)
+            .ok_or(Error::CorruptCell("index local payload offset overflow"))?;
+        let local = page
+            .get(offset..end)
+            .ok_or(Error::CorruptCell("truncated index payload"))?;
+        let overflow_page = if overflows {
+            if local.len() < 4 {
+                return Err(Error::CorruptCell("truncated index overflow pointer"));
+            }
+            Some(read_be_u32(&local[local.len() - 4..]))
+        } else {
+            None
+        };
+        let payload = self.assemble_payload(local, payload_size, overflow_page)?;
+        Ok((left_child, payload))
+    }
+
+    fn tile_index_key(record: &[Value]) -> Result<([i64; 3], i64)> {
+        if record.len() < 4 {
+            return Err(Error::CorruptRecord(
+                "tile index entry has fewer than four columns",
+            ));
+        }
+        let zoom = record[0]
+            .as_integer()
+            .ok_or(Error::CorruptRecord("tile index zoom is not an integer"))?;
+        let column = record[1]
+            .as_integer()
+            .ok_or(Error::CorruptRecord("tile index column is not an integer"))?;
+        let row = record[2]
+            .as_integer()
+            .ok_or(Error::CorruptRecord("tile index row is not an integer"))?;
+        let table_rowid = record
+            .last()
+            .and_then(Value::as_integer)
+            .ok_or(Error::CorruptRecord(
+                "tile index table rowid is not an integer",
+            ))?;
+        Ok(([zoom, column, row], table_rowid))
+    }
+
+    /// Find the tiles-table rowid through a conventional MBTiles composite
+    /// index. This keeps arbitrary third-party MBTiles archives streamable
+    /// without scanning every row at the requested zoom.
+    fn find_tile_rowid_in_index(
+        &mut self,
+        root_page_num: u32,
+        target: [i64; 3],
+    ) -> Result<Option<i64>> {
+        let mut page_num = root_page_num;
+        loop {
+            let page = self.read_btree_page(page_num)?;
+            let header_offset = if page_num == 1 { 100 } else { 0 };
+            let (page_type, cell_ptrs, rightmost_ptr) =
+                self.cell_pointers(&page, header_offset)?;
+
+            match page_type {
+                PageType::IndexInterior => {
+                    let mut next_child = rightmost_ptr.ok_or(Error::CorruptCell(
+                        "index interior page has no rightmost child",
+                    ))?;
+                    for ptr in cell_ptrs {
+                        let (left_child, payload) =
+                            self.parse_index_cell(&page, page_type, ptr)?;
+                        let record = parse_record(&payload, self.header.text_encoding)?;
+                        let (key, table_rowid) = Self::tile_index_key(&record)?;
+                        match target.cmp(&key) {
+                            Ordering::Less => {
+                                next_child = left_child.ok_or(Error::CorruptCell(
+                                    "index interior cell has no left child",
+                                ))?;
+                                break;
+                            }
+                            Ordering::Equal => return Ok(Some(table_rowid)),
+                            Ordering::Greater => {}
+                        }
+                    }
+                    page_num = next_child;
+                }
+                PageType::IndexLeaf => {
+                    for ptr in cell_ptrs {
+                        let (_, payload) = self.parse_index_cell(&page, page_type, ptr)?;
+                        let record = parse_record(&payload, self.header.text_encoding)?;
+                        let (key, table_rowid) = Self::tile_index_key(&record)?;
+                        match target.cmp(&key) {
+                            Ordering::Less => return Ok(None),
+                            Ordering::Equal => return Ok(Some(table_rowid)),
+                            Ordering::Greater => {}
+                        }
+                    }
+                    return Ok(None);
+                }
+                _ => {
+                    return Err(Error::CorruptCell(
+                        "tile index root points at a table B-tree page",
+                    ));
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------
@@ -661,9 +905,80 @@ impl MbtilesReader {
         Ok(metadata)
     }
 
+    /// Whether `get_tile` can seek directly to one deterministic tile row.
+    ///
+    /// Files emitted by [`MbtilesWriter`] use deterministic table rowids.
+    /// Conventional MBTiles files use their composite tile index. Only malformed
+    /// or unusually index-free third-party files require a compatibility scan.
+    pub fn supports_direct_tile_lookup(&self) -> bool {
+        self.makepad_block_rowids || self.tile_index_root_page.is_some()
+    }
+
     /// Get a single tile by (zoom_level, tile_column, tile_row).
     /// Returns the raw tile_data blob (typically gzip-compressed PBF).
     pub fn get_tile(&mut self, zoom: i64, column: i64, row: i64) -> Result<Option<Vec<u8>>> {
+        if self.makepad_block_rowids {
+            let Ok(zoom_u8) = u8::try_from(zoom) else {
+                return Ok(None);
+            };
+            let Ok(column_u32) = u32::try_from(column) else {
+                return Ok(None);
+            };
+            let Ok(tms_row_u32) = u32::try_from(row) else {
+                return Ok(None);
+            };
+            let Some(axis) = 1_u32.checked_shl(u32::from(zoom_u8)) else {
+                return Ok(None);
+            };
+            if column_u32 >= axis || tms_row_u32 >= axis {
+                return Ok(None);
+            }
+            let xyz_row = axis - 1 - tms_row_u32;
+            let Some(rowid) = writer::tile_rowid_xyz(zoom_u8, column_u32, xyz_row) else {
+                return Ok(None);
+            };
+            let root = self.tiles_root_page;
+            let Some(payload) = self.find_table_row(root, rowid)? else {
+                return Ok(None);
+            };
+            let record = parse_record(&payload, self.header.text_encoding)?;
+            if record.len() < 4
+                || record[0].as_integer() != Some(zoom)
+                || record[1].as_integer() != Some(column)
+                || record[2].as_integer() != Some(row)
+            {
+                return Err(Error::CorruptRecord(
+                    "deterministic rowid points at the wrong tile",
+                ));
+            }
+            return Ok(record.into_iter().nth(3).and_then(Value::into_blob));
+        }
+
+        if let Some(index_root) = self.tile_index_root_page {
+            let Some(table_rowid) =
+                self.find_tile_rowid_in_index(index_root, [zoom, column, row])?
+            else {
+                return Ok(None);
+            };
+            let root = self.tiles_root_page;
+            let Some(payload) = self.find_table_row(root, table_rowid)? else {
+                return Err(Error::CorruptRecord(
+                    "tile index points at a missing table row",
+                ));
+            };
+            let record = parse_record(&payload, self.header.text_encoding)?;
+            if record.len() < 4
+                || record[0].as_integer() != Some(zoom)
+                || record[1].as_integer() != Some(column)
+                || record[2].as_integer() != Some(row)
+            {
+                return Err(Error::CorruptRecord(
+                    "tile index points at the wrong tile",
+                ));
+            }
+            return Ok(record.into_iter().nth(3).and_then(Value::into_blob));
+        }
+
         let mut result: Option<Vec<u8>> = None;
         let root = self.tiles_root_page;
         self.scan_table_pages(root, &mut |reader, _rowid, local, total, overflow| {
@@ -816,6 +1131,9 @@ fn parse_record_header_and_ints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_read_varint() {
@@ -870,5 +1188,74 @@ mod tests {
         assert!(overflows);
         assert!(local > 0);
         assert!(local <= max_leaf + 4);
+    }
+
+    #[test]
+    fn direct_lookup_through_standard_tile_index() {
+        // Build this interoperability fixture with the system SQLite when it
+        // is available. The library itself has no native SQLite dependency.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "makepad-mbtiles-index-{}-{nonce}.mbtiles",
+            std::process::id()
+        ));
+        let mut child = match Command::new("sqlite3")
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => panic!("start sqlite3: {err}"),
+        };
+        let sql = br#"
+PRAGMA page_size=512;
+VACUUM;
+CREATE TABLE tiles (
+    zoom_level INTEGER,
+    tile_column INTEGER,
+    tile_row INTEGER,
+    tile_data BLOB
+);
+CREATE UNIQUE INDEX tile_index
+    ON tiles (zoom_level, tile_column, tile_row);
+CREATE TABLE metadata (name TEXT, value TEXT);
+INSERT INTO metadata VALUES ('format', 'pbf');
+WITH RECURSIVE sequence(i) AS (
+    VALUES(0)
+    UNION ALL
+    SELECT i + 1 FROM sequence WHERE i < 4999
+)
+INSERT INTO tiles
+SELECT 14, i, 100000 - i, CAST(printf('tile-%d', i) AS BLOB)
+FROM sequence;
+"#;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(sql)
+            .expect("write sqlite fixture");
+        let output = child.wait_with_output().expect("wait for sqlite3");
+        assert!(
+            output.status.success(),
+            "sqlite3 fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut reader = MbtilesReader::open(&path).unwrap();
+        assert!(reader.supports_direct_tile_lookup());
+        assert_eq!(
+            reader.get_tile(14, 4321, 95679).unwrap().unwrap(),
+            b"tile-4321"
+        );
+        assert_eq!(reader.get_tile(14, 6000, 94000).unwrap(), None);
+
+        std::fs::remove_file(path).unwrap();
     }
 }
