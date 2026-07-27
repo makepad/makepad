@@ -2303,10 +2303,14 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_SHOP, false) => Vec4f::from_u32(0xac39acff),
         (LABEL_CLASS_CULTURE, false) => Vec4f::from_u32(0x734a08ff),
         (LABEL_CLASS_MUTED, false) => Vec4f::from_u32(0x66768dff),
+        (LABEL_CLASS_HEALTH, false) => Vec4f::from_u32(0xbf0000ff),
+        (LABEL_CLASS_GREEN, false) => Vec4f::from_u32(0x267d3fff),
         (LABEL_CLASS_AMENITY, true) => Vec4f::from_u32(0xe09a4aff),
         (LABEL_CLASS_SHOP, true) => Vec4f::from_u32(0xcf7fcfff),
         (LABEL_CLASS_CULTURE, true) => Vec4f::from_u32(0xc9a36cff),
         (LABEL_CLASS_MUTED, true) => Vec4f::from_u32(0x8899aaff),
+        (LABEL_CLASS_HEALTH, true) => Vec4f::from_u32(0xe06666ff),
+        (LABEL_CLASS_GREEN, true) => Vec4f::from_u32(0x7fc98fff),
         _ => default_color,
     }
 }

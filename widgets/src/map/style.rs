@@ -588,6 +588,17 @@ pub fn stroke_style_for_tags(
             }
         }
         let mut style = scaled_style(template, rank_bias, width_scale);
+        // carto draws bridge roads with a dark casing edge
+        if tag_is_truthy(tags, "bridge") {
+            let width = style
+                .casing
+                .map_or(style.center.width * 1.35, |casing| casing.width);
+            style.casing = Some(StrokePassStyle {
+                color: 0x4a4a4a,
+                width,
+                shape_id: 0.0,
+            });
+        }
         if tag_is_truthy(tags, "tunnel") {
             style.center.shape_id = 11.0;
             if let Some(casing) = style.casing.as_mut() {
