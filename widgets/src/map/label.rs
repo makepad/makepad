@@ -245,6 +245,25 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
+        // Detail-layer offices carry their name (base pois don't have
+        // them, so no duplicate risk); everything else in micro_pois
+        // stays icon-only.
+        "micro_pois" => {
+            if !tags.contains_key("office") {
+                return None;
+            }
+            let name = select_label_text(tags)?;
+            return Some(TileLabel {
+                text: name,
+                priority: 3,
+                source_layer,
+                road_kind: format!("office{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                color_class: LABEL_CLASS_MUTED,
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
         // Water body names (lakes, the IJ, canals-as-polygons) come as
         // centroid points in their own shortbread layer.
         "water_polygons_labels" => {
@@ -397,6 +416,7 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         // Water names sit just under street names in prominence.
         "water_polygons_labels" => 5,
         "water_lines_labels" => 4,
+        "micro_pois" => 3,
         "pois" => 3,
         "green_area" => 3,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"

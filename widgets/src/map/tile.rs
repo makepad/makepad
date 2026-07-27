@@ -451,8 +451,8 @@ fn merge_detail_features(
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
     if want_points {
-        let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
         for (point, mut tags) in collector.points {
             if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
                 continue;
@@ -460,16 +460,25 @@ fn merge_detail_features(
             let Some((icon, _)) = micro_icon_for_tags(&tags) else {
                 continue;
             };
-            // Door-level detail: carto shows entrances only when you're
-            // close enough to walk through one.
-            if icon == "entrance" && render_zoom < 17.5 {
+            // Per-icon zoom gates, carto-style: doors only when you could
+            // walk through one, signals/chargers at street level.
+            let icon_min_zoom = match icon {
+                "entrance" => 17.5,
+                "traffic_signals" | "charger" | "dot" => 16.5,
+                "parking" => 15.5,
+                _ => 0.0,
+            };
+            if render_zoom < icon_min_zoom {
                 continue;
             }
             tags.insert("layer".to_string(), "micro_pois".to_string());
             points.push((point, tags));
         }
     }
-    if want_buildings {
+    // Station/stop platforms render as gray polygons from z15.5 in both
+    // 2D and 3D modes; buildings only when the 3D pass wants them.
+    let want_platforms = render_zoom >= 15.5;
+    if want_buildings || want_platforms {
         for mut way in collector.ways {
             // Plain building ways AND assembled multipolygon relations
             // (palaces, courtyarded blocks) both carry building geometry.
@@ -478,6 +487,38 @@ fn merge_detail_features(
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
             if !way.closed || !from_polygons {
+                continue;
+            }
+            let is_platform = way.tags.get("railway").map(|v| v.as_str()) == Some("platform")
+                || way.tags.get("public_transport").map(|v| v.as_str()) == Some("platform");
+            if is_platform {
+                if want_platforms {
+                    way.tags.insert("layer".to_string(), "platforms".to_string());
+                    ways.push(way);
+                }
+                continue;
+            }
+            // Small green patches (verges, lawns) are generalized away in
+            // the z14 base tiles; at street zoom the detail archive fills
+            // them back in. Bigger landuse stays with the base tile.
+            let is_green_patch = matches!(
+                way.tags.get("landuse").map(|v| v.as_str()),
+                Some("grass" | "village_green" | "flowerbed" | "meadow")
+            ) || matches!(
+                way.tags.get("leisure").map(|v| v.as_str()),
+                Some("garden")
+            ) || matches!(
+                way.tags.get("natural").map(|v| v.as_str()),
+                Some("scrub" | "heath" | "shrubbery")
+            );
+            if is_green_patch {
+                if want_platforms {
+                    way.tags.insert("layer".to_string(), "detail_land".to_string());
+                    ways.push(way);
+                }
+                continue;
+            }
+            if !want_buildings {
                 continue;
             }
             let is_building = way
@@ -493,6 +534,52 @@ fn merge_detail_features(
         }
     }
     Ok(())
+}
+
+/// Chaikin corner-cutting; endpoints stay pinned (open) or the seam joins
+/// smoothly (closed rings arrive with first==last from the merger).
+fn chaikin_smooth(points: &[(f32, f32)], rounds: usize) -> Vec<(f32, f32)> {
+    if rounds == 0 || points.len() < 3 || points.len() > 2000 {
+        return points.to_vec();
+    }
+    let closed = points.first() == points.last();
+    let mut pts = if closed {
+        points[..points.len() - 1].to_vec()
+    } else {
+        points.to_vec()
+    };
+    for _ in 0..rounds {
+        if pts.len() < 3 {
+            break;
+        }
+        let mut out = Vec::with_capacity(pts.len() * 2 + 2);
+        let lerp = |a: (f32, f32), b: (f32, f32), t: f32| {
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+        };
+        if closed {
+            let n = pts.len();
+            for i in 0..n {
+                let a = pts[i];
+                let b = pts[(i + 1) % n];
+                out.push(lerp(a, b, 0.25));
+                out.push(lerp(a, b, 0.75));
+            }
+        } else {
+            out.push(pts[0]);
+            for i in 0..pts.len() - 1 {
+                out.push(lerp(pts[i], pts[i + 1], 0.25));
+                out.push(lerp(pts[i], pts[i + 1], 0.75));
+            }
+            out.push(*pts.last().unwrap());
+        }
+        pts = out;
+    }
+    if closed {
+        if let Some(&first) = pts.first() {
+            pts.push(first);
+        }
+    }
+    pts
 }
 
 /// Building height in meters from OSM tags: explicit `height`, else
@@ -986,8 +1073,12 @@ fn build_tile_buffers_from_features(
         if let Some(style) =
             stroke_style_for_tags(theme, &way.tags, tile_key.z, render_zoom, zoom_mult, px_to_units)
         {
+            let implicit_oneway = matches!(
+                way.tags.get("junction").map(|v| v.as_str()),
+                Some("roundabout") | Some("circular")
+            );
             if render_zoom >= ICON_MIN_ZOOM
-                && tag_is_truthy(&way.tags, "oneway")
+                && (tag_is_truthy(&way.tags, "oneway") || implicit_oneway)
                 && way.tags.contains_key("highway")
                 && !tag_is_truthy(&way.tags, "rail")
             {
@@ -1032,9 +1123,20 @@ fn build_tile_buffers_from_features(
         )
     });
     let clip_bounds = tile_clip_bounds(ROAD_CLIP_PADDING);
+    // Overzoomed tiles magnify the source tile's coordinate quantization
+    // into visibly angular curves (ovals read as polygons at 8-16x). A
+    // round or two of Chaikin corner-cutting restores the curvature.
+    let chaikin_rounds = if render_scale >= 8.0 {
+        2
+    } else if render_scale >= 3.0 {
+        1
+    } else {
+        0
+    };
     let mut merged_stroke_parts = Vec::<(StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in merged_stroke_jobs {
-        let parts = build_polyline_parts(&job.points, clip_bounds, false, ROAD_SMOOTH_FACTOR);
+        let smooth = chaikin_smooth(&job.points, chaikin_rounds);
+        let parts = build_polyline_parts(&smooth, clip_bounds, false, ROAD_SMOOTH_FACTOR);
         merged_stroke_parts.push((job.style, parts));
     }
 
