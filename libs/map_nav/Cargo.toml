@@ -1,0 +1,8 @@
+[package]
+name = "makepad-map-nav"
+version = "0.1.0"
+edition = "2021"
+description = "Offline map navigation: search index, routing graph, A*, turn-by-turn session"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

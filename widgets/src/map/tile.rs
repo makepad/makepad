@@ -21,7 +21,10 @@ pub const RETRY_BASE_FRAMES: u64 = 30;
 pub const RETRY_MAX_FRAMES: u64 = 300;
 pub const TILE_CACHE_DIR: &str = "local/tilecache_v4";
 pub const TILE_QUERY_PAD: f64 = 0.05;
-pub const LOCAL_MBTILES_PATH: &str = "noord-holland-shortbread-1.0.mbtiles";
+// Default archive: the curated Europe Shortbread base produced by
+// `./download_map.sh convert`. Apps can override per-widget via the
+// MapView `mbtiles_path` property (examples/map pins Noord-Holland).
+pub const LOCAL_MBTILES_PATH: &str = "local/maps/europe-shortbread.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
 // One tile per worker job: a batch runs sequentially inside one closure, so
@@ -1802,4 +1805,3 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
         _ => Err(format!("unsupported protobuf wire type {}", wire)),
     }
 }
-

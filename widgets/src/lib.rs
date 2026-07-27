@@ -227,6 +227,8 @@ pub use crate::html::*;
 pub use crate::markdown::*;
 
 #[cfg(feature = "maps")]
+pub use crate::map::overlay::{MapMarker, MapPuck, MapRouteOverlay};
+#[cfg(feature = "maps")]
 pub use crate::map::view::*;
 
 pub use crate::math_view::*;
