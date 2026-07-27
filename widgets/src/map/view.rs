@@ -1109,8 +1109,14 @@ impl MapView {
         if missing.is_empty() {
             return;
         }
-        if missing.len() > MAX_LOCAL_TILE_BATCH {
-            missing.truncate(MAX_LOCAL_TILE_BATCH);
+        // Dispatch each tile as its own worker job so builds run in parallel
+        // across the pool; keep enough in flight to cover a viewport restyle.
+        let max_in_flight = 12usize.saturating_sub(self.local_requested_tiles.len());
+        if missing.len() > max_in_flight {
+            missing.truncate(max_in_flight);
+        }
+        if missing.is_empty() {
+            return;
         }
 
         for key in &missing {
@@ -1133,20 +1139,19 @@ impl MapView {
         }
 
         let pool = self.tile_thread_pool.as_ref().unwrap();
-        let sender = self.tile_worker_rx.sender();
-        let requested = missing.clone();
-        let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
         let style_epoch = self.style_epoch;
-        let theme_style = self.active_style().clone();
-        let batch_tag = missing[0];
-
-        pool.execute_rev(batch_tag, move |_tag| {
-            let result = load_local_tile_batch(
-                Path::new(&mbtiles_path),
-                &requested,
-                &theme_style,
-                bucket,
-            );
+        for key in missing {
+            let sender = self.tile_worker_rx.sender();
+            let requested = vec![key];
+            let mbtiles_path = LOCAL_MBTILES_PATH.to_string();
+            let theme_style = self.active_style().clone();
+            pool.execute_rev(key, move |_tag| {
+                let result = load_local_tile_batch(
+                    Path::new(&mbtiles_path),
+                    &requested,
+                    &theme_style,
+                    bucket,
+                );
             match result {
                 Ok(loaded) => {
                     let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
@@ -1163,7 +1168,8 @@ impl MapView {
                     });
                 }
             }
-        });
+            });
+        }
     }
 
     fn mark_tile_failed(&mut self, tile_key: TileKey, reason: &str) {
