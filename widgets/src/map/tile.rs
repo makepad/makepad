@@ -661,7 +661,7 @@ fn build_tile_buffers_from_features(
             labels.push(label);
         }
         if let Some(style) =
-            stroke_style_for_tags(theme, &way.tags, tile_key.z, zoom_mult, px_to_units)
+            stroke_style_for_tags(theme, &way.tags, tile_key.z, render_zoom, zoom_mult, px_to_units)
         {
             if render_zoom >= ICON_MIN_ZOOM
                 && tag_is_truthy(&way.tags, "oneway")

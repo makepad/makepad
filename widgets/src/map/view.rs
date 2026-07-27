@@ -166,17 +166,17 @@ script_mod! {
             MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #xbbbbbb casing_width: 4.0 center_color: #xededed center_width: 3.0}
             MapRoadRule{kind: "service" sort_rank: 240 casing_color: #xbbbbbb casing_width: 3.0 center_color: #xffffff center_width: 2.0}
             MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x999999 casing_width: 4.0 center_color: #xdddde8 center_width: 3.0}
-            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x6262ff center_width: 0.9 center_shape_id: 10.0}
-            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xfa8072 center_width: 0.9 center_shape_id: 10.0}
-            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xfa8072 center_width: 0.8 center_shape_id: 10.0}
-            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xfa8072 center_width: 2.0 center_shape_id: 10.0}
-            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x996600 center_width: 1.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x6262ff center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xfa8072 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xfa8072 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xfa8072 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x996600 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xbbbbbb casing_width: 3.6 center_color: #xffffff center_width: 2.5}
 
             MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #xaad3df center_width: 4.0}
-            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #xaad3df center_width: 3.0}
-            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #xaad3df center_width: 1.4}
-            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #xaad3df center_width: 1.2}
+            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #xaad3df center_width: 3.0 min_zoom: 12.0}
+            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #xaad3df center_width: 1.4 min_zoom: 13.0}
+            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #xaad3df center_width: 1.2 min_zoom: 13.0}
             MapRailRule{sort_rank: 710 center_color: #x6e6e6e center_width: 1.0}
         }
         style_dark: MapThemeStyle{
@@ -216,17 +216,17 @@ script_mod! {
             MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #x404a57 casing_width: 4.0 center_color: #x677383 center_width: 3.0}
             MapRoadRule{kind: "service" sort_rank: 240 casing_color: #x3e4753 casing_width: 3.0 center_color: #x5e6a79 center_width: 2.0}
             MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x3e4753 casing_width: 4.0 center_color: #x5e6a79 center_width: 3.0}
-            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0}
-            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0}
-            MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.8 center_shape_id: 10.0}
-            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x4f5966 center_width: 2.0 center_shape_id: 10.0}
-            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x4f5966 center_width: 1.0 center_shape_id: 10.0}
+            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x4f5966 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x4f5966 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "*" sort_rank: 280 casing_color: #x404a57 casing_width: 3.6 center_color: #x606c7b center_width: 2.5}
 
             MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #x204f74 center_width: 4.0}
-            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #x204f74 center_width: 3.0}
-            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #x204f74 center_width: 1.4}
-            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #x204f74 center_width: 1.2}
+            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #x204f74 center_width: 3.0 min_zoom: 12.0}
+            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #x204f74 center_width: 1.4 min_zoom: 13.0}
+            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #x204f74 center_width: 1.2 min_zoom: 13.0}
             MapRailRule{sort_rank: 710 center_color: #x8a919d center_width: 1.0}
         }
 
