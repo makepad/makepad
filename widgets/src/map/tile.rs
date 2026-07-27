@@ -494,7 +494,11 @@ fn merge_detail_features(
                 way.tags.get("layer").map(|value| value.as_str()),
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
-            if !way.closed {
+            // osm_lines rings arrive as LineStrings, so `closed` is only
+            // set for real Polygon geometry — detect implicit closure.
+            let ring_closed = way.closed
+                || (way.points.len() >= 4 && way.points.first() == way.points.last());
+            if !ring_closed {
                 continue;
             }
             // Pedestrian squares mapped as highway=pedestrian + area=yes
@@ -507,6 +511,7 @@ fn merge_detail_features(
                         Some("pedestrian" | "footway")
                     );
                 if is_ped_area && want_platforms {
+                    way.closed = true;
                     way.tags
                         .insert("layer".to_string(), "street_polygons".to_string());
                     ways.push(way);
@@ -579,7 +584,7 @@ fn merge_detail_features(
 /// through one, signals/chargers at street level.
 fn micro_icon_min_zoom(icon: &str) -> f32 {
     match icon {
-        "entrance" => 17.5,
+        "entrance" => 18.0,
         "traffic_signals" | "charger" | "dot" => 16.5,
         "parking" => 15.5,
         _ => 0.0,
@@ -700,13 +705,21 @@ fn build_tile_buffers_from_features(
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8)>::new();
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         if render_zoom >= ICON_MIN_ZOOM {
             if let Some((icon_name, color_class)) = icon_for_tags(tags) {
                 if let Some(mesh) = icon_mesh(icon_name) {
-                    icon_jobs.push((*point, mesh, color_class));
+                    // Doors and generic dots yield to real symbols in the
+                    // collision pass (a recycling point must not lose to
+                    // the building entrance next to it).
+                    let priority = match icon_name {
+                        "entrance" => 2,
+                        "dot" => 1,
+                        _ => 0,
+                    };
+                    icon_jobs.push((*point, mesh, color_class, priority));
                     // text sits below the symbol, carto-style
                     label_point.1 += 11.0 / render_scale;
                 }
@@ -716,13 +729,14 @@ fn build_tile_buffers_from_features(
             labels.push(label);
         }
     }
+    icon_jobs.sort_by_key(|job| job.3);
 
     // Icon-vs-icon collision: keep the first symbol in any ~icon-sized
     // neighborhood (dense shopping streets otherwise stack into a carpet).
     let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
     let icon_min_dist_sq = icon_min_dist * icon_min_dist;
     let mut accepted_icons = Vec::<(f32, f32)>::new();
-    icon_jobs.retain(|(point, _, _)| {
+    icon_jobs.retain(|(point, _, _, _)| {
         let collides = accepted_icons.iter().any(|other| {
             let dx = other.0 - point.0;
             let dy = other.1 - point.1;
@@ -1263,7 +1277,7 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class) in &icon_jobs {
+    for (anchor, mesh, color_class, _) in &icon_jobs {
         append_icon_mesh(
             mesh,
             *anchor,
