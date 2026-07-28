@@ -805,15 +805,42 @@ pub fn stroke_style_for_tags(
     // road network; nature and admin boundaries as outlines.
     match layer {
         "routes" => {
+            // Transit-map look: each tram/metro line gets its own strong,
+            // stable color (hash of the line ref) over a white casing so
+            // routes read as a network, not faint threads under the roads.
+            const LINE_PALETTE: [u32; 10] = [
+                0xd7263d, 0x1b9e4b, 0x2456d7, 0xf2760c, 0x8e2bbf, 0x0b8f8f,
+                0xc72b8e, 0x8a5a2b, 0x5a7d00, 0x364fc7,
+            ];
+            let mode = tags.get("mode").map(|v| v.as_str()).unwrap_or("");
+            let line_ref = tags.get("ref").map(|v| v.as_str()).unwrap_or("");
+            let (color, width) = match mode {
+                "rail" => (0x37474f, 2.0),
+                "ferry" => (0x1b78c4, 2.0),
+                _ => {
+                    // tram/metro: stable per-line color
+                    let mut h: u32 = 5381;
+                    for b in line_ref.bytes() {
+                        h = h.wrapping_mul(33) ^ b as u32;
+                    }
+                    (LINE_PALETTE[(h % LINE_PALETTE.len() as u32) as usize], 2.6)
+                }
+            };
             return Some(StrokeStyle {
-                sort_rank: 400,
-                casing: None,
-                center: StrokePassStyle {
-                    color: 0x0a6cc8,
-                    width: 1.5 * px_to_units,
+                sort_rank: 730,
+                casing: Some(StrokePassStyle {
+                    color: 0xffffff,
+                    width: (width + 2.0) * px_to_units,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
-                    depth_micro: 400.0 * DEPTH_MICRO_PER_RANK,
+                    depth_micro: 729.0 * DEPTH_MICRO_PER_RANK,
+                }),
+                center: StrokePassStyle {
+                    color,
+                    width: width * px_to_units,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 730.0 * DEPTH_MICRO_PER_RANK,
                 },
             });
         }
@@ -831,11 +858,17 @@ pub fn stroke_style_for_tags(
             });
         }
         "gemeenten" | "wijken" | "buurten" => {
-            let width = match layer {
-                "gemeenten" => 1.6,
-                "wijken" => 1.1,
-                _ => 0.8,
+            // Administrative boundary look: purple-gray, weight by tier,
+            // finer tiers only appear as you zoom in.
+            let (width, min_zoom) = match layer {
+                "gemeenten" => (1.8, 6),
+                "wijken" => (1.2, 11),
+                _ => (0.9, 13),
             };
+            if render_zoom < min_zoom {
+                return None;
+            }
+            let width: f32 = width;
             return Some(StrokeStyle {
                 sort_rank: 380,
                 casing: None,
