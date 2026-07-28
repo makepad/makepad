@@ -1750,7 +1750,7 @@ fn append_icon_mesh(
             vertex.y,
             0.0,
             0.0,
-            0.04, // tilt micro-depth: symbols above every ground stroke
+            90.0, // tilt depth: markers NEVER clip into the tilted ground
             24.0, // clip_radius: generous, avoids pop-in at view edges
             *zbias,
         ]);
