@@ -651,6 +651,11 @@ impl LlamaVocab {
         self.token_to_id.get(piece).copied()
     }
 
+    /// Resolve a token piece (e.g. `<|image_pad|>`) to its id.
+    pub fn token_id(&self, piece: &str) -> Option<i32> {
+        self.lookup_token(piece)
+    }
+
     fn token_score(&self, token_id: i32) -> Option<f32> {
         usize::try_from(token_id)
             .ok()
