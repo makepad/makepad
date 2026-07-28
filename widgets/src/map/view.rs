@@ -224,6 +224,8 @@ script_mod! {
             MapFillRule{group: "landuse" value: "meadow" color: #xcdebb0}
             MapFillRule{group: "landuse" value: "farmland" color: #xeef0d5}
             MapFillRule{group: "landuse" value: "railway" color: #xece7f1}
+            MapFillRule{group: "landuse" value: "cemetery" color: #xaacbaf}
+            MapFillRule{group: "landuse" value: "sand" color: #xf2e9cf}
             MapFillRule{group: "landuse" value: "*" color: #xe8e7e2}
             MapFillRule{group: "leisure" value: "park" color: #xc8facc}
             MapFillRule{group: "leisure" value: "garden" color: #xcdebb0}
@@ -275,6 +277,8 @@ script_mod! {
             MapFillRule{group: "landuse" value: "meadow" color: #x2a3c2d}
             MapFillRule{group: "landuse" value: "farmland" color: #x2a3c2d}
             MapFillRule{group: "landuse" value: "railway" color: #x2f2b36}
+            MapFillRule{group: "landuse" value: "cemetery" color: #x2b3a2f}
+            MapFillRule{group: "landuse" value: "sand" color: #x3a362c}
             MapFillRule{group: "landuse" value: "*" color: #x2d3239}
             MapFillRule{group: "leisure" value: "park" color: #x2f4a34}
             MapFillRule{group: "leisure" value: "garden" color: #x2f4a34}

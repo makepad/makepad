@@ -504,15 +504,29 @@ fn merge_detail_features(
                         way.tags.get("highway").map(|v| v.as_str()),
                         Some("pedestrian" | "footway")
                     );
-                if is_ped_area && want_platforms && way.points.len() >= 3 {
-                    if way.points.first() != way.points.last() {
-                        let first = way.points[0];
-                        way.points.push(first);
+                let is_attraction_ring = way.tags.contains_key("name")
+                    && (way.tags.contains_key("attraction")
+                        || way.tags.contains_key("zoo")
+                        || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"))
+                    && way.points.len() >= 4
+                    && way.points.first() == way.points.last();
+                let target_layer = if is_ped_area {
+                    Some("street_polygons")
+                } else if is_attraction_ring {
+                    Some("attraction_area")
+                } else {
+                    None
+                };
+                if let Some(layer) = target_layer {
+                    if want_platforms && way.points.len() >= 3 {
+                        if way.points.first() != way.points.last() {
+                            let first = way.points[0];
+                            way.points.push(first);
+                        }
+                        way.closed = true;
+                        way.tags.insert("layer".to_string(), layer.to_string());
+                        ways.push(way);
                     }
-                    way.closed = true;
-                    way.tags
-                        .insert("layer".to_string(), "street_polygons".to_string());
-                    ways.push(way);
                 }
                 continue;
             }
@@ -543,8 +557,34 @@ fn merge_detail_features(
                 Some("garden")
             ) || matches!(
                 way.tags.get("natural").map(|v| v.as_str()),
-                Some("scrub" | "heath" | "shrubbery")
+                Some("scrub" | "heath" | "shrubbery" | "sand" | "beach" | "shingle")
             );
+            // Zoo perimeter draws carto's purple boundary line.
+            if matches!(
+                way.tags.get("tourism").map(|v| v.as_str()),
+                Some("zoo" | "theme_park")
+            ) {
+                if want_platforms {
+                    way.tags
+                        .insert("layer".to_string(), "tourism_boundary".to_string());
+                    ways.push(way);
+                }
+                continue;
+            }
+            // Named zoo enclosures / attractions label at their centroid
+            // (and fill if they carry a surface like sand).
+            let is_attraction = way.tags.contains_key("name")
+                && (way.tags.contains_key("attraction")
+                    || way.tags.contains_key("zoo")
+                    || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"));
+            if is_attraction {
+                if want_platforms {
+                    way.tags
+                        .insert("layer".to_string(), "attraction_area".to_string());
+                    ways.push(way);
+                }
+                continue;
+            }
             if is_green_patch {
                 if want_platforms {
                     way.tags.insert("layer".to_string(), "detail_land".to_string());
@@ -873,9 +913,9 @@ fn build_tile_buffers_from_features(
             // Base buildings are replaced by the extruded detail set.
             continue;
         }
-        let Some(color) = fill_color_for_tags(theme, &way.tags, way.closed) else {
-            continue;
-        };
+        // Labels are independent of fills: a named zoo enclosure with no
+        // distinctive surface still gets its name at the centroid.
+        let fill_color = fill_color_for_tags(theme, &way.tags, way.closed);
         let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
             continue;
         };
@@ -896,6 +936,9 @@ fn build_tile_buffers_from_features(
                 labels.push(label);
             }
         }
+        let Some(color) = fill_color else {
+            continue;
+        };
         let feature_key = way
             .tags
             .get(MVT_INTERNAL_FEATURE_KEY)
