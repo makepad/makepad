@@ -824,23 +824,17 @@ pub fn stroke_style_for_tags(
             ) {
                 style.center.color = 0x9c9c9c;
             }
-            // Footway bridges: white deck with a thin dark rim (carto's
-            // little outline box over water) — the dots stop on the span.
+            // Footway bridges: white deck under the dots; the dark rim is
+            // a companion job (thin_bridge_rim_style) — three passes total,
+            // like carto's outlined bridge box with faint dots on top.
             if tag_is_truthy(tags, "bridge") {
                 style.casing = Some(StrokePassStyle {
-                    color: 0x8f8f8f,
-                    width: style.center.width * 3.0,
+                    color: THIN_BRIDGE_DECK_COLOR,
+                    width: style.center.width * 2.6,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
                 });
-                style.center = StrokePassStyle {
-                    color: 0xfbfbfa,
-                    width: style.center.width * 2.2,
-                    shape_id: 0.0,
-                    expand_class: EXPAND_CLASS_THIN,
-                    depth_micro: style.center.depth_micro,
-                };
             }
         }
         // Bridges float above (and tunnels below) their base rank in the
@@ -933,6 +927,29 @@ const RAIL_SLEEPER_MIN_ZOOM: u32 = 15;
 /// Trams darken toward carto's near-black only at street level; at city
 /// scale they stay the theme's faint gray so they don't dominate.
 const TRAM_DARK_MIN_ZOOM: u32 = 16;
+
+/// Marker color for the thin-bridge white deck (see thin_bridge_rim_style).
+pub const THIN_BRIDGE_DECK_COLOR: u32 = 0xfbfbfa;
+
+/// Companion pass for thin footway bridges: the dark rim drawn just under
+/// the white deck, producing carto's outlined bridge box.
+pub fn thin_bridge_rim_style(style: &StrokeStyle) -> Option<StrokeStyle> {
+    let casing = style.casing?;
+    if casing.color != THIN_BRIDGE_DECK_COLOR {
+        return None;
+    }
+    Some(StrokeStyle {
+        sort_rank: style.sort_rank,
+        casing: None,
+        center: StrokePassStyle {
+            color: 0x8f8f8f,
+            width: casing.width * 1.4,
+            shape_id: 0.0,
+            expand_class: EXPAND_CLASS_THIN,
+            depth_micro: casing.depth_micro - DEPTH_MICRO_PER_RANK,
+        },
+    })
+}
 
 fn rail_stroke_style(
     template: StrokeTemplate,
