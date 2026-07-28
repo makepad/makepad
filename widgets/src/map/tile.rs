@@ -2624,6 +2624,64 @@ mod bridge_probe_tests {
 
     #[test]
     #[ignore]
+    fn place_labels_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        if !base.exists() {
+            return;
+        }
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(base).unwrap();
+        // Amsterdam's own tile: dump raw place kinds.
+        {
+            let (z, x, y) = (10i64, 525i64, 336i64);
+            if let Some(raw) = reader.get_tile(z, x, (1 << z) - 1 - y).unwrap() {
+                let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+                let pbf = decode_vector_tile_payload(&raw).unwrap();
+                let mut collector = MvtLocalCollector::new(1.0);
+                parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+                for (_, tags) in &collector.points {
+                    if tags.get("layer").map(|v| v.as_str()) == Some("place_labels") {
+                        let name = tags.get("name").cloned().unwrap_or_default();
+                        if name.contains("Amsterdam") || name.contains("Haarlem") {
+                            let mut t: Vec<_> = tags.iter().collect();
+                            t.sort();
+                            println!("PLACE {:?}", t);
+                        }
+                    }
+                }
+            }
+        }
+        for (z, x, y) in [(11i64, 1052i64, 674i64), (10, 526, 337), (8, 131, 84)] {
+            let raw = reader.get_tile(z, x, (1 << z) - 1 - y).unwrap().unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let theme = CompiledMapTheme::default();
+            let buffers =
+                build_tile_buffers_from_mvt(key, &raw, None, &[], &theme, z as u32, false)
+                    .unwrap();
+            let places: Vec<&TileLabel> = buffers
+                .labels
+                .iter()
+                .filter(|l| l.source_layer == "place_labels")
+                .collect();
+            let streets = buffers
+                .labels
+                .iter()
+                .filter(|l| l.source_layer.starts_with("street"))
+                .count();
+            println!(
+                "z{} labels total {} places {} streets {}",
+                z,
+                buffers.labels.len(),
+                places.len(),
+                streets
+            );
+            for label in places.iter().take(5) {
+                println!("  {:?} kind={} prio={}", label.text, label.road_kind, label.priority);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn overlay_chargers_probe() {
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let overlay = std::path::Path::new("../local/overlays/nl-chargers.mbtiles");
