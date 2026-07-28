@@ -19,5 +19,9 @@ name = "whisper-test"
 path = "src/bin/whisper_test.rs"
 
 [[bin]]
+name = "vad-test"
+path = "src/bin/vad_test.rs"
+
+[[bin]]
 name = "apple-speech-test"
 path = "src/bin/apple_speech_test.rs"
