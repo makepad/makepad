@@ -63,6 +63,17 @@ script_mod! {
         }
     }
 
+    // Light panel checkbox: the desktop theme's label text is white.
+    let LayerCheck = CheckBox{
+        draw_text +: {
+            color: #x223038
+            color_hover: #x000000
+            color_down: #x000000
+            color_active: #x223038
+            color_focus: #x223038
+        }
+    }
+
     // The app's floating panels are light; the desktop theme's button text
     // is white, so pin dark label colors.
     let AppButton = Button{
@@ -242,10 +253,10 @@ script_mod! {
                                     border_size: 1.0
                                     border_color: #x00000022
                                 }
-                                layer_chargers := CheckBox{text: "EV chargers"}
-                                layer_transit := CheckBox{text: "Transit"}
-                                layer_nature := CheckBox{text: "Nature areas"}
-                                layer_districts := CheckBox{text: "Districts"}
+                                layer_chargers := LayerCheck{text: "EV chargers"}
+                                layer_transit := LayerCheck{text: "Transit"}
+                                layer_nature := LayerCheck{text: "Nature areas"}
+                                layer_districts := LayerCheck{text: "Districts"}
                                 PanelText{
                                     margin: Inset{top: 6}
                                     text: "Terrain · Noise · Flood · Rain: soon"
@@ -403,6 +414,8 @@ pub struct App {
     mode: TravelMode,
     #[rust]
     active_elevation_id: u64,
+    #[rust]
+    layers_open: bool,
 }
 
 impl App {
@@ -984,9 +997,10 @@ impl MatchEvent for App {
             self.end_nav(cx);
         }
         if self.ui.button(cx, ids!(layers_button)).clicked(actions) {
-            let panel = self.ui.view(cx, ids!(layers_panel));
-            let visible = panel.visible();
-            panel.set_visible(cx, !visible);
+            self.layers_open = !self.layers_open;
+            self.ui
+                .view(cx, ids!(layers_panel))
+                .set_visible(cx, self.layers_open);
         }
         let layers_changed = self
             .ui
