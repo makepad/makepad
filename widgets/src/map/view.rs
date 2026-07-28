@@ -2493,6 +2493,23 @@ impl MapView {
                 };
                 let is_address = label.source_layer == "addresses";
                 let is_poi = label.source_layer == "pois";
+                // carto placenames zoom gates by settlement kind.
+                if let Some(kind) = label.road_kind.strip_prefix("place:") {
+                    let min_zoom = match kind {
+                        "city" => 4.0,
+                        "town" => 7.0,
+                        "village" | "suburb" | "borough" => 11.5,
+                        _ => 13.5,
+                    };
+                    let max_zoom = match kind {
+                        "city" => 15.5,
+                        "town" => 16.5,
+                        _ => 17.0,
+                    };
+                    if view_zoom < min_zoom || view_zoom > max_zoom {
+                        continue;
+                    }
+                }
                 if is_address && view_zoom < ADDRESS_LABEL_MIN_ZOOM {
                     continue;
                 }
@@ -2590,6 +2607,13 @@ impl MapView {
                     font_scale = 0.60;
                 } else if is_poi {
                     font_scale = 0.72;
+                } else if let Some(kind) = label.road_kind.strip_prefix("place:") {
+                    font_scale = match kind {
+                        "city" => 1.55,
+                        "town" => 1.2,
+                        "village" | "suburb" | "borough" => 1.0,
+                        _ => 0.9,
+                    };
                 }
                 // quantize so the shaped-run cache hits during continuous zoom
                 font_scale = (font_scale * 32.0).round() / 32.0;
