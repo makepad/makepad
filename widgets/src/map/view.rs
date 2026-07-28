@@ -38,7 +38,7 @@ script_mod! {
         tilt_params: uniform(vec4(1.0, 0.0, 0.0, 0.0))
 
         fragment: fn(){
-            self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade, self.depth_clip)
+            self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade * self.fill_pattern(), self.depth_clip)
         }
 
         vertex: fn() {
@@ -174,6 +174,23 @@ script_mod! {
             );
             self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+
+        fill_pattern: fn() {
+            if self.v_shape_id > 29.5 && self.v_shape_id < 30.5 {
+                let cell = fract(self.v_world / 7.0) - vec2(0.5, 0.5)
+                let d = length(cell) * 7.0
+                let dot = 1.0 - smoothstep(1.0, 1.7, d)
+                let f = 1.0 - 0.16 * dot
+                return vec4(f, f, f, 1.0)
+            }
+            if self.v_shape_id > 30.5 && self.v_shape_id < 31.5 {
+                let band = fract((self.v_world.x + self.v_world.y) / 9.0)
+                let line = 1.0 - smoothstep(0.10, 0.20, abs(band - 0.5))
+                let f = 1.0 - 0.12 * line
+                return vec4(f, f, f, 1.0)
+            }
+            return vec4(1.0, 1.0, 1.0, 1.0)
         }
 
         get_stroke_mask: fn() {
