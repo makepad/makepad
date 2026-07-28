@@ -19,7 +19,11 @@ use crate::vocab::LlamaVocab;
 use crate::weights::LoadedGgufWeights;
 
 const DEFAULT_EXTRA_ACTIVATION_BYTES: usize = 512 << 20;
-const DEFAULT_PREFILL_BATCH_SIZE: usize = 1;
+// Was 1 while batched prefill produced garbage — root cause was the non-flat
+// unary metal dispatch dropping its ne0-chunk grid factor (fixed 2026-07-28,
+// see makepad-ggml `executes_unary_large_rows_on_metal_when_available`).
+// Batched prefill now verifies against sequential on qwen35 4B/9B up to 64.
+const DEFAULT_PREFILL_BATCH_SIZE: usize = 32;
 const GRAPH_RESERVE_RETRY_BYTES: usize = 64 << 20;
 const MAX_GRAPH_RESERVE_RETRIES: usize = 4;
 
@@ -261,7 +265,7 @@ impl LlamaSession {
             recurrent_r_type: config.recurrent_r_type,
             recurrent_s_type: config.recurrent_s_type,
         };
-        let spec = model.hybrid_decode_spec(
+        let mut spec = model.hybrid_decode_spec(
             cache_shape.n_ctx_seq,
             cache_shape.n_seq_max,
             config.attention_k_type,
@@ -269,6 +273,17 @@ impl LlamaSession {
             config.recurrent_r_type,
             config.recurrent_s_type,
         )?;
+        // Debug escape hatch: truncate the network to the first N blocks so a
+        // wrong-output bug can be bisected to the block where it starts.
+        if let Ok(max_blocks) = std::env::var("MAKEPAD_LLAMA_MAX_BLOCKS") {
+            if let Ok(max_blocks) = max_blocks.parse::<usize>() {
+                eprintln!(
+                    "session: truncating {} layers to {max_blocks} (MAKEPAD_LLAMA_MAX_BLOCKS)",
+                    spec.layers.len()
+                );
+                spec.layers.truncate(max_blocks);
+            }
+        }
         let cache_bytes = if let Some(template) = plan.hybrid_cache.as_ref() {
             HybridCacheLayout::new(template.materialize(cache_shape, cache_types))?.total_bytes
         } else {
@@ -375,7 +390,14 @@ impl LlamaSession {
             return Ok(());
         }
         for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
-            self.graphs.evict_graphs_except(params);
+            // Cached graphs don't reserve buffer space of their own (plans
+            // share the main buffer), so keep them: prefill steps revisit the
+            // same (n_tokens, key_count) params across prompts, and evicting
+            // here forced a recompile of every step on every prompt. Eviction
+            // happens only when a compile actually fails to reserve, below.
+            if attempt > 0 {
+                self.graphs.evict_graphs_except(params);
+            }
             match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
                 &mut self.weights,
                 &self.spec,
