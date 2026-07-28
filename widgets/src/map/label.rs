@@ -313,6 +313,34 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
+        // Settlement names — THE labels at low zoom (carto placenames.mss:
+        // city z4+, town z7+, village/suburb z12+, quarter/hamlet z14+).
+        // Kind-based zoom gating and text scaling happen at candidate time
+        // in the view (it knows the live zoom); here we classify.
+        "place_labels" => {
+            let name = select_label_text(tags)?;
+            let kind = tags
+                .get("kind")
+                .or_else(|| tags.get("place"))
+                .map(|value| value.as_str())
+                .unwrap_or("");
+            let priority = match kind {
+                "city" => 0,
+                "town" => 1,
+                "village" | "suburb" | "borough" => 2,
+                _ => 3,
+            };
+            return Some(TileLabel {
+                text: name,
+                priority,
+                source_layer,
+                road_kind: format!("place:{}", kind),
+                color_class: LABEL_CLASS_DEFAULT,
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
         // Water body names (lakes, the IJ, canals-as-polygons) come as
         // centroid points in their own shortbread layer.
         "water_polygons_labels" => {
@@ -462,6 +490,8 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "street_labels" | "street_labels_points" => 7,
         "streets_polygons_labels" => 6,
         "transportation_name" => 6,
+        // Settlement names outrank everything.
+        "place_labels" => 9,
         // Water names sit just under street names in prominence.
         "water_polygons_labels" => 5,
         "water_lines_labels" => 4,
