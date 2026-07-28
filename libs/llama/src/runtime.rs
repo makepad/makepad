@@ -8714,6 +8714,7 @@ mod tests {
             },
             embedding_length: (s_v * h_v) as u32,
             input_norm_name: String::new(),
+            merged_input_proj_name: None,
             qkv_proj_name: String::new(),
             qkv_proj_scale_name: None,
             z_proj_name: String::new(),

@@ -10,6 +10,7 @@ pub mod qwen35moe;
 pub mod qwen35moe_runtime;
 pub mod runtime;
 pub mod session;
+pub mod vision;
 pub mod vocab;
 pub mod weights;
 
@@ -115,5 +116,9 @@ pub use runtime::{
     RmsNormSpec,
 };
 pub use session::{LlamaGeneration, LlamaSession, LlamaSessionConfig, LlamaStopReason};
+pub use vision::{
+    calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
+    VisionConfig, VisionTower,
+};
 pub use vocab::{LlamaTextDecoder, LlamaTokenizerKind, LlamaVocab};
 pub use weights::{GgufWeightLayout, LoadedGgufWeights};
