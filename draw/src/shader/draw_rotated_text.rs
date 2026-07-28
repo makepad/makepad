@@ -17,16 +17,29 @@ script_mod! {
 
         rotated_pos: varying(vec2f)
 
+        // Camera-delta transform (best-effort label tracking while the
+        // map rotates/tilts between re-places): whole placed glyphs spin
+        // about the view pivot on the GPU, the async re-place trues up.
+        cam_cs: uniform(1.0)
+        cam_sn: uniform(0.0)
+        cam_tilt: uniform(1.0)
+        cam_pivot: uniform(vec2(0.0, 0.0))
+
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
             let origin = self.rotation_origin
             let scaled = (p - origin) * self.label_scale
             let cs = cos(self.rotation)
             let sn = sin(self.rotation)
-            let rotated = vec2(
+            var rotated = vec2(
                 scaled.x * cs - scaled.y * sn,
                 scaled.x * sn + scaled.y * cs
             ) + origin
+            let cam_rel = rotated - self.cam_pivot
+            rotated = vec2(
+                cam_rel.x * self.cam_cs - cam_rel.y * self.cam_sn,
+                (cam_rel.x * self.cam_sn + cam_rel.y * self.cam_cs) * self.cam_tilt
+            ) + self.cam_pivot
 
             self.pos = self.geom.pos
             self.t = mix(self.t_min, self.t_max, self.geom.pos.xy)
@@ -84,6 +97,26 @@ pub struct DrawRotatedText {
     pub label_scale: f32,
     #[live(vec2(0.0, 0.0))]
     pub rotation_origin: Vec2f,
+}
+
+impl DrawRotatedText {
+    /// Camera-delta uniforms: rotate placed glyphs about `pivot` by the
+    /// given cos/sin and compress y by `tilt_ratio` — identity when the
+    /// placement is fresh.
+    pub fn set_camera_delta(
+        &mut self,
+        cx: &mut Cx,
+        cos: f32,
+        sin: f32,
+        tilt_ratio: f32,
+        pivot: Vec2f,
+    ) {
+        self.draw_vars.set_uniform(cx, live_id!(cam_cs), &[cos]);
+        self.draw_vars.set_uniform(cx, live_id!(cam_sn), &[sin]);
+        self.draw_vars.set_uniform(cx, live_id!(cam_tilt), &[tilt_ratio]);
+        self.draw_vars
+            .set_uniform(cx, live_id!(cam_pivot), &[pivot.x, pivot.y]);
+    }
 }
 
 /// A single glyph positioned along a path, ready to draw.
