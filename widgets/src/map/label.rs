@@ -45,6 +45,8 @@ pub const LABEL_CLASS_TRANSPORT: u8 = 7;
 pub const LABEL_CLASS_TREE: u8 = 8;
 /// Water body / waterway names (steel blue, carto-style).
 pub const LABEL_CLASS_WATER: u8 = 9;
+/// Text drawn INSIDE a colored pin badge (white, both themes).
+pub const LABEL_CLASS_PIN: u8 = 10;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -315,6 +317,8 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         }
         // Charger sites label their power (and Superchargers their brand):
         // the kW number is the routing-relevant fact for an EV navigator.
+        // Fast-charger pins carry their kW INSIDE the bubble: white text
+        // over the tier-colored badge, number only ("250").
         "chargers" => {
             let kw = tags
                 .get("max_kw")
@@ -323,24 +327,12 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
             if kw < 50.0 {
                 return None;
             }
-            let operator = tags.get("operator").map(|value| value.as_str()).unwrap_or("");
-            let is_tesla = operator.to_ascii_lowercase().contains("tesla");
-            let text = if is_tesla {
-                format!("Supercharger {:.0} kW", kw)
-            } else {
-                format!("{:.0} kW", kw)
-            };
-            let color_class = if kw >= 150.0 {
-                LABEL_CLASS_HEALTH
-            } else {
-                LABEL_CLASS_AMENITY
-            };
             return Some(TileLabel {
-                text,
+                text: format!("{:.0}", kw),
                 priority: 3,
                 source_layer,
                 road_kind: format!("chg{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
-                color_class,
+                color_class: LABEL_CLASS_PIN,
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
@@ -549,6 +541,7 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "micro_pois" => 3,
         // Charger kW labels outrank street names — this is an EV navigator.
         "chargers" => 8,
+        "charger_brand" => 8,
         "pois" => 3,
         "green_area" => 4,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
@@ -625,6 +618,10 @@ pub fn is_road_point_label_layer(layer: &str) -> bool {
             | "streets_polygons_labels"
             | "transportation_name"
     )
+}
+
+pub fn point_label_path_pub(point: (f32, f32)) -> Vec<(f32, f32)> {
+    point_label_path(point)
 }
 
 fn point_label_path(point: (f32, f32)) -> Vec<(f32, f32)> {
