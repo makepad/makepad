@@ -31,3 +31,7 @@ path = "src/bin/llama_batch_probe.rs"
 [[bin]]
 name = "vlm-vision-probe"
 path = "src/bin/vlm_vision_probe.rs"
+
+[[bin]]
+name = "vlm-probe"
+path = "src/bin/vlm_probe.rs"
