@@ -520,27 +520,89 @@ fn read_pbf_header(path: &Path) -> Result<PbfHeaderInfo, String> {
     })
 }
 
+/// Ordered parallel pbf visitor: blob READS stay serial (cheap IO), the
+/// expensive zlib+protobuf DECODE fans out over a worker pool, and the
+/// callback runs on the calling thread in exact file order — so store
+/// builders that rely on id-sorted input need no changes. This is where
+/// the old converter spent most of its 10+ hours: one core decoding.
 fn visit_pbf<F>(path: &Path, mut callback: F) -> Result<(), String>
 where
     F: for<'a> FnMut(Element<'a>) -> Result<(), String>,
 {
-    let reader =
-        BlobReader::from_path(path).map_err(|err| format!("open {}: {err}", path.display()))?;
-    for blob in reader {
-        match blob
-            .map_err(|err| format!("read {}: {err}", path.display()))?
-            .decode()
-            .map_err(|err| format!("decode {}: {err}", path.display()))?
-        {
-            BlobDecode::OsmData(block) => {
-                for element in block.elements() {
-                    callback(element)?;
+    use osmpbf::PrimitiveBlock;
+    use std::collections::BinaryHeap;
+    use std::sync::mpsc::sync_channel;
+    use std::sync::{Arc, Mutex};
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2).max(2))
+        .unwrap_or(4);
+    let (blob_tx, blob_rx) = sync_channel::<(u64, osmpbf::Blob)>(workers * 4);
+    let blob_rx = Arc::new(Mutex::new(blob_rx));
+    let (block_tx, block_rx) =
+        sync_channel::<(u64, Result<Option<PrimitiveBlock>, String>)>(workers * 4);
+
+    std::thread::scope(|scope| -> Result<(), String> {
+        let path_owned = path.to_path_buf();
+        let reader_handle = scope.spawn(move || -> Result<(), String> {
+            let reader = BlobReader::from_path(&path_owned)
+                .map_err(|err| format!("open {}: {err}", path_owned.display()))?;
+            for (seq, blob) in reader.enumerate() {
+                let blob =
+                    blob.map_err(|err| format!("read {}: {err}", path_owned.display()))?;
+                if blob_tx.send((seq as u64, blob)).is_err() {
+                    break;
                 }
             }
-            BlobDecode::OsmHeader(_) | BlobDecode::Unknown(_) => {}
+            Ok(())
+        });
+        for _ in 0..workers {
+            let blob_rx = Arc::clone(&blob_rx);
+            let block_tx = block_tx.clone();
+            scope.spawn(move || {
+                loop {
+                    let received = { blob_rx.lock().unwrap().recv() };
+                    let Ok((seq, blob)) = received else {
+                        break;
+                    };
+                    let decoded = match blob.decode() {
+                        Ok(BlobDecode::OsmData(block)) => Ok(Some(block)),
+                        Ok(BlobDecode::OsmHeader(_)) | Ok(BlobDecode::Unknown(_)) => Ok(None),
+                        Err(err) => Err(format!("decode: {err}")),
+                    };
+                    if block_tx.send((seq, decoded)).is_err() {
+                        break;
+                    }
+                }
+            });
         }
-    }
-    Ok(())
+        drop(block_tx);
+
+        // Reassemble in order; apply the callback serially.
+        let mut pending = BinaryHeap::<std::cmp::Reverse<(u64, u64)>>::new();
+        let mut stash =
+            std::collections::HashMap::<u64, Result<Option<PrimitiveBlock>, String>>::new();
+        let mut next_seq = 0u64;
+        for (seq, decoded) in block_rx.iter() {
+            stash.insert(seq, decoded);
+            pending.push(std::cmp::Reverse((seq, seq)));
+            while stash.contains_key(&next_seq) {
+                let decoded = stash.remove(&next_seq).unwrap();
+                next_seq += 1;
+                if let Some(block) = decoded? {
+                    for element in block.elements() {
+                        callback(element)?;
+                    }
+                }
+            }
+        }
+        // On callback error the receivers drop and threads unwind on their
+        // own; surface the reader error if any.
+        match reader_handle.join() {
+            Ok(result) => result,
+            Err(_) => Err("pbf reader thread panicked".to_string()),
+        }
+    })
 }
 
 fn mark_relation_ways(
