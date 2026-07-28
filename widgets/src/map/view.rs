@@ -294,7 +294,7 @@ script_mod! {
             MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xaaa8a5 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
             MapRoadRule{kind: "path" sort_rank: 160 center_color: #xaaa8a5 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
             MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xaaa8a5 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
-            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x996600 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #xaaa8a5 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xbbbbbb casing_width: 3.6 center_color: #xffffff center_width: 2.5}
 
             MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #xaad3df center_width: 4.0}
