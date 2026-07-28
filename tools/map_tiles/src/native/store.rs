@@ -72,6 +72,10 @@ fn write_u16(output: &mut Vec<u8>, value: u16) {
 }
 
 /// Node-group cache size: MAKEPAD_NODE_CACHE_MIB (default 8192 MiB).
+pub fn node_cache_groups_public() -> usize {
+    node_cache_groups()
+}
+
 fn node_cache_groups() -> usize {
     let mib = std::env::var("MAKEPAD_NODE_CACHE_MIB")
         .ok()
@@ -437,6 +441,10 @@ pub struct NodeStore {
     cache_capacity: usize,
     cache_clock: u64,
     last_group: Option<u64>,
+    // FIFO eviction: O(1) amortized. The old min_by_key full scan was
+    // O(cache) per miss — with a Europe-sized cache that scan WAS the
+    // pass-3 bottleneck.
+    eviction_queue: std::collections::VecDeque<u64>,
 }
 
 impl NodeStore {
@@ -455,7 +463,20 @@ impl NodeStore {
             cache_capacity: node_cache_groups(),
             cache_clock: 0,
             last_group: None,
+            eviction_queue: std::collections::VecDeque::new(),
         })
+    }
+
+    /// Same store with an explicit group-cache budget (parallel way
+    /// resolution gives each worker its own slice of the total).
+    pub fn open_with_cache(
+        data_path: &Path,
+        index_path: &Path,
+        cache_groups: usize,
+    ) -> Result<Self, String> {
+        let mut store = Self::open(data_path, index_path)?;
+        store.cache_capacity = cache_groups.max(64);
+        Ok(store)
     }
 
     pub fn get(&mut self, id: i64) -> Result<Option<NodeCoord>, String> {
@@ -483,14 +504,11 @@ impl NodeStore {
             self.last_group = Some(entry.group_id);
             return Ok(&cached.value);
         }
-        if self.cache.len() >= self.cache_capacity {
-            let oldest = *self
-                .cache
-                .iter()
-                .min_by_key(|(_, cached)| cached.used)
-                .map(|(group_id, _)| group_id)
-                .unwrap();
-            self.cache.remove(&oldest);
+        while self.cache.len() >= self.cache_capacity {
+            let Some(candidate) = self.eviction_queue.pop_front() else {
+                break;
+            };
+            self.cache.remove(&candidate);
         }
         self.file
             .seek(SeekFrom::Start(entry.offset))
@@ -500,6 +518,7 @@ impl NodeStore {
             .read_exact(&mut bytes)
             .map_err(|err| format!("read {}: {err}", self.path.display()))?;
         let group = decode_node_group(&bytes, entry.group_id)?;
+        self.eviction_queue.push_back(entry.group_id);
         self.cache.insert(
             entry.group_id,
             CacheEntry {
