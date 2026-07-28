@@ -688,6 +688,19 @@ fn build_nodes(
     Ok(())
 }
 
+/// One tagged way handed to a resolver worker.
+struct WayJob {
+    id: i64,
+    refs: Vec<i64>,
+    tags: Vec<(String, String)>,
+}
+
+/// Resolved features from a worker, ready for the single spool writer.
+struct PreparedBatch {
+    tags: Vec<(String, String)>,
+    features: Vec<geom::PreparedFeature>,
+}
+
 fn build_ways(
     source: &Path,
     paths: &NativePaths,
@@ -695,69 +708,164 @@ fn build_ways(
     spool: &mut BlockSpoolWriter,
     stats: &mut ConversionStats,
 ) -> Result<(), String> {
+    use std::sync::mpsc::sync_channel;
+    use std::sync::{Arc, Mutex};
+
     let mut relation_ways = PagedBitset::open(&paths.relation_ways)?;
-    let mut nodes = NodeStore::open(&paths.node_data, &paths.node_index)?;
     let mut ways = WayStoreBuilder::create(&paths.way_data, &paths.way_index)?;
     let mut progress = Progress::new("ways resolved");
-    visit_pbf(source, |element| {
-        let Element::Way(way) = element else {
-            return Ok(());
-        };
-        stats.ways += 1;
-        progress.tick(1);
-        let relation_member = relation_ways.contains(way.id())?;
-        let tags = collect_tags(way.tags());
-        if tags.is_empty() {
-            if relation_member {
-                let refs = way.refs().collect::<Vec<_>>();
-                ways.push(way.id(), refs)?;
+
+    // Way resolution parallelizes cleanly: the spool is order-free (pass 5
+    // external-sorts it) and only the relation-member way store needs
+    // id-ordered pushes, which stay on this thread.
+    let workers = std::thread::available_parallelism()
+        .map(|n| (n.get().saturating_sub(4)).clamp(4, 10))
+        .unwrap_or(4);
+    let cache_slice = (crate::native::store::node_cache_groups_public() / workers).max(512);
+    let (job_tx, job_rx) = sync_channel::<WayJob>(8192);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (out_tx, out_rx) = sync_channel::<Result<PreparedBatch, String>>(8192);
+
+    let result: Result<(u64, u64, u64, u64), String> = std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let job_rx = Arc::clone(&job_rx);
+            let out_tx = out_tx.clone();
+            let node_data = paths.node_data.clone();
+            let node_index = paths.node_index.clone();
+            scope.spawn(move || {
+                let mut nodes =
+                    match NodeStore::open_with_cache(&node_data, &node_index, cache_slice) {
+                        Ok(nodes) => nodes,
+                        Err(err) => {
+                            let _ = out_tx.send(Err(err));
+                            return;
+                        }
+                    };
+                loop {
+                    let job = { job_rx.lock().unwrap().recv() };
+                    let Ok(job) = job else {
+                        break;
+                    };
+                    let resolved = (|| -> Result<PreparedBatch, String> {
+                        let (projected, closed) = resolve_projected_refs(
+                            &mut nodes,
+                            job.refs.iter().copied(),
+                            job.id,
+                        )?;
+                        let mut features = Vec::new();
+                        geom::prepare_lines(
+                            zoom,
+                            Layer::OsmLines,
+                            OsmType::Way,
+                            job.id,
+                            closed,
+                            std::slice::from_ref(&projected),
+                            &mut features,
+                        )?;
+                        if closed && projected.len() >= 4 {
+                            geom::prepare_polygons(
+                                zoom,
+                                Layer::OsmPolygons,
+                                OsmType::Way,
+                                job.id,
+                                &[PolygonPart {
+                                    outer: projected,
+                                    holes: Vec::new(),
+                                }],
+                                &mut features,
+                            )?;
+                        }
+                        Ok(PreparedBatch {
+                            tags: job.tags,
+                            features,
+                        })
+                    })();
+                    if out_tx.send(resolved).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(out_tx);
+
+        // Writer thread: owns the spool, appends prepared features.
+        let writer = scope.spawn(move || -> Result<(u64, u64), String> {
+            let mut line_records = 0u64;
+            let mut polygon_records = 0u64;
+            for batch in out_rx.iter() {
+                let batch = batch?;
+                for feature in &batch.features {
+                    spool.push_parts(
+                        feature.tile_x,
+                        feature.tile_y,
+                        feature.layer,
+                        feature.geometry_type,
+                        feature.osm_type,
+                        feature.id,
+                        feature.closed,
+                        &batch.tags,
+                        feature.paths.iter().map(Vec::as_slice),
+                    )?;
+                    match feature.geometry_type {
+                        crate::native::mvt::GeometryType::Polygon => polygon_records += 1,
+                        _ => line_records += 1,
+                    }
+                }
             }
-            return Ok(());
-        }
-        stats.tagged_ways += 1;
-        stats.add_tags(inspect_tag_flags(&tags));
-        let (projected, closed, refs) = if relation_member {
-            let refs = way.refs().collect::<Vec<_>>();
-            let closed = refs.len() > 2 && refs.first() == refs.last();
-            (
-                resolve_projected_refs(&mut nodes, refs.iter().copied(), way.id())?.0,
-                closed,
-                Some(refs),
-            )
-        } else {
-            let (projected, closed) =
-                resolve_projected_refs(&mut nodes, way.refs(), way.id())?;
-            (projected, closed, None)
+            Ok((line_records, polygon_records))
+        });
+
+        // Consumer: ordered pbf visit; dispatch tagged ways, keep the
+        // id-ordered way store here.
+        let mut total_ways = 0u64;
+        let mut tagged_ways = 0u64;
+        let visit_result = visit_pbf(source, |element| {
+            let Element::Way(way) = element else {
+                return Ok(());
+            };
+            total_ways += 1;
+            progress.tick(1);
+            let relation_member = relation_ways.contains(way.id())?;
+            let tags = collect_tags(way.tags());
+            if tags.is_empty() {
+                if relation_member {
+                    let refs = way.refs().collect::<Vec<_>>();
+                    ways.push(way.id(), refs)?;
+                }
+                return Ok(());
+            }
+            tagged_ways += 1;
+            stats.add_tags(inspect_tag_flags(&tags));
+            let refs = way.refs().collect::<Vec<i64>>();
+            if relation_member {
+                ways.push(way.id(), refs.clone())?;
+            }
+            let owned_tags: Vec<(String, String)> = tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            job_tx
+                .send(WayJob {
+                    id: way.id(),
+                    refs,
+                    tags: owned_tags,
+                })
+                .map_err(|_| "way resolver workers exited early".to_string())?;
+            Ok(())
+        });
+        drop(job_tx);
+        let (line_records, polygon_records) = match writer.join() {
+            Ok(result) => result?,
+            Err(_) => return Err("spool writer thread panicked".to_string()),
         };
-        stats.way_line_tile_records += emit_lines(
-            spool,
-            zoom,
-            Layer::OsmLines,
-            OsmType::Way,
-            way.id(),
-            closed,
-            &tags,
-            std::slice::from_ref(&projected),
-        )?;
-        if closed && projected.len() >= 4 {
-            stats.way_polygon_tile_records += emit_polygons(
-                spool,
-                zoom,
-                Layer::OsmPolygons,
-                OsmType::Way,
-                way.id(),
-                &tags,
-                &[PolygonPart {
-                    outer: projected,
-                    holes: Vec::new(),
-                }],
-            )?;
-        }
-        if let Some(refs) = refs {
-            ways.push(way.id(), refs)?;
-        }
-        Ok(())
-    })?;
+        visit_result?;
+        Ok((total_ways, tagged_ways, line_records, polygon_records))
+    });
+    let (total_ways, tagged_ways, line_records, polygon_records) = result?;
+    stats.ways += total_ways;
+    stats.tagged_ways += tagged_ways;
+    stats.way_line_tile_records += line_records;
+    stats.way_polygon_tile_records += polygon_records;
     progress.finish();
     ways.finish()?;
     Ok(())

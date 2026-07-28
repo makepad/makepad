@@ -193,6 +193,122 @@ pub fn emit_polygons<T: TagPair>(
     Ok(emitted)
 }
 
+/// A feature fully localized to one tile, ready for the spool writer —
+/// produced on resolver worker threads so the single writer only appends.
+pub struct PreparedFeature {
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub layer: Layer,
+    pub geometry_type: GeometryType,
+    pub osm_type: OsmType,
+    pub id: i64,
+    pub closed: bool,
+    pub paths: Vec<Vec<TilePoint>>,
+}
+
+/// emit_lines minus the spool: collect per-tile localized features.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_lines(
+    zoom: u8,
+    layer: Layer,
+    osm_type: OsmType,
+    id: i64,
+    closed: bool,
+    paths: &[Vec<GlobalPoint>],
+    out: &mut Vec<PreparedFeature>,
+) -> Result<(), String> {
+    for path in paths {
+        if path.len() < 2 {
+            continue;
+        }
+        let Some((min_x, min_y, max_x, max_y)) = bounds(path) else {
+            continue;
+        };
+        let range = tile_range(zoom, min_x, min_y, max_x, max_y, TILE_BUFFER)?;
+        for tile_y in range.y_min..=range.y_max {
+            for tile_x in range.x_min..=range.x_max {
+                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
+                let clipped = clip_line(path, rect);
+                if clipped.is_empty() {
+                    continue;
+                }
+                let mut local_paths = Vec::with_capacity(clipped.len());
+                for clipped_path in clipped {
+                    let mut local = Vec::with_capacity(clipped_path.len());
+                    for point in clipped_path {
+                        local.push(to_local(point, tile_x, tile_y)?);
+                    }
+                    remove_consecutive_duplicates(&mut local);
+                    if local.len() >= 2 {
+                        local_paths.push(local);
+                    }
+                }
+                if local_paths.is_empty() {
+                    continue;
+                }
+                out.push(PreparedFeature {
+                    tile_x,
+                    tile_y,
+                    layer,
+                    geometry_type: GeometryType::LineString,
+                    osm_type,
+                    id,
+                    closed,
+                    paths: local_paths,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// emit_polygons minus the spool: collect per-tile localized features.
+pub fn prepare_polygons(
+    zoom: u8,
+    layer: Layer,
+    osm_type: OsmType,
+    id: i64,
+    polygons: &[PolygonPart],
+    out: &mut Vec<PreparedFeature>,
+) -> Result<(), String> {
+    for polygon in polygons {
+        if polygon.outer.len() < 3 {
+            continue;
+        }
+        let Some((min_x, min_y, max_x, max_y)) = bounds(&polygon.outer) else {
+            continue;
+        };
+        let range = tile_range(zoom, min_x, min_y, max_x, max_y, TILE_BUFFER)?;
+        for tile_y in range.y_min..=range.y_max {
+            for tile_x in range.x_min..=range.x_max {
+                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
+                let mut outer = clip_ring(&polygon.outer, rect);
+                if !normalize_ring(&mut outer, true) {
+                    continue;
+                }
+                let mut paths = vec![to_local_ring(&outer, tile_x, tile_y)?];
+                for hole in &polygon.holes {
+                    let mut clipped = clip_ring(hole, rect);
+                    if normalize_ring(&mut clipped, false) {
+                        paths.push(to_local_ring(&clipped, tile_x, tile_y)?);
+                    }
+                }
+                out.push(PreparedFeature {
+                    tile_x,
+                    tile_y,
+                    layer,
+                    geometry_type: GeometryType::Polygon,
+                    osm_type,
+                    id,
+                    closed: true,
+                    paths,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn to_local(point: GlobalPoint, tile_x: u32, tile_y: u32) -> Result<TilePoint, String> {
     let x = point.x - i64::from(tile_x) * MVT_EXTENT;
     let y = point.y - i64::from(tile_y) * MVT_EXTENT;
