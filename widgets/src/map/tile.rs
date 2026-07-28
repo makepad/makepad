@@ -1030,7 +1030,12 @@ fn build_tile_buffers_from_features(
             }
         }
 
-        if render_zoom >= 15 {
+        let area_label_ok = render_zoom >= 15
+            || matches!(
+                way.tags.get("layer").map(|value| value.as_str()),
+                Some("natura2000" | "wetlands")
+            );
+        if area_label_ok {
             if let Some(label) = extract_area_label(&way.tags, ring_centroid(&ring_points)) {
                 labels.push(label);
             }
@@ -2386,6 +2391,8 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
         "water_polygons_labels" => select_label_text(tags).is_some(),
         // Geodata overlay point layers (layers.md).
         "chargers" | "stops" => true,
+        // Settlement names (city/town/suburb…).
+        "place_labels" => select_label_text(tags).is_some(),
         _ => {
             is_road_point_label_layer(layer)
                 && tags.contains_key("highway")
