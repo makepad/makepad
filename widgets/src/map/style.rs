@@ -474,6 +474,7 @@ pub fn fill_alpha_for_tags(tags: &HashMap<String, String>) -> f32 {
     match tags.get("layer").map(|value| value.as_str()) {
         Some("natura2000" | "wetlands") => 0.22,
         Some("vk100" | "vk500") => 0.45,
+        Some("gemeenten" | "wijken" | "buurten") => 0.32,
         Some("bag") => 0.85,
         _ => 1.0,
     }
@@ -498,10 +499,31 @@ pub fn fill_pattern_shape(tags: &HashMap<String, String>) -> f32 {
     0.0
 }
 
+/// Building-age color from BAG bouwjaar — shared by the flat choropleth
+/// fill and the 3D building tint.
+pub fn bag_year_color(tags: &HashMap<String, String>) -> Option<u32> {
+    let bouwjaar = tags
+        .get("bouwjaar")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0) as i32;
+    Some(match bouwjaar {
+        0 => 0xbdbdbd,
+        year if year < 1800 => 0x8c2d04,
+        year if year < 1900 => 0xcc4c02,
+        year if year < 1930 => 0xec7014,
+        year if year < 1960 => 0xfe9929,
+        year if year < 1980 => 0xfec44f,
+        year if year < 2000 => 0x78c679,
+        year if year < 2010 => 0x41b6c4,
+        _ => 0x225ea8,
+    })
+}
+
 pub fn fill_color_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
     closed: bool,
+    render_zoom: u32,
 ) -> Option<u32> {
     if !closed {
         return None;
@@ -527,21 +549,35 @@ pub fn fill_color_for_tags(
     }
     // Building-age choropleth (BAG bouwjaar): rust = old, blue = new.
     if layer == "bag" {
-        let bouwjaar = tags
-            .get("bouwjaar")
-            .and_then(|value| value.parse::<f64>().ok())
-            .unwrap_or(0.0) as i32;
-        return Some(match bouwjaar {
-            0 => 0xbdbdbd,
-            year if year < 1800 => 0x8c2d04,
-            year if year < 1900 => 0xcc4c02,
-            year if year < 1930 => 0xec7014,
-            year if year < 1960 => 0xfe9929,
-            year if year < 1980 => 0xfec44f,
-            year if year < 2000 => 0x78c679,
-            year if year < 2010 => 0x41b6c4,
-            _ => 0x225ea8,
-        });
+        return bag_year_color(tags);
+    }
+    // Districts tint as translucent AREA shapes, one tier per zoom band so
+    // gemeente/wijk/buurt tints never stack into mud; stable per-district
+    // hue from the CBS code.
+    if matches!(layer, "gemeenten" | "wijken" | "buurten") {
+        let tier_active = match layer {
+            "gemeenten" => render_zoom < 11,
+            "wijken" => (11..13).contains(&render_zoom),
+            _ => render_zoom >= 13,
+        };
+        if !tier_active {
+            return None;
+        }
+        const DISTRICT_PALETTE: [u32; 8] = [
+            0xe57373, 0x64b5f6, 0x81c784, 0xffb74d, 0xba68c8, 0x4db6ac,
+            0xf06292, 0xa1887f,
+        ];
+        let code = tags
+            .get("buurtcode")
+            .or_else(|| tags.get("wijkcode"))
+            .or_else(|| tags.get("gemeentecode"))
+            .map(|value| value.as_str())
+            .unwrap_or("");
+        let mut h: u32 = 5381;
+        for b in code.bytes() {
+            h = h.wrapping_mul(33) ^ b as u32;
+        }
+        return Some(DISTRICT_PALETTE[(h % DISTRICT_PALETTE.len() as u32) as usize]);
     }
     // Population choropleth (CBS grid cells), yellow -> deep blue.
     if matches!(layer, "vk100" | "vk500") {
@@ -621,6 +657,11 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
     }
     if layer == "bag" {
         return 41;
+    }
+    // District tints paint OVER everything ground-level (roads included)
+    // so the area reads as one marked shape.
+    if matches!(layer, "gemeenten" | "wijken" | "buurten") {
+        return 60;
     }
     // Green areas (parks/gardens/grass) rank above generic landuse and sites:
     // they share the `land` layer with huge residential polygons and would

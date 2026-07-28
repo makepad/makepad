@@ -1,0 +1,11 @@
+[package]
+name = "makepad-tesla"
+version = "0.1.0"
+edition = "2021"
+description = "Tesla Fleet API client on the makepad network layer"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-micro-serde = { path = "../../libs/micro_serde" }
+makepad-live-id = { path = "../../libs/live_id" }

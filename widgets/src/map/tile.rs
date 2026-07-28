@@ -74,6 +74,8 @@ pub struct TileEntry {
     /// View-zoom bucket the geometry was styled for; stale buckets stay
     /// drawable while a rebuild is in flight.
     pub bucket: u32,
+    /// This bake carries 3D extrusions (buildings/trees/signals).
+    pub baked_3d: bool,
     /// Cross-fade state: the replaced generation's geometry stays drawable
     /// underneath while the new one fades in.
     pub fade: Option<TileFade>,
@@ -85,6 +87,10 @@ pub struct TileFade {
     /// Render bucket the outgoing geometry was styled for, so its stroke
     /// widths can be corrected while it fades out.
     pub bucket: u32,
+    /// This fade is the flat->3D transition: the incoming bake grows its
+    /// heights with the fade. 3D->3D rebakes keep full height (alpha-only
+    /// crossfade) so zoom regens never replay the animation.
+    pub grow_heights: bool,
     pub fill_geometry: Option<Geometry>,
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
@@ -142,6 +148,8 @@ struct WayData {
 pub struct PinHit {
     pub norm: (f64, f64),
     pub info: Vec<(String, String)>,
+    /// 3D stalk height of this pin's marker (0 = grounded).
+    pub lift_m: f32,
 }
 
 #[derive(Debug)]
@@ -914,10 +922,41 @@ fn append_ball(
     zbias: &mut f32,
 ) {
     let (segs, rings) = (segs.max(3), rings.max(2));
+    // Phong-ish per-vertex lighting (Gouraud across the triangles): the
+    // same NW sun as the building walls plus a tight glossy highlight, so
+    // canopies and lights read as lit volumes instead of flat blobs.
+    // Map coords: x east, y SOUTH (screen down), z up.
+    let light = {
+        let (lx, ly, lz) = (-0.55f32, -0.835, 1.05);
+        let len = (lx * lx + ly * ly + lz * lz).sqrt();
+        (lx / len, ly / len, lz / len)
+    };
+    let view = {
+        let (vx, vy, vz) = (0.0f32, 0.62, 0.79);
+        let len = (vx * vx + vy * vy + vz * vz).sqrt();
+        (vx / len, vy / len, vz / len)
+    };
+    let half = {
+        let (hx, hy, hz) = (light.0 + view.0, light.1 + view.1, light.2 + view.2);
+        let len = (hx * hx + hy * hy + hz * hz).sqrt();
+        (hx / len, hy / len, hz / len)
+    };
+    let lit = |nx: f32, ny: f32, nz: f32| -> [f32; 4] {
+        let ndl = (nx * light.0 + ny * light.1 + nz * light.2).max(0.0);
+        let ndh = (nx * half.0 + ny * half.1 + nz * half.2).max(0.0);
+        let diffuse = 0.45 + 0.55 * ndl;
+        let spec = ndh.powi(32) * 0.85;
+        [
+            (color[0] * diffuse + spec).min(1.0),
+            (color[1] * diffuse + spec).min(1.0),
+            (color[2] * diffuse + spec).min(1.0),
+            color[3],
+        ]
+    };
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let mut push_vertex = |x: f32, y: f32, h: f32| {
+    let mut push_vertex = |x: f32, y: f32, h: f32, shade: [f32; 4]| {
         out_vertices.extend_from_slice(&[
-            x, y, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
+            x, y, 0.5, 1.0, shade[0], shade[1], shade[2], shade[3], 1e6, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, h, 0.05, 24.0, *zbias,
         ]);
     };
@@ -928,7 +967,13 @@ fn append_ball(
         let h = center_h_m + radius_m * phi.sin();
         for seg in 0..segs {
             let a = seg as f32 / segs as f32 * std::f32::consts::TAU;
-            push_vertex(center.0 + a.cos() * ring_r, center.1 + a.sin() * ring_r, h);
+            let shade = lit(phi.cos() * a.cos(), phi.cos() * a.sin(), phi.sin());
+            push_vertex(
+                center.0 + a.cos() * ring_r,
+                center.1 + a.sin() * ring_r,
+                h,
+                shade,
+            );
         }
     }
     for ring in 0..rings {
@@ -996,7 +1041,7 @@ fn build_tile_buffers_from_features(
     let mut labels = Vec::<TileLabel>::new();
     let mut pin_hits = Vec::<PinHit>::new();
     let mut icon_jobs =
-        Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32)>::new();
+        Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32, f32)>::new();
     let mut tree_points_3d = Vec::<(f32, f32)>::new();
     let mut signal_points_3d = Vec::<(f32, f32)>::new();
     for (point, tags) in &tagged_points {
@@ -1090,6 +1135,23 @@ fn build_tile_buffers_from_features(
                     } else {
                         micro_icon_min_zoom(icon_name).max(icon_zoom_floor as f32)
                     };
+                    // 3D mode: markers fly on stalks above the skyline —
+                    // chargers highest, then shops/cafés (base pois), then
+                    // transit stops. Street furniture (benches, entrances,
+                    // micro POIs) stays on the ground where it belongs.
+                    let pin_lift_m = if buildings_3d {
+                        if layer == "chargers" {
+                            if charger_kw >= 50.0 { 26.0f32 } else { 20.0 }
+                        } else if layer == "stops" {
+                            12.0
+                        } else if tags.get("layer").map(|v| v.as_str()) == Some("pois") {
+                            18.0
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
                     // In 3D mode trees become little REAL 3D trees (trunk +
                     // canopy blob lifted by the building height mechanism)
                     // instead of flat billboard discs.
@@ -1117,6 +1179,7 @@ fn build_tile_buffers_from_features(
                         charger_kw as f32,
                         charger_stalls as f32,
                         zoom_floor,
+                        pin_lift_m,
                     ));
                     if two_tone == 2 || two_tone == 3 {
                         // Tappable: record position + info for the bubble.
@@ -1133,7 +1196,7 @@ fn build_tile_buffers_from_features(
                                 }
                             }
                         }
-                        pin_hits.push(PinHit { norm, info });
+                        pin_hits.push(PinHit { norm, info, lift_m: 0.0 });
                     }
                     if two_tone == 2 {
                         // In-pin text via the NORMAL text renderer (drawn in
@@ -1169,6 +1232,7 @@ fn build_tile_buffers_from_features(
                                 )),
                                 name_key: String::new(),
                                 bbox: (0.0, 0.0, 0.0, 0.0),
+                                        lift_m: 0.0,
                             });
                         }
                         // brand reads below the pin from z13; the kW digits
@@ -1206,6 +1270,7 @@ fn build_tile_buffers_from_features(
                                         )),
                                         name_key: String::new(),
                                         bbox: (0.0, 0.0, 0.0, 0.0),
+                                        lift_m: 0.0,
                                     });
                                 }
                             }
@@ -1228,7 +1293,7 @@ fn build_tile_buffers_from_features(
     let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
     let icon_min_dist_sq = icon_min_dist * icon_min_dist;
     let mut accepted_icons = Vec::<(f32, f32)>::new();
-    icon_jobs.retain(|(point, _, _, _, dist_factor, _, _, _, _)| {
+    icon_jobs.retain(|(point, _, _, _, dist_factor, _, _, _, _, _)| {
         let collides = accepted_icons.iter().any(|other| {
             let dx = other.0 - point.0;
             let dy = other.1 - point.1;
@@ -1287,6 +1352,22 @@ fn build_tile_buffers_from_features(
     }
     let mut building_groups = Vec::<BuildingGroup>::new();
     let mut building_group_lookup = HashMap::<String, usize>::new();
+    // Building-age layer active: index BAG polygons by quantized centroid
+    // so extruded buildings can pick up their bouwjaar tint (BAG footprints
+    // match OSM buildings nearly 1:1).
+    let mut bag_centroid_colors = HashMap::<(i32, i32), u32>::new();
+    for way in tile_ways.iter() {
+        if way.tags.get("layer").map(|v| v.as_str()) == Some("bag")
+            && way.closed
+            && way.points.len() >= 3
+        {
+            if let Some(color) = crate::map::style::bag_year_color(&way.tags) {
+                let c = ring_centroid(&way.points);
+                bag_centroid_colors
+                    .insert(((c.0 / 6.0).round() as i32, (c.1 / 6.0).round() as i32), color);
+            }
+        }
+    }
 
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
@@ -1348,7 +1429,7 @@ fn build_tile_buffers_from_features(
         }
         // Labels are independent of fills: a named zoo enclosure with no
         // distinctive surface still gets its name at the centroid.
-        let fill_color = fill_color_for_tags(theme, &way.tags, way.closed);
+        let fill_color = fill_color_for_tags(theme, &way.tags, way.closed, render_zoom);
         let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
             continue;
         };
@@ -1532,6 +1613,7 @@ fn build_tile_buffers_from_features(
             polygon: Vec<Vec<(f32, f32)>>,
             height_m: f32,
             base_m: f32,
+            tint: Option<u32>,
             min_y: f32,
         }
         // Simple 3D Buildings: an outline whose interior holds
@@ -1580,10 +1662,31 @@ fn build_tile_buffers_from_features(
                     .iter()
                     .flat_map(|ring| ring.iter())
                     .fold(f32::MAX, |acc, p| acc.min(p.1));
+                let tint = if bag_centroid_colors.is_empty() {
+                    None
+                } else {
+                    polygon.first().and_then(|ring| {
+                        let c = ring_centroid(ring);
+                        let (qx, qy) = ((c.0 / 6.0).round() as i32, (c.1 / 6.0).round() as i32);
+                        let mut found = None;
+                        'search: for dy in -1..=1 {
+                            for dx in -1..=1 {
+                                if let Some(color) =
+                                    bag_centroid_colors.get(&(qx + dx, qy + dy))
+                                {
+                                    found = Some(*color);
+                                    break 'search;
+                                }
+                            }
+                        }
+                        found
+                    })
+                };
                 building_jobs.push(BuildingJob {
                     polygon,
                     height_m: group.height_m,
                     base_m: group.min_height_m.clamp(0.0, group.height_m),
+                    tint,
                     min_y,
                 });
             }
@@ -1594,10 +1697,12 @@ fn build_tile_buffers_from_features(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
-        let roof_color = hex_to_premul_rgba(base_color, 1.0);
         // Light from the north-west; walls shade by their outward normal.
         let (light_x, light_y) = (-0.55_f32, -0.835_f32);
         for job in &building_jobs {
+            // Building-age layer tints the 3D model itself (walls shade
+            // from the same hue via the normal lighting math).
+            let roof_color = hex_to_premul_rgba(job.tint.unwrap_or(base_color), 1.0);
             if job.height_m <= 0.05 {
                 // Flattened outline: footprint fill only, no walls.
             } else {
@@ -1726,13 +1831,123 @@ fn build_tile_buffers_from_features(
                 4.0,
                 7.5,
                 canopy_color,
-                12,
-                6,
+                16,
+                8,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
             );
             feature_count += 1;
+        }
+    }
+
+    // Dynamic stalk heights: every flying marker clears the building under
+    // it by ~8 m (a 100 m tower gets a 108 m pin), plus a small
+    // deterministic stagger so clustered pins don't form one flat plane.
+    let job_lifts: Vec<f32> = icon_jobs
+        .iter()
+        .map(|job| {
+            let base = job.9;
+            if base <= 0.0 {
+                return 0.0;
+            }
+            let (px, py) = job.0;
+            let mut clearance = 0.0f32;
+            for group in &building_groups {
+                if group.height_m <= clearance {
+                    continue;
+                }
+                for ring in &group.rings {
+                    if ring.signed_area <= 0.0 {
+                        continue;
+                    }
+                    if point_in_ring((px, py), &ring.points) {
+                        clearance = clearance.max(group.height_m);
+                        break;
+                    }
+                }
+            }
+            base.max(clearance + 8.0)
+        })
+        .collect();
+    // Propagate the FINAL lifts into the labels and tap zones that belong
+    // to these markers, so text and hit-testing ride the same stalk.
+    for (job, lift) in icon_jobs.iter().zip(job_lifts.iter()) {
+        if *lift <= 0.0 {
+            continue;
+        }
+        let (jx, jy) = job.0;
+        for label in labels.iter_mut() {
+            let eligible = label.color_class == crate::map::label::LABEL_CLASS_PIN
+                || label.road_kind.starts_with("chb")
+                || label.road_kind.starts_with("poi")
+                || label.road_kind.starts_with("stS")
+                || label.road_kind.starts_with("stp");
+            if !eligible || label.path_points.is_empty() {
+                continue;
+            }
+            let (lx, ly) = label.path_points[0];
+            let (mx, my) = label
+                .path_points
+                .last()
+                .map(|p| ((lx + p.0) * 0.5, (ly + p.1) * 0.5))
+                .unwrap_or((lx, ly));
+            if (mx - jx).abs() < 2.5 && (my - jy).abs() < 2.5 {
+                label.lift_m = *lift;
+            }
+        }
+        let world = (1u32 << tile_key.z) as f64;
+        let jnorm = (
+            (tile_key.x as f64 + jx as f64 / crate::map::geometry::TILE_SIZE) / world,
+            (tile_key.y as f64 + jy as f64 / crate::map::geometry::TILE_SIZE) / world,
+        );
+        for hit in pin_hits.iter_mut() {
+            if (hit.norm.0 - jnorm.0).abs() < 1e-7 && (hit.norm.1 - jnorm.1).abs() < 1e-7 {
+                hit.lift_m = *lift;
+            }
+        }
+    }
+    // Marker stalks (3D mode): thin dark lines from the ground point up to
+    // every floating marker.
+    if buildings_3d {
+        let has_pins = icon_jobs.iter().any(|job| job.9 > 0.0);
+        if has_pins {
+            let n = (1u32 << tile_key.z) as f64;
+            let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
+                .sinh()
+                .atan();
+            let units_per_m =
+                (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
+            let stalk_color = hex_to_premul_rgba(0x4a5058, 1.0);
+            for (job_index, job) in icon_jobs.iter().enumerate() {
+                let lift = job_lifts[job_index];
+                if lift <= 0.0 {
+                    continue;
+                }
+                // Chargers get a slightly heavier stalk than POI markers.
+                let arm = if job.5 == 2 || job.5 == 3 { 0.22 } else { 0.14 } * units_per_m;
+                let (x, y) = job.0;
+                append_wall_quad(
+                    (x - arm, y),
+                    (x + arm, y),
+                    0.0,
+                    lift,
+                    stalk_color,
+                    &mut fill_vertices,
+                    &mut fill_indices,
+                    &mut fill_zbias,
+                );
+                append_wall_quad(
+                    (x, y - arm),
+                    (x, y + arm),
+                    0.0,
+                    lift,
+                    stalk_color,
+                    &mut fill_vertices,
+                    &mut fill_indices,
+                    &mut fill_zbias,
+                );
+            }
         }
     }
 
@@ -1960,12 +2175,18 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class, _, _, two_tone, kw, stalls, zoom_floor) in &icon_jobs {
+    for (job_index, (anchor, mesh, color_class, _, _, two_tone, kw, stalls, zoom_floor, _)) in
+        icon_jobs.iter().enumerate()
+    {
+        let pin_lift_m = job_lifts[job_index];
+        // The lift rides in param4's hundreds so the zoom floor keeps its
+        // low digits.
+        let param4_encoded = zoom_floor + pin_lift_m * 100.0;
         append_icon_mesh(
             mesh,
             *anchor,
             hex_to_premul_rgba(poi_class_hex(*color_class), 1.0),
-            *zoom_floor,
+            param4_encoded,
             &mut icon_vertices,
             &mut icon_indices,
             &mut icon_zbias,
@@ -1977,7 +2198,7 @@ fn build_tile_buffers_from_features(
                     core,
                     *anchor,
                     hex_to_premul_rgba(0x4c7a4c, 1.0),
-                    *zoom_floor,
+                    param4_encoded,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
@@ -1995,7 +2216,7 @@ fn build_tile_buffers_from_features(
                     bolt,
                     *anchor,
                     hex_to_premul_rgba(0xffffff, 1.0),
-                    *zoom_floor,
+                    param4_encoded,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
@@ -2210,11 +2431,11 @@ fn append_icon_mesh_offset_scaled(
             // param4: this icon's view-zoom floor; the shader collapses the
             // vertex when the live view zoom is below it (no stale flash).
             min_zoom,
-            // Tilt depth: markers never clip into the tilted ground or
-            // building walls (ground-y span + sort ranks stay under ~4),
-            // but the total map depth (-24 + this) MUST stay negative —
-            // at 90 the icons rose above 0 and painted over the UI panels.
-            16.0,
+            // Tilt depth: a SMALL camera-ward bias -- enough to clear the
+            // marker's own ground pixel (fill/stroke micro-ranks are tiny),
+            // small enough that buildings meaningfully in FRONT occlude
+            // the marker, keeping the 3D illusion honest.
+            0.35,
             24.0, // clip_radius: generous, avoids pop-in at view edges
             *zbias,
         ]);
