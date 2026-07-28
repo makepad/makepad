@@ -83,7 +83,7 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         }
         // Trees render as plain canopy discs (carto draws them as circles,
         // not glyphs).
-        if let Some(mesh) = build_disc_mesh(3.4) {
+        if let Some(mesh) = build_disc_mesh(5.4) {
             out.insert("tree", mesh);
         }
         // Generic small dot for named POIs with no dedicated symbol.
@@ -91,7 +91,7 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
             out.insert("dot", mesh);
         }
         // Dark center dot layered over the light tree canopy.
-        if let Some(mesh) = build_disc_mesh(1.3) {
+        if let Some(mesh) = build_disc_mesh(1.7) {
             out.insert("tree_core", mesh);
         }
         out
