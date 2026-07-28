@@ -468,16 +468,21 @@ impl CompiledMapTheme {
     }
 }
 
-/// Procedural fill texture, carto-style: 30 = dot stipple (gardens,
-/// cemeteries), 31 = diagonal hatch (playgrounds). 0 = solid.
+/// Procedural fill texture, carto-style: 30 = staggered dot stipple
+/// (courtyard gardens), 31 = diagonal hatch (playgrounds), 32 = staggered
+/// open circles (woods/forests/cemeteries — tree rings). 0 = solid.
 pub fn fill_pattern_shape(tags: &HashMap<String, String>) -> f32 {
     match tags.get("leisure").map(|value| value.as_str()) {
         Some("garden") => return 30.0,
         Some("playground") => return 31.0,
         _ => {}
     }
-    if tags.get("landuse").map(|value| value.as_str()) == Some("cemetery") {
-        return 30.0;
+    if matches!(
+        tags.get("landuse").map(|value| value.as_str()),
+        Some("cemetery" | "forest")
+    ) || tags.get("natural").map(|value| value.as_str()) == Some("wood")
+    {
+        return 32.0;
     }
     0.0
 }
