@@ -19,6 +19,8 @@ pub mod png;
 pub mod query;
 pub mod knmi_hdf5;
 pub mod radar_raster;
+pub mod terrain_shade;
+pub mod wind;
 pub mod radar;
 pub mod raster;
 pub mod sidecar;

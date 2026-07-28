@@ -264,9 +264,11 @@ script_mod! {
                                 layer_bag := LayerCheck{text: "Building age"}
                                 layer_population := LayerCheck{text: "Population"}
                                 layer_rain := LayerCheck{text: "Rain radar"}
+                                layer_wind := LayerCheck{text: "Wind"}
+                                layer_terrain := LayerCheck{text: "Terrain"}
                                 PanelText{
                                     margin: Inset{top: 6}
-                                    text: "Terrain · Noise · Flood: soon"
+                                    text: "Noise · Flood: soon"
                                 }
                             }
                         }
@@ -360,6 +362,29 @@ enum NavResponse {
 }
 
 #[derive(Clone)]
+struct TerrainUpdate {
+    texels: Vec<u32>,
+    width: usize,
+    height: usize,
+    /// Elevation meters, terrarium-packed BGRA texels for the GPU
+    /// displacement sampler, plus the raw grid for CPU (pin/label) lifts.
+    elev_texels: Vec<u32>,
+    elev: Vec<f32>,
+    elev_width: usize,
+    elev_height: usize,
+    bbox: (f64, f64, f64, f64),
+}
+
+#[derive(Clone)]
+struct WindUpdate {
+    nx: usize,
+    ny: usize,
+    u: Vec<f32>,
+    v: Vec<f32>,
+    bbox: (f64, f64, f64, f64),
+}
+
+#[derive(Clone)]
 struct RainUpdate {
     frames: Vec<Vec<u32>>,
     width: usize,
@@ -411,6 +436,24 @@ pub struct App {
     /// Last decoded nowcast, kept so toggling rain back on is instant.
     #[rust]
     rain_cache: Option<RainUpdate>,
+    #[rust]
+    wind_on: bool,
+    #[rust]
+    wind_worker_started: bool,
+    #[rust]
+    wind_rx: ToUIReceiver<WindUpdate>,
+    #[rust]
+    wind_cache: Option<WindUpdate>,
+    #[rust]
+    terrain_on: bool,
+    #[rust]
+    terrain_worker_started: bool,
+    #[rust]
+    terrain_tx: Option<mpsc::Sender<(f64, f64, f64, f64)>>,
+    #[rust]
+    terrain_rx: ToUIReceiver<TerrainUpdate>,
+    #[rust]
+    last_terrain_request: Option<(i64, i64, i64, i64)>,
     #[rust]
     program_moves: u32,
     #[rust]
@@ -674,14 +717,27 @@ impl App {
                         if last_decoded.as_deref() != Some(newest.path.as_path()) {
                             if let Ok(data) = std::fs::read(&newest.path) {
                                 if let Ok(frames) = knmi_hdf5::decode_frames(&data) {
-                                    let texels: Vec<Vec<u32>> = frames
-                                        .iter()
-                                        .map(|frame| {
-                                            radar_raster::rgba_to_bgra_texels(
-                                                &projection.frame_to_rgba(frame),
-                                            )
-                                        })
-                                        .collect();
+                                    // Reproject the 25 frames in parallel —
+                                    // serial this was the multi-second wait
+                                    // blamed on "downloading".
+                                    let texels: Vec<Vec<u32>> =
+                                        std::thread::scope(|scope| {
+                                            let handles: Vec<_> = frames
+                                                .iter()
+                                                .map(|frame| {
+                                                    let projection = &projection;
+                                                    scope.spawn(move || {
+                                                        radar_raster::rgba_to_bgra_texels(
+                                                            &projection.frame_to_rgba(frame),
+                                                        )
+                                                    })
+                                                })
+                                                .collect();
+                                            handles
+                                                .into_iter()
+                                                .map(|h| h.join().unwrap())
+                                                .collect()
+                                        });
                                     let _ = sender.send(RainUpdate {
                                         frames: texels,
                                         width: 1024,
@@ -696,6 +752,163 @@ impl App {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         });
+    }
+
+    /// GFS wind worker: 30 min disk-gated NOMADS polls (US public domain,
+    /// ~3 KB per fetch), cached GRIB2 on disk, decoded in-process.
+    fn ensure_wind_worker(&mut self) {
+        if self.wind_worker_started {
+            return;
+        }
+        self.wind_worker_started = true;
+        let sender = self.wind_rx.sender();
+        std::thread::spawn(move || {
+            use makepad_geodata::wind::{WindSync, WIND_EAST, WIND_NORTH, WIND_SOUTH, WIND_WEST};
+            let sync = WindSync::new("local/overlays/wind");
+            loop {
+                let field = sync.sync().ok().flatten().or_else(|| sync.cached());
+                if let Some(field) = field {
+                    let _ = sender.send(WindUpdate {
+                        nx: field.nx,
+                        ny: field.ny,
+                        u: field.u,
+                        v: field.v,
+                        bbox: (WIND_WEST, WIND_SOUTH, WIND_EAST, WIND_NORTH),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_secs(300));
+            }
+        });
+    }
+
+    /// Terrain worker: renders hillshade textures for requested view
+    /// bboxes from the local terrarium mbtiles (no network at all).
+    fn ensure_terrain_worker(&mut self) {
+        if self.terrain_worker_started {
+            return;
+        }
+        self.terrain_worker_started = true;
+        let (tx, rx) = mpsc::channel::<(f64, f64, f64, f64)>();
+        self.terrain_tx = Some(tx);
+        let sender = self.terrain_rx.sender();
+        std::thread::spawn(move || {
+            use makepad_geodata::terrain_shade::TerrainShader;
+            let Ok(mut shader) =
+                TerrainShader::open(std::path::Path::new("local/overlays/nl-terrain.mbtiles"))
+            else {
+                return;
+            };
+            let mut land_reader =
+                makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(
+                    "local/maps/europe-shortbread.mbtiles",
+                ))
+                .ok();
+            while let Ok(mut bbox) = rx.recv() {
+                // Only the newest pending request matters.
+                while let Ok(newer) = rx.try_recv() {
+                    bbox = newer;
+                }
+                let (w, h) = (4096usize, 3072usize);
+                let (mut rgba, elev_full, shade) =
+                    shader.shade_region(bbox.0, bbox.1, bbox.2, bbox.3, w, h);
+                if let Some(reader) = land_reader.as_mut() {
+                    drape_landcover(reader, bbox, w, h, &elev_full, &shade, &mut rgba);
+                }
+                let texels = makepad_geodata::radar_raster::rgba_to_bgra_texels(&rgba);
+                // Displacement grid matches the renderer's 48x36 terrain
+                // mesh EXACTLY (49x37 corners): GPU bilinear over this
+                // texture then equals the mesh's linear interpolation, so
+                // roads ride the surface without poking through on slopes.
+                let (ew, eh) = (289usize, 217usize);
+                let mut elev = vec![0f32; ew * eh];
+                let mut elev_texels = vec![0u32; ew * eh];
+                for y in 0..eh {
+                    for x in 0..ew {
+                        let sx = (x * (w - 1)) / (ew - 1);
+                        let sy = (y * (h - 1)) / (eh - 1);
+                        let m = elev_full[sy * w + sx].max(0.0);
+                        elev[y * ew + x] = m;
+                        // Terrarium pack: m + 32768 in R*256 + G + B/256.
+                        let v = ((m + 32768.0) * 256.0) as u32;
+                        let (r, g, b) = (v >> 16 & 255, v >> 8 & 255, v & 255);
+                        elev_texels[y * ew + x] = b | (g << 8) | (r << 16) | (255 << 24);
+                    }
+                }
+                let _ = sender.send(TerrainUpdate {
+                    texels,
+                    width: w,
+                    height: h,
+                    elev_texels,
+                    elev,
+                    elev_width: ew,
+                    elev_height: eh,
+                    bbox,
+                });
+            }
+        });
+    }
+
+    /// Request a hillshade render for the current viewport (debounced by
+    /// bbox identity).
+    fn request_terrain(&mut self, cx: &mut Cx) {
+        if !self.terrain_on {
+            return;
+        }
+        self.ensure_terrain_worker();
+        let Some((lon, lat, zoom)) = self
+            .map(cx)
+            .center()
+            .map(|(lon, lat)| (lon, lat, self.map(cx).map_zoom().unwrap_or(10.0)))
+        else {
+            return;
+        };
+        let world_px = 256.0 * 2f64.powf(zoom);
+        // Cover ~3 viewports (plus tilt horizon) in one render: pans and
+        // small zooms reuse the texture instead of re-rezzing every nudge.
+        let margin = 3.0 + 1.6 * self.tilt_current.to_radians().sin();
+        let half_w = 1000.0 * margin / world_px;
+        let half_h = 750.0 * margin / world_px;
+        let center = makepad_map_nav::geo::LonLat::new(lon, lat);
+        // normalized mercator center
+        let nx = (center.lon + 180.0) / 360.0;
+        let lat_rad = center.lat.to_radians();
+        let ny = (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0;
+        let bbox = (nx - half_w, ny - half_h, nx + half_w, ny + half_h);
+        // Re-render only when the view really leaves the current render:
+        // center snapped to half-viewport steps + integer zoom bucket. In
+        // between, the renderer keeps magnifying the last texture.
+        let step = half_w / 3.0;
+        let key = (
+            (nx / step).round() as i64,
+            (ny / step).round() as i64,
+            zoom.floor() as i64,
+            (self.tilt_current > 0.5) as i64,
+        );
+        if self.last_terrain_request == Some(key) {
+            return;
+        }
+        self.last_terrain_request = Some(key);
+        if let Some(tx) = &self.terrain_tx {
+            let _ = tx.send(bbox);
+        }
+    }
+
+    fn apply_wind(&mut self, cx: &mut Cx) {
+        if self.wind_on {
+            if let Some(update) = &self.wind_cache {
+                self.map(cx).set_wind_field(
+                    cx,
+                    update.nx,
+                    update.ny,
+                    update.u.clone(),
+                    update.v.clone(),
+                    update.bbox,
+                );
+            }
+        } else {
+            self.map(cx)
+                .set_wind_field(cx, 0, 0, Vec::new(), Vec::new(), (0.0, 0.0, 0.0, 0.0));
+        }
     }
 
     fn apply_rain(&mut self, cx: &mut Cx) {
@@ -1122,11 +1335,16 @@ impl MatchEvent for App {
             self.tilt_target = tilt;
             self.tilt_current = tilt;
             self.sync_tilt_button(cx);
+            // A tilted camera sees far beyond the flat viewport: refresh
+            // the terrain bbox for the new frustum.
+            self.last_terrain_request = None;
+            self.request_terrain(cx);
         }
         if map.viewport_changed(actions).is_some() {
             if self.program_moves > 0 {
                 self.program_moves -= 1;
             }
+            self.request_terrain(cx);
             // Gestures (pan/tilt/rotate) do NOT detach the follow camera —
             // attach/detach is an explicit toggle in the UI.
         }
@@ -1217,6 +1435,22 @@ impl MatchEvent for App {
             }
             self.apply_rain(cx);
         }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_wind)).changed(actions) {
+            self.wind_on = value;
+            if value {
+                self.ensure_wind_worker();
+            }
+            self.apply_wind(cx);
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_terrain)).changed(actions) {
+            self.terrain_on = value;
+            if value {
+                self.request_terrain(cx);
+            } else {
+                self.map(cx)
+                    .set_terrain_overlay(cx, TerrainOverlayData::default());
+            }
+        }
         if layers_changed {
             self.apply_overlay_selection(cx);
         }
@@ -1260,6 +1494,29 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // Worker responses
+        while let Ok(update) = self.terrain_rx.try_recv() {
+            if self.terrain_on {
+                self.map(cx).set_terrain_overlay(
+                    cx,
+                    TerrainOverlayData {
+                        texels: update.texels,
+                        width: update.width,
+                        height: update.height,
+                        elev_texels: update.elev_texels,
+                        elev: update.elev,
+                        elev_width: update.elev_width,
+                        elev_height: update.elev_height,
+                        bbox: update.bbox,
+                    },
+                );
+            }
+        }
+        while let Ok(update) = self.wind_rx.try_recv() {
+            self.wind_cache = Some(update);
+            if self.wind_on {
+                self.apply_wind(cx);
+            }
+        }
         while let Ok(update) = self.rain_rx.try_recv() {
             self.rain_cache = Some(update);
             if self.rain_on {
@@ -1327,6 +1584,9 @@ impl AppMain for App {
             let delta = self.tilt_target - self.tilt_current;
             if delta.abs() < 0.1 {
                 self.tilt_current = self.tilt_target;
+                // Animation settled: fetch terrain for the tilted frustum.
+                self.last_terrain_request = None;
+                self.request_terrain(cx);
             } else {
                 self.tilt_current += delta * 0.12;
                 self.tilt_next_frame = cx.new_next_frame();
@@ -1336,6 +1596,203 @@ impl AppMain for App {
 
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+    }
+}
+
+/// Drape-lite: rasterize base-map landcover polygons into the terrain
+/// shade texture, lit by the same hillshade factor, so regional 3D reads
+/// as green forested mountainsides instead of bare hypsometric rock.
+fn drape_landcover(
+    reader: &mut makepad_mbtile_reader::MbtilesReader,
+    bbox: (f64, f64, f64, f64),
+    w: usize,
+    h: usize,
+    elev: &[f32],
+    shade: &[u8],
+    rgba: &mut [u8],
+) {
+    use makepad_widgets::map::geometry::TileKey;
+    use makepad_widgets::map::tile::{decode_vector_tile_payload, parse_mvt_tile, MvtSink};
+    use std::collections::HashMap;
+
+    let (west, north, east, south) = bbox;
+    let span_x = (east - west).max(1e-12);
+    let span_y = (south - north).max(1e-12);
+    // Landcover at the shade's own zoom for crisp forest edges, backed
+    // off only if the tile fetch would explode.
+    let want = (w as f64 / (span_x * 256.0)).log2().ceil() as i64;
+    let mut z = want.clamp(6, 12) as u32;
+    loop {
+        let nt = 1_i64 << z;
+        let count = (((east * nt as f64).floor() - (west * nt as f64).floor()) + 1.0)
+            * (((south * nt as f64).floor() - (north * nt as f64).floor()) + 1.0);
+        if count <= 400.0 || z <= 6 {
+            break;
+        }
+        z -= 1;
+    }
+    let n_tiles = 1_i64 << z;
+
+    struct LandSink {
+        // Even-odd polygon rings in shade-pixel coords with a palette id.
+        polys: Vec<(Vec<(f32, f32)>, u8)>,
+        origin: (f64, f64),
+        scale: (f64, f64),
+        next_id: u64,
+    }
+    // Palette: 1 wood, 2 grass/farm, 3 scrub/heath, 4 water, 5 glacier.
+    const PALETTE: [[u8; 3]; 6] = [
+        [0, 0, 0],
+        [88, 126, 82],
+        [140, 165, 110],
+        [120, 144, 96],
+        [110, 148, 176],
+        [238, 242, 246],
+    ];
+    impl MvtSink for LandSink {
+        fn alloc_feature_id(&mut self) -> u64 {
+            self.next_id += 1;
+            self.next_id
+        }
+        fn add_point(
+            &mut self,
+            _tile_key: TileKey,
+            _extent: u32,
+            _point: (i32, i32),
+            _tags: HashMap<String, String>,
+        ) {
+        }
+        fn add_path(
+            &mut self,
+            tile_key: TileKey,
+            extent: u32,
+            points: &[(i32, i32)],
+            tags: HashMap<String, String>,
+            close: bool,
+        ) {
+            if !close || points.len() < 3 {
+                return;
+            }
+            let layer = tags.get("layer").map(|v| v.as_str()).unwrap_or("");
+            let kind = tags.get("kind").map(|v| v.as_str()).unwrap_or("");
+            let class: u8 = match layer {
+                "water_polygons" | "ocean" => 4,
+                "land" | "landuse" | "landcover" | "nature" | "sites" => match kind {
+                    "forest" | "wood" => 1,
+                    "grass" | "grassland" | "meadow" | "farmland" | "orchard"
+                    | "allotments" | "vineyard" | "garden" | "park" | "village_green" => 2,
+                    "scrub" | "heath" | "bare_rock" if kind == "scrub" || kind == "heath" => 3,
+                    "glacier" => 5,
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            if class == 0 {
+                return;
+            }
+            let tz = 1u32 << tile_key.z;
+            let ring: Vec<(f32, f32)> = points
+                .iter()
+                .map(|&(px, py)| {
+                    let nx = (tile_key.x as f64 + px as f64 / extent as f64) / tz as f64;
+                    let ny = (tile_key.y as f64 + py as f64 / extent as f64) / tz as f64;
+                    (
+                        ((nx - self.origin.0) * self.scale.0) as f32,
+                        ((ny - self.origin.1) * self.scale.1) as f32,
+                    )
+                })
+                .collect();
+            self.polys.push((ring, class));
+        }
+    }
+
+    let mut sink = LandSink {
+        polys: Vec::new(),
+        origin: (west, north),
+        scale: (w as f64 / span_x, h as f64 / span_y),
+        next_id: 0,
+    };
+    let tx0 = ((west * n_tiles as f64).floor() as i64).clamp(0, n_tiles - 1);
+    let tx1 = ((east * n_tiles as f64).floor() as i64).clamp(0, n_tiles - 1);
+    let ty0 = ((north * n_tiles as f64).floor() as i64).clamp(0, n_tiles - 1);
+    let ty1 = ((south * n_tiles as f64).floor() as i64).clamp(0, n_tiles - 1);
+    for ty in ty0..=ty1 {
+        for tx in tx0..=tx1 {
+            let tms_row = n_tiles - 1 - ty;
+            let Ok(Some(raw)) = reader.get_tile(z as i64, tx, tms_row) else {
+                continue;
+            };
+            let Ok(data) = decode_vector_tile_payload(&raw) else {
+                continue;
+            };
+            let key = TileKey {
+                z,
+                x: tx as i32,
+                y: ty as i32,
+            };
+            let _ = parse_mvt_tile(&data, key, &mut sink);
+        }
+    }
+
+    // Scanline even-odd fill into a full-resolution class mask.
+    let (mw, mh) = (w, h);
+    let mut mask = vec![0u8; mw * mh];
+    let mut xs: Vec<f32> = Vec::new();
+    for (ring, class) in &sink.polys {
+        let min_y = ring.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+        let max_y = ring.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+        let y0 = (min_y.floor().max(0.0)) as usize;
+        let y1 = (max_y.ceil().min(mh as f32 - 1.0)) as usize;
+        for my in y0..=y1.min(mh - 1) {
+            let sy = my as f32 + 0.5;
+            xs.clear();
+            for i in 0..ring.len() {
+                let (x1p, y1p) = ring[i];
+                let (x2p, y2p) = ring[(i + 1) % ring.len()];
+                if (y1p <= sy && y2p > sy) || (y2p <= sy && y1p > sy) {
+                    xs.push(x1p + (sy - y1p) / (y2p - y1p) * (x2p - x1p));
+                }
+            }
+            xs.sort_unstable_by(|a, b| a.total_cmp(b));
+            for pair in xs.chunks_exact(2) {
+                let a = (pair[0].max(0.0)) as usize;
+                let b = (pair[1].min(mw as f32 - 1.0)) as usize;
+                for mx in a..=b.min(mw - 1) {
+                    mask[my * mw + mx] = *class;
+                }
+            }
+        }
+    }
+
+    // Blend: landcover color, lit by the hillshade, below the treeline.
+    for y in 0..h {
+        for x in 0..w {
+            let class = mask[y * mw + x] as usize;
+            if class == 0 {
+                continue;
+            }
+            let i = y * w + x;
+            if rgba[i * 4 + 3] == 0 {
+                continue; // outside coverage stays transparent
+            }
+            let e = elev[i];
+            // Fade landcover out across the treeline into rock/snow.
+            let t = if class == 4 || class == 5 {
+                1.0
+            } else {
+                (1.0 - (e - 1750.0) / 300.0).clamp(0.0, 1.0)
+            };
+            if t <= 0.0 {
+                continue;
+            }
+            let light = shade[i] as f32 / 255.0;
+            let c = PALETTE[class];
+            for ch in 0..3 {
+                let lc = c[ch] as f32 * light;
+                let base = rgba[i * 4 + ch] as f32;
+                rgba[i * 4 + ch] = (base * (1.0 - t) + lc * t) as u8;
+            }
+        }
     }
 }
 
