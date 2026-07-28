@@ -257,6 +257,8 @@ script_mod! {
                                 layer_transit := LayerCheck{text: "Transit"}
                                 layer_nature := LayerCheck{text: "Nature areas"}
                                 layer_districts := LayerCheck{text: "Districts"}
+                                layer_bag := LayerCheck{text: "Building age"}
+                                layer_population := LayerCheck{text: "Population"}
                                 PanelText{
                                     margin: Inset{top: 6}
                                     text: "Terrain · Noise · Flood · Rain: soon"
@@ -682,6 +684,12 @@ impl App {
         if self.ui.check_box(cx, ids!(layer_districts)).active(cx) {
             paths.push("local/overlays/nl-wijkbuurt.mbtiles");
         }
+        if self.ui.check_box(cx, ids!(layer_bag)).active(cx) {
+            paths.push("local/overlays/nl-buildings-age.mbtiles");
+        }
+        if self.ui.check_box(cx, ids!(layer_population)).active(cx) {
+            paths.push("local/overlays/nl-demographics.mbtiles");
+        }
         self.map(cx).set_overlay_paths(cx, &paths.join(";"));
     }
 
@@ -1020,6 +1028,16 @@ impl MatchEvent for App {
             || self
                 .ui
                 .check_box(cx, ids!(layer_districts))
+                .changed(actions)
+                .is_some()
+            || self
+                .ui
+                .check_box(cx, ids!(layer_bag))
+                .changed(actions)
+                .is_some()
+            || self
+                .ui
+                .check_box(cx, ids!(layer_population))
                 .changed(actions)
                 .is_some();
         if layers_changed {
