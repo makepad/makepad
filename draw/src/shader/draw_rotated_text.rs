@@ -18,11 +18,14 @@ script_mod! {
         rotated_pos: varying(vec2f)
 
         // Camera-delta transform (best-effort label tracking while the
-        // map rotates/tilts between re-places): whole placed glyphs spin
-        // about the view pivot on the GPU, the async re-place trues up.
-        cam_cs: uniform(1.0)
-        cam_sn: uniform(0.0)
-        cam_tilt: uniform(1.0)
+        // map rotates/tilts between re-places): a full 2x2 matrix about
+        // the view pivot — tilt does NOT commute with rotation, so the
+        // exact delta S(t1)*R(d)*S(1/t0) is a general matrix. The async
+        // re-place trues up with identity.
+        cam_a: uniform(1.0)
+        cam_b: uniform(0.0)
+        cam_c: uniform(0.0)
+        cam_d: uniform(1.0)
         cam_pivot: uniform(vec2(0.0, 0.0))
 
         vertex: fn() {
@@ -37,8 +40,8 @@ script_mod! {
             ) + origin
             let cam_rel = rotated - self.cam_pivot
             rotated = vec2(
-                cam_rel.x * self.cam_cs - cam_rel.y * self.cam_sn,
-                (cam_rel.x * self.cam_sn + cam_rel.y * self.cam_cs) * self.cam_tilt
+                cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
+                cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
             ) + self.cam_pivot
 
             self.pos = self.geom.pos
@@ -103,17 +106,11 @@ impl DrawRotatedText {
     /// Camera-delta uniforms: rotate placed glyphs about `pivot` by the
     /// given cos/sin and compress y by `tilt_ratio` — identity when the
     /// placement is fresh.
-    pub fn set_camera_delta(
-        &mut self,
-        cx: &mut Cx,
-        cos: f32,
-        sin: f32,
-        tilt_ratio: f32,
-        pivot: Vec2f,
-    ) {
-        self.draw_vars.set_uniform(cx, live_id!(cam_cs), &[cos]);
-        self.draw_vars.set_uniform(cx, live_id!(cam_sn), &[sin]);
-        self.draw_vars.set_uniform(cx, live_id!(cam_tilt), &[tilt_ratio]);
+    pub fn set_camera_delta(&mut self, cx: &mut Cx, m: [f32; 4], pivot: Vec2f) {
+        self.draw_vars.set_uniform(cx, live_id!(cam_a), &[m[0]]);
+        self.draw_vars.set_uniform(cx, live_id!(cam_b), &[m[1]]);
+        self.draw_vars.set_uniform(cx, live_id!(cam_c), &[m[2]]);
+        self.draw_vars.set_uniform(cx, live_id!(cam_d), &[m[3]]);
         self.draw_vars
             .set_uniform(cx, live_id!(cam_pivot), &[pivot.x, pivot.y]);
     }

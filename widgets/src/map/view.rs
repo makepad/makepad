@@ -681,6 +681,8 @@ pub struct MapView {
     label_cache_generation: u64,
     #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }, 1.0))]
     label_draw_transform: (f32, Vec2f, f32, Vec2f, f32),
+    #[rust(1.0)]
+    label_cache_tilt_cos_for_delta: f32,
     #[rust]
     tiles_generation: u64,
     #[rust]
@@ -2307,12 +2309,31 @@ impl MapView {
                 let pivot = rect.pos + rect.size * 0.5;
                 shift += (pivot - camera_vec(pivot)) * (1.0 - k);
             }
-            // Screen-space delta rotation about the view pivot (phi = -rotation)
-            // plus a tilt-compression ratio: cached glyphs follow the camera
-            // every frame — ANY delta — and the async re-place trues up.
+            // The GPU camera-delta matrix transforms everything AFTER the
+            // CPU offsets are applied — pre-invert the pan shift so it
+            // lands where intended: shift_pre = M^-1 * shift.
+            {
+                let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
+                let t0 = self
+                    .label_cache_tilt
+                    .clamp(0.0, 65.0)
+                    .to_radians()
+                    .cos()
+                    .max(1e-6);
+                let t1 = self.tilt_cos().max(1e-6);
+                let (a, b, c, d) = (dc, -ds / t0, t1 * ds, t1 * dc / t0);
+                let det = a * d - b * c;
+                if det.abs() > 1e-9 {
+                    let (sx, sy) = (shift.x, shift.y);
+                    shift = dvec2((d * sx - b * sy) / det, (-c * sx + a * sy) / det);
+                }
+            }
+            // Screen-space delta rotation about the view pivot (phi = -rotation);
+            // the cached placement's tilt_cos rides along so the draw can
+            // build the exact non-commuting delta matrix.
             let rot_rad = (-rot_delta).to_radians() as f32;
-            let cached_tilt_cos = self.label_cache_tilt.clamp(0.0, 65.0).to_radians().cos();
-            let tilt_ratio = (self.tilt_cos() / cached_tilt_cos.max(1e-6)) as f32;
+            let cached_tilt_cos =
+                (self.label_cache_tilt.clamp(0.0, 65.0).to_radians().cos() as f32).max(1e-4);
             let pivot = rect.pos + rect.size * 0.5;
             self.draw_label_plans_scaled(
                 cx,
@@ -2326,7 +2347,7 @@ impl MapView {
                     x: pivot.x as f32,
                     y: pivot.y as f32,
                 },
-                tilt_ratio,
+                cached_tilt_cos,
                 false,
             );
             return false;
@@ -2481,13 +2502,14 @@ impl MapView {
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
+        let current_tilt_cos = (self.tilt_cos() as f32).max(1e-4);
         self.draw_label_plans_scaled(
             cx,
             1.0,
             extra_offset,
             0.0,
             Vec2f { x: 0.0, y: 0.0 },
-            1.0,
+            current_tilt_cos,
             false,
         );
     }
@@ -2495,8 +2517,8 @@ impl MapView {
     /// Redraw only the pin-class (in-bubble) label plans — called after
     /// the icon pass so kW text sits on top of the charger pins.
     fn draw_pin_label_phase(&mut self, cx: &mut Cx2d) {
-        let (scale, offset, rot, pivot, tilt_ratio) = self.label_draw_transform;
-        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, tilt_ratio, true);
+        let (scale, offset, rot, pivot, cached_tilt_cos) = self.label_draw_transform;
+        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, cached_tilt_cos, true);
     }
 
     fn draw_label_plans_scaled(
@@ -2506,12 +2528,13 @@ impl MapView {
         extra_offset: Vec2f,
         rot: f32,
         pivot: Vec2f,
-        tilt_ratio: f32,
+        cached_tilt_cos: f32,
         pin_phase: bool,
     ) {
         // Remember the transform so the pin-text phase redraws with the
         // exact same mapping after the icon pass.
-        self.label_draw_transform = (scale, extra_offset, rot, pivot, tilt_ratio);
+        self.label_draw_transform = (scale, extra_offset, rot, pivot, cached_tilt_cos);
+        self.label_cache_tilt_cos_for_delta = cached_tilt_cos;
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -2527,16 +2550,17 @@ impl MapView {
         };
         // Rigid delta-rotation of the cached placement about the pivot
         // (heading-up nav): transform a copy once, draw slices from it.
-        // Camera-delta on the GPU: placed glyphs spin/squash about the
-        // pivot via uniforms — zero per-frame CPU work, the async
-        // re-place trues everything up (identity uniforms then).
-        self.draw_label.set_camera_delta(
-            cx.cx,
-            rot.cos(),
-            rot.sin(),
-            tilt_ratio,
-            pivot,
-        );
+        // Camera-delta on the GPU: the EXACT delta between the cached
+        // placement's camera and now. The placement maps world points as
+        // rotate-about-pivot THEN y-compress by tilt_cos; the delta from
+        // (r0, t0) to (r1, t1) is S(t1)*R(d)*S(1/t0) — a general 2x2 (S
+        // and R do not commute), which is why a plain rotate+scale
+        // snapped visibly at every re-place in 2.5D.
+        let (dc, ds) = (rot.cos(), rot.sin());
+        let t0 = self.label_cache_tilt_cos_for_delta;
+        let t1 = self.tilt_cos() as f32;
+        let m = [dc, -ds / t0, t1 * ds, t1 * dc / t0];
+        self.draw_label.set_camera_delta(cx.cx, m, pivot);
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
             let (_, start, end, color_class, post_icon) = self.scratch_accepted_plans[i];
