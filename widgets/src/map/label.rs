@@ -70,6 +70,8 @@ pub struct TileLabel {
     /// point transforms.
     pub name_key: String,
     pub bbox: (f32, f32, f32, f32),
+    /// 3D marker lift in meters (flying pins); labels ride the same stalk.
+    pub lift_m: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +90,8 @@ pub struct LabelCandidate {
     /// keeps it horizontal, so the live camera-delta must translate its
     /// anchor without rotating the glyphs.
     pub screen_point: bool,
+    /// Screen-px marker lift this candidate rides (0 when grounded/2D).
+    pub lift_px: f32,
     pub screen_path: Vec<Vec2d>,
 }
 
@@ -151,6 +155,7 @@ pub fn extract_way_label(
             path_points,
             name_key: String::new(),
             bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
         });
     }
     // Waterway names follow their line like street names do.
@@ -169,6 +174,7 @@ pub fn extract_way_label(
             path_points,
             name_key: String::new(),
             bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
         });
     }
     if !tags.contains_key("highway") {
@@ -199,6 +205,7 @@ pub fn extract_way_label(
         path_points,
         name_key: String::new(),
         bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
     })
 }
 
@@ -276,6 +283,7 @@ pub fn extract_area_label(
                 path_points: point_label_path(centroid),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
     }
@@ -296,6 +304,7 @@ pub fn extract_area_label(
                 path_points: point_label_path(centroid),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
     }
@@ -334,6 +343,7 @@ pub fn extract_area_label(
         path_points: point_label_path(centroid),
         name_key: String::new(),
         bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
     })
 }
 
@@ -356,6 +366,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         // Detail-layer offices and named parkings carry their name (base
@@ -386,6 +397,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         // Transit stops label with their name; stations lead (bigger zoom
@@ -409,6 +421,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         // Charger sites label their power (and Superchargers their brand):
@@ -460,6 +473,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         // Water body names (lakes, the IJ, canals-as-polygons) come as
@@ -475,6 +489,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         "pois" => {
@@ -489,6 +504,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         // Shortbread street_labels_points is EXCLUSIVELY motorway junctions
@@ -514,6 +530,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
             });
         }
         _ => {}
@@ -545,6 +562,7 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
+        lift_m: 0.0,
     })
 }
 
