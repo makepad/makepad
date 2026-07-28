@@ -331,11 +331,24 @@ impl AdaptiveView {
         self.should_reapply_selector = true;
     }
 
+    /// The template id of the currently-active variant (e.g. `Desktop`/`Mobile`),
+    /// or `None` before the first selection. Read this after `draw_walk` to keep
+    /// dependent styling in lockstep with the variant that's actually shown.
+    pub fn active_variant(&self) -> Option<LiveId> {
+        self.active_widget.as_ref().map(|w| w.template_id)
+    }
+
     pub fn set_default_variant_selector(&mut self) {
-        // TODO(Julian): setup a more comprehensive default, currently defaults to Desktop even if the screen size is unknown
-        // (happens on startup for macOS due to a regression, first few WindowGeomChange events report size 0)
-        self.set_variant_selector(|cx, _parent_size| {
-            if cx.display_context.is_desktop() || !cx.display_context.is_screen_size_known() {
+        // When the screen size isn't known yet (e.g. the first few macOS startup
+        // geom events report size 0), fall back to `parent_size`, the actual layout
+        // size handed to this view, which is reliable during draw.
+        self.set_variant_selector(|cx, parent_size| {
+            let is_desktop = if cx.display_context.is_screen_size_known() {
+                cx.display_context.is_desktop()
+            } else {
+                cx.display_context.is_desktop_width(parent_size.x)
+            };
+            if is_desktop {
                 live_id!(Desktop)
             } else {
                 live_id!(Mobile)
