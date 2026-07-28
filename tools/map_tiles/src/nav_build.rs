@@ -39,6 +39,11 @@ pub struct NavBuildOptions {
     /// Build a `<basename>.searchdb` disk-backed index of EVERY searchable
     /// string (all named features + addresses) instead of the RAM formats.
     pub searchdb: bool,
+    /// Graph-only build over MAJOR roads (motorway..secondary + car
+    /// ferries). Ways pass runs FIRST so node retention stays bounded at
+    /// continent scale — the long-haul fallback graph for routing beyond
+    /// the detailed regional graph.
+    pub major_roads_only: bool,
 }
 
 /// Way tags that matter for routing or search; everything else is dropped
@@ -199,6 +204,9 @@ fn collect_all_tags<'a>(
 }
 
 pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
+    if options.major_roads_only {
+        return build_major_roads_graph(&options);
+    }
     if options.places_only {
         return build_places_index(&options);
     }
@@ -449,6 +457,189 @@ pub fn nav_build(options: NavBuildOptions) -> Result<(), String> {
         graph_bytes.len() as f64 / 1e6,
         search_path.display(),
         search_bytes.len() as f64 / 1e6,
+    );
+    Ok(())
+}
+
+fn is_major_road(tags: &HashMap<String, String>) -> bool {
+    if matches!(
+        tags.get("highway").map(|v| v.as_str()),
+        Some(
+            "motorway"
+                | "motorway_link"
+                | "trunk"
+                | "trunk_link"
+                | "primary"
+                | "primary_link"
+                | "secondary"
+                | "secondary_link"
+        )
+    ) {
+        return true;
+    }
+    tags.get("route").map(|r| r.as_str()) == Some("ferry")
+        && tags.get("motor_vehicle").map(|v| v.as_str()) != Some("no")
+}
+
+/// Continent-scale graph-only build: ways first (major roads are ~3% of
+/// ways), then only their nodes — Europe fits in a few GB of RAM where the
+/// all-nodes pass would need >100 GB.
+fn build_major_roads_graph(options: &NavBuildOptions) -> Result<(), String> {
+    let total_start = Instant::now();
+    let bbox = options.bbox;
+    eprintln!(
+        "nav-build --major-roads: pass 1/2 (ways) over {}",
+        options.source.display()
+    );
+    let pass1_start = Instant::now();
+    let reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    let way_pass = reader
+        .par_map_reduce(
+            |element| {
+                let mut acc = WayPass::default();
+                match element {
+                    Element::Way(way) => {
+                        let tags = collect_tags(way.tags());
+                        if !is_major_road(&tags) {
+                            return acc;
+                        }
+                        let refs: Vec<i64> = way.refs().collect();
+                        if refs.len() < 2 {
+                            return acc;
+                        }
+                        acc.ways.push((way.id(), refs, tags));
+                    }
+                    Element::Relation(relation) => {
+                        let mut is_restriction = false;
+                        let mut restriction_value = String::new();
+                        for (k, v) in relation.tags() {
+                            if k == "type" && v == "restriction" {
+                                is_restriction = true;
+                            }
+                            if k == "restriction" {
+                                restriction_value = v.to_string();
+                            }
+                        }
+                        if !is_restriction || restriction_value.is_empty() {
+                            return acc;
+                        }
+                        let only = restriction_value.starts_with("only_");
+                        let banned = restriction_value.starts_with("no_");
+                        if !only && !banned {
+                            return acc;
+                        }
+                        let mut from_way = None;
+                        let mut to_way = None;
+                        let mut via_node = None;
+                        for member in relation.members() {
+                            let role = member.role().unwrap_or("");
+                            match (role, member.member_type) {
+                                ("from", RelMemberType::Way) => from_way = Some(member.member_id),
+                                ("to", RelMemberType::Way) => to_way = Some(member.member_id),
+                                ("via", RelMemberType::Node) => via_node = Some(member.member_id),
+                                _ => {}
+                            }
+                        }
+                        if let (Some(from_way), Some(via_node), Some(to_way)) =
+                            (from_way, via_node, to_way)
+                        {
+                            acc.restrictions.push(BuildRestriction {
+                                from_way,
+                                via_node,
+                                to_way,
+                                only,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                acc
+            },
+            WayPass::default,
+            WayPass::merge,
+        )
+        .map_err(|err| format!("pbf way pass: {err}"))?;
+    let needed: std::collections::HashSet<i64> = way_pass
+        .ways
+        .iter()
+        .flat_map(|(_, refs, _)| refs.iter().copied())
+        .collect();
+    eprintln!(
+        "nav-build --major-roads: pass 1 done in {:.1}s — {} major ways, {} nodes needed, {} restrictions",
+        pass1_start.elapsed().as_secs_f64(),
+        way_pass.ways.len(),
+        needed.len(),
+        way_pass.restrictions.len()
+    );
+
+    eprintln!("nav-build --major-roads: pass 2/2 (nodes)");
+    let pass2_start = Instant::now();
+    let needed_ref = &needed;
+    let reader = ElementReader::from_path(&options.source)
+        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
+    let nodes = reader
+        .par_map_reduce(
+            |element| {
+                let mut acc: Vec<(i64, f64, f64)> = Vec::new();
+                let (id, lon, lat) = match &element {
+                    Element::Node(node) => (node.id(), node.lon(), node.lat()),
+                    Element::DenseNode(node) => (node.id(), node.lon(), node.lat()),
+                    _ => return acc,
+                };
+                if !needed_ref.contains(&id) {
+                    return acc;
+                }
+                if let Some(bbox) = &bbox {
+                    if !bbox.contains(lon, lat) {
+                        return acc;
+                    }
+                }
+                acc.push((id, lon, lat));
+                acc
+            },
+            Vec::new,
+            |mut a, mut b| {
+                a.append(&mut b);
+                a
+            },
+        )
+        .map_err(|err| format!("pbf node pass: {err}"))?;
+    eprintln!(
+        "nav-build --major-roads: pass 2 done in {:.1}s — {} nodes kept",
+        pass2_start.elapsed().as_secs_f64(),
+        nodes.len()
+    );
+
+    let build_start = Instant::now();
+    let mut graph_builder = GraphBuilder::new();
+    for &(id, lon, lat) in &nodes {
+        graph_builder.add_node(id, lon, lat);
+    }
+    for (id, refs, tags) in way_pass.ways {
+        graph_builder.add_way(id, refs, tags);
+    }
+    for r in way_pass.restrictions {
+        if needed.contains(&r.via_node) {
+            graph_builder.add_restriction(r);
+        }
+    }
+    let graph = graph_builder.build();
+    eprintln!(
+        "nav-build --major-roads: graph built in {:.1}s — {} vertices, {} directed edges",
+        build_start.elapsed().as_secs_f64(),
+        graph.vertices.len(),
+        graph.edges.len()
+    );
+    let graph_path = options.output_basename.with_extension("graph");
+    let graph_bytes = graph.serialize();
+    std::fs::write(&graph_path, &graph_bytes)
+        .map_err(|err| format!("write {}: {err}", graph_path.display()))?;
+    eprintln!(
+        "nav-build --major-roads: done in {:.1}s\n  {} ({:.1} MB)",
+        total_start.elapsed().as_secs_f64(),
+        graph_path.display(),
+        graph_bytes.len() as f64 / 1e6,
     );
     Ok(())
 }
@@ -970,6 +1161,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
     let mut skip_addresses = false;
     let mut places_only = false;
     let mut searchdb = false;
+    let mut major_roads_only = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -994,6 +1186,7 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
             "--skip-addresses" => skip_addresses = true,
             "--places-only" => places_only = true,
             "--searchdb" => searchdb = true,
+            "--major-roads" => major_roads_only = true,
             other => return Err(format!("unknown nav-build option {:?}", other)),
         }
         i += 1;
@@ -1005,5 +1198,6 @@ pub fn parse_nav_build_options(args: &[String]) -> Result<NavBuildOptions, Strin
         skip_addresses,
         places_only,
         searchdb,
+        major_roads_only,
     })
 }

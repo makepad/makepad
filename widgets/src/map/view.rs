@@ -30,6 +30,10 @@ script_mod! {
         // Live view zoom for per-icon zoom floors (param4 on shape 20):
         // stale deeper-bucket tiles must not flash markers on zoom-out.
         icon_zoom: uniform(24.0)
+        // 2D->3D transition: scales the per-meter height lift so buildings
+        // (and trees/signals) GROW out of the ground as their 3D bake fades
+        // in, and sink back when leaving 3D — instead of crossfading.
+        height_grow: uniform(1.0)
         // Heading-up camera: cos/sin of the screen rotation and its pivot
         // (the view center). Identity when north-up.
         view_rot: uniform(vec2(1.0, 0.0))
@@ -85,9 +89,12 @@ script_mod! {
             // param4 is building height in meters — EXCEPT on shape 20
             // icons, where it carries the icon's zoom floor and must not
             // lift the marker off the ground.
-            var lift_m = self.geom.param4;
+            var lift_m = self.geom.param4 * self.height_grow;
             if shape_id > 19.5 && shape_id < 20.5 {
-                lift_m = 0.0;
+                // Icon param4 = zoom_floor + pin_lift_m*100: markers fly at
+                // their encoded height (0 for grounded icons).
+                let icon_floor = modf(self.geom.param4, 100.0);
+                lift_m = (self.geom.param4 - icon_floor) * 0.01 * self.height_grow;
             }
             transformed.y = self.rot_pivot.y
                 + ground_rel_y * self.tilt_params.x
@@ -103,7 +110,7 @@ script_mod! {
                 // FAIL-OPEN: if the icon_zoom uniform hasn't landed (reads
                 // ~0 — seen when a startup DSL override re-parses this
                 // shader), the gate disarms instead of hiding every icon.
-                if self.icon_zoom > 1.0 && self.geom.param4 > self.icon_zoom + 0.6 {
+                if self.icon_zoom > 1.0 && modf(self.geom.param4, 100.0) > self.icon_zoom + 0.6 {
                     self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
                     return
                 }
@@ -252,6 +259,57 @@ script_mod! {
                 return self.dash(8.0, 8.0)
             }
             return 1.0
+        }
+    }
+
+    // Rain radar raster overlay: one textured quad whose four SCREEN-space
+    // corners come from the overlay camera (so it pans/zooms/rotates/tilts
+    // with the map); texture is a mercator-aligned RGBA nowcast frame.
+    mod.draw.DrawRainOverlay = mod.std.set_type_default() do #(DrawRainOverlay::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        tex: texture_2d(float)
+        // c0..c3 + rain_alpha come from the Rust struct's #[live] fields
+        // (auto-registered as instance inputs; declaring them here too
+        // collides, as with DrawRotatedText.upright).
+        uv: varying(vec2f)
+
+        vertex: fn() {
+            let top = mix(self.c0, self.c1, self.geom.pos.x)
+            let bottom = mix(self.c3, self.c2, self.geom.pos.x)
+            let p = mix(top, bottom, self.geom.pos.y)
+            self.uv = self.geom.pos
+            let shifted = p + self.draw_list.view_shift
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (
+                self.draw_list.view_transform * vec4(
+                    shifted.x,
+                    shifted.y,
+                    self.draw_depth + self.draw_call.zbias,
+                    1.
+                )
+            ))
+        }
+
+        pixel: fn() {
+            let color = self.tex.sample_as_bgra(self.uv)
+            // Isosurface look: each intensity band has a UNIQUE alpha, so a
+            // differing neighbor alpha marks a band boundary -> draw a
+            // darker contour line there (weather-radar isopleths).
+            let e1 = self.tex.sample_as_bgra(self.uv + vec2(self.texel.x, 0.0))
+            let e2 = self.tex.sample_as_bgra(self.uv - vec2(self.texel.x, 0.0))
+            let e3 = self.tex.sample_as_bgra(self.uv + vec2(0.0, self.texel.y))
+            let e4 = self.tex.sample_as_bgra(self.uv - vec2(0.0, self.texel.y))
+            var edge = 0.0
+            if abs(e1.w - color.w) > 0.01 || abs(e2.w - color.w) > 0.01
+                || abs(e3.w - color.w) > 0.01 || abs(e4.w - color.w) > 0.01 {
+                edge = 1.0
+            }
+            var rgb = color.xyz
+            var alpha = color.w * self.rain_alpha
+            if edge > 0.5 && color.w > 0.01 {
+                rgb = rgb * 0.55
+                alpha = min(alpha * 1.7 + 0.12, 0.95)
+            }
+            return vec4(rgb * alpha, alpha)
         }
     }
 
@@ -465,6 +523,25 @@ struct FlyTo {
 
 // --- Draw shaders ---
 
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawRainOverlay {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live(vec2(0.0, 0.0))]
+    pub c0: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c1: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c2: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c3: Vec2f,
+    #[live(0.85)]
+    pub rain_alpha: f32,
+    #[live(vec2(0.0015625, 0.00125))]
+    pub texel: Vec2f,
+}
+
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawMapVector {
@@ -492,6 +569,7 @@ impl DrawMapVector {
         rot_pivot: [f32; 2],
         tilt_params: [f32; 4],
         icon_zoom: f32,
+        height_grow: f32,
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
@@ -526,6 +604,9 @@ impl DrawMapVector {
         self.draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(icon_zoom), &[icon_zoom]);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(height_grow), &[height_grow]);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -558,6 +639,9 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_label: DrawRotatedText,
+    #[redraw]
+    #[live]
+    draw_rain: DrawRainOverlay,
     #[redraw]
     #[live]
     draw_text: DrawText,
@@ -654,6 +738,19 @@ pub struct MapView {
     applied_dark_theme: Option<bool>,
     #[rust]
     style_epoch: u64,
+    /// Rain radar nowcast: one mercator-aligned RGBA texture per +5 min
+    /// frame, animated on a timer while enabled.
+    #[rust]
+    rain_frames: Vec<Texture>,
+    #[rust]
+    rain_frame_index: usize,
+    #[rust]
+    rain_timer: Timer,
+    /// (west, south, east, north) of the rain textures in lon/lat.
+    #[rust]
+    rain_bbox: (f64, f64, f64, f64),
+    #[rust]
+    rain_tex_size: (usize, usize),
     /// The 2D/3D mode the current tile set was baked with — a flip
     /// re-bakes tiles (extrusions only exist in the 3D bake).
     #[rust]
@@ -841,6 +938,10 @@ impl Widget for MapView {
         self.handle_tile_worker_messages(cx);
         self.widget_match_event(cx, event, scope);
 
+        if self.rain_timer.is_event(event).is_some() && !self.rain_frames.is_empty() {
+            self.rain_frame_index = (self.rain_frame_index + 1) % self.rain_frames.len();
+            self.redraw(cx);
+        }
         if self.tile_fade_timer.is_event(event).is_some() {
             self.redraw(cx);
             if self.tiles.values().any(|entry| entry.fade.is_some()) {
@@ -932,8 +1033,16 @@ impl Widget for MapView {
                     if self.tilt > 0.0 && self.tilt < 10.0 {
                         self.tilt = 0.0;
                         cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: 0.0 });
-                        self.redraw(cx);
                     }
+                    // Guarantee a full label re-place AFTER the rate-limit
+                    // window: without this, a fast spin that ends inside the
+                    // window leaves the cached placement rigidly rotated
+                    // (180° = upside-down labels) with no frame scheduled
+                    // to true it up.
+                    cx.stop_timer(self.zoom_settle_timer);
+                    self.zoom_settle_timer =
+                        cx.start_timeout(LABEL_REPLACE_MIN_SECONDS + 0.05);
+                    self.redraw(cx);
                     self.sync_camera_fields();
                     self.emit_viewport_changed(cx);
                     return;
@@ -1130,6 +1239,7 @@ impl Widget for MapView {
                             rot_pivot_uniform,
                             tilt_uniform,
                             view_zoom as f32,
+                            1.0,
                         );
                     }
                 }
@@ -1148,6 +1258,11 @@ impl Widget for MapView {
                     rot_pivot_uniform,
                     tilt_uniform,
                     view_zoom as f32,
+                    if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                        fade_alpha
+                    } else {
+                        1.0
+                    },
                 );
             }
         }
@@ -1234,6 +1349,7 @@ impl Widget for MapView {
                             rot_pivot_uniform,
                             tilt_uniform,
                             view_zoom as f32,
+                            1.0,
                         );
                     }
                 }
@@ -1252,12 +1368,54 @@ impl Widget for MapView {
                     rot_pivot_uniform,
                     tilt_uniform,
                     view_zoom as f32,
+                    if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                        fade_alpha
+                    } else {
+                        1.0
+                    },
                 );
             }
         }
 
 
         // Pin-class label text (white kW numbers) over the pins.
+        // Rain radar overlay: over all map content, under labels/UI. The
+        // quad's corners go through the overlay camera so it sticks to the
+        // map in every projection.
+        if !self.rain_frames.is_empty() {
+            let camera = self.overlay_camera();
+            let (west, south, east, north) = self.rain_bbox;
+            let nw = lon_lat_to_normalized(west, north);
+            let ne = lon_lat_to_normalized(east, north);
+            let se = lon_lat_to_normalized(east, south);
+            let sw = lon_lat_to_normalized(west, south);
+            let c0 = camera.norm_to_screen(nw);
+            let c1 = camera.norm_to_screen(ne);
+            let c2 = camera.norm_to_screen(se);
+            let c3 = camera.norm_to_screen(sw);
+            let texture = self.rain_frames[self.rain_frame_index % self.rain_frames.len()].clone();
+            self.draw_rain.draw_super.draw_vars.set_texture(0, &texture);
+            self.draw_rain.c0 = Vec2f { x: c0.x as f32, y: c0.y as f32 };
+            self.draw_rain.c1 = Vec2f { x: c1.x as f32, y: c1.y as f32 };
+            self.draw_rain.c2 = Vec2f { x: c2.x as f32, y: c2.y as f32 };
+            self.draw_rain.c3 = Vec2f { x: c3.x as f32, y: c3.y as f32 };
+            self.draw_rain.texel = Vec2f {
+                x: 1.0 / self.rain_tex_size.0 as f32,
+                y: 1.0 / self.rain_tex_size.1 as f32,
+            };
+            let min_x = c0.x.min(c1.x).min(c2.x).min(c3.x);
+            let min_y = c0.y.min(c1.y).min(c2.y).min(c3.y);
+            let max_x = c0.x.max(c1.x).max(c2.x).max(c3.x);
+            let max_y = c0.y.max(c1.y).max(c2.y).max(c3.y);
+            self.draw_rain.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(min_x, min_y),
+                    size: dvec2(max_x - min_x, max_y - min_y),
+                },
+            );
+        }
+
         self.draw_pin_label_phase(cx);
 
 
@@ -1544,6 +1702,7 @@ impl MapView {
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
+        let new_baked_3d = self.baked_3d_mode;
         let fade = match self.tiles.remove(&tile_key) {
             Some(TileEntry {
                 state:
@@ -1555,10 +1714,12 @@ impl MapView {
                         ..
                     },
                 bucket: old_bucket,
+                baked_3d: old_baked_3d,
                 ..
             }) => Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: old_bucket,
+                grow_heights: new_baked_3d && !old_baked_3d,
                 fill_geometry: old_fill,
                 casing_geometry: old_casing,
                 stroke_geometry: old_stroke,
@@ -1567,6 +1728,7 @@ impl MapView {
             _ => Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: buffers.render_zoom,
+                grow_heights: new_baked_3d,
                 fill_geometry: None,
                 casing_geometry: None,
                 stroke_geometry: None,
@@ -1591,6 +1753,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts: 0,
                 bucket: buffers.render_zoom,
+                baked_3d: self.baked_3d_mode,
                 fade,
             },
         );
@@ -1816,6 +1979,7 @@ impl MapView {
                         last_used: self.frame_counter,
                         attempts: 0,
                         bucket,
+                        baked_3d: self.baked_3d_mode,
                         fade: None,
                     },
                 );
@@ -1885,6 +2049,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts,
                 bucket,
+                baked_3d: self.baked_3d_mode,
                 fade: None,
             },
         );
@@ -2248,6 +2413,7 @@ impl MapView {
                         last_used: self.frame_counter,
                         attempts: 0,
                         bucket,
+                        baked_3d: self.baked_3d_mode,
                         fade: None,
                     },
                 );
@@ -2303,6 +2469,7 @@ impl MapView {
                 last_used: self.frame_counter,
                 attempts,
                 bucket,
+                baked_3d: self.baked_3d_mode,
                 fade: None,
             },
         );
@@ -2556,10 +2723,18 @@ impl MapView {
             // Billboard pin-phase plans anchor at the SITE point (the pin's
             // baked anchor): back the screen-px layout shift out of the
             // placement center so glyph offsets carry the layout instead.
+            let lift_px = candidate.lift_px;
             let layout_shift = if candidate.color_class == LABEL_CLASS_PIN {
-                (3.0f32, -12.35f32)
+                (3.0f32, -12.35f32 - lift_px)
             } else if candidate.road_kind.starts_with("chb") {
-                (0.0, 9.0)
+                (0.0, 9.0 - lift_px)
+            } else if candidate.road_kind.starts_with("poi") && lift_px > 0.0 {
+                (0.0, -lift_px - 12.0)
+            } else if (candidate.road_kind.starts_with("stS")
+                || candidate.road_kind.starts_with("stp"))
+                && lift_px > 0.0
+            {
+                (0.0, -lift_px - 10.0)
             } else {
                 (0.0, 0.0)
             };
@@ -2884,17 +3059,31 @@ impl MapView {
                 // Charger brand reads just under the billboard pin: a fixed
                 // SCREEN-space drop below the site anchor (a map-space offset
                 // would tilt-compress and orbit the pin under rotation).
+                // Flying-marker labels ride their marker's BAKED stalk
+                // height (dynamic: each pin clears its own building).
+                let lift_px = self.lift_screen_px(label.lift_m, view_zoom);
+                if is_poi && lift_px > 0.0 {
+                    // Above the floating icon.
+                    for p in self.scratch_screen_path.iter_mut() {
+                        p.y -= lift_px + 12.0;
+                    }
+                }
+                if label.source_layer == "stops" && lift_px > 0.0 {
+                    for p in self.scratch_screen_path.iter_mut() {
+                        p.y -= lift_px + 10.0;
+                    }
+                }
                 if label.road_kind.starts_with("chb") {
                     for p in self.scratch_screen_path.iter_mut() {
-                        p.y += 9.0;
+                        p.y += 9.0 - lift_px;
                     }
                 }
                 // In-pin text: center in the droplet's text zone (right of
-                // the bolt, above the tail) — screen-px pin layout.
+                // the bolt, above the tail); rides the stalk in 3D.
                 if label.color_class == LABEL_CLASS_PIN {
                     for p in self.scratch_screen_path.iter_mut() {
                         p.x += 3.0;
-                        p.y += -12.35;
+                        p.y += -12.35 - lift_px;
                     }
                 }
                 if self.scratch_screen_path.len() < 2
@@ -3002,6 +3191,7 @@ impl MapView {
                     c.repeat_distance = repeat_distance;
                     c.font_scale = font_scale;
                     c.screen_point = is_screen_point;
+                    c.lift_px = lift_px as f32;
                     c.screen_path.extend_from_slice(&self.scratch_screen_path);
                 } else {
                     self.scratch_candidates.push(LabelCandidate {
@@ -3016,6 +3206,7 @@ impl MapView {
                         repeat_distance,
                         font_scale,
                         screen_point: is_screen_point,
+                        lift_px: lift_px as f32,
                         screen_path: self.scratch_screen_path.clone(),
                     });
                 }
@@ -3364,6 +3555,19 @@ impl MapView {
 impl MapView {
     /// Hit-test the tappable charger pins of ready tiles against a screen
     /// point (billboard rect around the pin anchor, camera-transformed).
+    /// Screen-px height of a flying marker above its ground anchor (0 in
+    /// 2D) — the baked per-marker lift converted through the current tilt
+    /// and meters-per-pixel.
+    fn lift_screen_px(&self, lift_m: f32, view_zoom: f64) -> f64 {
+        if !self.buildings_3d || self.tilt <= 0.0 || lift_m <= 0.0 {
+            return 0.0;
+        }
+        let world_size = TILE_SIZE * 2f64.powf(view_zoom);
+        let (_, lat) = normalized_to_lon_lat(self.center_norm);
+        let px_per_meter = world_size / (40_075_016.686 * lat.to_radians().cos());
+        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, 65.0).to_radians().sin()
+    }
+
     fn pin_at(&self, abs: Vec2d) -> Option<(f64, f64, Vec<(String, String)>)> {
         let camera = self.overlay_camera();
         let mut best: Option<(f64, &PinHit)> = None;
@@ -3375,6 +3579,8 @@ impl MapView {
                 let screen = camera.norm_to_screen(dvec2(hit.norm.0, hit.norm.1));
                 let dx = abs.x - screen.x;
                 let dy = abs.y - screen.y;
+                let lift = self.lift_screen_px(hit.lift_m, self.view_zoom());
+                let dy = dy + lift;
                 if dx.abs() <= 18.0 && dy >= -26.0 && dy <= 6.0 {
                     let dist = dx * dx + dy * dy;
                     if best.as_ref().is_none_or(|(d, _)| dist < *d) {
@@ -3517,6 +3723,38 @@ impl MapView {
 
     pub fn tilt(&self) -> f64 {
         self.tilt
+    }
+
+    /// Install the rain nowcast animation frames (BGRA u32 texels) covering
+    /// the given lon/lat bbox; empty = disable. Frames advance every 220 ms.
+    pub fn set_rain_frames(
+        &mut self,
+        cx: &mut Cx,
+        frames: Vec<Vec<u32>>,
+        width: usize,
+        height: usize,
+        bbox: (f64, f64, f64, f64),
+    ) {
+        cx.stop_timer(self.rain_timer);
+        self.rain_frames.clear();
+        self.rain_frame_index = 0;
+        self.rain_bbox = bbox;
+        self.rain_tex_size = (width.max(1), height.max(1));
+        for data in frames {
+            self.rain_frames.push(Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    data: Some(data),
+                    width,
+                    height,
+                    updated: TextureUpdated::Full,
+                },
+            ));
+        }
+        if !self.rain_frames.is_empty() {
+            self.rain_timer = cx.start_interval(0.22);
+        }
+        self.redraw(cx);
     }
 
     pub fn set_map_zoom(&mut self, cx: &mut Cx, zoom: f64) {
@@ -3710,6 +3948,19 @@ impl MapViewRef {
     pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_overlay_paths(cx, paths);
+        }
+    }
+
+    pub fn set_rain_frames(
+        &self,
+        cx: &mut Cx,
+        frames: Vec<Vec<u32>>,
+        width: usize,
+        height: usize,
+        bbox: (f64, f64, f64, f64),
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_rain_frames(cx, frames, width, height, bbox);
         }
     }
 
