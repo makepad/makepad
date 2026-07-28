@@ -71,6 +71,15 @@ fn write_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Node-group cache size: MAKEPAD_NODE_CACHE_MIB (default 8192 MiB).
+fn node_cache_groups() -> usize {
+    let mib = std::env::var("MAKEPAD_NODE_CACHE_MIB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8192);
+    (mib * 4 / 3).max(256)
+}
+
 fn write_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
@@ -440,7 +449,10 @@ impl NodeStore {
             file,
             entries: StoreIndex::new(read_index(index_path, NODE_INDEX_MAGIC)?),
             cache: FastHashMap::default(),
-            cache_capacity: 256,
+            // ~0.75MB per decoded group; 16384 groups ~= 12GB. The old 256
+            // (128MB) thrashed on Europe-scale way resolution — cache-miss
+            // zlib re-decode was ~115us per way, the whole pass-3 cost.
+            cache_capacity: node_cache_groups(),
             cache_clock: 0,
             last_group: None,
         })
