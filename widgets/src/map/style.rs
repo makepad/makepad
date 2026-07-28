@@ -809,6 +809,17 @@ pub fn stroke_style_for_tags(
             ) {
                 style.center.color = 0x9c9c9c;
             }
+            // Footway bridges get a small white deck under the dots (the
+            // "outline box" carto draws over water crossings).
+            if tag_is_truthy(tags, "bridge") {
+                style.casing = Some(StrokePassStyle {
+                    color: 0xffffff,
+                    width: style.center.width * 3.4,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_THIN,
+                    depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
+                });
+            }
         }
         // Bridges float above (and tunnels below) their base rank in the
         // tilt-mode micro-depth as well, so crossings resolve stably.
