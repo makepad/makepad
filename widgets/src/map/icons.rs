@@ -270,8 +270,12 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
 
 /// Map shortbread poi attributes to a symbol + label color class.
 pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
-    if tags.get("layer").map(|v| v.as_str()) == Some("micro_pois") {
-        return micro_icon_for_tags(tags);
+    match tags.get("layer").map(|v| v.as_str()) {
+        Some("micro_pois") => return micro_icon_for_tags(tags),
+        // Geodata overlays (layers.md).
+        Some("chargers") => return Some(("charger", LABEL_CLASS_TRANSPORT)),
+        Some("stops") => return Some(("dot", LABEL_CLASS_TRANSPORT)),
+        _ => {}
     }
     if let Some(shop) = tags.get("shop") {
         let name = match shop.as_str() {

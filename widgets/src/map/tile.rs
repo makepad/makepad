@@ -201,6 +201,7 @@ struct PreparedWay {
 #[derive(Debug)]
 struct FillFeatureGroup {
     color: u32,
+    alpha: f32,
     layer_rank: u8,
     is_building: bool,
     pattern: f32,
@@ -391,6 +392,7 @@ pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
     raw_tile_data: &[u8],
     detail_tile_data: Option<&[u8]>,
+    overlay_tiles: &[OverlayTileData],
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
@@ -426,6 +428,23 @@ pub fn build_tile_buffers_from_mvt(
             }
         }
     }
+    for overlay in overlay_tiles {
+        if let Err(err) = merge_overlay_features(
+            overlay,
+            tile_key,
+            render_scale,
+            &mut collector.points,
+            &mut collector.ways,
+        ) {
+            log!(
+                "MapView: overlay tile z{} x{} y{} decode failed: {}",
+                tile_key.z,
+                tile_key.x,
+                tile_key.y,
+                err
+            );
+        }
+    }
     Ok(build_tile_buffers_from_features(
         tile_key,
         collector.ways,
@@ -433,6 +452,45 @@ pub fn build_tile_buffers_from_mvt(
         theme,
         render_zoom,
     ))
+}
+
+/// Merge features from a geodata overlay tile (layers.md track: chargers,
+/// transit, nature, districts…). The MVT layer name arrives as the "layer"
+/// tag and drives styling. Ancestor tiles (overlay maxzoom below the
+/// requested zoom) are scaled into this tile's local space and rely on the
+/// existing fill/stroke clipping; points get a bounds filter here.
+fn merge_overlay_features(
+    overlay: &OverlayTileData,
+    tile_key: TileKey,
+    render_scale: f32,
+    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    ways: &mut Vec<TileWay>,
+) -> Result<(), String> {
+    let pbf_data = decode_vector_tile_payload(&overlay.raw)?;
+    let mut collector = MvtLocalCollector::new(render_scale);
+    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    let scale = (1u32 << overlay.shift) as f32;
+    let offset_x = overlay.quadrant_x as f32 * TILE_SIZE as f32;
+    let offset_y = overlay.quadrant_y as f32 * TILE_SIZE as f32;
+    let transform = |p: (f32, f32)| (p.0 * scale - offset_x, p.1 * scale - offset_y);
+    for (point, tags) in collector.points {
+        let point = transform(point);
+        if point.0 < -32.0
+            || point.1 < -32.0
+            || point.0 > TILE_SIZE as f32 + 32.0
+            || point.1 > TILE_SIZE as f32 + 32.0
+        {
+            continue;
+        }
+        points.push((point, tags));
+    }
+    for mut way in collector.ways {
+        for point in way.points.iter_mut() {
+            *point = transform(*point);
+        }
+        ways.push(way);
+    }
+    Ok(())
 }
 
 /// Merge whitelisted features from a detail-archive tile: micro-POI points
@@ -799,7 +857,15 @@ fn build_tile_buffers_from_features(
     let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, bool)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
-        if render_zoom >= ICON_MIN_ZOOM {
+        let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+        // Overlay points (chargers, transit stops) show earlier than the
+        // dense base-POI iconography.
+        let icon_zoom_floor = match layer {
+            "chargers" => 12,
+            "stops" => 13,
+            _ => ICON_MIN_ZOOM,
+        };
+        if render_zoom >= icon_zoom_floor {
             if let Some((icon_name, color_class)) = icon_for_tags(tags) {
                 if let Some(mesh) = icon_mesh(icon_name) {
                     // Doors and generic dots yield to real symbols in the
@@ -978,7 +1044,8 @@ fn build_tile_buffers_from_features(
             .cloned()
             .unwrap_or_else(|| format!("way:{}", prepared_way.way_index));
         let pattern = fill_pattern_shape(&way.tags);
-        let group_key = (feature_key, color, pattern.to_bits());
+        let alpha = fill_alpha_for_tags(&way.tags);
+        let group_key = (feature_key, color, pattern.to_bits() ^ alpha.to_bits());
         let group_index = if let Some(index) = fill_group_lookup.get(&group_key).copied() {
             index
         } else {
@@ -988,6 +1055,7 @@ fn build_tile_buffers_from_features(
                 color,
                 layer_rank: fill_layer_rank(&way.tags),
                 is_building: way.tags.contains_key("building"),
+                alpha,
                 pattern,
                 rings: Vec::new(),
             });
@@ -1049,7 +1117,7 @@ fn build_tile_buffers_from_features(
                 &mut fill_vertices,
                 &mut fill_indices,
                 VectorRenderParams {
-                    color: hex_to_premul_rgba(group.color, 1.0),
+                    color: hex_to_premul_rgba(group.color, group.alpha),
                     stroke_mult: 1e6,
                     shape_id: group.pattern,
                     params: [
@@ -1621,9 +1689,31 @@ fn project_way_points_with_nodes(
 
 // --- Local mbtiles loading ---
 
+/// One decoded overlay tile handed to the tile builder: raw MVT bytes plus
+/// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
+/// ancestor's local space into this tile's.
+pub struct OverlayTileData {
+    pub raw: Vec<u8>,
+    pub shift: u32,
+    pub quadrant_x: u32,
+    pub quadrant_y: u32,
+}
+
+fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
+    let metadata = reader.get_metadata().unwrap_or_default();
+    let parse = |key: &str, fallback: u32| {
+        metadata
+            .get(key)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(fallback)
+    };
+    (parse("minzoom", 0), parse("maxzoom", 30))
+}
+
 pub fn load_local_tile_batch(
     mbtiles_path: &Path,
     detail_mbtiles_path: Option<&Path>,
+    overlay_paths: &[String],
     requested: &[TileKey],
     theme: &CompiledMapTheme,
     render_zoom: u32,
@@ -1632,6 +1722,39 @@ pub fn load_local_tile_batch(
     if requested.is_empty() {
         return Ok(Vec::new());
     }
+
+    let mut overlay_readers: Vec<(MbtilesReader, u32, u32)> = overlay_paths
+        .iter()
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| MbtilesReader::open(Path::new(path)).ok())
+        .map(|mut reader| {
+            let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
+            (reader, min_zoom, max_zoom)
+        })
+        .collect();
+
+    let mut fetch_overlays = |tile_key: TileKey| -> Vec<OverlayTileData> {
+        let mut out = Vec::new();
+        for (reader, min_zoom, max_zoom) in overlay_readers.iter_mut() {
+            if tile_key.z < *min_zoom {
+                continue;
+            }
+            let shift = tile_key.z.saturating_sub(*max_zoom);
+            let fetch_z = tile_key.z - shift;
+            let fetch_x = (tile_key.x as u32 >> shift) as i64;
+            let fetch_y = (tile_key.y as u32 >> shift) as i64;
+            let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
+            if let Ok(Some(raw)) = reader.get_tile(fetch_z as i64, fetch_x, tms_row) {
+                out.push(OverlayTileData {
+                    raw,
+                    shift,
+                    quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
+                    quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
+                });
+            }
+        }
+        out
+    };
 
     // The MBTiles archive is already the local, seekable tile cache. Do not
     // duplicate it into millions of generated JSON files.
@@ -1692,11 +1815,13 @@ pub fn load_local_tile_batch(
                     .as_mut()
                     .and_then(|reader| reader.get_tile(zoom as i64, tile_key.x as i64, tms_row).ok())
                     .flatten();
+                let overlay_tiles = fetch_overlays(tile_key);
 
                 match build_tile_buffers_from_mvt(
                     tile_key,
                     &raw,
                     detail_raw.as_deref(),
+                    &overlay_tiles,
                     theme,
                     render_zoom,
                     buildings_3d,
@@ -1779,10 +1904,12 @@ pub fn load_local_tile_batch(
                         .ok()
                 })
                 .flatten();
+            let overlay_tiles = fetch_overlays(tile_key);
             match build_tile_buffers_from_mvt(
                 tile_key,
                 &tile.tile_data,
                 detail_raw.as_deref(),
+                &overlay_tiles,
                 theme,
                 render_zoom,
                 buildings_3d,
@@ -2257,6 +2384,8 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
         // whitelist decides downstream what actually draws.
         "osm_points" => true,
         "water_polygons_labels" => select_label_text(tags).is_some(),
+        // Geodata overlay point layers (layers.md).
+        "chargers" | "stops" => true,
         _ => {
             is_road_point_label_layer(layer)
                 && tags.contains_key("highway")
@@ -2502,7 +2631,8 @@ mod bridge_probe_tests {
         let det = detail_reader.get_tile(14, 8415, 16383 - y).unwrap();
         let theme = CompiledMapTheme::default();
         let buffers =
-            build_tile_buffers_from_mvt(key, &raw, det.as_deref(), &theme, 17, false).unwrap();
+            build_tile_buffers_from_mvt(key, &raw, det.as_deref(), &[], &theme, 17, false)
+                .unwrap();
         let attraction: Vec<&TileLabel> = buffers
             .labels
             .iter()

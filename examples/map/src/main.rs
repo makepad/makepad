@@ -223,6 +223,36 @@ script_mod! {
                             }
                         }
 
+                        // --- Layers panel (above the bottom-right buttons) ---
+                        View{
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 1.0 y: 1.0}
+                            layers_panel := RoundedView{
+                                visible: false
+                                flow: Down
+                                width: Fit
+                                height: Fit
+                                margin: Inset{right: 16, bottom: 56}
+                                padding: Inset{left: 12, right: 14, top: 10, bottom: 10}
+                                spacing: 4
+                                draw_bg +: {
+                                    color: #xfffffff2
+                                    border_radius: 9.0
+                                    border_size: 1.0
+                                    border_color: #x00000022
+                                }
+                                layer_chargers := CheckBox{text: "EV chargers"}
+                                layer_transit := CheckBox{text: "Transit"}
+                                layer_nature := CheckBox{text: "Nature areas"}
+                                layer_districts := CheckBox{text: "Districts"}
+                                PanelText{
+                                    margin: Inset{top: 6}
+                                    text: "Terrain · Noise · Flood · Rain: soon"
+                                }
+                            }
+                        }
+
                         // --- Zoom + recenter (bottom-right) ---
                         View{
                             width: Fill
@@ -233,6 +263,10 @@ script_mod! {
                                 visible: false
                                 margin: Inset{right: 6, bottom: 18}
                                 text: "Recenter"
+                            }
+                            layers_button := AppButton{
+                                margin: Inset{right: 4, bottom: 18}
+                                text: "Layers"
                             }
                             tilt_button := AppButton{
                                 margin: Inset{right: 4, bottom: 18}
@@ -620,6 +654,24 @@ impl App {
         self.set_status(cx, &format!("Routing to {}…", name));
     }
 
+    /// Rebuild the overlay path list from the layer checkboxes.
+    fn apply_overlay_selection(&mut self, cx: &mut Cx) {
+        let mut paths: Vec<&str> = Vec::new();
+        if self.ui.check_box(cx, ids!(layer_chargers)).active(cx) {
+            paths.push("local/overlays/nl-chargers.mbtiles");
+        }
+        if self.ui.check_box(cx, ids!(layer_transit)).active(cx) {
+            paths.push("local/overlays/nl-transit.mbtiles");
+        }
+        if self.ui.check_box(cx, ids!(layer_nature)).active(cx) {
+            paths.push("local/overlays/nl-nature.mbtiles");
+        }
+        if self.ui.check_box(cx, ids!(layer_districts)).active(cx) {
+            paths.push("local/overlays/nl-wijkbuurt.mbtiles");
+        }
+        self.map(cx).set_overlay_paths(cx, &paths.join(";"));
+    }
+
     fn apply_route(&mut self, cx: &mut Cx, route: Route) {
         let points: Vec<(f64, f64)> = route.points.iter().map(|p| (p.lon, p.lat)).collect();
         let map = self.map(cx);
@@ -930,6 +982,34 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(end_button)).clicked(actions) {
             self.end_nav(cx);
+        }
+        if self.ui.button(cx, ids!(layers_button)).clicked(actions) {
+            let panel = self.ui.view(cx, ids!(layers_panel));
+            let visible = panel.visible();
+            panel.set_visible(cx, !visible);
+        }
+        let layers_changed = self
+            .ui
+            .check_box(cx, ids!(layer_chargers))
+            .changed(actions)
+            .is_some()
+            || self
+                .ui
+                .check_box(cx, ids!(layer_transit))
+                .changed(actions)
+                .is_some()
+            || self
+                .ui
+                .check_box(cx, ids!(layer_nature))
+                .changed(actions)
+                .is_some()
+            || self
+                .ui
+                .check_box(cx, ids!(layer_districts))
+                .changed(actions)
+                .is_some();
+        if layers_changed {
+            self.apply_overlay_selection(cx);
         }
         if self.ui.button(cx, ids!(tilt_button)).clicked(actions) {
             self.tilt_target = if self.tilt_target > 0.0 { 0.0 } else { 42.0 };
