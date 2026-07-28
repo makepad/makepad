@@ -59,6 +59,7 @@ pub enum TileLoadState {
         icon_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
+        pin_hits: Vec<PinHit>,
     },
     Failed {
         retry_after: u64,
@@ -135,8 +136,17 @@ struct WayData {
     closed: bool,
 }
 
+/// A tappable pin baked into a tile: normalized world position + the
+/// attributes the info bubble shows.
+#[derive(Debug, Clone)]
+pub struct PinHit {
+    pub norm: (f64, f64),
+    pub info: Vec<(String, String)>,
+}
+
 #[derive(Debug)]
 pub struct TileBuffers {
+    pub pin_hits: Vec<PinHit>,
     pub fill_indices: Vec<u32>,
     pub fill_vertices: Vec<f32>,
     pub casing_indices: Vec<u32>,
@@ -866,6 +876,7 @@ fn build_tile_buffers_from_features(
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
+    let mut pin_hits = Vec::<PinHit>::new();
     let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
@@ -941,6 +952,23 @@ fn build_tile_buffers_from_features(
                         two_tone,
                         charger_kw as f32,
                     ));
+                    if two_tone == 2 || two_tone == 3 {
+                        // Tappable: record position + info for the bubble.
+                        let world = (1u32 << tile_key.z) as f64;
+                        let norm = (
+                            (tile_key.x as f64 + point.0 as f64 / TILE_SIZE) / world,
+                            (tile_key.y as f64 + point.1 as f64 / TILE_SIZE) / world,
+                        );
+                        let mut info: Vec<(String, String)> = Vec::new();
+                        for key in ["name", "operator", "city", "max_kw", "evses", "connectors"] {
+                            if let Some(value) = tags.get(key) {
+                                if !value.trim().is_empty() {
+                                    info.push((key.to_string(), value.clone()));
+                                }
+                            }
+                        }
+                        pin_hits.push(PinHit { norm, info });
+                    }
                     if two_tone == 2 {
                         // brand reads below the pin from z13; the kW digits
                         // are part of the icon composite itself.
@@ -1679,6 +1707,7 @@ fn build_tile_buffers_from_features(
     compact_tile_labels(&mut labels);
 
     TileBuffers {
+        pin_hits,
         fill_indices,
         fill_vertices,
         casing_indices,
