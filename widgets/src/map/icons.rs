@@ -19,6 +19,10 @@ use std::sync::OnceLock;
 
 /// On-screen symbol size; carto icons are authored at 14x14.
 pub const ICON_SIZE_PX: f32 = 14.0;
+pub const DIGIT_NAMES: [&str; 10] = [
+    "digit_0", "digit_1", "digit_2", "digit_3", "digit_4", "digit_5", "digit_6", "digit_7",
+    "digit_8", "digit_9",
+];
 /// Symbols appear from this view-zoom bucket (carto shows the full POI
 /// symbol set from z17).
 pub const ICON_MIN_ZOOM: u32 = 17;
@@ -104,8 +108,23 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger_pin.svg"), 16.0) {
             out.insert("charger_pin_ac", mesh);
         }
-        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger.svg"), 9.0) {
-            out.insert("charger_bolt", mesh);
+        // Bolt overlays carry their in-pin offset IN THE MESH (screen px):
+        // offsetting the anchor instead scales with the map and the pin
+        // composite smears apart at fractional zooms.
+        if let Some(mesh) =
+            build_icon_mesh_sized_offset(include_str!("icons/charger.svg"), 9.0, -8.5, -3.5)
+        {
+            out.insert("charger_bolt_fast", mesh);
+        }
+        if let Some(mesh) =
+            build_icon_mesh_sized_offset(include_str!("icons/charger.svg"), 9.0, 0.0, -2.5)
+        {
+            out.insert("charger_bolt_ac", mesh);
+        }
+        for digit in 0u8..10 {
+            if let Some(mesh) = build_digit_mesh(digit) {
+                out.insert(DIGIT_NAMES[digit as usize], mesh);
+            }
         }
         out
     })
@@ -155,6 +174,73 @@ fn collect_paths(nodes: &[SvgNode], out: &mut VectorPath) {
 /// origin so vertices double as screen-px offsets from the anchor point.
 fn build_icon_mesh(svg: &str) -> Option<IconMesh> {
     build_icon_mesh_sized(svg, ICON_SIZE_PX)
+}
+
+fn build_icon_mesh_sized_offset(
+    svg: &str,
+    size_px: f32,
+    dx: f32,
+    dy: f32,
+) -> Option<IconMesh> {
+    let mut mesh = build_icon_mesh_sized(svg, size_px)?;
+    for vertex in &mut mesh.verts {
+        vertex.x += dx;
+        vertex.y += dy;
+    }
+    Some(mesh)
+}
+
+/// Seven-segment digit meshes: pin badges draw their kW number as PART
+/// of the icon composite — same anchor, same billboard transform, so the
+/// text can never detach, double, or re-layout while zooming/rotating.
+fn build_digit_mesh(digit: u8) -> Option<IconMesh> {
+    // Segment layout in a 6x10 box centered at origin; thickness 1.5.
+    // (A top, B tr, C br, D bottom, E bl, F tl, G middle)
+    const ON: [[bool; 7]; 10] = [
+        [true, true, true, true, true, true, false],    // 0
+        [false, true, true, false, false, false, false], // 1
+        [true, true, false, true, true, false, true],   // 2
+        [true, true, true, true, false, false, true],   // 3
+        [false, true, true, false, false, true, true],  // 4
+        [true, false, true, true, false, true, true],   // 5
+        [true, false, true, true, true, true, true],    // 6
+        [true, true, true, false, false, false, false], // 7
+        [true, true, true, true, true, true, true],     // 8
+        [true, true, true, true, false, true, true],    // 9
+    ];
+    let flags = ON.get(digit as usize)?;
+    let (w, h, t) = (5.4f32, 9.6f32, 1.5f32);
+    let (hw, hh) = (w * 0.5, h * 0.5);
+    // (x, y, width, height) per segment, y-down.
+    let segments = [
+        (-hw, -hh, w, t),               // A
+        (hw - t, -hh, t, hh + t * 0.5), // B
+        (hw - t, -t * 0.5, t, hh + t * 0.5), // C
+        (-hw, hh - t, w, t),            // D
+        (-hw, -t * 0.5, t, hh + t * 0.5), // E
+        (-hw, -hh, t, hh + t * 0.5),    // F
+        (-hw, -t * 0.5, w, t),          // G
+    ];
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+    for (on, (x, y, sw, sh)) in flags.iter().zip(segments) {
+        if !on {
+            continue;
+        }
+        let base = verts.len() as u32;
+        for (px, py) in [(x, y), (x + sw, y), (x + sw, y + sh), (x, y + sh)] {
+            verts.push(VVertex {
+                x: px,
+                y: py,
+                u: 0.0,
+                v: 0.0,
+                stroke_dist: 0.0,
+                clip_radius: 12.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Some(IconMesh { verts, indices })
 }
 
 fn build_icon_mesh_sized(svg: &str, size_px: f32) -> Option<IconMesh> {
