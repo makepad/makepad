@@ -1,0 +1,21 @@
+[package]
+name = "makepad-converse"
+version = "0.1.0"
+edition = "2021"
+description = "Conversational voice pipeline for Makepad apps: streamed agent replies spoken as they arrive, with a pluggable transcript filter between speech-to-text and the backend LLM."
+license = "MIT OR Apache-2.0"
+
+[features]
+# The local filtering LLM (QwenFilter) on makepad-llama; heavy, so opt-in.
+local-llm = ["dep:makepad-llama"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-ai = { path = "../makepad_ai" }
+makepad-tts = { path = "../tts" }
+makepad-llama = { path = "../llama", optional = true }
+
+[[bin]]
+name = "filter-repl"
+path = "src/bin/filter_repl.rs"
+required-features = ["local-llm"]

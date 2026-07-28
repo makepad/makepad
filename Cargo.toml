@@ -46,6 +46,7 @@ workspace.members = [
     "libs/mbtile_reader",
     "libs/map_nav",
     "libs/makepad_ai",
+    "libs/converse",
     "libs/pdf_parse",
     "libs/regex",
     "libs/svg",
