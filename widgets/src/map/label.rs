@@ -47,6 +47,8 @@ pub const LABEL_CLASS_TREE: u8 = 8;
 pub const LABEL_CLASS_WATER: u8 = 9;
 /// Text drawn INSIDE a colored pin badge (white, both themes).
 pub const LABEL_CLASS_PIN: u8 = 10;
+/// Motorway exit (junction) labels — carto junction red.
+pub const LABEL_CLASS_EXIT: u8 = 11;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -76,6 +78,10 @@ pub struct LabelCandidate {
     pub center: Vec2d,
     pub repeat_distance: f64,
     pub font_scale: f32,
+    /// Straightened point label (place name, POI, pin text): the re-place
+    /// keeps it horizontal, so the live camera-delta must translate its
+    /// anchor without rotating the glyphs.
+    pub screen_point: bool,
     pub screen_path: Vec<Vec2d>,
 }
 
@@ -395,6 +401,31 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
+        // Shortbread street_labels_points is EXCLUSIVELY motorway junctions
+        // (exits): name + exit ref number, carto-red, navigation-critical.
+        "street_labels_points" => {
+            let name = select_label_text(tags);
+            let exit_ref = tags
+                .get("ref")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value.len() <= 6);
+            let text = match (&name, &exit_ref) {
+                (Some(name), Some(exit_ref)) => format!("{name} {exit_ref}"),
+                (Some(name), None) => name.clone(),
+                (None, Some(exit_ref)) => exit_ref.clone(),
+                (None, None) => return None,
+            };
+            return Some(TileLabel {
+                text,
+                priority: 1,
+                source_layer,
+                road_kind: "exit".to_string(),
+                color_class: LABEL_CLASS_EXIT,
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
         _ => {}
     }
     if !tags.contains_key("highway") {
@@ -512,7 +543,9 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         return Some(4);
     }
     Some(match layer {
-        "street_labels" | "street_labels_points" => 7,
+        "street_labels" => 7,
+        // Motorway exits: sparse and navigation-critical — beat street names.
+        "street_labels_points" => 8,
         "streets_polygons_labels" => 6,
         "transportation_name" => 6,
         // Settlement names outrank everything.

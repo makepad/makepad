@@ -104,7 +104,7 @@ script_mod! {
                             zoom: 13.0
                             min_zoom: 3.0
                             mbtiles_path: "local/maps/europe-shortbread.mbtiles"
-                            detail_mbtiles_path: "local/maps/noord-holland-detail.mbtiles"
+                            detail_mbtiles_path: "local/maps/europe-osm-detail.mbtiles"
                             buildings_3d: true
                         }
 
@@ -615,6 +615,13 @@ impl App {
         self.ui.view(cx, ids!(results_view)).set_visible(cx, false);
     }
 
+    /// The 3D button shows the mode a press switches TO ("3D" when flat,
+    /// "2D" when tilted) so the current mode is always visible.
+    fn sync_tilt_button(&mut self, cx: &mut Cx) {
+        let label = if self.tilt_target > 0.0 { "2D" } else { "3D" };
+        self.ui.button(cx, ids!(tilt_button)).set_text(cx, label);
+    }
+
     fn pick_result(&mut self, cx: &mut Cx, index: usize) {
         let Some(result) = self.search_results.get(index).cloned() else {
             return;
@@ -689,7 +696,6 @@ impl App {
             .filter(|(_, on)| **on)
             .map(|(path, _)| *path)
             .collect();
-        log!("overlays: {:?}", paths);
         self.map(cx).set_overlay_paths(cx, &paths.join(";"));
     }
 
@@ -998,6 +1004,14 @@ impl MatchEvent for App {
             self.hide_results(cx);
             self.ui.view(cx, ids!(pin_info)).set_visible(cx, false);
         }
+        // Manual tilt gesture = entering/leaving 3D mode: track it so the
+        // 3D button toggles from the REAL camera state (no snap-to-flat
+        // then re-animate) and dragging upright returns cleanly to 2D.
+        if let Some(tilt) = map.tilt_changed(actions) {
+            self.tilt_target = tilt;
+            self.tilt_current = tilt;
+            self.sync_tilt_button(cx);
+        }
         if map.viewport_changed(actions).is_some() {
             if self.program_moves > 0 {
                 self.program_moves -= 1;
@@ -1094,6 +1108,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(tilt_button)).clicked(actions) {
             self.tilt_target = if self.tilt_target > 0.0 { 0.0 } else { 42.0 };
             self.tilt_next_frame = cx.new_next_frame();
+            self.sync_tilt_button(cx);
         }
         if self.ui.button(cx, ids!(zoom_in_button)).clicked(actions) {
             if let Some(zoom) = self.map(cx).map_zoom() {

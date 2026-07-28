@@ -67,6 +67,8 @@ const KEPT_WAY_TAGS: &[&str] = &[
     "railway",
     "aeroway",
     "natural",
+    "attraction",
+    "zoo",
     "place",
     "population",
     "addr:street",

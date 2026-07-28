@@ -27,6 +27,9 @@ script_mod! {
         map_offset: uniform(vec2(0.0, 0.0))
         tile_fade: uniform(1.0)
         width_correction: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        // Live view zoom for per-icon zoom floors (param4 on shape 20):
+        // stale deeper-bucket tiles must not flash markers on zoom-out.
+        icon_zoom: uniform(24.0)
         // Heading-up camera: cos/sin of the screen rotation and its pivot
         // (the view center). Identity when north-up.
         view_rot: uniform(vec2(1.0, 0.0))
@@ -79,14 +82,25 @@ script_mod! {
             // extrude toward screen-top. The pre-tilt (ground) y doubles as
             // the view depth so the depth buffer resolves occlusion.
             let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // param4 is building height in meters — EXCEPT on shape 20
+            // icons, where it carries the icon's zoom floor and must not
+            // lift the marker off the ground.
+            var lift_m = self.geom.param4;
+            if shape_id > 19.5 && shape_id < 20.5 {
+                lift_m = 0.0;
+            }
             transformed.y = self.rot_pivot.y
                 + ground_rel_y * self.tilt_params.x
-                - self.geom.param4 * self.tilt_params.y;
+                - lift_m * self.tilt_params.y;
             // shape 20: zoom-constant symbol — position is the anchor point,
             // param1/2 the vertex offset in screen px added after the
             // transform. POI symbols stay upright; map-aligned glyphs like
             // oneway arrows (param3 flag) rotate with the camera.
             if shape_id > 19.5 && shape_id < 20.5 {
+                if self.geom.param4 > self.icon_zoom {
+                    self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                    return
+                }
                 var off = vec2(self.geom.param1, self.geom.param2);
                 if self.geom.param3 > 0.5 {
                     off = vec2(
@@ -402,6 +416,11 @@ pub enum MapViewAction {
         lat: f64,
         zoom: f64,
     },
+    /// Camera tilt changed via the rotate/tilt gesture — lets the app
+    /// keep its 2D/3D mode state in sync with manual tilting.
+    TiltChanged {
+        tilt: f64,
+    },
     /// A charger pin was tapped: position + the attributes we know.
     PinTapped {
         lon: f64,
@@ -466,6 +485,7 @@ impl DrawMapVector {
         view_rot: [f32; 2],
         rot_pivot: [f32; 2],
         tilt_params: [f32; 4],
+        icon_zoom: f32,
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
@@ -497,6 +517,9 @@ impl DrawMapVector {
         self.draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(tilt_params), &tilt_params);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(icon_zoom), &[icon_zoom]);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -625,6 +648,10 @@ pub struct MapView {
     applied_dark_theme: Option<bool>,
     #[rust]
     style_epoch: u64,
+    /// The 2D/3D mode the current tile set was baked with — a flip
+    /// re-bakes tiles (extrusions only exist in the 3D bake).
+    #[rust]
+    baked_3d_mode: bool,
     #[rust]
     compiled_style_light: CompiledMapTheme,
     #[rust]
@@ -645,7 +672,7 @@ pub struct MapView {
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool)>,
+    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool, bool, Vec2f)>,
     // Labels drawn last frame (hashed name+position key); kept to stabilize
     // placement while panning instead of flickering between candidates.
     #[rust]
@@ -864,7 +891,12 @@ impl Widget for MapView {
                 if let Some((start_abs, start_rotation, start_tilt)) = self.rotate_drag {
                     let delta = fe.abs - start_abs;
                     self.rotation = (start_rotation - delta.x * 0.35).rem_euclid(360.0);
-                    self.tilt = (start_tilt + delta.y * 0.25).clamp(0.0, 65.0);
+                    // Snap-to-2D dead zone: dragging the camera back to
+                    // straight above lands on EXACTLY 0 so the renderer
+                    // re-enters the flat classic path (2D mode).
+                    let raw_tilt = (start_tilt + delta.y * 0.25).clamp(0.0, 65.0);
+                    self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
+                    cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: self.tilt });
                     self.redraw(cx);
                 } else if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
@@ -889,6 +921,13 @@ impl Widget for MapView {
             }
             Hit::FingerUp(fe) => {
                 if self.rotate_drag.take().is_some() {
+                    // Releasing near straight-above settles on EXACTLY 0:
+                    // a 5-10 degree residual reads as "3D mode stuck on".
+                    if self.tilt > 0.0 && self.tilt < 10.0 {
+                        self.tilt = 0.0;
+                        cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: 0.0 });
+                        self.redraw(cx);
+                    }
                     self.sync_camera_fields();
                     self.emit_viewport_changed(cx);
                     return;
@@ -1084,6 +1123,7 @@ impl Widget for MapView {
                             view_rot_uniform,
                             rot_pivot_uniform,
                             tilt_uniform,
+                            view_zoom as f32,
                         );
                     }
                 }
@@ -1101,6 +1141,7 @@ impl Widget for MapView {
                     view_rot_uniform,
                     rot_pivot_uniform,
                     tilt_uniform,
+                    view_zoom as f32,
                 );
             }
         }
@@ -1186,6 +1227,7 @@ impl Widget for MapView {
                             view_rot_uniform,
                             rot_pivot_uniform,
                             tilt_uniform,
+                            view_zoom as f32,
                         );
                     }
                 }
@@ -1203,6 +1245,7 @@ impl Widget for MapView {
                     view_rot_uniform,
                     rot_pivot_uniform,
                     tilt_uniform,
+                    view_zoom as f32,
                 );
             }
         }
@@ -1786,9 +1829,6 @@ impl MapView {
                 .filter(|p| !p.trim().is_empty())
                 .map(|p| p.trim().to_string())
                 .collect();
-            if !overlay_paths.is_empty() {
-                log!("tile fetch {:?} with {} overlays", key, overlay_paths.len());
-            }
             // Extruded buildings only bake while the camera is tilted; flat
             // mode keeps the classic 2D building style with outlines.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
@@ -1909,6 +1949,14 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
+        // Tiles bake differently in 2D vs 3D (building extrusions replace
+        // the flat fills). Crossing tilt 0 must re-bake, or leaving 3D
+        // keeps the extruded set until a zoom forces a bucket rebuild.
+        let mode_3d = self.buildings_3d && self.tilt > 0.0;
+        if mode_3d != self.baked_3d_mode {
+            self.baked_3d_mode = mode_3d;
+            self.restyle_tiles_keep_stale(cx);
+        }
         // Read the archive's declared zoom range BEFORE computing visible
         // tile keys — request_zoom_level clamps to it, and reading it after
         // meant the very first frame requested impossible zoom levels.
@@ -2401,7 +2449,11 @@ impl MapView {
                 break;
             }
             let candidate = &self.scratch_candidates[candidate_index];
-            let close_repeat = self
+            // Every pin needs ITS number: two 120kW sites near each other
+            // are different chargers, not a repeated street name — the
+            // name-key repeat suppression must not blank the second pin.
+            let close_repeat = candidate.color_class != LABEL_CLASS_PIN
+                && self
                 .scratch_accepted_centers
                 .get(&candidate.name_key)
                 .is_some_and(|centers| {
@@ -2445,9 +2497,17 @@ impl MapView {
                 label_perf.rejected_outside += 1;
                 continue;
             }
-            if self.scratch_accepted_bounds.iter().any(|placed| {
-                rects_overlap_with_padding(*placed, placement.bounds, LABEL_COLLISION_PADDING)
-            }) {
+            // In-pin text never collision-culls: it sits INSIDE the pin
+            // bubble (which already icon-collides), so losing to a nearby
+            // place/street label just blanked the pin. It still RESERVES
+            // its box so street text avoids the area.
+            let is_pin_text = self.scratch_candidates[candidate_index].color_class
+                == LABEL_CLASS_PIN;
+            if !is_pin_text
+                && self.scratch_accepted_bounds.iter().any(|placed| {
+                    rects_overlap_with_padding(*placed, placement.bounds, LABEL_COLLISION_PADDING)
+                })
+            {
                 self.path_glyphs.truncate(placement.glyph_start);
                 label_perf.rejected_collision += 1;
                 continue;
@@ -2464,7 +2524,12 @@ impl MapView {
                     .or_default()
                     .push(placement.center);
             }
-            self.scratch_accepted_bounds.push(placement.bounds);
+            // In-pin text reserves NO space: the pin bubble covers whatever
+            // sits under it (pins draw over street text by design), and its
+            // box was collision-culling the brand label under the same pin.
+            if !is_pin_text {
+                self.scratch_accepted_bounds.push(placement.bounds);
+            }
             let glyph_count = placement.glyph_end - placement.glyph_start;
             label_perf.drawn_labels += 1;
             label_perf.drawn_glyphs += glyph_count;
@@ -2475,12 +2540,27 @@ impl MapView {
             // the symbol pass so they sit on the pins, not under them.
             let post_icon = candidate.color_class == LABEL_CLASS_PIN
                 || candidate.road_kind.starts_with("chb");
+            // Billboard pin-phase plans anchor at the SITE point (the pin's
+            // baked anchor): back the screen-px layout shift out of the
+            // placement center so glyph offsets carry the layout instead.
+            let layout_shift = if candidate.color_class == LABEL_CLASS_PIN {
+                (3.0f32, -12.35f32)
+            } else if candidate.road_kind.starts_with("chb") {
+                (0.0, 9.0)
+            } else {
+                (0.0, 0.0)
+            };
             self.scratch_accepted_plans.push((
                 score,
                 placement.glyph_start,
                 placement.glyph_end,
                 candidate.color_class,
                 post_icon,
+                candidate.screen_point,
+                Vec2f {
+                    x: placement.center.x as f32 - layout_shift.0,
+                    y: placement.center.y as f32 - layout_shift.1,
+                },
             ));
         }
 
@@ -2563,26 +2643,43 @@ impl MapView {
         self.draw_label.set_camera_delta(cx.cx, m, pivot);
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end, color_class, post_icon) = self.scratch_accepted_plans[i];
+            let (_, start, end, color_class, post_icon, upright, anchor) =
+                self.scratch_accepted_plans[i];
             if post_icon != pin_phase {
                 continue;
             }
             let glyphs = &self.path_glyphs[start..end];
-            self.draw_label.draw_super.color = halo_color;
-            for offset in HALO_OFFSETS {
-                self.draw_label.draw_path_glyphs_scaled(
-                    cx,
-                    glyphs,
-                    scale,
-                    Vec2f {
+            let billboard = pin_phase && upright;
+            // In-pin text sits on a solid pin color: no halo underdraw.
+            if color_class != LABEL_CLASS_PIN {
+                self.draw_label.draw_super.color = halo_color;
+                for offset in HALO_OFFSETS {
+                    let off = Vec2f {
                         x: offset.0 + extra_offset.x,
                         y: offset.1 + extra_offset.y,
-                    },
-                );
+                    };
+                    if billboard {
+                        self.draw_label
+                            .draw_path_glyphs_billboard(cx, glyphs, scale, off, anchor);
+                    } else if upright {
+                        self.draw_label
+                            .draw_path_glyphs_upright(cx, glyphs, scale, off, anchor);
+                    } else {
+                        self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, off);
+                    }
+                }
             }
             self.draw_label.draw_super.color =
                 label_class_color(color_class, label_color, dark_theme);
-            self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, extra_offset);
+            if billboard {
+                self.draw_label
+                    .draw_path_glyphs_billboard(cx, glyphs, scale, extra_offset, anchor);
+            } else if upright {
+                self.draw_label
+                    .draw_path_glyphs_upright(cx, glyphs, scale, extra_offset, anchor);
+            } else {
+                self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, extra_offset);
+            }
         }
         self.draw_label.end_glyph_batch(cx);
     }
@@ -2675,6 +2772,22 @@ impl MapView {
                 if is_address && view_zoom < ADDRESS_LABEL_MIN_ZOOM {
                     continue;
                 }
+                // Charger pin text carries the pin's zoom floor in its key
+                // ("chp11_..."): stale deeper tiles must not flash numbers
+                // for pins the icon shader is hiding at this view zoom.
+                if let Some(rest) = label.road_kind.strip_prefix("chp") {
+                    let floor: f64 = rest
+                        .split('_')
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0.0);
+                    if view_zoom < floor - 0.01 {
+                        continue;
+                    }
+                }
+                if label.road_kind.starts_with("chb") && view_zoom < 12.75 {
+                    continue;
+                }
                 if is_poi && view_zoom < POI_LABEL_MIN_ZOOM {
                     continue;
                 }
@@ -2700,7 +2813,9 @@ impl MapView {
                 }
                 // precomputed at tile build; no per-frame allocation
                 let name_key = &label.name_key;
-                if name_key.len() < if is_address { 1 } else { 2 } {
+                let is_exit = label.source_layer == "street_labels_points";
+                let is_pin_text = label.color_class == LABEL_CLASS_PIN;
+                if name_key.len() < if is_address || is_exit || is_pin_text { 1 } else { 2 } {
                     continue;
                 }
 
@@ -2721,7 +2836,11 @@ impl MapView {
                     || is_poi
                     || matches!(
                         label.source_layer.as_str(),
-                        "chargers" | "charger_brand" | "place_labels" | "micro_pois"
+                        "chargers"
+                            | "charger_brand"
+                            | "place_labels"
+                            | "micro_pois"
+                            | "street_labels_points"
                     );
                 if rotated && is_screen_point && self.scratch_screen_path.len() == 2 {
                     let a = self.scratch_screen_path[0];
@@ -2730,6 +2849,22 @@ impl MapView {
                     let half = (b - a).length() * 0.5;
                     self.scratch_screen_path[0] = dvec2(mid.x - half, mid.y);
                     self.scratch_screen_path[1] = dvec2(mid.x + half, mid.y);
+                }
+                // Charger brand reads just under the billboard pin: a fixed
+                // SCREEN-space drop below the site anchor (a map-space offset
+                // would tilt-compress and orbit the pin under rotation).
+                if label.road_kind.starts_with("chb") {
+                    for p in self.scratch_screen_path.iter_mut() {
+                        p.y += 9.0;
+                    }
+                }
+                // In-pin text: center in the droplet's text zone (right of
+                // the bolt, above the tail) — screen-px pin layout.
+                if label.color_class == LABEL_CLASS_PIN {
+                    for p in self.scratch_screen_path.iter_mut() {
+                        p.x += 3.0;
+                        p.y += -12.35;
+                    }
                 }
                 if self.scratch_screen_path.len() < 2
                     || polyline_outside_rect(&self.scratch_screen_path, rect, LABEL_VIEW_MARGIN)
@@ -2776,7 +2911,9 @@ impl MapView {
                 } else if is_poi {
                     font_scale = 0.72;
                 } else if label.source_layer == "chargers" {
-                    font_scale = 0.85;
+                    font_scale = 0.78;
+                } else if is_exit {
+                    font_scale = 0.80;
                 } else if let Some((kind, population)) = place {
                     // Kind sets the class, population separates Amsterdam
                     // from Purmerend within it.
@@ -2833,6 +2970,7 @@ impl MapView {
                     c.center = center;
                     c.repeat_distance = repeat_distance;
                     c.font_scale = font_scale;
+                    c.screen_point = is_screen_point;
                     c.screen_path.extend_from_slice(&self.scratch_screen_path);
                 } else {
                     self.scratch_candidates.push(LabelCandidate {
@@ -2846,6 +2984,7 @@ impl MapView {
                         center,
                         repeat_distance,
                         font_scale,
+                        screen_point: is_screen_point,
                         screen_path: self.scratch_screen_path.clone(),
                     });
                 }
@@ -3176,7 +3315,7 @@ impl MapView {
                 let screen = camera.norm_to_screen(dvec2(hit.norm.0, hit.norm.1));
                 let dx = abs.x - screen.x;
                 let dy = abs.y - screen.y;
-                if dx.abs() <= 18.0 && dy >= -18.0 && dy <= 16.0 {
+                if dx.abs() <= 18.0 && dy >= -26.0 && dy <= 6.0 {
                     let dist = dx * dx + dy * dy;
                     if best.as_ref().is_none_or(|(d, _)| dist < *d) {
                         best = Some((dist, hit));
@@ -3297,7 +3436,6 @@ impl MapView {
             return;
         }
         self.overlay_mbtiles_paths = paths.to_string();
-        log!("set_overlay_paths: {:?} -> restyle", paths);
         self.restyle_tiles_keep_stale(cx);
     }
 
@@ -3462,6 +3600,15 @@ impl MapViewRef {
         None
     }
 
+    pub fn tilt_changed(&self, actions: &Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::TiltChanged { tilt } = item.cast() {
+                return Some(tilt);
+            }
+        }
+        None
+    }
+
     pub fn marker_clicked(&self, actions: &Actions) -> Option<u64> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
             if let MapViewAction::MarkerClicked { id } = item.cast() {
@@ -3592,6 +3739,8 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_WATER, false) => Vec4f::from_u32(0x39688fff),
         (LABEL_CLASS_WATER, true) => Vec4f::from_u32(0x7fb2d9ff),
         (LABEL_CLASS_PIN, _) => Vec4f::from_u32(0xffffffff),
+        (LABEL_CLASS_EXIT, false) => Vec4f::from_u32(0x960000ff),
+        (LABEL_CLASS_EXIT, true) => Vec4f::from_u32(0xe07070ff),
         _ => default_color,
     }
 }
