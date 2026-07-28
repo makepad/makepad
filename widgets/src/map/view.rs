@@ -97,7 +97,13 @@ script_mod! {
             // transform. POI symbols stay upright; map-aligned glyphs like
             // oneway arrows (param3 flag) rotate with the camera.
             if shape_id > 19.5 && shape_id < 20.5 {
-                if self.geom.param4 > self.icon_zoom {
+                // 0.6 grace below the floor: markers fade out on a zoom
+                // gesture instead of vanishing the instant the tier line
+                // is crossed (still far above the stale-carpet zone).
+                // FAIL-OPEN: if the icon_zoom uniform hasn't landed (reads
+                // ~0 — seen when a startup DSL override re-parses this
+                // shader), the gate disarms instead of hiding every icon.
+                if self.icon_zoom > 1.0 && self.geom.param4 > self.icon_zoom + 0.6 {
                     self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
                     return
                 }
@@ -1074,7 +1080,7 @@ impl Widget for MapView {
                 // view drops below icon level, instead of splattering
                 // hundreds of full-size shop icons across the region.
                 if pass == 3
-                    && (view_zoom < 8.75
+                    && (view_zoom < 7.75
                         || (entry.bucket >= ICON_MIN_ZOOM
                             && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
                 {
@@ -1178,7 +1184,7 @@ impl Widget for MapView {
                 // view drops below icon level, instead of splattering
                 // hundreds of full-size shop icons across the region.
                 if pass == 3
-                    && (view_zoom < 8.75
+                    && (view_zoom < 7.75
                         || (entry.bucket >= ICON_MIN_ZOOM
                             && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
                 {
@@ -2524,10 +2530,17 @@ impl MapView {
                     .or_default()
                     .push(placement.center);
             }
-            // In-pin text reserves NO space: the pin bubble covers whatever
-            // sits under it (pins draw over street text by design), and its
-            // box was collision-culling the brand label under the same pin.
-            if !is_pin_text {
+            // Pin text reserves the pin BUBBLE's box (not its own glyph
+            // box): POI/street labels then place beside the pin instead of
+            // under it, while the brand label below the tail stays legal.
+            if is_pin_text {
+                let anchor_x = placement.center.x - 3.0;
+                let anchor_y = placement.center.y + 12.35;
+                self.scratch_accepted_bounds.push(Rect {
+                    pos: dvec2(anchor_x - 16.0, anchor_y - 27.0),
+                    size: dvec2(32.0, 28.0),
+                });
+            } else {
                 self.scratch_accepted_bounds.push(placement.bounds);
             }
             let glyph_count = placement.glyph_end - placement.glyph_start;
@@ -2781,12 +2794,30 @@ impl MapView {
                         .next()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0.0);
-                    if view_zoom < floor - 0.01 {
+                    if view_zoom < floor - 0.6 {
                         continue;
                     }
                 }
                 if label.road_kind.starts_with("chb") && view_zoom < 12.75 {
                     continue;
+                }
+                // District names: gemeente wide-out, wijk mid, buurt close.
+                if let Some(rest) = label.road_kind.strip_prefix("adm") {
+                    let (floor, ceil) = match rest.chars().next() {
+                        Some('g') => (8.0, 12.0),
+                        Some('w') => (11.5, 14.0),
+                        _ => (13.5, 17.0),
+                    };
+                    if view_zoom < floor || view_zoom > ceil {
+                        continue;
+                    }
+                }
+                // Stop names: stations from z13, local tram/bus stops z15+.
+                if label.source_layer == "stops" {
+                    let floor = if label.road_kind.starts_with("stS") { 13.0 } else { 15.0 };
+                    if view_zoom < floor {
+                        continue;
+                    }
                 }
                 if is_poi && view_zoom < POI_LABEL_MIN_ZOOM {
                     continue;
@@ -3107,7 +3138,7 @@ impl MapView {
             * 0.5
             * LABEL_BASELINE_SHIFT_FACTOR as f32;
 
-        let result = self.draw_label.place_text_along_path(
+        let mut result = self.draw_label.place_text_along_path(
             &run,
             &smooth_a,
             &cum,
@@ -3120,6 +3151,35 @@ impl MapView {
             candidate.center,
             &mut self.path_glyphs,
         );
+        // HARD invariant instead of trusting the chord heuristic: if the
+        // REALIZED glyph run reads leftward (net upside-down — hairpin
+        // ramps fool any pre-placement guess, e.g. the inverted "A1"
+        // motorway ref), throw it away and place flipped.
+        if let Some(placed) = &result {
+            if placed.glyph_end > placed.glyph_start + 1 {
+                let a = self.path_glyphs[placed.glyph_start].glyph_origin;
+                let b = self.path_glyphs[placed.glyph_end - 1].glyph_origin;
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len > 1.0 && dx / len < -LABEL_VERTICAL_AXIS_EPSILON {
+                    let glyph_start = placed.glyph_start;
+                    self.path_glyphs.truncate(glyph_start);
+                    result = self.draw_label.place_text_along_path(
+                        &run,
+                        &smooth_a,
+                        &cum,
+                        start_distance,
+                        !reverse,
+                        baseline_shift,
+                        if reverse { 0.0 } else { std::f32::consts::PI },
+                        LABEL_MAX_GLYPH_TURN_RADIANS,
+                        LABEL_GLYPH_ANGLE_BLEND,
+                        candidate.center,
+                        &mut self.path_glyphs,
+                    );
+                }
+            }
+        }
 
         self.scratch_smooth_a = smooth_a;
         self.scratch_smooth_b = smooth_b;
@@ -3741,6 +3801,8 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_PIN, _) => Vec4f::from_u32(0xffffffff),
         (LABEL_CLASS_EXIT, false) => Vec4f::from_u32(0x960000ff),
         (LABEL_CLASS_EXIT, true) => Vec4f::from_u32(0xe07070ff),
+        (LABEL_CLASS_ADMIN, false) => Vec4f::from_u32(0x6a5b8eff),
+        (LABEL_CLASS_ADMIN, true) => Vec4f::from_u32(0xb3a5d6ff),
         _ => default_color,
     }
 }

@@ -585,11 +585,46 @@ pub fn merge_stroke_polylines(polylines: &[Vec<(f32, f32)>]) -> Vec<Vec<(f32, f3
         return Vec::new();
     }
 
-    let lines = polylines
-        .iter()
-        .filter(|line| line.len() >= 2)
-        .cloned()
-        .collect::<Vec<_>>();
+    // Forked ways (rail switches, dual-carriageway splits) duplicate their
+    // shared segments exactly; drawing a segment twice at the same depth
+    // rank z-fight-shimmers in tilt mode. Keep the FIRST occurrence of
+    // every quantized segment, splitting a polyline where a duplicate is
+    // dropped.
+    let mut seen_segments =
+        std::collections::HashSet::<(StrokeEndpointKey, StrokeEndpointKey)>::new();
+    let mut lines = Vec::<Vec<(f32, f32)>>::new();
+    for line in polylines.iter().filter(|line| line.len() >= 2) {
+        let mut current = Vec::<(f32, f32)>::new();
+        for pair in line.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (ka, kb) = (stroke_endpoint_key(a), stroke_endpoint_key(b));
+            // Sub-quantum micro segments never dedup (they'd collide
+            // across the whole tile).
+            let keep = if ka == kb {
+                true
+            } else {
+                let seg = if (ka.x, ka.y) <= (kb.x, kb.y) {
+                    (ka, kb)
+                } else {
+                    (kb, ka)
+                };
+                seen_segments.insert(seg)
+            };
+            if keep {
+                if current.is_empty() {
+                    current.push(a);
+                }
+                current.push(b);
+            } else if current.len() >= 2 {
+                lines.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+        if current.len() >= 2 {
+            lines.push(current);
+        }
+    }
     if lines.is_empty() {
         return Vec::new();
     }

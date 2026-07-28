@@ -289,14 +289,22 @@ fn handle_cx_live_edit_files(cx: &mut Cx) -> bool {
     }
 
     *cx.script_data.live_reload.script_mod_overrides.borrow_mut() = next_overrides;
+    // Name the files: a PERSISTENT override at every cold launch means some
+    // file permanently differs from its compiled-in copy — that's a build
+    // staleness bug to chase, not a feature.
+    let override_files: Vec<String> = cx
+        .script_data
+        .live_reload
+        .script_mod_overrides
+        .borrow()
+        .keys()
+        .map(|key| format!("{:?}", key))
+        .collect();
     crate::log!(
-        "hot reload applied {} override(s) from {} file change(s)",
-        cx.script_data
-            .live_reload
-            .script_mod_overrides
-            .borrow()
-            .len(),
-        processed_files
+        "hot reload applied {} override(s) from {} file change(s): {}",
+        override_files.len(),
+        processed_files,
+        override_files.join(", ")
     );
     true
 }

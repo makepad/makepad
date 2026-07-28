@@ -391,6 +391,8 @@ pub fn build_tile_buffers_from_body(
         theme,
         render_zoom,
         false,
+    
+        false,
     ))
 }
 
@@ -408,6 +410,7 @@ pub fn build_tile_buffers_from_mvt(
     render_zoom: u32,
     buildings_3d: bool,
 ) -> Result<TileBuffers, String> {
+    let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -463,6 +466,8 @@ pub fn build_tile_buffers_from_mvt(
         theme,
         render_zoom,
         buildings_3d,
+    
+        have_charger_overlay,
     ))
 }
 
@@ -892,33 +897,49 @@ fn point_in_ring(point: (f32, f32), ring: &[(f32, f32)]) -> bool {
     inside
 }
 
-/// A flat horizontal disc lifted `height_m` meters (roof-style param4):
-/// triangle fan, hard edge (canopy blobs are small; AA fringe not worth it).
-fn append_horizontal_disc(
+/// A low-poly SPHERE: horizontal rings in map units, per-vertex height in
+/// param4 — the tilt shader's per-meter lift renders a true ball silhouette
+/// (stacked flat discs read as separate pancakes).
+#[allow(clippy::too_many_arguments)]
+fn append_ball(
     center: (f32, f32),
     radius_units: f32,
-    height_m: f32,
+    radius_m: f32,
+    center_h_m: f32,
     color: [f32; 4],
+    segs: u32,
+    rings: u32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    const SEGS: u32 = 14;
+    let (segs, rings) = (segs.max(3), rings.max(2));
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let mut push_vertex = |x: f32, y: f32| {
+    let mut push_vertex = |x: f32, y: f32, h: f32| {
         out_vertices.extend_from_slice(&[
             x, y, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, height_m, 0.05, 24.0, *zbias,
+            0.0, 0.0, 0.0, h, 0.05, 24.0, *zbias,
         ]);
     };
-    push_vertex(center.0, center.1);
-    for i in 0..SEGS {
-        let a = i as f32 / SEGS as f32 * std::f32::consts::TAU;
-        push_vertex(center.0 + a.cos() * radius_units, center.1 + a.sin() * radius_units);
+    // rings from south pole (phi -90) to north pole (phi +90)
+    for ring in 0..=rings {
+        let phi = (ring as f32 / rings as f32 - 0.5) * std::f32::consts::PI;
+        let ring_r = radius_units * phi.cos();
+        let h = center_h_m + radius_m * phi.sin();
+        for seg in 0..segs {
+            let a = seg as f32 / segs as f32 * std::f32::consts::TAU;
+            push_vertex(center.0 + a.cos() * ring_r, center.1 + a.sin() * ring_r, h);
+        }
     }
-    for i in 0..SEGS {
-        let next = (i + 1) % SEGS;
-        out_indices.extend_from_slice(&[base, base + 1 + i, base + 1 + next]);
+    for ring in 0..rings {
+        for seg in 0..segs {
+            let next = (seg + 1) % segs;
+            let a = base + ring * segs + seg;
+            let b = base + ring * segs + next;
+            let c = base + (ring + 1) * segs + seg;
+            let d = base + (ring + 1) * segs + next;
+            out_indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
     }
     *zbias += VECTOR_ZBIAS_STEP;
 }
@@ -960,6 +981,7 @@ fn build_tile_buffers_from_features(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    have_charger_overlay: bool,
 ) -> TileBuffers {
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
@@ -976,6 +998,7 @@ fn build_tile_buffers_from_features(
     let mut icon_jobs =
         Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32)>::new();
     let mut tree_points_3d = Vec::<(f32, f32)>::new();
+    let mut signal_points_3d = Vec::<(f32, f32)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
@@ -989,11 +1012,11 @@ fn build_tile_buffers_from_features(
                     .and_then(|value| value.parse::<f64>().ok())
                     .unwrap_or(0.0);
                 if kw >= 150.0 {
-                    9
+                    8
                 } else if kw >= 50.0 {
-                    11
+                    10
                 } else {
-                    13
+                    12
                 }
             }
             "stops" => 13,
@@ -1008,7 +1031,10 @@ fn build_tile_buffers_from_features(
                     // Chargers place before everything (EV navigator) and
                     // are never collided away by shop/POI symbols.
                     let priority = match icon_name {
-                        "charger" => 0,
+                        // Overlay charger pins are never collided away —
+                        // base-map charging_station icons yield to them.
+                        "charger" if layer == "chargers" => 0,
+                        "charger" => 2,
                         "entrance" => 3,
                         "dot" => 2,
                         _ => 1,
@@ -1054,13 +1080,31 @@ fn build_tile_buffers_from_features(
                     // (param4): the shader hides the icon the instant the
                     // LIVE view zoom drops below it, so stale deeper-bucket
                     // tiles never flash markers while zooming out.
-                    let zoom_floor =
-                        micro_icon_min_zoom(icon_name).max(icon_zoom_floor as f32);
+                    // Overlay layers (chargers, stops) use their TIER floor;
+                    // micro_icon_min_zoom("charger") is the 16.5 street-level
+                    // gate for BASE-map charging posts and must not apply to
+                    // overlay pins (it hid every pin below z16 — the
+                    // "chargers disappeared" bug).
+                    let zoom_floor = if layer == "chargers" || layer == "stops" {
+                        icon_zoom_floor as f32
+                    } else {
+                        micro_icon_min_zoom(icon_name).max(icon_zoom_floor as f32)
+                    };
                     // In 3D mode trees become little REAL 3D trees (trunk +
                     // canopy blob lifted by the building height mechanism)
                     // instead of flat billboard discs.
+                    // With the charger overlay active the base-map
+                    // charging_station icons are duplicates of overlay
+                    // pins — drop them instead of letting them collide.
+                    if icon_name == "charger" && layer != "chargers" && have_charger_overlay {
+                        continue;
+                    }
                     if buildings_3d && icon_name == "tree" {
                         tree_points_3d.push(*point);
+                        continue;
+                    }
+                    if buildings_3d && icon_name == "traffic_signals" {
+                        signal_points_3d.push(*point);
                         continue;
                     }
                     icon_jobs.push((
@@ -1650,19 +1694,14 @@ fn build_tile_buffers_from_features(
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
         let trunk_color = hex_to_premul_rgba(0x8a6b4a, 1.0);
         let canopy_color = hex_to_premul_rgba(0x4a7d44, 1.0);
-        let arm = 0.55 * units_per_m;
-        // Canopy = a BALL, not a pancake: same-color sphere slices give the
-        // blob a round silhouette under tilt. Architecture-model
-        // proportions: the ball dominates (R 2.6m, center 3.4m), with a
-        // short visible trunk under it.
-        const BALL_SLICES: [(f32, f32); 4] =
-            [(1.9, 1.6), (2.5, 2.8), (2.5, 4.0), (1.9, 5.2)];
+        let arm = 0.7 * units_per_m;
+
         for (x, y) in &tree_points_3d {
             append_wall_quad(
                 (*x - arm, *y),
                 (*x + arm, *y),
                 0.0,
-                3.4,
+                7.5,
                 trunk_color,
                 &mut fill_vertices,
                 &mut fill_indices,
@@ -1672,18 +1711,77 @@ fn build_tile_buffers_from_features(
                 (*x, *y - arm),
                 (*x, *y + arm),
                 0.0,
-                3.4,
+                7.5,
                 trunk_color,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
             );
-            for (radius_m, height_m) in BALL_SLICES {
-                append_horizontal_disc(
+            // Street-tree proportions vs buildings: ~11.5m total. The
+            // canopy is a PROLATE ellipsoid (taller than wide) on a tall
+            // trunk — scaling the ball uniformly reads as a bush.
+            append_ball(
+                (*x, *y),
+                2.9 * units_per_m,
+                4.0,
+                7.5,
+                canopy_color,
+                12,
+                6,
+                &mut fill_vertices,
+                &mut fill_indices,
+                &mut fill_zbias,
+            );
+            feature_count += 1;
+        }
+    }
+
+    // Little 3D stoplights (tilt mode): a slim dark pole with the classic
+    // three lights stacked on top — red above amber above green.
+    if !signal_points_3d.is_empty() {
+        let n = (1u32 << tile_key.z) as f64;
+        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
+            .sinh()
+            .atan();
+        let units_per_m =
+            (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
+        let pole_color = hex_to_premul_rgba(0x3c4046, 1.0);
+        let lights = [
+            (hex_to_premul_rgba(0x2ecc40, 1.0), 3.5f32),
+            (hex_to_premul_rgba(0xf5a623, 1.0), 4.35),
+            (hex_to_premul_rgba(0xd7263d, 1.0), 5.2),
+        ];
+        let arm = 0.32 * units_per_m;
+        for (x, y) in &signal_points_3d {
+            append_wall_quad(
+                (*x - arm, *y),
+                (*x + arm, *y),
+                0.0,
+                3.2,
+                pole_color,
+                &mut fill_vertices,
+                &mut fill_indices,
+                &mut fill_zbias,
+            );
+            append_wall_quad(
+                (*x, *y - arm),
+                (*x, *y + arm),
+                0.0,
+                3.2,
+                pole_color,
+                &mut fill_vertices,
+                &mut fill_indices,
+                &mut fill_zbias,
+            );
+            for (color, height_m) in lights {
+                append_ball(
                     (*x, *y),
-                    radius_m * units_per_m,
+                    0.5 * units_per_m,
+                    0.5,
                     height_m,
-                    canopy_color,
+                    color,
+                    8,
+                    4,
                     &mut fill_vertices,
                     &mut fill_indices,
                     &mut fill_zbias,
@@ -1708,7 +1806,9 @@ fn build_tile_buffers_from_features(
                 way.tags.get("junction").map(|v| v.as_str()),
                 Some("roundabout") | Some("circular")
             );
-            if render_zoom >= ICON_MIN_ZOOM
+            // Oneway arrows read from mid zoom, not just street level —
+            // direction matters while route-planning zoomed out.
+            if render_zoom >= 15
                 && (tag_is_truthy(&way.tags, "oneway") || implicit_oneway)
                 && way.tags.contains_key("highway")
                 && !tag_is_truthy(&way.tags, "rail")
@@ -2175,6 +2275,9 @@ pub struct OverlayTileData {
     pub quadrant_y: u32,
     /// 0 = all features, 1 = fast chargers (>=50 kW), 2 = slow chargers.
     pub filter: u8,
+    /// Source is a charger overlay: base-map charging_station icons are
+    /// suppressed as duplicates while one is active.
+    pub has_chargers: bool,
 }
 
 fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
@@ -2202,7 +2305,7 @@ pub fn load_local_tile_batch(
     }
 
     // Path entries may carry a "?fast" / "?slow" charger-power filter.
-    let mut overlay_readers: Vec<(MbtilesReader, u32, u32, u8)> = overlay_paths
+    let mut overlay_readers: Vec<(MbtilesReader, u32, u32, u8, bool)> = overlay_paths
         .iter()
         .filter(|path| !path.is_empty())
         .filter_map(|path| {
@@ -2212,17 +2315,20 @@ pub fn load_local_tile_batch(
                 Some((file, _)) => (file, 0),
                 None => (path.as_str(), 0),
             };
-            MbtilesReader::open(Path::new(file)).ok().map(|reader| (reader, filter))
+            let has_chargers = file.contains("chargers");
+            MbtilesReader::open(Path::new(file))
+                .ok()
+                .map(|reader| (reader, filter, has_chargers))
         })
-        .map(|(mut reader, filter)| {
+        .map(|(mut reader, filter, has_chargers)| {
             let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
-            (reader, min_zoom, max_zoom, filter)
+            (reader, min_zoom, max_zoom, filter, has_chargers)
         })
         .collect();
 
     let mut fetch_overlays = |tile_key: TileKey| -> Vec<OverlayTileData> {
         let mut out = Vec::new();
-        for (reader, min_zoom, max_zoom, filter) in overlay_readers.iter_mut() {
+        for (reader, min_zoom, max_zoom, filter, has_chargers) in overlay_readers.iter_mut() {
             if tile_key.z < *min_zoom {
                 continue;
             }
@@ -2238,6 +2344,7 @@ pub fn load_local_tile_batch(
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
                     filter: *filter,
+                    has_chargers: *has_chargers,
                 });
             }
         }
@@ -3253,6 +3360,7 @@ mod bridge_probe_tests {
             quadrant_x: 0,
             quadrant_y: 0,
             filter: 0,
+            has_chargers: true,
         }];
         let theme = CompiledMapTheme::default();
         let buffers =
