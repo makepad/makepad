@@ -673,8 +673,8 @@ pub struct MapView {
     label_cache_tiles: Vec<TileKey>,
     #[rust]
     label_cache_generation: u64,
-    #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }))]
-    label_draw_transform: (f32, Vec2f, f32, Vec2f),
+    #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }, 1.0))]
+    label_draw_transform: (f32, Vec2f, f32, Vec2f, f32),
     #[rust]
     tiles_generation: u64,
     #[rust]
@@ -2246,10 +2246,11 @@ impl MapView {
         let pan_delta = map_offset - self.label_cache_offset;
         let pan_dist = pan_delta.x.abs().max(pan_delta.y.abs());
         let rot_delta = self.rotation - self.label_cache_rotation;
+        let tilt_delta = self.tilt != self.label_cache_tilt;
         let cache_strict = self.label_cache_valid
             && self.label_cache_zoom == view_zoom
             && rot_delta == 0.0
-            && self.label_cache_tilt == self.tilt
+            && !tilt_delta
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
             && pan_dist < LABEL_REPLACE_PAN_PX;
@@ -2263,9 +2264,8 @@ impl MapView {
         // but only at identical zoom (rotation+zoom compose non-affinely
         // with the cached-screen transform below).
         let cache_soft = self.label_cache_valid
-            && (rot_delta == 0.0
-                || (rot_delta.abs() <= 15.0 && self.label_cache_zoom == view_zoom))
-            && self.label_cache_tilt == self.tilt
+            && ((rot_delta == 0.0 && !tilt_delta)
+                || self.label_cache_zoom == view_zoom)
             && (self.label_cache_zoom - view_zoom).abs() < 0.5
             && self
                 .last_full_place_time
@@ -2286,8 +2286,12 @@ impl MapView {
                 let pivot = rect.pos + rect.size * 0.5;
                 shift += (pivot - camera_vec(pivot)) * (1.0 - k);
             }
-            // Screen-space delta rotation about the view pivot (phi = -rotation).
+            // Screen-space delta rotation about the view pivot (phi = -rotation)
+            // plus a tilt-compression ratio: cached glyphs follow the camera
+            // every frame — ANY delta — and the async re-place trues up.
             let rot_rad = (-rot_delta).to_radians() as f32;
+            let cached_tilt_cos = self.label_cache_tilt.clamp(0.0, 65.0).to_radians().cos();
+            let tilt_ratio = (self.tilt_cos() / cached_tilt_cos.max(1e-6)) as f32;
             let pivot = rect.pos + rect.size * 0.5;
             self.draw_label_plans_scaled(
                 cx,
@@ -2301,6 +2305,7 @@ impl MapView {
                     x: pivot.x as f32,
                     y: pivot.y as f32,
                 },
+                tilt_ratio,
                 false,
             );
             return false;
@@ -2450,14 +2455,22 @@ impl MapView {
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        self.draw_label_plans_scaled(cx, 1.0, extra_offset, 0.0, Vec2f { x: 0.0, y: 0.0 }, false);
+        self.draw_label_plans_scaled(
+            cx,
+            1.0,
+            extra_offset,
+            0.0,
+            Vec2f { x: 0.0, y: 0.0 },
+            1.0,
+            false,
+        );
     }
 
     /// Redraw only the pin-class (in-bubble) label plans — called after
     /// the icon pass so kW text sits on top of the charger pins.
     fn draw_pin_label_phase(&mut self, cx: &mut Cx2d) {
-        let (scale, offset, rot, pivot) = self.label_draw_transform;
-        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, true);
+        let (scale, offset, rot, pivot, tilt_ratio) = self.label_draw_transform;
+        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, tilt_ratio, true);
     }
 
     fn draw_label_plans_scaled(
@@ -2467,11 +2480,12 @@ impl MapView {
         extra_offset: Vec2f,
         rot: f32,
         pivot: Vec2f,
+        tilt_ratio: f32,
         pin_phase: bool,
     ) {
         // Remember the transform so the pin-text phase redraws with the
         // exact same mapping after the icon pass.
-        self.label_draw_transform = (scale, extra_offset, rot, pivot);
+        self.label_draw_transform = (scale, extra_offset, rot, pivot, tilt_ratio);
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -2499,7 +2513,8 @@ impl MapView {
         }
         let in_pin_range =
             |index: usize| pin_ranges.iter().any(|&(s0, e0)| index >= s0 && index < e0);
-        let rotated: Vec<PathGlyphInstance> = if rot != 0.0 {
+        let transform_active = rot != 0.0 || (tilt_ratio - 1.0).abs() > 1e-4;
+        let rotated: Vec<PathGlyphInstance> = if transform_active {
             let (c, s) = (rot.cos(), rot.sin());
             self.path_glyphs
                 .iter()
@@ -2509,17 +2524,21 @@ impl MapView {
                         return glyph.clone();
                     }
                     let mut glyph = glyph.clone();
+                    // Rotate about the pivot, then compress y by the tilt
+                    // ratio — cached glyphs track the camera best-effort;
+                    // the async re-place trues everything up.
                     let spin = |p: crate::makepad_draw::text::geom::Point<f32>| {
                         let dx = p.x - pivot.x;
                         let dy = p.y - pivot.y;
                         crate::makepad_draw::text::geom::Point::new(
                             pivot.x + dx * c - dy * s,
-                            pivot.y + dx * s + dy * c,
+                            pivot.y + (dx * s + dy * c) * tilt_ratio,
                         )
                     };
                     glyph.glyph_origin = spin(glyph.glyph_origin);
                     glyph.rotation_origin = spin(glyph.rotation_origin);
-                    glyph.angle += rot;
+                    let a = glyph.angle + rot;
+                    glyph.angle = (a.sin() * tilt_ratio).atan2(a.cos());
                     glyph
                 })
                 .collect()
@@ -2532,7 +2551,7 @@ impl MapView {
             if (color_class == LABEL_CLASS_PIN) != pin_phase {
                 continue;
             }
-            let glyphs = if rot != 0.0 {
+            let glyphs = if transform_active {
                 &rotated[start..end]
             } else {
                 &self.path_glyphs[start..end]
