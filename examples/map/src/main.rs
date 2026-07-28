@@ -30,6 +30,9 @@ const NAV_DATA_BASENAME: &str = "local/maps/noord-holland";
 /// search so any European place is a fly-to target.
 const EUROPE_PLACES_PATH: &str = "local/maps/europe-places.search";
 const EUROPE_SEARCHDB_PATH: &str = "local/maps/europe.searchdb";
+/// Long-haul fallback graph: Europe major roads (motorway..secondary),
+/// used when a route endpoint lies outside the detailed regional graph.
+const EUROPE_MAJOR_GRAPH_PATH: &str = "local/maps/europe-major.graph";
 /// Simulated drive runs this much faster than real time.
 const SIM_SPEED_MULT: f64 = 6.0;
 const MAX_RESULTS: usize = 8;
@@ -260,9 +263,10 @@ script_mod! {
                                 layer_districts := LayerCheck{text: "Districts"}
                                 layer_bag := LayerCheck{text: "Building age"}
                                 layer_population := LayerCheck{text: "Population"}
+                                layer_rain := LayerCheck{text: "Rain radar"}
                                 PanelText{
                                     margin: Inset{top: 6}
-                                    text: "Terrain · Noise · Flood · Rain: soon"
+                                    text: "Terrain · Noise · Flood: soon"
                                 }
                             }
                         }
@@ -276,7 +280,7 @@ script_mod! {
                             recenter_button := AppButton{
                                 visible: false
                                 margin: Inset{right: 6, bottom: 18}
-                                text: "Recenter"
+                                text: "Detach"
                             }
                             layers_button := AppButton{
                                 margin: Inset{right: 4, bottom: 18}
@@ -355,6 +359,13 @@ enum NavResponse {
     },
 }
 
+#[derive(Clone)]
+struct RainUpdate {
+    frames: Vec<Vec<u32>>,
+    width: usize,
+    height: usize,
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -391,6 +402,15 @@ pub struct App {
     navigating: bool,
     #[rust]
     follow: bool,
+    #[rust]
+    rain_on: bool,
+    #[rust]
+    rain_worker_started: bool,
+    #[rust]
+    rain_rx: ToUIReceiver<RainUpdate>,
+    /// Last decoded nowcast, kept so toggling rain back on is instant.
+    #[rust]
+    rain_cache: Option<RainUpdate>,
     #[rust]
     program_moves: u32,
     #[rust]
@@ -479,6 +499,17 @@ impl App {
                     .ok()
                     .and_then(|data| SearchIndex::deserialize(&data).ok())
             };
+            // Europe-wide major-roads graph: loaded lazily as the long-haul
+            // fallback (missing file = regional routing only).
+            let major_graph = std::fs::read(EUROPE_MAJOR_GRAPH_PATH)
+                .ok()
+                .and_then(|data| RouteGraph::deserialize(&data).ok());
+            if let Some(major) = &major_graph {
+                log!(
+                    "nav: europe major-roads graph loaded ({} edges)",
+                    major.edges.len()
+                );
+            }
             let dem_cache = std::sync::Arc::new(std::sync::Mutex::new(dem::DemCache::new(
                 "local/maps/dem",
             )));
@@ -521,7 +552,14 @@ impl App {
                         });
                     }
                     NavRequest::Route { id, from, to, mode } => {
-                        let route = graph.route(from, to, mode);
+                        // Detailed regional graph first; beyond its coverage
+                        // (Paris!) fall back to the Europe major-roads graph.
+                        let mut route = graph.route(from, to, mode);
+                        if route.is_none() {
+                            if let Some(major) = &major_graph {
+                                route = major.route(from, to, mode);
+                            }
+                        }
                         let _ = sender.send(NavResponse::RouteDone {
                             id,
                             route: Box::new(route),
@@ -613,6 +651,73 @@ impl App {
     fn hide_results(&mut self, cx: &mut Cx) {
         self.search_results.clear();
         self.ui.view(cx, ids!(results_view)).set_visible(cx, false);
+    }
+
+    /// Start the rain radar worker: polls the KNMI +2h nowcast through the
+    /// on-disk cache (RadarSync never hits the network more than once per
+    /// 4 min), decodes the 25-frame HDF5 and reprojects to mercator RGBA.
+    fn ensure_rain_worker(&mut self) {
+        if self.rain_worker_started {
+            return;
+        }
+        self.rain_worker_started = true;
+        let sender = self.rain_rx.sender();
+        std::thread::spawn(move || {
+            use makepad_geodata::radar::{RadarConfig, RadarSync};
+            use makepad_geodata::{knmi_hdf5, radar_raster};
+            let sync = RadarSync::new(RadarConfig::new("local/overlays/radar"));
+            let projection = radar_raster::RadarProjection::new(1024, 1280);
+            let mut last_decoded: Option<std::path::PathBuf> = None;
+            loop {
+                if let Ok(state) = sync.sync() {
+                    if let Some(newest) = state.frames.last() {
+                        if last_decoded.as_deref() != Some(newest.path.as_path()) {
+                            if let Ok(data) = std::fs::read(&newest.path) {
+                                if let Ok(frames) = knmi_hdf5::decode_frames(&data) {
+                                    let texels: Vec<Vec<u32>> = frames
+                                        .iter()
+                                        .map(|frame| {
+                                            radar_raster::rgba_to_bgra_texels(
+                                                &projection.frame_to_rgba(frame),
+                                            )
+                                        })
+                                        .collect();
+                                    let _ = sender.send(RainUpdate {
+                                        frames: texels,
+                                        width: 1024,
+                                        height: 1280,
+                                    });
+                                    last_decoded = Some(newest.path.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+    }
+
+    fn apply_rain(&mut self, cx: &mut Cx) {
+        let bbox = (
+            makepad_geodata::radar_raster::RASTER_WEST,
+            makepad_geodata::radar_raster::RASTER_SOUTH,
+            makepad_geodata::radar_raster::RASTER_EAST,
+            makepad_geodata::radar_raster::RASTER_NORTH,
+        );
+        if self.rain_on {
+            if let Some(update) = &self.rain_cache {
+                self.map(cx).set_rain_frames(
+                    cx,
+                    update.frames.clone(),
+                    update.width,
+                    update.height,
+                    bbox,
+                );
+            }
+        } else {
+            self.map(cx).set_rain_frames(cx, Vec::new(), 0, 0, bbox);
+        }
     }
 
     /// The 3D button shows the mode a press switches TO ("3D" when flat,
@@ -748,6 +853,12 @@ impl App {
         self.session = Some(NavSession::new(route.clone()));
         self.navigating = true;
         self.follow = true;
+        self.ui
+            .button(cx, ids!(recenter_button))
+            .set_visible(cx, true);
+        self.ui
+            .button(cx, ids!(recenter_button))
+            .set_text(cx, "Detach");
         self.sim_progress_m = 0.0;
         self.sim_last_tick = Some(std::time::Instant::now());
         self.sim_started = Some(std::time::Instant::now());
@@ -1015,12 +1126,9 @@ impl MatchEvent for App {
         if map.viewport_changed(actions).is_some() {
             if self.program_moves > 0 {
                 self.program_moves -= 1;
-            } else if self.navigating && self.follow {
-                self.follow = false;
-                self.ui
-                    .button(cx, ids!(recenter_button))
-                    .set_visible(cx, true);
             }
+            // Gestures (pan/tilt/rotate) do NOT detach the follow camera —
+            // attach/detach is an explicit toggle in the UI.
         }
 
         // Route bar
@@ -1102,6 +1210,13 @@ impl MatchEvent for App {
             self.layer_states[5] = value;
             layers_changed = true;
         }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_rain)).changed(actions) {
+            self.rain_on = value;
+            if value {
+                self.ensure_rain_worker();
+            }
+            self.apply_rain(cx);
+        }
         if layers_changed {
             self.apply_overlay_selection(cx);
         }
@@ -1121,12 +1236,16 @@ impl MatchEvent for App {
             }
         }
         if self.ui.button(cx, ids!(recenter_button)).clicked(actions) {
-            self.follow = true;
+            // Attach/detach toggle: follow the puck, or roam freely.
+            self.follow = !self.follow;
+            let label = if self.follow { "Detach" } else { "Follow" };
             self.ui
                 .button(cx, ids!(recenter_button))
-                .set_visible(cx, false);
-            if let Some(pos) = self.position {
-                self.map(cx).set_center(cx, pos.lon, pos.lat);
+                .set_text(cx, label);
+            if self.follow {
+                if let Some(pos) = self.position {
+                    self.map(cx).set_center(cx, pos.lon, pos.lat);
+                }
             }
         }
     }
@@ -1141,6 +1260,12 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // Worker responses
+        while let Ok(update) = self.rain_rx.try_recv() {
+            self.rain_cache = Some(update);
+            if self.rain_on {
+                self.apply_rain(cx);
+            }
+        }
         while let Ok(response) = self.nav_rx.try_recv() {
             match response {
                 NavResponse::Ready { docs, edges } => {
