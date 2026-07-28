@@ -645,7 +645,7 @@ pub struct MapView {
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize, u8)>,
+    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool)>,
     // Labels drawn last frame (hashed name+position key); kept to stabilize
     // placement while panning instead of flickering between candidates.
     #[rust]
@@ -2450,11 +2450,16 @@ impl MapView {
             let score = candidate.score + candidate.source_rank as f64 * 2.0;
             self.scratch_accepted_hashes
                 .push(stable_label_key(&candidate.name_key, &candidate.road_kind));
+            // Post-icon phase: in-pin text and charger brand draw AFTER
+            // the symbol pass so they sit on the pins, not under them.
+            let post_icon = candidate.color_class == LABEL_CLASS_PIN
+                || candidate.road_kind.starts_with("chb");
             self.scratch_accepted_plans.push((
                 score,
                 placement.glyph_start,
                 placement.glyph_end,
                 candidate.color_class,
+                post_icon,
             ));
         }
 
@@ -2522,61 +2527,23 @@ impl MapView {
         };
         // Rigid delta-rotation of the cached placement about the pivot
         // (heading-up nav): transform a copy once, draw slices from it.
-        // Screen-point (pin) plans stay UPRIGHT: rotating them with the
-        // map while their billboard pins stay screen-aligned reads as
-        // doubled, garbled text during rotation. Collect their glyph
-        // ranges and exempt them from the rigid delta-rotation.
-        let mut pin_ranges: Vec<(usize, usize)> = Vec::new();
-        for &(_, start, end, color_class) in &self.scratch_accepted_plans {
-            if color_class == LABEL_CLASS_PIN {
-                pin_ranges.push((start, end));
-            }
-        }
-        let in_pin_range =
-            |index: usize| pin_ranges.iter().any(|&(s0, e0)| index >= s0 && index < e0);
-        let transform_active = rot != 0.0 || (tilt_ratio - 1.0).abs() > 1e-4;
-        let rotated: Vec<PathGlyphInstance> = if transform_active {
-            let (c, s) = (rot.cos(), rot.sin());
-            self.path_glyphs
-                .iter()
-                .enumerate()
-                .map(|(glyph_index, glyph)| {
-                    if in_pin_range(glyph_index) {
-                        return glyph.clone();
-                    }
-                    let mut glyph = glyph.clone();
-                    // Rotate about the pivot, then compress y by the tilt
-                    // ratio — cached glyphs track the camera best-effort;
-                    // the async re-place trues everything up.
-                    let spin = |p: crate::makepad_draw::text::geom::Point<f32>| {
-                        let dx = p.x - pivot.x;
-                        let dy = p.y - pivot.y;
-                        crate::makepad_draw::text::geom::Point::new(
-                            pivot.x + dx * c - dy * s,
-                            pivot.y + (dx * s + dy * c) * tilt_ratio,
-                        )
-                    };
-                    glyph.glyph_origin = spin(glyph.glyph_origin);
-                    glyph.rotation_origin = spin(glyph.rotation_origin);
-                    let a = glyph.angle + rot;
-                    glyph.angle = (a.sin() * tilt_ratio).atan2(a.cos());
-                    glyph
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Camera-delta on the GPU: placed glyphs spin/squash about the
+        // pivot via uniforms — zero per-frame CPU work, the async
+        // re-place trues everything up (identity uniforms then).
+        self.draw_label.set_camera_delta(
+            cx.cx,
+            rot.cos(),
+            rot.sin(),
+            tilt_ratio,
+            pivot,
+        );
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end, color_class) = self.scratch_accepted_plans[i];
-            if (color_class == LABEL_CLASS_PIN) != pin_phase {
+            let (_, start, end, color_class, post_icon) = self.scratch_accepted_plans[i];
+            if post_icon != pin_phase {
                 continue;
             }
-            let glyphs = if transform_active {
-                &rotated[start..end]
-            } else {
-                &self.path_glyphs[start..end]
-            };
+            let glyphs = &self.path_glyphs[start..end];
             self.draw_label.draw_super.color = halo_color;
             for offset in HALO_OFFSETS {
                 self.draw_label.draw_path_glyphs_scaled(
