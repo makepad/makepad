@@ -16,6 +16,7 @@ mod settings;
 #[path = "cpu/tensor.rs"]
 mod tensor;
 mod transcriber;
+mod vad;
 
 #[cfg(all(any(target_os = "macos", target_os = "ios"), not(force_whisper)))]
 #[path = "apple/speech.rs"]
@@ -26,6 +27,10 @@ pub use model::WhisperModel;
 pub use transcriber::{
     NativeAppleTranscriber, VoiceBackendKind, VoiceTranscribeError, VoiceTranscribeParams,
     VoiceTranscriber, WhisperTranscriber,
+};
+pub use vad::{
+    vad_model_path_if_present, SileroVad, VadError, VadStream, VAD_CHUNK_SAMPLES,
+    VAD_SAMPLE_RATE,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
