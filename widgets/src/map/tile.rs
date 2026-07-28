@@ -854,7 +854,7 @@ fn build_tile_buffers_from_features(
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, bool)>::new();
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
@@ -884,10 +884,13 @@ fn build_tile_buffers_from_features(
                     // Doors and generic dots yield to real symbols in the
                     // collision pass (a recycling point must not lose to
                     // the building entrance next to it).
+                    // Chargers place before everything (EV navigator) and
+                    // are never collided away by shop/POI symbols.
                     let priority = match icon_name {
-                        "entrance" => 2,
-                        "dot" => 1,
-                        _ => 0,
+                        "charger" => 0,
+                        "entrance" => 3,
+                        "dot" => 2,
+                        _ => 1,
                     };
                     // Micro street furniture packs tighter than shop/POI
                     // symbols — a bench must not knock out the tree row.
@@ -896,8 +899,19 @@ fn build_tile_buffers_from_features(
                         | "bicycle" => 0.45f32,
                         _ => 1.0,
                     };
-                    let is_tree = icon_name == "tree";
-                    icon_jobs.push((*point, mesh, color_class, priority, dist_factor, is_tree));
+                    let two_tone = match icon_name {
+                        "tree" => 1u8,
+                        "charger" => 2,
+                        _ => 0,
+                    };
+                    // Chargers render as Tesla-style pin badges: swap the
+                    // bolt mesh for the pin silhouette, bolt overlays white.
+                    let mesh = if two_tone == 2 {
+                        icon_mesh("charger_pin_big").unwrap_or(mesh)
+                    } else {
+                        mesh
+                    };
+                    icon_jobs.push((*point, mesh, color_class, priority, dist_factor, two_tone));
                     // text sits below the symbol, carto-style
                     label_point.1 += 11.0 / render_scale;
                 }
@@ -1483,7 +1497,7 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class, _, _, is_tree) in &icon_jobs {
+    for (anchor, mesh, color_class, _, _, two_tone) in &icon_jobs {
         append_icon_mesh(
             mesh,
             *anchor,
@@ -1493,12 +1507,27 @@ fn build_tile_buffers_from_features(
             &mut icon_zbias,
         );
         // carto trees: light canopy disc with a dark center dot.
-        if *is_tree {
+        if *two_tone == 1 {
             if let Some(core) = icon_mesh("tree_core") {
                 append_icon_mesh(
                     core,
                     *anchor,
                     hex_to_premul_rgba(0x4c7a4c, 1.0),
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+            }
+        }
+        // Charger pins: white bolt centered in the pin BODY (the mesh
+        // center sits lower because of the pointer tail).
+        if *two_tone == 2 {
+            if let Some(bolt) = icon_mesh("charger_bolt") {
+                let bolt_anchor = (anchor.0, anchor.1 - 3.5 / render_scale);
+                append_icon_mesh(
+                    bolt,
+                    bolt_anchor,
+                    hex_to_premul_rgba(0xffffff, 1.0),
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,

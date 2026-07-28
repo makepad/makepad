@@ -2614,6 +2614,8 @@ impl MapView {
                     font_scale = 0.60;
                 } else if is_poi {
                     font_scale = 0.72;
+                } else if label.source_layer == "chargers" {
+                    font_scale = 1.0;
                 } else if let Some((kind, population)) = place {
                     // Kind sets the class, population separates Amsterdam
                     // from Purmerend within it.
