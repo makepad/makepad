@@ -458,11 +458,20 @@ fn merge_detail_features(
             if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
                 continue;
             }
-            let Some((icon, _)) = micro_icon_for_tags(&tags) else {
-                continue;
-            };
-            if render_zoom < micro_icon_min_zoom(icon) {
-                continue;
+            // Attraction nodes (zoo animals) carry a label with no icon.
+            let is_attraction_node = tags.contains_key("name")
+                && (tags.contains_key("attraction") || tags.contains_key("zoo"));
+            match micro_icon_for_tags(&tags) {
+                Some((icon, _)) => {
+                    if render_zoom < micro_icon_min_zoom(icon) {
+                        continue;
+                    }
+                }
+                None => {
+                    if !is_attraction_node || render_zoom < 15.5 {
+                        continue;
+                    }
+                }
             }
             tags.insert("layer".to_string(), "micro_pois".to_string());
             points.push((point, tags));
@@ -2487,8 +2496,10 @@ mod bridge_probe_tests {
             .filter(|label| label.source_layer == "green_area")
             .collect();
         println!("green_area labels: {}", attraction.len());
-        for label in attraction.iter().take(10) {
-            println!("  {:?} class={}", label.text, label.color_class);
+        for label in attraction.iter() {
+            if label.color_class == 3 {
+                println!("  ATTRACTION {:?}", label.text);
+            }
         }
         println!("total labels: {}", buffers.labels.len());
     }
@@ -2501,13 +2512,34 @@ mod bridge_probe_tests {
             return;
         }
         let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
-        for y in 5384..=5386 {
+        for y in 5378..=5392 {
             let Some(raw) = reader.get_tile(14, 8415, 16383 - y).unwrap() else {
                 continue;
             };
             let key = TileKey { z: 14, x: 8415, y: y as i32 };
             let mut points = Vec::new();
             let mut ways = Vec::new();
+            {
+                let pbf_data = decode_vector_tile_payload(&raw).unwrap();
+                let mut collector = MvtLocalCollector::new(4.0);
+                parse_mvt_tile(&pbf_data, key, &mut collector).unwrap();
+                let mut max_id = 0i64;
+                for way in &collector.ways {
+                    if let Some(id) = way
+                        .tags
+                        .get("__makepad_osm_id")
+                        .and_then(|v| v.parse::<i64>().ok())
+                    {
+                        if way.tags.get("__makepad_osm_type").map(|v| v.as_str()) == Some("way") {
+                            max_id = max_id.max(id);
+                        }
+                        if id == 1391036659 {
+                            println!("tile y={} FOUND flamingo way!", y);
+                        }
+                    }
+                }
+                println!("tile y={} max way id {}", y, max_id);
+            }
             merge_detail_features(&raw, key, 4.0, true, false, &mut points, &mut ways).unwrap();
             let mut admitted = 0;
             let mut labeled = 0;
@@ -2520,15 +2552,14 @@ mod bridge_probe_tests {
                     });
                     if label.is_some() {
                         labeled += 1;
-                    } else if admitted <= 6 {
-                        println!(
-                            "tile y={} NO-LABEL {:?} ring={:?} closed={}",
-                            y,
-                            way.tags.get("name"),
-                            ring.as_ref().map(|r| r.len()),
-                            way.closed
-                        );
                     }
+                    println!(
+                        "tile y={} ADMIT {:?} attraction={:?} ring={:?}",
+                        y,
+                        way.tags.get("name"),
+                        way.tags.get("attraction"),
+                        ring.as_ref().map(|r| r.len())
+                    );
                 }
             }
             println!(

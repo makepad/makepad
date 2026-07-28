@@ -291,9 +291,9 @@ script_mod! {
             MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x999999 casing_width: 4.0 center_color: #xdddde8 center_width: 3.0}
             MapRoadRule{kind: "pedestrian" sort_rank: 300 casing_color: #xb5b5b5 casing_width: 4.0 center_color: #xfdfdfd center_width: 2.8 min_zoom: 14.0}
             MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x6262ff center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0}
-            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xfa8072 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
-            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xfa8072 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
-            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xfa8072 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xaaa8a5 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #xaaa8a5 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #xaaa8a5 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
             MapRoadRule{kind: "track" sort_rank: 160 center_color: #x996600 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "*" sort_rank: 280 casing_color: #xbbbbbb casing_width: 3.6 center_color: #xffffff center_width: 2.5}
 
