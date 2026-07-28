@@ -719,9 +719,18 @@ fn build_ways(
     // external-sorts it) and only the relation-member way store needs
     // id-ordered pushes, which stay on this thread.
     let workers = std::thread::available_parallelism()
-        .map(|n| (n.get().saturating_sub(4)).clamp(4, 10))
+        .map(|n| (n.get().saturating_sub(3)).clamp(4, 12))
         .unwrap_or(4);
-    let cache_slice = (crate::native::store::node_cache_groups_public() / workers).max(512);
+    eprintln!("  loading node store into RAM...");
+    let load_start = std::time::Instant::now();
+    let flat_nodes = std::sync::Arc::new(crate::native::store::FlatNodeStore::load(
+        &paths.node_data,
+        &paths.node_index,
+    )?);
+    eprintln!(
+        "  node store loaded in {:.1}s",
+        load_start.elapsed().as_secs_f64()
+    );
     let (job_tx, job_rx) = sync_channel::<WayJob>(8192);
     let job_rx = Arc::new(Mutex::new(job_rx));
     let (out_tx, out_rx) = sync_channel::<Result<PreparedBatch, String>>(8192);
@@ -730,25 +739,16 @@ fn build_ways(
         for _ in 0..workers {
             let job_rx = Arc::clone(&job_rx);
             let out_tx = out_tx.clone();
-            let node_data = paths.node_data.clone();
-            let node_index = paths.node_index.clone();
+            let flat_nodes = Arc::clone(&flat_nodes);
             scope.spawn(move || {
-                let mut nodes =
-                    match NodeStore::open_with_cache(&node_data, &node_index, cache_slice) {
-                        Ok(nodes) => nodes,
-                        Err(err) => {
-                            let _ = out_tx.send(Err(err));
-                            return;
-                        }
-                    };
                 loop {
                     let job = { job_rx.lock().unwrap().recv() };
                     let Ok(job) = job else {
                         break;
                     };
                     let resolved = (|| -> Result<PreparedBatch, String> {
-                        let (projected, closed) = resolve_projected_refs(
-                            &mut nodes,
+                        let (projected, closed) = resolve_projected_refs_flat(
+                            &flat_nodes,
                             job.refs.iter().copied(),
                             job.id,
                         )?;
@@ -991,6 +991,34 @@ fn resolve_nodes(
         result.push(node);
     }
     Ok(result)
+}
+
+fn resolve_projected_refs_flat(
+    store: &crate::native::store::FlatNodeStore,
+    refs: impl Iterator<Item = i64>,
+    object_id: i64,
+) -> Result<(Vec<geom::GlobalPoint>, bool), String> {
+    let (minimum, maximum) = refs.size_hint();
+    let mut result = Vec::with_capacity(maximum.unwrap_or(minimum));
+    let mut first_id = None;
+    let mut last_id = None;
+    let mut count = 0_usize;
+    for node_id in refs {
+        let Some(node) = store.get(node_id)? else {
+            return Err(format!(
+                "OSM object {object_id} references missing node {node_id}"
+            ));
+        };
+        first_id.get_or_insert(node_id);
+        last_id = Some(node_id);
+        count += 1;
+        let point = project_node(node);
+        if result.last() != Some(&point) {
+            result.push(point);
+        }
+    }
+    let closed = count > 2 && first_id == last_id;
+    Ok((result, closed))
 }
 
 fn resolve_projected_refs(

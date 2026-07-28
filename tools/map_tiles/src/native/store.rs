@@ -76,6 +76,86 @@ pub fn node_cache_groups_public() -> usize {
     node_cache_groups()
 }
 
+/// The whole node store decoded into RAM: lock-free shared lookups for
+/// parallel way resolution. Europe's ways visit node groups in creation
+/// order (i.e. randomly in space), so any cache small enough to fit loses;
+/// the full decode is ~5x the compressed store and loads in about a
+/// minute with all cores inflating.
+pub struct FlatNodeStore {
+    groups: Vec<Option<DecodedNodeGroup>>,
+}
+
+impl FlatNodeStore {
+    pub fn load(data_path: &Path, index_path: &Path) -> Result<Self, String> {
+        let mut file = File::open(data_path)
+            .map_err(|err| format!("open {}: {err}", data_path.display()))?;
+        verify_data_magic(&mut file, data_path, NODE_DATA_MAGIC)?;
+        drop(file);
+        let entries = read_index(index_path, NODE_INDEX_MAGIC)?;
+        let max_group = entries
+            .iter()
+            .map(|entry| entry.group_id)
+            .max()
+            .unwrap_or(0) as usize;
+        let mut groups: Vec<Option<DecodedNodeGroup>> = Vec::new();
+        groups.resize_with(max_group + 1, || None);
+
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 16))
+            .unwrap_or(4);
+        let chunk_size = entries.len().div_ceil(workers).max(1);
+        let decoded: Vec<Vec<(u64, DecodedNodeGroup)>> =
+            std::thread::scope(|scope| -> Result<_, String> {
+                let mut handles = Vec::new();
+                for chunk in entries.chunks(chunk_size) {
+                    let data_path = data_path.to_path_buf();
+                    handles.push(scope.spawn(move || -> Result<_, String> {
+                        let mut file = File::open(&data_path)
+                            .map_err(|err| format!("open {}: {err}", data_path.display()))?;
+                        let mut out = Vec::with_capacity(chunk.len());
+                        for entry in chunk {
+                            file.seek(SeekFrom::Start(entry.offset)).map_err(|err| {
+                                format!("seek {}: {err}", data_path.display())
+                            })?;
+                            let mut bytes = vec![0_u8; entry.length as usize];
+                            file.read_exact(&mut bytes).map_err(|err| {
+                                format!("read {}: {err}", data_path.display())
+                            })?;
+                            out.push((entry.group_id, decode_node_group(&bytes, entry.group_id)?));
+                        }
+                        Ok(out)
+                    }));
+                }
+                let mut decoded = Vec::new();
+                for handle in handles {
+                    decoded.push(
+                        handle
+                            .join()
+                            .map_err(|_| "node store load thread panicked".to_string())??,
+                    );
+                }
+                Ok(decoded)
+            })?;
+        for part in decoded {
+            for (group_id, group) in part {
+                groups[group_id as usize] = Some(group);
+            }
+        }
+        Ok(Self { groups })
+    }
+
+    pub fn get(&self, id: i64) -> Result<Option<NodeCoord>, String> {
+        if id < 0 {
+            return Ok(None);
+        }
+        let group_id = (id as u64 >> NODE_GROUP_SHIFT) as usize;
+        match self.groups.get(group_id).and_then(|group| group.as_ref()) {
+            Some(group) => group.get(id),
+            None => Ok(None),
+        }
+    }
+}
+
 fn node_cache_groups() -> usize {
     let mib = std::env::var("MAKEPAD_NODE_CACHE_MIB")
         .ok()
