@@ -130,34 +130,11 @@ impl RadarProjection {
         top * (1.0 - fy) + bottom * fy
     }
 
-    /// Rain colormap over (interpolated) KNMI pixel values
-    /// (dBZ = 0.5·PV − 32).
-    fn colorize(value: f32) -> [u8; 4] {
-        if value < 1.0 {
-            return [0, 0, 0, 0];
-        }
-        let dbz = 0.5 * value - 32.0;
-        // Premultiplied-ish straight RGBA; renderer treats it as straight
-        // alpha. Thresholds follow common rain-intensity ramps.
-        let (r, g, b, a) = if dbz < 5.0 {
-            (150, 200, 255, 85)
-        } else if dbz < 15.0 {
-            (90, 160, 250, 125)
-        } else if dbz < 25.0 {
-            (35, 105, 235, 160)
-        } else if dbz < 33.0 {
-            (25, 170, 90, 185)
-        } else if dbz < 40.0 {
-            (245, 185, 35, 205)
-        } else if dbz < 47.0 {
-            (235, 80, 30, 225)
-        } else {
-            (205, 25, 160, 245)
-        };
-        [r, g, b, a]
-    }
 
-    /// Apply the LUT + bilinear sample + colormap to one frame → RGBA.
+    /// Apply the LUT + bilinear sample to one frame → a CONTINUOUS value
+    /// texture (raw 0..255 value in RGB, 255 alpha inside the radar grid).
+    /// Banding/colormapping happens in the fragment shader so isolines stay
+    /// crisp at screen resolution instead of texture resolution.
     pub fn frame_to_rgba(&self, frame: &KnmiFrame) -> Vec<u8> {
         let mut out = vec![0u8; self.width * self.height * 4];
         if frame.cols != GRID_COLS || frame.rows != GRID_ROWS {
@@ -168,9 +145,14 @@ impl RadarProjection {
             if col.is_nan() {
                 continue;
             }
-            let value = Self::sample_value(frame, col, self.src_row[i]);
-            let rgba = Self::colorize(value);
-            out[i * 4..i * 4 + 4].copy_from_slice(&rgba);
+            let value = Self::sample_value(frame, col, self.src_row[i])
+                .round()
+                .clamp(0.0, 254.0) as u8;
+            let px = &mut out[i * 4..i * 4 + 4];
+            px[0] = value;
+            px[1] = value;
+            px[2] = value;
+            px[3] = 255;
         }
         out
     }

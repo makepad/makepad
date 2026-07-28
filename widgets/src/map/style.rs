@@ -29,7 +29,11 @@ pub struct StrokePassStyle {
 }
 
 /// Micro-depth per unit of sort rank (rank 710 rail → 0.0014).
-pub const DEPTH_MICRO_PER_RANK: f32 = 4e-5;
+pub const DEPTH_MICRO_PER_RANK: f32 = 2e-4;
+/// Per-feature micro ladder for SAME-rank overlapping fills (park over
+/// grass): keeps bake order deterministic where ranks tie, wraps well
+/// below one rank step.
+pub const DEPTH_MICRO_PER_FEATURE: f32 = 1e-5;
 
 /// Regular roads: widths follow `zoom_width_mult` directly.
 pub const EXPAND_CLASS_ROAD: f32 = 0.0;

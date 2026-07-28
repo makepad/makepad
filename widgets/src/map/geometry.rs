@@ -877,17 +877,6 @@ pub fn tile_bounds_padded(tile_key: TileKey, pad_tiles: f64) -> (f64, f64, f64, 
     (south, west, north, east)
 }
 
-pub fn local_tile_to_lon_lat(tile_key: TileKey, extent: u32, x: i32, y: i32) -> (f64, f64) {
-    let extent = extent.max(1) as f64;
-    let n = 2.0_f64.powi(tile_key.z as i32);
-    let tile_x = tile_key.x as f64 + x as f64 / extent;
-    let tile_y = tile_key.y as f64 + y as f64 / extent;
-    let lon = tile_x / n * 360.0 - 180.0;
-    let lat_rad = (std::f64::consts::PI * (1.0 - 2.0 * tile_y / n))
-        .sinh()
-        .atan();
-    (lon, lat_rad.to_degrees())
-}
 
 // --- Tile key ---
 

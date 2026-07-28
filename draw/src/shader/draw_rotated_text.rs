@@ -43,18 +43,18 @@ script_mod! {
                 scaled.x * sn + scaled.y * cs
             ) + origin
             if self.upright > 0.5 {
-                let anchor_rel = origin - self.cam_pivot
+                let anchor_rel = origin + vec2(0.0, self.lift) - self.cam_pivot
                 let cam_anchor = vec2(
                     anchor_rel.x * self.cam_a + anchor_rel.y * self.cam_b,
                     anchor_rel.x * self.cam_c + anchor_rel.y * self.cam_d
-                ) + self.cam_pivot
+                ) + self.cam_pivot - vec2(0.0, self.lift)
                 rotated = rotated - origin + cam_anchor
             } else {
-                let cam_rel = rotated - self.cam_pivot
+                let cam_rel = rotated + vec2(0.0, self.lift) - self.cam_pivot
                 rotated = vec2(
                     cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
                     cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
-                ) + self.cam_pivot
+                ) + self.cam_pivot - vec2(0.0, self.lift)
             }
 
             self.pos = self.geom.pos
@@ -115,6 +115,11 @@ pub struct DrawRotatedText {
     pub rotation_origin: Vec2f,
     #[live(0.0)]
     pub upright: f32,
+    /// Screen-px lift already baked into this label's placement (terrain
+    /// ground + marker stalk). The camera delta re-projects the GROUND
+    /// anchor and re-applies the lift, so lifted labels track rotation.
+    #[live(0.0)]
+    pub lift: f32,
 }
 
 impl DrawRotatedText {
