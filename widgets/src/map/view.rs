@@ -2487,11 +2487,27 @@ impl MapView {
         };
         // Rigid delta-rotation of the cached placement about the pivot
         // (heading-up nav): transform a copy once, draw slices from it.
+        // Screen-point (pin) plans stay UPRIGHT: rotating them with the
+        // map while their billboard pins stay screen-aligned reads as
+        // doubled, garbled text during rotation. Collect their glyph
+        // ranges and exempt them from the rigid delta-rotation.
+        let mut pin_ranges: Vec<(usize, usize)> = Vec::new();
+        for &(_, start, end, color_class) in &self.scratch_accepted_plans {
+            if color_class == LABEL_CLASS_PIN {
+                pin_ranges.push((start, end));
+            }
+        }
+        let in_pin_range =
+            |index: usize| pin_ranges.iter().any(|&(s0, e0)| index >= s0 && index < e0);
         let rotated: Vec<PathGlyphInstance> = if rot != 0.0 {
             let (c, s) = (rot.cos(), rot.sin());
             self.path_glyphs
                 .iter()
-                .map(|glyph| {
+                .enumerate()
+                .map(|(glyph_index, glyph)| {
+                    if in_pin_range(glyph_index) {
+                        return glyph.clone();
+                    }
                     let mut glyph = glyph.clone();
                     let spin = |p: crate::makepad_draw::text::geom::Point<f32>| {
                         let dx = p.x - pivot.x;
