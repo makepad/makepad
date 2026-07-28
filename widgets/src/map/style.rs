@@ -691,6 +691,25 @@ pub fn stroke_style_for_tags(
     if matches!(layer, "water_lines_labels" | "water_polygons_labels") {
         return None;
     }
+    // Walls/fences dark thin, hedges green (detail archive).
+    if layer == "barrier_line" {
+        let (color, width) = match tags.get("barrier").map(|value| value.as_str()) {
+            Some("hedge") => (0x9dc29a, 1.6),
+            Some("fence") => (0xaaaaaa, 0.7),
+            _ => (0x8a8a8a, 1.0),
+        };
+        return Some(StrokeStyle {
+            sort_rank: 155,
+            casing: None,
+            center: StrokePassStyle {
+                color,
+                width: width * px_to_units,
+                shape_id: 0.0,
+                expand_class: EXPAND_CLASS_CONST_PX,
+                depth_micro: 155.0 * DEPTH_MICRO_PER_RANK,
+            },
+        });
+    }
     // Zoo / theme park perimeter: carto's muted purple boundary.
     if layer == "tourism_boundary" {
         return Some(StrokeStyle {
@@ -782,6 +801,14 @@ pub fn stroke_style_for_tags(
         let mut style = scaled_style(template, rank_bias, width_scale);
         if thin_growth {
             style.center.expand_class = EXPAND_CLASS_THIN;
+            // carto grays out paths you can't freely walk (zoos, private
+            // grounds) instead of the public salmon.
+            if matches!(
+                tags.get("access").map(|value| value.as_str()),
+                Some("private" | "no" | "customers")
+            ) {
+                style.center.color = 0x9c9c9c;
+            }
         }
         // Bridges float above (and tunnels below) their base rank in the
         // tilt-mode micro-depth as well, so crossings resolve stably.
