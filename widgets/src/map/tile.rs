@@ -2617,6 +2617,41 @@ mod bridge_probe_tests {
 
     #[test]
     #[ignore]
+    fn overlay_chargers_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        let overlay = std::path::Path::new("../local/overlays/nl-chargers.mbtiles");
+        if !base.exists() || !overlay.exists() {
+            return;
+        }
+        let mut base_reader = makepad_mbtile_reader::MbtilesReader::open(base).unwrap();
+        let mut overlay_reader = makepad_mbtile_reader::MbtilesReader::open(overlay).unwrap();
+        let (z, x, y) = (12i64, 2103i64, 1346i64);
+        let raw = base_reader.get_tile(z, x, (1 << z) - 1 - y).unwrap().unwrap();
+        let ov = overlay_reader
+            .get_tile(z, x, (1 << z) - 1 - y)
+            .unwrap()
+            .unwrap();
+        let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+        let overlay_tiles = vec![OverlayTileData {
+            raw: ov,
+            shift: 0,
+            quadrant_x: 0,
+            quadrant_y: 0,
+        }];
+        let theme = CompiledMapTheme::default();
+        let buffers =
+            build_tile_buffers_from_mvt(key, &raw, None, &overlay_tiles, &theme, 12, false)
+                .unwrap();
+        println!(
+            "icon verts {} labels {} features {}",
+            buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            buffers.labels.len(),
+            buffers.feature_count
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn artis_full_build_probe() {
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let detail = std::path::Path::new("../local/maps/noord-holland-detail.mbtiles");
