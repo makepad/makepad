@@ -317,27 +317,9 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         }
         // Charger sites label their power (and Superchargers their brand):
         // the kW number is the routing-relevant fact for an EV navigator.
-        // Fast-charger pins carry their kW INSIDE the bubble: white text
-        // over the tier-colored badge, number only ("250").
-        "chargers" => {
-            let kw = tags
-                .get("max_kw")
-                .and_then(|value| value.parse::<f64>().ok())
-                .unwrap_or(0.0);
-            if kw < 50.0 {
-                return None;
-            }
-            return Some(TileLabel {
-                text: format!("{:.0}", kw),
-                priority: 3,
-                source_layer,
-                road_kind: format!("chg{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
-                color_class: LABEL_CLASS_PIN,
-                path_points: point_label_path(point),
-                name_key: String::new(),
-                bbox: (0.0, 0.0, 0.0, 0.0),
-            });
-        }
+        // Charger kW digits are drawn INSIDE the pin composite by the icon
+        // pass (see tile.rs) — no label-system text for chargers.
+        "chargers" => return None,
         // Settlement names — THE labels at low zoom (carto placenames.mss:
         // city z4+, town z7+, village/suburb z12+, quarter/hamlet z14+).
         // Kind-based zoom gating and text scaling happen at candidate time
