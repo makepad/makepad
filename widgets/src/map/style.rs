@@ -667,11 +667,15 @@ pub fn stroke_style_for_tags(
         // Pedestrian squares / wide path areas get carto's thin gray edge
         // from street level; the fill itself comes from the fill pass.
         if is_road_polygon_layer(layer) && render_zoom >= 15 {
+            let edge = theme
+                .street_area_fill
+                .map(contrast_edge)
+                .unwrap_or(0xc2bfba);
             return Some(StrokeStyle {
                 sort_rank: 135,
                 casing: None,
                 center: StrokePassStyle {
-                    color: 0xc2bfba,
+                    color: edge,
                     width: 0.8 * px_to_units,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
@@ -741,11 +745,15 @@ pub fn stroke_style_for_tags(
     }
     // Platform slabs get a thin constant-px edge like carto.
     if layer == "platforms" {
+        let edge = theme
+            .bridge_area_fill
+            .map(contrast_edge)
+            .unwrap_or(0x9a938b);
         return Some(StrokeStyle {
             sort_rank: 140,
             casing: None,
             center: StrokePassStyle {
-                color: 0x9a938b,
+                color: edge,
                 width: 0.8 * px_to_units,
                 shape_id: 0.0,
                 expand_class: EXPAND_CLASS_CONST_PX,
@@ -824,17 +832,27 @@ pub fn stroke_style_for_tags(
             ) {
                 style.center.color = 0x9c9c9c;
             }
-            // Footway bridges: white deck under the dots; the dark rim is
-            // a companion job (thin_bridge_rim_style) — three passes total,
-            // like carto's outlined bridge box with faint dots on top.
+            // Footway bridges: dark rim (casing pass) + light deck (center
+            // pass); the faint dots ride a companion style one rank above
+            // (thin_bridge_dots_for_tags). Colors derive from the theme's
+            // bridge fill so dark mode just works.
             if tag_is_truthy(tags, "bridge") {
+                let deck = theme.bridge_area_fill.unwrap_or(0xf2f0ed);
+                let dot_width = style.center.width;
                 style.casing = Some(StrokePassStyle {
-                    color: THIN_BRIDGE_DECK_COLOR,
-                    width: style.center.width * 2.6,
+                    color: contrast_edge(deck),
+                    width: dot_width * 3.0,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_THIN,
+                    depth_micro: style.center.depth_micro - 2.0 * DEPTH_MICRO_PER_RANK,
+                });
+                style.center = StrokePassStyle {
+                    color: deck,
+                    width: dot_width * 2.2,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
-                });
+                };
             }
         }
         // Bridges float above (and tunnels below) their base rank in the
@@ -928,27 +946,58 @@ const RAIL_SLEEPER_MIN_ZOOM: u32 = 15;
 /// scale they stay the theme's faint gray so they don't dominate.
 const TRAM_DARK_MIN_ZOOM: u32 = 16;
 
-/// Marker color for the thin-bridge white deck (see thin_bridge_rim_style).
-pub const THIN_BRIDGE_DECK_COLOR: u32 = 0xfbfbfa;
+/// A readable edge color for a fill: dark fills get a lighter rim, light
+/// fills a darker one — the single hook that keeps outline-style strokes
+/// working in both palettes.
+pub fn contrast_edge(color: u32) -> u32 {
+    let r = color >> 16 & 0xff;
+    let g = color >> 8 & 0xff;
+    let b = color & 0xff;
+    let luminance = (r * 3 + g * 6 + b) / 10;
+    let scale = |v: u32, factor: u32| (v * factor / 100).min(0xff);
+    if luminance >= 0x80 {
+        (scale(r, 58) << 16) | (scale(g, 58) << 8) | scale(b, 58)
+    } else {
+        let lift = |v: u32| (v + (0xff - v) * 45 / 100).min(0xff);
+        (lift(r) << 16) | (lift(g) << 8) | lift(b)
+    }
+}
 
-/// Companion pass for thin footway bridges: the dark rim drawn just under
-/// the white deck, producing carto's outlined bridge box.
-pub fn thin_bridge_rim_style(style: &StrokeStyle) -> Option<StrokeStyle> {
-    let casing = style.casing?;
-    if casing.color != THIN_BRIDGE_DECK_COLOR {
+/// Companion pass for thin footway bridges: the ORIGINAL dotted centerline
+/// drawn one rank above the rim+deck, so the dots stay faintly visible on
+/// the span (they do on osm.org).
+pub fn thin_bridge_dots_for_tags(
+    theme: &CompiledMapTheme,
+    tags: &HashMap<String, String>,
+    render_zoom: u32,
+    zoom_mult: f32,
+    px_to_units: f32,
+) -> Option<StrokeStyle> {
+    if !tag_is_truthy(tags, "bridge") {
         return None;
     }
-    Some(StrokeStyle {
-        sort_rank: style.sort_rank,
-        casing: None,
-        center: StrokePassStyle {
-            color: 0x8f8f8f,
-            width: casing.width * 1.4,
-            shape_id: 0.0,
-            expand_class: EXPAND_CLASS_THIN,
-            depth_micro: casing.depth_micro - DEPTH_MICRO_PER_RANK,
-        },
-    })
+    let highway = tags.get("highway")?;
+    let key = highway.trim().to_ascii_lowercase();
+    let template = theme.road_rules.get(&key).copied().or(theme.road_default)?;
+    if (render_zoom as f32) < template.min_zoom {
+        return None;
+    }
+    // Thin uncased paths only — road bridges keep their own casing look.
+    if template.casing.is_some() || template.center.width > 2.0 {
+        return None;
+    }
+    let width_scale = zoom_mult.max(1.0).powf(0.35) * px_to_units;
+    let mut style = scaled_style(template, 26, width_scale);
+    style.sort_rank = style.sort_rank.saturating_add(1);
+    style.center.expand_class = EXPAND_CLASS_THIN;
+    if matches!(
+        tags.get("access").map(|value| value.as_str()),
+        Some("private" | "no" | "customers")
+    ) {
+        style.center.color = 0x9c9c9c;
+    }
+    style.center.depth_micro += 26.0 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK;
+    Some(style)
 }
 
 fn rail_stroke_style(

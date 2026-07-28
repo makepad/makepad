@@ -1255,10 +1255,16 @@ fn build_tile_buffers_from_features(
                     tag_is_truthy(&way.tags, "oneway_reverse"),
                 ));
             }
-            if let Some(rim) = thin_bridge_rim_style(&style) {
+            if let Some(dots) = thin_bridge_dots_for_tags(
+                theme,
+                &way.tags,
+                render_zoom,
+                zoom_mult,
+                px_to_units,
+            ) {
                 stroke_jobs.push(StrokeDrawJob {
-                    sort_rank: rim.sort_rank,
-                    style: rim,
+                    sort_rank: dots.sort_rank,
+                    style: dots,
                     points: prepared_way.points.clone(),
                 });
             }
