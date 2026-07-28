@@ -673,6 +673,8 @@ pub struct MapView {
     label_cache_tiles: Vec<TileKey>,
     #[rust]
     label_cache_generation: u64,
+    #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }))]
+    label_draw_transform: (f32, Vec2f, f32, Vec2f),
     #[rust]
     tiles_generation: u64,
     #[rust]
@@ -1001,7 +1003,7 @@ impl Widget for MapView {
         // every tile's road casings, then road centers, then POI symbols.
         // Casings interleaved per tile would stamp over neighbor tiles' road
         // interiors in the clip-padding overlap at tile seams.
-        for pass in 0..4 {
+        for pass in 0..3 {
             for key in &draw_tiles {
                 let Some(entry) = self.tiles.get(key) else {
                     continue;
@@ -1089,15 +1091,104 @@ impl Widget for MapView {
 
         let geo_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Labels
+        // Labels place and draw BEFORE the icon pass: charger pins must sit
+        // OVER street names (EV navigator), while their own in-bubble kW
+        // text redraws after the pins in draw_pin_label_phase.
         let labels_start = std::time::Instant::now();
-        // No global zoom gate: place labels carry the map from z4 (cities)
-        // outward, streets/water/nature take over as their own per-kind
-        // gates open. The old `view_zoom >= 13` guard predated place
-        // labels and blanked EVERYTHING when zoomed out.
         let full_place =
             self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
         let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
+
+        for pass in 3..4 {
+            for key in &draw_tiles {
+                let Some(entry) = self.tiles.get(key) else {
+                    continue;
+                };
+                let TileLoadState::Ready {
+                    fill_geometry,
+                    casing_geometry,
+                    stroke_geometry,
+                    icon_geometry,
+                    ..
+                } = &entry.state
+                else {
+                    continue;
+                };
+                // Stale higher-bucket tiles keep their baked symbols until
+                // the rebuild lands; hide the pass on deep zoom-out. The
+                // floor tracks the LOWEST icon class — charger pins start
+                // at z9 (EV navigator), not the z16 POI carpet.
+                if pass == 3 && view_zoom < 8.75 {
+                    continue;
+                }
+                let geometry = match pass {
+                    0 => fill_geometry,
+                    1 => casing_geometry,
+                    2 => stroke_geometry,
+                    _ => icon_geometry,
+                };
+                let scale = 2.0_f64.powf(view_zoom - key.z as f64);
+                let tile_offset = map_offset
+                    + dvec2(
+                        key.x as f64 * TILE_SIZE * scale,
+                        key.y as f64 * TILE_SIZE * scale,
+                    );
+                let map_scale = Vec2f {
+                    x: scale as f32,
+                    y: scale as f32,
+                };
+                let screen_offset = Vec2f {
+                    x: tile_offset.x as f32,
+                    y: tile_offset.y as f32,
+                };
+                let mut fade_alpha = 1.0_f32;
+                if let Some(fade) = &entry.fade {
+                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
+                        as f32)
+                        .clamp(0.0, 1.0);
+                    let outgoing = match pass {
+                        0 => &fade.fill_geometry,
+                        1 => &fade.casing_geometry,
+                        2 => &fade.stroke_geometry,
+                        _ => &fade.icon_geometry,
+                    };
+                    if let Some(outgoing) = outgoing {
+                        let outgoing_id = outgoing.geometry_id();
+                        self.draw_map.draw_geometry(
+                            cx,
+                            outgoing_id,
+                            map_scale,
+                            screen_offset,
+                            1.0,
+                            stroke_width_correction(fade.bucket, view_zoom),
+                            view_rot_uniform,
+                            rot_pivot_uniform,
+                            tilt_uniform,
+                        );
+                    }
+                }
+                let Some(geometry) = geometry else {
+                    continue;
+                };
+                let geometry_id = geometry.geometry_id();
+                self.draw_map.draw_geometry(
+                    cx,
+                    geometry_id,
+                    map_scale,
+                    screen_offset,
+                    fade_alpha,
+                    stroke_width_correction(entry.bucket, view_zoom),
+                    view_rot_uniform,
+                    rot_pivot_uniform,
+                    tilt_uniform,
+                );
+            }
+        }
+
+
+        // Pin-class label text (white kW numbers) over the pins.
+        self.draw_pin_label_phase(cx);
+
 
         // Put draw_tiles back into scratch buffer (preserves allocation)
         self.scratch_draw_tiles = draw_tiles;
@@ -2210,6 +2301,7 @@ impl MapView {
                     x: pivot.x as f32,
                     y: pivot.y as f32,
                 },
+                false,
             );
             return false;
         }
@@ -2358,7 +2450,14 @@ impl MapView {
     /// as one glyph instance batch, optionally shifted by a screen offset
     /// (used to redraw the cached placement while panning).
     fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        self.draw_label_plans_scaled(cx, 1.0, extra_offset, 0.0, Vec2f { x: 0.0, y: 0.0 });
+        self.draw_label_plans_scaled(cx, 1.0, extra_offset, 0.0, Vec2f { x: 0.0, y: 0.0 }, false);
+    }
+
+    /// Redraw only the pin-class (in-bubble) label plans — called after
+    /// the icon pass so kW text sits on top of the charger pins.
+    fn draw_pin_label_phase(&mut self, cx: &mut Cx2d) {
+        let (scale, offset, rot, pivot) = self.label_draw_transform;
+        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, true);
     }
 
     fn draw_label_plans_scaled(
@@ -2368,7 +2467,11 @@ impl MapView {
         extra_offset: Vec2f,
         rot: f32,
         pivot: Vec2f,
+        pin_phase: bool,
     ) {
+        // Remember the transform so the pin-text phase redraws with the
+        // exact same mapping after the icon pass.
+        self.label_draw_transform = (scale, extra_offset, rot, pivot);
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -2410,6 +2513,9 @@ impl MapView {
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
             let (_, start, end, color_class) = self.scratch_accepted_plans[i];
+            if (color_class == LABEL_CLASS_PIN) != pin_phase {
+                continue;
+            }
             let glyphs = if rot != 0.0 {
                 &rotated[start..end]
             } else {
@@ -2564,7 +2670,13 @@ impl MapView {
                 );
                 // Point labels (addresses, POI names) stay upright: keep the
                 // rotated anchor but restore a horizontal baseline.
-                if rotated && (is_address || is_poi) && self.scratch_screen_path.len() == 2 {
+                let is_screen_point = is_address
+                    || is_poi
+                    || matches!(
+                        label.source_layer.as_str(),
+                        "chargers" | "charger_brand" | "place_labels" | "micro_pois"
+                    );
+                if rotated && is_screen_point && self.scratch_screen_path.len() == 2 {
                     let a = self.scratch_screen_path[0];
                     let b = self.scratch_screen_path[1];
                     let mid = (a + b) * 0.5;
@@ -2617,7 +2729,7 @@ impl MapView {
                 } else if is_poi {
                     font_scale = 0.72;
                 } else if label.source_layer == "chargers" {
-                    font_scale = 1.0;
+                    font_scale = 0.85;
                 } else if let Some((kind, population)) = place {
                     // Kind sets the class, population separates Amsterdam
                     // from Purmerend within it.
@@ -3397,6 +3509,7 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_GREEN, true) => Vec4f::from_u32(0x7fc98fff),
         (LABEL_CLASS_WATER, false) => Vec4f::from_u32(0x39688fff),
         (LABEL_CLASS_WATER, true) => Vec4f::from_u32(0x7fb2d9ff),
+        (LABEL_CLASS_PIN, _) => Vec4f::from_u32(0xffffffff),
         _ => default_color,
     }
 }

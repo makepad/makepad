@@ -482,6 +482,18 @@ fn merge_overlay_features(
         {
             continue;
         }
+        if overlay.filter != 0
+            && tags.get("layer").map(|v| v.as_str()) == Some("chargers")
+        {
+            let kw = tags
+                .get("max_kw")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let is_fast = kw >= 50.0;
+            if (overlay.filter == 1) != is_fast {
+                continue;
+            }
+        }
         points.push((point, tags));
     }
     for mut way in collector.ways {
@@ -899,21 +911,69 @@ fn build_tile_buffers_from_features(
                         | "bicycle" => 0.45f32,
                         _ => 1.0,
                     };
+                    let charger_kw = (layer == "chargers")
+                        .then(|| {
+                            tags.get("max_kw")
+                                .and_then(|value| value.parse::<f64>().ok())
+                                .unwrap_or(0.0)
+                        })
+                        .unwrap_or(0.0);
+                    // Chargers render as Tesla-style pin badges: wide badge
+                    // (bolt + kW text inside) for fast sites, small badge
+                    // for street AC.
                     let two_tone = match icon_name {
                         "tree" => 1u8,
-                        "charger" => 2,
+                        "charger" if charger_kw >= 50.0 => 2,
+                        "charger" => 3,
                         _ => 0,
                     };
-                    // Chargers render as Tesla-style pin badges: swap the
-                    // bolt mesh for the pin silhouette, bolt overlays white.
-                    let mesh = if two_tone == 2 {
-                        icon_mesh("charger_pin_big").unwrap_or(mesh)
-                    } else {
-                        mesh
+                    let mesh = match two_tone {
+                        2 => icon_mesh("charger_pin_fast").unwrap_or(mesh),
+                        3 => icon_mesh("charger_pin_ac").unwrap_or(mesh),
+                        _ => mesh,
                     };
                     icon_jobs.push((*point, mesh, color_class, priority, dist_factor, two_tone));
-                    // text sits below the symbol, carto-style
-                    label_point.1 += 11.0 / render_scale;
+                    if two_tone == 2 {
+                        // kW text sits INSIDE the wide bubble, right of the
+                        // bolt; brand reads below the pin from z13.
+                        label_point.0 += 4.0 / render_scale;
+                        label_point.1 -= 3.5 / render_scale;
+                        if render_zoom >= 13 {
+                            if let Some(operator) = tags.get("operator") {
+                                let brand = operator
+                                    .split([' ', '/'])
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string();
+                                if brand.len() >= 2 {
+                                    labels.push(TileLabel {
+                                        text: brand,
+                                        priority: 3,
+                                        source_layer: "charger_brand".to_string(),
+                                        road_kind: format!(
+                                            "chb{:.0}x{:.0}",
+                                            point.0 * 4.0,
+                                            point.1 * 4.0
+                                        ),
+                                        color_class: if charger_kw >= 150.0 {
+                                            crate::map::label::LABEL_CLASS_HEALTH
+                                        } else {
+                                            crate::map::label::LABEL_CLASS_AMENITY
+                                        },
+                                        path_points: crate::map::label::point_label_path_pub((
+                                            point.0,
+                                            point.1 + 12.0 / render_scale,
+                                        )),
+                                        name_key: String::new(),
+                                        bbox: (0.0, 0.0, 0.0, 0.0),
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        // text sits below the symbol, carto-style
+                        label_point.1 += 11.0 / render_scale;
+                    }
                 }
             }
         }
@@ -1519,11 +1579,16 @@ fn build_tile_buffers_from_features(
                 );
             }
         }
-        // Charger pins: white bolt centered in the pin BODY (the mesh
-        // center sits lower because of the pointer tail).
-        if *two_tone == 2 {
+        // Charger pins: white bolt in the pin BODY (mesh centers sit lower
+        // because of the pointer tail; wide pins keep the bolt left of the
+        // kW text).
+        if *two_tone == 2 || *two_tone == 3 {
             if let Some(bolt) = icon_mesh("charger_bolt") {
-                let bolt_anchor = (anchor.0, anchor.1 - 3.5 / render_scale);
+                let (dx, dy) = if *two_tone == 2 { (-8.5, -3.5) } else { (0.0, -2.5) };
+                let bolt_anchor = (
+                    anchor.0 + dx / render_scale,
+                    anchor.1 + dy / render_scale,
+                );
                 append_icon_mesh(
                     bolt,
                     bolt_anchor,
@@ -1744,6 +1809,8 @@ pub struct OverlayTileData {
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,
+    /// 0 = all features, 1 = fast chargers (>=50 kW), 2 = slow chargers.
+    pub filter: u8,
 }
 
 fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
@@ -1770,19 +1837,28 @@ pub fn load_local_tile_batch(
         return Ok(Vec::new());
     }
 
-    let mut overlay_readers: Vec<(MbtilesReader, u32, u32)> = overlay_paths
+    // Path entries may carry a "?fast" / "?slow" charger-power filter.
+    let mut overlay_readers: Vec<(MbtilesReader, u32, u32, u8)> = overlay_paths
         .iter()
         .filter(|path| !path.is_empty())
-        .filter_map(|path| MbtilesReader::open(Path::new(path)).ok())
-        .map(|mut reader| {
+        .filter_map(|path| {
+            let (file, filter) = match path.split_once('?') {
+                Some((file, "fast")) => (file, 1u8),
+                Some((file, "slow")) => (file, 2),
+                Some((file, _)) => (file, 0),
+                None => (path.as_str(), 0),
+            };
+            MbtilesReader::open(Path::new(file)).ok().map(|reader| (reader, filter))
+        })
+        .map(|(mut reader, filter)| {
             let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
-            (reader, min_zoom, max_zoom)
+            (reader, min_zoom, max_zoom, filter)
         })
         .collect();
 
     let mut fetch_overlays = |tile_key: TileKey| -> Vec<OverlayTileData> {
         let mut out = Vec::new();
-        for (reader, min_zoom, max_zoom) in overlay_readers.iter_mut() {
+        for (reader, min_zoom, max_zoom, filter) in overlay_readers.iter_mut() {
             if tile_key.z < *min_zoom {
                 continue;
             }
@@ -1797,6 +1873,7 @@ pub fn load_local_tile_batch(
                     shift,
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
+                    filter: *filter,
                 });
             }
         }
