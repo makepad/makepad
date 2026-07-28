@@ -501,6 +501,13 @@ pub fn fill_color_for_tags(
         // carto scrub green; the detail archive routes these as natural=*.
         return theme.landuse_fills.get("grass").copied().or(theme.landuse_default);
     }
+    if matches!(
+        tags.get("natural").map(|value| value.as_str()),
+        Some("sand" | "beach" | "shingle")
+    ) {
+        // zoo enclosures, dunes, riverbanks — carto's pale sand tan.
+        return theme.landuse_fills.get("sand").copied().or(theme.landuse_default);
+    }
     if let Some(landuse) = tags.get("landuse") {
         let key = landuse.trim().to_ascii_lowercase();
         if let Some(color) = theme.landuse_fills.get(&key) {
@@ -533,6 +540,10 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
     }
     if layer == "platforms" {
         return 13;
+    }
+    // Sand-floored enclosures paint over the zoo's grass.
+    if layer == "attraction_area" {
+        return 20;
     }
     // Green areas (parks/gardens/grass) rank above generic landuse and sites:
     // they share the `land` layer with huge residential polygons and would
@@ -660,6 +671,20 @@ pub fn stroke_style_for_tags(
     // water_polygons layers own the visible geometry.
     if matches!(layer, "water_lines_labels" | "water_polygons_labels") {
         return None;
+    }
+    // Zoo / theme park perimeter: carto's muted purple boundary.
+    if layer == "tourism_boundary" {
+        return Some(StrokeStyle {
+            sort_rank: 150,
+            casing: None,
+            center: StrokePassStyle {
+                color: 0xa383a3,
+                width: 1.6 * px_to_units,
+                shape_id: 0.0,
+                expand_class: EXPAND_CLASS_CONST_PX,
+                depth_micro: 150.0 * DEPTH_MICRO_PER_RANK,
+            },
+        });
     }
     // Platform slabs get a thin constant-px edge like carto.
     if layer == "platforms" {
