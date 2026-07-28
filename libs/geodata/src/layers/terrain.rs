@@ -13,23 +13,28 @@ use crate::raster::{build_raster, RasterConfig, RasterEncoding};
 use crate::tiff::Tiff;
 use std::collections::HashMap;
 
-const LAT_RANGE: std::ops::RangeInclusive<i32> = 50..=53;
-const LON_RANGE: std::ops::RangeInclusive<i32> = 3..=7;
-const NL_BOUNDS: (f64, f64, f64, f64) = (3.0, 50.7, 7.3, 53.8);
+// EV-trip Europe: Benelux, Germany, France, the Alps, northern Italy,
+// Denmark — the box a Tesla from NL actually drives in.
+const LAT_RANGE: std::ops::RangeInclusive<i32> = 43..=57;
+const LON_RANGE: std::ops::RangeInclusive<i32> = -5..=17;
+const NL_BOUNDS: (f64, f64, f64, f64) = (-5.0, 43.0, 18.0, 57.9);
 
 fn tile_specs() -> Vec<SourceSpec> {
     let mut specs = Vec::new();
     for lat in LAT_RANGE {
         for lon in LON_RANGE {
-            let stem = format!("Copernicus_DSM_COG_10_N{lat:02}_00_E{lon:03}_00_DEM");
+            let (ns, alat) = if lat >= 0 { ('N', lat) } else { ('S', -lat) };
+            let (ew, alon) = if lon >= 0 { ('E', lon) } else { ('W', -lon) };
+            let stem =
+                format!("Copernicus_DSM_COG_10_{ns}{alat:02}_00_{ew}{alon:03}_00_DEM");
             let url: &'static str = Box::leak(
                 format!("https://copernicus-dem-30m.s3.amazonaws.com/{stem}/{stem}.tif")
                     .into_boxed_str(),
             );
             let filename: &'static str =
-                Box::leak(format!("glo30_N{lat:02}_E{lon:03}.tif").into_boxed_str());
+                Box::leak(format!("glo30_{ns}{alat:02}_{ew}{alon:03}.tif").into_boxed_str());
             let id: &'static str =
-                Box::leak(format!("glo30-N{lat:02}-E{lon:03}").into_boxed_str());
+                Box::leak(format!("glo30-{ns}{alat:02}-{ew}{alon:03}").into_boxed_str());
             specs.push(SourceSpec {
                 id,
                 url,
@@ -64,9 +69,10 @@ impl Layer for TerrainLayer {
             force: false,
         };
         let mut cells: HashMap<(i32, i32), Option<Tiff>> = HashMap::new();
+        let lon_count = LON_RANGE.end() - LON_RANGE.start() + 1;
         for (index, spec) in tile_specs().iter().enumerate() {
-            let lat = 50 + (index as i32) / 5;
-            let lon = 3 + (index as i32) % 5;
+            let lat = LAT_RANGE.start() + (index as i32) / lon_count;
+            let lon = LON_RANGE.start() + (index as i32) % lon_count;
             let path = ctx.cached(spec);
             if !path.exists() {
                 match fetch_source(&opts, spec) {

@@ -92,6 +92,9 @@ pub struct LabelCandidate {
     pub screen_point: bool,
     /// Screen-px marker lift this candidate rides (0 when grounded/2D).
     pub lift_px: f32,
+    /// TOTAL screen-px shift baked into screen_path (terrain ground +
+    /// marker lift): the glyph shader uses it to camera-delta the ground.
+    pub baked_lift_px: f32,
     pub screen_path: Vec<Vec2d>,
 }
 

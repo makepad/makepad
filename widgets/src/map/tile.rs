@@ -27,10 +27,6 @@ pub const TILE_QUERY_PAD: f64 = 0.05;
 pub const LOCAL_MBTILES_PATH: &str = "local/maps/europe-shortbread.mbtiles";
 pub const LOCAL_MBTILES_MIN_ZOOM: u32 = 0;
 pub const LOCAL_MBTILES_MAX_ZOOM: u32 = 14;
-// One tile per worker job: a batch runs sequentially inside one closure, so
-// 10-tile batches took 2-3s to restyle after a zoom while single-tile jobs
-// spread across the thread pool.
-pub const MAX_LOCAL_TILE_BATCH: usize = 1;
 // Stroke clip padding must stay below the MVT generator's tile buffer (~4
 // world px) so cross-boundary ways are cut by OUR clip (detectable, butt-
 // capped) rather than ending mid-buffer with a rogue round cap.
@@ -109,6 +105,9 @@ pub enum TileWorkerMessage {
         style_epoch: u64,
         requested: Vec<TileKey>,
         loaded: Vec<LoadedLocalTile>,
+        /// Keys whose tile data exists but failed to decode — retryable,
+        /// unlike keys absent from the archive.
+        failed: Vec<TileKey>,
     },
     LocalBatchFailed {
         style_epoch: u64,
@@ -223,6 +222,9 @@ struct FillFeatureGroup {
     layer_rank: u8,
     is_building: bool,
     pattern: f32,
+    /// Bake into the ICON buffer (pass 3, after road strokes): district
+    /// tints must colorize the roads too, and fills draw before strokes.
+    late: bool,
     rings: Vec<FillRing>,
 }
 
@@ -407,7 +409,7 @@ pub fn build_tile_buffers_from_body(
 /// Local mbtiles path: decode the MVT protobuf STRAIGHT into tile-local
 /// coordinates — no lon/lat round trip, no generated-JSON detour.
 /// Render buckets from which 2.5D buildings are baked.
-pub const BUILDING_3D_MIN_ZOOM: u32 = 16;
+pub const BUILDING_3D_MIN_ZOOM: u32 = 15;
 
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
@@ -1477,6 +1479,10 @@ fn build_tile_buffers_from_features(
                 is_building: way.tags.contains_key("building"),
                 alpha,
                 pattern,
+                late: matches!(
+                    way.tags.get("layer").map(|v| v.as_str()),
+                    Some("gemeenten" | "wijken" | "buurten")
+                ),
                 rings: Vec::new(),
             });
             index
@@ -1531,11 +1537,16 @@ fn build_tile_buffers_from_features(
                 false,
                 tolerance,
             );
+            let (target_verts, target_indices, target_zbias) = if group.late {
+                (&mut icon_vertices, &mut icon_indices, &mut icon_zbias)
+            } else {
+                (&mut fill_vertices, &mut fill_indices, &mut fill_zbias)
+            };
             append_tessellated_geometry(
                 &tess_verts,
                 &tess_indices,
-                &mut fill_vertices,
-                &mut fill_indices,
+                target_verts,
+                target_indices,
                 VectorRenderParams {
                     color: hex_to_premul_rgba(group.color, group.alpha),
                     stroke_mult: 1e6,
@@ -1546,12 +1557,13 @@ fn build_tile_buffers_from_features(
                         0.0,
                         0.0,
                         0.0,
-                        group.layer_rank as f32 * DEPTH_MICRO_PER_RANK,
+                        group.layer_rank as f32 * DEPTH_MICRO_PER_RANK
+                            + (feature_count % 16) as f32 * DEPTH_MICRO_PER_FEATURE,
                     ],
-                    zbias: fill_zbias,
+                    zbias: *target_zbias,
                 },
             );
-            fill_zbias += VECTOR_ZBIAS_STEP;
+            *target_zbias += VECTOR_ZBIAS_STEP;
             feature_count += 1;
 
             if let (true, Some(outline)) = (group.is_building, building_outline) {
@@ -2520,9 +2532,9 @@ pub fn load_local_tile_batch(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
-) -> Result<Vec<LoadedLocalTile>, String> {
+) -> Result<(Vec<LoadedLocalTile>, Vec<TileKey>), String> {
     if requested.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     // Path entries may carry a "?fast" / "?slow" charger-power filter.
@@ -2575,6 +2587,7 @@ pub fn load_local_tile_batch(
     // The MBTiles archive is already the local, seekable tile cache. Do not
     // duplicate it into millions of generated JSON files.
     let mut loaded = Vec::<LoadedLocalTile>::new();
+    let mut decode_failed = Vec::<TileKey>::new();
     let missing = requested;
 
     let mut reader = MbtilesReader::open(mbtiles_path)
@@ -2646,6 +2659,7 @@ pub fn load_local_tile_batch(
                         loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
                     Err(err) => {
+                        decode_failed.push(tile_key);
                         log!(
                             "MapView: failed to decode local mbtile z{} x{} y{}: {}",
                             tile_key.z,
@@ -2734,6 +2748,7 @@ pub fn load_local_tile_batch(
                     loaded.push(LoadedLocalTile { tile_key, buffers });
                 }
                 Err(err) => {
+                    decode_failed.push(tile_key);
                     log!(
                         "MapView: failed to decode local mbtile z{} x{} y{}: {}",
                         tile_key.z,
@@ -2757,13 +2772,13 @@ pub fn load_local_tile_batch(
         }
     }
 
-    Ok(loaded)
+    Ok((loaded, decode_failed))
 }
 
 // --- MVT (Mapbox Vector Tile) parsing ---
 
 /// Receives decoded MVT features (tile-local integer geometry + tags).
-trait MvtSink {
+pub trait MvtSink {
     fn alloc_feature_id(&mut self) -> u64;
     fn add_path(
         &mut self,
@@ -2868,7 +2883,7 @@ impl MvtSink for MvtLocalCollector {
     }
 }
 
-fn decode_vector_tile_payload(raw: &[u8]) -> Result<Vec<u8>, String> {
+pub fn decode_vector_tile_payload(raw: &[u8]) -> Result<Vec<u8>, String> {
     if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
         return gzip_decompress_vec(raw).map_err(|e| format!("gzip decode failed: {}", e));
     }
@@ -2930,7 +2945,7 @@ impl MvtValue {
     }
 }
 
-fn parse_mvt_tile(
+pub fn parse_mvt_tile(
     tile_data: &[u8],
     tile_key: TileKey,
     builder: &mut impl MvtSink,

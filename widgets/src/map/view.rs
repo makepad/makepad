@@ -43,6 +43,18 @@ script_mod! {
         // per screen-y of view-space ground position (hardware occlusion
         // for extruded geometry, rotation-proof), w unused.
         tilt_params: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        // 3D terrain displacement: terrarium-packed elevation texture over
+        // a pre-rotation screen rect; span zero = disabled.
+        terrain_tex: texture_2d(float)
+        terrain_org: uniform(vec2(0.0, 0.0))
+        terrain_span: uniform(vec2(0.0, 0.0))
+        // Texel-center remap for the elevation texture (half-texel inset),
+        // so bilinear fetch equals the CPU mesh's corner interpolation.
+        terrain_uvfit: uniform(vec4(1.0, 1.0, 0.0, 0.0))
+        // Regional zooms: big landcover polygons cannot follow the surface
+        // between their sparse vertices — leave fills flat and let the
+        // (more opaque) surface be the ground; strokes/icons keep riding.
+        terrain_fill_lift: uniform(1.0)
 
         fragment: fn(){
             self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade * self.fill_pattern(), self.depth_clip)
@@ -74,6 +86,23 @@ script_mod! {
                 transformed = transformed + off * self.map_scale * corr;
                 expand_slack = length(off) * (corr + 1.0);
             }
+            // 3D terrain: every vertex lifts by the ground elevation under
+            // it, so roads/fills/buildings ride the displaced surface.
+            // Sampled at the centerline anchor (pre width-expansion): the
+            // casing and center of one road must lift identically.
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let anchor_pos = pos * self.map_scale + self.map_offset;
+                let tuv = (anchor_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
             // Heading-up camera: rotate map geometry (and expanded stroke
             // offsets, which are map-space) about the view center.
             let rel = transformed - self.rot_pivot;
@@ -89,12 +118,17 @@ script_mod! {
             // param4 is building height in meters — EXCEPT on shape 20
             // icons, where it carries the icon's zoom floor and must not
             // lift the marker off the ground.
-            var lift_m = self.geom.param4 * self.height_grow;
+            var ground_fill = ground_m;
+            if expanded < 0.5 {
+                ground_fill = ground_m * self.terrain_fill_lift;
+            }
+            var lift_m = self.geom.param4 * self.height_grow + ground_fill;
             if shape_id > 19.5 && shape_id < 20.5 {
                 // Icon param4 = zoom_floor + pin_lift_m*100: markers fly at
                 // their encoded height (0 for grounded icons).
                 let icon_floor = modf(self.geom.param4, 100.0);
-                lift_m = (self.geom.param4 - icon_floor) * 0.01 * self.height_grow;
+                lift_m = (self.geom.param4 - icon_floor) * 0.01 * self.height_grow
+                    + ground_m;
             }
             transformed.y = self.rot_pivot.y
                 + ground_rel_y * self.tilt_params.x
@@ -262,6 +296,43 @@ script_mod! {
         }
     }
 
+    // Terrain hillshade: plain textured quad (RGBA baked CPU-side),
+    // drawn between the land fills and the road network.
+    mod.draw.DrawTerrainOverlay = mod.std.set_type_default() do #(DrawTerrainOverlay::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        tex: texture_2d(float)
+        uv: varying(vec2f)
+        depth_on: uniform(0.0)
+        opacity_boost: uniform(1.0)
+
+        vertex: fn() {
+            let top = mix(self.c0, self.c1, self.geom.pos.x)
+            let bottom = mix(self.c3, self.c2, self.geom.pos.x)
+            let p = mix(top, bottom, self.geom.pos.y)
+            self.uv = mix(self.uv0, self.uv1, self.geom.pos)
+            let shifted = p + self.draw_list.view_shift
+            let gd = mix(
+                mix(self.gdepth.x, self.gdepth.y, self.geom.pos.x),
+                mix(self.gdepth.w, self.gdepth.z, self.geom.pos.x),
+                self.geom.pos.y
+            )
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (
+                self.draw_list.view_transform * vec4(
+                    shifted.x,
+                    shifted.y,
+                    mix(self.draw_depth + self.draw_call.zbias, gd, self.depth_on),
+                    1.
+                )
+            ))
+        }
+
+        pixel: fn() {
+            let color = self.tex.sample_as_bgra(self.uv)
+            let a = min(color.w * self.opacity_boost, 1.0)
+            return vec4(color.xyz * a, a)
+        }
+    }
+
     // Rain radar raster overlay: one textured quad whose four SCREEN-space
     // corners come from the overlay camera (so it pans/zooms/rotates/tilts
     // with the map); texture is a mercator-aligned RGBA nowcast frame.
@@ -290,25 +361,32 @@ script_mod! {
         }
 
         pixel: fn() {
-            let color = self.tex.sample_as_bgra(self.uv)
-            // Isosurface look: each intensity band has a UNIQUE alpha, so a
-            // differing neighbor alpha marks a band boundary -> draw a
-            // darker contour line there (weather-radar isopleths).
-            let e1 = self.tex.sample_as_bgra(self.uv + vec2(self.texel.x, 0.0))
-            let e2 = self.tex.sample_as_bgra(self.uv - vec2(self.texel.x, 0.0))
-            let e3 = self.tex.sample_as_bgra(self.uv + vec2(0.0, self.texel.y))
-            let e4 = self.tex.sample_as_bgra(self.uv - vec2(0.0, self.texel.y))
-            var edge = 0.0
-            if abs(e1.w - color.w) > 0.01 || abs(e2.w - color.w) > 0.01
-                || abs(e3.w - color.w) > 0.01 || abs(e4.w - color.w) > 0.01 {
-                edge = 1.0
+            // The texture stores the CONTINUOUS interpolated radar value
+            // (0..255 in .x, coverage in .w); band the field HERE so the
+            // isolines are screen-resolution crisp at any zoom.
+            let sampled = self.tex.sample_as_bgra(self.uv)
+            if sampled.w < 0.5 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
             }
-            var rgb = color.xyz
-            var alpha = color.w * self.rain_alpha
-            if edge > 0.5 && color.w > 0.01 {
-                rgb = rgb * 0.55
-                alpha = min(alpha * 1.7 + 0.12, 0.95)
+            let value = sampled.x * 255.0
+            if value < 1.0 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
             }
+            let dbz = 0.5 * value - 32.0
+            // Band index as a continuous function -> fwidth spikes exactly
+            // at band boundaries = 1-2 px contour lines.
+            var band = 0.0
+            var rgb = vec3(0.59, 0.78, 1.0)
+            var alpha = 0.33
+            if dbz >= 5.0 { band = 1.0; rgb = vec3(0.35, 0.63, 0.98); alpha = 0.49 }
+            if dbz >= 15.0 { band = 2.0; rgb = vec3(0.14, 0.41, 0.92); alpha = 0.63 }
+            if dbz >= 25.0 { band = 3.0; rgb = vec3(0.10, 0.67, 0.35); alpha = 0.73 }
+            if dbz >= 33.0 { band = 4.0; rgb = vec3(0.96, 0.73, 0.14); alpha = 0.80 }
+            if dbz >= 40.0 { band = 5.0; rgb = vec3(0.92, 0.31, 0.12); alpha = 0.88 }
+            if dbz >= 47.0 { band = 6.0; rgb = vec3(0.80, 0.10, 0.63); alpha = 0.96 }
+            let contour = min(length(vec2(dFdx(band), dFdy(band))) * 1.2, 1.0)
+            rgb = mix(rgb, rgb * 0.5, contour)
+            alpha = min(alpha + contour * 0.18, 0.97) * self.rain_alpha
             return vec4(rgb * alpha, alpha)
         }
     }
@@ -453,7 +531,12 @@ script_mod! {
 /// Frames after the last zoom change before stale-bucket tiles restyle
 /// (~0.3s at 60fps).
 const ZOOM_SETTLE_SECONDS: f64 = 0.08;
+/// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
+const MISSING_RECHECK_FRAMES: u64 = 1800;
 
+/// Camera tilt ceiling (degrees from top-down). Flat enough to read
+/// terrain relief against the horizon without the far plane exploding.
+const TILT_MAX_DEG: f64 = 78.0;
 /// Accumulated pan (screen px) before labels are re-placed; must stay under
 /// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
 const LABEL_REPLACE_PAN_PX: f64 = 48.0;
@@ -462,6 +545,12 @@ const LABEL_REPLACE_PAN_PX: f64 = 48.0;
 /// frames at 120Hz — and tile arrivals during panning invalidated the cache
 /// almost every other frame).
 const LABEL_REPLACE_MIN_SECONDS: f64 = 0.12;
+/// One shared time-lapse for ALL weather layers: the rain nowcast frame
+/// rate AND the wind-particle advection derive from it, so cloud drift and
+/// wind streaks move as one physical system (900x real time).
+const WEATHER_TIMELAPSE: f64 = 900.0;
+/// Rain nowcast frames are 5 minutes of real weather apart.
+const RAIN_FRAME_REAL_SECONDS: f64 = 300.0;
 /// Cross-fade duration when a tile's new geometry replaces the old.
 const TILE_FADE_SECONDS: f64 = 0.25;
 /// Hard time budget for one placement pass; labels that don't make it are
@@ -523,6 +612,72 @@ struct FlyTo {
 
 // --- Draw shaders ---
 
+const WIND_TRAIL: usize = 22;
+
+#[derive(Clone)]
+struct WindParticle {
+    /// Ring buffer of recent positions; head = newest.
+    history: Vec<Vec2d>,
+    age: u32,
+    speed: f32,
+}
+
+impl WindParticle {
+    fn spawn(pos: Vec2d, age: u32) -> Self {
+        Self {
+            history: vec![pos; 1],
+            age,
+            speed: 0.0,
+        }
+    }
+    fn head(&self) -> Vec2d {
+        *self.history.last().unwrap()
+    }
+    fn push(&mut self, pos: Vec2d) {
+        if self.history.len() >= WIND_TRAIL {
+            self.history.remove(0);
+        }
+        self.history.push(pos);
+    }
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTerrainOverlay {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live(vec2(0.0, 0.0))]
+    pub c0: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c1: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c2: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub c3: Vec2f,
+    #[live(vec2(0.0, 0.0))]
+    pub uv0: Vec2f,
+    #[live(vec2(1.0, 1.0))]
+    pub uv1: Vec2f,
+    /// Tilt-mode depth per corner (pre-lift ground-y formula, matching the
+    /// tile shader): x=c0 y=c1 z=c2 w=c3. Unused when depth_on is 0.
+    #[live(vec4(0.0, 0.0, 0.0, 0.0))]
+    pub gdepth: Vec4f,
+}
+
+/// One terrain worker render: shaded hillshade texels plus the elevation
+/// grid (GPU texels + CPU meters) that drives 3D displacement.
+#[derive(Default)]
+pub struct TerrainOverlayData {
+    pub texels: Vec<u32>,
+    pub width: usize,
+    pub height: usize,
+    pub elev_texels: Vec<u32>,
+    pub elev: Vec<f32>,
+    pub elev_width: usize,
+    pub elev_height: usize,
+    pub bbox: (f64, f64, f64, f64),
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawRainOverlay {
@@ -570,7 +725,17 @@ impl DrawMapVector {
         tilt_params: [f32; 4],
         icon_zoom: f32,
         height_grow: f32,
+        terrain_org: [f32; 2],
+        terrain_span: [f32; 2],
+        terrain_uvfit: [f32; 4],
+        terrain_tex: &Texture,
+        pass_depth: f32,
+        terrain_fill_lift: f32,
     ) {
+        // Casings/centers/icons ride far above the displaced terrain
+        // surface: quad-twist between the GPU bilinear lift and the mesh
+        // triangles is bounded well below this.
+        self.draw_super.draw_depth = pass_depth;
         self.map_scale = map_scale;
         self.map_offset = map_offset;
         self.tile_fade = fade;
@@ -607,6 +772,19 @@ impl DrawMapVector {
         self.draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(height_grow), &[height_grow]);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(terrain_org), &terrain_org);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(terrain_span), &terrain_span);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(terrain_uvfit), &terrain_uvfit);
+        self.draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(terrain_fill_lift), &[terrain_fill_lift]);
+        self.draw_super.draw_vars.set_texture(1, terrain_tex);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -642,6 +820,9 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_rain: DrawRainOverlay,
+    #[redraw]
+    #[live]
+    draw_terrain: DrawTerrainOverlay,
     #[redraw]
     #[live]
     draw_text: DrawText,
@@ -733,7 +914,11 @@ pub struct MapView {
     #[rust]
     local_requested_tiles: HashMap<TileKey, u64>,
     #[rust]
-    local_missing_tiles: HashSet<TileKey>,
+    /// Tiles the archive reported absent, stamped with the frame we learned
+    /// it — re-checked after MISSING_RECHECK_FRAMES so a rebuilt/replaced
+    /// mbtiles (or a transient read glitch) heals instead of leaving a
+    /// permanent hole.
+    local_missing_tiles: HashMap<TileKey, u64>,
     #[rust]
     applied_dark_theme: Option<bool>,
     #[rust]
@@ -751,6 +936,38 @@ pub struct MapView {
     rain_bbox: (f64, f64, f64, f64),
     #[rust]
     rain_tex_size: (usize, usize),
+    #[rust(0.35)]
+    rain_interval_current: f64,
+    #[rust]
+    terrain_texture: Option<Texture>,
+    #[rust]
+    terrain_elev_texture: Option<Texture>,
+    #[rust]
+    terrain_fallback_texture: Option<Texture>,
+    #[rust]
+    terrain_elev: Vec<f32>,
+    #[rust((0, 0))]
+    terrain_elev_size: (usize, usize),
+    #[rust]
+    terrain_elev_max: f32,
+    /// Tilt-mode depth per screen px of ground y, rescaled each frame so
+    /// the whole ladder stays inside the -24 map-depth budget on tall or
+    /// steep views (a fixed 0.01 overflowed into the UI/label domain).
+    #[rust(0.01)]
+    tilt_depth_slope: f64,
+    /// (west, north, east, south) in normalized mercator.
+    #[rust]
+    terrain_bbox: (f64, f64, f64, f64),
+    /// 10 m wind field (u east+, v north+, row 0 = south) for the particle
+    /// layer; bbox in lon/lat.
+    #[rust]
+    wind_field: Option<(usize, usize, Vec<f32>, Vec<f32>, (f64, f64, f64, f64))>,
+    #[rust]
+    wind_particles: Vec<WindParticle>,
+    #[rust]
+    wind_timer: Timer,
+    #[rust]
+    wind_rng: u64,
     /// The 2D/3D mode the current tile set was baked with — a flip
     /// re-bakes tiles (extrusions only exist in the 3D bake).
     #[rust]
@@ -775,7 +992,7 @@ pub struct MapView {
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool, bool, Vec2f)>,
+    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool, bool, Vec2f, f32)>,
     // Labels drawn last frame (hashed name+position key); kept to stabilize
     // placement while panning instead of flickering between candidates.
     #[rust]
@@ -938,8 +1155,13 @@ impl Widget for MapView {
         self.handle_tile_worker_messages(cx);
         self.widget_match_event(cx, event, scope);
 
+        if self.wind_timer.is_event(event).is_some() && self.wind_field.is_some() {
+            self.tick_wind();
+            self.redraw(cx);
+        }
         if self.rain_timer.is_event(event).is_some() && !self.rain_frames.is_empty() {
             self.rain_frame_index = (self.rain_frame_index + 1) % self.rain_frames.len();
+            self.retune_rain_timer(cx);
             self.redraw(cx);
         }
         if self.tile_fade_timer.is_event(event).is_some() {
@@ -1001,7 +1223,7 @@ impl Widget for MapView {
                     // Snap-to-2D dead zone: dragging the camera back to
                     // straight above lands on EXACTLY 0 so the renderer
                     // re-enters the flat classic path (2D mode).
-                    let raw_tilt = (start_tilt + delta.y * 0.25).clamp(0.0, 65.0);
+                    let raw_tilt = (start_tilt + delta.y * 0.25).clamp(0.0, TILT_MAX_DEG);
                     self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
                     cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: self.tilt });
                     self.redraw(cx);
@@ -1125,7 +1347,7 @@ impl Widget for MapView {
         let rot_pivot = rect.pos + rect.size * 0.5;
         let view_rot_uniform = [rot_cos as f32, rot_sin as f32];
         let rot_pivot_uniform = [rot_pivot.x as f32, rot_pivot.y as f32];
-        let tilt_rad = self.tilt.clamp(0.0, 65.0).to_radians();
+        let tilt_rad = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians();
         let px_per_meter = {
             let (_, lat) = normalized_to_lon_lat(self.center_norm);
             world_size / (40_075_016.686 * lat.to_radians().cos())
@@ -1136,15 +1358,65 @@ impl Widget for MapView {
         // the baked sort-rank micro-depth (param5) resolves overlapping
         // layers at the same ground pixel without depth-precision flicker.
         let tilt_uniform = if tilt_rad > 1e-4 {
+            let max_rel = (rect.size.y * 0.5
+                + self.terrain_elev_max as f64 * self.terrain_lift_px_per_m())
+                / tilt_rad.cos().max(0.05);
+            self.tilt_depth_slope = (18.0 / (max_rel.max(1.0) * 2.0)).min(0.01);
             [
                 tilt_rad.cos() as f32,
                 (px_per_meter * tilt_rad.sin()) as f32,
-                0.01,
+                self.tilt_depth_slope as f32,
                 -24.0,
             ]
         } else {
             // Flat mode stays byte-identical to the classic paint order.
             [tilt_rad.cos() as f32, 0.0, 0.0, 0.0]
+        };
+        // Below city buckets, fills stay flat (their sparse vertices cannot
+        // track the surface) and the hillshade becomes the visible ground.
+        let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
+        // Road/symbol clearance over the terrain surface, scaled by the
+        // relief actually in view: the margin exists to beat interpolation
+        // twist (which grows with relief), but a flat-city boost lets
+        // streets depth-beat the buildings in front of them.
+        let pass_boost = if self.terrain_elev.is_empty() {
+            0.0f32
+        } else {
+            let ground_margin_px = (self.terrain_elev_max as f64
+                * self.terrain_lift_px_per_m()
+                / 50.0)
+                .clamp(4.0, 30.0);
+            (ground_margin_px * self.tilt_depth_slope) as f32
+        };
+        // 3D terrain displacement inputs: the elevation texture's bbox as a
+        // pre-rotation screen rect (the shader's sampling uv space). Span
+        // zero disables the lift; a 1x1 fallback keeps the slot bound.
+        let mut terrain_org = [0.0f32; 2];
+        let mut terrain_span = [0.0f32; 2];
+        let terrain_tex = match (tilt_rad > 1e-4, self.terrain_elev_texture.clone()) {
+            (true, Some(tex)) => {
+                let camera = self.overlay_camera();
+                let (west, north, east, south) = self.terrain_bbox;
+                let org = dvec2(west, north) * camera.world_size + camera.offset;
+                let se = dvec2(east, south) * camera.world_size + camera.offset;
+                terrain_org = [org.x as f32, org.y as f32];
+                terrain_span = [(se.x - org.x) as f32, (se.y - org.y) as f32];
+                tex
+            }
+            _ => self.terrain_fallback(cx),
+        };
+        // bbox uv 0..1 -> texel centers (half-texel inset) so GPU bilinear
+        // lands exactly on the CPU mesh's linear surface.
+        let (ew, eh) = self.terrain_elev_size;
+        let terrain_uvfit = if ew > 1 && eh > 1 {
+            [
+                (ew as f32 - 1.0) / ew as f32,
+                (eh as f32 - 1.0) / eh as f32,
+                0.5 / ew as f32,
+                0.5 / eh as f32,
+            ]
+        } else {
+            [1.0, 1.0, 0.0, 0.0]
         };
 
         self.fill_draw_tile_keys();
@@ -1168,6 +1440,10 @@ impl Widget for MapView {
         // Casings interleaved per tile would stamp over neighbor tiles' road
         // interiors in the clip-padding overlap at tile seams.
         for pass in 0..3 {
+            if pass == 1 {
+                // Hillshade sits over the land fills but UNDER the roads.
+                self.draw_terrain_overlay(cx);
+            }
             for key in &draw_tiles {
                 let Some(entry) = self.tiles.get(key) else {
                     continue;
@@ -1240,6 +1516,12 @@ impl Widget for MapView {
                             tilt_uniform,
                             view_zoom as f32,
                             1.0,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            &terrain_tex,
+                            if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                            terrain_fill_lift,
                         );
                     }
                 }
@@ -1263,6 +1545,12 @@ impl Widget for MapView {
                     } else {
                         1.0
                     },
+                    terrain_org,
+                    terrain_span,
+                    terrain_uvfit,
+                    &terrain_tex,
+                    if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                    terrain_fill_lift,
                 );
             }
         }
@@ -1350,6 +1638,12 @@ impl Widget for MapView {
                             tilt_uniform,
                             view_zoom as f32,
                             1.0,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            &terrain_tex,
+                            if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                            terrain_fill_lift,
                         );
                     }
                 }
@@ -1373,6 +1667,12 @@ impl Widget for MapView {
                     } else {
                         1.0
                     },
+                    terrain_org,
+                    terrain_span,
+                    terrain_uvfit,
+                    &terrain_tex,
+                    if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                    terrain_fill_lift,
                 );
             }
         }
@@ -1389,10 +1689,14 @@ impl Widget for MapView {
             let ne = lon_lat_to_normalized(east, north);
             let se = lon_lat_to_normalized(east, south);
             let sw = lon_lat_to_normalized(west, south);
-            let c0 = camera.norm_to_screen(nw);
-            let c1 = camera.norm_to_screen(ne);
-            let c2 = camera.norm_to_screen(se);
-            let c3 = camera.norm_to_screen(sw);
+            // In 3D the rain deck hovers like cloud cover: lift the whole
+            // quad by ~650 m of parallax so it visibly sits ABOVE the city.
+            let cloud_lift = self.lift_screen_px(650.0, view_zoom);
+            let lift = dvec2(0.0, -cloud_lift);
+            let c0 = camera.norm_to_screen(nw) + lift;
+            let c1 = camera.norm_to_screen(ne) + lift;
+            let c2 = camera.norm_to_screen(se) + lift;
+            let c3 = camera.norm_to_screen(sw) + lift;
             let texture = self.rain_frames[self.rain_frame_index % self.rain_frames.len()].clone();
             self.draw_rain.draw_super.draw_vars.set_texture(0, &texture);
             self.draw_rain.c0 = Vec2f { x: c0.x as f32, y: c0.y as f32 };
@@ -1417,6 +1721,7 @@ impl Widget for MapView {
         }
 
         self.draw_pin_label_phase(cx);
+        self.draw_wind_particles(cx);
 
 
         // Put draw_tiles back into scratch buffer (preserves allocation)
@@ -1768,6 +2073,7 @@ impl MapView {
                     style_epoch,
                     requested,
                     loaded,
+                    failed,
                 } => {
                     if style_epoch != self.style_epoch {
                         for key in &requested {
@@ -1795,11 +2101,18 @@ impl MapView {
                         empty_feature_tiles.sort_unstable();
                         log!("MapView: local mbtiles loaded {} tile(s) with 0 rendered features sample:{}", empty_feature_tiles.len(), format_tile_key_sample(&empty_feature_tiles, 8));
                     }
+                    let failed_keys: HashSet<TileKey> = failed.into_iter().collect();
                     for key in requested {
                         if loaded_keys.contains(&key) {
                             continue;
                         }
-                        self.local_missing_tiles.insert(key);
+                        if failed_keys.contains(&key) {
+                            // Data exists but the decode failed — retry with
+                            // backoff, never blacklist as missing.
+                            self.mark_tile_failed(key, "decode failed");
+                            continue;
+                        }
+                        self.local_missing_tiles.insert(key, self.frame_counter);
                         self.tiles.remove(&key);
                     }
                     redraw = true;
@@ -1818,7 +2131,7 @@ impl MapView {
                     log!("MapView: local mbtiles load failed: {}", error);
                     for key in requested {
                         self.local_requested_tiles.remove(&key);
-                        self.tiles.remove(&key);
+                        self.mark_tile_failed(key, &error);
                     }
                     redraw = true;
                 }
@@ -1928,6 +2241,11 @@ impl MapView {
                 self.tiles.remove(&key);
             }
         }
+        // Absent tiles get re-checked after a while: our mbtiles archives
+        // are rebuilt in place during development, and a one-off read
+        // glitch must not leave a permanent hole.
+        self.local_missing_tiles
+            .retain(|_, learned| now.saturating_sub(*learned) < MISSING_RECHECK_FRAMES);
         // Mid-gesture the baked geometry scales geometrically (smooth); only
         // restyle stale buckets once the zoom has settled, or widths flicker
         // tile-batch by tile-batch under the gesture.
@@ -1936,7 +2254,9 @@ impl MapView {
             .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS);
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
-            if self.local_requested_tiles.contains_key(key) || self.local_missing_tiles.contains(key) {
+            if self.local_requested_tiles.contains_key(key)
+                || self.local_missing_tiles.contains_key(key)
+            {
                 continue;
             }
             if let Some(entry) = self.tiles.get(key) {
@@ -1947,6 +2267,8 @@ impl MapView {
                             continue;
                         }
                     }
+                    // Failed tiles retry once their backoff elapses.
+                    TileLoadState::Failed { retry_after } if now >= *retry_after => {}
                     _ => continue,
                 }
             }
@@ -1967,6 +2289,7 @@ impl MapView {
 
         for key in &missing {
             self.local_requested_tiles.insert(*key, self.frame_counter);
+            let prev_attempts = self.tiles.get(key).map_or(0, |entry| entry.attempts);
             let keep_stale = self
                 .tiles
                 .get(key)
@@ -1977,7 +2300,7 @@ impl MapView {
                     TileEntry {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
-                        attempts: 0,
+                        attempts: prev_attempts,
                         bucket,
                         baked_3d: self.baked_3d_mode,
                         fade: None,
@@ -2015,11 +2338,12 @@ impl MapView {
                     buildings_3d,
                 );
             match result {
-                Ok(loaded) => {
+                Ok((loaded, failed)) => {
                     let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
                         style_epoch,
                         requested,
                         loaded,
+                        failed,
                     });
                 }
                 Err(error) => {
@@ -2190,7 +2514,7 @@ impl MapView {
             if self.tiles.contains_key(&key) {
                 continue;
             }
-            if self.local_missing_tiles.contains(&key) {
+            if self.local_missing_tiles.contains_key(&key) {
                 if self.use_network
                     && pending < MAX_PENDING_REQUESTS
                     && self.request_tile(cx, key, 0, true)
@@ -2244,7 +2568,12 @@ impl MapView {
         let (rot_cos, rot_sin) = self.screen_rotation();
         let half_w = rect.size.x * 0.5;
         // Tilt compression means the screen shows more world vertically.
-        let half_h = rect.size.y * 0.5 / self.tilt_cos().max(1e-3);
+        let mut half_h = rect.size.y * 0.5 / self.tilt_cos().max(1e-3);
+        // Terrain displacement pulls geometry up-screen by up to the max
+        // elevation: ground past both screen edges still lands in view.
+        let lift_pad = self.terrain_elev_max as f64 * self.terrain_lift_px_per_m()
+            / self.tilt_cos().max(1e-3);
+        half_h += lift_pad;
         let half_size = dvec2(
             (half_w * rot_cos.abs() + half_h * rot_sin.abs()) / overzoom,
             (half_w * rot_sin.abs() + half_h * rot_cos.abs()) / overzoom,
@@ -2537,7 +2866,7 @@ impl MapView {
                 let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
                 let t0 = self
                     .label_cache_tilt
-                    .clamp(0.0, 65.0)
+                    .clamp(0.0, TILT_MAX_DEG)
                     .to_radians()
                     .cos()
                     .max(1e-6);
@@ -2554,7 +2883,7 @@ impl MapView {
             // build the exact non-commuting delta matrix.
             let rot_rad = (-rot_delta).to_radians() as f32;
             let cached_tilt_cos =
-                (self.label_cache_tilt.clamp(0.0, 65.0).to_radians().cos() as f32).max(1e-4);
+                (self.label_cache_tilt.clamp(0.0, TILT_MAX_DEG).to_radians().cos() as f32).max(1e-4);
             let pivot = rect.pos + rect.size * 0.5;
             self.draw_label_plans_scaled(
                 cx,
@@ -2749,6 +3078,7 @@ impl MapView {
                     x: placement.center.x as f32 - layout_shift.0,
                     y: placement.center.y as f32 - layout_shift.1,
                 },
+                candidate.baked_lift_px,
             ));
         }
 
@@ -2831,11 +3161,12 @@ impl MapView {
         self.draw_label.set_camera_delta(cx.cx, m, pivot);
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end, color_class, post_icon, upright, anchor) =
+            let (_, start, end, color_class, post_icon, upright, anchor, baked_lift) =
                 self.scratch_accepted_plans[i];
             if post_icon != pin_phase {
                 continue;
             }
+            self.draw_label.lift = baked_lift;
             let glyphs = &self.path_glyphs[start..end];
             let billboard = pin_phase && upright;
             // In-pin text sits on a solid pin color: no halo underdraw.
@@ -2869,6 +3200,7 @@ impl MapView {
                 self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, extra_offset);
             }
         }
+        self.draw_label.lift = 0.0;
         self.draw_label.end_glyph_batch(cx);
     }
 
@@ -3062,18 +3394,35 @@ impl MapView {
                 // Flying-marker labels ride their marker's BAKED stalk
                 // height (dynamic: each pin clears its own building).
                 let lift_px = self.lift_screen_px(label.lift_m, view_zoom);
+                // Total upward screen shift baked into this path — the glyph
+                // shader camera-deltas the GROUND anchor and re-applies it.
+                let mut baked_lift_px = 0.0f64;
+                // Terrain: labels ride the displaced ground like the tiles.
+                if !self.scratch_screen_path.is_empty() {
+                    let ground_px =
+                        self.terrain_ground_lift_px_at_screen(self.scratch_screen_path[0]);
+                    if ground_px > 0.0 {
+                        baked_lift_px += ground_px;
+                        for p in self.scratch_screen_path.iter_mut() {
+                            p.y -= ground_px;
+                        }
+                    }
+                }
                 if is_poi && lift_px > 0.0 {
                     // Above the floating icon.
+                    baked_lift_px += lift_px + 12.0;
                     for p in self.scratch_screen_path.iter_mut() {
                         p.y -= lift_px + 12.0;
                     }
                 }
                 if label.source_layer == "stops" && lift_px > 0.0 {
+                    baked_lift_px += lift_px + 10.0;
                     for p in self.scratch_screen_path.iter_mut() {
                         p.y -= lift_px + 10.0;
                     }
                 }
                 if label.road_kind.starts_with("chb") {
+                    baked_lift_px += lift_px - 9.0;
                     for p in self.scratch_screen_path.iter_mut() {
                         p.y += 9.0 - lift_px;
                     }
@@ -3081,6 +3430,7 @@ impl MapView {
                 // In-pin text: center in the droplet's text zone (right of
                 // the bolt, above the tail); rides the stalk in 3D.
                 if label.color_class == LABEL_CLASS_PIN {
+                    baked_lift_px += 12.35 + lift_px;
                     for p in self.scratch_screen_path.iter_mut() {
                         p.x += 3.0;
                         p.y += -12.35 - lift_px;
@@ -3192,6 +3542,7 @@ impl MapView {
                     c.font_scale = font_scale;
                     c.screen_point = is_screen_point;
                     c.lift_px = lift_px as f32;
+                    c.baked_lift_px = baked_lift_px as f32;
                     c.screen_path.extend_from_slice(&self.scratch_screen_path);
                 } else {
                     self.scratch_candidates.push(LabelCandidate {
@@ -3207,6 +3558,7 @@ impl MapView {
                         font_scale,
                         screen_point: is_screen_point,
                         lift_px: lift_px as f32,
+                        baked_lift_px: baked_lift_px as f32,
                         screen_path: self.scratch_screen_path.clone(),
                     });
                 }
@@ -3460,7 +3812,7 @@ impl MapView {
     }
 
     fn tilt_cos(&self) -> f64 {
-        self.tilt.clamp(0.0, 65.0).to_radians().cos()
+        self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians().cos()
     }
 
     /// Screen-space vector (relative to the view pivot) back into
@@ -3565,7 +3917,7 @@ impl MapView {
         let world_size = TILE_SIZE * 2f64.powf(view_zoom);
         let (_, lat) = normalized_to_lon_lat(self.center_norm);
         let px_per_meter = world_size / (40_075_016.686 * lat.to_radians().cos());
-        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, 65.0).to_radians().sin()
+        lift_m as f64 * px_per_meter * self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians().sin()
     }
 
     fn pin_at(&self, abs: Vec2d) -> Option<(f64, f64, Vec<(String, String)>)> {
@@ -3592,6 +3944,105 @@ impl MapView {
         let (_, hit) = best?;
         let (lon, lat) = normalized_to_lon_lat(dvec2(hit.norm.0, hit.norm.1));
         Some((lon, lat, hit.info.clone()))
+    }
+
+    /// Wind particle streaks: short comet segments advected by tick_wind,
+    /// drawn through the overlay camera (pan/zoom/rotate/tilt aware).
+    fn draw_wind_particles(&mut self, cx: &mut Cx2d) {
+        if self.wind_field.is_none() || self.wind_particles.is_empty() {
+            return;
+        }
+        let camera = self.overlay_camera();
+        let rect = camera.rect;
+        // The wind flows at its own altitude in 3D (~150 m — beneath the
+        // 650 m rain deck): same screen-parallax as the cloud layer, so
+        // rotating the camera shows ground, wind and clouds as three
+        // separate planes.
+        let wind_lift = self.lift_screen_px(150.0, self.view_zoom());
+        let particles = std::mem::take(&mut self.wind_particles);
+        // Same turtle-pinning pattern as draw_map_overlay: DrawVector paths
+        // land in absolute screen coordinates.
+        cx.begin_turtle(
+            Walk {
+                abs_pos: Some(rect.pos),
+                width: Size::Fixed(rect.size.x),
+                height: Size::Fixed(rect.size.y),
+                margin: Inset::default(),
+                metrics: Metrics::default(),
+            },
+            Layout {
+                clip_x: true,
+                clip_y: true,
+                ..Layout::default()
+            },
+        );
+        let dv = &mut self.draw_overlay;
+        dv.begin();
+        // Speed buckets share a stroke call each; palette flips with the
+        // theme so streaks always run HIGH CONTRAST against the basemap
+        // (near-black family on the light map, pale family on dark).
+        let buckets: [(f32, f32, u32, f32); 4] = if self.dark_theme {
+            [
+                (0.0, 3.0, 0xcfd8e3, 0.6),
+                (3.0, 7.0, 0x7ab8f5, 0.75),
+                (7.0, 12.0, 0x4dd0c4, 0.85),
+                (12.0, f32::MAX, 0xff8a65, 0.92),
+            ]
+        } else {
+            [
+                (0.0, 3.0, 0x1c2733, 0.65),
+                (3.0, 7.0, 0x0d47a1, 0.8),
+                (7.0, 12.0, 0x00695c, 0.88),
+                (12.0, f32::MAX, 0xb3261e, 0.95),
+            ]
+        };
+        // Nullschool-style comet trails: each particle draws its position
+        // HISTORY as a polyline, split into tail/mid/head passes so the
+        // trail tapers in alpha and width toward the tail.
+        for (min_speed, max_speed, color, alpha) in buckets {
+            for (seg_from, seg_to, alpha_mul, width) in [
+                (0usize, 10usize, 0.22f32, 0.7f32),
+                (10, 16, 0.5, 0.95),
+                (16, WIND_TRAIL, 1.0, 1.25),
+            ] {
+                dv.clear();
+                dv.set_color_hex(color, alpha * alpha_mul);
+                let mut any = false;
+                for particle in &particles {
+                    if particle.speed < min_speed || particle.speed >= max_speed {
+                        continue;
+                    }
+                    if particle.age < 4 || particle.history.len() < 2 {
+                        continue;
+                    }
+                    let n = particle.history.len();
+                    let from = seg_from.min(n - 1);
+                    let to = seg_to.min(n);
+                    if to <= from + 1 && from > 0 {
+                        continue;
+                    }
+                    let start = camera.norm_to_screen(particle.history[from]);
+                    dv.move_to(start.x as f32, (start.y - wind_lift) as f32);
+                    for i in (from + 1)..to {
+                        let p = camera.norm_to_screen(particle.history[i]);
+                        dv.line_to(p.x as f32, (p.y - wind_lift) as f32);
+                    }
+                    any = true;
+                }
+                if any {
+                    dv.stroke_opts(
+                        width,
+                        crate::makepad_draw::vector::LineCap::Butt,
+                        crate::makepad_draw::vector::LineJoin::Miter,
+                        4.0,
+                        1.0,
+                    );
+                }
+            }
+        }
+        dv.end(cx);
+        cx.end_turtle();
+        self.wind_particles = particles;
     }
 
     fn overlay_camera(&self) -> OverlayCamera {
@@ -3658,6 +4109,7 @@ impl MapView {
         self.center_norm = lon_lat_to_normalized(lon, lat);
         self.wrap_and_clamp_center();
         self.sync_camera_fields();
+        self.emit_viewport_changed(cx);
         self.redraw(cx);
     }
 
@@ -3675,12 +4127,12 @@ impl MapView {
         self.rotation
     }
 
-    /// Axonometric camera tilt (degrees, 0 = top-down, clamped to 65).
+    /// Axonometric camera tilt (degrees, 0 = top-down, clamped to TILT_MAX_DEG).
     /// Crossing between flat and tilted rebakes tiles: flat mode uses the
     /// true 2D building style (base fills + outlines), tilted mode the
     /// extruded detail buildings.
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
-        let tilt = tilt_deg.clamp(0.0, 65.0);
+        let tilt = tilt_deg.clamp(0.0, TILT_MAX_DEG);
         if (tilt - self.tilt).abs() < 1e-9 {
             return;
         }
@@ -3710,10 +4162,13 @@ impl MapView {
         if self.style_epoch == 0 {
             self.style_epoch = 1;
         }
+        // Drop Loading/Failed placeholders: their in-flight results are
+        // discarded by the epoch check, and a placeholder that survives
+        // here is never re-requested — a tile stuck broken forever.
+        self.tiles
+            .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
         for entry in self.tiles.values_mut() {
-            if matches!(entry.state, TileLoadState::Ready { .. }) {
-                entry.bucket = u32::MAX;
-            }
+            entry.bucket = u32::MAX;
         }
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
@@ -3723,6 +4178,352 @@ impl MapView {
 
     pub fn tilt(&self) -> f64 {
         self.tilt
+    }
+
+    /// Install (or clear) the 10 m wind field driving the particle layer.
+    pub fn set_wind_field(
+        &mut self,
+        cx: &mut Cx,
+        nx: usize,
+        ny: usize,
+        u: Vec<f32>,
+        v: Vec<f32>,
+        bbox: (f64, f64, f64, f64),
+    ) {
+        cx.stop_timer(self.wind_timer);
+        self.wind_particles.clear();
+        if nx * ny == 0 || u.len() != nx * ny || v.len() != nx * ny {
+            self.wind_field = None;
+            self.redraw(cx);
+            return;
+        }
+        self.wind_field = Some((nx, ny, u, v, bbox));
+        self.wind_rng = 0x9e3779b97f4a7c15;
+        self.wind_timer = cx.start_interval(1.0 / 30.0);
+        self.redraw(cx);
+    }
+
+    /// The weather clock, slowed at deep zooms so streaks stay readable —
+    /// rain playback AND wind advection both use this, keeping them in
+    /// lockstep at every zoom.
+    fn effective_weather_timelapse(&self) -> f64 {
+        let view_zoom = self.view_zoom();
+        let world_px = TILE_SIZE * 2f64.powf(view_zoom);
+        let (_, lat) = normalized_to_lon_lat(self.center_norm);
+        let meters_to_norm = 1.0 / (40_075_016.686 * lat.to_radians().cos());
+        // px per tick a 10 m/s wind would cover at full time-lapse
+        let px_per_tick = 10.0 * WEATHER_TIMELAPSE * (1.0 / 30.0) * meters_to_norm * world_px;
+        if px_per_tick > 3.5 {
+            WEATHER_TIMELAPSE * 3.5 / px_per_tick
+        } else {
+            WEATHER_TIMELAPSE
+        }
+    }
+
+    /// Restart the rain frame timer if the effective clock moved >15%
+    /// (zoom changed) — called from the wind/rain tick paths.
+    fn retune_rain_timer(&mut self, cx: &mut Cx) {
+        if self.rain_frames.is_empty() {
+            return;
+        }
+        let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
+        let drift = (interval - self.rain_interval_current).abs()
+            / self.rain_interval_current.max(1e-6);
+        if drift > 0.15 {
+            self.rain_interval_current = interval;
+            cx.stop_timer(self.rain_timer);
+            self.rain_timer = cx.start_interval(interval);
+        }
+    }
+
+    fn wind_rand(&mut self) -> f64 {
+        // xorshift — deterministic, no Instant/random dependencies.
+        let mut x = self.wind_rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.wind_rng = x;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Advect the particle field one tick: constant SCREEN-space speed per
+    /// m/s so the flow reads the same at every zoom.
+    fn tick_wind(&mut self) {
+        let Some((nx, ny, u, v, bbox)) = self.wind_field.clone() else {
+            return;
+        };
+        let view_zoom = self.view_zoom();
+        let world_px = TILE_SIZE * 2f64.powf(view_zoom);
+        let rect = self.view_rect;
+        let half_w = rect.size.x.max(64.0) * 0.7 / world_px;
+        let half_h = rect.size.y.max(64.0) * 0.7 / world_px;
+        let center = self.center_norm;
+        let target = 2600usize;
+        while self.wind_particles.len() < target {
+            let px = center.x + (self.wind_rand() - 0.5) * 2.0 * half_w;
+            let py = center.y + (self.wind_rand() - 0.5) * 2.0 * half_h;
+            let age = (self.wind_rand() * 80.0) as u32;
+            self.wind_particles
+                .push(WindParticle::spawn(dvec2(px, py), age));
+        }
+        let sample = |pos: Vec2d| -> Option<(f32, f32)> {
+            let (lon, lat) = normalized_to_lon_lat(pos);
+            let (west, south, east, north) = bbox;
+            let fx = (lon - west) / (east - west) * (nx - 1) as f64;
+            let fy = (lat - south) / (north - south) * (ny - 1) as f64;
+            if fx < 0.0 || fy < 0.0 || fx > (nx - 1) as f64 || fy > (ny - 1) as f64 {
+                return None;
+            }
+            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+            let (tx, ty) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
+            let (x1, y1) = ((x0 + 1).min(nx - 1), (y0 + 1).min(ny - 1));
+            let at = |x: usize, y: usize| y * nx + x;
+            let lerp2 = |g: &Vec<f32>| {
+                let top = g[at(x0, y0)] * (1.0 - tx) + g[at(x1, y0)] * tx;
+                let bottom = g[at(x0, y1)] * (1.0 - tx) + g[at(x1, y1)] * tx;
+                top * (1.0 - ty) + bottom * ty
+            };
+            Some((lerp2(&u), lerp2(&v)))
+        };
+        // Advect in REAL map meters at the shared weather time-lapse — the
+        // SAME effective clock the rain playback uses at this zoom, so the
+        // two layers never drift apart.
+        let (_, lat) = normalized_to_lon_lat(center);
+        let meters_to_norm = 1.0 / (40_075_016.686 * lat.to_radians().cos());
+        let dt = 1.0 / 30.0;
+        let k = self.effective_weather_timelapse() * dt * meters_to_norm;
+        let mut respawns: Vec<usize> = Vec::new();
+        for i in 0..self.wind_particles.len() {
+            let p = self.wind_particles[i].head();
+            let Some((wu, wv)) = sample(p) else {
+                respawns.push(i);
+                continue;
+            };
+            let particle = &mut self.wind_particles[i];
+            let next = dvec2(p.x + wu as f64 * k, p.y - wv as f64 * k);
+            particle.push(next);
+            particle.speed = (wu * wu + wv * wv).sqrt();
+            particle.age += 1;
+            let out_of_view = (next.x - center.x).abs() > half_w
+                || (next.y - center.y).abs() > half_h;
+            if particle.age > 260 || out_of_view {
+                respawns.push(i);
+            }
+        }
+        for i in respawns {
+            let px = center.x + (self.wind_rand() - 0.5) * 2.0 * half_w;
+            let py = center.y + (self.wind_rand() - 0.5) * 2.0 * half_h;
+            self.wind_particles[i] = WindParticle::spawn(dvec2(px, py), 0);
+        }
+    }
+
+    /// Install (or clear) the hillshade overlay for a normalized-mercator
+    /// bbox (west, north, east, south).
+    pub fn set_terrain_overlay(&mut self, cx: &mut Cx, data: TerrainOverlayData) {
+        if data.texels.is_empty() {
+            self.terrain_texture = None;
+            self.terrain_elev_texture = None;
+            self.terrain_elev = Vec::new();
+            self.terrain_elev_size = (0, 0);
+            self.terrain_elev_max = 0.0;
+        } else {
+            self.terrain_bbox = data.bbox;
+            self.terrain_texture = Some(Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    data: Some(data.texels),
+                    width: data.width,
+                    height: data.height,
+                    updated: TextureUpdated::Full,
+                },
+            ));
+            if data.elev_texels.is_empty() {
+                self.terrain_elev_texture = None;
+                self.terrain_elev = Vec::new();
+                self.terrain_elev_size = (0, 0);
+            } else {
+                self.terrain_elev_texture = Some(Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        data: Some(data.elev_texels),
+                        width: data.elev_width,
+                        height: data.elev_height,
+                        updated: TextureUpdated::Full,
+                    },
+                ));
+                self.terrain_elev_max =
+                    data.elev.iter().fold(0.0f32, |acc, e| acc.max(*e));
+                self.terrain_elev = data.elev;
+                self.terrain_elev_size = (data.elev_width, data.elev_height);
+            }
+        }
+        self.redraw(cx);
+    }
+
+    /// Ground elevation (m) at a normalized-mercator point, bilinear over
+    /// the CPU copy of the displacement grid; 0 outside coverage.
+    fn terrain_elevation_at(&self, norm: Vec2d) -> f64 {
+        let (ew, eh) = self.terrain_elev_size;
+        if ew == 0 || eh == 0 {
+            return 0.0;
+        }
+        let (west, north, east, south) = self.terrain_bbox;
+        let sx = (east - west).abs().max(1e-12);
+        let sy = (south - north).abs().max(1e-12);
+        let fx = ((norm.x - west) / sx).clamp(0.0, 1.0) * (ew - 1) as f64;
+        let fy = ((norm.y - north) / sy).clamp(0.0, 1.0) * (eh - 1) as f64;
+        let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+        let (dx, dy) = (fx - x0 as f64, fy - y0 as f64);
+        let x1 = (x0 + 1).min(ew - 1);
+        let y1 = (y0 + 1).min(eh - 1);
+        let at = |x: usize, y: usize| self.terrain_elev[y * ew + x] as f64;
+        let top = at(x0, y0) * (1.0 - dx) + at(x1, y0) * dx;
+        let bottom = at(x0, y1) * (1.0 - dx) + at(x1, y1) * dx;
+        top * (1.0 - dy) + bottom * dy
+    }
+
+    /// Hillshade between the fills and the road network. Flat: one quad.
+    /// Tilted with elevation data: a grid mesh whose corners lift by the
+    /// ground elevation, so the terrain is a real displaced surface.
+    fn draw_terrain_overlay(&mut self, cx: &mut Cx2d) {
+        let Some(texture) = self.terrain_texture.clone() else {
+            return;
+        };
+        let camera = self.overlay_camera();
+        let (west, north, east, south) = self.terrain_bbox;
+        self.draw_terrain.draw_super.draw_vars.set_texture(0, &texture);
+        let tilted = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians() > 1e-4;
+        self.draw_terrain
+            .draw_super
+            .draw_vars
+            .set_uniform(cx.cx, live_id!(depth_on), &[if tilted { 1.0f32 } else { 0.0 }]);
+        // Regional 3D: the surface IS the ground (fills stay flat under it).
+        let ground_mode = tilted && self.render_bucket() < 14;
+        self.draw_terrain.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(opacity_boost),
+            &[if ground_mode { 1.7f32 } else { 1.0 }],
+        );
+        let inv_tilt_cos = 1.0 / camera.tilt_cos.max(1e-6);
+        let slope = self.tilt_depth_slope;
+        let depth_of = move |screen_y: f64| -> f32 {
+            let ground_rel = (screen_y - camera.rot_pivot.y) * inv_tilt_cos;
+            (-24.0 + 0.02 + ground_rel * slope) as f32
+        };
+        let lift_px_per_m = self.terrain_lift_px_per_m();
+        let displace = lift_px_per_m > 0.0 && !self.terrain_elev.is_empty();
+        if !displace {
+            self.draw_terrain.uv0 = Vec2f { x: 0.0, y: 0.0 };
+            self.draw_terrain.uv1 = Vec2f { x: 1.0, y: 1.0 };
+            let c0 = camera.norm_to_screen(dvec2(west, north));
+            let c1 = camera.norm_to_screen(dvec2(east, north));
+            let c2 = camera.norm_to_screen(dvec2(east, south));
+            let c3 = camera.norm_to_screen(dvec2(west, south));
+            self.draw_terrain.gdepth = Vec4f {
+                x: depth_of(c0.y),
+                y: depth_of(c1.y),
+                z: depth_of(c2.y),
+                w: depth_of(c3.y),
+            };
+            self.terrain_cell(cx, c0, c1, c2, c3);
+            return;
+        }
+        // Grid resolution balances silhouette quality against per-frame CPU.
+        const GX: usize = 288;
+        const GY: usize = 216;
+        let mut pts = Vec::with_capacity((GX + 1) * (GY + 1));
+        let mut ground_depth = Vec::with_capacity((GX + 1) * (GY + 1));
+        for gy in 0..=GY {
+            let v = gy as f64 / GY as f64;
+            let ny = north + (south - north) * v;
+            for gx in 0..=GX {
+                let u = gx as f64 / GX as f64;
+                let nx = west + (east - west) * u;
+                let mut p = camera.norm_to_screen(dvec2(nx, ny));
+                ground_depth.push(depth_of(p.y));
+                p.y -= self.terrain_elevation_at(dvec2(nx, ny)) * lift_px_per_m;
+                pts.push(p);
+            }
+        }
+        for gy in 0..GY {
+            for gx in 0..GX {
+                let i = gy * (GX + 1) + gx;
+                self.draw_terrain.uv0 = Vec2f {
+                    x: gx as f32 / GX as f32,
+                    y: gy as f32 / GY as f32,
+                };
+                self.draw_terrain.uv1 = Vec2f {
+                    x: (gx + 1) as f32 / GX as f32,
+                    y: (gy + 1) as f32 / GY as f32,
+                };
+                self.draw_terrain.gdepth = Vec4f {
+                    x: ground_depth[i],
+                    y: ground_depth[i + 1],
+                    z: ground_depth[i + GX + 2],
+                    w: ground_depth[i + GX + 1],
+                };
+                self.terrain_cell(cx, pts[i], pts[i + 1], pts[i + GX + 2], pts[i + GX + 1]);
+            }
+        }
+    }
+
+    /// 1x1 zero-elevation texture so the shader's terrain slot is always
+    /// bound even when the layer is off.
+    fn terrain_fallback(&mut self, cx: &mut Cx2d) -> Texture {
+        if self.terrain_fallback_texture.is_none() {
+            self.terrain_fallback_texture = Some(Texture::new_with_format(
+                cx.cx,
+                TextureFormat::VecBGRAu8_32 {
+                    data: Some(vec![0u32]),
+                    width: 1,
+                    height: 1,
+                    updated: TextureUpdated::Full,
+                },
+            ));
+        }
+        self.terrain_fallback_texture.clone().unwrap()
+    }
+
+    /// Ground elevation lift (screen px) under a screen point; 0 when the
+    /// terrain layer is off or the camera is flat.
+    fn terrain_ground_lift_px_at_screen(&self, p: Vec2d) -> f64 {
+        if self.terrain_elev.is_empty() {
+            return 0.0;
+        }
+        let lift = self.terrain_lift_px_per_m();
+        if lift <= 0.0 {
+            return 0.0;
+        }
+        let (lon, lat) = self.screen_to_lon_lat(p);
+        self.terrain_elevation_at(lon_lat_to_normalized(lon, lat)) * lift
+    }
+
+    /// Screen px of lift per meter of elevation (0 when flat / no 3D).
+    fn terrain_lift_px_per_m(&self) -> f64 {
+        let tilt_rad = self.tilt.clamp(0.0, TILT_MAX_DEG).to_radians();
+        if tilt_rad <= 1e-4 {
+            return 0.0;
+        }
+        let camera = self.overlay_camera();
+        tilt_rad.sin() / camera.meters_per_px.max(1e-9)
+    }
+
+    fn terrain_cell(&mut self, cx: &mut Cx2d, c0: Vec2d, c1: Vec2d, c2: Vec2d, c3: Vec2d) {
+        self.draw_terrain.c0 = Vec2f { x: c0.x as f32, y: c0.y as f32 };
+        self.draw_terrain.c1 = Vec2f { x: c1.x as f32, y: c1.y as f32 };
+        self.draw_terrain.c2 = Vec2f { x: c2.x as f32, y: c2.y as f32 };
+        self.draw_terrain.c3 = Vec2f { x: c3.x as f32, y: c3.y as f32 };
+        let min_x = c0.x.min(c1.x).min(c2.x).min(c3.x);
+        let min_y = c0.y.min(c1.y).min(c2.y).min(c3.y);
+        let max_x = c0.x.max(c1.x).max(c2.x).max(c3.x);
+        let max_y = c0.y.max(c1.y).max(c2.y).max(c3.y);
+        self.draw_terrain.draw_abs(
+            cx,
+            Rect {
+                pos: dvec2(min_x, min_y),
+                size: dvec2(max_x - min_x, max_y - min_y),
+            },
+        );
     }
 
     /// Install the rain nowcast animation frames (BGRA u32 texels) covering
@@ -3752,7 +4553,9 @@ impl MapView {
             ));
         }
         if !self.rain_frames.is_empty() {
-            self.rain_timer = cx.start_interval(0.22);
+            let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
+            self.rain_interval_current = interval;
+            self.rain_timer = cx.start_interval(interval);
         }
         self.redraw(cx);
     }
@@ -3766,6 +4569,7 @@ impl MapView {
         self.last_zoom_change_time = Some(std::time::Instant::now());
         cx.stop_timer(self.zoom_settle_timer);
         self.zoom_settle_timer = cx.start_timeout(0.15);
+        self.emit_viewport_changed(cx);
         self.redraw(cx);
     }
 
@@ -3961,6 +4765,26 @@ impl MapViewRef {
     ) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_rain_frames(cx, frames, width, height, bbox);
+        }
+    }
+
+    pub fn set_terrain_overlay(&self, cx: &mut Cx, data: TerrainOverlayData) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_terrain_overlay(cx, data);
+        }
+    }
+
+    pub fn set_wind_field(
+        &self,
+        cx: &mut Cx,
+        nx: usize,
+        ny: usize,
+        u: Vec<f32>,
+        v: Vec<f32>,
+        bbox: (f64, f64, f64, f64),
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_wind_field(cx, nx, ny, u, v, bbox);
         }
     }
 
