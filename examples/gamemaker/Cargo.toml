@@ -10,4 +10,4 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../../widgets", features = ["maps", "pdf", "voice"] }
 makepad-code-editor = { path = "../../code_editor" }
 makepad-ai = { path = "../../libs/makepad_ai" }
-makepad-tts = { path = "../../libs/tts" }
+makepad-converse = { path = "../../libs/converse" }
