@@ -435,6 +435,11 @@ pub fn category_from_osm_tags(tags: &HashMap<String, String>) -> Option<Category
     if get("natural") == Some("beach") {
         return Some(Category::Beach);
     }
+    // Zoo enclosures / attraction buildings tag attraction=* with no
+    // tourism key (Artis's Reptielenhuis).
+    if tags.contains_key("attraction") || tags.contains_key("zoo") {
+        return Some(Category::Attraction);
+    }
     if tags.contains_key("addr:housenumber") {
         return Some(Category::Address);
     }
@@ -975,18 +980,23 @@ pub fn score_search_hit(
     query_has_number: bool,
     distance_m: Option<f64>,
 ) -> f64 {
-    // Entity tier: what KIND of thing dominates what the name looks like.
-    let (tier, locality) = match category {
-        Category::City => (5.0, 0.10),
-        Category::Town => (4.6, 0.15),
-        Category::Airport => (4.3, 0.25),
+    // Entity tier + "reach": how far away this kind of thing stays
+    // relevant. The penalty is log2(1 + d/reach), so a zoo 3km away loses
+    // ~2 points while a same-named hamlet 900km away loses ~7 — the old
+    // locality MULTIPLIER did the opposite (punished the nearby POI harder
+    // than the distant settlement, which is how searching "artis" in
+    // Amsterdam flew to a hamlet in France).
+    let (tier, reach_m) = match category {
+        Category::City => (5.0, 50_000.0),
+        Category::Town => (4.6, 20_000.0),
+        Category::Airport => (4.3, 30_000.0),
         Category::Village | Category::Suburb | Category::Hamlet | Category::Neighbourhood => {
-            (4.0, 0.35)
+            (4.0, 8_000.0)
         }
-        Category::Station => (3.8, 0.5),
-        Category::Street => (2.0, 1.0),
-        Category::Address => (1.6, 1.0),
-        _ => (3.0, 1.0),
+        Category::Station => (3.8, 5_000.0),
+        Category::Street => (2.0, 800.0),
+        Category::Address => (1.6, 500.0),
+        _ => (3.0, 1_500.0),
     };
     let mut score = tier * 30.0 + rank as f64 * 0.15;
     if via_category {
@@ -1005,9 +1015,8 @@ pub fn score_search_hit(
         score += 55.0;
     }
     if let Some(d) = distance_m {
-        // log2 falloff: being 10x closer is worth a constant bonus; scaled
-        // by how inherently local the entity kind is.
-        score -= 7.0 * (1.0 + d / 30.0).log2() * locality;
+        // log2 falloff against the tier's reach.
+        score -= 7.0 * (1.0 + d / reach_m).log2();
     }
     score
 }
