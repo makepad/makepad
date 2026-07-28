@@ -68,6 +68,7 @@ const ICON_SVGS: &[(&str, &str)] = &[
     ("entrance", include_str!("icons/entrance.svg")),
     ("information", include_str!("icons/information.svg")),
     ("traffic_signals", include_str!("icons/traffic_signals.svg")),
+    ("charger_pin", include_str!("icons/charger_pin.svg")),
     ("parking", include_str!("icons/parking.svg")),
     ("charger", include_str!("icons/charger.svg")),
 ];
@@ -93,6 +94,13 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         // Dark center dot layered over the light tree canopy.
         if let Some(mesh) = build_disc_mesh(1.7) {
             out.insert("tree_core", mesh);
+        }
+        // Tesla-style charger pin: big badge + small white bolt overlay.
+        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger_pin.svg"), 24.0) {
+            out.insert("charger_pin_big", mesh);
+        }
+        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger.svg"), 10.0) {
+            out.insert("charger_bolt", mesh);
         }
         out
     })
@@ -141,6 +149,10 @@ fn collect_paths(nodes: &[SvgNode], out: &mut VectorPath) {
 /// Parse + tessellate one symbol at its final screen size, centered on the
 /// origin so vertices double as screen-px offsets from the anchor point.
 fn build_icon_mesh(svg: &str) -> Option<IconMesh> {
+    build_icon_mesh_sized(svg, ICON_SIZE_PX)
+}
+
+fn build_icon_mesh_sized(svg: &str, size_px: f32) -> Option<IconMesh> {
     let doc = parse_svg(svg);
     let (width, height) = doc.logical_size();
     if width <= 0.0 || height <= 0.0 {
@@ -152,7 +164,7 @@ fn build_icon_mesh(svg: &str) -> Option<IconMesh> {
         return None;
     }
 
-    let scale = ICON_SIZE_PX / width.max(height);
+    let scale = size_px / width.max(height);
     let (center_x, center_y) = (width * 0.5, height * 0.5);
     for cmd in &mut path.cmds {
         match cmd {
