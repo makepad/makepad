@@ -664,6 +664,21 @@ pub fn stroke_style_for_tags(
 ) -> Option<StrokeStyle> {
     let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
     if is_road_polygon_layer(layer) || layer == "bridges" {
+        // Pedestrian squares / wide path areas get carto's thin gray edge
+        // from street level; the fill itself comes from the fill pass.
+        if is_road_polygon_layer(layer) && render_zoom >= 15 {
+            return Some(StrokeStyle {
+                sort_rank: 135,
+                casing: None,
+                center: StrokePassStyle {
+                    color: 0xc2bfba,
+                    width: 0.8 * px_to_units,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 135.0 * DEPTH_MICRO_PER_RANK,
+                },
+            });
+        }
         return None;
     }
 
@@ -814,7 +829,7 @@ pub fn stroke_style_for_tags(
             if tag_is_truthy(tags, "bridge") {
                 style.casing = Some(StrokePassStyle {
                     color: 0xffffff,
-                    width: style.center.width * 3.4,
+                    width: style.center.width * 2.4,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
