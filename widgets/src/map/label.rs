@@ -270,7 +270,9 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
             let is_office = tags.contains_key("office");
             let is_named_parking =
                 tags.get("amenity").map(|v| v.as_str()) == Some("parking");
-            if !is_office && !is_named_parking {
+            let is_attraction =
+                tags.contains_key("attraction") || tags.contains_key("zoo");
+            if !is_office && !is_named_parking && !is_attraction {
                 return None;
             }
             let name = select_label_text(tags)?;
@@ -281,6 +283,8 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 road_kind: format!("office{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
                 color_class: if is_named_parking {
                     LABEL_CLASS_TRANSPORT
+                } else if is_attraction {
+                    LABEL_CLASS_CULTURE
                 } else {
                     LABEL_CLASS_MUTED
                 },
