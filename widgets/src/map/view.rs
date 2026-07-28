@@ -132,6 +132,15 @@ script_mod! {
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
                 self.v_param4 = bbox_max.y;
+            } else if shape_id > 29.5 && shape_id < 32.5 {
+                // Pattern fills: anchor the texture to the MAP, not the
+                // screen — tile-local position scaled to view px (stable
+                // under pan/rotation; rebakes per zoom like carto).
+                let pattern_uv = pos * self.map_scale;
+                self.v_param1 = pattern_uv.x;
+                self.v_param2 = pattern_uv.y;
+                self.v_param3 = 0.0;
+                self.v_param4 = 0.0;
             } else {
                 self.v_param1 = self.geom.param1;
                 self.v_param2 = self.geom.param2;
@@ -177,17 +186,36 @@ script_mod! {
         }
 
         fill_pattern: fn() {
+            // 30: small staggered dot stipple (courtyard gardens).
             if self.v_shape_id > 29.5 && self.v_shape_id < 30.5 {
-                let cell = fract(self.v_world / 7.0) - vec2(0.5, 0.5)
-                let d = length(cell) * 7.0
-                let dot = 1.0 - smoothstep(1.0, 1.7, d)
-                let f = 1.0 - 0.16 * dot
+                let uv = vec2(self.v_param1, self.v_param2)
+                let period = 5.0
+                let row = floor(uv.y / period)
+                let sx = uv.x + fract(row * 0.5) * period
+                let cell = fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)
+                let d = length(cell) * period
+                let dot = 1.0 - smoothstep(0.55, 1.0, d)
+                let f = 1.0 - 0.14 * dot
                 return vec4(f, f, f, 1.0)
             }
+            // 31: diagonal hatch (playgrounds).
             if self.v_shape_id > 30.5 && self.v_shape_id < 31.5 {
-                let band = fract((self.v_world.x + self.v_world.y) / 9.0)
+                let uv = vec2(self.v_param1, self.v_param2)
+                let band = fract((uv.x + uv.y) / 9.0)
                 let line = 1.0 - smoothstep(0.10, 0.20, abs(band - 0.5))
                 let f = 1.0 - 0.12 * line
+                return vec4(f, f, f, 1.0)
+            }
+            // 32: staggered open circles (woods, cemeteries — tree rings).
+            if self.v_shape_id > 31.5 && self.v_shape_id < 32.5 {
+                let uv = vec2(self.v_param1, self.v_param2)
+                let period = 12.0
+                let row = floor(uv.y / period)
+                let sx = uv.x + fract(row * 0.5) * period
+                let cell = fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)
+                let d = length(cell) * period
+                let ring = 1.0 - smoothstep(0.45, 0.85, abs(d - 2.4))
+                let f = 1.0 - 0.15 * ring
                 return vec4(f, f, f, 1.0)
             }
             return vec4(1.0, 1.0, 1.0, 1.0)
