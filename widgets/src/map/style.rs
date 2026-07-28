@@ -824,16 +824,23 @@ pub fn stroke_style_for_tags(
             ) {
                 style.center.color = 0x9c9c9c;
             }
-            // Footway bridges get a small white deck under the dots (the
-            // "outline box" carto draws over water crossings).
+            // Footway bridges: white deck with a thin dark rim (carto's
+            // little outline box over water) — the dots stop on the span.
             if tag_is_truthy(tags, "bridge") {
                 style.casing = Some(StrokePassStyle {
-                    color: 0xffffff,
-                    width: style.center.width * 2.4,
+                    color: 0x8f8f8f,
+                    width: style.center.width * 3.0,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
                 });
+                style.center = StrokePassStyle {
+                    color: 0xfbfbfa,
+                    width: style.center.width * 2.2,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_THIN,
+                    depth_micro: style.center.depth_micro,
+                };
             }
         }
         // Bridges float above (and tunnels below) their base rank in the
