@@ -1260,9 +1260,13 @@ impl Widget for Window {
                         _ => (),
                     }
 
-                    // Update the display context if the screen size has changed
+                    // Update the display context if the screen size has changed.
+                    // Some platforms send spurious zero-size geometry at startup (notably macOS);
+                    // don't let it clobber a good size and flip adaptive layouts to their fallback.
                     let old_insets = cx.display_context.safe_area_insets;
-                    cx.display_context.screen_size = ev.new_geom.inner_size;
+                    if ev.new_geom.inner_size.x > 0.0 && ev.new_geom.inner_size.y > 0.0 {
+                        cx.display_context.screen_size = ev.new_geom.inner_size;
+                    }
                     cx.display_context.safe_area_insets = ev.new_geom.safe_area_insets;
                     cx.display_context.updated_on_event_id = cx.event_id();
 

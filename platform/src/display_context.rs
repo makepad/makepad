@@ -41,6 +41,12 @@ impl DisplayContext {
         self.screen_size.x >= DEFAULT_MIN_DESKTOP_WIDTH
     }
 
+    /// Whether the given width qualifies as the wide "desktop" layout.
+    /// Useful as a fallback signal when `screen_size` isn't known yet.
+    pub fn is_desktop_width(&self, width: f64) -> bool {
+        width >= DEFAULT_MIN_DESKTOP_WIDTH
+    }
+
     pub fn is_screen_size_known(&self) -> bool {
         self.screen_size.x != 0.0 && self.screen_size.y != 0.0
     }
