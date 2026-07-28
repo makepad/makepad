@@ -9,7 +9,7 @@
 
 use super::label::{
     LABEL_CLASS_AMENITY, LABEL_CLASS_CULTURE, LABEL_CLASS_DEFAULT, LABEL_CLASS_GREEN,
-    LABEL_CLASS_MUTED, LABEL_CLASS_SHOP, LABEL_CLASS_TRANSPORT, LABEL_CLASS_TREE,
+    LABEL_CLASS_MUTED, LABEL_CLASS_SHOP, LABEL_CLASS_TRANSPORT, LABEL_CLASS_TREE, LABEL_CLASS_HEALTH,
 };
 use crate::makepad_draw::vector::{
     document::SvgNode, parse::parse_svg, LineJoin, PathCmd, Tessellator, VVertex, VectorPath,
@@ -272,8 +272,23 @@ pub fn micro_icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static s
 pub fn icon_for_tags(tags: &HashMap<String, String>) -> Option<(&'static str, u8)> {
     match tags.get("layer").map(|v| v.as_str()) {
         Some("micro_pois") => return micro_icon_for_tags(tags),
-        // Geodata overlays (layers.md).
-        Some("chargers") => return Some(("charger", LABEL_CLASS_TRANSPORT)),
+        // Geodata overlays (layers.md). Chargers tier by max_kw — this is
+        // a Tesla-style EV navigator, charging power is first-class:
+        // ultra-fast/Supercharger red, fast DC amber, street AC blue.
+        Some("chargers") => {
+            let kw = tags
+                .get("max_kw")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let class = if kw >= 150.0 {
+                LABEL_CLASS_HEALTH
+            } else if kw >= 50.0 {
+                LABEL_CLASS_AMENITY
+            } else {
+                LABEL_CLASS_TRANSPORT
+            };
+            return Some(("charger", class));
+        }
         Some("stops") => return Some(("dot", LABEL_CLASS_TRANSPORT)),
         _ => {}
     }
