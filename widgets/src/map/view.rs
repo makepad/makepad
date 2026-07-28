@@ -563,6 +563,11 @@ pub struct MapView {
     /// can point its MapView at its own tile archive.
     #[live]
     mbtiles_path: String,
+    /// Semicolon-separated list of geodata overlay mbtiles (layers.md
+    /// track: chargers, transit, nature, districts…). Set at runtime via
+    /// set_overlay_paths; tiles rebuild on change.
+    #[live]
+    overlay_mbtiles_paths: String,
     /// Optional all-tag detail archive (pbf-detail output) composed over the
     /// base for micro-POI symbols: trees, benches, bins, artwork…
     #[live]
@@ -1659,6 +1664,12 @@ impl MapView {
             let requested = vec![key];
             let mbtiles_path = active_path.clone();
             let detail_path = self.detail_mbtiles_path.clone();
+            let overlay_paths: Vec<String> = self
+                .overlay_mbtiles_paths
+                .split(';')
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| p.trim().to_string())
+                .collect();
             // Extruded buildings only bake while the camera is tilted; flat
             // mode keeps the classic 2D building style with outlines.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
@@ -1668,6 +1679,7 @@ impl MapView {
                 let result = load_local_tile_batch(
                     Path::new(&mbtiles_path),
                     detail_path.as_deref().map(Path::new),
+                    &overlay_paths,
                     &requested,
                     &theme_style,
                     bucket,
@@ -3048,6 +3060,16 @@ impl MapView {
     /// Rebuild every resident tile under the current style/mode while its
     /// previous geometry stays on screen (bucket sentinel → the normal
     /// stale-bucket restyle path picks it up and cross-fades).
+    /// Swap the active geodata overlays; stale tiles keep rendering while
+    /// rebuilt ones stream in with the new layer set.
+    pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
+        if self.overlay_mbtiles_paths == paths {
+            return;
+        }
+        self.overlay_mbtiles_paths = paths.to_string();
+        self.restyle_tiles_keep_stale(cx);
+    }
+
     fn restyle_tiles_keep_stale(&mut self, cx: &mut Cx) {
         self.style_epoch = self.style_epoch.wrapping_add(1);
         if self.style_epoch == 0 {
@@ -3235,6 +3257,12 @@ impl MapViewRef {
     pub fn set_map_zoom(&self, cx: &mut Cx, zoom: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_map_zoom(cx, zoom);
+        }
+    }
+
+    pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_overlay_paths(cx, paths);
         }
     }
 
