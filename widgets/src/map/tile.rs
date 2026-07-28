@@ -632,7 +632,18 @@ fn chaikin_smooth(points: &[(f32, f32)], rounds: usize, cut_below: f32) -> Vec<(
             let prev = pts[(i + n - 1) % n];
             let v = pts[i];
             let next = pts[(i + 1) % n];
-            if seg_sq(prev, v) < cut_below_sq && seg_sq(v, next) < cut_below_sq {
+            // Only gentle bends get cut (turn < ~30 degrees): densely
+            // sampled quay curves still carry SHARP corners at bridge
+            // junctions between short segments — rounding those pulls
+            // the road through the corner buildings.
+            let a = (v.0 - prev.0, v.1 - prev.1);
+            let b = (next.0 - v.0, next.1 - v.1);
+            let dot = (a.0 * b.0 + a.1 * b.1) as f64;
+            let len = ((a.0 as f64 * a.0 as f64 + a.1 as f64 * a.1 as f64)
+                * (b.0 as f64 * b.0 as f64 + b.1 as f64 * b.1 as f64))
+                .sqrt();
+            let gentle = len > 1e-12 && dot / len > 0.866;
+            if gentle && seg_sq(prev, v) < cut_below_sq && seg_sq(v, next) < cut_below_sq {
                 out.push(lerp(v, prev, 0.25));
                 out.push(lerp(v, next, 0.25));
             } else {
@@ -2357,5 +2368,40 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
             Ok(())
         }
         _ => Err(format!("unsupported protobuf wire type {}", wire)),
+    }
+}
+
+#[cfg(test)]
+mod bridge_probe_tests {
+    use super::*;
+
+    // Diagnostic: print line features near the Reguliersgracht x
+    // Keizersgracht bridge to identify the "black dashed fragments".
+    // Run: cargo test -p makepad-widgets --features maps bridge_probe -- --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn bridge_probe() {
+        let path = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        if !path.exists() {
+            return;
+        }
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let raw = reader.get_tile(14, 8414, 16383 - 5386).unwrap().unwrap();
+        let data = decode_vector_tile_payload(&raw).unwrap();
+        let mut collector = MvtLocalCollector::new(1.0);
+        parse_mvt_tile(&data, TileKey { z: 14, x: 8414, y: 5386 }, &mut collector).unwrap();
+        let target = (3219.0f32 / 16.0, 3973.0f32 / 16.0);
+        for way in &collector.ways {
+            let near = way.points.iter().any(|p| {
+                let dx = p.0 - target.0;
+                let dy = p.1 - target.1;
+                dx * dx + dy * dy < (12.0f32) * 12.0
+            });
+            if near && !way.closed {
+                let mut tags: Vec<_> = way.tags.iter().collect();
+                tags.sort();
+                println!("LINE pts={} {:?}", way.points.len(), tags);
+            }
+        }
     }
 }
