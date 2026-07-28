@@ -253,7 +253,8 @@ script_mod! {
                                     border_size: 1.0
                                     border_color: #x00000022
                                 }
-                                layer_chargers := LayerCheck{text: "EV chargers"}
+                                layer_chargers := LayerCheck{text: "EV fast chargers"}
+                                layer_chargers_slow := LayerCheck{text: "EV slow chargers"}
                                 layer_transit := LayerCheck{text: "Transit"}
                                 layer_nature := LayerCheck{text: "Nature areas"}
                                 layer_districts := LayerCheck{text: "Districts"}
@@ -419,7 +420,7 @@ pub struct App {
     #[rust]
     layers_open: bool,
     #[rust]
-    layer_states: [bool; 6],
+    layer_states: [bool; 7],
 }
 
 impl App {
@@ -673,13 +674,14 @@ impl App {
 
     /// Rebuild the overlay path list from the app-tracked layer states.
     fn apply_overlay_selection(&mut self, cx: &mut Cx) {
-        const LAYER_PATHS: [&str; 6] = [
-            "local/overlays/nl-chargers.mbtiles",
+        const LAYER_PATHS: [&str; 7] = [
+            "local/overlays/nl-chargers.mbtiles?fast",
             "local/overlays/nl-transit.mbtiles",
             "local/overlays/nl-nature.mbtiles",
             "local/overlays/nl-wijkbuurt.mbtiles",
             "local/overlays/nl-buildings-age.mbtiles",
             "local/overlays/nl-demographics.mbtiles",
+            "local/overlays/nl-chargers.mbtiles?slow",
         ];
         let paths: Vec<&str> = LAYER_PATHS
             .iter()
@@ -1014,6 +1016,14 @@ impl MatchEvent for App {
         let mut layers_changed = false;
         if let Some(value) = self.ui.check_box(cx, ids!(layer_chargers)).changed(actions) {
             self.layer_states[0] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self
+            .ui
+            .check_box(cx, ids!(layer_chargers_slow))
+            .changed(actions)
+        {
+            self.layer_states[6] = value;
             layers_changed = true;
         }
         if let Some(value) = self.ui.check_box(cx, ids!(layer_transit)).changed(actions) {

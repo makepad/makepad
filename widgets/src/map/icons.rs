@@ -95,11 +95,16 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         if let Some(mesh) = build_disc_mesh(1.7) {
             out.insert("tree_core", mesh);
         }
-        // Tesla-style charger pin: big badge + small white bolt overlay.
-        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger_pin.svg"), 24.0) {
-            out.insert("charger_pin_big", mesh);
+        // Tesla-style charger pins: wide badge (bolt + kW text) for fast
+        // sites, small badge for street AC; white bolt overlays.
+        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger_pin_wide.svg"), 30.0)
+        {
+            out.insert("charger_pin_fast", mesh);
         }
-        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger.svg"), 10.0) {
+        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger_pin.svg"), 16.0) {
+            out.insert("charger_pin_ac", mesh);
+        }
+        if let Some(mesh) = build_icon_mesh_sized(include_str!("icons/charger.svg"), 9.0) {
             out.insert("charger_bolt", mesh);
         }
         out
