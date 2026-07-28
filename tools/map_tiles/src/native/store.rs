@@ -614,7 +614,10 @@ impl NodeStore {
 #[derive(Debug)]
 struct DecodedNodeChunk {
     positions: Box<[u16; 256]>,
-    coordinates: Vec<(i64, i64)>,
+    // Projected grid coords are <= 2^26 at zoom 14 (2^30 at zoom 18):
+    // i32 is lossless and halves the biggest allocation. Decode errors
+    // out-of-range instead of ever truncating.
+    coordinates: Vec<(i32, i32)>,
 }
 
 #[derive(Debug)]
@@ -641,7 +644,11 @@ impl DecodedNodeGroup {
             .coordinates
             .get(rank as usize)
             .ok_or_else(|| "decoded node rank exceeds chunk length".to_string())?;
-        Ok(Some(NodeCoord { id, x, y }))
+        Ok(Some(NodeCoord {
+            id,
+            x: i64::from(x),
+            y: i64::from(y),
+        }))
     }
 }
 
@@ -708,8 +715,14 @@ fn decode_node_chunk(bytes: &[u8]) -> Result<DecodedNodeChunk, String> {
     }
     let mut x = read_i64(bytes, &mut offset)?;
     let mut y = read_i64(bytes, &mut offset)?;
+    let compact = |x: i64, y: i64| -> Result<(i32, i32), String> {
+        Ok((
+            i32::try_from(x).map_err(|_| "projected node x exceeds i32".to_string())?,
+            i32::try_from(y).map_err(|_| "projected node y exceeds i32".to_string())?,
+        ))
+    };
     let mut coordinates = Vec::with_capacity(count);
-    coordinates.push((x, y));
+    coordinates.push(compact(x, y)?);
     for _ in 1..count {
         x = x
             .checked_add(unzigzag_i64(read_varint(bytes, &mut offset)?))
@@ -717,7 +730,7 @@ fn decode_node_chunk(bytes: &[u8]) -> Result<DecodedNodeChunk, String> {
         y = y
             .checked_add(unzigzag_i64(read_varint(bytes, &mut offset)?))
             .ok_or_else(|| "decoded projected node y overflow".to_string())?;
-        coordinates.push((x, y));
+        coordinates.push(compact(x, y)?);
     }
     if offset != bytes.len() {
         return Err("node scratch chunk has trailing bytes".to_string());
