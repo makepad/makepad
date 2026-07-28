@@ -13,7 +13,7 @@ use crate::runtime::{
     create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
     CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
     HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
-    HybridSharedCacheTensorIds, LogitsProbeInput,
+    HybridSharedCacheTensorIds, LogitsProbeInput, ProbeInputKind,
 };
 use crate::vocab::LlamaVocab;
 use crate::weights::LoadedGgufWeights;
@@ -73,6 +73,8 @@ struct SessionGraphParams {
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: usize,
+    /// Graph takes precomputed embeddings instead of token ids (image spans).
+    embeddings_input: bool,
 }
 
 impl SessionGraphParams {
@@ -81,11 +83,18 @@ impl SessionGraphParams {
             n_tokens,
             n_outputs,
             attention_key_count,
+            embeddings_input: false,
         }
     }
 
     fn greedy(n_tokens: usize, attention_key_count: usize) -> Self {
         Self::new(n_tokens, 1, attention_key_count)
+    }
+
+    fn greedy_embeddings(n_tokens: usize, attention_key_count: usize) -> Self {
+        let mut params = Self::greedy(n_tokens, attention_key_count);
+        params.embeddings_input = true;
+        params
     }
 
     fn token_generation(max_context: usize) -> Self {
@@ -126,12 +135,17 @@ pub struct LlamaSession {
     vocab: LlamaVocab,
     plan: ModelExecutionPlan,
     spec: HybridDecodeSpec,
+    spec_embeddings: HybridDecodeSpec,
     config: LlamaSessionConfig,
     max_context: usize,
     context_extra_bytes: usize,
     weights: LoadedGgufWeights,
     graphs: SessionGraphSet,
     token_ids: Vec<i32>,
+    /// Next M-RoPE position. Tracks token count for pure text; falls behind it
+    /// after an image span, whose n_pos is max(tokens_w, tokens_h) rather than
+    /// its token count.
+    rope_pos_next: i64,
     last_run: Option<HybridDecodeRun>,
 }
 
@@ -191,6 +205,7 @@ impl LlamaSession {
         self.weights = weights;
         self.graphs = graphs;
         self.token_ids.clear();
+        self.rope_pos_next = 0;
         self.last_run = None;
         Ok(())
     }
@@ -284,6 +299,14 @@ impl LlamaSession {
                 spec.layers.truncate(max_blocks);
             }
         }
+        // Same graph with precomputed-embedding input for image spans; both
+        // specs share the cache tensors, so batches can alternate freely.
+        let mut spec_embeddings = spec.clone();
+        spec_embeddings.input = ProbeInputKind::Embeddings {
+            hidden_size: model.embedding_length()?,
+            input_type: TensorType::F32,
+        };
+
         let cache_bytes = if let Some(template) = plan.hybrid_cache.as_ref() {
             HybridCacheLayout::new(template.materialize(cache_shape, cache_types))?.total_bytes
         } else {
@@ -307,12 +330,14 @@ impl LlamaSession {
             vocab,
             plan,
             spec,
+            spec_embeddings,
             config,
             max_context: max_context_usize,
             context_extra_bytes,
             weights,
             graphs,
             token_ids: Vec::new(),
+            rope_pos_next: 0,
             last_run: None,
         })
     }
@@ -360,6 +385,23 @@ impl LlamaSession {
         let cache_tokens = start
             .checked_add(batch_size)
             .ok_or_else(|| LlamaError::format("overflow computing session cache length"))?;
+        // After an image span, rope positions run behind the linear sequence
+        // index — text continues from the image's pos_0 + max(w, h).
+        let rope_positions = if self.rope_pos_next != start as i64 {
+            let base = self.rope_pos_next;
+            let mut planes = vec![0i32; batch_size * 4];
+            for i in 0..batch_size {
+                let p = i32::try_from(base + i as i64)
+                    .map_err(|_| LlamaError::format("rope position does not fit in i32"))?;
+                planes[i] = p;
+                planes[batch_size + i] = p;
+                planes[2 * batch_size + i] = p;
+                // fourth component stays 0 (unused section)
+            }
+            Some(planes)
+        } else {
+            None
+        };
         let graph_params = SessionGraphParams::greedy(batch_size, cache_tokens);
         self.ensure_compiled_graph(graph_params)?;
         let run = {
@@ -374,6 +416,7 @@ impl LlamaSession {
                 cache_tokens,
                 &output_ids,
             )?;
+            layout.rope_positions = rope_positions;
             if compiled.decode().input_recurrent_state_rows.is_none() {
                 layout.recurrent_state_rows.clear();
             }
@@ -381,7 +424,103 @@ impl LlamaSession {
                 .execute_logits_only_with_layout(LogitsProbeInput::TokenIds(token_ids), &layout)?
         };
         self.token_ids.extend_from_slice(token_ids);
+        self.rope_pos_next += batch_size as i64;
         self.last_run = Some(collapse_last_token_run(run)?);
+        Ok(())
+    }
+
+    /// Append an image span: precomputed vision embeddings for a grid of
+    /// `tokens_w` x `tokens_h` merged tokens (row-major), as produced by
+    /// `VisionTower::encode`. Occupies `tokens_w * tokens_h` sequence slots
+    /// but advances the rope position by only `max(tokens_w, tokens_h)`,
+    /// with Qwen-VL 2D positions `[pos0, pos0+y, pos0+x, 0]` per token.
+    /// Callers surround this with the `<|vision_start|>` / `<|vision_end|>`
+    /// text tokens via `append_tokens`.
+    pub fn append_image_embeddings(
+        &mut self,
+        embeddings: &[f32],
+        tokens_w: usize,
+        tokens_h: usize,
+    ) -> Result<()> {
+        let n_tokens = tokens_w * tokens_h;
+        if n_tokens == 0 {
+            return Ok(());
+        }
+        let hidden = usize::try_from(self.model.embedding_length()?)
+            .map_err(|_| LlamaError::format("embedding length does not fit in usize"))?;
+        if embeddings.len() != n_tokens * hidden {
+            return Err(LlamaError::format(format!(
+                "image embeddings length {} does not match {}x{} tokens x {} hidden",
+                embeddings.len(),
+                tokens_w,
+                tokens_h,
+                hidden
+            )));
+        }
+        self.ensure_capacity(n_tokens)?;
+        let pad_token = self.vocab.token_id("<|image_pad|>").unwrap_or(-1);
+        let pos0 = self.rope_pos_next;
+
+        let prefill_batch_size = self.config.prefill_batch_size.max(1);
+        let mut offset = 0usize;
+        while offset < n_tokens {
+            let batch_size = (n_tokens - offset).min(prefill_batch_size);
+            let start = self.token_ids.len();
+            let positions = (start..start + batch_size)
+                .map(|position| {
+                    i32::try_from(position)
+                        .map_err(|_| LlamaError::format("token position does not fit in i32"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let cache_tokens = start + batch_size;
+
+            let mut planes = vec![0i32; batch_size * 4];
+            for i in 0..batch_size {
+                let token_index = offset + i;
+                let y = (token_index / tokens_w) as i64;
+                let x = (token_index % tokens_w) as i64;
+                let clamp = |v: i64| {
+                    i32::try_from(v)
+                        .map_err(|_| LlamaError::format("rope position does not fit in i32"))
+                };
+                planes[i] = clamp(pos0)?;
+                planes[batch_size + i] = clamp(pos0 + y)?;
+                planes[2 * batch_size + i] = clamp(pos0 + x)?;
+                // fourth component stays 0 (unused section)
+            }
+
+            let graph_params = SessionGraphParams::greedy_embeddings(batch_size, cache_tokens);
+            self.ensure_compiled_graph(graph_params)?;
+            let run = {
+                let compiled = self
+                    .graphs
+                    .graph_for_mut(graph_params)
+                    .ok_or_else(|| LlamaError::format("compiled graph params were not cached"))?;
+                let output_ids = [i32::try_from(batch_size - 1)
+                    .map_err(|_| LlamaError::format("session output id does not fit in i32"))?];
+                let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+                    &positions,
+                    cache_tokens,
+                    &output_ids,
+                )?;
+                layout.rope_positions = Some(planes);
+                if compiled.decode().input_recurrent_state_rows.is_none() {
+                    layout.recurrent_state_rows.clear();
+                }
+                compiled.execute_logits_only_with_layout(
+                    LogitsProbeInput::EmbeddingsF32 {
+                        data: &embeddings[offset * hidden..(offset + batch_size) * hidden],
+                        n_tokens: batch_size,
+                    },
+                    &layout,
+                )?
+            };
+            self.token_ids
+                .extend(std::iter::repeat(pad_token).take(batch_size));
+            self.last_run = Some(collapse_last_token_run(run)?);
+            offset += batch_size;
+        }
+        self.rope_pos_next = pos0 + tokens_w.max(tokens_h) as i64;
         Ok(())
     }
 
@@ -398,9 +537,14 @@ impl LlamaSession {
             if attempt > 0 {
                 self.graphs.evict_graphs_except(params);
             }
+            let spec = if params.embeddings_input {
+                &self.spec_embeddings
+            } else {
+                &self.spec
+            };
             match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
                 &mut self.weights,
-                &self.spec,
+                spec,
                 &self.graphs.shared_runtime,
                 &self.graphs.shared_cache,
                 &self.graphs.shared_main_buffer,
