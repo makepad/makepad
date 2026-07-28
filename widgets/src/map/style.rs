@@ -837,7 +837,15 @@ pub fn stroke_style_for_tags(
             // (thin_bridge_dots_for_tags). Colors derive from the theme's
             // bridge fill so dark mode just works.
             if tag_is_truthy(tags, "bridge") {
-                let deck = theme.bridge_area_fill.unwrap_or(0xf2f0ed);
+                // Deck = the pedestrian-street surface color (white in the
+                // light palette, dark slab in dark), not the gray bridge-
+                // structure fill.
+                let deck = theme
+                    .road_rules
+                    .get("pedestrian")
+                    .map(|rule| rule.center.color)
+                    .or(theme.bridge_area_fill)
+                    .unwrap_or(0xf8f8f8);
                 let dot_width = style.center.width;
                 style.casing = Some(StrokePassStyle {
                     color: contrast_edge(deck),
