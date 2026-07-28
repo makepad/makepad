@@ -18,7 +18,11 @@ pub const LABEL_CURVE_MAX_SAMPLES: usize = 192;
 pub const LABEL_CURVE_SMOOTH_PASSES: usize = 2;
 pub const LABEL_BASELINE_SHIFT_FACTOR: f64 = 1.0;
 pub const LABEL_LAYOUT_MAX_CURVATURE: f32 = 1.0;
-pub const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.22;
+// cos threshold for the "treat as vertical" band around 90 degrees. Keep it
+// TIGHT (~±4°): inside the band the deterministic top-to-bottom rule wins,
+// which SKIPS the upside-down flip — at 0.22 the band reached 103° and
+// labels tilted past 90° rendered inverted (IJpromenade bug).
+pub const LABEL_VERTICAL_AXIS_EPSILON: f32 = 0.07;
 // One overzoomed z14 tile can hold a whole city's addresses; house numbers
 // are lowest-priority and must survive this per-tile cap to ever reach the
 // viewport filter.
@@ -49,6 +53,8 @@ pub const LABEL_CLASS_WATER: u8 = 9;
 pub const LABEL_CLASS_PIN: u8 = 10;
 /// Motorway exit (junction) labels — carto junction red.
 pub const LABEL_CLASS_EXIT: u8 = 11;
+/// Administrative district names (gemeente/wijk/buurt) — muted purple.
+pub const LABEL_CLASS_ADMIN: u8 = 12;
 
 #[derive(Clone, Debug)]
 pub struct TileLabel {
@@ -116,6 +122,37 @@ pub fn extract_way_label(
         return None;
     }
     let source_layer = tags.get("layer").cloned().unwrap_or_default();
+    // Transit route lines label with their line ref ("5", "52", "A") along
+    // the way, like street names.
+    if source_layer == "routes" {
+        let line_ref = tags
+            .get("ref")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value.len() <= 6)?;
+        let path_points = simplify_label_path(points);
+        if path_points.len() < 2 {
+            return None;
+        }
+        let mode = tags.get("mode").cloned().unwrap_or_default();
+        // "Tram 7" / "Metro 52" — the mode makes the number meaningful.
+        let text = match mode.as_str() {
+            "tram" => format!("Tram {line_ref}"),
+            "metro" => format!("Metro {line_ref}"),
+            "ferry" => format!("Ferry {line_ref}"),
+            "rail" => format!("Rail {line_ref}"),
+            _ => line_ref.clone(),
+        };
+        return Some(TileLabel {
+            text,
+            priority: 2,
+            source_layer,
+            road_kind: format!("transit:{}:{}", mode, line_ref),
+            color_class: LABEL_CLASS_TRANSPORT,
+            path_points,
+            name_key: String::new(),
+            bbox: (0.0, 0.0, 0.0, 0.0),
+        });
+    }
     // Waterway names follow their line like street names do.
     if source_layer == "water_lines_labels" {
         let name = select_label_text(tags)?;
@@ -212,6 +249,36 @@ pub fn extract_area_label(
     tags: &HashMap<String, String>,
     centroid: (f32, f32),
 ) -> Option<TileLabel> {
+    // CBS district overlays: gemeente / wijk / buurt names at the area
+    // centroid, staged by zoom at candidate time (tier in road_kind).
+    if let Some(layer) = tags.get("layer") {
+        if matches!(layer.as_str(), "gemeenten" | "wijken" | "buurten") {
+            let (name_field, tier) = match layer.as_str() {
+                "gemeenten" => ("gemeentenaam", 'g'),
+                "wijken" => ("wijknaam", 'w'),
+                _ => ("buurtnaam", 'b'),
+            };
+            let name = tags
+                .get(name_field)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())?;
+            return Some(TileLabel {
+                text: name,
+                priority: 2,
+                source_layer: layer.clone(),
+                road_kind: format!(
+                    "adm{}{:.0}x{:.0}",
+                    tier,
+                    centroid.0 * 4.0,
+                    centroid.1 * 4.0
+                ),
+                color_class: LABEL_CLASS_ADMIN,
+                path_points: point_label_path(centroid),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+    }
     // Geodata nature overlays name their areas with Dutch source columns.
     if let Some(layer) = tags.get("layer") {
         if matches!(layer.as_str(), "natura2000" | "wetlands") {
@@ -316,6 +383,29 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 } else {
                     LABEL_CLASS_MUTED
                 },
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+        // Transit stops label with their name; stations lead (bigger zoom
+        // range at candidate time via the roadkind flag).
+        "stops" => {
+            let name = select_label_text(tags)?;
+            let is_station = tags
+                .get("station")
+                .is_some_and(|v| v == "true" || v == "1" || v == "yes");
+            return Some(TileLabel {
+                text: name,
+                priority: if is_station { 2 } else { 3 },
+                source_layer,
+                road_kind: format!(
+                    "{}{:.0}x{:.0}",
+                    if is_station { "stS" } else { "stp" },
+                    point.0 * 4.0,
+                    point.1 * 4.0
+                ),
+                color_class: LABEL_CLASS_TRANSPORT,
                 path_points: point_label_path(point),
                 name_key: String::new(),
                 bbox: (0.0, 0.0, 0.0, 0.0),
@@ -554,6 +644,11 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "water_polygons_labels" => 5,
         "water_lines_labels" => 4,
         "micro_pois" => 3,
+        // Transit line refs sit with street names in prominence.
+        "routes" => 6,
+        "stops" => 4,
+        // Admin district names: visible but under settlements/streets.
+        "gemeenten" | "wijken" | "buurten" => 5,
         // Charger kW labels outrank street names — this is an EV navigator.
         "chargers" => 8,
         "charger_brand" => 8,
