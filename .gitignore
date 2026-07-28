@@ -51,3 +51,4 @@ CLAUDE.md
 ggml-*.bin
 /kokoro_voices/
 __pycache__/
+tesla_credentials.json
