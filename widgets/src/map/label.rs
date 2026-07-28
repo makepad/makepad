@@ -204,6 +204,26 @@ pub fn extract_area_label(
     tags: &HashMap<String, String>,
     centroid: (f32, f32),
 ) -> Option<TileLabel> {
+    // Geodata nature overlays name their areas with Dutch source columns.
+    if let Some(layer) = tags.get("layer") {
+        if matches!(layer.as_str(), "natura2000" | "wetlands") {
+            let name = tags
+                .get("naam_n2k")
+                .or_else(|| tags.get("naam"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())?;
+            return Some(TileLabel {
+                text: name,
+                priority: 2,
+                source_layer: "green_area".to_string(),
+                road_kind: format!("area{:.0}x{:.0}", centroid.0 * 4.0, centroid.1 * 4.0),
+                color_class: LABEL_CLASS_GREEN,
+                path_points: point_label_path(centroid),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+    }
     let is_green = tags.contains_key("leisure")
         || matches!(
             tags.get("landuse").map(|value| value.as_str()),

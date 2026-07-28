@@ -473,6 +473,8 @@ impl CompiledMapTheme {
 pub fn fill_alpha_for_tags(tags: &HashMap<String, String>) -> f32 {
     match tags.get("layer").map(|value| value.as_str()) {
         Some("natura2000" | "wetlands") => 0.22,
+        Some("vk100" | "vk500") => 0.45,
+        Some("bag") => 0.85,
         _ => 1.0,
     }
 }
@@ -522,6 +524,42 @@ pub fn fill_color_for_tags(
     // Nature reserves tint translucent green (alpha via fill_alpha_for_tags).
     if matches!(layer, "natura2000" | "wetlands") {
         return Some(0x74b787);
+    }
+    // Building-age choropleth (BAG bouwjaar): rust = old, blue = new.
+    if layer == "bag" {
+        let bouwjaar = tags
+            .get("bouwjaar")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0) as i32;
+        return Some(match bouwjaar {
+            0 => 0xbdbdbd,
+            year if year < 1800 => 0x8c2d04,
+            year if year < 1900 => 0xcc4c02,
+            year if year < 1930 => 0xec7014,
+            year if year < 1960 => 0xfe9929,
+            year if year < 1980 => 0xfec44f,
+            year if year < 2000 => 0x78c679,
+            year if year < 2010 => 0x41b6c4,
+            _ => 0x225ea8,
+        });
+    }
+    // Population choropleth (CBS grid cells), yellow -> deep blue.
+    if matches!(layer, "vk100" | "vk500") {
+        let population = tags
+            .get("aantal_inwoners")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        if population <= 0.0 {
+            return None;
+        }
+        return Some(match population as i64 {
+            1..=25 => 0xffffcc,
+            26..=100 => 0xc7e9b4,
+            101..=250 => 0x7fcdbb,
+            251..=500 => 0x41b6c4,
+            501..=1000 => 0x2c7fb8,
+            _ => 0x253494,
+        });
     }
     if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
         return theme.water_fill;
@@ -576,6 +614,13 @@ pub fn fill_layer_rank(tags: &HashMap<String, String>) -> u8 {
     // Sand-floored enclosures paint over the zoo's grass.
     if layer == "attraction_area" {
         return 20;
+    }
+    // Overlay choropleths: population under buildings, building-age above.
+    if matches!(layer, "vk100" | "vk500") {
+        return 21;
+    }
+    if layer == "bag" {
+        return 41;
     }
     // Green areas (parks/gardens/grass) rank above generic landuse and sites:
     // they share the `land` layer with huge residential polygons and would
