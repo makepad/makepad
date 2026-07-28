@@ -203,6 +203,7 @@ struct FillFeatureGroup {
     color: u32,
     layer_rank: u8,
     is_building: bool,
+    pattern: f32,
     rings: Vec<FillRing>,
 }
 
@@ -862,7 +863,7 @@ fn build_tile_buffers_from_features(
 
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
-    let mut fill_group_lookup = HashMap::<(String, u32), usize>::new();
+    let mut fill_group_lookup = HashMap::<(String, u32, u32), usize>::new();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
         if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
@@ -944,7 +945,8 @@ fn build_tile_buffers_from_features(
             .get(MVT_INTERNAL_FEATURE_KEY)
             .cloned()
             .unwrap_or_else(|| format!("way:{}", prepared_way.way_index));
-        let group_key = (feature_key, color);
+        let pattern = fill_pattern_shape(&way.tags);
+        let group_key = (feature_key, color, pattern.to_bits());
         let group_index = if let Some(index) = fill_group_lookup.get(&group_key).copied() {
             index
         } else {
@@ -954,6 +956,7 @@ fn build_tile_buffers_from_features(
                 color,
                 layer_rank: fill_layer_rank(&way.tags),
                 is_building: way.tags.contains_key("building"),
+                pattern,
                 rings: Vec::new(),
             });
             index
@@ -1016,7 +1019,7 @@ fn build_tile_buffers_from_features(
                 VectorRenderParams {
                     color: hex_to_premul_rgba(group.color, 1.0),
                     stroke_mult: 1e6,
-                    shape_id: 0.0,
+                    shape_id: group.pattern,
                     params: [
                         0.0,
                         0.0,
