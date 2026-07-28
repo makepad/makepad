@@ -859,9 +859,22 @@ fn build_tile_buffers_from_features(
         let mut label_point = *point;
         let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
         // Overlay points (chargers, transit stops) show earlier than the
-        // dense base-POI iconography.
+        // dense base-POI iconography. Chargers tier by power: an ultra-fast
+        // site matters at road-trip zoom, a street post doesn't.
         let icon_zoom_floor = match layer {
-            "chargers" => 12,
+            "chargers" => {
+                let kw = tags
+                    .get("max_kw")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                if kw >= 150.0 {
+                    9
+                } else if kw >= 50.0 {
+                    11
+                } else {
+                    13
+                }
+            }
             "stops" => 13,
             _ => ICON_MIN_ZOOM,
         };
@@ -2677,6 +2690,38 @@ mod bridge_probe_tests {
             for label in places.iter().take(5) {
                 println!("  {:?} kind={} prio={}", label.text, label.road_kind, label.priority);
             }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn overlay_batch_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        let overlay = "../local/overlays/nl-chargers.mbtiles".to_string();
+        let transit = "../local/overlays/nl-transit.mbtiles".to_string();
+        if !base.exists() {
+            return;
+        }
+        let theme = CompiledMapTheme::default();
+        let keys = vec![TileKey { z: 12, x: 2103, y: 1346 }];
+        let loaded = load_local_tile_batch(
+            base,
+            None,
+            &[overlay, transit],
+            &keys,
+            &theme,
+            12,
+            false,
+        )
+        .unwrap();
+        for tile in &loaded {
+            println!(
+                "tile z{} icons {} strokes {} labels {}",
+                tile.tile_key.z,
+                tile.buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                tile.buffers.stroke_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                tile.buffers.labels.len()
+            );
         }
     }
 
