@@ -27,3 +27,7 @@ path = "src/bin/llama_tokenize.rs"
 [[bin]]
 name = "llama-batch-probe"
 path = "src/bin/llama_batch_probe.rs"
+
+[[bin]]
+name = "vlm-vision-probe"
+path = "src/bin/vlm_vision_probe.rs"

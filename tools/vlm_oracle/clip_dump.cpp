@@ -56,15 +56,18 @@ int main(int argc, char ** argv) {
     const char * image_path  = argv[2];
     std::string  out_prefix  = argv[3];
     bool use_gpu = true;
+    bool use_flash = false;
     int max_tokens = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--cpu") == 0) use_gpu = false;
+        if (strcmp(argv[i], "--flash") == 0) use_flash = true;
         if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) max_tokens = atoi(argv[++i]);
     }
 
     clip_context_params cparams = {};
     cparams.use_gpu = use_gpu;
-    cparams.flash_attn_type = CLIP_FLASH_ATTN_TYPE_DISABLED; // deterministic reference path
+    cparams.flash_attn_type =
+        use_flash ? CLIP_FLASH_ATTN_TYPE_ENABLED : CLIP_FLASH_ATTN_TYPE_DISABLED;
     if (max_tokens > 0) cparams.image_max_tokens = max_tokens;
 
     clip_init_result res = clip_init(mmproj_path, cparams);
