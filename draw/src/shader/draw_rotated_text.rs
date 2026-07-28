@@ -27,6 +27,10 @@ script_mod! {
         cam_c: uniform(0.0)
         cam_d: uniform(1.0)
         cam_pivot: uniform(vec2(0.0, 0.0))
+        // self.upright (instance from the Rust struct): 1.0 = screen-upright
+        // label (place names, pin/brand text) — its ANCHOR tracks the camera
+        // delta but its orientation must not; the re-place keeps such labels
+        // horizontal, so rotating them live would snap back on regen.
 
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
@@ -38,11 +42,20 @@ script_mod! {
                 scaled.x * cs - scaled.y * sn,
                 scaled.x * sn + scaled.y * cs
             ) + origin
-            let cam_rel = rotated - self.cam_pivot
-            rotated = vec2(
-                cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
-                cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
-            ) + self.cam_pivot
+            if self.upright > 0.5 {
+                let anchor_rel = origin - self.cam_pivot
+                let cam_anchor = vec2(
+                    anchor_rel.x * self.cam_a + anchor_rel.y * self.cam_b,
+                    anchor_rel.x * self.cam_c + anchor_rel.y * self.cam_d
+                ) + self.cam_pivot
+                rotated = rotated - origin + cam_anchor
+            } else {
+                let cam_rel = rotated - self.cam_pivot
+                rotated = vec2(
+                    cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
+                    cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
+                ) + self.cam_pivot
+            }
 
             self.pos = self.geom.pos
             self.t = mix(self.t_min, self.t_max, self.geom.pos.xy)
@@ -100,6 +113,8 @@ pub struct DrawRotatedText {
     pub label_scale: f32,
     #[live(vec2(0.0, 0.0))]
     pub rotation_origin: Vec2f,
+    #[live(0.0)]
+    pub upright: f32,
 }
 
 impl DrawRotatedText {
@@ -212,6 +227,7 @@ impl DrawRotatedText {
         // advances and labels render letter-spaced.
         let saved_font_scale = self.draw_super.font_scale;
         self.draw_super.font_scale = 1.0;
+        self.upright = 0.0;
         for glyph in glyphs {
             self.draw_glyph_at(
                 cx,
@@ -229,6 +245,78 @@ impl DrawRotatedText {
                 1.0,
             );
         }
+        self.draw_super.font_scale = saved_font_scale;
+    }
+
+    /// Billboard variant for text INSIDE zoom-constant pins: the shared
+    /// anchor scales/translates with the map (tracking the pin's baked
+    /// anchor exactly), but glyph offsets and size stay in constant screen
+    /// px — so the text is rigid on the pin at every gesture zoom, like
+    /// the pin mesh itself.
+    pub fn draw_path_glyphs_billboard(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[PathGlyphInstance],
+        scale: f32,
+        offset: Vec2f,
+        anchor: Vec2f,
+    ) {
+        let saved_font_scale = self.draw_super.font_scale;
+        self.draw_super.font_scale = 1.0;
+        self.upright = 1.0;
+        let scaled_anchor =
+            Point::new(anchor.x * scale + offset.x, anchor.y * scale + offset.y);
+        for glyph in glyphs {
+            self.draw_glyph_at(
+                cx,
+                Point::new(
+                    scaled_anchor.x + (glyph.glyph_origin.x - anchor.x),
+                    scaled_anchor.y + (glyph.glyph_origin.y - anchor.y),
+                ),
+                scaled_anchor,
+                glyph.font_size_in_lpxs,
+                glyph.rasterized,
+                glyph.angle,
+                1.0,
+            );
+        }
+        self.upright = 0.0;
+        self.draw_super.font_scale = saved_font_scale;
+    }
+
+    /// Draw a straightened (screen-upright) label: every glyph carries the
+    /// SAME anchor (the label's world-anchor in cached screen space) so the
+    /// camera-delta shader translates the string rigidly to where the next
+    /// re-place will put it, without rotating the glyphs. Straightened
+    /// glyphs have angle 0, so hijacking rotation_origin as the anchor is
+    /// free.
+    pub fn draw_path_glyphs_upright(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[PathGlyphInstance],
+        scale: f32,
+        offset: Vec2f,
+        anchor: Vec2f,
+    ) {
+        let saved_font_scale = self.draw_super.font_scale;
+        self.draw_super.font_scale = 1.0;
+        self.upright = 1.0;
+        let anchor = Point::new(anchor.x * scale + offset.x, anchor.y * scale + offset.y);
+        for glyph in glyphs {
+            self.draw_glyph_at(
+                cx,
+                Point::new(
+                    glyph.glyph_origin.x * scale + offset.x,
+                    glyph.glyph_origin.y * scale + offset.y,
+                ),
+                anchor,
+                glyph.font_size_in_lpxs * scale,
+                glyph.rasterized,
+                glyph.angle,
+                1.0,
+            );
+        }
+        self.upright = 0.0;
         self.draw_super.font_scale = saved_font_scale;
     }
 
