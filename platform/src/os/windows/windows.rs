@@ -822,6 +822,27 @@ impl Cx {
                 | CxOsOp::DetachCameraNativePreview { .. } => {
                     // Native camera preview is emulated via composited texture path on Windows.
                 }
+                CxOsOp::SelectFileDialog(settings) => {
+                    let paths =
+                        crate::os::windows::win32_file_dialog::open_select_file_dialog(&settings);
+                    let cancelled = paths.is_none();
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent {
+                            paths: paths.unwrap_or_default(),
+                            cancelled,
+                        },
+                    ));
+                }
+                CxOsOp::SaveFileDialog(_)
+                | CxOsOp::SaveFolderDialog(_)
+                | CxOsOp::SelectFolderDialog(_) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent {
+                            paths: Vec::new(),
+                            cancelled: true,
+                        },
+                    ));
+                }
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {
                     // TODO: implement Windows audio-only playback
                 }

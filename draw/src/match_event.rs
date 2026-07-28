@@ -103,6 +103,20 @@ pub trait MatchEvent {
         false
     }
 
+    fn handle_permission_result(
+        &mut self,
+        _cx: &mut Cx,
+        _e: &crate::permission::PermissionResult,
+    ) {
+    }
+
+    fn handle_file_dialog_result(
+        &mut self,
+        _cx: &mut Cx,
+        _e: &crate::file_dialogs::FileDialogResultEvent,
+    ) {
+    }
+
     fn match_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Startup => self.handle_startup(cx),
@@ -128,6 +142,8 @@ pub trait MatchEvent {
             Event::NetworkResponses(e) => self.handle_network_responses(cx, e),
             Event::KeyDown(e) => self.handle_key_down(cx, e),
             Event::KeyUp(e) => self.handle_key_up(cx, e),
+            Event::PermissionResult(e) => self.handle_permission_result(cx, e),
+            Event::FileDialogResult(e) => self.handle_file_dialog_result(cx, e),
             Event::BackPressed { handled } if !handled.get() => {
                 let was_handled = self.handle_back_pressed(cx);
                 handled.set(was_handled);

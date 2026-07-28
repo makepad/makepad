@@ -1077,6 +1077,11 @@ impl Cx {
                     ));
                 }
             }
+            FromJavaMessage::FileDialogResult { paths, cancelled } => {
+                self.call_event_handler(&Event::FileDialogResult(
+                    crate::file_dialogs::FileDialogResultEvent { paths, cancelled },
+                ));
+            }
             FromJavaMessage::VideoPlaybackPrepared {
                 video_id,
                 video_width,
@@ -2889,6 +2894,35 @@ impl Cx {
                 }
                 CxOsOp::StartDragging(items) => {
                     self.os.internal_drag_items = Some(Arc::new(items));
+                }
+                CxOsOp::SelectFileDialog(settings) => {
+                    let mime = if settings.filters.iter().any(|f| {
+                        f.extensions.iter().any(|e| {
+                            let e = e.trim_start_matches('.').to_ascii_lowercase();
+                            matches!(
+                                e.as_str(),
+                                "mp4" | "mkv" | "webm" | "mov" | "m4v" | "3gp" | "avi" | "flv"
+                                    | "ts" | "wmv" | "mpg" | "mpeg"
+                            )
+                        })
+                    }) {
+                        "video/*"
+                    } else {
+                        "*/*"
+                    };
+                    unsafe {
+                        android_jni::to_java_open_file_dialog(mime);
+                    }
+                }
+                CxOsOp::SaveFileDialog(_)
+                | CxOsOp::SaveFolderDialog(_)
+                | CxOsOp::SelectFolderDialog(_) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent {
+                            paths: Vec::new(),
+                            cancelled: true,
+                        },
+                    ));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);

@@ -86,3 +86,11 @@ impl Default for FileDialog {
         Self::new()
     }
 }
+
+/// Result of a system open/save file dialog.
+#[derive(Clone, Debug, Default)]
+pub struct FileDialogResultEvent {
+    /// Selected filesystem paths (or `content://` URIs on Android). Empty when cancelled.
+    pub paths: Vec<String>,
+    pub cancelled: bool,
+}

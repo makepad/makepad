@@ -1467,6 +1467,39 @@ public class MakepadActivity
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
+        if (requestCode == FILE_DIALOG_REQUEST_CODE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                android.net.Uri uri = data.getData();
+                try {
+                    final int takeFlags = data.getFlags()
+                        & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    getContentResolver().takePersistableUriPermission(uri, takeFlags);
+                } catch (Throwable ignored) {}
+                MakepadNative.onFileDialogResult(new String[]{ uri.toString() }, false);
+            } else {
+                MakepadNative.onFileDialogResult(new String[0], true);
+            }
+            return;
+        }
+    }
+
+    private static final int FILE_DIALOG_REQUEST_CODE = 0x4D4B4644; // 'MKFD'
+
+    public void openFileDialog(String mimeType) {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType(mimeType != null && !mimeType.isEmpty() ? mimeType : "*/*");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, FILE_DIALOG_REQUEST_CODE);
+            } catch (Throwable e) {
+                Log.e("Makepad", "openFileDialog failed", e);
+                MakepadNative.onFileDialogResult(new String[0], true);
+            }
+        });
     }
 
     @Override

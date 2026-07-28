@@ -66,6 +66,9 @@ public class MakepadNative {
     // permissions
     public native static void onPermissionResult(String permission, int requestId, int status);
 
+    // system file / document picker
+    public native static void onFileDialogResult(String[] paths, boolean cancelled);
+
     // video playback
     public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);
     public static native void onVideoPlaybackCompleted(long videoId);

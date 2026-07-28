@@ -174,6 +174,10 @@ pub enum FromJavaMessage {
         request_id: i32,
         status: i32, // 0=NotDetermined, 1=Granted, 2=DeniedCanRetry, 3=DeniedPermanent
     },
+    FileDialogResult {
+        paths: Vec<String>,
+        cancelled: bool,
+    },
     VideoPlaybackPrepared {
         video_id: u64,
         video_width: u32,
@@ -1193,6 +1197,30 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionResu
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResult(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    paths: jni_sys::jobjectArray,
+    cancelled: jni_sys::jboolean,
+) {
+    let mut out = Vec::new();
+    if !paths.is_null() {
+        let len = (**env).GetArrayLength.unwrap()(env, paths);
+        for i in 0..len {
+            let s = (**env).GetObjectArrayElement.unwrap()(env, paths, i) as jni_sys::jstring;
+            if !s.is_null() {
+                out.push(jstring_to_string(env, s));
+                (**env).DeleteLocalRef.unwrap()(env, s as jni_sys::jobject);
+            }
+        }
+    }
+    send_from_java_message(FromJavaMessage::FileDialogResult {
+        paths: out,
+        cancelled: cancelled != 0,
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionDenied(
     env: *mut jni_sys::JNIEnv,
     class: jni_sys::jclass,
@@ -1953,6 +1981,20 @@ pub unsafe fn to_java_cleanup_video_decoder_ref(
     video_decoder_ref: jni_sys::jobject,
 ) {
     (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
+}
+
+pub unsafe fn to_java_open_file_dialog(mime_type: &str) {
+    let env = attach_jni_env();
+    let mime = CString::new(mime_type).unwrap_or_else(|_| CString::new("").unwrap());
+    let mime_j = ((**env).NewStringUTF.unwrap())(env, mime.as_ptr());
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "openFileDialog",
+        "(Ljava/lang/String;)V",
+        mime_j
+    );
+    (**env).DeleteLocalRef.unwrap()(env, mime_j);
 }
 
 pub unsafe fn to_java_check_permission(permission: &str) -> i32 {

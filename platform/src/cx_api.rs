@@ -1696,6 +1696,11 @@ impl Cx {
             .push(CxOsOp::SelectFileDialog(FileDialog::new()));
     }
 
+    /// Opens a system file picker with custom title/filters.
+    pub fn open_system_openfile_dialog_with(&mut self, dialog: FileDialog) {
+        self.platform_ops.push(CxOsOp::SelectFileDialog(dialog));
+    }
+
     pub fn open_system_savefolder_dialog(&mut self) {
         self.platform_ops
             .push(CxOsOp::SaveFolderDialog(FileDialog::new()));
