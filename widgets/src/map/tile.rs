@@ -866,7 +866,7 @@ fn build_tile_buffers_from_features(
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8)>::new();
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
@@ -932,12 +932,18 @@ fn build_tile_buffers_from_features(
                         3 => icon_mesh("charger_pin_ac").unwrap_or(mesh),
                         _ => mesh,
                     };
-                    icon_jobs.push((*point, mesh, color_class, priority, dist_factor, two_tone));
+                    icon_jobs.push((
+                        *point,
+                        mesh,
+                        color_class,
+                        priority,
+                        dist_factor,
+                        two_tone,
+                        charger_kw as f32,
+                    ));
                     if two_tone == 2 {
-                        // kW text sits INSIDE the wide bubble, right of the
-                        // bolt; brand reads below the pin from z13.
-                        label_point.0 += 4.0 / render_scale;
-                        label_point.1 -= 3.5 / render_scale;
+                        // brand reads below the pin from z13; the kW digits
+                        // are part of the icon composite itself.
                         if render_zoom >= 13 {
                             if let Some(operator) = tags.get("operator") {
                                 let brand = operator
@@ -988,7 +994,7 @@ fn build_tile_buffers_from_features(
     let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
     let icon_min_dist_sq = icon_min_dist * icon_min_dist;
     let mut accepted_icons = Vec::<(f32, f32)>::new();
-    icon_jobs.retain(|(point, _, _, _, dist_factor, _)| {
+    icon_jobs.retain(|(point, _, _, _, dist_factor, _, _)| {
         let collides = accepted_icons.iter().any(|other| {
             let dx = other.0 - point.0;
             let dy = other.1 - point.1;
@@ -1557,7 +1563,7 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class, _, _, two_tone) in &icon_jobs {
+    for (anchor, mesh, color_class, _, _, two_tone, kw) in &icon_jobs {
         append_icon_mesh(
             mesh,
             *anchor,
@@ -1579,24 +1585,42 @@ fn build_tile_buffers_from_features(
                 );
             }
         }
-        // Charger pins: white bolt in the pin BODY (mesh centers sit lower
-        // because of the pointer tail; wide pins keep the bolt left of the
-        // kW text).
+        // Charger pins are one COMPOSITE at a single anchor: badge, white
+        // bolt (offset baked in the mesh) and, for fast sites, the kW
+        // digits as vector glyphs — all billboard together, so nothing
+        // detaches, doubles or re-lays-out while zooming or rotating.
         if *two_tone == 2 || *two_tone == 3 {
-            if let Some(bolt) = icon_mesh("charger_bolt") {
-                let (dx, dy) = if *two_tone == 2 { (-8.5, -3.5) } else { (0.0, -2.5) };
-                let bolt_anchor = (
-                    anchor.0 + dx / render_scale,
-                    anchor.1 + dy / render_scale,
-                );
+            let bolt_name = if *two_tone == 2 { "charger_bolt_fast" } else { "charger_bolt_ac" };
+            if let Some(bolt) = icon_mesh(bolt_name) {
                 append_icon_mesh(
                     bolt,
-                    bolt_anchor,
+                    *anchor,
                     hex_to_premul_rgba(0xffffff, 1.0),
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
                 );
+            }
+        }
+        if *two_tone == 2 {
+            let text = format!("{:.0}", kw.min(999.0));
+            let advance = 6.4f32;
+            let total = text.len() as f32 * advance;
+            // Text zone: right of the bolt inside the wide bubble.
+            let start_x = 3.0 - total * 0.5 + advance * 0.5;
+            for (index, ch) in text.chars().enumerate() {
+                let Some(digit) = ch.to_digit(10) else { continue };
+                if let Some(mesh) = icon_mesh(super::icons::DIGIT_NAMES[digit as usize]) {
+                    append_icon_mesh_offset(
+                        mesh,
+                        *anchor,
+                        (start_x + index as f32 * advance, -3.5),
+                        hex_to_premul_rgba(0xffffff, 1.0),
+                        &mut icon_vertices,
+                        &mut icon_indices,
+                        &mut icon_zbias,
+                    );
+                }
             }
         }
         feature_count += 1;
@@ -1731,6 +1755,21 @@ fn append_icon_mesh(
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
+    append_icon_mesh_offset(mesh, anchor, (0.0, 0.0), color, out_vertices, out_indices, zbias)
+}
+
+/// Like append_icon_mesh with an extra SCREEN-px offset added to every
+/// vertex — lets shared meshes (digits) compose inside a pin badge while
+/// staying zoom-constant with it.
+fn append_icon_mesh_offset(
+    mesh: &IconMesh,
+    anchor: (f32, f32),
+    screen_offset: (f32, f32),
+    color: [f32; 4],
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
     for vertex in &mesh.verts {
         out_vertices.extend_from_slice(&[
@@ -1746,8 +1785,8 @@ fn append_icon_mesh(
             vertex.stroke_dist,
             ICON_SHAPE_ID,
             0.0,      // param0: solid color
-            vertex.x, // param1/2: screen-px offset from the anchor
-            vertex.y,
+            vertex.x + screen_offset.0, // param1/2: screen-px offset from the anchor
+            vertex.y + screen_offset.1,
             0.0,
             0.0,
             90.0, // tilt depth: markers NEVER clip into the tilted ground
