@@ -957,8 +957,46 @@ impl MatchEvent for App {
                 self.set_destination(cx, LonLat::new(lon, lat), "Dropped pin", false);
             }
         }
+        if let Some((_lon, _lat, info)) = map.pin_tapped(actions) {
+            let get = |key: &str| {
+                info.iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("")
+            };
+            let title = if !get("operator").is_empty() {
+                get("operator").to_string()
+            } else if !get("name").is_empty() {
+                get("name").to_string()
+            } else {
+                "Charger".to_string()
+            };
+            let mut lines: Vec<String> = Vec::new();
+            if !get("max_kw").is_empty() {
+                lines.push(format!("{} kW max", get("max_kw")));
+            }
+            if !get("evses").is_empty() || !get("connectors").is_empty() {
+                lines.push(format!(
+                    "{} bays · {} connectors",
+                    get("evses"),
+                    get("connectors")
+                ));
+            }
+            if !get("name").is_empty() && get("name") != title {
+                lines.push(get("name").to_string());
+            }
+            if !get("city").is_empty() {
+                lines.push(get("city").to_string());
+            }
+            self.ui.label(cx, ids!(pin_info_title)).set_text(cx, &title);
+            self.ui
+                .label(cx, ids!(pin_info_body))
+                .set_text(cx, &lines.join("\n"));
+            self.ui.view(cx, ids!(pin_info)).set_visible(cx, true);
+        }
         if map.tapped(actions).is_some() {
             self.hide_results(cx);
+            self.ui.view(cx, ids!(pin_info)).set_visible(cx, false);
         }
         if map.viewport_changed(actions).is_some() {
             if self.program_moves > 0 {

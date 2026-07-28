@@ -402,6 +402,12 @@ pub enum MapViewAction {
         lat: f64,
         zoom: f64,
     },
+    /// A charger pin was tapped: position + the attributes we know.
+    PinTapped {
+        lon: f64,
+        lat: f64,
+        info: Vec<(String, String)>,
+    },
     /// Finger up without drag or long-press, not on a marker.
     Tapped {
         lon: f64,
@@ -896,6 +902,8 @@ impl Widget for MapView {
                             self.uid,
                             MapViewAction::LongPressed { lon, lat, abs: fe.abs },
                         );
+                    } else if let Some((lon, lat, info)) = self.pin_at(fe.abs) {
+                        cx.widget_action(self.uid, MapViewAction::PinTapped { lon, lat, info });
                     } else if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), fe.abs)
                     {
                         cx.widget_action(self.uid, MapViewAction::MarkerClicked { id });
@@ -1019,10 +1027,16 @@ impl Widget for MapView {
                     continue;
                 };
                 // Stale higher-bucket tiles keep their baked symbols until
-                // the rebuild lands; hide the pass on deep zoom-out. The
-                // floor tracks the LOWEST icon class — charger pins start
-                // at z9 (EV navigator), not the z16 POI carpet.
-                if pass == 3 && view_zoom < 8.75 {
+                // the rebuild lands. Charger pins bake from z9 so the pass
+                // itself stays on when zoomed out — but a stale POI-carpet
+                // tile (baked at z16+) hides its symbols the moment the
+                // view drops below icon level, instead of splattering
+                // hundreds of full-size shop icons across the region.
+                if pass == 3
+                    && (view_zoom < 8.75
+                        || (entry.bucket >= ICON_MIN_ZOOM
+                            && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
+                {
                     continue;
                 }
                 let geometry = match pass {
@@ -1115,10 +1129,16 @@ impl Widget for MapView {
                     continue;
                 };
                 // Stale higher-bucket tiles keep their baked symbols until
-                // the rebuild lands; hide the pass on deep zoom-out. The
-                // floor tracks the LOWEST icon class — charger pins start
-                // at z9 (EV navigator), not the z16 POI carpet.
-                if pass == 3 && view_zoom < 8.75 {
+                // the rebuild lands. Charger pins bake from z9 so the pass
+                // itself stays on when zoomed out — but a stale POI-carpet
+                // tile (baked at z16+) hides its symbols the moment the
+                // view drops below icon level, instead of splattering
+                // hundreds of full-size shop icons across the region.
+                if pass == 3
+                    && (view_zoom < 8.75
+                        || (entry.bucket >= ICON_MIN_ZOOM
+                            && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
+                {
                     continue;
                 }
                 let geometry = match pass {
@@ -1515,6 +1535,7 @@ impl MapView {
                     icon_geometry,
                     feature_count: buffers.feature_count,
                     labels: buffers.labels,
+                    pin_hits: buffers.pin_hits,
                 },
                 last_used: self.frame_counter,
                 attempts: 0,
@@ -3151,6 +3172,32 @@ impl MapView {
 // --- Camera + overlay public API (the M0 interaction surface) ---
 
 impl MapView {
+    /// Hit-test the tappable charger pins of ready tiles against a screen
+    /// point (billboard rect around the pin anchor, camera-transformed).
+    fn pin_at(&self, abs: Vec2d) -> Option<(f64, f64, Vec<(String, String)>)> {
+        let camera = self.overlay_camera();
+        let mut best: Option<(f64, &PinHit)> = None;
+        for entry in self.tiles.values() {
+            let TileLoadState::Ready { pin_hits, .. } = &entry.state else {
+                continue;
+            };
+            for hit in pin_hits {
+                let screen = camera.norm_to_screen(dvec2(hit.norm.0, hit.norm.1));
+                let dx = abs.x - screen.x;
+                let dy = abs.y - screen.y;
+                if dx.abs() <= 18.0 && dy >= -18.0 && dy <= 16.0 {
+                    let dist = dx * dx + dy * dy;
+                    if best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                        best = Some((dist, hit));
+                    }
+                }
+            }
+        }
+        let (_, hit) = best?;
+        let (lon, lat) = normalized_to_lon_lat(dvec2(hit.norm.0, hit.norm.1));
+        Some((lon, lat, hit.info.clone()))
+    }
+
     fn overlay_camera(&self) -> OverlayCamera {
         let world_size = tile_world_size_zoom(self.view_zoom());
         let center_world = self.center_norm * world_size;
@@ -3451,6 +3498,15 @@ impl MapViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_map_zoom(cx, zoom);
         }
+    }
+
+    pub fn pin_tapped(&self, actions: &Actions) -> Option<(f64, f64, Vec<(String, String)>)> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let MapViewAction::PinTapped { lon, lat, info } = item.cast() {
+                return Some((lon, lat, info));
+            }
+        }
+        None
     }
 
     pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
