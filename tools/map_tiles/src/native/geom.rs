@@ -206,6 +206,32 @@ pub struct PreparedFeature {
     pub paths: Vec<Vec<TilePoint>>,
 }
 
+/// emit_point minus the spool.
+pub fn prepare_point(
+    zoom: u8,
+    layer: Layer,
+    osm_type: OsmType,
+    id: i64,
+    point: GlobalPoint,
+    out: &mut Vec<PreparedFeature>,
+) -> Result<(), String> {
+    let axis = 1_i64 << zoom;
+    let tile_x = point.x.div_euclid(MVT_EXTENT).clamp(0, axis - 1) as u32;
+    let tile_y = point.y.div_euclid(MVT_EXTENT).clamp(0, axis - 1) as u32;
+    let local = to_local(point, tile_x, tile_y)?;
+    out.push(PreparedFeature {
+        tile_x,
+        tile_y,
+        layer,
+        geometry_type: GeometryType::Point,
+        osm_type,
+        id,
+        closed: false,
+        paths: vec![vec![local]],
+    });
+    Ok(())
+}
+
 /// emit_lines minus the spool: collect per-tile localized features.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_lines(

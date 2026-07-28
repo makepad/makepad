@@ -868,6 +868,83 @@ fn encode_way_refs(refs: &[i64]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+/// The relation-member way store fully decoded into RAM (mirrors
+/// FlatNodeStore): relations reference ways randomly across the whole
+/// extract, so the 128-group LRU thrashed pass 4 the same way pass 3 did.
+pub struct FlatWayStore {
+    groups: Vec<Option<DecodedWayGroup>>,
+}
+
+impl FlatWayStore {
+    pub fn load(data_path: &Path, index_path: &Path) -> Result<Self, String> {
+        let mut file = File::open(data_path)
+            .map_err(|err| format!("open {}: {err}", data_path.display()))?;
+        verify_data_magic(&mut file, data_path, WAY_DATA_MAGIC)?;
+        drop(file);
+        let entries = read_index(index_path, WAY_INDEX_MAGIC)?;
+        let max_group = entries
+            .iter()
+            .map(|entry| entry.group_id)
+            .max()
+            .unwrap_or(0) as usize;
+        let mut groups: Vec<Option<DecodedWayGroup>> = Vec::new();
+        groups.resize_with(max_group + 1, || None);
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 16))
+            .unwrap_or(4);
+        let chunk_size = entries.len().div_ceil(workers).max(1);
+        let decoded: Vec<Vec<(u64, DecodedWayGroup)>> =
+            std::thread::scope(|scope| -> Result<_, String> {
+                let mut handles = Vec::new();
+                for chunk in entries.chunks(chunk_size) {
+                    let data_path = data_path.to_path_buf();
+                    handles.push(scope.spawn(move || -> Result<_, String> {
+                        let mut file = File::open(&data_path)
+                            .map_err(|err| format!("open {}: {err}", data_path.display()))?;
+                        let mut out = Vec::with_capacity(chunk.len());
+                        for entry in chunk {
+                            file.seek(SeekFrom::Start(entry.offset)).map_err(|err| {
+                                format!("seek {}: {err}", data_path.display())
+                            })?;
+                            let mut bytes = vec![0_u8; entry.length as usize];
+                            file.read_exact(&mut bytes).map_err(|err| {
+                                format!("read {}: {err}", data_path.display())
+                            })?;
+                            out.push((entry.group_id, decode_way_group(&bytes, entry.group_id)?));
+                        }
+                        Ok(out)
+                    }));
+                }
+                let mut decoded = Vec::new();
+                for handle in handles {
+                    decoded.push(
+                        handle
+                            .join()
+                            .map_err(|_| "way store load thread panicked".to_string())??,
+                    );
+                }
+                Ok(decoded)
+            })?;
+        for part in decoded {
+            for (group_id, group) in part {
+                groups[group_id as usize] = Some(group);
+            }
+        }
+        Ok(Self { groups })
+    }
+
+    pub fn get(&self, id: i64) -> Result<Option<&[i64]>, String> {
+        if id < 0 {
+            return Ok(None);
+        }
+        let group_id = (id as u64 >> WAY_GROUP_SHIFT) as usize;
+        match self.groups.get(group_id).and_then(|group| group.as_ref()) {
+            Some(group) => group.get(id),
+            None => Ok(None),
+        }
+    }
+}
+
 pub struct WayStore {
     path: PathBuf,
     file: File,
