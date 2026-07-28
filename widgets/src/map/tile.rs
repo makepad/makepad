@@ -390,6 +390,7 @@ pub fn build_tile_buffers_from_body(
         tagged_points,
         theme,
         render_zoom,
+        false,
     ))
 }
 
@@ -461,6 +462,7 @@ pub fn build_tile_buffers_from_mvt(
         collector.points,
         theme,
         render_zoom,
+        buildings_3d,
     ))
 }
 
@@ -676,12 +678,24 @@ fn merge_detail_features(
                 }
                 continue;
             }
+            let is_building = way
+                .tags
+                .get("building")
+                .is_some_and(|value| value != "no");
+            let is_building_part = way
+                .tags
+                .get("building:part")
+                .is_some_and(|value| value != "no");
             // Named zoo enclosures / attractions label at their centroid
-            // (and fill if they carry a surface like sand).
+            // (and fill if they carry a surface like sand). Famous BUILDINGS
+            // also carry tourism=attraction (Westerkerk, Munttoren…) — in 3D
+            // mode they must fall through to the extrusion path, not get
+            // swallowed as a flat attraction fill.
             let is_attraction = way.tags.contains_key("name")
                 && (way.tags.contains_key("attraction")
                     || way.tags.contains_key("zoo")
-                    || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"));
+                    || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"))
+                && !(want_buildings && (is_building || is_building_part));
             if is_attraction {
                 if want_platforms {
                     way.tags
@@ -715,11 +729,17 @@ fn merge_detail_features(
             if !want_buildings {
                 continue;
             }
-            let is_building = way
-                .tags
-                .get("building")
-                .is_some_and(|value| value != "no");
-            if !is_building {
+            if !is_building && !is_building_part {
+                continue;
+            }
+            // Underground volumes (metro halls mapped as building:part,
+            // parking cellars) must never extrude above ground.
+            if way.tags.get("location").map(|v| v.as_str()) == Some("underground")
+                || way
+                    .tags
+                    .get("osm_layer")
+                    .is_some_and(|value| value.starts_with('-'))
+            {
                 continue;
             }
             way.tags
@@ -829,11 +849,86 @@ fn building_height_m(tags: &HashMap<String, String>) -> f32 {
     8.0
 }
 
+/// Base height (bottom of the volume) for building:part features:
+/// `min_height` meters, else `building:min_level` x 3m.
+fn building_min_height_m(tags: &HashMap<String, String>) -> f32 {
+    if let Some(min_height) = tags.get("min_height") {
+        let digits: String = min_height
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if let Ok(h) = digits.parse::<f32>() {
+            return h.clamp(0.0, 220.0);
+        }
+    }
+    if let Some(levels) = tags.get("building:min_level") {
+        if let Ok(n) = levels.trim().parse::<f32>() {
+            return (n * 3.0).clamp(0.0, 220.0);
+        }
+    }
+    0.0
+}
+
+/// Ray-cast point-in-polygon on a tile-local ring.
+fn point_in_ring(point: (f32, f32), ring: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = ring[i];
+        let (xj, yj) = ring[j];
+        if (yi > point.1) != (yj > point.1) {
+            let x_cross = xi + (point.1 - yi) / (yj - yi) * (xj - xi);
+            if point.0 < x_cross {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// A flat horizontal disc lifted `height_m` meters (roof-style param4):
+/// triangle fan, hard edge (canopy blobs are small; AA fringe not worth it).
+fn append_horizontal_disc(
+    center: (f32, f32),
+    radius_units: f32,
+    height_m: f32,
+    color: [f32; 4],
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    const SEGS: u32 = 14;
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    let mut push_vertex = |x: f32, y: f32| {
+        out_vertices.extend_from_slice(&[
+            x, y, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, height_m, 0.05, 24.0, *zbias,
+        ]);
+    };
+    push_vertex(center.0, center.1);
+    for i in 0..SEGS {
+        let a = i as f32 / SEGS as f32 * std::f32::consts::TAU;
+        push_vertex(center.0 + a.cos() * radius_units, center.1 + a.sin() * radius_units);
+    }
+    for i in 0..SEGS {
+        let next = (i + 1) % SEGS;
+        out_indices.extend_from_slice(&[base, base + 1 + i, base + 1 + next]);
+    }
+    *zbias += VECTOR_ZBIAS_STEP;
+}
+
 /// One flat-shaded wall quad: two ground vertices and two roof vertices
 /// whose height rides in param4 for the tilt shader to lift.
 fn append_wall_quad(
     a: (f32, f32),
     b: (f32, f32),
+    base_m: f32,
     height_m: f32,
     color: [f32; 4],
     out_vertices: &mut Vec<f32>,
@@ -841,7 +936,7 @@ fn append_wall_quad(
     zbias: &mut f32,
 ) {
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (p, h) in [(a, 0.0), (b, 0.0), (b, height_m), (a, height_m)] {
+    for (p, h) in [(a, base_m), (b, base_m), (b, height_m), (a, height_m)] {
         out_vertices.extend_from_slice(&[
             p.0, p.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, h, 0.05, 90.0, *zbias,
@@ -864,6 +959,7 @@ fn build_tile_buffers_from_features(
     tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
     theme: &CompiledMapTheme,
     render_zoom: u32,
+    buildings_3d: bool,
 ) -> TileBuffers {
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
@@ -877,7 +973,9 @@ fn build_tile_buffers_from_features(
 
     let mut labels = Vec::<TileLabel>::new();
     let mut pin_hits = Vec::<PinHit>::new();
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32)>::new();
+    let mut icon_jobs =
+        Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32)>::new();
+    let mut tree_points_3d = Vec::<(f32, f32)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
@@ -929,6 +1027,15 @@ fn build_tile_buffers_from_features(
                                 .unwrap_or(0.0)
                         })
                         .unwrap_or(0.0);
+                    // Stall count (OCPI EVSEs) rides along for the in-pin
+                    // "kW/stalls" text at close zooms.
+                    let charger_stalls = (layer == "chargers")
+                        .then(|| {
+                            tags.get("evses")
+                                .and_then(|value| value.parse::<f64>().ok())
+                                .unwrap_or(0.0)
+                        })
+                        .unwrap_or(0.0);
                     // Chargers render as Tesla-style pin badges: wide badge
                     // (bolt + kW text inside) for fast sites, small badge
                     // for street AC.
@@ -943,6 +1050,19 @@ fn build_tile_buffers_from_features(
                         3 => icon_mesh("charger_pin_ac").unwrap_or(mesh),
                         _ => mesh,
                     };
+                    // The icon's own zoom floor rides into the vertex data
+                    // (param4): the shader hides the icon the instant the
+                    // LIVE view zoom drops below it, so stale deeper-bucket
+                    // tiles never flash markers while zooming out.
+                    let zoom_floor =
+                        micro_icon_min_zoom(icon_name).max(icon_zoom_floor as f32);
+                    // In 3D mode trees become little REAL 3D trees (trunk +
+                    // canopy blob lifted by the building height mechanism)
+                    // instead of flat billboard discs.
+                    if buildings_3d && icon_name == "tree" {
+                        tree_points_3d.push(*point);
+                        continue;
+                    }
                     icon_jobs.push((
                         *point,
                         mesh,
@@ -951,6 +1071,8 @@ fn build_tile_buffers_from_features(
                         dist_factor,
                         two_tone,
                         charger_kw as f32,
+                        charger_stalls as f32,
+                        zoom_floor,
                     ));
                     if two_tone == 2 || two_tone == 3 {
                         // Tappable: record position + info for the bubble.
@@ -970,6 +1092,41 @@ fn build_tile_buffers_from_features(
                         pin_hits.push(PinHit { norm, info });
                     }
                     if two_tone == 2 {
+                        // In-pin text via the NORMAL text renderer (drawn in
+                        // the post-icon pin phase, billboard-anchored):
+                        // Tesla pins show the stall count (the kW is implied
+                        // by the brand, like the Tesla app), other brands
+                        // show the peak kW.
+                        let is_tesla = tags
+                            .get("operator")
+                            .or_else(|| tags.get("brand"))
+                            .is_some_and(|v| v.to_lowercase().contains("tesla"));
+                        let pin_text = if is_tesla && charger_stalls >= 1.0 {
+                            format!("{:.0}", charger_stalls.min(99.0))
+                        } else if charger_kw >= 1.0 {
+                            format!("{:.0}", charger_kw.min(999.0))
+                        } else {
+                            String::new()
+                        };
+                        if !pin_text.is_empty() {
+                            labels.push(TileLabel {
+                                text: pin_text,
+                                priority: 1,
+                                source_layer: "chargers".to_string(),
+                                road_kind: format!(
+                                    "chp{}_{:.0}x{:.0}",
+                                    icon_zoom_floor,
+                                    point.0 * 4.0,
+                                    point.1 * 4.0
+                                ),
+                                color_class: crate::map::label::LABEL_CLASS_PIN,
+                                path_points: crate::map::label::point_label_path_pub((
+                                    point.0, point.1,
+                                )),
+                                name_key: String::new(),
+                                bbox: (0.0, 0.0, 0.0, 0.0),
+                            });
+                        }
                         // brand reads below the pin from z13; the kW digits
                         // are part of the icon composite itself.
                         if render_zoom >= 13 {
@@ -989,14 +1146,19 @@ fn build_tile_buffers_from_features(
                                             point.0 * 4.0,
                                             point.1 * 4.0
                                         ),
-                                        color_class: if charger_kw >= 150.0 {
+                                        color_class: if operator.to_lowercase().contains("tesla")
+                                        {
                                             crate::map::label::LABEL_CLASS_HEALTH
                                         } else {
                                             crate::map::label::LABEL_CLASS_AMENITY
                                         },
+                                        // Anchor AT the charger point; the
+                                        // below-the-pin offset is applied in
+                                        // SCREEN space at candidate time so it
+                                        // doesn't tilt-compress or orbit the
+                                        // billboard pin when the camera moves.
                                         path_points: crate::map::label::point_label_path_pub((
-                                            point.0,
-                                            point.1 + 12.0 / render_scale,
+                                            point.0, point.1,
                                         )),
                                         name_key: String::new(),
                                         bbox: (0.0, 0.0, 0.0, 0.0),
@@ -1022,7 +1184,7 @@ fn build_tile_buffers_from_features(
     let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
     let icon_min_dist_sq = icon_min_dist * icon_min_dist;
     let mut accepted_icons = Vec::<(f32, f32)>::new();
-    icon_jobs.retain(|(point, _, _, _, dist_factor, _, _)| {
+    icon_jobs.retain(|(point, _, _, _, dist_factor, _, _, _, _)| {
         let collides = accepted_icons.iter().any(|other| {
             let dx = other.0 - point.0;
             let dy = other.1 - point.1;
@@ -1076,6 +1238,8 @@ fn build_tile_buffers_from_features(
     struct BuildingGroup {
         rings: Vec<FillRing>,
         height_m: f32,
+        min_height_m: f32,
+        is_part: bool,
     }
     let mut building_groups = Vec::<BuildingGroup>::new();
     let mut building_group_lookup = HashMap::<String, usize>::new();
@@ -1114,6 +1278,11 @@ fn build_tile_buffers_from_features(
                     building_groups.push(BuildingGroup {
                         rings: Vec::new(),
                         height_m: building_height_m(&way.tags),
+                        min_height_m: building_min_height_m(&way.tags),
+                        is_part: way
+                            .tags
+                            .get("building:part")
+                            .is_some_and(|value| value != "no"),
                     });
                     index
                 };
@@ -1318,7 +1487,44 @@ fn build_tile_buffers_from_features(
         struct BuildingJob {
             polygon: Vec<Vec<(f32, f32)>>,
             height_m: f32,
+            base_m: f32,
             min_y: f32,
+        }
+        // Simple 3D Buildings: an outline whose interior holds
+        // building:parts must NOT extrude — the parts carry the true
+        // volumes (Westerkerk's nave + 85m Westertoren); the outline
+        // keeps only a flat footprint fill beneath them.
+        let part_centroids: Vec<(f32, f32)> = building_groups
+            .iter()
+            .filter(|group| group.is_part)
+            .filter_map(|group| {
+                group
+                    .rings
+                    .iter()
+                    .max_by(|a, b| {
+                        a.signed_area
+                            .abs()
+                            .partial_cmp(&b.signed_area.abs())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|ring| ring_centroid(&ring.points))
+            })
+            .collect();
+        if !part_centroids.is_empty() {
+            for group in building_groups.iter_mut() {
+                if group.is_part {
+                    continue;
+                }
+                let covers = group.rings.iter().any(|ring| {
+                    part_centroids
+                        .iter()
+                        .any(|c| point_in_ring(*c, &ring.points))
+                });
+                if covers {
+                    group.height_m = 0.0;
+                    group.min_height_m = 0.0;
+                }
+            }
         }
         let mut building_jobs = Vec::<BuildingJob>::new();
         for group in &building_groups {
@@ -1333,6 +1539,7 @@ fn build_tile_buffers_from_features(
                 building_jobs.push(BuildingJob {
                     polygon,
                     height_m: group.height_m,
+                    base_m: group.min_height_m.clamp(0.0, group.height_m),
                     min_y,
                 });
             }
@@ -1347,6 +1554,9 @@ fn build_tile_buffers_from_features(
         // Light from the north-west; walls shade by their outward normal.
         let (light_x, light_y) = (-0.55_f32, -0.835_f32);
         for job in &building_jobs {
+            if job.height_m <= 0.05 {
+                // Flattened outline: footprint fill only, no walls.
+            } else {
             for ring in &job.polygon {
                 // Outward normal needs ring orientation; positive shoelace
                 // in y-down tile space = exterior winding, holes come
@@ -1384,6 +1594,7 @@ fn build_tile_buffers_from_features(
                     append_wall_quad(
                         a,
                         b,
+                        job.base_m,
                         job.height_m,
                         wall_color,
                         &mut fill_vertices,
@@ -1391,6 +1602,7 @@ fn build_tile_buffers_from_features(
                         &mut fill_zbias,
                     );
                 }
+            }
             }
             for ring in &job.polygon {
                 emit_path(&mut path, ring, true);
@@ -1420,6 +1632,63 @@ fn build_tile_buffers_from_features(
                 },
             );
             fill_zbias += VECTOR_ZBIAS_STEP;
+            feature_count += 1;
+        }
+    }
+
+    // Little 3D trees (tilt mode): two crossed trunk quads (visible from
+    // any camera heading) + two stacked canopy discs lifted by the same
+    // per-meter height mechanism as building roofs — the tilt compression
+    // turns them into oval blobs.
+    if !tree_points_3d.is_empty() {
+        let n = (1u32 << tile_key.z) as f64;
+        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
+            .sinh()
+            .atan();
+        // tile-local units per meter at this latitude
+        let units_per_m =
+            (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
+        let trunk_color = hex_to_premul_rgba(0x8a6b4a, 1.0);
+        let canopy_color = hex_to_premul_rgba(0x4a7d44, 1.0);
+        let arm = 0.55 * units_per_m;
+        // Canopy = a BALL, not a pancake: same-color sphere slices give the
+        // blob a round silhouette under tilt. Architecture-model
+        // proportions: the ball dominates (R 2.6m, center 3.4m), with a
+        // short visible trunk under it.
+        const BALL_SLICES: [(f32, f32); 4] =
+            [(1.9, 1.6), (2.5, 2.8), (2.5, 4.0), (1.9, 5.2)];
+        for (x, y) in &tree_points_3d {
+            append_wall_quad(
+                (*x - arm, *y),
+                (*x + arm, *y),
+                0.0,
+                3.4,
+                trunk_color,
+                &mut fill_vertices,
+                &mut fill_indices,
+                &mut fill_zbias,
+            );
+            append_wall_quad(
+                (*x, *y - arm),
+                (*x, *y + arm),
+                0.0,
+                3.4,
+                trunk_color,
+                &mut fill_vertices,
+                &mut fill_indices,
+                &mut fill_zbias,
+            );
+            for (radius_m, height_m) in BALL_SLICES {
+                append_horizontal_disc(
+                    (*x, *y),
+                    radius_m * units_per_m,
+                    height_m,
+                    canopy_color,
+                    &mut fill_vertices,
+                    &mut fill_indices,
+                    &mut fill_zbias,
+                );
+            }
             feature_count += 1;
         }
     }
@@ -1591,11 +1860,12 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class, _, _, two_tone, kw) in &icon_jobs {
+    for (anchor, mesh, color_class, _, _, two_tone, kw, stalls, zoom_floor) in &icon_jobs {
         append_icon_mesh(
             mesh,
             *anchor,
             hex_to_premul_rgba(poi_class_hex(*color_class), 1.0),
+            *zoom_floor,
             &mut icon_vertices,
             &mut icon_indices,
             &mut icon_zbias,
@@ -1607,6 +1877,7 @@ fn build_tile_buffers_from_features(
                     core,
                     *anchor,
                     hex_to_premul_rgba(0x4c7a4c, 1.0),
+                    *zoom_floor,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
@@ -1624,33 +1895,14 @@ fn build_tile_buffers_from_features(
                     bolt,
                     *anchor,
                     hex_to_premul_rgba(0xffffff, 1.0),
+                    *zoom_floor,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
                 );
             }
         }
-        if *two_tone == 2 {
-            let text = format!("{:.0}", kw.min(999.0));
-            let advance = 6.4f32;
-            let total = text.len() as f32 * advance;
-            // Text zone: right of the bolt inside the wide bubble.
-            let start_x = 3.0 - total * 0.5 + advance * 0.5;
-            for (index, ch) in text.chars().enumerate() {
-                let Some(digit) = ch.to_digit(10) else { continue };
-                if let Some(mesh) = icon_mesh(super::icons::DIGIT_NAMES[digit as usize]) {
-                    append_icon_mesh_offset(
-                        mesh,
-                        *anchor,
-                        (start_x + index as f32 * advance, -3.5),
-                        hex_to_premul_rgba(0xffffff, 1.0),
-                        &mut icon_vertices,
-                        &mut icon_indices,
-                        &mut icon_zbias,
-                    );
-                }
-            }
-        }
+        let _ = (kw, stalls);
         feature_count += 1;
     }
 
@@ -1780,21 +2032,58 @@ fn append_icon_mesh(
     mesh: &IconMesh,
     anchor: (f32, f32),
     color: [f32; 4],
+    min_zoom: f32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    append_icon_mesh_offset(mesh, anchor, (0.0, 0.0), color, out_vertices, out_indices, zbias)
+    append_icon_mesh_offset(
+        mesh,
+        anchor,
+        (0.0, 0.0),
+        color,
+        min_zoom,
+        out_vertices,
+        out_indices,
+        zbias,
+    )
 }
 
 /// Like append_icon_mesh with an extra SCREEN-px offset added to every
 /// vertex — lets shared meshes (digits) compose inside a pin badge while
 /// staying zoom-constant with it.
+#[allow(clippy::too_many_arguments)]
 fn append_icon_mesh_offset(
     mesh: &IconMesh,
     anchor: (f32, f32),
     screen_offset: (f32, f32),
     color: [f32; 4],
+    min_zoom: f32,
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    append_icon_mesh_offset_scaled(
+        mesh,
+        anchor,
+        screen_offset,
+        1.0,
+        color,
+        min_zoom,
+        out_vertices,
+        out_indices,
+        zbias,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_icon_mesh_offset_scaled(
+    mesh: &IconMesh,
+    anchor: (f32, f32),
+    screen_offset: (f32, f32),
+    scale: f32,
+    color: [f32; 4],
+    min_zoom: f32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
@@ -1814,11 +2103,18 @@ fn append_icon_mesh_offset(
             vertex.stroke_dist,
             ICON_SHAPE_ID,
             0.0,      // param0: solid color
-            vertex.x + screen_offset.0, // param1/2: screen-px offset from the anchor
-            vertex.y + screen_offset.1,
+            // param1/2: screen-px offset from the anchor
+            vertex.x * scale + screen_offset.0,
+            vertex.y * scale + screen_offset.1,
             0.0,
-            0.0,
-            90.0, // tilt depth: markers NEVER clip into the tilted ground
+            // param4: this icon's view-zoom floor; the shader collapses the
+            // vertex when the live view zoom is below it (no stale flash).
+            min_zoom,
+            // Tilt depth: markers never clip into the tilted ground or
+            // building walls (ground-y span + sort ranks stay under ~4),
+            // but the total map depth (-24 + this) MUST stay negative —
+            // at 90 the icons rose above 0 and painted over the UI panels.
+            16.0,
             24.0, // clip_radius: generous, avoids pop-in at view edges
             *zbias,
         ]);
@@ -2811,6 +3107,41 @@ mod bridge_probe_tests {
 
     #[test]
     #[ignore]
+    fn westerkerk_probe() {
+        let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
+        if !detail.exists() {
+            return;
+        }
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(detail).unwrap();
+        let (z, x, y) = (14i64, 8414i64, 5384i64);
+        let raw = reader.get_tile(z, x, (1 << z) - 1 - y).unwrap().unwrap();
+        let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+        let pbf = decode_vector_tile_payload(&raw).unwrap();
+        let mut collector = MvtLocalCollector::new(4.0);
+        parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+        let mut by_layer = std::collections::HashMap::<String, usize>::new();
+        for way in &collector.ways {
+            let layer = way.tags.get("layer").cloned().unwrap_or_default();
+            *by_layer.entry(layer).or_default() += 1;
+            if way.tags.contains_key("building:part") {
+                println!(
+                    "PART layer={} closed={} pts={} id={:?} h={:?} min={:?}",
+                    way.tags.get("layer").cloned().unwrap_or_default(),
+                    way.closed,
+                    way.points.len(),
+                    way.tags.get("__makepad_osm_id"),
+                    way.tags.get("height"),
+                    way.tags.get("min_height"),
+                );
+            }
+        }
+        let mut stats: Vec<_> = by_layer.into_iter().collect();
+        stats.sort();
+        println!("LAYER STATS {:?}", stats);
+    }
+
+    #[test]
+    #[ignore]
     fn place_labels_probe() {
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         if !base.exists() {
@@ -2921,6 +3252,7 @@ mod bridge_probe_tests {
             shift: 0,
             quadrant_x: 0,
             quadrant_y: 0,
+            filter: 0,
         }];
         let theme = CompiledMapTheme::default();
         let buffers =
