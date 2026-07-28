@@ -1947,9 +1947,15 @@ fn dispatch_unary(
         while 2 * nth < args.ne0 as u64 && nth < nth_max {
             nth *= 2;
         }
+        // The non-flat unary kernel does NOT loop over ne0: it decomposes
+        // tgpig.x into (ne0-chunk k0, row i01) and each threadgroup covers
+        // exactly ntg.x elements of one row. The grid's x dimension must
+        // therefore span ne01 * ceil(ne0 / nth) — with just ne01, everything
+        // past a row's first nth elements is silently never written.
+        let ne0_chunks = (args.ne0.max(1) as u64).div_ceil(nth);
         (
             MetalSize {
-                width: src0_shape.ne[1] as u64,
+                width: (src0_shape.ne[1] as u64) * ne0_chunks,
                 height: src0_shape.ne[2] as u64,
                 depth: src0_shape.ne[3] as u64,
             },
@@ -6600,6 +6606,344 @@ mod tests {
         }
     }
 
+    /// Regression: the non-flat unary path (chosen for 32768+ elements or
+    /// non-contiguous sources) must cover full rows. Its kernel decomposes
+    /// tgpig.x into (ne0-chunk, row); a dispatch that sized the grid as just
+    /// ne01 silently left everything past a row's first threadgroup-width
+    /// unwritten — which corrupted qwen35 batched prefill at n_tokens >= 4
+    /// (silu over [8192, n] crosses 32768 elements exactly at n = 4).
+    #[test]
+    fn executes_unary_large_rows_on_metal_when_available() {
+        for (ne0, ne1) in [(8192_i64, 4_i64), (8192, 5), (4096, 16), (511, 65)] {
+            let runtime = match MetalRuntime::new() {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            let mut ctx = Context::new(InitParams {
+                mem_size: 16 << 20,
+                mem_buffer: None,
+                no_alloc: false,
+            });
+            let src = ctx
+                .new_tensor_2d(TensorType::F32, ne0, ne1, BufferUsage::Activations)
+                .unwrap();
+            let out = ctx.unary(src, UnaryOp::Silu, BufferUsage::Activations).unwrap();
+            let values: Vec<f32> = (0..ne0 * ne1)
+                .map(|i| ((i as f32 + 0.37) * 0.618_034).fract() * 8.0 - 4.0)
+                .collect();
+            ctx.write_tensor_data(src, &f32s_to_bytes(&values)).unwrap();
+
+            let mut graph = Graph::new();
+            graph.build_forward_expand(&ctx, out).unwrap();
+            let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+            let session = MetalGraphSession::from_runtime(
+                runtime,
+                &ctx,
+                &prepared,
+                BufferStorageMode::Shared,
+                BufferStorageMode::Shared,
+            )
+            .unwrap();
+            let execution = session.execute(&ctx, &[], &[out]).unwrap();
+            let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+            for (index, (a, x)) in actual.iter().zip(values.iter()).enumerate() {
+                let expect = x / (1.0 + (-x).exp());
+                assert!(
+                    (a - expect).abs() < 1.0e-5,
+                    "unary silu [{ne0}x{ne1}] mismatch at {index}: actual={a} expected={expect}"
+                );
+            }
+            eprintln!("unary large rows ok: [{ne0}x{ne1}]");
+        }
+    }
+
+    /// Replicates the qwen35 delta-net conv stage — concat of carried conv
+    /// states with the transposed projection, then ssm_conv — for a range of
+    /// token counts, checked against a direct CPU convolution.
+    #[test]
+    fn executes_ssm_conv_concat_token_counts_on_metal_when_available() {
+        let d_conv = 4_i64;
+        let d_inner = 8192_i64;
+        let n_seqs = 1_i64;
+        for n_tokens in 1..=8_i64 {
+            let runtime = match MetalRuntime::new() {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            let mut ctx = Context::new(InitParams {
+                mem_size: 64 << 20,
+                mem_buffer: None,
+                no_alloc: false,
+            });
+            let states = ctx
+                .new_tensor_3d(
+                    TensorType::F32,
+                    d_conv - 1,
+                    d_inner,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            let qkv = ctx
+                .new_tensor_3d(
+                    TensorType::F32,
+                    d_inner,
+                    n_tokens,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            let kernel = ctx
+                .new_tensor_2d(TensorType::F32, d_conv, d_inner, BufferUsage::Weights)
+                .unwrap();
+
+            let qkv_t = ctx.transpose(qkv).unwrap();
+            let conv_input = ctx
+                .concat(states, qkv_t, 0, BufferUsage::Activations)
+                .unwrap();
+            let conv_out = ctx
+                .ssm_conv(conv_input, kernel, BufferUsage::Activations)
+                .unwrap();
+
+            let bounded = |len: usize, salt: f32| -> Vec<f32> {
+                (0..len)
+                    .map(|i| ((i as f32 + salt) * 0.618_034).fract() * 0.6 - 0.3)
+                    .collect()
+            };
+            let states_values = bounded(((d_conv - 1) * d_inner) as usize, 0.13);
+            let qkv_values = bounded((d_inner * n_tokens) as usize, 0.57);
+            let kernel_values = bounded((d_conv * d_inner) as usize, 0.91);
+            ctx.write_tensor_data(states, &f32s_to_bytes(&states_values))
+                .unwrap();
+            ctx.write_tensor_data(qkv, &f32s_to_bytes(&qkv_values))
+                .unwrap();
+            ctx.write_tensor_data(kernel, &f32s_to_bytes(&kernel_values))
+                .unwrap();
+
+            let mut graph = Graph::new();
+            graph.build_forward_expand(&ctx, conv_out).unwrap();
+            let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+            let session = MetalGraphSession::from_runtime(
+                runtime,
+                &ctx,
+                &prepared,
+                BufferStorageMode::Shared,
+                BufferStorageMode::Shared,
+            )
+            .unwrap();
+            let execution = session.execute(&ctx, &[], &[conv_out]).unwrap();
+            let actual = bytes_to_f32s(execution.outputs.get(&conv_out).unwrap());
+
+            // CPU reference straight from the definition. Time index i of the
+            // conv window reads carried state for i < d_conv-1 and the token
+            // stream after: in[i][c] = i < 3 ? states[i][c] : qkv[c][i-3].
+            let read_in = |i: i64, c: i64| -> f32 {
+                if i < d_conv - 1 {
+                    states_values[(c * (d_conv - 1) + i) as usize]
+                } else {
+                    qkv_values[((i - (d_conv - 1)) * d_inner + c) as usize]
+                }
+            };
+            let mut mismatches = 0usize;
+            let mut first_report = String::new();
+            for t in 0..n_tokens {
+                for c in 0..d_inner {
+                    let mut sum = 0.0f32;
+                    for k in 0..d_conv {
+                        sum += read_in(t + k, c) * kernel_values[(c * d_conv + k) as usize];
+                    }
+                    let actual_value = actual[(t * d_inner + c) as usize];
+                    if (actual_value - sum).abs() > 1.0e-4 {
+                        if mismatches == 0 {
+                            first_report = format!(
+                                "first mismatch at token {t} channel {c}: actual={actual_value} expected={sum}"
+                            );
+                        }
+                        mismatches += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "ssm_conv concat n_tokens={n_tokens}: {mismatches} mismatches of {} ({first_report})",
+                (n_tokens * d_inner)
+            );
+            eprintln!("ssm_conv concat ok: n_tokens={n_tokens}");
+        }
+    }
+
+    /// The full qwen35 conv-state chain: carried states come out of a cache
+    /// row (get_rows + view), join the token stream (concat with a transposed
+    /// projection), feed ssm_conv, and the last window is written back into
+    /// the same cache row (view + cont + set_rows). The write-back shares a
+    /// buffer with the read, so ordering and aliasing must hold up at every
+    /// token count.
+    #[test]
+    fn executes_ssm_conv_cache_chain_token_counts_on_metal_when_available() {
+        let d_conv = 4_i64;
+        let d_inner = 8192_i64;
+        let n_seqs = 1_i64;
+        let conv_prefix = d_conv - 1;
+        let r_width = conv_prefix * d_inner;
+        for n_tokens in 1..=8_i64 {
+            let runtime = match MetalRuntime::new() {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            let mut ctx = Context::new(InitParams {
+                mem_size: 64 << 20,
+                mem_buffer: None,
+                no_alloc: false,
+            });
+            let rs = |n: i64| ggml_row_size_for_type(TensorType::F32, n).unwrap();
+
+            let r_cache = ctx
+                .new_tensor_2d(TensorType::F32, r_width, n_seqs, BufferUsage::State)
+                .unwrap();
+            let state_rows = ctx
+                .new_tensor_1d(TensorType::I32, 1, BufferUsage::Activations)
+                .unwrap();
+            let qkv = ctx
+                .new_tensor_3d(
+                    TensorType::F32,
+                    d_inner,
+                    n_tokens,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            let kernel = ctx
+                .new_tensor_2d(TensorType::F32, d_conv, d_inner, BufferUsage::Weights)
+                .unwrap();
+
+            let active_r_cache = ctx
+                .get_rows(r_cache, state_rows, BufferUsage::State)
+                .unwrap();
+            let conv_states = ctx
+                .view_3d(
+                    active_r_cache,
+                    conv_prefix,
+                    d_inner,
+                    n_seqs,
+                    rs(conv_prefix),
+                    rs(r_width),
+                    0,
+                )
+                .unwrap();
+            let qkv_t = ctx.transpose(qkv).unwrap();
+            let conv_input = ctx
+                .concat(conv_states, qkv_t, 0, BufferUsage::Activations)
+                .unwrap();
+            let conv_input_tensor = ctx.tensor(conv_input).unwrap().clone();
+            let last_conv_states = ctx
+                .view_3d(
+                    conv_input,
+                    conv_prefix,
+                    d_inner,
+                    n_seqs,
+                    conv_input_tensor.nb[1],
+                    conv_input_tensor.nb[2],
+                    rs(n_tokens),
+                )
+                .unwrap();
+            let last_conv_states_rows = ctx.cont_2d(last_conv_states, r_width, n_seqs).unwrap();
+            let r_cache_update = ctx
+                .set_rows(r_cache, last_conv_states_rows, state_rows, BufferUsage::State)
+                .unwrap();
+            let conv_out = ctx
+                .ssm_conv(conv_input, kernel, BufferUsage::Activations)
+                .unwrap();
+
+            let bounded = |len: usize, salt: f32| -> Vec<f32> {
+                (0..len)
+                    .map(|i| ((i as f32 + salt) * 0.618_034).fract() * 0.6 - 0.3)
+                    .collect()
+            };
+            let cache_values = bounded(r_width as usize, 0.13);
+            let qkv_values = bounded((d_inner * n_tokens) as usize, 0.57);
+            let kernel_values = bounded((d_conv * d_inner) as usize, 0.91);
+            ctx.write_tensor_data(r_cache, &f32s_to_bytes(&cache_values))
+                .unwrap();
+            ctx.write_tensor_data(state_rows, &{
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&0_i32.to_le_bytes());
+                bytes
+            })
+            .unwrap();
+            ctx.write_tensor_data(qkv, &f32s_to_bytes(&qkv_values))
+                .unwrap();
+            ctx.write_tensor_data(kernel, &f32s_to_bytes(&kernel_values))
+                .unwrap();
+
+            let mut graph = Graph::new();
+            graph.build_forward_expand(&ctx, conv_out).unwrap();
+            graph.build_forward_expand(&ctx, r_cache_update).unwrap();
+            let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+            let session = MetalGraphSession::from_runtime(
+                runtime,
+                &ctx,
+                &prepared,
+                BufferStorageMode::Shared,
+                BufferStorageMode::Shared,
+            )
+            .unwrap();
+            let execution = session
+                .execute(&ctx, &[], &[conv_out, r_cache_update])
+                .unwrap();
+            let actual = bytes_to_f32s(execution.outputs.get(&conv_out).unwrap());
+            let updated_cache = bytes_to_f32s(execution.outputs.get(&r_cache_update).unwrap());
+
+            // The conv-state layout in the cache row is [conv_prefix] per
+            // channel: cache[c * conv_prefix + i] is time step i for channel c.
+            let read_in = |i: i64, c: i64| -> f32 {
+                if i < conv_prefix {
+                    cache_values[(c * conv_prefix + i) as usize]
+                } else {
+                    qkv_values[((i - conv_prefix) * d_inner + c) as usize]
+                }
+            };
+            let mut mismatches = 0usize;
+            let mut first_report = String::new();
+            for t in 0..n_tokens {
+                for c in 0..d_inner {
+                    let mut sum = 0.0f32;
+                    for k in 0..d_conv {
+                        sum += read_in(t + k, c) * kernel_values[(c * d_conv + k) as usize];
+                    }
+                    let actual_value = actual[(t * d_inner + c) as usize];
+                    if (actual_value - sum).abs() > 1.0e-4 {
+                        if mismatches == 0 {
+                            first_report = format!(
+                                "first mismatch at token {t} channel {c}: actual={actual_value} expected={sum}"
+                            );
+                        }
+                        mismatches += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "ssm_conv cache chain n_tokens={n_tokens}: {mismatches} conv mismatches ({first_report})"
+            );
+
+            let mut cache_mismatches = 0usize;
+            for c in 0..d_inner {
+                for i in 0..conv_prefix {
+                    let expect = read_in(n_tokens + i, c);
+                    let actual_value = updated_cache[(c * conv_prefix + i) as usize];
+                    if (actual_value - expect).abs() > 1.0e-5 {
+                        cache_mismatches += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                cache_mismatches, 0,
+                "ssm_conv cache chain n_tokens={n_tokens}: {cache_mismatches} cache write-back mismatches"
+            );
+            eprintln!("ssm_conv cache chain ok: n_tokens={n_tokens}");
+        }
+    }
+
     #[test]
     fn executes_ssm_conv_multi_token_consistently_on_metal_when_available() {
         let runtime = match MetalRuntime::new() {
@@ -9554,6 +9898,304 @@ mod tests {
                 e
             );
         }
+    }
+
+    /// One gated_delta_net metal-vs-cpu comparison. `strided_qkv` feeds q/k/v
+    /// as views of a packed `[qkv_dim, n_tokens, n_seqs]` tensor, the same
+    /// shape the qwen35 runtime carves out of its conv output — the kernel
+    /// must honor the per-token strides, not assume contiguity.
+    fn run_gated_delta_net_metal_case(
+        s_v: i64,
+        h_k: i64,
+        h_v: i64,
+        n_tokens: i64,
+        n_seqs: i64,
+        strided_qkv: bool,
+    ) {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let label = format!(
+            "s_v={s_v} h_k={h_k} h_v={h_v} n_tokens={n_tokens} n_seqs={n_seqs} strided={strided_qkv}"
+        );
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 24,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let rs = |n: i64| ggml_row_size_for_type(TensorType::F32, n).unwrap();
+
+        let qk_width = s_v * h_k;
+        let v_width = s_v * h_v;
+        let qkv_dim = 2 * qk_width + v_width;
+
+        // Bounded pseudo-random data: linear ramps explode the recurrent state
+        // (the gate is exponentiated per token), which would mask real errors
+        // behind a relative tolerance. Golden-ratio hashing keeps values tame.
+        let bounded = |len: usize, lo: f32, hi: f32, salt: f32| -> Vec<f32> {
+            (0..len)
+                .map(|i| lo + (hi - lo) * ((i as f32 + salt) * 0.618_034).fract())
+                .collect()
+        };
+        let backing_values = bounded((qkv_dim * n_tokens * n_seqs) as usize, -0.25, 0.25, 0.31);
+        let (q, k, v) = if strided_qkv {
+            let backing = ctx
+                .new_tensor_4d(
+                    TensorType::F32,
+                    qkv_dim,
+                    n_tokens,
+                    n_seqs,
+                    1,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            ctx.write_tensor_data(backing, &f32s_to_bytes(&backing_values))
+                .unwrap();
+            let q = ctx
+                .view_4d(
+                    backing,
+                    s_v,
+                    h_k,
+                    n_tokens,
+                    n_seqs,
+                    rs(s_v),
+                    rs(qkv_dim),
+                    rs(qkv_dim * n_tokens),
+                    0,
+                )
+                .unwrap();
+            let k = ctx
+                .view_4d(
+                    backing,
+                    s_v,
+                    h_k,
+                    n_tokens,
+                    n_seqs,
+                    rs(s_v),
+                    rs(qkv_dim),
+                    rs(qkv_dim * n_tokens),
+                    rs(qk_width),
+                )
+                .unwrap();
+            let v = ctx
+                .view_4d(
+                    backing,
+                    s_v,
+                    h_v,
+                    n_tokens,
+                    n_seqs,
+                    rs(s_v),
+                    rs(qkv_dim),
+                    rs(qkv_dim * n_tokens),
+                    rs(2 * qk_width),
+                )
+                .unwrap();
+            (q, k, v)
+        } else {
+            let q = ctx
+                .new_tensor_4d(
+                    TensorType::F32,
+                    s_v,
+                    h_k,
+                    n_tokens,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            let k = ctx
+                .new_tensor_4d(
+                    TensorType::F32,
+                    s_v,
+                    h_k,
+                    n_tokens,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            let v = ctx
+                .new_tensor_4d(
+                    TensorType::F32,
+                    s_v,
+                    h_v,
+                    n_tokens,
+                    n_seqs,
+                    BufferUsage::Activations,
+                )
+                .unwrap();
+            (q, k, v)
+        };
+
+        let g = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                1,
+                h_v,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let beta = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                1,
+                h_v,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let state = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                s_v,
+                h_v,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+
+        // Contiguous cpu-side copies of q/k/v as `[s_v][h][token][seq]`.
+        let extract = |offset: i64, heads: i64| -> Vec<f32> {
+            let mut out = Vec::with_capacity((s_v * heads * n_tokens * n_seqs) as usize);
+            for seq in 0..n_seqs {
+                for token in 0..n_tokens {
+                    for head in 0..heads {
+                        for i in 0..s_v {
+                            let idx = (seq * n_tokens + token) * qkv_dim + offset + head * s_v + i;
+                            out.push(backing_values[idx as usize]);
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let (q_values, k_values, v_values) = if strided_qkv {
+            (
+                extract(0, h_k),
+                extract(qk_width, h_k),
+                extract(2 * qk_width, h_v),
+            )
+        } else {
+            let q_values = bounded((s_v * h_k * n_tokens * n_seqs) as usize, -0.3, 0.3, 0.11);
+            let k_values = bounded((s_v * h_k * n_tokens * n_seqs) as usize, -0.3, 0.3, 0.47);
+            let v_values = bounded((s_v * h_v * n_tokens * n_seqs) as usize, -0.3, 0.3, 0.83);
+            ctx.write_tensor_data(q, &f32s_to_bytes(&q_values)).unwrap();
+            ctx.write_tensor_data(k, &f32s_to_bytes(&k_values)).unwrap();
+            ctx.write_tensor_data(v, &f32s_to_bytes(&v_values)).unwrap();
+            (q_values, k_values, v_values)
+        };
+
+        // Decay gates stay negative and beta stays in (0, 1), like the model's.
+        let g_values = bounded((h_v * n_tokens * n_seqs) as usize, -0.9, -0.05, 0.29);
+        let beta_values = bounded((h_v * n_tokens * n_seqs) as usize, 0.2, 0.9, 0.61);
+        let state_values = bounded((s_v * s_v * h_v * n_seqs) as usize, -0.1, 0.1, 0.07);
+        ctx.write_tensor_data(g, &f32s_to_bytes(&g_values)).unwrap();
+        ctx.write_tensor_data(beta, &f32s_to_bytes(&beta_values))
+            .unwrap();
+        ctx.write_tensor_data(state, &f32s_to_bytes(&state_values))
+            .unwrap();
+
+        let result = ctx
+            .gated_delta_net(q, k, v, g, beta, state, BufferUsage::Activations)
+            .unwrap();
+        let output = ctx
+            .view_4d(
+                result,
+                s_v,
+                h_v,
+                n_tokens,
+                n_seqs,
+                rs(s_v),
+                rs(s_v * h_v),
+                rs(s_v * h_v * n_tokens),
+                0,
+            )
+            .unwrap();
+        let new_state = ctx
+            .view_4d(
+                result,
+                s_v,
+                s_v,
+                h_v,
+                n_seqs,
+                rs(s_v),
+                rs(s_v * s_v),
+                rs(s_v * s_v * h_v),
+                rs(s_v * h_v * n_tokens * n_seqs),
+            )
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, output).unwrap();
+        graph.build_forward_expand(&ctx, new_state).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[output, new_state]).unwrap();
+        let actual_output = bytes_to_f32s(execution.outputs.get(&output).unwrap());
+        let actual_state = bytes_to_f32s(execution.outputs.get(&new_state).unwrap());
+        let (expected_output, expected_state) = cpu_gated_delta_net_f32(
+            &q_values,
+            &k_values,
+            &v_values,
+            &g_values,
+            &beta_values,
+            &state_values,
+            s_v as usize,
+            h_k as usize,
+            h_v as usize,
+            n_tokens as usize,
+            n_seqs as usize,
+        );
+
+        assert_eq!(actual_output.len(), expected_output.len(), "{label}");
+        let mut max_diff = 0.0f32;
+        for (index, (a, e)) in actual_output.iter().zip(expected_output.iter()).enumerate() {
+            let diff = (a - e).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+            assert!(
+                diff < 5.0e-4 * e.abs().max(1.0),
+                "gated_delta_net output mismatch at {index} ({label}): actual={a} expected={e}"
+            );
+        }
+        assert_eq!(actual_state.len(), expected_state.len(), "{label}");
+        for (index, (a, e)) in actual_state.iter().zip(expected_state.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 5.0e-4 * e.abs().max(1.0),
+                "gated_delta_net state mismatch at {index} ({label}): actual={a} expected={e}"
+            );
+        }
+        eprintln!("gated_delta_net ok: {label} (max output diff {max_diff:.2e})");
+    }
+
+    #[test]
+    fn executes_gated_delta_net_multi_token_on_metal_when_available() {
+        for n_tokens in [1, 2, 3, 4, 5, 8] {
+            run_gated_delta_net_metal_case(32, 1, 2, n_tokens, 1, false);
+        }
+    }
+
+    #[test]
+    fn executes_gated_delta_net_strided_views_on_metal_when_available() {
+        for n_tokens in [1, 3, 4, 8] {
+            run_gated_delta_net_metal_case(32, 2, 4, n_tokens, 1, true);
+        }
+        // Qwen3.5-shaped: 128-wide value heads.
+        run_gated_delta_net_metal_case(128, 2, 4, 4, 1, true);
     }
 
     #[test]
