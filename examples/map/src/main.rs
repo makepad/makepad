@@ -418,6 +418,8 @@ pub struct App {
     active_elevation_id: u64,
     #[rust]
     layers_open: bool,
+    #[rust]
+    layer_states: [bool; 6],
 }
 
 impl App {
@@ -669,27 +671,23 @@ impl App {
         self.set_status(cx, &format!("Routing to {}…", name));
     }
 
-    /// Rebuild the overlay path list from the layer checkboxes.
+    /// Rebuild the overlay path list from the app-tracked layer states.
     fn apply_overlay_selection(&mut self, cx: &mut Cx) {
-        let mut paths: Vec<&str> = Vec::new();
-        if self.ui.check_box(cx, ids!(layer_chargers)).active(cx) {
-            paths.push("local/overlays/nl-chargers.mbtiles");
-        }
-        if self.ui.check_box(cx, ids!(layer_transit)).active(cx) {
-            paths.push("local/overlays/nl-transit.mbtiles");
-        }
-        if self.ui.check_box(cx, ids!(layer_nature)).active(cx) {
-            paths.push("local/overlays/nl-nature.mbtiles");
-        }
-        if self.ui.check_box(cx, ids!(layer_districts)).active(cx) {
-            paths.push("local/overlays/nl-wijkbuurt.mbtiles");
-        }
-        if self.ui.check_box(cx, ids!(layer_bag)).active(cx) {
-            paths.push("local/overlays/nl-buildings-age.mbtiles");
-        }
-        if self.ui.check_box(cx, ids!(layer_population)).active(cx) {
-            paths.push("local/overlays/nl-demographics.mbtiles");
-        }
+        const LAYER_PATHS: [&str; 6] = [
+            "local/overlays/nl-chargers.mbtiles",
+            "local/overlays/nl-transit.mbtiles",
+            "local/overlays/nl-nature.mbtiles",
+            "local/overlays/nl-wijkbuurt.mbtiles",
+            "local/overlays/nl-buildings-age.mbtiles",
+            "local/overlays/nl-demographics.mbtiles",
+        ];
+        let paths: Vec<&str> = LAYER_PATHS
+            .iter()
+            .zip(self.layer_states.iter())
+            .filter(|(_, on)| **on)
+            .map(|(path, _)| *path)
+            .collect();
+        log!("overlays: {:?}", paths);
         self.map(cx).set_overlay_paths(cx, &paths.join(";"));
     }
 
@@ -1010,36 +1008,38 @@ impl MatchEvent for App {
                 .view(cx, ids!(layers_panel))
                 .set_visible(cx, self.layers_open);
         }
-        let layers_changed = self
+        // Track layer state app-side: reading .active(cx) in the same
+        // event pass as changed() races the widget state (same class of
+        // bug as the layers panel visibility).
+        let mut layers_changed = false;
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_chargers)).changed(actions) {
+            self.layer_states[0] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_transit)).changed(actions) {
+            self.layer_states[1] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_nature)).changed(actions) {
+            self.layer_states[2] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_districts)).changed(actions) {
+            self.layer_states[3] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_bag)).changed(actions) {
+            self.layer_states[4] = value;
+            layers_changed = true;
+        }
+        if let Some(value) = self
             .ui
-            .check_box(cx, ids!(layer_chargers))
+            .check_box(cx, ids!(layer_population))
             .changed(actions)
-            .is_some()
-            || self
-                .ui
-                .check_box(cx, ids!(layer_transit))
-                .changed(actions)
-                .is_some()
-            || self
-                .ui
-                .check_box(cx, ids!(layer_nature))
-                .changed(actions)
-                .is_some()
-            || self
-                .ui
-                .check_box(cx, ids!(layer_districts))
-                .changed(actions)
-                .is_some()
-            || self
-                .ui
-                .check_box(cx, ids!(layer_bag))
-                .changed(actions)
-                .is_some()
-            || self
-                .ui
-                .check_box(cx, ids!(layer_population))
-                .changed(actions)
-                .is_some();
+        {
+            self.layer_states[5] = value;
+            layers_changed = true;
+        }
         if layers_changed {
             self.apply_overlay_selection(cx);
         }

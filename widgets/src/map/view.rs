@@ -1670,6 +1670,9 @@ impl MapView {
                 .filter(|p| !p.trim().is_empty())
                 .map(|p| p.trim().to_string())
                 .collect();
+            if !overlay_paths.is_empty() {
+                log!("tile fetch {:?} with {} overlays", key, overlay_paths.len());
+            }
             // Extruded buildings only bake while the camera is tilted; flat
             // mode keeps the classic 2D building style with outlines.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
@@ -3105,6 +3108,7 @@ impl MapView {
             return;
         }
         self.overlay_mbtiles_paths = paths.to_string();
+        log!("set_overlay_paths: {:?} -> restyle", paths);
         self.restyle_tiles_keep_stale(cx);
     }
 
