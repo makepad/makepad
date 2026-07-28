@@ -32,7 +32,8 @@ use crate::{
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-                    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+                    D3D11_SRV_DIMENSION_TEXTURECUBE, D3D_DRIVER_TYPE_UNKNOWN,
+                    D3D_FEATURE_LEVEL_11_0,
                 },
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
@@ -56,7 +57,7 @@ use crate::{
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
                     D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SDK_VERSION,
                     D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-                    D3D11_SRV_DIMENSION_TEXTURECUBE, D3D11_STENCIL_OP_REPLACE,
+                    D3D11_STENCIL_OP_REPLACE,
                     D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV, D3D11_TEXCUBE_SRV,
                     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
@@ -92,7 +93,11 @@ use crate::{
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
-            System::Threading::WaitForSingleObject,
+            System::{
+                Com::CoTaskMemFree,
+                Threading::WaitForSingleObject,
+            },
+            UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
         },
     },
 };
@@ -1532,7 +1537,14 @@ impl CxTexture {
                     let src = unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
                     let resource: ID3D11Resource = self.os.texture.as_ref().unwrap().cast().unwrap();
                     unsafe {
-                        d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, src, row_pitch, 0);
+                        d3d11_cx.context.UpdateSubresource(
+                            &resource,
+                            0,
+                            Some(&dst_box as *const _),
+                            src,
+                            row_pitch,
+                            0,
+                        );
                     }
                     self.os.vec_uploaded_height = (by + bh).max(self.os.vec_uploaded_height);
                 }
@@ -1579,7 +1591,14 @@ impl CxTexture {
                 left: 0, top: 0, front: 0, right: width as u32, bottom: height as u32, back: 1,
             };
             unsafe {
-                d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, data_ptr as *const _, row_pitch, 0);
+                d3d11_cx.context.UpdateSubresource(
+                    &resource,
+                    0,
+                    Some(&dst_box as *const _),
+                    data_ptr as *const _,
+                    row_pitch,
+                    0,
+                );
             }
             let mut shader_resource_view = None;
             unsafe {
@@ -2152,10 +2171,6 @@ impl DrawVars {
 
 fn shader_cache_dir() -> Option<&'static std::path::Path> {
     use std::sync::OnceLock;
-    use windows::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
-    };
 
     static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {

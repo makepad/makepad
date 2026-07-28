@@ -4,6 +4,19 @@ use {
         texture::{Texture, TextureFormat, TextureSize},
     },
     std::ffi::{c_void, CString},
+    windows::{
+        core::{Interface, PCSTR},
+        Win32::{
+            Graphics::{
+                Direct3D11::{
+                    ID3D11Resource, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+                    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                },
+                Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+            },
+            System::LibraryLoader::{GetProcAddress, LoadLibraryA},
+        },
+    },
 };
 
 // EGL types
@@ -87,9 +100,6 @@ impl EglFns {
     /// via mozangle's build_dlls feature). The library handle is intentionally leaked
     /// so the DLL stays loaded for the process lifetime.
     fn load() -> Self {
-        use windows::core::PCSTR;
-        use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-
         let module = unsafe { LoadLibraryA(PCSTR::from_raw(b"libEGL.dll\0".as_ptr())) }
             .expect("Failed to load libEGL.dll — ANGLE DLLs must be present");
 
@@ -301,15 +311,6 @@ impl AngleRenderBridge {
         {
             let d3d11_device = cx.os.d3d11_device.as_ref().unwrap();
             let cxtexture = &mut cx.textures[texture.texture_id()];
-
-            use windows::core::Interface;
-            use windows::Win32::Graphics::Direct3D11::{
-                ID3D11Resource, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-                D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-            };
-            use windows::Win32::Graphics::Dxgi::Common::{
-                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-            };
 
             let texture_desc = D3D11_TEXTURE2D_DESC {
                 Width: width as u32,

@@ -283,7 +283,6 @@ impl Win32App {
 
     /// Create an HICON from RGBA8 pixel data. Returns the default system icon on failure.
     fn create_icon_from_rgba(width: u32, height: u32, rgba: &[u8]) -> HICON {
-        use crate::windows::Win32::UI::WindowsAndMessaging::HICON;
         // CreateIcon expects AND mask (1bpp) + XOR mask (color).
         // We use CreateIcon with nWidth, nHeight, cPlanes=1, cBitsPixel=32.
         // The XOR mask is BGRA pixel data, the AND mask is all zeros (fully opaque).
