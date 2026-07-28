@@ -871,6 +871,21 @@ fn build_ways(
     Ok(())
 }
 
+/// One tagged relation handed to an assembler worker.
+struct RelationJob {
+    id: i64,
+    tags: Vec<(String, String)>,
+    /// (member kind: 0 node / 1 way, id, role_is_inner)
+    members: Vec<(u8, i64, bool)>,
+    is_multipolygon: bool,
+}
+
+struct RelationOut {
+    batch: PreparedBatch,
+    missing_nodes: u64,
+    missing_ways: u64,
+}
+
 fn build_relations(
     source: &Path,
     paths: &NativePaths,
@@ -878,100 +893,239 @@ fn build_relations(
     spool: &mut BlockSpoolWriter,
     stats: &mut ConversionStats,
 ) -> Result<(), String> {
-    let mut nodes = NodeStore::open(&paths.node_data, &paths.node_index)?;
-    let mut ways = WayStore::open(&paths.way_data, &paths.way_index)?;
-    let mut progress = Progress::new("relations assembled");
-    visit_pbf(source, |element| {
-        let Element::Relation(relation) = element else {
-            return Ok(());
-        };
-        stats.relations += 1;
-        progress.tick(1);
-        let mut tags = collect_tags(relation.tags());
-        if tags.is_empty() {
-            return Ok(());
-        }
-        stats.tagged_relations += 1;
-        stats.add_tags(inspect_tag_flags(&tags));
+    use std::sync::mpsc::sync_channel;
+    use std::sync::{Arc, Mutex};
 
-        let is_multipolygon = tag_value(&tags, "type") == Some("multipolygon");
-        let mut points = Vec::<NodeCoord>::new();
-        let mut outer = Vec::<SourcePath>::new();
-        let mut inner = Vec::<SourcePath>::new();
-        let mut lines = Vec::<Vec<geom::GlobalPoint>>::new();
-        let mut nested = 0_u64;
-        for member in relation.members() {
-            let role = member
-                .role()
-                .map_err(|err| format!("read relation {} member role: {err}", relation.id()))?;
-            match member.member_type {
-                RelMemberType::Node => {
-                    if let Some(node) = nodes.get(member.member_id)? {
-                        points.push(node);
-                    } else {
-                        stats.missing_relation_nodes += 1;
+    eprintln!("  loading node + way stores into RAM...");
+    let load_start = std::time::Instant::now();
+    let flat_nodes = Arc::new(crate::native::store::FlatNodeStore::load(
+        &paths.node_data,
+        &paths.node_index,
+    )?);
+    let flat_ways = Arc::new(crate::native::store::FlatWayStore::load(
+        &paths.way_data,
+        &paths.way_index,
+    )?);
+    eprintln!(
+        "  stores loaded in {:.1}s",
+        load_start.elapsed().as_secs_f64()
+    );
+    let mut progress = Progress::new("relations assembled");
+    let workers = std::thread::available_parallelism()
+        .map(|n| (n.get().saturating_sub(3)).clamp(4, 12))
+        .unwrap_or(4);
+    let (job_tx, job_rx) = sync_channel::<RelationJob>(4096);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (out_tx, out_rx) = sync_channel::<Result<RelationOut, String>>(4096);
+
+    let result: Result<(u64, u64, u64, u64, u64, u64, u64), String> =
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let job_rx = Arc::clone(&job_rx);
+                let out_tx = out_tx.clone();
+                let flat_nodes = Arc::clone(&flat_nodes);
+                let flat_ways = Arc::clone(&flat_ways);
+                scope.spawn(move || {
+                    loop {
+                        let job = { job_rx.lock().unwrap().recv() };
+                        let Ok(job) = job else {
+                            break;
+                        };
+                        let assembled = (|| -> Result<RelationOut, String> {
+                            let mut missing_nodes = 0u64;
+                            let mut missing_ways = 0u64;
+                            let mut features = Vec::new();
+                            let mut outer = Vec::<SourcePath>::new();
+                            let mut inner = Vec::<SourcePath>::new();
+                            let mut lines = Vec::<Vec<geom::GlobalPoint>>::new();
+                            for &(kind, member_id, is_inner) in &job.members {
+                                if kind == 0 {
+                                    if let Some(node) = flat_nodes.get(member_id)? {
+                                        geom::prepare_point(
+                                            zoom,
+                                            Layer::OsmRelationPoints,
+                                            OsmType::Relation,
+                                            job.id,
+                                            project_node(node),
+                                            &mut features,
+                                        )?;
+                                    } else {
+                                        missing_nodes += 1;
+                                    }
+                                    continue;
+                                }
+                                let Some(refs) = flat_ways.get(member_id)? else {
+                                    missing_ways += 1;
+                                    continue;
+                                };
+                                let mut coordinates = Vec::with_capacity(refs.len());
+                                for &node_id in refs {
+                                    let Some(node) = flat_nodes.get(node_id)? else {
+                                        return Err(format!(
+                                            "OSM object {} references missing node {node_id}",
+                                            member_id
+                                        ));
+                                    };
+                                    coordinates.push(node);
+                                }
+                                let source_path = SourcePath {
+                                    nodes: coordinates,
+                                };
+                                lines.push(project_path(&source_path.nodes));
+                                if is_inner {
+                                    inner.push(source_path);
+                                } else {
+                                    outer.push(source_path);
+                                }
+                            }
+                            geom::prepare_lines(
+                                zoom,
+                                Layer::OsmRelationLines,
+                                OsmType::Relation,
+                                job.id,
+                                false,
+                                &lines,
+                                &mut features,
+                            )?;
+                            if job.is_multipolygon {
+                                let (polygons, _) = group_polygon_rings(outer, inner);
+                                geom::prepare_polygons(
+                                    zoom,
+                                    Layer::OsmRelationPolygons,
+                                    OsmType::Relation,
+                                    job.id,
+                                    &polygons,
+                                    &mut features,
+                                )?;
+                            }
+                            Ok(RelationOut {
+                                batch: PreparedBatch {
+                                    tags: job.tags,
+                                    features,
+                                },
+                                missing_nodes,
+                                missing_ways,
+                            })
+                        })();
+                        if out_tx.send(assembled).is_err() {
+                            break;
+                        }
                     }
-                }
-                RelMemberType::Way => {
-                    let Some(refs) = ways.get(member.member_id)? else {
-                        stats.missing_relation_ways += 1;
-                        continue;
-                    };
-                    let coordinates = resolve_nodes(&mut nodes, refs, member.member_id)?;
-                    let source_path = SourcePath {
-                        nodes: coordinates,
-                    };
-                    lines.push(project_path(&source_path.nodes));
-                    if role == "inner" {
-                        inner.push(source_path);
-                    } else {
-                        outer.push(source_path);
-                    }
-                }
-                RelMemberType::Relation => nested += 1,
+                });
             }
-        }
-        if nested != 0 {
-            tags.push((
-                Cow::Borrowed("__makepad_nested_relation_members"),
-                Cow::Owned(nested.to_string()),
-            ));
-        }
-        for point in points {
-            stats.relation_point_tile_records += emit_point(
-                spool,
-                zoom,
-                Layer::OsmRelationPoints,
-                OsmType::Relation,
-                relation.id(),
-                &tags,
-                project_node(point),
-            )?;
-        }
-        stats.relation_line_tile_records += emit_lines(
-            spool,
-            zoom,
-            Layer::OsmRelationLines,
-            OsmType::Relation,
-            relation.id(),
-            false,
-            &tags,
-            &lines,
-        )?;
-        if is_multipolygon {
-            let (polygons, _) = group_polygon_rings(outer, inner);
-            stats.relation_polygon_tile_records += emit_polygons(
-                spool,
-                zoom,
-                Layer::OsmRelationPolygons,
-                OsmType::Relation,
-                relation.id(),
-                &tags,
-                &polygons,
-            )?;
-        }
-        Ok(())
-    })?;
+            drop(out_tx);
+
+            let writer = scope.spawn(move || -> Result<(u64, u64, u64, u64, u64), String> {
+                let mut point_records = 0u64;
+                let mut line_records = 0u64;
+                let mut polygon_records = 0u64;
+                let mut missing_nodes = 0u64;
+                let mut missing_ways = 0u64;
+                for out in out_rx.iter() {
+                    let out = out?;
+                    missing_nodes += out.missing_nodes;
+                    missing_ways += out.missing_ways;
+                    for feature in &out.batch.features {
+                        spool.push_parts(
+                            feature.tile_x,
+                            feature.tile_y,
+                            feature.layer,
+                            feature.geometry_type,
+                            feature.osm_type,
+                            feature.id,
+                            feature.closed,
+                            &out.batch.tags,
+                            feature.paths.iter().map(Vec::as_slice),
+                        )?;
+                        match feature.geometry_type {
+                            crate::native::mvt::GeometryType::Point => point_records += 1,
+                            crate::native::mvt::GeometryType::Polygon => polygon_records += 1,
+                            _ => line_records += 1,
+                        }
+                    }
+                }
+                Ok((
+                    point_records,
+                    line_records,
+                    polygon_records,
+                    missing_nodes,
+                    missing_ways,
+                ))
+            });
+
+            let mut total = 0u64;
+            let mut tagged = 0u64;
+            let visit_result = visit_pbf(source, |element| {
+                let Element::Relation(relation) = element else {
+                    return Ok(());
+                };
+                total += 1;
+                progress.tick(1);
+                let tags = collect_tags(relation.tags());
+                if tags.is_empty() {
+                    return Ok(());
+                }
+                tagged += 1;
+                stats.add_tags(inspect_tag_flags(&tags));
+                let is_multipolygon = tag_value(&tags, "type") == Some("multipolygon");
+                let mut members = Vec::new();
+                let mut nested = 0u64;
+                for member in relation.members() {
+                    let role = member.role().map_err(|err| {
+                        format!("read relation {} member role: {err}", relation.id())
+                    })?;
+                    match member.member_type {
+                        RelMemberType::Node => members.push((0u8, member.member_id, false)),
+                        RelMemberType::Way => {
+                            members.push((1u8, member.member_id, role == "inner"))
+                        }
+                        RelMemberType::Relation => nested += 1,
+                    }
+                }
+                let mut owned_tags: Vec<(String, String)> = tags
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                if nested != 0 {
+                    owned_tags.push((
+                        "__makepad_nested_relation_members".to_string(),
+                        nested.to_string(),
+                    ));
+                }
+                job_tx
+                    .send(RelationJob {
+                        id: relation.id(),
+                        tags: owned_tags,
+                        members,
+                        is_multipolygon,
+                    })
+                    .map_err(|_| "relation assembler workers exited early".to_string())?;
+                Ok(())
+            });
+            drop(job_tx);
+            let (points, lines, polygons, missing_nodes, missing_ways) = match writer.join() {
+                Ok(result) => result?,
+                Err(_) => return Err("relation spool writer panicked".to_string()),
+            };
+            visit_result?;
+            Ok((
+                total,
+                tagged,
+                points,
+                lines,
+                polygons,
+                missing_nodes,
+                missing_ways,
+            ))
+        });
+    let (total, tagged, points, lines, polygons, missing_nodes, missing_ways) = result?;
+    stats.relations += total;
+    stats.tagged_relations += tagged;
+    stats.relation_point_tile_records += points;
+    stats.relation_line_tile_records += lines;
+    stats.relation_polygon_tile_records += polygons;
+    stats.missing_relation_nodes += missing_nodes;
+    stats.missing_relation_ways += missing_ways;
     progress.finish();
     Ok(())
 }
