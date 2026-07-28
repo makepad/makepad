@@ -289,6 +289,7 @@ script_mod! {
             MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #xbbbbbb casing_width: 4.0 center_color: #xededed center_width: 3.0}
             MapRoadRule{kind: "service" sort_rank: 240 casing_color: #xbbbbbb casing_width: 3.0 center_color: #xffffff center_width: 2.0}
             MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x999999 casing_width: 4.0 center_color: #xdddde8 center_width: 3.0}
+            MapRoadRule{kind: "pedestrian" sort_rank: 300 casing_color: #xb5b5b5 casing_width: 4.0 center_color: #xfdfdfd center_width: 2.8 min_zoom: 14.0}
             MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x6262ff center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "footway" sort_rank: 160 center_color: #xfa8072 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
             MapRoadRule{kind: "path" sort_rank: 160 center_color: #xfa8072 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
@@ -342,6 +343,7 @@ script_mod! {
             MapRoadRule{kind: "living_street" sort_rank: 310 casing_color: #x404a57 casing_width: 4.0 center_color: #x677383 center_width: 3.0}
             MapRoadRule{kind: "service" sort_rank: 240 casing_color: #x3e4753 casing_width: 3.0 center_color: #x5e6a79 center_width: 2.0}
             MapRoadRule{kind: "pedestrian" sort_rank: 240 casing_color: #x3e4753 casing_width: 4.0 center_color: #x5e6a79 center_width: 3.0}
+            MapRoadRule{kind: "pedestrian" sort_rank: 300 casing_color: #x3c424a casing_width: 4.0 center_color: #x272b31 center_width: 2.8 min_zoom: 14.0}
             MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0}
             MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x4f5966 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
             MapRoadRule{kind: "path" sort_rank: 160 center_color: #x4f5966 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
@@ -2580,10 +2582,19 @@ impl MapView {
                 // quantize so the shaped-run cache hits during continuous zoom
                 font_scale = (font_scale * 32.0).round() / 32.0;
 
+                // Point-anchored area labels (parks, squares, zoo
+                // enclosures) have a ~zero-length path; without a length
+                // credit every street name outscores them in dense
+                // viewports and they never place.
+                let effective_length = if label.path_points.len() <= 2 {
+                    path_length.max(420.0)
+                } else {
+                    path_length
+                };
                 let mut score = source_rank as f64 * 1000.0
                     + (4_u8.saturating_sub(label.priority) as f64) * 120.0
                     + (220.0 - zoom_delta * 65.0)
-                    + path_length.min(640.0) * 0.35;
+                    + effective_length.min(640.0) * 0.35;
                 // Hysteresis: prefer labels that were visible last frame so
                 // panning doesn't flicker between competing candidates.
                 if self

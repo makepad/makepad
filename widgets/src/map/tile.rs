@@ -2464,6 +2464,80 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
 mod bridge_probe_tests {
     use super::*;
 
+    #[test]
+    #[ignore]
+    fn artis_full_build_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        let detail = std::path::Path::new("../local/maps/noord-holland-detail.mbtiles");
+        if !base.exists() || !detail.exists() {
+            return;
+        }
+        let mut base_reader = makepad_mbtile_reader::MbtilesReader::open(base).unwrap();
+        let mut detail_reader = makepad_mbtile_reader::MbtilesReader::open(detail).unwrap();
+        let y = 5384i64;
+        let key = TileKey { z: 14, x: 8415, y: y as i32 };
+        let raw = base_reader.get_tile(14, 8415, 16383 - y).unwrap().unwrap();
+        let det = detail_reader.get_tile(14, 8415, 16383 - y).unwrap();
+        let theme = CompiledMapTheme::default();
+        let buffers =
+            build_tile_buffers_from_mvt(key, &raw, det.as_deref(), &theme, 17, false).unwrap();
+        let attraction: Vec<&TileLabel> = buffers
+            .labels
+            .iter()
+            .filter(|label| label.source_layer == "green_area")
+            .collect();
+        println!("green_area labels: {}", attraction.len());
+        for label in attraction.iter().take(10) {
+            println!("  {:?} class={}", label.text, label.color_class);
+        }
+        println!("total labels: {}", buffers.labels.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn artis_attraction_probe() {
+        let path = std::path::Path::new("../local/maps/noord-holland-detail.mbtiles");
+        if !path.exists() {
+            return;
+        }
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        for y in 5384..=5386 {
+            let Some(raw) = reader.get_tile(14, 8415, 16383 - y).unwrap() else {
+                continue;
+            };
+            let key = TileKey { z: 14, x: 8415, y: y as i32 };
+            let mut points = Vec::new();
+            let mut ways = Vec::new();
+            merge_detail_features(&raw, key, 4.0, true, false, &mut points, &mut ways).unwrap();
+            let mut admitted = 0;
+            let mut labeled = 0;
+            for way in &ways {
+                if way.tags.get("layer").map(|v| v.as_str()) == Some("attraction_area") {
+                    admitted += 1;
+                    let ring = normalize_polygon_ring(&way.points);
+                    let label = ring.as_ref().and_then(|ring| {
+                        crate::map::label::extract_area_label(&way.tags, ring_centroid(ring))
+                    });
+                    if label.is_some() {
+                        labeled += 1;
+                    } else if admitted <= 6 {
+                        println!(
+                            "tile y={} NO-LABEL {:?} ring={:?} closed={}",
+                            y,
+                            way.tags.get("name"),
+                            ring.as_ref().map(|r| r.len()),
+                            way.closed
+                        );
+                    }
+                }
+            }
+            println!(
+                "tile y={} attraction_area ways: {} labeled: {}",
+                y, admitted, labeled
+            );
+        }
+    }
+
     // Diagnostic: print line features near the Reguliersgracht x
     // Keizersgracht bridge to identify the "black dashed fragments".
     // Run: cargo test -p makepad-widgets --features maps bridge_probe -- --nocapture --ignored

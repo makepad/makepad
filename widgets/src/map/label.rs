@@ -443,7 +443,7 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "water_lines_labels" => 4,
         "micro_pois" => 3,
         "pois" => 3,
-        "green_area" => 3,
+        "green_area" => 4,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
         | "public_transport" => 2,
         "addresses" => 1,
