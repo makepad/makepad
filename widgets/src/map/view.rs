@@ -1016,9 +1016,11 @@ impl Widget for MapView {
                 else {
                     continue;
                 };
-                // Stale higher-bucket tiles keep their baked symbols until the
-                // rebuild lands; hide the pass immediately on zoom-out instead.
-                if pass == 3 && view_zoom < ICON_MIN_ZOOM as f64 - 0.25 {
+                // Stale higher-bucket tiles keep their baked symbols until
+                // the rebuild lands; hide the pass on deep zoom-out. The
+                // floor tracks the LOWEST icon class — charger pins start
+                // at z9 (EV navigator), not the z16 POI carpet.
+                if pass == 3 && view_zoom < 8.75 {
                     continue;
                 }
                 let geometry = match pass {
