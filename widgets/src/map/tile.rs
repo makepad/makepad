@@ -1255,6 +1255,13 @@ fn build_tile_buffers_from_features(
                     tag_is_truthy(&way.tags, "oneway_reverse"),
                 ));
             }
+            if let Some(rim) = thin_bridge_rim_style(&style) {
+                stroke_jobs.push(StrokeDrawJob {
+                    sort_rank: rim.sort_rank,
+                    style: rim,
+                    points: prepared_way.points.clone(),
+                });
+            }
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
