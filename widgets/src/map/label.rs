@@ -547,7 +547,8 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "water_polygons_labels" => 5,
         "water_lines_labels" => 4,
         "micro_pois" => 3,
-        "chargers" => 3,
+        // Charger kW labels outrank street names — this is an EV navigator.
+        "chargers" => 8,
         "pois" => 3,
         "green_area" => 4,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
