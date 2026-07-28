@@ -4,7 +4,7 @@ use crate::makepad_draw::{
     thread::SignalToUI,
     Cx, CxMediaApi, Event, NextFrame,
 };
-use makepad_voice::{Segment, VoiceTranscribeParams, VoiceTranscriber};
+use makepad_voice::{Segment, SileroVad, VadStream, VoiceTranscribeParams, VoiceTranscriber};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -21,6 +21,10 @@ const VOICE_MAX_PENDING_SAMPLES: usize = 16_000 * 12; // 12.0s backlog cap
 const VOICE_SILENCE_RMS_THRESHOLD: f32 = 0.0026;
 const VOICE_PAUSE_RMS_THRESHOLD: f32 = 0.0024;
 const VOICE_SPEECH_RMS_THRESHOLD: f32 = 0.0030;
+// Silero VAD gate (preferred over the RMS thresholds when the model file is
+// present): silero's own defaults — enter speech at 0.5, leave below 0.35.
+const VOICE_VAD_SPEECH_PROB: f32 = 0.5;
+const VOICE_VAD_PAUSE_PROB: f32 = 0.35;
 const VOICE_PAUSE_PACKETS_TO_FLUSH: usize = 24; // ~480ms
 const VOICE_IDLE_TIMEOUT_TICKS_TO_FLUSH: usize = 40; // ~400ms at 10ms poll
 const VOICE_MIN_VOICED_SAMPLES_FOR_EARLY_FLUSH: usize = 16_000 / 2; // ~0.50s
@@ -589,6 +593,20 @@ fn spawn_voice_worker(
         let params = VoiceTranscribeParams::for_live_dictation();
         crate::log!("voice: backend {:?}", transcriber.kind());
 
+        // Learned gate when the Silero weights are present, RMS energy gate
+        // otherwise. The VAD stream carries its own 512-sample chunking, so it
+        // just eats the 320-sample packets as they come.
+        let mut vad = match SileroVad::from_makepad_env() {
+            Ok(vad) => {
+                crate::log!("voice: gate silero vad");
+                Some(VadStream::new(vad))
+            }
+            Err(err) => {
+                crate::log!("voice: gate rms (no silero model: {err:?})");
+                None
+            }
+        };
+
         let mut pending_samples = VecDeque::<f32>::new();
         let mut chunk = Vec::with_capacity(VOICE_MAX_PENDING_SAMPLES);
         let mut silence_packet_run = 0usize;
@@ -605,6 +623,9 @@ fn spawn_voice_worker(
                         saw_speech_since_flush = false;
                         voiced_samples_since_flush = 0;
                         idle_timeout_ticks = 0;
+                        if let Some(vad) = vad.as_mut() {
+                            vad.reset();
+                        }
                     }
                     VoiceControlMessage::Preload => {
                         let _ = transcriber.preload(&params);
@@ -616,8 +637,24 @@ fn spawn_voice_worker(
             match audio_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(audio_chunk) => {
                     idle_timeout_ticks = 0;
-                    let packet_rms = rms(&audio_chunk);
-                    if packet_rms >= VOICE_SPEECH_RMS_THRESHOLD {
+                    // Classify the packet as speech / undecided / pause. Silero
+                    // updates its probability every 512 samples, so between
+                    // chunk boundaries the newest probability carries over.
+                    let (is_speech, is_pause) = match vad.as_mut() {
+                        Some(vad) => {
+                            vad.push(&audio_chunk);
+                            let prob = vad.prob();
+                            (prob >= VOICE_VAD_SPEECH_PROB, prob < VOICE_VAD_PAUSE_PROB)
+                        }
+                        None => {
+                            let packet_rms = rms(&audio_chunk);
+                            (
+                                packet_rms >= VOICE_SPEECH_RMS_THRESHOLD,
+                                packet_rms < VOICE_PAUSE_RMS_THRESHOLD,
+                            )
+                        }
+                    };
+                    if is_speech {
                         if !saw_speech_since_flush {
                             trim_pending_to_recent(
                                 &mut pending_samples,
@@ -628,12 +665,13 @@ fn spawn_voice_worker(
                         saw_speech_since_flush = true;
                         voiced_samples_since_flush =
                             voiced_samples_since_flush.saturating_add(audio_chunk.len());
-                    } else if packet_rms < VOICE_PAUSE_RMS_THRESHOLD {
+                    } else if is_pause {
                         if saw_speech_since_flush {
                             silence_packet_run += 1;
                         }
                     } else {
-                        // Mid-band packet: keep phrase active if speech already started.
+                        // Undecided packet: keep the phrase active if speech
+                        // already started.
                         if saw_speech_since_flush {
                             silence_packet_run = 0;
                         }
