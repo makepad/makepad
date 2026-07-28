@@ -319,22 +319,40 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
         // in the view (it knows the live zoom); here we classify.
         "place_labels" => {
             let name = select_label_text(tags)?;
-            let kind = tags
+            // Normalize shortbread kinds: capitals ARE cities (Amsterdam is
+            // kind=capital, Haarlem state_capital — unmapped they fell into
+            // the z13.5+ bucket and the capital vanished from the map).
+            let kind = match tags
                 .get("kind")
                 .or_else(|| tags.get("place"))
                 .map(|value| value.as_str())
-                .unwrap_or("");
+                .unwrap_or("")
+            {
+                "capital" | "state_capital" | "city" => "city",
+                "town" => "town",
+                "village" => "village",
+                "suburb" | "borough" | "quarter" => "suburb",
+                other => match other {
+                    "hamlet" | "neighbourhood" | "island" => "hamlet",
+                    _ => "hamlet",
+                },
+            };
+            let population = tags
+                .get("population")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
             let priority = match kind {
                 "city" => 0,
                 "town" => 1,
-                "village" | "suburb" | "borough" => 2,
+                "village" | "suburb" => 2,
                 _ => 3,
             };
             return Some(TileLabel {
                 text: name,
                 priority,
                 source_layer,
-                road_kind: format!("place:{}", kind),
+                // kind + population ride along for zoom gating and sizing.
+                road_kind: format!("place:{}:{}", kind, population),
                 color_class: LABEL_CLASS_DEFAULT,
                 path_points: point_label_path(point),
                 name_key: String::new(),

@@ -1089,12 +1089,12 @@ impl Widget for MapView {
 
         // Labels
         let labels_start = std::time::Instant::now();
-        let mut full_place = false;
-        if view_zoom >= 13.0 {
-            full_place = self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
-        } else {
-            self.label_perf = LabelPerfStats::default();
-        }
+        // No global zoom gate: place labels carry the map from z4 (cities)
+        // outward, streets/water/nature take over as their own per-kind
+        // gates open. The old `view_zoom >= 13` guard predated place
+        // labels and blanked EVERYTHING when zoomed out.
+        let full_place =
+            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
         let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
 
         // Put draw_tiles back into scratch buffer (preserves allocation)
@@ -2494,11 +2494,15 @@ impl MapView {
                 let is_address = label.source_layer == "addresses";
                 let is_poi = label.source_layer == "pois";
                 // carto placenames zoom gates by settlement kind.
-                if let Some(kind) = label.road_kind.strip_prefix("place:") {
+                let place = label.road_kind.strip_prefix("place:").map(|rest| {
+                    let (kind, population) = rest.split_once(':').unwrap_or((rest, "0"));
+                    (kind, population.parse::<u64>().unwrap_or(0))
+                });
+                if let Some((kind, _)) = place {
                     let min_zoom = match kind {
                         "city" => 4.0,
                         "town" => 7.0,
-                        "village" | "suburb" | "borough" => 11.5,
+                        "village" | "suburb" => 11.5,
                         _ => 13.5,
                     };
                     let max_zoom = match kind {
@@ -2607,12 +2611,18 @@ impl MapView {
                     font_scale = 0.60;
                 } else if is_poi {
                     font_scale = 0.72;
-                } else if let Some(kind) = label.road_kind.strip_prefix("place:") {
+                } else if let Some((kind, population)) = place {
+                    // Kind sets the class, population separates Amsterdam
+                    // from Purmerend within it.
                     font_scale = match kind {
-                        "city" => 1.55,
-                        "town" => 1.2,
-                        "village" | "suburb" | "borough" => 1.0,
-                        _ => 0.9,
+                        "city" => match population {
+                            p if p >= 500_000 => 1.65,
+                            p if p >= 150_000 => 1.4,
+                            _ => 1.2,
+                        },
+                        "town" => 1.05,
+                        "village" | "suburb" => 0.95,
+                        _ => 0.88,
                     };
                 }
                 // quantize so the shaped-run cache hits during continuous zoom
@@ -2631,6 +2641,10 @@ impl MapView {
                     + (4_u8.saturating_sub(label.priority) as f64) * 120.0
                     + (220.0 - zoom_delta * 65.0)
                     + effective_length.min(640.0) * 0.35;
+                if let Some((_, population)) = place {
+                    // log-population tiebreak inside a settlement tier.
+                    score += (population.max(1) as f64).log10() * 15.0;
+                }
                 // Hysteresis: prefer labels that were visible last frame so
                 // panning doesn't flicker between competing candidates.
                 if self
