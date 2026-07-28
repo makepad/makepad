@@ -213,7 +213,14 @@ pub fn extract_area_label(
         tags.get("highway").map(|value| value.as_str()),
         Some("pedestrian" | "footway")
     ) || tags.get("place").map(|value| value.as_str()) == Some("square");
-    if !is_green && !is_square {
+    // Zoo enclosures and attractions (animal names at Artis, monuments).
+    let is_attraction = tags.contains_key("attraction")
+        || tags.contains_key("zoo")
+        || matches!(
+            tags.get("tourism").map(|value| value.as_str()),
+            Some("attraction" | "zoo" | "theme_park")
+        );
+    if !is_green && !is_square && !is_attraction {
         return None;
     }
     let name = select_label_text(tags)?;
@@ -224,6 +231,8 @@ pub fn extract_area_label(
         road_kind: format!("area{:.0}x{:.0}", centroid.0 * 4.0, centroid.1 * 4.0),
         color_class: if is_green {
             LABEL_CLASS_GREEN
+        } else if is_attraction {
+            LABEL_CLASS_CULTURE
         } else {
             LABEL_CLASS_DEFAULT
         },
