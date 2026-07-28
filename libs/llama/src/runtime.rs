@@ -374,6 +374,9 @@ fn flash_attention_supported_head_dim(head_dim: u32) -> bool {
 }
 
 fn should_use_flash_attention(head_dim: u32, n_tokens: usize) -> bool {
+    if std::env::var("LLAMA_NO_FLASH_ATTN").is_ok() {
+        return false;
+    }
     flash_attention_supported_head_dim(head_dim) && n_tokens < 20
 }
 
@@ -4507,7 +4510,11 @@ fn build_delta_net_recurrent_decode_from_hidden(
     ctx.set_tensor_name(conv_states, format!("{prefix}.conv_states_reshaped"))
         .map_err(LlamaError::format)?;
 
-    let qkv_mixed_t = ctx.transpose(qkv_mixed).map_err(LlamaError::format)?;
+    let mut qkv_mixed_t = ctx.transpose(qkv_mixed).map_err(LlamaError::format)?;
+    // Debug bisection hatch: materialize the transpose before the concat.
+    if std::env::var("MAKEPAD_LLAMA_DN_CONT_CONCAT").is_ok() {
+        qkv_mixed_t = ctx.cont(qkv_mixed_t).map_err(LlamaError::format)?;
+    }
     ctx.set_tensor_name(qkv_mixed_t, format!("{prefix}.qkv_mixed_transposed"))
         .map_err(LlamaError::format)?;
     let conv_input = ctx
@@ -4572,12 +4579,21 @@ fn build_delta_net_recurrent_decode_from_hidden(
     let conv_output = ctx
         .ssm_conv(conv_input, conv_kernel_id, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(conv_output, format!("{prefix}.conv_raw"))
+        .map_err(LlamaError::format)?;
     let conv_output = ctx
         .unary(conv_output, UnaryOp::Silu, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(conv_output, format!("{prefix}.conv_output"))
         .map_err(LlamaError::format)?;
 
+    // Debug bisection hatch: bypass the causal conv, reading q/k/v straight
+    // from the projection (same [qkv_dim, n_tokens, n_seqs] shape).
+    let conv_output = if std::env::var("MAKEPAD_LLAMA_DN_NO_CONV").is_ok() {
+        qkv_mixed
+    } else {
+        conv_output
+    };
     let conv_output_tensor = require_tensor(ctx, conv_output)?.clone();
     let qk_heads_width = i64::from(block.key_head_dim) * i64::from(block.key_head_count);
     let q_conv = ctx
@@ -4628,14 +4644,22 @@ fn build_delta_net_recurrent_decode_from_hidden(
 
     let use_fused_delta_net = true;
 
-    let mut q_conv = ctx
-        .l2_norm_eps(q_conv, block.rms_epsilon, BufferUsage::Activations)
-        .map_err(LlamaError::format)?;
+    // Debug bisection hatch: skip the pre-delta q/k L2 norm.
+    let skip_qk_norm = std::env::var("MAKEPAD_LLAMA_DN_NO_QKNORM").is_ok();
+    let mut q_conv = if skip_qk_norm {
+        q_conv
+    } else {
+        ctx.l2_norm_eps(q_conv, block.rms_epsilon, BufferUsage::Activations)
+            .map_err(LlamaError::format)?
+    };
     ctx.set_tensor_name(q_conv, format!("{prefix}.q_conv_predelta"))
         .map_err(LlamaError::format)?;
-    let mut k_conv = ctx
-        .l2_norm_eps(k_conv, block.rms_epsilon, BufferUsage::Activations)
-        .map_err(LlamaError::format)?;
+    let mut k_conv = if skip_qk_norm {
+        k_conv
+    } else {
+        ctx.l2_norm_eps(k_conv, block.rms_epsilon, BufferUsage::Activations)
+            .map_err(LlamaError::format)?
+    };
     ctx.set_tensor_name(k_conv, format!("{prefix}.k_conv_predelta"))
         .map_err(LlamaError::format)?;
     if block.value_head_count != block.key_head_count && !use_fused_delta_net {
@@ -4816,6 +4840,13 @@ fn build_delta_net_recurrent_decode_from_hidden(
         )?
     };
 
+    // Debug bisection hatch: pass raw v through instead of the delta-net
+    // attention result (the state save still runs).
+    let output = if std::env::var("MAKEPAD_LLAMA_DN_RAW_V").is_ok() {
+        v_conv
+    } else {
+        output
+    };
     let new_state_rows = ctx
         .view_2d(
             new_state,
@@ -5157,6 +5188,102 @@ pub fn execute_prepared_delta_net_recurrent_decode_metal(
         hidden_size: ne_usize(output, 0)?,
         n_tokens: ne_usize(output, 1)?,
     })
+}
+
+/// [`execute_prepared_delta_net_recurrent_decode_metal`], but also reading
+/// back arbitrary intermediate tensors (by graph tensor id) as f32 data —
+/// the instrument for bisecting wrong-output bugs inside the block.
+pub fn execute_prepared_delta_net_recurrent_decode_metal_with_taps(
+    runtime: &MetalRuntime,
+    ctx: &mut Context,
+    spec: &DeltaNetRecurrentDecodeSpec,
+    decode: &DeltaNetRecurrentDecodeGraph,
+    compiled: &MetalCompiledGraph,
+    input: LogitsProbeInput<'_>,
+    taps: &[TensorId],
+) -> Result<(AttentionBlockRun, Vec<Vec<f32>>)> {
+    let input_primary = match (&spec.block.input, input) {
+        (ProbeInputKind::TokenIds { .. }, LogitsProbeInput::TokenIds(token_ids)) => {
+            i32_slice_as_bytes(token_ids).to_vec()
+        }
+        _ => {
+            return Err(LlamaError::format(
+                "delta-net taps execute currently supports token-id input only",
+            ))
+        }
+    };
+
+    let mut outputs = vec![decode.result_output];
+    outputs.extend_from_slice(taps);
+    let execution = execute_compiled_graph(
+        runtime,
+        ctx,
+        compiled,
+        &[
+            MetalGraphTensorWrite {
+                tensor_id: decode.input_primary,
+                bytes: &input_primary,
+            },
+            MetalGraphTensorWrite {
+                tensor_id: decode.input_state_rows,
+                bytes: i32_slice_as_bytes(&[0]),
+            },
+        ],
+        &outputs,
+    )
+    .map_err(LlamaError::format)?;
+
+    let result_bytes = execution
+        .outputs
+        .get(&decode.result_output)
+        .ok_or_else(|| {
+            LlamaError::format("compiled delta-net recurrent decode did not produce result bytes")
+        })?;
+    let output = ctx
+        .tensor(decode.result_output)
+        .ok_or_else(|| LlamaError::format("delta-net recurrent result tensor is invalid"))?;
+    let hidden = tensor_bytes_to_f32_vec(result_bytes, output.desc.ty)?;
+    let run = AttentionBlockRun {
+        hidden,
+        hidden_size: ne_usize(output, 0)?,
+        n_tokens: ne_usize(output, 1)?,
+    };
+
+    let mut tap_values = Vec::with_capacity(taps.len());
+    for &tap in taps {
+        let bytes = execution.outputs.get(&tap).ok_or_else(|| {
+            LlamaError::format(format!("delta-net tap tensor {tap} produced no bytes"))
+        })?;
+        let tensor = ctx
+            .tensor(tap)
+            .ok_or_else(|| LlamaError::format("delta-net tap tensor is invalid"))?;
+        tap_values.push(tensor_bytes_to_f32_vec(bytes, tensor.desc.ty)?);
+    }
+    Ok((run, tap_values))
+}
+
+impl CompiledDeltaNetRecurrentDecodeMetal {
+    /// The compiled graph, for offline inspection (buffer layout debugging).
+    pub fn compiled_graph(&self) -> &MetalCompiledGraph {
+        self.session.compiled()
+    }
+
+    pub fn execute_with_taps(
+        &self,
+        ctx: &mut Context,
+        input: LogitsProbeInput<'_>,
+        taps: &[TensorId],
+    ) -> Result<(AttentionBlockRun, Vec<Vec<f32>>)> {
+        execute_prepared_delta_net_recurrent_decode_metal_with_taps(
+            self.session.runtime(),
+            ctx,
+            &self.spec,
+            &self.decode,
+            self.session.compiled(),
+            input,
+            taps,
+        )
+    }
 }
 
 pub fn execute_delta_net_recurrent_decode_graph_metal(
@@ -7450,7 +7577,10 @@ pub fn execute_prepared_hybrid_decode_metal(
                 )));
             }
         }
-    } else if !positions.is_empty() {
+    } else if !positions.is_empty() && std::env::var("MAKEPAD_LLAMA_MAX_BLOCKS").is_err() {
+        // Positions with no attention layers is normally a caller bug, but a
+        // block-truncated debug graph (MAKEPAD_LLAMA_MAX_BLOCKS) may cut off
+        // every attention layer on purpose.
         return Err(LlamaError::format(
             "hybrid decode received positions for a graph without attention layers",
         ));

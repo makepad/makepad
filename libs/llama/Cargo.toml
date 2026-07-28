@@ -23,3 +23,7 @@ path = "src/bin/llama_generate.rs"
 [[bin]]
 name = "llama-tokenize"
 path = "src/bin/llama_tokenize.rs"
+
+[[bin]]
+name = "llama-batch-probe"
+path = "src/bin/llama_batch_probe.rs"
