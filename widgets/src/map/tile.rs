@@ -494,28 +494,33 @@ fn merge_detail_features(
                 way.tags.get("layer").map(|value| value.as_str()),
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
-            // osm_lines rings arrive as LineStrings, so `closed` is only
-            // set for real Polygon geometry — detect implicit closure.
-            let ring_closed = way.closed
-                || (way.points.len() >= 4 && way.points.first() == way.points.last());
-            if !ring_closed {
-                continue;
-            }
             // Pedestrian squares mapped as highway=pedestrian + area=yes
             // stay in osm_lines (highway ways don't classify as polygons
-            // at conversion) — admit the closed ones here too.
+            // at conversion). area=yes MEANS polygon, so close the ring
+            // unconditionally — tile clipping can leave it open.
             if !from_polygons {
                 let is_ped_area = tag_is_truthy(&way.tags, "area")
                     && matches!(
                         way.tags.get("highway").map(|v| v.as_str()),
                         Some("pedestrian" | "footway")
                     );
-                if is_ped_area && want_platforms {
+                if is_ped_area && want_platforms && way.points.len() >= 3 {
+                    if way.points.first() != way.points.last() {
+                        let first = way.points[0];
+                        way.points.push(first);
+                    }
                     way.closed = true;
                     way.tags
                         .insert("layer".to_string(), "street_polygons".to_string());
                     ways.push(way);
                 }
+                continue;
+            }
+            // osm_lines rings arrive as LineStrings, so `closed` is only
+            // set for real Polygon geometry — detect implicit closure.
+            let ring_closed = way.closed
+                || (way.points.len() >= 4 && way.points.first() == way.points.last());
+            if !ring_closed {
                 continue;
             }
             let is_platform = way.tags.get("railway").map(|v| v.as_str()) == Some("platform")
@@ -591,9 +596,11 @@ fn micro_icon_min_zoom(icon: &str) -> f32 {
     }
 }
 
-/// Chaikin corner-cutting; endpoints stay pinned (open) or the seam joins
-/// smoothly (closed rings arrive with first==last from the merger).
-fn chaikin_smooth(points: &[(f32, f32)], rounds: usize) -> Vec<(f32, f32)> {
+/// ADAPTIVE Chaikin corner-cutting: only vertices whose adjacent segments
+/// are both short (dense curve sampling from tile quantization) get cut;
+/// sparse vertices are real corners — street grids must stay sharp or
+/// roads round through buildings and detach from their bridges.
+fn chaikin_smooth(points: &[(f32, f32)], rounds: usize, cut_below: f32) -> Vec<(f32, f32)> {
     if rounds == 0 || points.len() < 3 || points.len() > 2000 {
         return points.to_vec();
     }
@@ -603,28 +610,36 @@ fn chaikin_smooth(points: &[(f32, f32)], rounds: usize) -> Vec<(f32, f32)> {
     } else {
         points.to_vec()
     };
+    let cut_below_sq = cut_below * cut_below;
+    let seg_sq = |a: (f32, f32), b: (f32, f32)| {
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        dx * dx + dy * dy
+    };
+    let lerp =
+        |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
     for _ in 0..rounds {
         if pts.len() < 3 {
             break;
         }
-        let mut out = Vec::with_capacity(pts.len() * 2 + 2);
-        let lerp = |a: (f32, f32), b: (f32, f32), t: f32| {
-            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
-        };
-        if closed {
-            let n = pts.len();
-            for i in 0..n {
-                let a = pts[i];
-                let b = pts[(i + 1) % n];
-                out.push(lerp(a, b, 0.25));
-                out.push(lerp(a, b, 0.75));
-            }
-        } else {
+        let n = pts.len();
+        let mut out = Vec::with_capacity(n * 2 + 2);
+        let range = if closed { 0..n } else { 1..n - 1 };
+        if !closed {
             out.push(pts[0]);
-            for i in 0..pts.len() - 1 {
-                out.push(lerp(pts[i], pts[i + 1], 0.25));
-                out.push(lerp(pts[i], pts[i + 1], 0.75));
+        }
+        for i in range {
+            let prev = pts[(i + n - 1) % n];
+            let v = pts[i];
+            let next = pts[(i + 1) % n];
+            if seg_sq(prev, v) < cut_below_sq && seg_sq(v, next) < cut_below_sq {
+                out.push(lerp(v, prev, 0.25));
+                out.push(lerp(v, next, 0.25));
+            } else {
+                out.push(v);
             }
+        }
+        if !closed {
             out.push(*pts.last().unwrap());
         }
         pts = out;
@@ -1197,9 +1212,12 @@ fn build_tile_buffers_from_features(
     } else {
         0
     };
+    // Only cut where segments are shorter than ~10 screen px — dense
+    // quantized curves qualify, real street corners never do.
+    let chaikin_cut_below = 10.0 / render_scale;
     let mut merged_stroke_parts = Vec::<(StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in merged_stroke_jobs {
-        let smooth = chaikin_smooth(&job.points, chaikin_rounds);
+        let smooth = chaikin_smooth(&job.points, chaikin_rounds, chaikin_cut_below);
         let parts = build_polyline_parts(&smooth, clip_bounds, false, ROAD_SMOOTH_FACTOR);
         merged_stroke_parts.push((job.style, parts));
     }
