@@ -712,7 +712,15 @@ impl WidgetNode for View {
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
         if self.visible != visible {
             self.visible = visible;
-            self.redraw(cx);
+            // A view that has never drawn has an empty area, so its own
+            // redraw is a no-op and the visibility change only lands on
+            // the next unrelated full repaint (the classic "appears after
+            // hot reload" bug). Escalate to a full redraw in that case.
+            if visible && matches!(self.area, Area::Empty) {
+                cx.redraw_all();
+            } else {
+                self.redraw(cx);
+            }
         }
     }
 
