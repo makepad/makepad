@@ -168,7 +168,7 @@ pub fn poi_class_hex(color_class: u8) -> u32 {
         LABEL_CLASS_HEALTH => 0xbf0000,
         LABEL_CLASS_GREEN => 0x267d3f,
         LABEL_CLASS_TRANSPORT => 0x0092da,
-        LABEL_CLASS_TREE => 0x69a05f,
+        LABEL_CLASS_TREE => 0xa5cf97,
         LABEL_CLASS_WATER => 0x39688f,
         _ => 0x444444,
     }
