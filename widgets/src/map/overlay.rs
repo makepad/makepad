@@ -244,7 +244,6 @@ fn draw_route(
                 }
                 if !pen_down {
                     dv.move_to(a.x as f32, a.y as f32);
-                    last_drawn = a;
                     pen_down = true;
                 }
                 dv.line_to(b.x as f32, b.y as f32);
