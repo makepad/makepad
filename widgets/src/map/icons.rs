@@ -90,6 +90,10 @@ fn icons() -> &'static HashMap<&'static str, IconMesh> {
         if let Some(mesh) = build_disc_mesh(2.4) {
             out.insert("dot", mesh);
         }
+        // Dark center dot layered over the light tree canopy.
+        if let Some(mesh) = build_disc_mesh(1.3) {
+            out.insert("tree_core", mesh);
+        }
         out
     })
 }

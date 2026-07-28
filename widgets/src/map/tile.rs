@@ -500,17 +500,32 @@ fn merge_detail_features(
             // at conversion). area=yes MEANS polygon, so close the ring
             // unconditionally — tile clipping can leave it open.
             if !from_polygons {
+                // Walls, fences and hedges draw as thin barrier lines
+                // (the dark perimeter around Artis is its wall).
+                if let Some(barrier) = way.tags.get("barrier") {
+                    if want_platforms
+                        && matches!(
+                            barrier.as_str(),
+                            "wall" | "fence" | "retaining_wall" | "city_wall" | "hedge"
+                        )
+                    {
+                        way.tags
+                            .insert("layer".to_string(), "barrier_line".to_string());
+                        ways.push(way);
+                    }
+                    continue;
+                }
                 let is_ped_area = tag_is_truthy(&way.tags, "area")
                     && matches!(
                         way.tags.get("highway").map(|v| v.as_str()),
                         Some("pedestrian" | "footway")
                     );
+                // Attractions are areas by convention; clipping may have
+                // opened the ring, so no first==last requirement.
                 let is_attraction_ring = way.tags.contains_key("name")
                     && (way.tags.contains_key("attraction")
                         || way.tags.contains_key("zoo")
-                        || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"))
-                    && way.points.len() >= 4
-                    && way.points.first() == way.points.last();
+                        || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"));
                 let target_layer = if is_ped_area {
                     Some("street_polygons")
                 } else if is_attraction_ring {
@@ -772,7 +787,7 @@ fn build_tile_buffers_from_features(
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
-    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8)>::new();
+    let mut icon_jobs = Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, bool)>::new();
     for (point, tags) in &tagged_points {
         let mut label_point = *point;
         if render_zoom >= ICON_MIN_ZOOM {
@@ -786,7 +801,15 @@ fn build_tile_buffers_from_features(
                         "dot" => 1,
                         _ => 0,
                     };
-                    icon_jobs.push((*point, mesh, color_class, priority));
+                    // Micro street furniture packs tighter than shop/POI
+                    // symbols — a bench must not knock out the tree row.
+                    let dist_factor = match icon_name {
+                        "tree" | "bench" | "waste_basket" | "recycling" | "dot"
+                        | "bicycle" => 0.45f32,
+                        _ => 1.0,
+                    };
+                    let is_tree = icon_name == "tree";
+                    icon_jobs.push((*point, mesh, color_class, priority, dist_factor, is_tree));
                     // text sits below the symbol, carto-style
                     label_point.1 += 11.0 / render_scale;
                 }
@@ -803,11 +826,11 @@ fn build_tile_buffers_from_features(
     let icon_min_dist = (ICON_SIZE_PX + 3.0) / render_scale;
     let icon_min_dist_sq = icon_min_dist * icon_min_dist;
     let mut accepted_icons = Vec::<(f32, f32)>::new();
-    icon_jobs.retain(|(point, _, _, _)| {
+    icon_jobs.retain(|(point, _, _, _, dist_factor, _)| {
         let collides = accepted_icons.iter().any(|other| {
             let dx = other.0 - point.0;
             let dy = other.1 - point.1;
-            dx * dx + dy * dy < icon_min_dist_sq
+            dx * dx + dy * dy < icon_min_dist_sq * dist_factor * dist_factor
         });
         if collides {
             false
@@ -1352,7 +1375,7 @@ fn build_tile_buffers_from_features(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
-    for (anchor, mesh, color_class, _) in &icon_jobs {
+    for (anchor, mesh, color_class, _, _, is_tree) in &icon_jobs {
         append_icon_mesh(
             mesh,
             *anchor,
@@ -1361,6 +1384,19 @@ fn build_tile_buffers_from_features(
             &mut icon_indices,
             &mut icon_zbias,
         );
+        // carto trees: light canopy disc with a dark center dot.
+        if *is_tree {
+            if let Some(core) = icon_mesh("tree_core") {
+                append_icon_mesh(
+                    core,
+                    *anchor,
+                    hex_to_premul_rgba(0x4c7a4c, 1.0),
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+            }
+        }
         feature_count += 1;
     }
 
@@ -2105,8 +2141,15 @@ fn normalize_mvt_tags(
     geom_type: MvtGeomType,
     tags: &mut HashMap<String, String>,
 ) {
-    tags.entry("layer".to_string())
-        .or_insert_with(|| layer_name.to_string());
+    // The source-layer name OWNS the "layer" key. OSM's own layer=-1/1
+    // stacking tag collides with it and silently broke recognition of any
+    // layer-tagged feature (the Artis zoo way, bridges, tunnels) — keep
+    // the OSM value under "osm_layer" instead.
+    if let Some(previous) = tags.insert("layer".to_string(), layer_name.to_string()) {
+        if previous != layer_name {
+            tags.insert("osm_layer".to_string(), previous);
+        }
+    }
 
     match layer_name {
         "building" | "buildings" => {
