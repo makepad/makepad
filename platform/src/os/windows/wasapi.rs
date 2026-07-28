@@ -130,6 +130,12 @@ impl WasapiAccess {
             Self::enumerate_loopback_devices(&enumerator, &mut out);
             self.descs = out;
         }
+        // Match Linux/macOS: once open fails, mark the device so default_* skips it
+        // and apps stop retrying forever via change_signal → use_audio_outputs.
+        let failed = self.failed_devices.lock().unwrap();
+        for d in &mut self.descs {
+            d.has_failed = failed.contains(&d.device_id);
+        }
         self.descs.clone()
     }
 
@@ -143,12 +149,14 @@ impl WasapiAccess {
                 }
             });
             // create the new ones
+            let failed = self.failed_devices.lock().unwrap();
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_inputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
                     .is_none()
+                    && !failed.contains(device_id)
                 {
                     let is_loopback = self.is_loopback_device(*device_id);
                     let channel_count = self
@@ -173,6 +181,7 @@ impl WasapiAccess {
                 std::thread::spawn(move || {
                     let _mmcss_handle = elevate_audio_thread_priority();
                     if let Ok(mut wasapi) = WasapiLoopback::new(device_id, channel_count) {
+                        let sample_rate = wasapi.base.sample_rate;
                         audio_inputs.lock().unwrap().push(wasapi.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
                             // Use try_lock to avoid blocking the audio thread
@@ -192,7 +201,7 @@ impl WasapiAccess {
                                         AudioInfo {
                                             device_id,
                                             time: None,
-                                            sample_rate: 48000.0,
+                                            sample_rate,
                                         },
                                         &buffer,
                                     );
@@ -213,6 +222,7 @@ impl WasapiAccess {
                 std::thread::spawn(move || {
                     let _mmcss_handle = elevate_audio_thread_priority();
                     if let Ok(mut wasapi) = WasapiInput::new(device_id, channel_count) {
+                        let sample_rate = wasapi.base.sample_rate;
                         audio_inputs.lock().unwrap().push(wasapi.base.get_ref());
                         while let Ok(buffer) = wasapi.wait_for_buffer() {
                             // Use try_lock to avoid blocking the audio thread
@@ -232,7 +242,7 @@ impl WasapiAccess {
                                         AudioInfo {
                                             device_id,
                                             time: None,
-                                            sample_rate: 48000.0,
+                                            sample_rate,
                                         },
                                         &buffer,
                                     );
@@ -262,12 +272,14 @@ impl WasapiAccess {
                 }
             });
             // create the new ones
+            let failed = self.failed_devices.lock().unwrap();
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
                 if audio_outputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
                     .is_none()
+                    && !failed.contains(device_id)
                 {
                     let channel_count = self
                         .descs
@@ -289,6 +301,7 @@ impl WasapiAccess {
             std::thread::spawn(move || {
                 let _mmcss_handle = elevate_audio_thread_priority();
                 if let Ok(mut wasapi) = WasapiOutput::new(device_id, channel_count) {
+                    let sample_rate = wasapi.base.sample_rate;
                     audio_outputs.lock().unwrap().push(wasapi.base.get_ref());
                     while let Ok(mut buffer) = wasapi.wait_for_buffer() {
                         // Use try_lock to avoid blocking the audio thread
@@ -308,7 +321,7 @@ impl WasapiAccess {
                                     AudioInfo {
                                         device_id,
                                         time: None,
-                                        sample_rate: 48000.0,
+                                        sample_rate,
                                     },
                                     &mut buffer.audio_buffer,
                                 );
@@ -532,6 +545,7 @@ struct WasapiBase {
     event: HANDLE,
     client: IAudioClient,
     channel_count: usize,
+    sample_rate: f64,
     audio_buffer: Option<AudioBuffer>,
 }
 
@@ -554,59 +568,104 @@ impl WasapiBase {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         unsafe {
             let channel_count = channel_count.min(2);
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
-            let device = WasapiAccess::find_device_by_id(device_id).unwrap();
-            let client3: IAudioClient3 = if let Ok(client) = device.Activate(CLSCTX_ALL, None) {
-                client
-            } else {
-                return Err(());
+            let device = WasapiAccess::find_device_by_id(device_id).ok_or(())?;
+
+            // Shared-mode streams must match (or autoconvert toward) the mix format.
+            // Hardcoding 48000 fails on devices whose engine runs at 44100/96000/etc.
+            let sample_rate = {
+                let probe: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+                let mix = probe.GetMixFormat().map_err(|_| ())?;
+                let rate = (*mix).nSamplesPerSec as usize;
+                crate::windows::Win32::System::Com::CoTaskMemFree(Some(
+                    mix as *const _ as *const _,
+                ));
+                if rate == 0 {
+                    48000
+                } else {
+                    rate
+                }
             };
+            let wave_format =
+                WasapiAccess::new_float_waveformatextensible(sample_rate, channel_count);
+            let wave_ptr = &wave_format as *const _
+                as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX;
 
-            let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
-
-            let mut default_period_frames = 0u32;
-            let mut fundamental_period_frames = 0u32;
-            let mut min_period_frames = 0u32;
-            let mut max_period_frames = 0u32;
-            if client3
-                .GetSharedModeEnginePeriod(
-                    &wave_format as *const _
-                        as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
-                    &mut default_period_frames,
-                    &mut fundamental_period_frames,
-                    &mut min_period_frames,
-                    &mut max_period_frames,
-                )
-                .is_err()
-            {
-                return Err(());
+            // Prefer IAudioClient3 low-latency shared stream when available.
+            if let Ok(client3) = device.Activate::<IAudioClient3>(CLSCTX_ALL, None) {
+                let mut default_period_frames = 0u32;
+                let mut fundamental_period_frames = 0u32;
+                let mut min_period_frames = 0u32;
+                let mut max_period_frames = 0u32;
+                if client3
+                    .GetSharedModeEnginePeriod(
+                        wave_ptr,
+                        &mut default_period_frames,
+                        &mut fundamental_period_frames,
+                        &mut min_period_frames,
+                        &mut max_period_frames,
+                    )
+                    .is_ok()
+                    && client3
+                        .InitializeSharedAudioStream(
+                            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                            default_period_frames,
+                            wave_ptr,
+                            None,
+                        )
+                        .is_ok()
+                {
+                    let event = CreateEventA(None, false, false, None).map_err(|_| ())?;
+                    client3.SetEventHandle(event).map_err(|_| ())?;
+                    client3.Start().map_err(|_| ())?;
+                    let client: IAudioClient = client3.cast().map_err(|_| ())?;
+                    return Ok(Self {
+                        device_id,
+                        frames: default_period_frames.max(1),
+                        device,
+                        channel_count,
+                        sample_rate: sample_rate as f64,
+                        audio_buffer: Some(Default::default()),
+                        event,
+                        client,
+                    });
+                }
             }
-            if client3
-                .InitializeSharedAudioStream(
-                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    default_period_frames,
-                    &wave_format as *const _
-                        as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX,
+
+            // Fallback: classic shared-mode client with PCM autoconvert.
+            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+            let mut def_period = 0i64;
+            let mut min_period = 0i64;
+            client
+                .GetDevicePeriod(Some(&mut def_period), Some(&mut min_period))
+                .map_err(|_| ())?;
+            if client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                        | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                    def_period,
+                    0,
+                    wave_ptr,
                     None,
                 )
                 .is_err()
             {
                 return Err(());
             }
-
-            let event = CreateEventA(None, false, false, None).unwrap();
-            client3.SetEventHandle(event).unwrap();
-            client3.Start().unwrap();
-
-            // Cast IAudioClient3 to IAudioClient for storage
-            let client: IAudioClient = client3.cast().unwrap();
-
+            let event = CreateEventA(None, false, false, None).map_err(|_| ())?;
+            client.SetEventHandle(event).map_err(|_| ())?;
+            client.Start().map_err(|_| ())?;
+            let frames =
+                (((def_period as f64 / 10_000_000.0) * sample_rate as f64) as u32).max(1);
             Ok(Self {
                 device_id,
-                frames: default_period_frames,
+                frames,
                 device,
                 channel_count,
+                sample_rate: sample_rate as f64,
                 audio_buffer: Some(Default::default()),
                 event,
                 client,
@@ -616,7 +675,7 @@ impl WasapiBase {
 
     pub fn new_loopback(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let channel_count = channel_count.min(2);
             // Find the output device that corresponds to this loopback device
             let device = WasapiAccess::find_loopback_device_by_id(device_id).ok_or(())?;
@@ -626,17 +685,32 @@ impl WasapiBase {
             let mut min_period = 0i64;
             client
                 .GetDevicePeriod(Some(&mut def_period), Some(&mut min_period))
-                .unwrap();
+                .map_err(|_| ())?;
 
             // Force at least 20ms buffer for loopback
             if def_period < 200_000 {
                 def_period = 200_000;
             }
 
-            // Calculate frames from period (100-nanosecond units to frames at 48kHz)
-            let frames = ((def_period as f64 / 10_000_000.0) * 48000.0) as u32;
+            let sample_rate = {
+                let mix = client.GetMixFormat().map_err(|_| ())?;
+                let rate = (*mix).nSamplesPerSec as usize;
+                crate::windows::Win32::System::Com::CoTaskMemFree(Some(
+                    mix as *const _ as *const _,
+                ));
+                if rate == 0 {
+                    48000
+                } else {
+                    rate
+                }
+            };
 
-            let wave_format = WasapiAccess::new_float_waveformatextensible(48000, channel_count);
+            // Calculate frames from period (100-nanosecond units)
+            let frames =
+                (((def_period as f64 / 10_000_000.0) * sample_rate as f64) as u32).max(1);
+
+            let wave_format =
+                WasapiAccess::new_float_waveformatextensible(sample_rate, channel_count);
 
             // Use AUDCLNT_STREAMFLAGS_LOOPBACK to capture from the output device
             if client
@@ -657,15 +731,16 @@ impl WasapiBase {
                 return Err(());
             }
 
-            let event = CreateEventA(None, false, false, None).unwrap();
-            client.SetEventHandle(event).unwrap();
-            client.Start().unwrap();
+            let event = CreateEventA(None, false, false, None).map_err(|_| ())?;
+            client.SetEventHandle(event).map_err(|_| ())?;
+            client.Start().map_err(|_| ())?;
 
             Ok(Self {
                 device_id,
                 frames,
                 device,
                 channel_count,
+                sample_rate: sample_rate as f64,
                 audio_buffer: Some(Default::default()),
                 event,
                 client,
@@ -713,17 +788,11 @@ impl WasapiOutput {
                     let device_buffer = self.render_client.GetBuffer(req_size).unwrap();
                     let mut audio_buffer = self.base.audio_buffer.take().unwrap();
                     let channel_count = self.base.channel_count;
-                    let frame_count = (req_size / channel_count as u32) as usize;
+                    // GetBuffer / GetCurrentPadding sizes are in frames, not samples.
+                    let frame_count = req_size as usize;
                     audio_buffer.clear_final_size();
                     audio_buffer.resize(frame_count, channel_count);
                     audio_buffer.set_final_size();
-                    if (frame_count as u32) < self.base.frames {
-                        println!(
-                            "Wasapi glitch detected, resettting output device {}<{}",
-                            frame_count, self.base.frames
-                        );
-                        return Err(());
-                    }
                     return Ok(WasapiAudioOutputBuffer {
                         frame_count,
                         channel_count,
