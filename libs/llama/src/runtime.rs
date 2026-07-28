@@ -836,6 +836,12 @@ pub struct HybridDecodeBatchLayout {
     pub attention_key_count: usize,
     pub recurrent_state_rows: Vec<i32>,
     pub output_ids: Vec<i32>,
+    /// Pre-expanded M-RoPE positions, `[c0 over all tokens][c1][c2][c3]`.
+    /// When absent, rope uses `positions` broadcast across components (the
+    /// text-only behavior). Image spans need this: their h/w components
+    /// diverge from the linear sequence index, while `positions` stays the
+    /// linear index used for cache writes and attention masking.
+    pub rope_positions: Option<Vec<i32>>,
 }
 
 impl HybridDecodeBatchLayout {
@@ -887,6 +893,7 @@ impl HybridDecodeBatchLayout {
             attention_key_count,
             recurrent_state_rows: vec![0],
             output_ids: output_ids.to_vec(),
+            rope_positions: None,
         })
     }
 
@@ -7776,7 +7783,10 @@ pub fn execute_prepared_hybrid_decode_metal(
                     "hybrid decode has rope position input without an attention rope spec",
                 )
             })?;
-        Some(encode_rope_positions(rope, positions, positions.len())?)
+        // Image spans carry pre-expanded 4-component M-RoPE positions on the
+        // layout; text batches fall back to broadcasting the linear positions.
+        let rope_source = layout.rope_positions.as_deref().unwrap_or(positions);
+        Some(encode_rope_positions(rope, rope_source, positions.len())?)
     } else {
         None
     };
