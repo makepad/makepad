@@ -748,8 +748,10 @@ pub fn stroke_style_for_tags(
                 casing.depth_micro += micro_bias;
             }
         }
-        // carto draws bridge roads with a dark casing edge
-        if tag_is_truthy(tags, "bridge") {
+        // carto draws bridge ROADS with a dark casing edge — never thin
+        // footpaths/steps: their sub-px dark casing under the salmon dots
+        // reads as black dashed fragments at every canal crossing.
+        if tag_is_truthy(tags, "bridge") && !thin_growth {
             let width = style
                 .casing
                 .map_or(style.center.width * 1.35, |casing| casing.width);
