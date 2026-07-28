@@ -468,6 +468,15 @@ impl CompiledMapTheme {
     }
 }
 
+/// Fill opacity: overlay tints are translucent so the base map reads
+/// through; everything else stays opaque.
+pub fn fill_alpha_for_tags(tags: &HashMap<String, String>) -> f32 {
+    match tags.get("layer").map(|value| value.as_str()) {
+        Some("natura2000" | "wetlands") => 0.22,
+        _ => 1.0,
+    }
+}
+
 /// Procedural fill texture, carto-style: 30 = staggered dot stipple
 /// (courtyard gardens), 31 = diagonal hatch (playgrounds), 32 = staggered
 /// open circles (woods/forests/cemeteries — tree rings). 0 = solid.
@@ -509,6 +518,10 @@ pub fn fill_color_for_tags(
     // Station platforms: carto draws them as calm gray slabs.
     if layer == "platforms" {
         return theme.bridge_area_fill;
+    }
+    // Nature reserves tint translucent green (alpha via fill_alpha_for_tags).
+    if matches!(layer, "natura2000" | "wetlands") {
+        return Some(0x74b787);
     }
     if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") {
         return theme.water_fill;
@@ -742,6 +755,55 @@ pub fn stroke_style_for_tags(
                 depth_micro: 150.0 * DEPTH_MICRO_PER_RANK,
             },
         });
+    }
+    // Geodata overlay layers (layers.md). Transit route shapes above the
+    // road network; nature and admin boundaries as outlines.
+    match layer {
+        "routes" => {
+            return Some(StrokeStyle {
+                sort_rank: 400,
+                casing: None,
+                center: StrokePassStyle {
+                    color: 0x0a6cc8,
+                    width: 1.5 * px_to_units,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 400.0 * DEPTH_MICRO_PER_RANK,
+                },
+            });
+        }
+        "natura2000" | "wetlands" => {
+            return Some(StrokeStyle {
+                sort_rank: 240,
+                casing: None,
+                center: StrokePassStyle {
+                    color: 0x2e8b57,
+                    width: 1.3 * px_to_units,
+                    shape_id: 0.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 240.0 * DEPTH_MICRO_PER_RANK,
+                },
+            });
+        }
+        "gemeenten" | "wijken" | "buurten" => {
+            let width = match layer {
+                "gemeenten" => 1.6,
+                "wijken" => 1.1,
+                _ => 0.8,
+            };
+            return Some(StrokeStyle {
+                sort_rank: 380,
+                casing: None,
+                center: StrokePassStyle {
+                    color: 0x8a4e9e,
+                    width: width * px_to_units,
+                    shape_id: 11.0,
+                    expand_class: EXPAND_CLASS_CONST_PX,
+                    depth_micro: 380.0 * DEPTH_MICRO_PER_RANK,
+                },
+            });
+        }
+        _ => {}
     }
     // Platform slabs get a thin constant-px edge like carto.
     if layer == "platforms" {
