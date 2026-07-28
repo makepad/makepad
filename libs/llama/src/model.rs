@@ -180,6 +180,22 @@ impl LlamaModel {
         )))
     }
 
+    pub fn embedding_length(&self) -> Result<u32> {
+        if let Some(cfg) = &self.qwen35 {
+            return Ok(cfg.embedding_length);
+        }
+        if let Some(cfg) = &self.qwen35moe {
+            return Ok(cfg.embedding_length);
+        }
+        if let Some(cfg) = &self.gemma4 {
+            return Ok(cfg.embedding_length);
+        }
+        Err(LlamaError::unsupported(format!(
+            "embedding length is not implemented for architecture '{}'",
+            self.architecture.name()
+        )))
+    }
+
     pub fn hybrid_decode_spec(
         &self,
         max_context: u32,
