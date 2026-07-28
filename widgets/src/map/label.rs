@@ -313,6 +313,39 @@ pub fn extract_point_label(tags: &HashMap<String, String>, point: (f32, f32)) ->
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
+        // Charger sites label their power (and Superchargers their brand):
+        // the kW number is the routing-relevant fact for an EV navigator.
+        "chargers" => {
+            let kw = tags
+                .get("max_kw")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if kw < 50.0 {
+                return None;
+            }
+            let operator = tags.get("operator").map(|value| value.as_str()).unwrap_or("");
+            let is_tesla = operator.to_ascii_lowercase().contains("tesla");
+            let text = if is_tesla {
+                format!("Supercharger {:.0} kW", kw)
+            } else {
+                format!("{:.0} kW", kw)
+            };
+            let color_class = if kw >= 150.0 {
+                LABEL_CLASS_HEALTH
+            } else {
+                LABEL_CLASS_AMENITY
+            };
+            return Some(TileLabel {
+                text,
+                priority: 3,
+                source_layer,
+                road_kind: format!("chg{:.0}x{:.0}", point.0 * 4.0, point.1 * 4.0),
+                color_class,
+                path_points: point_label_path(point),
+                name_key: String::new(),
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
         // Settlement names — THE labels at low zoom (carto placenames.mss:
         // city z4+, town z7+, village/suburb z12+, quarter/hamlet z14+).
         // Kind-based zoom gating and text scaling happen at candidate time
@@ -514,6 +547,7 @@ pub fn label_source_rank(layer: &str) -> Option<u8> {
         "water_polygons_labels" => 5,
         "water_lines_labels" => 4,
         "micro_pois" => 3,
+        "chargers" => 3,
         "pois" => 3,
         "green_area" => 4,
         "transportation" | "road" | "streets" | "bridges" | "aerialways" | "ferries"
