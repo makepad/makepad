@@ -35,6 +35,22 @@ pub struct MbtilesWriter {
     tiles: TableStream,
     tile_count: u64,
     tile_bytes: u64,
+    extra_tables: Vec<ExtraTable>,
+}
+
+struct ExtraTable {
+    name: String,
+    sql: String,
+    stream: TableStream,
+}
+
+/// Value for rows in extra (non-tiles) tables.
+pub enum WriterValue<'a> {
+    Null,
+    Integer(i64),
+    Float(f64),
+    Text(&'a str),
+    Blob(&'a [u8]),
 }
 
 impl MbtilesWriter {
@@ -48,7 +64,55 @@ impl MbtilesWriter {
             tiles,
             tile_count: 0,
             tile_bytes: 0,
+            extra_tables: Vec::new(),
         })
+    }
+
+    /// Declare an additional table. Rows are supplied via
+    /// [`MbtilesWriter::write_extra_row`] in strictly ascending rowid order
+    /// (per table). The CREATE TABLE statement is recorded verbatim in
+    /// sqlite_master, so standard SQLite tooling sees proper column names.
+    pub fn begin_extra_table(&mut self, name: &str, create_sql: &str) -> Result<()> {
+        if self.extra_tables.iter().any(|t| t.name == name) {
+            return Err(Error::InvalidInput(format!(
+                "extra table {name} already declared"
+            )));
+        }
+        let stream = TableStream::new(&mut self.db)?;
+        self.extra_tables.push(ExtraTable {
+            name: name.to_string(),
+            sql: create_sql.to_string(),
+            stream,
+        });
+        Ok(())
+    }
+
+    /// Append one row to a declared extra table.
+    pub fn write_extra_row(
+        &mut self,
+        table: &str,
+        rowid: i64,
+        values: &[WriterValue<'_>],
+    ) -> Result<()> {
+        let record: Vec<RecordValue<'_>> = values
+            .iter()
+            .map(|v| match v {
+                WriterValue::Null => RecordValue::Null,
+                WriterValue::Integer(i) => RecordValue::Integer(*i),
+                WriterValue::Float(f) => RecordValue::Float(*f),
+                WriterValue::Text(s) => RecordValue::Text(s),
+                WriterValue::Blob(b) => RecordValue::Blob(b),
+            })
+            .collect();
+        let payload = encode_record(&record)?;
+        let index = self
+            .extra_tables
+            .iter()
+            .position(|t| t.name == table)
+            .ok_or_else(|| Error::InvalidInput(format!("extra table {table} not declared")))?;
+        self.extra_tables[index]
+            .stream
+            .push(&mut self.db, rowid, &payload)
     }
 
     /// Set an MBTiles metadata value. Repeated keys replace the previous value.
@@ -107,7 +171,14 @@ impl MbtilesWriter {
         }
         let metadata_root = metadata_table.finish(&mut self.db)?;
 
-        self.db.write_sqlite_master(metadata_root, tiles_root)?;
+        let mut extra_roots = Vec::new();
+        for table in std::mem::take(&mut self.extra_tables) {
+            let root = table.stream.finish(&mut self.db)?;
+            extra_roots.push((table.name, table.sql, root));
+        }
+
+        self.db
+            .write_sqlite_master(metadata_root, tiles_root, &extra_roots)?;
         self.db.finish()?;
 
         Ok(MbtilesWriterStats {
@@ -181,12 +252,17 @@ impl RawDbWriter {
         Ok(())
     }
 
-    fn write_sqlite_master(&mut self, metadata_root: u32, tiles_root: u32) -> Result<()> {
+    fn write_sqlite_master(
+        &mut self,
+        metadata_root: u32,
+        tiles_root: u32,
+        extra_tables: &[(String, String, u32)],
+    ) -> Result<()> {
         let metadata_sql = "CREATE TABLE metadata (name TEXT, value TEXT)";
         let tiles_sql =
             "CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)";
 
-        let rows = [
+        let mut rows = vec![
             encode_record(&[
                 RecordValue::Text("table"),
                 RecordValue::Text("metadata"),
@@ -202,8 +278,22 @@ impl RawDbWriter {
                 RecordValue::Text(tiles_sql),
             ])?,
         ];
+        for (name, sql, root) in extra_tables {
+            rows.push(encode_record(&[
+                RecordValue::Text("table"),
+                RecordValue::Text(name),
+                RecordValue::Text(name),
+                RecordValue::Integer(i64::from(*root)),
+                RecordValue::Text(sql),
+            ])?);
+        }
 
-        let mut page = build_leaf_page(100, &[(1, &rows[0]), (2, &rows[1])])?;
+        let indexed: Vec<(i64, &[u8])> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i as i64 + 1, r.as_slice()))
+            .collect();
+        let mut page = build_leaf_page(100, &indexed)?;
         write_database_header(&mut page, self.page_count);
         self.write_page(1, &page)
     }
@@ -468,7 +558,9 @@ fn write_interior_page(db: &mut RawDbWriter, children: &[PageRef]) -> Result<Pag
 }
 
 enum RecordValue<'a> {
+    Null,
     Integer(i64),
+    Float(f64),
     Blob(&'a [u8]),
     Text(&'a str),
 }
@@ -479,6 +571,11 @@ fn encode_record(values: &[RecordValue<'_>]) -> Result<Vec<u8>> {
 
     for value in values {
         let serial_type = match value {
+            RecordValue::Null => 0,
+            RecordValue::Float(value) => {
+                body.extend_from_slice(&value.to_be_bytes());
+                7
+            }
             RecordValue::Integer(value) => encode_integer(*value, &mut body),
             RecordValue::Blob(value) => {
                 body.extend_from_slice(value);

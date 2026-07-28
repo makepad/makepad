@@ -19,7 +19,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 mod writer;
-pub use writer::{MbtilesWriter, MbtilesWriterStats};
+pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -1075,6 +1075,150 @@ impl MbtilesReader {
     pub fn header(&self) -> &DbHeader {
         &self.header
     }
+
+    /// Open any SQLite database (e.g. a GeoPackage) for generic table access.
+    /// Unlike [`MbtilesReader::open`] this does not require the mbtiles schema;
+    /// the tile-specific methods will fail on such a database, but
+    /// [`MbtilesReader::schema_entries`] and [`MbtilesReader::for_each_row`]
+    /// work on any table.
+    pub fn open_sqlite(path: &Path) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let mut header_buf = [0u8; 100];
+        file.read_exact(&mut header_buf)?;
+        let header = parse_db_header(&header_buf)?;
+        let usable_size = header.page_size as usize - header.reserved_space as usize;
+        Ok(MbtilesReader {
+            file,
+            header,
+            usable_size,
+            tiles_root_page: 0,
+            metadata_root_page: 0,
+            tile_index_root_page: None,
+            makepad_block_rowids: false,
+            btree_page_cache: HashMap::new(),
+            btree_page_cache_order: VecDeque::new(),
+        })
+    }
+
+    /// All objects recorded in sqlite_master: tables, indexes, views, triggers.
+    pub fn schema_entries(&mut self) -> Result<Vec<SchemaEntry>> {
+        let mut entries = Vec::new();
+        self.scan_table_pages(1, &mut |reader, _rowid, local, total, overflow| {
+            let payload = reader.assemble_payload(local, total, overflow)?;
+            let record = parse_record(&payload, reader.header.text_encoding)?;
+            if record.len() >= 5 {
+                entries.push(SchemaEntry {
+                    obj_type: record[0].as_text().unwrap_or("").to_string(),
+                    name: record[1].as_text().unwrap_or("").to_string(),
+                    tbl_name: record[2].as_text().unwrap_or("").to_string(),
+                    root_page: record[3].as_integer().unwrap_or(0) as u32,
+                    sql: record[4].as_text().unwrap_or("").to_string(),
+                });
+            }
+            Ok(())
+        })?;
+        Ok(entries)
+    }
+
+    /// Walk every row of the named table, decoding each record's values.
+    /// A column declared INTEGER PRIMARY KEY is the rowid alias and appears as
+    /// [`Value::Null`] in the record; use the callback's rowid for it.
+    pub fn for_each_row(
+        &mut self,
+        table: &str,
+        mut callback: impl FnMut(i64, Vec<Value>),
+    ) -> Result<()> {
+        let root = self
+            .schema_entries()?
+            .into_iter()
+            .find(|e| e.obj_type == "table" && e.name == table)
+            .map(|e| e.root_page)
+            .ok_or(Error::TableNotFound("requested table"))?;
+        if root == 0 {
+            return Err(Error::TableNotFound("requested table"));
+        }
+        self.scan_table_pages(root, &mut |reader, rowid, local, total, overflow| {
+            let payload = reader.assemble_payload(local, total, overflow)?;
+            let record = parse_record(&payload, reader.header.text_encoding)?;
+            callback(rowid, record);
+            Ok(())
+        })
+    }
+
+    /// Walk rows of the named table whose rowid lies in `lo..=hi`, pruning
+    /// b-tree subtrees outside the range — an indexed range query without SQL.
+    pub fn for_each_row_in_range(
+        &mut self,
+        table: &str,
+        lo: i64,
+        hi: i64,
+        mut callback: impl FnMut(i64, Vec<Value>),
+    ) -> Result<()> {
+        let root = self
+            .schema_entries()?
+            .into_iter()
+            .find(|e| e.obj_type == "table" && e.name == table)
+            .map(|e| e.root_page)
+            .ok_or(Error::TableNotFound("requested table"))?;
+        if root == 0 {
+            return Err(Error::TableNotFound("requested table"));
+        }
+        let mut page_stack = vec![root];
+        while let Some(page_num) = page_stack.pop() {
+            let page = self.read_btree_page(page_num)?;
+            let header_offset = if page_num == 1 { 100 } else { 0 };
+            let (page_type, cell_ptrs, rightmost_ptr) = self.cell_pointers(&page, header_offset)?;
+            match page_type {
+                PageType::TableLeaf => {
+                    for &ptr in &cell_ptrs {
+                        let (rowid, local, total, overflow) =
+                            self.parse_table_leaf_cell(&page, ptr)?;
+                        if rowid < lo || rowid > hi {
+                            continue;
+                        }
+                        let payload = self.assemble_payload(local, total, overflow)?;
+                        let record = parse_record(&payload, self.header.text_encoding)?;
+                        callback(rowid, record);
+                    }
+                }
+                PageType::TableInterior => {
+                    // Interior cells hold (child, max_rowid_of_child) in
+                    // ascending order; the rightmost pointer covers the rest.
+                    let mut prev_max = i64::MIN;
+                    let mut include_right = true;
+                    for &ptr in &cell_ptrs {
+                        let (child, key) = self.parse_table_interior_cell(&page, ptr)?;
+                        if key >= lo && prev_max <= hi {
+                            page_stack.push(child);
+                        }
+                        if key > hi {
+                            include_right = false;
+                            // later siblings are entirely above the range
+                            break;
+                        }
+                        prev_max = key;
+                    }
+                    if include_right {
+                        if let Some(right) = rightmost_ptr {
+                            page_stack.push(right);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One row of sqlite_master, describing a schema object.
+#[derive(Debug, Clone)]
+pub struct SchemaEntry {
+    pub obj_type: String,
+    pub name: String,
+    pub tbl_name: String,
+    pub root_page: u32,
+    pub sql: String,
 }
 
 /// Quick parse of the first 3 integer columns from a record's local payload.
