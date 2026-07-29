@@ -1769,17 +1769,27 @@ fn annotate_base_tiles(
                 }
             }
             // Grade-limited blend from both ends so a raised junction
-            // endpoint ramps into the path instead of spiking.
+            // endpoint ramps into the path instead of spiking. HOLD the
+            // junction height for the first stretch: a slip road must
+            // attach AT deck level through the gore and descend after —
+            // decaying immediately left a ledge along every merge.
+            let hold_units = 12.0 / m_per_unit.max(1e-6);
+            let mut arc = 0.0f32;
             for index in 1..count {
                 let seg = distance(points[index - 1], points[index]);
-                let limit = dz[index - 1] - grade_per_unit * seg;
+                arc += seg;
+                let decay = (arc - hold_units).max(0.0) - (arc - seg - hold_units).max(0.0);
+                let limit = dz[index - 1] - grade_per_unit * decay;
                 if limit > dz[index] {
                     dz[index] = limit;
                 }
             }
+            arc = 0.0;
             for index in (0..count - 1).rev() {
                 let seg = distance(points[index], points[index + 1]);
-                let limit = dz[index + 1] - grade_per_unit * seg;
+                arc += seg;
+                let decay = (arc - hold_units).max(0.0) - (arc - seg - hold_units).max(0.0);
+                let limit = dz[index + 1] - grade_per_unit * decay;
                 if limit > dz[index] {
                     dz[index] = limit;
                 }
