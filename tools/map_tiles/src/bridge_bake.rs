@@ -1323,6 +1323,55 @@ fn solve_bbox(
         }
     }
 
+    // Lateral consensus: a dual carriageway is TWO parallel ways whose
+    // ribbons overlap in 2D — if their solved profiles differ, the merged
+    // surface renders a height step down its middle (persistent stepped
+    // twin slabs). Each way vertex adopts the highest solved height found
+    // on a PARALLEL way within its own half-width. Two rounds settle
+    // chains; tunnels stay out.
+    {
+        let mut pre_field = SolvedField::default();
+        for way in &graph.ways {
+            if way.tunnel {
+                continue;
+            }
+            for seg in 0..way.nodes.len() - 1 {
+                let a = way.nodes[seg] as usize;
+                let b = way.nodes[seg + 1] as usize;
+                pre_field.push(
+                    graph.pos[a].0,
+                    graph.pos[a].1,
+                    graph.pos[b].0,
+                    graph.pos[b].1,
+                    z[a],
+                    z[b],
+                );
+            }
+        }
+        for way in &graph.ways {
+            if way.tunnel || way.nodes.len() < 2 {
+                continue;
+            }
+            let cap_units = way.half_width_m / m_per_unit.max(1e-6);
+            for index in 0..way.nodes.len() {
+                let node = way.nodes[index] as usize;
+                let (px, py) = graph.pos[node];
+                let previous = graph.pos
+                    [way.nodes[index.saturating_sub(1)] as usize];
+                let next =
+                    graph.pos[way.nodes[(index + 1).min(way.nodes.len() - 1)] as usize];
+                let dir = (next.0 - previous.0, next.1 - previous.1);
+                if let Some(height) =
+                    pre_field.parallel_max(px, py, dir, 0.7, cap_units)
+                {
+                    if height > z[node] + 0.3 {
+                        z[node] = height;
+                    }
+                }
+            }
+        }
+    }
+
     // The solved field itself, for sampling base-tile geometry.
     let mut field = SolvedField::default();
     for way in &graph.ways {
@@ -1397,6 +1446,64 @@ impl SolvedField {
     /// side sign relative to the matched segment) — distance and side feed
     /// the way-level consistency filters in the annotator.
     fn sample(&self, px: f32, py: f32, dir: Option<(f32, f32)>, cap: f32) -> Option<(f32, f32, f32)> {
+        self.sample_gated(px, py, dir, cap, 0.82)
+    }
+
+    /// Highest z among PARALLEL segments with lateral distance in
+    /// (min_dist, cap) — the own centerline (dist ~0) is excluded, so a
+    /// dual-carriageway twin's height is visible past one's own line.
+    fn parallel_max(
+        &self,
+        px: f32,
+        py: f32,
+        dir: (f32, f32),
+        min_dist: f32,
+        cap: f32,
+    ) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        let cy0 = ((py - cap) / FIELD_CELL).floor() as i32;
+        let cy1 = ((py + cap) / FIELD_CELL).floor() as i32;
+        let cx0 = ((px - cap) / FIELD_CELL).floor() as i32;
+        let cx1 = ((px + cap) / FIELD_CELL).floor() as i32;
+        let dl = (dir.0 * dir.0 + dir.1 * dir.1).sqrt().max(1e-6);
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                let Some(segs) = self.grid.get(&(cx, cy)) else { continue };
+                for seg in segs {
+                    let [ax, ay, bx, by, za, zb] = *seg;
+                    let (ex, ey) = (bx - ax, by - ay);
+                    let el2 = (ex * ex + ey * ey).max(1e-6);
+                    if ((dir.0 * ex + dir.1 * ey) / (dl * el2.sqrt())).abs() < 0.82 {
+                        continue;
+                    }
+                    let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
+                    let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
+                    let dist = (qx * qx + qy * qy).sqrt();
+                    if dist <= min_dist || dist >= cap {
+                        continue;
+                    }
+                    let height = za * (1.0 - t) + zb * t;
+                    if best.is_none_or(|b| height > b) {
+                        best = Some(height);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// `min_dot` relaxes the direction gate: endpoint fallbacks use ~0.5 so
+    /// angled merges still join their deck while a way SPLIT sitting under
+    /// a crossing viaduct no longer grabs the deck overhead (that spike
+    /// rendered as a detached floating slab).
+    fn sample_gated(
+        &self,
+        px: f32,
+        py: f32,
+        dir: Option<(f32, f32)>,
+        cap: f32,
+        min_dot: f32,
+    ) -> Option<(f32, f32, f32)> {
         let mut best_dist = cap;
         let mut best_z = None;
         let cy0 = ((py - cap) / FIELD_CELL).floor() as i32;
@@ -1413,7 +1520,7 @@ impl SolvedField {
                     if let Some((dx, dy)) = dir {
                         let dl = (dx * dx + dy * dy).sqrt();
                         if dl > 1e-6
-                            && ((dx * ex + dy * ey) / (dl * el2.sqrt())).abs() < 0.82
+                            && ((dx * ex + dy * ey) / (dl * el2.sqrt())).abs() < min_dot
                         {
                             continue;
                         }
@@ -1605,7 +1712,7 @@ fn annotate_base_tiles(
                 let dir = (next.0 - previous.0, next.1 - previous.1);
                 let gated = field.sample(gx, gy, Some(dir), 1.2);
                 if endpoint {
-                    gated.or_else(|| field.sample(gx, gy, None, 0.8))
+                    gated.or_else(|| field.sample_gated(gx, gy, Some(dir), 0.8, 0.5))
                 } else {
                     gated
                 }
@@ -1657,7 +1764,7 @@ fn annotate_base_tiles(
                 let (gx, gy) = (px + global_offset.0, py + global_offset.1);
                 let gated = tunnel_field.sample(gx, gy, Some(dir), 1.2);
                 let sampled = if endpoint {
-                    gated.or_else(|| tunnel_field.sample(gx, gy, None, 0.8))
+                    gated.or_else(|| tunnel_field.sample_gated(gx, gy, Some(dir), 0.8, 0.5))
                 } else {
                     gated
                 };
@@ -1675,6 +1782,41 @@ fn annotate_base_tiles(
                     for value in dz.iter_mut() {
                         *value = 0.0;
                     }
+                }
+            }
+        }
+        // Isolated 1-2 vertex spikes are grabs from a PARALLEL deck
+        // directly overhead (stacked carriageways are coincident in 2D —
+        // no direction or distance gate can reject them): real deck
+        // membership is CONTIGUOUS. Zero short isolated runs; genuine
+        // merges are re-established by the junction consensus afterwards,
+        // which blends at grade instead of spiking.
+        if !base_path.is_polygon {
+            let mut index = 0;
+            while index < count {
+                if dz[index] > 0.2 {
+                    let run_start = index;
+                    while index < count && dz[index] > 0.2 {
+                        index += 1;
+                    }
+                    // Whole-way profiles always keep (a short bridge way IS
+                    // two lifted vertices); internal/end spikes die only
+                    // when their ARC is short — vertex counts lie on
+                    // sparse geometry.
+                    let whole_path = run_start == 0 && index == count;
+                    if !whole_path {
+                        let mut arc = 0.0f32;
+                        for vertex in run_start.max(1)..index {
+                            arc += distance(points[vertex - 1], points[vertex]);
+                        }
+                        if arc * m_per_unit < 25.0 {
+                            for value in dz[run_start..index].iter_mut() {
+                                *value = 0.0;
+                            }
+                        }
+                    }
+                } else {
+                    index += 1;
                 }
             }
         }
@@ -1718,25 +1860,35 @@ fn annotate_base_tiles(
     // sampled dz disagrees by decimeters — in 2D overpainting hides it, in
     // 3D the overlap fractures into slivers. Coincident vertices must
     // agree exactly.
-    let mut junction: HashMap<(i32, i32), f32> = HashMap::new();
+    // Junction consensus entries carry the DIRECTION of the height
+    // carrier at that vertex: a joining way may inherit the height
+    // without its own support only when it attaches TANGENTIALLY (slip
+    // roads and gores) — perpendicular side streets never inherit a
+    // curb-lift.
+    let mut junction: HashMap<(i32, i32), (f32, (f32, f32))> = HashMap::new();
     for (path_index, base_path) in base_paths.iter().enumerate() {
         let Some(dz) = &sampled_paths[path_index] else { continue };
         if base_path.is_polygon {
             continue;
         }
         let offset = path_src[path_index].1;
+        let count = base_path.points.len();
         for (vertex, &height) in dz.iter().enumerate() {
             if height <= 0.2 {
                 continue;
             }
             let (px, py) = base_path.points[vertex];
+            let previous = base_path.points[vertex.saturating_sub(1)];
+            let next = base_path.points[(vertex + 1).min(count - 1)];
+            let (dx, dy) = (next.0 - previous.0, next.1 - previous.1);
+            let len = (dx * dx + dy * dy).sqrt().max(1e-6);
             let key = (
                 ((px + offset.0) * 4.0).round() as i32,
                 ((py + offset.1) * 4.0).round() as i32,
             );
-            let entry = junction.entry(key).or_insert(0.0);
-            if height > *entry {
-                *entry = height;
+            let entry = junction.entry(key).or_insert((0.0, (0.0, 0.0)));
+            if height > entry.0 {
+                *entry = (height, (dx / len, dy / len));
             }
         }
     }
@@ -1754,16 +1906,42 @@ fn annotate_base_tiles(
                     ((px + offset.0) * 4.0).round() as i32,
                     ((py + offset.1) * 4.0).round() as i32,
                 );
-                if let Some(&height) = junction.get(&key) {
-                    // Take the consensus only where this way already
-                    // carries height at or next to the vertex — a grounded
-                    // side street touching a lifted junction node must not
+                if let Some(&(height, junction_dir)) = junction.get(&key) {
+                    // Take the consensus where this way already carries
+                    // height at or next to the vertex — a grounded side
+                    // street touching a lifted junction node must not
                     // inherit a curb-lift.
                     let neighbor = dz[vertex.saturating_sub(1)]
                         .max(dz[(vertex + 1).min(count - 1)]);
                     let supported =
                         dz[vertex].max(neighbor) > (0.3 * height).min(0.5);
-                    if supported && height > dz[vertex] {
+                    // Unsupported ENDPOINTS still inherit when the join is
+                    // tangential: a slip road leaves the deck corridor
+                    // immediately (its own samples are empty) but must
+                    // attach AT deck height, not bump below it.
+                    let tangential = if !supported
+                        && (vertex == 0 || vertex + 1 == count)
+                    {
+                        let previous = points[vertex.saturating_sub(1)];
+                        let next = points[(vertex + 1).min(count - 1)];
+                        let (dx, dy) = (next.0 - previous.0, next.1 - previous.1);
+                        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                        let dot = (dx / len) * junction_dir.0
+                            + (dy / len) * junction_dir.1;
+                        // A slip road carries SOME height of its own a few
+                        // vertices in (gore-twin sampling); a grounded way
+                        // whose split merely sits under a parallel deck is
+                        // all-zero — no inheritance for it.
+                        let inward_support = if vertex == 0 {
+                            dz.iter().take(4).skip(1).any(|&v| v > 0.2)
+                        } else {
+                            dz.iter().rev().take(4).skip(1).any(|&v| v > 0.2)
+                        };
+                        dot.abs() > 0.8 && inward_support
+                    } else {
+                        false
+                    };
+                    if (supported || tangential) && height > dz[vertex] {
                         dz[vertex] = height;
                     }
                 }
@@ -1841,7 +2019,80 @@ fn annotate_base_tiles(
                     ((py + offset.1) * 4.0).round() as i32,
                 );
                 if let Some(&consensus) = vertex_consensus.get(&key) {
-                    *value = consensus;
+                    // Reconcile near-agreeing values (overlap clip copies
+                    // differ by centimeters) — never teleport: a stacked
+                    // deck's chance-coincident vertex must not yank a
+                    // grounded way to deck height.
+                    if (consensus - *value).abs() < 1.0 {
+                        *value = consensus;
+                    }
+                }
+            }
+            let count = base_path.points.len();
+            // Interior sampling holes: a zero run bounded by LIFTED values
+            // (base geometry drifting past the 1.2u gate) is a hole, not a
+            // descent — a real descent carries graded values. Interpolate
+            // by arc length, bounded so a genuine dip between two spans
+            // stays a dip.
+            if count >= 3 {
+                let mut index = 1;
+                while index < count {
+                    if dz[index] == 0.0 && dz[index - 1] > 0.3 {
+                        let run_start = index;
+                        let mut run_end = index;
+                        while run_end < count && dz[run_end] == 0.0 {
+                            run_end += 1;
+                        }
+                        if run_end < count && dz[run_end] > 0.3 {
+                            let mut arc = 0.0f32;
+                            let mut arcs = Vec::with_capacity(run_end - run_start + 1);
+                            for vertex in run_start..=run_end {
+                                arc += distance(
+                                    base_path.points[vertex - 1],
+                                    base_path.points[vertex],
+                                );
+                                arcs.push(arc);
+                            }
+                            let total = arc.max(1e-3);
+                            if total * m_per_unit < 120.0 {
+                                let from = dz[run_start - 1];
+                                let to = dz[run_end];
+                                for (slot, vertex) in (run_start..run_end).enumerate() {
+                                    let t = arcs[slot] / total;
+                                    dz[vertex] = from + (to - from) * t;
+                                }
+                            }
+                        }
+                        index = run_end;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            // The consensus above can raise a vertex WITHOUT a ramp behind
+            // it (it runs after pass-2 blending): re-run the hold+grade
+            // blend so no cliff survives.
+            let hold_units = 12.0 / m_per_unit.max(1e-6);
+            let mut arc = 0.0f32;
+            for index in 1..count {
+                let seg = distance(base_path.points[index - 1], base_path.points[index]);
+                arc += seg;
+                let decay =
+                    (arc - hold_units).max(0.0) - (arc - seg - hold_units).max(0.0);
+                let limit = dz[index - 1] - grade_per_unit * decay;
+                if limit > dz[index] {
+                    dz[index] = limit;
+                }
+            }
+            arc = 0.0;
+            for index in (0..count - 1).rev() {
+                let seg = distance(base_path.points[index], base_path.points[index + 1]);
+                arc += seg;
+                let decay =
+                    (arc - hold_units).max(0.0) - (arc - seg - hold_units).max(0.0);
+                let limit = dz[index + 1] - grade_per_unit * decay;
+                if limit > dz[index] {
+                    dz[index] = limit;
                 }
             }
         }
