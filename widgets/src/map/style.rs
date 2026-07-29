@@ -760,6 +760,10 @@ fn scaled_style(template: StrokeTemplate, rank_bias: i16, width_scale: f32) -> S
     }
 }
 
+fn is_pedestrian_bridge_member(highway: &str) -> bool {
+    matches!(highway, "footway" | "path" | "steps" | "cycleway")
+}
+
 pub fn stroke_style_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
@@ -1033,17 +1037,32 @@ pub fn stroke_style_for_tags(
                     .map(|rule| rule.center.color)
                     .or(theme.bridge_area_fill)
                     .unwrap_or(0xf8f8f8);
-                let dot_width = style.center.width;
+                // The solid carrier is one physical bridge even when OSM
+                // splits it between pedestrian members. Keep their symbolic
+                // dotted widths in the companion pass below, but canonicalize
+                // the slab to the theme's footway width so the union has no
+                // shoulders or internal tier changes. A custom narrow road
+                // rule is not part of that semantic family and keeps its own
+                // configured carrier width.
+                let physical_width = if is_pedestrian_bridge_member(&key) {
+                    theme
+                        .road_rules
+                        .get("footway")
+                        .map_or(1.0, |rule| rule.center.width)
+                        * width_scale
+                } else {
+                    style.center.width
+                };
                 style.casing = Some(StrokePassStyle { deck_m: 0.0,
                     color: contrast_edge(deck),
-                    width: dot_width * 3.0,
+                    width: physical_width * 3.0,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - 2.0 * DEPTH_MICRO_PER_RANK,
                 });
                 style.center = StrokePassStyle { deck_m: 0.0,
                     color: deck,
-                    width: dot_width * 2.2,
+                    width: physical_width * 2.2,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
@@ -1391,6 +1410,75 @@ mod tests {
 
         assert!(
             stroke_style_for_tags(&theme, &tags, 13, 18, zoom_width_mult(18), 1.0).is_some()
+        );
+    }
+
+    #[test]
+    fn thin_bridge_members_share_one_physical_carrier_width() {
+        let theme = probe_compiled_theme();
+        let tags = |highway: &str| {
+            HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), highway.to_string()),
+                ("bridge".to_string(), "1".to_string()),
+            ])
+        };
+        let zoom_mult = zoom_width_mult(18);
+        let members = ["footway", "path", "steps", "cycleway"];
+        let styles = members.map(|highway| {
+            stroke_style_for_tags(&theme, &tags(highway), 14, 18, zoom_mult, 1.0).unwrap()
+        });
+
+        for style in &styles[1..] {
+            assert_eq!(styles[0].sort_rank, style.sort_rank);
+            assert_eq!(
+                styles[0].center.width.to_bits(),
+                style.center.width.to_bits()
+            );
+            assert_eq!(
+                styles[0].casing.unwrap().width.to_bits(),
+                style.casing.unwrap().width.to_bits()
+            );
+        }
+
+        let footway = tags("footway");
+        let steps = tags("steps");
+        let footway_dots =
+            thin_bridge_dots_for_tags(&theme, &footway, 18, zoom_mult, 1.0).unwrap();
+        let steps_dots =
+            thin_bridge_dots_for_tags(&theme, &steps, 18, zoom_mult, 1.0).unwrap();
+        assert_ne!(
+            footway_dots.center.width.to_bits(),
+            steps_dots.center.width.to_bits()
+        );
+        assert_eq!(footway_dots.center.shape_id, 10.0);
+        assert_eq!(steps_dots.center.shape_id, 10.0);
+    }
+
+    #[test]
+    fn unrelated_narrow_bridge_rule_keeps_its_configured_carrier_width() {
+        let mut theme = probe_compiled_theme();
+        let configured_width = 1.35;
+        let service = theme.road_rules.get_mut("service").unwrap();
+        service.casing = None;
+        service.center.width = configured_width;
+
+        let tags = HashMap::from([
+            ("layer".to_string(), "streets".to_string()),
+            ("highway".to_string(), "service".to_string()),
+            ("bridge".to_string(), "1".to_string()),
+        ]);
+        let zoom_mult = zoom_width_mult(18);
+        let thin_scale = zoom_mult.max(1.0).powf(0.35);
+        let style = stroke_style_for_tags(&theme, &tags, 14, 18, zoom_mult, 1.0).unwrap();
+
+        assert_eq!(
+            style.center.width.to_bits(),
+            (configured_width * thin_scale * 2.2).to_bits()
+        );
+        assert_eq!(
+            style.casing.unwrap().width.to_bits(),
+            (configured_width * thin_scale * 3.0).to_bits()
         );
     }
 }
