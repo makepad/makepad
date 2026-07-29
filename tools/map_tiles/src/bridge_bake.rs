@@ -1782,6 +1782,75 @@ fn reconcile_sibling_carriageways(
     final_dz.clone_from_slice(&raised);
 }
 
+/// Reconcile exact shared line vertices before the final grade propagation.
+/// Near-agreeing interior vertices are ordinary duplicate copies. At a
+/// nominal tile edge we deliberately mirror the later encoded-feature
+/// boundary policy and take the largest absolute height unconditionally;
+/// doing that here lets the subsequent grade and cross-tile plane fits consume
+/// the final seam anchor instead of having serialization create a one-vertex
+/// cliff afterwards.
+fn reconcile_base_vertex_consensus(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &mut [Option<Vec<f32>>],
+) {
+    let mut consensus = HashMap::<(i32, i32), f32>::new();
+    let mut edge_consensus = HashMap::<(i32, i32), f32>::new();
+    let extent = EXTENT as f32;
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some(dz) = &final_dz[path_index] else { continue };
+        if base_path.is_polygon || dz.len() != base_path.points.len() {
+            continue;
+        }
+        let offset = path_src[path_index].1;
+        for (vertex, &value) in dz.iter().enumerate() {
+            let (px, py) = base_path.points[vertex];
+            let key = (
+                ((px + offset.0) * 4.0).round() as i32,
+                ((py + offset.1) * 4.0).round() as i32,
+            );
+            let entry = consensus.entry(key).or_insert(value);
+            if value.abs() > entry.abs() {
+                *entry = value;
+            }
+            if px <= 2.0 || px >= extent - 2.0 || py <= 2.0 || py >= extent - 2.0 {
+                let entry = edge_consensus.entry(key).or_insert(value);
+                if value.abs() > entry.abs() {
+                    *entry = value;
+                }
+            }
+        }
+    }
+
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some(dz) = final_dz[path_index].as_mut() else { continue };
+        if base_path.is_polygon || dz.len() != base_path.points.len() {
+            continue;
+        }
+        let offset = path_src[path_index].1;
+        for (vertex, value) in dz.iter_mut().enumerate() {
+            let (px, py) = base_path.points[vertex];
+            let key = (
+                ((px + offset.0) * 4.0).round() as i32,
+                ((py + offset.1) * 4.0).round() as i32,
+            );
+            let Some(&target) = consensus.get(&key) else {
+                continue;
+            };
+            let at_nominal_edge =
+                px <= 2.0 || px >= extent - 2.0 || py <= 2.0 || py >= extent - 2.0;
+            if (target - *value).abs() < 1.0 {
+                *value = target;
+            }
+            if at_nominal_edge {
+                if let Some(&target) = edge_consensus.get(&key) {
+                    *value = target;
+                }
+            }
+        }
+    }
+}
+
 /// Give the two padded copies of a centerline one common plane where they
 /// cross a nominal tile seam. MVT clips extend beyond the tile (+64/-64 in
 /// the usual 4096 extent), so neighboring copies overlap without sharing a
@@ -2706,49 +2775,10 @@ fn annotate_base_tiles(
         final_dz[path_index] = Some(dz);
     }
     reconcile_sibling_carriageways(&base_paths, &path_src, &mut final_dz, m_per_unit);
-    // Final pass: EXACT consensus over coincident line vertices across all
-    // tiles — overlap clip copies of one road share their inner vertices,
-    // and after per-path blending they can differ by centimeters, which a
-    // tilted camera renders as doubled slabs. Largest |dz| wins.
-    let mut vertex_consensus: HashMap<(i32, i32), f32> = HashMap::new();
-    for (path_index, base_path) in base_paths.iter().enumerate() {
-        let Some(dz) = &final_dz[path_index] else { continue };
-        if base_path.is_polygon {
-            continue;
-        }
-        let offset = path_src[path_index].1;
-        for (vertex, &value) in dz.iter().enumerate() {
-            let (px, py) = base_path.points[vertex];
-            let key = (
-                ((px + offset.0) * 4.0).round() as i32,
-                ((py + offset.1) * 4.0).round() as i32,
-            );
-            let entry = vertex_consensus.entry(key).or_insert(value);
-            if value.abs() > entry.abs() {
-                *entry = value;
-            }
-        }
-    }
+    reconcile_base_vertex_consensus(&base_paths, &path_src, &mut final_dz);
     for (path_index, base_path) in base_paths.iter().enumerate() {
         let Some(dz) = final_dz[path_index].as_mut() else { continue };
-        let offset = path_src[path_index].1;
         if !base_path.is_polygon {
-            for (vertex, value) in dz.iter_mut().enumerate() {
-                let (px, py) = base_path.points[vertex];
-                let key = (
-                    ((px + offset.0) * 4.0).round() as i32,
-                    ((py + offset.1) * 4.0).round() as i32,
-                );
-                if let Some(&consensus) = vertex_consensus.get(&key) {
-                    // Reconcile near-agreeing values (overlap clip copies
-                    // differ by centimeters) — never teleport: a stacked
-                    // deck's chance-coincident vertex must not yank a
-                    // grounded way to deck height.
-                    if (consensus - *value).abs() < 1.0 {
-                        *value = consensus;
-                    }
-                }
-            }
             let count = base_path.points.len();
             // Interior sampling holes: a zero run bounded by LIFTED values
             // (base geometry drifting past the 1.2u gate) is a hole, not a
@@ -3218,6 +3248,56 @@ mod tests {
         assert!((west_grade - east_grade).abs() < 0.0001);
         assert_eq!(dz[2].as_ref().unwrap(), &[10.0, 10.0]);
         assert_eq!(dz[3].as_ref().unwrap(), &[12.0, 12.0]);
+    }
+
+    #[test]
+    fn reconciles_edge_consensus_before_cross_tile_plane() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            // West-tile padding copy. Its seam anchor was initially lower
+            // than the coincident carrier, so a cross-tile plane fitted
+            // before consensus produced a low outside endpoint.
+            path(113, &[(4095.0, 1989.0), (4160.0, 1804.0)]),
+            // East tile's authoritative, longer copy of the same centerline.
+            path(95, &[(-1.0, 1989.0), (523.0, 486.0), (710.0, -64.0)]),
+            // Another physical centerline supplies the final shared seam
+            // height, as the encoded-feature boundary consensus also does.
+            path(90, &[(4021.0, 2216.0), (4095.0, 1989.0)]),
+        ];
+        let sources = vec![
+            ((8417, 5385), (0.0, 0.0)),
+            ((8418, 5385), (4096.0, 0.0)),
+            ((8417, 5385), (0.0, 0.0)),
+        ];
+        let mut dz = vec![
+            Some(vec![5.5, 6.3]),
+            Some(vec![5.5, 11.758, 10.9]),
+            Some(vec![9.4, 10.9]),
+        ];
+
+        reconcile_base_vertex_consensus(&paths, &sources, &mut dz);
+        assert!((dz[0].as_ref().unwrap()[0] - 10.9).abs() < 1e-6);
+        assert!((dz[1].as_ref().unwrap()[0] - 10.9).abs() < 1e-6);
+
+        reconcile_cross_tile_copies(&paths, &sources, &mut dz, 0.36472446);
+
+        let west = dz[0].as_ref().unwrap();
+        let east = dz[1].as_ref().unwrap();
+        assert!(
+            west[1] > 10.8,
+            "stale pre-consensus anchor left a low padding wedge: {west:?}"
+        );
+        assert!((west[1] - 11.01).abs() < 0.03);
+        assert!((east[0] - 10.9).abs() < 0.01);
+        assert!((east[1] - 11.758).abs() < 1e-6);
+        assert!((east[2] - 10.9).abs() < 1e-6);
+        assert_eq!(dz[2].as_ref().unwrap(), &[9.4, 10.9]);
     }
 
     #[test]
