@@ -944,6 +944,11 @@ pub struct RoadRibbon<'a> {
     /// Already a closed outline (street_polygons plaza joining its color
     /// tier): used verbatim as a union contour instead of being offset.
     pub closed_ring: bool,
+    /// Round cap discs at the way ends. A surface way ending at a tunnel
+    /// portal gets a BUTT end instead — the road stops flat where its
+    /// continuation dives underground.
+    pub start_disc: bool,
+    pub end_disc: bool,
 }
 
 /// The road geometry generator: every ribbon of a paint tier becomes
@@ -1313,7 +1318,14 @@ pub fn road_ribbon_rings(
             // Interior joins get the cheapest cover that closes the wedge
             // between consecutive rects: nothing when collinear, two bevel
             // triangles for gentle bends, a full disc (round join) only at
-            // real corners. Ends always get the disc (round cap).
+            // real corners. Ends get the disc (round cap) unless flagged
+            // butt (tunnel portals).
+            if index == 0 && !ribbon.start_disc {
+                continue;
+            }
+            if index + 1 == center.len() && !ribbon.end_disc {
+                continue;
+            }
             if index > 0 && index + 1 < center.len() {
                 let (ax, ay) = center[index - 1];
                 let (bx, by) = center[index + 1];
@@ -2070,6 +2082,12 @@ pub struct PaintGroup {
     pub rank: i16,
     /// Index of this group's DzField (DZ_FIELD_NONE = grounded).
     pub field: u16,
+    /// Flush tier-transition joints (way ends butt-joined to a same-class
+    /// way in another tier — bridge/approach splits): skirt walls and caps
+    /// are suppressed within `half_width` of these points so the deck
+    /// reads as ONE continuous body across the style change.
+    pub butt_points: Vec<(f32, f32)>,
+    pub half_width: f32,
     /// (ring, min corner dz, max corner dz). Lifted rings stay visible but
     /// do NOT punch holes in the groups below: the road continues under a
     /// deck — paint order hides it flat, real depth hides it tilted. Rings
@@ -2109,6 +2127,8 @@ pub struct PaintFace {
 /// Vertical wall quads along one boundary ring of a lifted face.
 fn append_ring_skirt(
     ring: &[[f64; 2]],
+    butt_points: &[(f32, f32)],
+    butt_reach: f32,
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -2116,15 +2136,35 @@ fn append_ring_skirt(
     if n < 3 {
         return;
     }
+    let mut area2 = 0.0f64;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        area2 += a[0] * b[1] - b[0] * a[1];
+    }
+    let out_sign = if area2 > 0.0 { 1.0f32 } else { -1.0 };
     let base = verts.len() as u32;
-    for p in ring {
+    for i in 0..n {
+        let p = ring[i];
+        let prev = ring[(i + n - 1) % n];
+        let next = ring[(i + 1) % n];
+        let (e0x, e0y) = ((p[0] - prev[0]) as f32, (p[1] - prev[1]) as f32);
+        let (e1x, e1y) = ((next[0] - p[0]) as f32, (next[1] - p[1]) as f32);
+        let l0 = (e0x * e0x + e0y * e0y).sqrt().max(1e-6);
+        let l1 = (e1x * e1x + e1y * e1y).sqrt().max(1e-6);
+        let (mut mx, mut my) = (-e0y / l0 - e1y / l1, e0x / l0 + e1x / l1);
+        let ml = (mx * mx + my * my).sqrt().max(1e-6);
+        mx /= ml;
+        my /= ml;
+        // stroke_dist = outward normal angle for the seam probe.
+        let out_angle = (my * out_sign).atan2(mx * out_sign);
         let (px, py) = (p[0] as f32, p[1] as f32);
         verts.push(VVertex {
             x: px,
             y: py,
             u: 0.5,
             v: 0.0,
-            stroke_dist: 0.0,
+            stroke_dist: out_angle,
             clip_radius: 4.0,
         });
         verts.push(VVertex {
@@ -2132,12 +2172,25 @@ fn append_ring_skirt(
             y: py,
             u: 0.5,
             v: 1.0,
-            stroke_dist: 0.0,
+            stroke_dist: out_angle,
             clip_radius: 4.0,
         });
     }
+    let reach_sq = butt_reach * butt_reach;
     for i in 0..n {
         let j = (i + 1) % n;
+        let mid = (
+            ((ring[i][0] + ring[j][0]) * 0.5) as f32,
+            ((ring[i][1] + ring[j][1]) * 0.5) as f32,
+        );
+        // No wall across a flush joint: the deck continues there.
+        let at_joint = butt_points.iter().any(|&(bx, by)| {
+            let (dx, dy) = (mid.0 - bx, mid.1 - by);
+            dx * dx + dy * dy < reach_sq
+        });
+        if at_joint {
+            continue;
+        }
         let (a_top, a_bottom) = (base + i as u32 * 2, base + i as u32 * 2 + 1);
         let (b_top, b_bottom) = (base + j as u32 * 2, base + j as u32 * 2 + 1);
         indices.extend_from_slice(&[a_top, a_bottom, b_bottom, a_top, b_bottom, b_top]);
@@ -2196,6 +2249,10 @@ fn append_ring_fringe(
         };
         let inner = if straddle { reach } else { 0.0 };
         let (px, py) = (p[0] as f32, p[1] as f32);
+        // stroke_dist carries the OUTWARD normal angle: the emitter probes
+        // the dz field outside each edge to drop internal seams (way-split
+        // cap arcs mid-deck must not draw fringes or walls).
+        let out_angle = (my * out_sign).atan2(mx * out_sign);
         // v = 1.0: the stroke-mode pixel shader multiplies by a cap mask
         // driven by tcoord.y (smoothstep from 0) — v of 0 renders the
         // whole skirt invisible.
@@ -2204,7 +2261,7 @@ fn append_ring_fringe(
             y: py - my * inner,
             u: 0.5,
             v: 1.0,
-            stroke_dist: 0.0,
+            stroke_dist: out_angle,
             clip_radius: aa * 4.0,
         });
         verts.push(VVertex {
@@ -2212,7 +2269,7 @@ fn append_ring_fringe(
             y: py + my * reach,
             u: 0.0,
             v: 1.0,
-            stroke_dist: 0.0,
+            stroke_dist: out_angle,
             clip_radius: aa * 4.0,
         });
     }
@@ -2292,6 +2349,7 @@ pub fn overlay_paint_groups(
         Lifted,
         Sunk,
         CoverSunk,
+        Surface,
     }
     let to_paths = |group: &PaintGroup, set: RingSet| -> Vec<Vec<[f64; 2]>> {
         let translucent = group.color[3] < 0.999;
@@ -2318,6 +2376,7 @@ pub fn overlay_paint_groups(
                     RingSet::Lifted => *max_dz >= LIFT_COVER_M,
                     RingSet::Sunk => *min_dz <= -LIFT_COVER_M,
                     RingSet::CoverSunk => *max_dz <= -LIFT_COVER_M,
+                    RingSet::Surface => *max_dz > -LIFT_COVER_M,
                 }
             })
             .filter_map(|(ring, _, _)| snap_ring(ring))
@@ -2339,6 +2398,12 @@ pub fn overlay_paint_groups(
     // overlap at level-transition seams: same color, same depth slot,
     // same dz field — identical pixels, so the tie is invisible.
     struct GroupOutline {
+        /// The whole drivable surface (grounded + lifted + portal ramps) as
+        /// ONE outline: the face a car could drive over must be a single
+        /// continuous mesh — splitting it at level seams left overlapping
+        /// twins that micro-diverge at grazing tilt (the lens endcaps).
+        surface_shapes: Shapes,
+        surface_paths: Vec<Vec<[f64; 2]>>,
         grounded_shapes: Shapes,
         grounded_paths: Vec<Vec<[f64; 2]>>,
         /// Strictly grounded outline (no straddling rings) — the only part
@@ -2431,6 +2496,11 @@ pub fn overlay_paint_groups(
                 });
             let (grounded_shapes, grounded_paths) =
                 dissolve(to_paths(group, RingSet::VisibleGrounded));
+            let (surface_shapes, surface_paths) = if has_lifted || has_sunk {
+                dissolve(to_paths(group, RingSet::Surface))
+            } else {
+                (grounded_shapes.clone(), grounded_paths.clone())
+            };
             let cover_grounded_paths = if has_straddler {
                 dissolve(to_paths(group, RingSet::CoverGrounded)).1
             } else {
@@ -2469,6 +2539,8 @@ pub fn overlay_paint_groups(
                 }
             }
             GroupOutline {
+                surface_shapes,
+                surface_paths,
                 grounded_shapes,
                 grounded_paths,
                 cover_grounded_paths,
@@ -2483,12 +2555,30 @@ pub fn overlay_paint_groups(
         .collect();
 
     // Incremental cascade per level, all operands dissolved outlines.
+    // LIFTED content never enters an accumulated cover: two decks at
+    // different heights (a viaduct over a bridge) must not cut each other
+    // — real depth separates them. The only lifted subtraction that is
+    // always height-safe is WITHIN one tier: the center cutting its own
+    // casing (same ways, same heights by construction). Pair them by the
+    // tier/field id. Same for sunk (stacked tunnels are rarer still).
+    let mut center_lifted_by_field: std::collections::HashMap<u16, Vec<Vec<[f64; 2]>>> =
+        std::collections::HashMap::new();
+    let mut center_sunk_by_field: std::collections::HashMap<u16, Vec<Vec<[f64; 2]>>> =
+        std::collections::HashMap::new();
+    for (group, outline) in groups.iter().zip(outlines.iter()) {
+        if group.phase == 2 {
+            if !outline.lifted_paths.is_empty() {
+                center_lifted_by_field.insert(group.field, outline.lifted_paths.clone());
+            }
+            if !outline.sunk_paths.is_empty() {
+                center_sunk_by_field.insert(group.field, outline.sunk_paths.clone());
+            }
+        }
+    }
     let mut cover_grounded: Shapes = Vec::new();
-    let mut cover_lifted: Shapes = Vec::new();
-    let mut cover_sunk: Shapes = Vec::new();
     let mut cover_bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    let mut visibles: Vec<(Shapes, Shapes, Shapes)> =
-        vec![(Vec::new(), Vec::new(), Vec::new()); outlines.len()];
+    let mut visibles: Vec<(Shapes, Shapes)> =
+        vec![(Vec::new(), Vec::new()); outlines.len()];
     for k in (0..outlines.len()).rev() {
         let outline = &outlines[k];
         let bbox = outline.bbox;
@@ -2513,15 +2603,68 @@ pub fn overlay_paint_groups(
                 part_shapes.clone()
             }
         };
-        visibles[k] = (
+        // ONE unified surface face per group — a continuous mesh a car
+        // could drive over. Grounded-only groups keep the plain cascade;
+        // groups with decks rebuild as (surface − grounded cover) ∪ lifted
+        // so under-deck holes close without splitting the mesh into
+        // overlapping level twins (those micro-diverged at grazing tilt).
+        // Casings then subtract their own tier's center deck (same ways,
+        // same heights — the only always-height-safe lifted subtraction).
+        let has_deck = !outline.lifted_paths.is_empty();
+        let has_sunk_part = !outline.sunk_paths.is_empty();
+        let main = if !has_deck && !has_sunk_part {
             visible_part(
                 &outline.grounded_paths,
                 &outline.grounded_shapes,
                 &cover_grounded,
-            ),
-            visible_part(&outline.lifted_paths, &outline.lifted_shapes, &cover_lifted),
-            visible_part(&outline.sunk_paths, &outline.sunk_shapes, &cover_sunk),
-        );
+            )
+        } else {
+            let base: Shapes = if overlaps_cover && !cover_grounded.is_empty() {
+                outline.surface_paths.overlay(
+                    &cover_grounded,
+                    OverlayRule::Difference,
+                    IoFillRule::NonZero,
+                )
+            } else {
+                outline.surface_shapes.clone()
+            };
+            let mut merged: Vec<Vec<[f64; 2]>> = base
+                .iter()
+                .flat_map(|shape| shape.iter().cloned())
+                .collect();
+            merged.extend(outline.lifted_paths.iter().cloned());
+            let mut unified: Shapes = merged.simplify_shape(IoFillRule::NonZero);
+            if groups[k].phase == 1 {
+                if let Some(center) = center_lifted_by_field.get(&groups[k].field) {
+                    let unified_paths: Vec<Vec<[f64; 2]>> = unified
+                        .iter()
+                        .flat_map(|shape| shape.iter().cloned())
+                        .collect();
+                    unified = unified_paths.overlay(
+                        center,
+                        OverlayRule::Difference,
+                        IoFillRule::NonZero,
+                    );
+                }
+            }
+            unified
+        };
+        let sunk = if !has_sunk_part {
+            Vec::new()
+        } else if groups[k].phase == 1 {
+            if let Some(center) = center_sunk_by_field.get(&groups[k].field) {
+                outline.sunk_paths.overlay(
+                    center,
+                    OverlayRule::Difference,
+                    IoFillRule::NonZero,
+                )
+            } else {
+                outline.sunk_shapes.clone()
+            }
+        } else {
+            outline.sunk_shapes.clone()
+        };
+        visibles[k] = (main, sunk);
         if !outline.cover_grounded_paths.is_empty() {
             if debug_dump {
                 let mut all = outline.cover_grounded_paths.clone();
@@ -2530,25 +2673,6 @@ pub fn overlay_paint_groups(
             }
             cover_grounded = outline.cover_grounded_paths.overlay(
                 &cover_grounded,
-                OverlayRule::Union,
-                IoFillRule::NonZero,
-            );
-        }
-        if !outline.lifted_paths.is_empty() {
-            if debug_dump {
-                let mut all = outline.lifted_paths.clone();
-                all.extend(cover_lifted.iter().flat_map(|shape| shape.iter().cloned()));
-                dump_paths("union-lifted", &all);
-            }
-            cover_lifted = outline.lifted_paths.overlay(
-                &cover_lifted,
-                OverlayRule::Union,
-                IoFillRule::NonZero,
-            );
-        }
-        if !outline.cover_sunk_paths.is_empty() {
-            cover_sunk = outline.cover_sunk_paths.overlay(
-                &cover_sunk,
                 OverlayRule::Union,
                 IoFillRule::NonZero,
             );
@@ -2568,21 +2692,14 @@ pub fn overlay_paint_groups(
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
     let mut tess_indices: Vec<u32> = Vec::new();
-    for (group, (visible_grounded, visible_lifted, visible_sunk)) in
-        groups.iter().zip(visibles)
+    for ((group, (visible_main, visible_sunk)), outline) in
+        groups.iter().zip(visibles).zip(outlines.iter())
     {
-        // Level parts become separate faces with identical metadata; their
-        // seam overlap renders identically on both sides.
-        for (part_index, visible) in [visible_grounded, visible_lifted, visible_sunk]
-            .into_iter()
-            .enumerate()
-        {
-            let level: i8 = match part_index {
-                1 => 1,
-                2 => -1,
-                _ => 0,
-            };
-            let lifted = level == 1;
+        for (part_index, visible) in [visible_main, visible_sunk].into_iter().enumerate() {
+            let level: i8 = if part_index == 1 { -1 } else { 0 };
+            // Walls hang from the deck's TRUE outer boundary (the lifted
+            // outline), attached to the unified main face.
+            let lifted = part_index == 0 && !outline.lifted_shapes.is_empty();
             if visible.is_empty() {
                 continue;
             }
@@ -2630,8 +2747,18 @@ pub fn overlay_paint_groups(
                             &mut fringe_indices,
                         );
                     }
-                    if lifted {
-                        append_ring_skirt(ring, &mut skirt_verts, &mut skirt_indices);
+                }
+            }
+            if lifted {
+                for shape in &outline.lifted_shapes {
+                    for ring in shape {
+                        append_ring_skirt(
+                            ring,
+                            &group.butt_points,
+                            group.half_width + 0.75,
+                            &mut skirt_verts,
+                            &mut skirt_indices,
+                        );
                     }
                 }
             }
@@ -2965,7 +3092,7 @@ mod overlay_tests {
                 if class != class_filter {
                     continue;
                 }
-                let ribbon = [RoadRibbon { points, dz: None, closed_ring: false }];
+                let ribbon = [RoadRibbon { points, dz: None, closed_ring: false, start_disc: true, end_disc: true }];
                 for (ring, _) in road_ribbon_rings(&ribbon, width * 0.5, 0.0, clip) {
                     rings.push((ring, 0.0, 0.0));
                 }
@@ -2977,6 +3104,8 @@ mod overlay_tests {
                 phase: 0,
                 rank: 0,
                 field: DZ_FIELD_NONE,
+                butt_points: Vec::new(),
+                half_width: 1.0,
                 rings,
             });
         }
