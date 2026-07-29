@@ -1,3 +1,4 @@
+mod bridge_bake;
 mod nav_build;
 mod native;
 mod pbf_audit;
@@ -26,6 +27,7 @@ Usage:
   makepad-map-tiles nav-build <source.osm.pbf> <basename> [--bbox w,s,e,n] [--skip-addresses]
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
+  makepad-map-tiles bridge-bake <detail.mbtiles> <output.mbtiles> --bbox w,s,e,n [--ahn DIR] [--base base.mbtiles] [--zoom 14]
 
 The legacy form without the 'versatiles' command is also accepted.
 
@@ -98,6 +100,9 @@ fn run() -> Result<(), String> {
     }
     if args.first().is_some_and(|arg| arg == "pbf-detail") {
         return native::convert_detail(parse_detail_options(&args)?);
+    }
+    if args.first().is_some_and(|arg| arg == "bridge-bake") {
+        return bridge_bake::bake(bridge_bake::parse_bake_options(&args)?);
     }
     if args.first().is_some_and(|arg| arg == "nav-build") {
         return nav_build::nav_build(nav_build::parse_nav_build_options(&args)?);

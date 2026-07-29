@@ -127,7 +127,7 @@ script_mod! {
                 // Icon param4 = zoom_floor + pin_lift_m*100: markers fly at
                 // their encoded height (0 for grounded icons).
                 let icon_floor = modf(self.geom.param4, 100.0);
-                lift_m = (self.geom.param4 - icon_floor) * 0.01 * self.height_grow
+                lift_m = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow
                     + ground_m;
             }
             transformed.y = self.rot_pivot.y
@@ -872,6 +872,11 @@ pub struct MapView {
     /// base for micro-POI symbols: trees, benches, bins, artwork…
     #[live]
     detail_mbtiles_path: String,
+    /// Optional bridge-bake overlay (bridge-bake output): constraint-solved
+    /// + AHN-measured per-vertex road elevation. Inside its coverage bounds
+    /// it replaces every tag-based bridge deck heuristic.
+    #[live]
+    bridge_dz_mbtiles_path: String,
     /// Declared minzoom/maxzoom of the active archive (from its metadata
     /// table). Single-zoom detail archives (minzoom=maxzoom=14) must not be
     /// probed at z13/z12 — those tiles cannot exist.
@@ -972,6 +977,10 @@ pub struct MapView {
     /// re-bakes tiles (extrusions only exist in the 3D bake).
     #[rust]
     baked_3d_mode: bool,
+    /// Road union-mesh generator toggle (debug A/B vs the legacy per-way
+    /// stroke path; "@roads 0/1" in the search box).
+    #[rust(true)]
+    union_roads: bool,
     #[rust]
     compiled_style_light: CompiledMapTheme,
     #[rust]
@@ -1520,7 +1529,11 @@ impl Widget for MapView {
                             terrain_span,
                             terrain_uvfit,
                             &terrain_tex,
-                            if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                            if tilt_rad > 1e-4 && pass != 0 {
+                                pass_boost + (pass - 1) as f32 * 0.02
+                            } else {
+                                0.0
+                            },
                             terrain_fill_lift,
                         );
                     }
@@ -1549,7 +1562,11 @@ impl Widget for MapView {
                     terrain_span,
                     terrain_uvfit,
                     &terrain_tex,
-                    if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                    if tilt_rad > 1e-4 && pass != 0 {
+                                pass_boost + (pass - 1) as f32 * 0.02
+                            } else {
+                                0.0
+                            },
                     terrain_fill_lift,
                 );
             }
@@ -1642,7 +1659,11 @@ impl Widget for MapView {
                             terrain_span,
                             terrain_uvfit,
                             &terrain_tex,
-                            if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                            if tilt_rad > 1e-4 && pass != 0 {
+                                pass_boost + (pass - 1) as f32 * 0.02
+                            } else {
+                                0.0
+                            },
                             terrain_fill_lift,
                         );
                     }
@@ -1671,7 +1692,11 @@ impl Widget for MapView {
                     terrain_span,
                     terrain_uvfit,
                     &terrain_tex,
-                    if tilt_rad > 1e-4 && pass != 0 { pass_boost } else { 0.0 },
+                    if tilt_rad > 1e-4 && pass != 0 {
+                                pass_boost + (pass - 1) as f32 * 0.02
+                            } else {
+                                0.0
+                            },
                     terrain_fill_lift,
                 );
             }
@@ -2316,6 +2341,7 @@ impl MapView {
             let requested = vec![key];
             let mbtiles_path = active_path.clone();
             let detail_path = self.detail_mbtiles_path.clone();
+            let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
             let overlay_paths: Vec<String> = self
                 .overlay_mbtiles_paths
                 .split(';')
@@ -2325,17 +2351,21 @@ impl MapView {
             // Extruded buildings only bake while the camera is tilted; flat
             // mode keeps the classic 2D building style with outlines.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+            let union_roads = self.union_roads;
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
+                let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
                 let result = load_local_tile_batch(
                     Path::new(&mbtiles_path),
                     detail_path.as_deref().map(Path::new),
+                    bridge_dz_path.as_deref().map(Path::new),
                     &overlay_paths,
                     &requested,
                     &theme_style,
                     bucket,
                     buildings_3d,
+                    union_roads,
                 );
             match result {
                 Ok((loaded, failed)) => {
@@ -3704,14 +3734,26 @@ impl MapView {
                 let b = self.path_glyphs[placed.glyph_end - 1].glyph_origin;
                 let (dx, dy) = (b.x - a.x, b.y - a.y);
                 let len = (dx * dx + dy * dy).sqrt();
+                // Origin order IS reading order in both walk modes (the
+                // reversed walk mirrors distances AND carries the pi bias).
                 if len > 1.0 && dx / len < -LABEL_VERTICAL_AXIS_EPSILON {
                     let glyph_start = placed.glyph_start;
                     self.path_glyphs.truncate(glyph_start);
+                    // Mirror the start so the flipped walk covers the SAME
+                    // stretch of road: reusing start_distance verbatim lands
+                    // on a different part of a curved path, whose local
+                    // direction can match the original — an un-flippable
+                    // "flip" that left hairpin labels upside down.
+                    let total_length = cum.last().copied().unwrap_or(0.0);
+                    let flipped_start = (total_length
+                        - start_distance
+                        - run.width_in_lpxs as f64)
+                        .max(0.0);
                     result = self.draw_label.place_text_along_path(
                         &run,
                         &smooth_a,
                         &cum,
-                        start_distance,
+                        flipped_start,
                         !reverse,
                         baseline_shift,
                         if reverse { 0.0 } else { std::f32::consts::PI },
@@ -4131,6 +4173,18 @@ impl MapView {
     /// Crossing between flat and tilted rebakes tiles: flat mode uses the
     /// true 2D building style (base fills + outlines), tilted mode the
     /// extruded detail buildings.
+    /// The live compiled theme, for headless A/B harnesses.
+    pub fn compiled_style(&self) -> CompiledMapTheme {
+        self.active_style().clone()
+    }
+
+    pub fn set_union_roads(&mut self, cx: &mut Cx, enabled: bool) {
+        if self.union_roads != enabled {
+            self.union_roads = enabled;
+            self.restyle_tiles_keep_stale(cx);
+        }
+    }
+
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
         let tilt = tilt_deg.clamp(0.0, TILT_MAX_DEG);
         if (tilt - self.tilt).abs() < 1e-9 {
@@ -4803,6 +4857,16 @@ impl MapViewRef {
             inner.set_tilt(cx, tilt_deg);
         }
     }
+    pub fn compiled_style(&self) -> Option<CompiledMapTheme> {
+        self.borrow().map(|view| view.compiled_style())
+    }
+
+    pub fn set_union_roads(&self, cx: &mut Cx, enabled: bool) {
+        if let Some(mut view) = self.borrow_mut() {
+            view.set_union_roads(cx, enabled);
+        }
+    }
+
 
     pub fn tilt(&self) -> f64 {
         self.borrow().map(|inner| inner.tilt()).unwrap_or(0.0)
