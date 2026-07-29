@@ -12,6 +12,11 @@ pub enum Layer {
     OsmRelationPoints = 3,
     OsmRelationLines = 4,
     OsmRelationPolygons = 5,
+    /// bridge-bake output: solved per-vertex road/rail elevation.
+    BridgeDz = 6,
+    /// bridge-bake output keyed to BASE tile features: per-vertex dz for
+    /// the exact geometry the renderer draws (L/F/P join, no matching).
+    BaseDz = 7,
 }
 
 impl Layer {
@@ -23,6 +28,8 @@ impl Layer {
             Self::OsmRelationPoints => "osm_relation_points",
             Self::OsmRelationLines => "osm_relation_lines",
             Self::OsmRelationPolygons => "osm_relation_polygons",
+            Self::BridgeDz => "bridge_dz",
+            Self::BaseDz => "base_dz",
         }
     }
 
@@ -34,6 +41,8 @@ impl Layer {
             3 => Ok(Self::OsmRelationPoints),
             4 => Ok(Self::OsmRelationLines),
             5 => Ok(Self::OsmRelationPolygons),
+            6 => Ok(Self::BridgeDz),
+            7 => Ok(Self::BaseDz),
             _ => Err(format!("unknown native tile layer {value}")),
         }
     }
@@ -501,7 +510,7 @@ fn inspect_layer(input: &[u8]) -> Result<LayerInspection, String> {
     })
 }
 
-fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32, u8), String> {
+pub(crate) fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32, u8), String> {
     let key = read_varint(input, offset)?;
     let field = u32::try_from(key >> 3).map_err(|_| "protobuf field exceeds u32".to_string())?;
     let wire = (key & 7) as u8;
@@ -511,7 +520,7 @@ fn read_protobuf_key(input: &[u8], offset: &mut usize) -> Result<(u32, u8), Stri
     Ok((field, wire))
 }
 
-fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
+pub(crate) fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u8], String> {
     let length = to_usize(read_varint(input, offset)?, "protobuf byte length")?;
     let end = offset
         .checked_add(length)
@@ -523,7 +532,7 @@ fn read_protobuf_bytes<'a>(input: &'a [u8], offset: &mut usize) -> Result<&'a [u
     Ok(result)
 }
 
-fn skip_protobuf_value(input: &[u8], offset: &mut usize, wire: u8) -> Result<(), String> {
+pub(crate) fn skip_protobuf_value(input: &[u8], offset: &mut usize, wire: u8) -> Result<(), String> {
     match wire {
         0 => {
             read_varint(input, offset)?;
@@ -644,7 +653,7 @@ fn write_varint(mut value: u64, output: &mut Vec<u8>) {
     output.push(value as u8);
 }
 
-fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64, String> {
+pub(crate) fn read_varint(input: &[u8], offset: &mut usize) -> Result<u64, String> {
     let mut value = 0_u64;
     for shift in (0..=63).step_by(7) {
         let byte = read_byte(input, offset)?;

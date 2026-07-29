@@ -156,13 +156,20 @@ pub fn append_expanded_stroke_geometry(
     acc_indices: &mut Vec<u32>,
     params: VectorRenderParams,
     expand_class: f32,
+    deck_m: f32,
+    deck_override: Option<&[f32]>,
 ) {
     if verts.is_empty() || indices.is_empty() || verts.len() != anchors.len() {
         return;
     }
 
+    // Bridge decks taper to ground over the segment ends so approaches
+    // read as ramps (stroke_dist is the along-line distance).
+    let total_dist = verts.iter().map(|v| v.stroke_dist).fold(0.0f32, f32::max);
+    let ramp = (total_dist * 0.35).min(96.0).max(1e-3);
+
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (v, anchor) in verts.iter().zip(anchors) {
+    for (vi, (v, anchor)) in verts.iter().zip(anchors).enumerate() {
         acc_verts.push(anchor[0]);
         acc_verts.push(anchor[1]);
         acc_verts.push(v.u);
@@ -178,8 +185,24 @@ pub fn append_expanded_stroke_geometry(
         acc_verts.push(v.x - anchor[0]);
         acc_verts.push(v.y - anchor[1]);
         acc_verts.push(expand_class);
-        acc_verts.push(params.params[4]);
-        acc_verts.push(params.params[5]);
+        let deck_v = if let Some(decks) = deck_override {
+            decks.get(vi).copied().unwrap_or(0.0)
+        } else if deck_m > 0.0 {
+            // Smoothstep the ramp: linear tapers read as hard facets.
+            let t = (v.stroke_dist.min(total_dist - v.stroke_dist) / ramp).clamp(0.0, 1.0);
+            deck_m * t * t * (3.0 - 2.0 * t)
+        } else {
+            params.params[4]
+        };
+        acc_verts.push(deck_v);
+        // A lifted deck is semantically ABOVE whatever it crosses: bump its
+        // tilt micro-depth with the lift, or high-rank strokes underneath
+        // (rail over secondary) still depth-win near the crossing.
+        acc_verts.push(if deck_m > 0.0 || deck_override.is_some() {
+            params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
+        } else {
+            params.params[5]
+        });
         acc_verts.push(v.clip_radius);
         acc_verts.push(params.zbias);
     }
@@ -196,12 +219,31 @@ pub fn append_tessellated_geometry(
     acc_indices: &mut Vec<u32>,
     params: VectorRenderParams,
 ) {
+    append_tessellated_geometry_decked(verts, indices, acc_verts, acc_indices, params, None)
+}
+
+/// Fill variant with a per-vertex deck override (meters, parallel to
+/// `verts`): road-polygon fills riding a bridge corridor replace the
+/// constant params[4] deck and get the same depth bump as decked strokes so
+/// the lifted deck wins over grounded geometry underneath.
+pub fn append_tessellated_geometry_decked(
+    verts: &[VVertex],
+    indices: &[u32],
+    acc_verts: &mut Vec<f32>,
+    acc_indices: &mut Vec<u32>,
+    params: VectorRenderParams,
+    deck_override: Option<&[f32]>,
+) {
     if verts.is_empty() || indices.is_empty() {
         return;
     }
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for v in verts {
+    for (vi, v) in verts.iter().enumerate() {
+        let deck_v = match deck_override {
+            Some(decks) => decks.get(vi).copied().unwrap_or(0.0),
+            None => params.params[4],
+        };
         acc_verts.push(v.x);
         acc_verts.push(v.y);
         acc_verts.push(v.u);
@@ -217,8 +259,12 @@ pub fn append_tessellated_geometry(
         acc_verts.push(params.params[1]);
         acc_verts.push(params.params[2]);
         acc_verts.push(params.params[3]);
-        acc_verts.push(params.params[4]);
-        acc_verts.push(params.params[5]);
+        acc_verts.push(deck_v);
+        acc_verts.push(if deck_v > 0.0 {
+            params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
+        } else {
+            params.params[5]
+        });
         acc_verts.push(v.clip_radius);
         acc_verts.push(params.zbias);
     }
