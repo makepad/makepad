@@ -2799,8 +2799,15 @@ pub struct DzField {
 
 impl DzField {
     /// Returns None when the tier carries no lift at all — the zero field
-    /// needs no sampling and no subdivision.
-    pub fn build(ways: &[(&[(f32, f32)], Option<&[f32]>)], radius: f32) -> Option<DzField> {
+    /// needs no sampling and no subdivision. `clip` marks the tile bounds:
+    /// endpoints created by the tile CLIP get no cap extension — holding
+    /// the cut height flat while the neighbor tile interpolates the ramp
+    /// was the doubled-slab step in the tile-overlap band.
+    pub fn build(
+        ways: &[(&[(f32, f32)], Option<&[f32]>)],
+        radius: f32,
+        clip: GeoBounds,
+    ) -> Option<DzField> {
         if !ways
             .iter()
             .any(|(_, dz)| dz.is_some_and(|dz| dz.iter().any(|&v| v.abs() > 0.01)))
@@ -2832,11 +2839,17 @@ impl DzField {
                 let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
                 if cap_reach > 0.0 && len > 0.5 {
                     let (ux, uy) = ((bx - ax) / len, (by - ay) / len);
-                    if i == 0 && dza.abs() > 0.2 {
+                    if i == 0
+                        && dza.abs() > 0.2
+                        && !point_on_bounds((ax, ay), clip, 0.6)
+                    {
                         ax -= ux * cap_reach;
                         ay -= uy * cap_reach;
                     }
-                    if i + 2 == points.len() && dzb.abs() > 0.2 {
+                    if i + 2 == points.len()
+                        && dzb.abs() > 0.2
+                        && !point_on_bounds((bx, by), clip, 0.6)
+                    {
                         bx += ux * cap_reach;
                         by += uy * cap_reach;
                     }
