@@ -1310,6 +1310,46 @@ pub fn road_ribbon_rings(
             push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
         }
         for (index, &(px, py)) in center.iter().enumerate() {
+            // Interior joins get the cheapest cover that closes the wedge
+            // between consecutive rects: nothing when collinear, two bevel
+            // triangles for gentle bends, a full disc (round join) only at
+            // real corners. Ends always get the disc (round cap).
+            if index > 0 && index + 1 < center.len() {
+                let (ax, ay) = center[index - 1];
+                let (bx, by) = center[index + 1];
+                let (ux, uy) = (px - ax, py - ay);
+                let (vx, vy) = (bx - px, by - py);
+                let ul = (ux * ux + uy * uy).sqrt().max(1e-6);
+                let vl = (vx * vx + vy * vy).sqrt().max(1e-6);
+                let cos_bend = (ux * vx + uy * vy) / (ul * vl);
+                if cos_bend > 0.999 {
+                    continue;
+                }
+                if cos_bend > 0.94 {
+                    // Left normals of the incoming and outgoing segments.
+                    let (n1x, n1y) = (-uy / ul * half_width, ux / ul * half_width);
+                    let (n2x, n2y) = (-vy / vl * half_width, vx / vl * half_width);
+                    for side in [1.0f32, -1.0] {
+                        let (mut ax1, mut ay1) = (n1x * side, n1y * side);
+                        let (mut ax2, mut ay2) = (n2x * side, n2y * side);
+                        // Positive-area orientation, matching the rects.
+                        if ax1 * ay2 - ay1 * ax2 < 0.0 {
+                            std::mem::swap(&mut ax1, &mut ax2);
+                            std::mem::swap(&mut ay1, &mut ay2);
+                        }
+                        ring.clear();
+                        ring_dz.clear();
+                        ring.extend_from_slice(&[
+                            (px, py),
+                            (px + ax1, py + ay1),
+                            (px + ax2, py + ay2),
+                        ]);
+                        ring_dz.extend_from_slice(&[center_dz[index]; 3]);
+                        push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
+                    }
+                    continue;
+                }
+            }
             ring.clear();
             ring_dz.clear();
             const DISC_SEGMENTS: usize = 12;
@@ -1668,6 +1708,12 @@ pub fn append_road_union(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Micro-depth for strokes OUTSIDE the road paint ladder: tunnels under
+/// everything, other strokes above the road surfaces (their 2D late paint).
+pub fn stroke_pass_param5(pass: &StrokePassStyle) -> f32 {
+    (if pass.deck_m < 0.0 { 0.05 } else { 0.22 }) + pass.depth_micro
+}
+
 pub fn append_stroke_pass(
     path: &mut VectorPath,
     points: &[(f32, f32)],
@@ -1685,6 +1731,9 @@ pub fn append_stroke_pass(
     aa: f32,
     tolerance: f32,
     stroke_zbias: &mut f32,
+    // Tilt micro-depth slot. Callers place the stroke in the global paint
+    // ladder; tunnels (deck sentinel < 0) pass their fixed under-value.
+    param5: f32,
 ) {
     // Baked in GPU re-expandable form: the vertex shader re-derives the
     // stroke width the current view zoom calls for, so stale-bucket tiles
@@ -1751,18 +1800,7 @@ pub fn append_stroke_pass(
                 color: hex_to_premul_rgba(pass.color, 1.0),
                 stroke_mult,
                 shape_id: pass.shape_id,
-                // Legacy strokes (rails, dashes, outlines) draw over the
-                // road union surfaces, mirroring their 2D late paint —
-                // EXCEPT tunnels (deck sentinel < 0), which belong under
-                // every surface.
-                params: [
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    if pass.deck_m < 0.0 { 0.05 } else { 0.22 } + pass.depth_micro,
-                ],
+                params: [0.0, 0.0, 0.0, 0.0, 0.0, param5],
                 zbias: *stroke_zbias,
             },
             pass.expand_class,
@@ -2020,16 +2058,34 @@ mod tests {
 
 /// One paint group, bottom-to-top: everything that would have been painted
 /// with this color at this position in the 2D painter sequence.
+/// Sentinel for a paint group with no dz field (grounded tier).
+pub const DZ_FIELD_NONE: u16 = u16::MAX;
+
 pub struct PaintGroup {
     pub color: [f32; 4],
     pub param5: f32,
-    pub rings: Vec<Vec<(f32, f32)>>,
+    /// Paint phase: 0 = plaza fills, 1 = casings, 2 = centers. Carried onto
+    /// the output face so legacy strokes can interleave at their true rank.
+    pub phase: u8,
+    pub rank: i16,
+    /// Index of this group's DzField (DZ_FIELD_NONE = grounded).
+    pub field: u16,
+    /// (ring, max corner dz). Lifted rings stay visible but do NOT punch
+    /// holes in the groups below: the road continues underneath a deck —
+    /// paint order hides it flat, real depth hides it tilted.
+    pub rings: Vec<(Vec<(f32, f32)>, f32)>,
 }
+
+/// Rings lifted beyond this stop covering (subtracting from) lower groups.
+pub const LIFT_COVER_M: f32 = 0.2;
 
 /// A triangulated visible region of one paint group.
 pub struct PaintFace {
     pub color: [f32; 4],
     pub param5: f32,
+    pub phase: u8,
+    pub rank: i16,
+    pub field: u16,
     pub verts: Vec<VVertex>,
     pub indices: Vec<u32>,
 }
@@ -2049,12 +2105,14 @@ pub fn overlay_paint_groups(
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
-    let to_paths = |group: &PaintGroup| -> Vec<Vec<[f64; 2]>> {
+    let to_paths = |group: &PaintGroup, grounded_only: bool| -> Vec<Vec<[f64; 2]>> {
         group
             .rings
             .iter()
-            .filter(|ring| ring.len() >= 3)
-            .map(|ring| {
+            .filter(|(ring, max_dz)| {
+                ring.len() >= 3 && (!grounded_only || *max_dz < LIFT_COVER_M)
+            })
+            .map(|(ring, _)| {
                 ring.iter()
                     .map(|&(x, y)| [f64::from(x), f64::from(y)])
                     .collect()
@@ -2065,13 +2123,18 @@ pub fn overlay_paint_groups(
     let mut cover: Shapes = Vec::new();
     let mut visibles: Vec<Shapes> = Vec::with_capacity(groups.len());
     for group in groups.iter().rev() {
-        let paths = to_paths(group);
+        let paths = to_paths(group, false);
         if paths.is_empty() {
             visibles.push(Vec::new());
             continue;
         }
         let visible: Shapes = paths.overlay(&cover, OverlayRule::Difference, IoFillRule::NonZero);
-        cover = paths.overlay(&cover, OverlayRule::Union, IoFillRule::NonZero);
+        // Only grounded rings join the cover: a lifted deck must not cut
+        // the road running underneath it out of the map.
+        let grounded = to_paths(group, true);
+        if !grounded.is_empty() {
+            cover = grounded.overlay(&cover, OverlayRule::Union, IoFillRule::NonZero);
+        }
         visibles.push(visible);
     }
     visibles.reverse();
@@ -2115,11 +2178,226 @@ pub fn overlay_paint_groups(
         faces.push(PaintFace {
             color: group.color,
             param5: group.param5,
+            phase: group.phase,
+            rank: group.rank,
+            field: group.field,
             verts: tess_verts.clone(),
             indices: tess_indices.clone(),
         });
     }
     faces
+}
+
+/// Nearest-way deck field for one paint tier: every way of the tier —
+/// grounded ways included at dz 0 — indexed on a coarse grid, sampled by
+/// nearest segment. Ownership by nearest centerline is what keeps a
+/// grounded street flat beside an elevated deck (the parallel-carpet
+/// problem), while the whole cross-section of the deck itself, edge to
+/// edge, lifts uniformly. The baker's junction consensus makes way dz agree
+/// at shared nodes, so nearest-wins stays continuous across junctions.
+pub struct DzField {
+    cell: f32,
+    radius: f32,
+    grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    /// Cells within reach of a lifted segment — the "needs subdivision" set.
+    active: std::collections::HashSet<(i32, i32)>,
+    segs: Vec<[f32; 6]>,
+}
+
+impl DzField {
+    /// Returns None when the tier carries no lift at all — the zero field
+    /// needs no sampling and no subdivision.
+    pub fn build(ways: &[(&[(f32, f32)], Option<&[f32]>)], radius: f32) -> Option<DzField> {
+        if !ways
+            .iter()
+            .any(|(_, dz)| dz.is_some_and(|dz| dz.iter().any(|&v| v > 0.01)))
+        {
+            return None;
+        }
+        let radius = radius.max(1.0);
+        let cell = radius * 2.0;
+        let mut field = DzField {
+            cell,
+            radius,
+            grid: Default::default(),
+            active: Default::default(),
+            segs: Vec::new(),
+        };
+        for (points, dz) in ways {
+            for i in 0..points.len().saturating_sub(1) {
+                let (ax, ay) = points[i];
+                let (bx, by) = points[i + 1];
+                let (dza, dzb) = dz.map_or((0.0, 0.0), |d| (d[i], d[i + 1]));
+                let id = field.segs.len() as u32;
+                field.segs.push([ax, ay, bx, by, dza, dzb]);
+                let min_cx = ((ax.min(bx) - radius) / cell).floor() as i32;
+                let max_cx = ((ax.max(bx) + radius) / cell).floor() as i32;
+                let min_cy = ((ay.min(by) - radius) / cell).floor() as i32;
+                let max_cy = ((ay.max(by) + radius) / cell).floor() as i32;
+                for cx in min_cx..=max_cx {
+                    for cy in min_cy..=max_cy {
+                        field.grid.entry((cx, cy)).or_default().push(id);
+                        if dza > 0.01 || dzb > 0.01 {
+                            field.active.insert((cx, cy));
+                        }
+                    }
+                }
+            }
+        }
+        Some(field)
+    }
+
+    /// Does this bbox touch any cell within reach of a lifted segment?
+    pub fn active_near(&self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> bool {
+        let min_cx = (min_x / self.cell).floor() as i32;
+        let max_cx = (max_x / self.cell).floor() as i32;
+        let min_cy = (min_y / self.cell).floor() as i32;
+        let max_cy = (max_y / self.cell).floor() as i32;
+        for cx in min_cx..=max_cx {
+            for cy in min_cy..=max_cy {
+                if self.active.contains(&(cx, cy)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Deck height at a point: nearest tier segment within `radius` wins,
+    /// fading out over the outer 1.5 units so faces that leave the corridor
+    /// stay continuous.
+    pub fn sample(&self, x: f32, y: f32) -> f32 {
+        let key = (
+            (x / self.cell).floor() as i32,
+            (y / self.cell).floor() as i32,
+        );
+        let Some(ids) = self.grid.get(&key) else {
+            return 0.0;
+        };
+        let mut best_d2 = f32::MAX;
+        let mut best_dz = 0.0f32;
+        for &id in ids {
+            let [ax, ay, bx, by, dza, dzb] = self.segs[id as usize];
+            let (ex, ey) = (bx - ax, by - ay);
+            let el2 = (ex * ex + ey * ey).max(1e-9);
+            let t = (((x - ax) * ex + (y - ay) * ey) / el2).clamp(0.0, 1.0);
+            let (qx, qy) = (ax + ex * t - x, ay + ey * t - y);
+            let d2 = qx * qx + qy * qy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best_dz = dza + (dzb - dza) * t;
+            }
+        }
+        if best_dz <= 0.0 || best_d2 >= self.radius * self.radius {
+            return 0.0;
+        }
+        let d = best_d2.sqrt();
+        let fade_start = (self.radius - 1.5).max(0.0);
+        let fade =
+            1.0 - ((d - fade_start) / (self.radius - fade_start).max(1e-3)).clamp(0.0, 1.0);
+        best_dz * fade
+    }
+}
+
+/// Crack-free refinement of a face mesh near lifted geometry: every edge
+/// longer than `max_edge` that touches the field's active area is split at
+/// its midpoint — shared midpoints via the edge map, so neighboring
+/// triangles always agree and no T-junctions appear. Runs to a fixpoint so
+/// deck ramps interpolate as smoothly as the legacy dense strokes did.
+pub fn subdivide_face_mesh(
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+    max_edge: f32,
+    field: &DzField,
+) {
+    use std::collections::HashMap;
+    let max_edge_sq = max_edge * max_edge;
+    for _pass in 0..10 {
+        let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut out: Vec<u32> = Vec::with_capacity(indices.len());
+        let mut split_any = false;
+        let need_split = |verts: &[VVertex], i: u32, j: u32| -> bool {
+            let (vi, vj) = (&verts[i as usize], &verts[j as usize]);
+            let d2 = (vi.x - vj.x).powi(2) + (vi.y - vj.y).powi(2);
+            d2 > max_edge_sq
+                && field.active_near(
+                    vi.x.min(vj.x),
+                    vi.y.min(vj.y),
+                    vi.x.max(vj.x),
+                    vi.y.max(vj.y),
+                )
+        };
+        for t in 0..indices.len() / 3 {
+            let (mut a, mut b, mut c) = (indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]);
+            let (mut sab, mut sbc, mut sca) = (
+                need_split(verts, a, b),
+                need_split(verts, b, c),
+                need_split(verts, c, a),
+            );
+            // Rotate so the split pattern is canonical: single split on
+            // (a,b); double split on (a,b)+(b,c).
+            for _ in 0..2 {
+                let rotate = match (sab, sbc, sca) {
+                    (false, true, _) | (false, false, true) => true,
+                    (true, false, true) => true,
+                    _ => false,
+                };
+                if !rotate {
+                    break;
+                }
+                let (na, nb, nc) = (b, c, a);
+                let (nab, nbc, nca) = (sbc, sca, sab);
+                a = na;
+                b = nb;
+                c = nc;
+                sab = nab;
+                sbc = nbc;
+                sca = nca;
+            }
+            let mut mid = |i: u32, j: u32, verts: &mut Vec<VVertex>| -> u32 {
+                let key = (i.min(j), i.max(j));
+                *midpoints.entry(key).or_insert_with(|| {
+                    let (vi, vj) = (verts[i as usize], verts[j as usize]);
+                    verts.push(VVertex {
+                        x: (vi.x + vj.x) * 0.5,
+                        y: (vi.y + vj.y) * 0.5,
+                        u: (vi.u + vj.u) * 0.5,
+                        v: (vi.v + vj.v) * 0.5,
+                        stroke_dist: (vi.stroke_dist + vj.stroke_dist) * 0.5,
+                        clip_radius: vi.clip_radius.max(vj.clip_radius),
+                    });
+                    (verts.len() - 1) as u32
+                })
+            };
+            match (sab, sbc, sca) {
+                (false, false, false) => out.extend_from_slice(&[a, b, c]),
+                (true, false, false) => {
+                    let m = mid(a, b, verts);
+                    out.extend_from_slice(&[a, m, c, m, b, c]);
+                    split_any = true;
+                }
+                (true, true, false) => {
+                    let m1 = mid(a, b, verts);
+                    let m2 = mid(b, c, verts);
+                    out.extend_from_slice(&[a, m1, c, m1, m2, c, m1, b, m2]);
+                    split_any = true;
+                }
+                (true, true, true) => {
+                    let m1 = mid(a, b, verts);
+                    let m2 = mid(b, c, verts);
+                    let m3 = mid(c, a, verts);
+                    out.extend_from_slice(&[a, m1, m3, m1, b, m2, m3, m2, c, m1, m2, m3]);
+                    split_any = true;
+                }
+                // Rotation above normalized the remaining patterns away.
+                _ => out.extend_from_slice(&[a, b, c]),
+            }
+        }
+        *indices = out;
+        if !split_any {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2197,17 +2475,24 @@ mod overlay_tests {
                 }
                 let ribbon = [RoadRibbon { points, dz: None, closed_ring: false }];
                 for (ring, _) in road_ribbon_rings(&ribbon, width * 0.5, 0.0, clip) {
-                    rings.push(ring);
+                    rings.push((ring, 0.0));
                 }
             }
             let _ = pass;
-            groups.push(PaintGroup { color, param5: 0.0, rings });
+            groups.push(PaintGroup {
+                color,
+                param5: 0.0,
+                phase: 0,
+                rank: 0,
+                field: DZ_FIELD_NONE,
+                rings,
+            });
         }
         let mut tess = Tessellator::default();
         // Ground truth: tessellate each ring separately, paint in order.
         let mut truth_sets: Vec<(Vec<VVertex>, Vec<u32>, [f32; 4])> = Vec::new();
         for group in &groups {
-            for ring in &group.rings {
+            for (ring, _) in &group.rings {
                 let mut path = VectorPath::new();
                 path.move_to(ring[0].0, ring[0].1);
                 for point in ring.iter().skip(1) {
