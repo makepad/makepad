@@ -1327,47 +1327,71 @@ fn solve_bbox(
     // ribbons overlap in 2D — if their solved profiles differ, the merged
     // surface renders a height step down its middle (persistent stepped
     // twin slabs). Each way vertex adopts the highest solved height found
-    // on a PARALLEL way within its own half-width. Two rounds settle
-    // chains; tunnels stay out.
+    // on a parallel SAME-CLASS way (width classes match on duals) within
+    // its own half-width. A nearby service/bus road is a different class
+    // and must NOT be hoisted to deck height.
     {
-        let mut pre_field = SolvedField::default();
-        for way in &graph.ways {
-            if way.tunnel {
-                continue;
-            }
-            for seg in 0..way.nodes.len() - 1 {
-                let a = way.nodes[seg] as usize;
-                let b = way.nodes[seg + 1] as usize;
-                pre_field.push(
-                    graph.pos[a].0,
-                    graph.pos[a].1,
-                    graph.pos[b].0,
-                    graph.pos[b].1,
-                    z[a],
-                    z[b],
-                );
-            }
-        }
+        let mut adopted: Vec<(usize, f32)> = Vec::new();
         for way in &graph.ways {
             if way.tunnel || way.nodes.len() < 2 {
                 continue;
             }
-            let cap_units = way.half_width_m / m_per_unit.max(1e-6);
+            let cap = way.half_width_m / m_per_unit.max(1e-6);
             for index in 0..way.nodes.len() {
                 let node = way.nodes[index] as usize;
                 let (px, py) = graph.pos[node];
-                let previous = graph.pos
-                    [way.nodes[index.saturating_sub(1)] as usize];
+                let previous =
+                    graph.pos[way.nodes[index.saturating_sub(1)] as usize];
                 let next =
                     graph.pos[way.nodes[(index + 1).min(way.nodes.len() - 1)] as usize];
-                let dir = (next.0 - previous.0, next.1 - previous.1);
-                if let Some(height) =
-                    pre_field.parallel_max(px, py, dir, 0.7, cap_units)
-                {
-                    if height > z[node] + 0.3 {
-                        z[node] = height;
+                let (dx, dy) = (next.0 - previous.0, next.1 - previous.1);
+                let dl = (dx * dx + dy * dy).sqrt().max(1e-6);
+                let mut best = z[node];
+                let cy0 = ((py - cap) / CELL).floor() as i32;
+                let cy1 = ((py + cap) / CELL).floor() as i32;
+                let cx0 = ((px - cap) / CELL).floor() as i32;
+                let cx1 = ((px + cap) / CELL).floor() as i32;
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        let Some(bucket) = grid.get(&(cx, cy)) else { continue };
+                        for &(other_index, other_seg) in bucket {
+                            let other = &graph.ways[other_index];
+                            if other.tunnel
+                                || (other.half_width_m - way.half_width_m).abs() > 1.5
+                            {
+                                continue;
+                            }
+                            let a = graph.pos[other.nodes[other_seg] as usize];
+                            let b = graph.pos[other.nodes[other_seg + 1] as usize];
+                            let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+                            let el2 = (ex * ex + ey * ey).max(1e-6);
+                            if ((dx * ex + dy * ey) / (dl * el2.sqrt())).abs() < 0.82 {
+                                continue;
+                            }
+                            let t = (((px - a.0) * ex + (py - a.1) * ey) / el2)
+                                .clamp(0.0, 1.0);
+                            let (qx, qy) = (a.0 + ex * t - px, a.1 + ey * t - py);
+                            let dist = (qx * qx + qy * qy).sqrt();
+                            if dist <= 0.7 || dist >= cap {
+                                continue;
+                            }
+                            let za = z[other.nodes[other_seg] as usize];
+                            let zb = z[other.nodes[other_seg + 1] as usize];
+                            let height = za * (1.0 - t) + zb * t;
+                            if height > best + 0.3 {
+                                best = height;
+                            }
+                        }
                     }
                 }
+                if best > z[node] + 0.3 {
+                    adopted.push((node, best));
+                }
+            }
+        }
+        for (node, height) in adopted {
+            if height > z[node] {
+                z[node] = height;
             }
         }
     }
@@ -1550,6 +1574,703 @@ struct BasePath {
     path: u32,
     is_polygon: bool,
     points: Vec<(f32, f32)>,
+}
+
+/// Reconcile the two carriageways encoded as sibling paths of one base-map
+/// feature. Shortbread commonly emits a dual motorway as reversed parallel
+/// paths under one feature id. Sampling them independently can give one side
+/// a deck and the other ground, which tears the renderer's union surface down
+/// the middle.
+///
+/// This deliberately has a narrow admission gate: same source feature,
+/// positive lift on both paths, full-run reversed endpoint pairing, reciprocal
+/// parallel coverage, realistic carriageway spacing, and one already-agreeing
+/// lifted anchor. Heights only propagate from a snapshot and only upward, so
+/// an unrelated nearby service road (a different feature) cannot be hoisted.
+fn reconcile_sibling_carriageways(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &mut [Option<Vec<f32>>],
+    m_per_unit: f32,
+) {
+    const MIN_SEPARATION_M: f32 = 4.0;
+    const MAX_SEPARATION_M: f32 = 24.0;
+    const MIN_PARALLEL_DOT: f32 = 0.92;
+
+    fn direction(points: &[(f32, f32)], index: usize) -> (f32, f32) {
+        let previous = points[index.saturating_sub(1)];
+        let next = points[(index + 1).min(points.len() - 1)];
+        let (dx, dy) = (next.0 - previous.0, next.1 - previous.1);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+        (dx / len, dy / len)
+    }
+
+    fn path_length(points: &[(f32, f32)]) -> f32 {
+        points.windows(2).map(|w| distance(w[0], w[1])).sum()
+    }
+
+    fn endpoint_distance(
+        a: (f32, f32),
+        a_offset: (f32, f32),
+        b: (f32, f32),
+        b_offset: (f32, f32),
+    ) -> f32 {
+        distance(
+            (a.0 + a_offset.0, a.1 + a_offset.1),
+            (b.0 + b_offset.0, b.1 + b_offset.1),
+        )
+    }
+
+    /// For every target vertex, interpolate the nearest locally-parallel
+    /// source segment. The returned distance is in meters.
+    fn matches(
+        target: &BasePath,
+        target_offset: (f32, f32),
+        source: &BasePath,
+        source_offset: (f32, f32),
+        source_dz: &[f32],
+        m_per_unit: f32,
+    ) -> Vec<Option<(f32, f32)>> {
+        let mut out = Vec::with_capacity(target.points.len());
+        for (index, &(px, py)) in target.points.iter().enumerate() {
+            let p = (px + target_offset.0, py + target_offset.1);
+            let target_dir = direction(&target.points, index);
+            let mut best: Option<(f32, f32)> = None;
+            for seg in 0..source.points.len().saturating_sub(1) {
+                let a = (
+                    source.points[seg].0 + source_offset.0,
+                    source.points[seg].1 + source_offset.1,
+                );
+                let b = (
+                    source.points[seg + 1].0 + source_offset.0,
+                    source.points[seg + 1].1 + source_offset.1,
+                );
+                let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+                let el2 = (ex * ex + ey * ey).max(1e-6);
+                let el = el2.sqrt();
+                if ((target_dir.0 * ex + target_dir.1 * ey) / el).abs()
+                    < MIN_PARALLEL_DOT
+                {
+                    continue;
+                }
+                let t = (((p.0 - a.0) * ex + (p.1 - a.1) * ey) / el2).clamp(0.0, 1.0);
+                let q = (a.0 + ex * t, a.1 + ey * t);
+                let dist_m = distance(p, q) * m_per_unit;
+                if dist_m > MAX_SEPARATION_M
+                    || best.is_some_and(|(_, best_dist)| dist_m >= best_dist)
+                {
+                    continue;
+                }
+                let height = source_dz[seg] * (1.0 - t) + source_dz[seg + 1] * t;
+                best = Some((height, dist_m));
+            }
+            out.push(best);
+        }
+        out
+    }
+
+    let snapshot = final_dz.to_vec();
+    let mut raised = snapshot.clone();
+    let mut groups: HashMap<((u32, u32), String, u32), Vec<usize>> = HashMap::new();
+    for (index, path) in base_paths.iter().enumerate() {
+        if path.is_polygon || path.layer != "streets" || path.points.len() < 2 {
+            continue;
+        }
+        let Some(dz) = snapshot.get(index).and_then(|dz| dz.as_ref()) else {
+            continue;
+        };
+        if dz.len() != path.points.len()
+            || dz.iter().any(|&value| value < -0.05)
+            || !dz.iter().any(|&value| value > 0.3)
+        {
+            continue;
+        }
+        groups
+            .entry((path_src[index].0, path.layer.clone(), path.feature))
+            .or_default()
+            .push(index);
+    }
+
+    for siblings in groups.values() {
+        for pair_start in 0..siblings.len() {
+            for pair_end in pair_start + 1..siblings.len() {
+                let (a_index, b_index) = (siblings[pair_start], siblings[pair_end]);
+                let (a, b) = (&base_paths[a_index], &base_paths[b_index]);
+                let (a_offset, b_offset) = (path_src[a_index].1, path_src[b_index].1);
+                let (a_dz, b_dz) = (
+                    snapshot[a_index].as_ref().unwrap(),
+                    snapshot[b_index].as_ref().unwrap(),
+                );
+                let a_len = path_length(&a.points);
+                let b_len = path_length(&b.points);
+                let length_ratio = a_len / b_len.max(1e-6);
+                if !(0.75..=1.33).contains(&length_ratio) {
+                    continue;
+                }
+                let reverse_ends = [
+                    endpoint_distance(a.points[0], a_offset, *b.points.last().unwrap(), b_offset)
+                        * m_per_unit,
+                    endpoint_distance(*a.points.last().unwrap(), a_offset, b.points[0], b_offset)
+                        * m_per_unit,
+                ];
+                let direct_sum = (endpoint_distance(a.points[0], a_offset, b.points[0], b_offset)
+                    + endpoint_distance(
+                        *a.points.last().unwrap(),
+                        a_offset,
+                        *b.points.last().unwrap(),
+                        b_offset,
+                    ))
+                    * m_per_unit;
+                let reverse_sum = reverse_ends[0] + reverse_ends[1];
+                if reverse_ends
+                    .iter()
+                    .any(|&dist| !(MIN_SEPARATION_M..=MAX_SEPARATION_M).contains(&dist))
+                    || reverse_sum >= direct_sum * 0.75
+                {
+                    continue;
+                }
+
+                let a_from_b = matches(a, a_offset, b, b_offset, b_dz, m_per_unit);
+                let b_from_a = matches(b, b_offset, a, a_offset, a_dz, m_per_unit);
+                let covered_a = a_from_b.iter().filter(|sample| sample.is_some()).count();
+                let covered_b = b_from_a.iter().filter(|sample| sample.is_some()).count();
+                if covered_a * 10 < a.points.len() * 8
+                    || covered_b * 10 < b.points.len() * 8
+                {
+                    continue;
+                }
+                let mut separations: Vec<f32> = a_from_b
+                    .iter()
+                    .chain(b_from_a.iter())
+                    .filter_map(|sample| sample.map(|(_, dist)| dist))
+                    .collect();
+                separations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let median_separation = separations[separations.len() / 2];
+                if !(MIN_SEPARATION_M..=MAX_SEPARATION_M).contains(&median_separation) {
+                    continue;
+                }
+                let agreeing_anchor = a_from_b
+                    .iter()
+                    .zip(a_dz)
+                    .chain(b_from_a.iter().zip(b_dz))
+                    .any(|(sample, own)| {
+                        sample.is_some_and(|(other, _)| {
+                            *own > 0.3 && other > 0.3 && (*own - other).abs() <= 1.0
+                        })
+                    });
+                if !agreeing_anchor {
+                    continue;
+                }
+
+                if let Some(target) = raised[a_index].as_mut() {
+                    for (value, sample) in target.iter_mut().zip(a_from_b) {
+                        if let Some((other, _)) = sample {
+                            *value = value.max(other);
+                        }
+                    }
+                }
+                if let Some(target) = raised[b_index].as_mut() {
+                    for (value, sample) in target.iter_mut().zip(b_from_a) {
+                        if let Some((other, _)) = sample {
+                            *value = value.max(other);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    final_dz.clone_from_slice(&raised);
+}
+
+/// Give the two padded copies of a centerline one common plane where they
+/// cross a nominal tile seam. MVT clips extend beyond the tile (+64/-64 in
+/// the usual 4096 extent), so neighboring copies overlap without sharing a
+/// raw vertex. Matching only equal vertices leaves two independently baked
+/// ramp planes on top of each other.
+///
+/// For a reciprocal pair of nearly coincident seam crossings, the vertices
+/// INSIDE the two nominal tiles are immutable anchors. Their combined grade
+/// defines one seam height and slope; only the two OUTSIDE padding vertices
+/// are changed. The overlapping segments then agree in both height and
+/// grade without introducing a kink in either tile's authoritative interior.
+fn reconcile_cross_tile_copies(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &mut [Option<Vec<f32>>],
+    m_per_unit: f32,
+) {
+    const MAX_CROSSING_GAP_M: f32 = 1.25;
+    const MIN_PARALLEL_DOT: f32 = 0.98;
+    const MAX_GRADE: f32 = 0.20;
+
+    #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+    enum Seam {
+        /// x coordinate is the east tile index; y is the common row.
+        Vertical(u32, u32),
+        /// y coordinate is the south tile index; x is the common column.
+        Horizontal(u32, u32),
+    }
+
+    #[derive(Clone, Copy)]
+    struct Crossing {
+        path: usize,
+        /// True for west/north (the negative coordinate side).
+        negative_side: bool,
+        point: (f32, f32),
+        dir: (f32, f32),
+        inside_vertex: usize,
+        outside_vertex: usize,
+        inside_point: (f32, f32),
+        outside_point: (f32, f32),
+    }
+
+    fn push_crossing(
+        seams: &mut HashMap<Seam, Vec<Crossing>>,
+        seam: Seam,
+        path: usize,
+        seg: usize,
+        negative_side: bool,
+        a: (f32, f32),
+        b: (f32, f32),
+        axis_a: f32,
+        axis_b: f32,
+        boundary: f32,
+    ) {
+        let da = axis_a - boundary;
+        let db = axis_b - boundary;
+        // We only need true padding overlaps. A vertex exactly on the seam
+        // is already handled by ordinary exact-vertex consensus.
+        if da * db >= 0.0 {
+            return;
+        }
+        let t = (-da / (db - da)).clamp(0.0, 1.0);
+        let point = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+        let a_inside = if negative_side { da < 0.0 } else { da > 0.0 };
+        seams.entry(seam).or_default().push(Crossing {
+            path,
+            negative_side,
+            point,
+            dir: (dx / len, dy / len),
+            inside_vertex: if a_inside { seg } else { seg + 1 },
+            outside_vertex: if a_inside { seg + 1 } else { seg },
+            inside_point: if a_inside { a } else { b },
+            outside_point: if a_inside { b } else { a },
+        });
+    }
+
+    let mut seams: HashMap<Seam, Vec<Crossing>> = HashMap::new();
+    for (path_index, path) in base_paths.iter().enumerate() {
+        if path.is_polygon
+            || path.points.len() < 2
+            || final_dz
+                .get(path_index)
+                .and_then(|values| values.as_ref())
+                .is_none_or(|values| values.len() != path.points.len())
+        {
+            continue;
+        }
+        let (src, offset) = path_src[path_index];
+        for seg in 0..path.points.len() - 1 {
+            let local_a = path.points[seg];
+            let local_b = path.points[seg + 1];
+            let a = (local_a.0 + offset.0, local_a.1 + offset.1);
+            let b = (local_b.0 + offset.0, local_b.1 + offset.1);
+            push_crossing(
+                &mut seams,
+                Seam::Vertical(src.0, src.1),
+                path_index,
+                seg,
+                false,
+                a,
+                b,
+                local_a.0,
+                local_b.0,
+                0.0,
+            );
+            push_crossing(
+                &mut seams,
+                Seam::Vertical(src.0 + 1, src.1),
+                path_index,
+                seg,
+                true,
+                a,
+                b,
+                local_a.0,
+                local_b.0,
+                EXTENT as f32,
+            );
+            push_crossing(
+                &mut seams,
+                Seam::Horizontal(src.0, src.1),
+                path_index,
+                seg,
+                false,
+                a,
+                b,
+                local_a.1,
+                local_b.1,
+                0.0,
+            );
+            push_crossing(
+                &mut seams,
+                Seam::Horizontal(src.0, src.1 + 1),
+                path_index,
+                seg,
+                true,
+                a,
+                b,
+                local_a.1,
+                local_b.1,
+                EXTENT as f32,
+            );
+        }
+    }
+
+    let max_gap = MAX_CROSSING_GAP_M / m_per_unit.max(1e-6);
+    let mut proposals: HashMap<(usize, usize), Vec<f32>> = HashMap::new();
+    for crossings in seams.values() {
+        let nearest = |index: usize, opposite_negative_side: bool| -> Option<usize> {
+            let from = crossings[index];
+            crossings
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| {
+                    candidate.negative_side == opposite_negative_side
+                        && base_paths[candidate.path].layer == base_paths[from.path].layer
+                        && (from.dir.0 * candidate.dir.0 + from.dir.1 * candidate.dir.1).abs()
+                            >= MIN_PARALLEL_DOT
+                })
+                .filter_map(|(candidate_index, candidate)| {
+                    let gap = distance(from.point, candidate.point);
+                    (gap <= max_gap).then_some((candidate_index, gap))
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(candidate_index, _)| candidate_index)
+        };
+        for negative_index in 0..crossings.len() {
+            let negative = crossings[negative_index];
+            if !negative.negative_side {
+                continue;
+            }
+            let Some(positive_index) = nearest(negative_index, false) else {
+                continue;
+            };
+            if nearest(positive_index, true) != Some(negative_index) {
+                continue;
+            }
+            let positive = crossings[positive_index];
+            let negative_dz = final_dz[negative.path].as_ref().unwrap();
+            let positive_dz = final_dz[positive.path].as_ref().unwrap();
+            let z_negative = negative_dz[negative.inside_vertex];
+            let z_positive = positive_dz[positive.inside_vertex];
+            if z_negative.abs() <= 0.2 && z_positive.abs() <= 0.2 {
+                continue;
+            }
+            let negative_to_seam = distance(negative.inside_point, negative.point);
+            let seam_to_positive = distance(positive.point, positive.inside_point);
+            let anchor_distance = negative_to_seam + seam_to_positive;
+            if anchor_distance <= 1e-3 {
+                continue;
+            }
+            let grade = (z_positive - z_negative) / anchor_distance;
+            if grade.abs() / m_per_unit.max(1e-6) > MAX_GRADE {
+                continue;
+            }
+            let seam_height = z_negative + grade * negative_to_seam;
+            let negative_outside =
+                seam_height + grade * distance(negative.point, negative.outside_point);
+            let positive_outside =
+                seam_height - grade * distance(positive.outside_point, positive.point);
+            if negative_outside.abs() <= MAX_LIFT_M
+                && positive_outside.abs() <= MAX_LIFT_M
+            {
+                proposals
+                    .entry((negative.path, negative.outside_vertex))
+                    .or_default()
+                    .push(negative_outside);
+                proposals
+                    .entry((positive.path, positive.outside_vertex))
+                    .or_default()
+                    .push(positive_outside);
+            }
+        }
+    }
+    for ((path, vertex), values) in proposals {
+        let min = values.iter().copied().fold(f32::MAX, f32::min);
+        let max = values.iter().copied().fold(f32::MIN, f32::max);
+        // A corner vertex can receive both a horizontal and vertical seam
+        // proposal. Apply it only when both planes agree.
+        if max - min <= 0.2 {
+            if let Some(target) = final_dz[path].as_mut() {
+                target[vertex] = values.iter().sum::<f32>() / values.len() as f32;
+            }
+        }
+    }
+
+    // Some MVT encoders quantize a seam intersection one extent unit
+    // INSIDE both tiles. The authoritative tile then ends at x=4095 while
+    // its neighbor carries a padding-only reverse copy ending at x=-1.
+    // Neither segment crosses x=4096/0, so the crossing logic above never
+    // sees them even though their terminal points and centerlines coincide.
+    //
+    // Pair those terminal copies conservatively and fit the padding segment
+    // to the authoritative in-tile segment's height plane. The authoritative
+    // profile remains untouched. Both padding vertices are fitted because
+    // the later encoded-feature boundary consensus would otherwise raise
+    // only the shared tip and recreate the triangular wedge.
+    const SEAM_QUANTIZATION_UNITS: f32 = 2.0;
+    const MAX_TERMINAL_GAP_UNITS: f32 = 2.25;
+
+    #[derive(Clone, Copy)]
+    struct TerminalSegment {
+        path: usize,
+        /// True when this source tile lies west/north of the seam.
+        source_negative_side: bool,
+        /// The segment lies inside its source tile rather than in padding.
+        authoritative: bool,
+        tip_vertex: usize,
+        neighbor_vertex: usize,
+        tip: (f32, f32),
+        neighbor: (f32, f32),
+        dir: (f32, f32),
+    }
+
+    fn push_terminal(
+        seams: &mut HashMap<Seam, Vec<TerminalSegment>>,
+        seam: Seam,
+        path: usize,
+        source_negative_side: bool,
+        tip_vertex: usize,
+        neighbor_vertex: usize,
+        tip: (f32, f32),
+        neighbor: (f32, f32),
+        tip_axis: f32,
+        neighbor_axis: f32,
+        boundary: f32,
+    ) {
+        let tip_delta = tip_axis - boundary;
+        let neighbor_delta = neighbor_axis - boundary;
+        // This pass is only for the same-side quantization case. Genuine
+        // crossings were handled above, and the endpoint must be the point
+        // closest to the nominal seam.
+        if tip_delta.abs() > SEAM_QUANTIZATION_UNITS
+            || tip_delta * neighbor_delta < 0.0
+            || neighbor_delta.abs() <= tip_delta.abs() + 0.5
+        {
+            return;
+        }
+        let neighbor_negative_side = neighbor_delta < 0.0;
+        let authoritative = neighbor_negative_side == source_negative_side;
+        let (dx, dy) = (neighbor.0 - tip.0, neighbor.1 - tip.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 1e-3 {
+            return;
+        }
+        seams.entry(seam).or_default().push(TerminalSegment {
+            path,
+            source_negative_side,
+            authoritative,
+            tip_vertex,
+            neighbor_vertex,
+            tip,
+            neighbor,
+            dir: (dx / len, dy / len),
+        });
+    }
+
+    let mut terminal_seams = HashMap::<Seam, Vec<TerminalSegment>>::new();
+    for (path_index, path) in base_paths.iter().enumerate() {
+        if path.is_polygon
+            || path.points.len() < 2
+            || final_dz
+                .get(path_index)
+                .and_then(|values| values.as_ref())
+                .is_none_or(|values| values.len() != path.points.len())
+        {
+            continue;
+        }
+        let (src, offset) = path_src[path_index];
+        let last = path.points.len() - 1;
+        for (tip_vertex, neighbor_vertex) in [(0, 1), (last, last - 1)] {
+            let local_tip = path.points[tip_vertex];
+            let local_neighbor = path.points[neighbor_vertex];
+            let tip = (local_tip.0 + offset.0, local_tip.1 + offset.1);
+            let neighbor = (
+                local_neighbor.0 + offset.0,
+                local_neighbor.1 + offset.1,
+            );
+            push_terminal(
+                &mut terminal_seams,
+                Seam::Vertical(src.0, src.1),
+                path_index,
+                false,
+                tip_vertex,
+                neighbor_vertex,
+                tip,
+                neighbor,
+                local_tip.0,
+                local_neighbor.0,
+                0.0,
+            );
+            push_terminal(
+                &mut terminal_seams,
+                Seam::Vertical(src.0 + 1, src.1),
+                path_index,
+                true,
+                tip_vertex,
+                neighbor_vertex,
+                tip,
+                neighbor,
+                local_tip.0,
+                local_neighbor.0,
+                EXTENT as f32,
+            );
+            push_terminal(
+                &mut terminal_seams,
+                Seam::Horizontal(src.0, src.1),
+                path_index,
+                false,
+                tip_vertex,
+                neighbor_vertex,
+                tip,
+                neighbor,
+                local_tip.1,
+                local_neighbor.1,
+                0.0,
+            );
+            push_terminal(
+                &mut terminal_seams,
+                Seam::Horizontal(src.0, src.1 + 1),
+                path_index,
+                true,
+                tip_vertex,
+                neighbor_vertex,
+                tip,
+                neighbor,
+                local_tip.1,
+                local_neighbor.1,
+                EXTENT as f32,
+            );
+        }
+    }
+
+    let mut terminal_proposals = HashMap::<(usize, usize), Vec<f32>>::new();
+    for terminals in terminal_seams.values() {
+        let match_pair = |authoritative: TerminalSegment,
+                          padding: TerminalSegment|
+         -> Option<(f32, f32)> {
+            if !authoritative.authoritative
+                || padding.authoritative
+                || authoritative.path == padding.path
+                || authoritative.source_negative_side == padding.source_negative_side
+                || base_paths[authoritative.path].layer != base_paths[padding.path].layer
+            {
+                return None;
+            }
+            let tip_gap = distance(authoritative.tip, padding.tip);
+            if tip_gap > MAX_TERMINAL_GAP_UNITS
+                || (authoritative.dir.0 * padding.dir.0
+                    + authoritative.dir.1 * padding.dir.1)
+                    .abs()
+                    < MIN_PARALLEL_DOT
+            {
+                return None;
+            }
+            let authoritative_dz = final_dz[authoritative.path].as_ref().unwrap();
+            let tip_z = authoritative_dz[authoritative.tip_vertex];
+            let (vx, vy) = (
+                authoritative.neighbor.0 - authoritative.tip.0,
+                authoritative.neighbor.1 - authoritative.tip.1,
+            );
+            let length_sq = (vx * vx + vy * vy).max(1e-6);
+            let t = ((padding.neighbor.0 - authoritative.tip.0) * vx
+                + (padding.neighbor.1 - authoritative.tip.1) * vy)
+                / length_sq;
+            // The padding segment must actually overlap the authoritative
+            // terminal segment, not merely be a nearby parallel road.
+            if !(0.0..=1.02).contains(&t) {
+                return None;
+            }
+            let projected = (
+                authoritative.tip.0 + vx * t,
+                authoritative.tip.1 + vy * t,
+            );
+            let lateral_gap = distance(projected, padding.neighbor);
+            if lateral_gap > max_gap {
+                return None;
+            }
+            let neighbor_z = authoritative_dz[authoritative.neighbor_vertex];
+            let authoritative_length = length_sq.sqrt();
+            let grade = (neighbor_z - tip_z) / authoritative_length;
+            if grade.abs() / m_per_unit.max(1e-6) > MAX_GRADE {
+                return None;
+            }
+            let target = tip_z + (neighbor_z - tip_z) * t;
+            if target.abs() > MAX_LIFT_M {
+                return None;
+            }
+            Some((tip_gap + lateral_gap, target))
+        };
+
+        let nearest_padding = |authoritative_index: usize| -> Option<(usize, f32, f32)> {
+            terminals
+                .iter()
+                .enumerate()
+                .filter_map(|(padding_index, &padding)| {
+                    match_pair(terminals[authoritative_index], padding)
+                        .map(|(score, target)| (padding_index, score, target))
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        };
+        let nearest_authoritative = |padding_index: usize| -> Option<(usize, f32)> {
+            terminals
+                .iter()
+                .enumerate()
+                .filter_map(|(authoritative_index, &authoritative)| {
+                    match_pair(authoritative, terminals[padding_index])
+                        .map(|(score, _)| (authoritative_index, score))
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        };
+
+        for authoritative_index in 0..terminals.len() {
+            if !terminals[authoritative_index].authoritative {
+                continue;
+            }
+            let Some((padding_index, _, target)) = nearest_padding(authoritative_index) else {
+                continue;
+            };
+            if nearest_authoritative(padding_index).map(|pair| pair.0)
+                != Some(authoritative_index)
+            {
+                continue;
+            }
+            let padding = terminals[padding_index];
+            let authoritative = terminals[authoritative_index];
+            let tip_target =
+                final_dz[authoritative.path].as_ref().unwrap()[authoritative.tip_vertex];
+            terminal_proposals
+                .entry((padding.path, padding.tip_vertex))
+                .or_default()
+                .push(tip_target);
+            terminal_proposals
+                .entry((padding.path, padding.neighbor_vertex))
+                .or_default()
+                .push(target);
+        }
+    }
+    for ((path, vertex), values) in terminal_proposals {
+        let min = values.iter().copied().fold(f32::MAX, f32::min);
+        let max = values.iter().copied().fold(f32::MIN, f32::max);
+        if max - min <= 0.2 {
+            let value = values.iter().sum::<f32>() / values.len() as f32;
+            if let Some(target) = final_dz[path].as_mut() {
+                target[vertex] = value;
+            }
+        }
+    }
 }
 
 const BASE_DZ_LAYERS: &[&str] =
@@ -1984,6 +2705,7 @@ fn annotate_base_tiles(
         }
         final_dz[path_index] = Some(dz);
     }
+    reconcile_sibling_carriageways(&base_paths, &path_src, &mut final_dz, m_per_unit);
     // Final pass: EXACT consensus over coincident line vertices across all
     // tiles — overlap clip copies of one road share their inner vertices,
     // and after per-path blending they can differ by centimeters, which a
@@ -2007,10 +2729,9 @@ fn annotate_base_tiles(
             }
         }
     }
-    let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
     for (path_index, base_path) in base_paths.iter().enumerate() {
-        let Some(mut dz) = final_dz[path_index].take() else { continue };
-        let (src, offset) = path_src[path_index];
+        let Some(dz) = final_dz[path_index].as_mut() else { continue };
+        let offset = path_src[path_index].1;
         if !base_path.is_polygon {
             for (vertex, value) in dz.iter_mut().enumerate() {
                 let (px, py) = base_path.points[vertex];
@@ -2096,6 +2817,16 @@ fn annotate_base_tiles(
                 }
             }
         }
+    }
+    // This must be terminal profile surgery: the padding endpoints are
+    // fitted to one common cross-tile plane after all consensus, dropout
+    // filling, and grade propagation have settled the inside anchors.
+    reconcile_cross_tile_copies(&base_paths, &path_src, &mut final_dz, m_per_unit);
+
+    let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some(dz) = final_dz[path_index].take() else { continue };
+        let src = path_src[path_index].0;
         let any = dz.iter().any(|&v| v.abs() > 0.2);
         if !any {
             continue;
@@ -2398,6 +3129,168 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconciles_reversed_sibling_carriageways_only() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            path(7, &[(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)]),
+            path(7, &[(100.0, 10.0), (50.0, 10.0), (0.0, 10.0)]),
+            // A nearby higher road under another feature never participates.
+            path(8, &[(100.0, 15.0), (50.0, 15.0), (0.0, 15.0)]),
+            // Same feature, but a partial perpendicular branch is rejected.
+            path(7, &[(50.0, -25.0), (50.0, 25.0)]),
+        ];
+        let sources = vec![((1, 2), (0.0, 0.0)); paths.len()];
+        let mut dz = vec![
+            Some(vec![0.0, 0.0, 5.5]),
+            Some(vec![5.5, 0.0, 6.4]),
+            Some(vec![9.0, 9.0, 9.0]),
+            Some(vec![4.0, 4.0]),
+        ];
+
+        reconcile_sibling_carriageways(&paths, &sources, &mut dz, 1.0);
+
+        assert!((dz[0].as_ref().unwrap()[0] - 6.4).abs() < 0.01);
+        assert_eq!(dz[2].as_ref().unwrap(), &[9.0, 9.0, 9.0]);
+        assert_eq!(dz[3].as_ref().unwrap(), &[4.0, 4.0]);
+    }
+
+    #[test]
+    fn reconciles_geometric_copies_across_tile_overlap() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            path(1, &[(4012.0, 3484.0), (4160.0, 3431.0)]),
+            path(9, &[(-64.0, 3477.0), (331.0, 3334.0)]),
+            // A separate parallel centerline is much farther than the
+            // duplicate-copy tolerance and must remain independent.
+            path(10, &[(-64.0, 3517.0), (331.0, 3374.0)]),
+            // A crossing line in the neighbor tile is direction-rejected.
+            path(11, &[(-64.0, 3370.0), (64.0, 3498.0)]),
+        ];
+        let sources = vec![
+            ((10, 20), (0.0, 0.0)),
+            ((11, 20), (4096.0, 0.0)),
+            ((11, 20), (4096.0, 0.0)),
+            ((11, 20), (4096.0, 0.0)),
+        ];
+        let mut dz = vec![
+            Some(vec![8.1, 5.2]),
+            Some(vec![6.4, 1.2]),
+            Some(vec![10.0, 10.0]),
+            Some(vec![12.0, 12.0]),
+        ];
+
+        reconcile_cross_tile_copies(&paths, &sources, &mut dz, 0.4);
+
+        let west = dz[0].as_ref().unwrap();
+        let east = dz[1].as_ref().unwrap();
+        assert!((west[0] - 8.1).abs() < 0.001);
+        assert!((east[1] - 1.2).abs() < 0.001);
+        let sample_at_x = |points: &[(f32, f32)], offset_x: f32, values: &[f32], x: f32| {
+            let ax = points[0].0 + offset_x;
+            let bx = points[1].0 + offset_x;
+            let t = (x - ax) / (bx - ax);
+            values[0] + (values[1] - values[0]) * t
+        };
+        for x in [4048.0, 4096.0, 4144.0] {
+            let west_height = sample_at_x(&paths[0].points, 0.0, west, x);
+            let east_height = sample_at_x(&paths[1].points, 4096.0, east, x);
+            assert!(
+                (west_height - east_height).abs() < 0.02,
+                "overlap mismatch at {x}: {west_height} vs {east_height}"
+            );
+        }
+        let west_grade =
+            (west[1] - west[0]) / distance(paths[0].points[0], paths[0].points[1]);
+        let east_grade =
+            (east[1] - east[0]) / distance(paths[1].points[0], paths[1].points[1]);
+        assert!((west_grade - east_grade).abs() < 0.0001);
+        assert_eq!(dz[2].as_ref().unwrap(), &[10.0, 10.0]);
+        assert_eq!(dz[3].as_ref().unwrap(), &[12.0, 12.0]);
+    }
+
+    #[test]
+    fn reconciles_same_side_quantized_terminal_overlap() {
+        let path = |layer: &str, feature, points: &[(f32, f32)]| BasePath {
+            layer: layer.to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            // Authoritative west-tile segment: its quantized endpoint is
+            // one extent unit shy of the nominal x=4096 seam.
+            path("streets", 90, &[(4021.0, 2216.0), (4095.0, 1989.0)]),
+            // Reverse copy in the east tile's west padding. It also ends at
+            // x=-1, so neither copy crosses the nominal seam.
+            path("streets", 76, &[(-64.0, 2181.0), (-1.0, 1989.0)]),
+            // A separate parallel road is too far from the shared endpoint.
+            path("streets", 77, &[(-64.0, 2193.0), (-1.0, 2001.0)]),
+            // A line sharing the endpoint but crossing the carrier's
+            // direction is rejected by the tangent gate.
+            path("streets", 78, &[(-64.0, 1989.0), (-1.0, 1989.0)]),
+            // Coincident label geometry is not the same physical layer.
+            path("street_labels", 41, &[(-64.0, 2181.0), (-1.0, 1989.0)]),
+        ];
+        let sources = vec![
+            ((8417, 5385), (0.0, 0.0)),
+            ((8418, 5385), (4096.0, 0.0)),
+            ((8418, 5385), (4096.0, 0.0)),
+            ((8418, 5385), (4096.0, 0.0)),
+            ((8418, 5385), (4096.0, 0.0)),
+        ];
+        let mut dz = vec![
+            Some(vec![9.4, 10.9]),
+            // Before the later encoded-feature boundary consensus, even
+            // the coincident seam tip can disagree substantially.
+            Some(vec![1.8, 5.5]),
+            Some(vec![4.0, 4.0]),
+            Some(vec![7.0, 10.9]),
+            Some(vec![2.0, 10.9]),
+        ];
+
+        reconcile_cross_tile_copies(&paths, &sources, &mut dz, 0.36472446);
+
+        let authoritative = dz[0].as_ref().unwrap();
+        let padding = dz[1].as_ref().unwrap();
+        assert_eq!(authoritative, &[9.4, 10.9]);
+        assert!((padding[1] - 10.9).abs() < 1e-6);
+        let tip = paths[0].points[1];
+        let inner = paths[0].points[0];
+        let padding_outer = (
+            paths[1].points[0].0 + sources[1].1.0,
+            paths[1].points[0].1,
+        );
+        let (vx, vy) = (inner.0 - tip.0, inner.1 - tip.1);
+        let t = ((padding_outer.0 - tip.0) * vx + (padding_outer.1 - tip.1) * vy)
+            / (vx * vx + vy * vy);
+        let expected = authoritative[1] + (authoritative[0] - authoritative[1]) * t;
+        assert!(
+            (padding[0] - expected).abs() < 1e-5,
+            "{} != {}",
+            padding[0],
+            expected
+        );
+        assert!((padding[0] - 9.63048).abs() < 1e-4);
+        assert!(padding[0] > 9.0, "low padding wedge survived: {padding:?}");
+        assert_eq!(dz[2].as_ref().unwrap(), &[4.0, 4.0]);
+        assert_eq!(dz[3].as_ref().unwrap(), &[7.0, 10.9]);
+        assert_eq!(dz[4].as_ref().unwrap(), &[2.0, 10.9]);
+    }
+
+    #[test]
     #[ignore] // needs a local bake output
     fn probe_baked_dz() {
         let path = Path::new("../../examples/map/local/maps/ams-bridge-dz.mbtiles");
@@ -2643,4 +3536,5 @@ mod probe_amstelveenseweg {
             );
         }
     }
+
 }
