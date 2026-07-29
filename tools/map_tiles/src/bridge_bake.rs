@@ -622,6 +622,43 @@ impl Graph {
     }
 }
 
+/// Closest approach between two segments: (u on b, distance). Used for
+/// lateral clearance — wide rendered ribbons overlap in 2D even when the
+/// centerlines never cross.
+fn segments_closest(
+    a0: (f32, f32),
+    a1: (f32, f32),
+    b0: (f32, f32),
+    b1: (f32, f32),
+) -> (f32, f32) {
+    let point_seg = |p: (f32, f32), s0: (f32, f32), s1: (f32, f32)| -> (f32, f32) {
+        let (ex, ey) = (s1.0 - s0.0, s1.1 - s0.1);
+        let el2 = (ex * ex + ey * ey).max(1e-9);
+        let t = (((p.0 - s0.0) * ex + (p.1 - s0.1) * ey) / el2).clamp(0.0, 1.0);
+        let (qx, qy) = (s0.0 + ex * t - p.0, s0.1 + ey * t - p.1);
+        (t, (qx * qx + qy * qy).sqrt())
+    };
+    // Sampled approximation is plenty at ~60 m segment scale: check both
+    // endpoints of a against b (tracking u) and of b against a.
+    let mut best_u = 0.0f32;
+    let mut best_d = f32::MAX;
+    for p in [a0, a1] {
+        let (u, d) = point_seg(p, b0, b1);
+        if d < best_d {
+            best_d = d;
+            best_u = u;
+        }
+    }
+    for (bu, p) in [(0.0f32, b0), (1.0, b1)] {
+        let (_, d) = point_seg(p, a0, a1);
+        if d < best_d {
+            best_d = d;
+            best_u = bu;
+        }
+    }
+    (best_u, best_d)
+}
+
 fn segments_intersect(
     a0: (f32, f32),
     a1: (f32, f32),
@@ -882,6 +919,32 @@ fn solve_tile(
         }
     }
 
+    // Ways sharing a node are one connected structure: a ramp forking off a
+    // road runs beside it by construction and must never receive lateral
+    // clearance against it.
+    let connected_pairs: std::collections::HashSet<(u32, u32)> = {
+        let mut node_ways: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (way_index, way) in graph.ways.iter().enumerate() {
+            for &node in &way.nodes {
+                node_ways.entry(node).or_default().push(way_index as u32);
+            }
+        }
+        let mut pairs = std::collections::HashSet::new();
+        for ways in node_ways.values() {
+            for i in 0..ways.len() {
+                for j in i + 1..ways.len() {
+                    pairs.insert((ways[i].min(ways[j]), ways[i].max(ways[j])));
+                }
+            }
+        }
+        pairs
+    };
+    // Rendered ribbons are far wider than centerlines: an elevated ramp
+    // running laterally beside a lower road still overlaps it on screen.
+    // Within this distance the deck needs (tapered) clearance even though
+    // the centerlines never cross.
+    const LATERAL_CLEAR_M: f32 = 6.0;
+
     // Constraint rounds: crossings raise decks, deck rules keep spans level,
     // grade propagation grows the approach ramps. Iterate so stacked
     // structures (deck over deck) settle.
@@ -896,8 +959,14 @@ fn solve_tile(
             for seg in 0..way.nodes.len() - 1 {
                 let a0 = graph.pos[way.nodes[seg] as usize];
                 let a1 = graph.pos[way.nodes[seg + 1] as usize];
-                let (min_x, max_x) = (a0.0.min(a1.0), a0.0.max(a1.0));
-                let (min_y, max_y) = (a0.1.min(a1.1), a0.1.max(a1.1));
+                let (min_x, max_x) = (
+                    a0.0.min(a1.0) - LATERAL_CLEAR_M,
+                    a0.0.max(a1.0) + LATERAL_CLEAR_M,
+                );
+                let (min_y, max_y) = (
+                    a0.1.min(a1.1) - LATERAL_CLEAR_M,
+                    a0.1.max(a1.1) + LATERAL_CLEAR_M,
+                );
                 let mut hits: Vec<(usize, usize, f32)> = Vec::new();
                 let mut cell_y = (min_y / CELL).floor() as i32;
                 while cell_y <= (max_y / CELL).floor() as i32 {
@@ -933,6 +1002,32 @@ fn solve_tile(
                                         other_seg,
                                         z_under + CLEARANCE_PER_LAYER_M * steps,
                                     ));
+                                } else {
+                                    let pair = (
+                                        (way_index.min(other_index)) as u32,
+                                        (way_index.max(other_index)) as u32,
+                                    );
+                                    if !connected_pairs.contains(&pair) {
+                                        let (u, d) = segments_closest(a0, a1, b0, b1);
+                                        if d < LATERAL_CLEAR_M {
+                                            let z_under = graph.low
+                                                [other.nodes[other_seg] as usize]
+                                                * (1.0 - u)
+                                                + graph.low
+                                                    [other.nodes[other_seg + 1] as usize]
+                                                    * u;
+                                            let steps = (way.layer - other.layer.max(0))
+                                                .clamp(1, 3)
+                                                as f32;
+                                            let taper = 1.0 - d / LATERAL_CLEAR_M;
+                                            hits.push((
+                                                other_index,
+                                                other_seg,
+                                                z_under
+                                                    + CLEARANCE_PER_LAYER_M * steps * taper,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
