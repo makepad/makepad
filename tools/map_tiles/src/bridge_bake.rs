@@ -489,6 +489,8 @@ struct SolveWay {
     half_width_m: f32,
     center: bool,
     id: u64,
+    /// Source tile this fragment was decoded from (feature binning).
+    src: (u32, u32),
 }
 
 #[derive(Default)]
@@ -522,6 +524,7 @@ impl Graph {
         offset_units: (f32, f32),
         m_per_unit: f32,
         center: bool,
+        src: (u32, u32),
     ) {
         let Some((grade, class_half_width)) = class_params(&way.tags) else {
             return;
@@ -617,6 +620,7 @@ impl Graph {
                 half_width_m,
                 center,
                 id: way.id,
+                src,
             });
         }
     }
@@ -662,40 +666,52 @@ struct SolveStats {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn solve_tile(
+/// ONE global solve over every decoded tile: per-tile solves (even with a
+/// 1-ring context) reached slightly different heights for the same way on
+/// each side of a tile seam — visible steps and doubled slabs mid-deck.
+/// A single graph + single field makes overlap copies coincide exactly.
+/// `range` = tiles whose bridge_dz features should be emitted.
+fn solve_bbox(
     z: u8,
-    x: u32,
-    y: u32,
+    origin: (u32, u32),
+    range: (u32, u32, u32, u32),
     decoded: &HashMap<(u32, u32), Vec<RawWay>>,
     ahn: &mut Ahn,
-) -> (Vec<TileFeature>, SolveStats, SolvedField, SolvedField) {
+) -> (
+    HashMap<(u32, u32), Vec<TileFeature>>,
+    SolveStats,
+    SolvedField,
+    SolvedField,
+) {
     let mut stats = SolveStats::default();
     let axis = 1u32 << z;
-    let center_lat = tile_y_to_lat(f64::from(y) + 0.5, z);
+    let (x0, y0) = origin;
+    let lat_min = tile_y_to_lat(f64::from(range.3) + 1.0, z);
+    let lat_max = tile_y_to_lat(f64::from(range.1), z);
+    let center_lat = (lat_min + lat_max) * 0.5;
     let m_per_unit =
         (center_lat.to_radians().cos() * 40_075_016.686 / f64::from(axis) / EXTENT) as f32;
 
     let mut graph = Graph::default();
-    for dy in -1i64..=1 {
-        for dx in -1i64..=1 {
-            let nx = x as i64 + dx;
-            let ny = y as i64 + dy;
-            if nx < 0 || ny < 0 || nx >= i64::from(axis) || ny >= i64::from(axis) {
-                continue;
-            }
-            let Some(ways) = decoded.get(&(nx as u32, ny as u32)) else {
-                continue;
-            };
-            let offset = (dx as f32 * EXTENT as f32, dy as f32 * EXTENT as f32);
-            let center = dx == 0 && dy == 0;
-            for way in ways {
-                graph.add_way(way, offset, m_per_unit, center);
-            }
+    for (&(tx, ty), ways) in decoded {
+        let offset = (
+            (tx as i64 - x0 as i64) as f32 * EXTENT as f32,
+            (ty as i64 - y0 as i64) as f32 * EXTENT as f32,
+        );
+        let center =
+            tx >= range.0 && tx <= range.2 && ty >= range.1 && ty <= range.3;
+        for way in ways {
+            graph.add_way(way, offset, m_per_unit, center, (tx, ty));
         }
     }
     stats.ways = graph.ways.len();
     if graph.ways.is_empty() {
-        return (Vec::new(), stats, SolvedField::default(), SolvedField::default());
+        return (
+            HashMap::new(),
+            stats,
+            SolvedField::default(),
+            SolvedField::default(),
+        );
     }
 
     // Ground init from the AHN DTM (bare earth, NAP). Water and structures
@@ -704,8 +720,8 @@ fn solve_tile(
     let lonlat = |graph: &Graph, node: u32| -> (f64, f64) {
         let (ux, uy) = graph.pos[node as usize];
         (
-            tile_x_to_lon(f64::from(x) + f64::from(ux) / EXTENT, z),
-            tile_y_to_lat(f64::from(y) + f64::from(uy) / EXTENT, z),
+            tile_x_to_lon(f64::from(x0) + f64::from(ux) / EXTENT, z),
+            tile_y_to_lat(f64::from(y0) + f64::from(uy) / EXTENT, z),
         )
     };
     if ahn.any() {
@@ -1121,13 +1137,18 @@ fn solve_tile(
         }
     }
 
-    // Bake: center-tile ways whose lift is visible (bridge_dz — the
-    // heuristic corridor consumers and debugging).
-    let mut features = Vec::new();
+    // Bake: in-range ways whose lift is visible (bridge_dz — the
+    // heuristic corridor consumers and debugging), binned per source tile
+    // in that tile's local coordinates.
+    let mut features: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
     for way in &graph.ways {
         if !way.center || way.tunnel {
             continue;
         }
+        let src_offset = (
+            (way.src.0 as i64 - x0 as i64) as f32 * EXTENT as f32,
+            (way.src.1 as i64 - y0 as i64) as f32 * EXTENT as f32,
+        );
         let mut dz_dm = Vec::with_capacity(way.nodes.len());
         let mut max_dz = 0.0f32;
         for &node in &way.nodes {
@@ -1143,7 +1164,10 @@ fn solve_tile(
             .iter()
             .map(|&node| {
                 let (ux, uy) = graph.pos[node as usize];
-                TilePoint { x: ux.round() as i32, y: uy.round() as i32 }
+                TilePoint {
+                    x: (ux - src_offset.0).round() as i32,
+                    y: (uy - src_offset.1).round() as i32,
+                }
             })
             .collect();
         if path.len() < 2 {
@@ -1154,7 +1178,7 @@ fn solve_tile(
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        features.push(TileFeature {
+        features.entry(way.src).or_default().push(TileFeature {
             layer: Layer::BridgeDz,
             geometry_type: GeometryType::LineString,
             osm_type: OsmType::Way,
@@ -1538,6 +1562,7 @@ fn annotate_base_tile(
     field: &SolvedField,
     tunnel_field: &SolvedField,
     m_per_unit: f32,
+    global_offset: (f32, f32),
 ) -> Result<Vec<TileFeature>, String> {
     let base_paths = decode_base_paths(base_raw)?;
     // Pass 1: sample every path. Interior line vertices gate by direction
@@ -1559,16 +1584,17 @@ fn annotate_base_tile(
         let mut side_neg = false;
         for index in 0..count {
             let (px, py) = points[index];
+            let (gx, gy) = (px + global_offset.0, py + global_offset.1);
             let sampled = if base_path.is_polygon {
-                field.sample(px, py, None, 2.4)
+                field.sample(gx, gy, None, 2.4)
             } else {
                 let endpoint = index == 0 || index == count - 1;
                 let previous = points[index.saturating_sub(1)];
                 let next = points[(index + 1).min(count - 1)];
                 let dir = (next.0 - previous.0, next.1 - previous.1);
-                let gated = field.sample(px, py, Some(dir), 1.2);
+                let gated = field.sample(gx, gy, Some(dir), 1.2);
                 if endpoint {
-                    gated.or_else(|| field.sample(px, py, None, 0.8))
+                    gated.or_else(|| field.sample(gx, gy, None, 0.8))
                 } else {
                     gated
                 }
@@ -1617,9 +1643,10 @@ fn annotate_base_tile(
                 let previous = points[index.saturating_sub(1)];
                 let next = points[(index + 1).min(count - 1)];
                 let dir = (next.0 - previous.0, next.1 - previous.1);
-                let gated = tunnel_field.sample(px, py, Some(dir), 1.2);
+                let (gx, gy) = (px + global_offset.0, py + global_offset.1);
+                let gated = tunnel_field.sample(gx, gy, Some(dir), 1.2);
                 let sampled = if endpoint {
-                    gated.or_else(|| tunnel_field.sample(px, py, None, 0.8))
+                    gated.or_else(|| tunnel_field.sample(gx, gy, None, 0.8))
                 } else {
                     gated
                 };
@@ -1800,16 +1827,16 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
     eprintln!("bridge-bake: {} detail tiles decoded", decoded.len());
 
     let mut jobs: Vec<TileJob> = Vec::new();
-    let mut totals = SolveStats::default();
     let mut base_annotated = 0usize;
+    let origin = (
+        x0.saturating_sub(1),
+        y0.saturating_sub(1),
+    );
+    let (mut per_tile_features, totals, field, tunnel_field) =
+        solve_bbox(zoom, origin, (x0, y0, x1, y1), &decoded, &mut ahn);
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (mut features, stats, field, tunnel_field) =
-                solve_tile(zoom, x, y, &decoded, &mut ahn);
-            totals.ways += stats.ways;
-            totals.crossings += stats.crossings;
-            totals.measured += stats.measured;
-            totals.baked += stats.baked;
+            let mut features = per_tile_features.remove(&(x, y)).unwrap_or_default();
             if let Some(base) = base_reader.as_mut() {
                 let tms_row = axis - 1 - i64::from(y);
                 if let Ok(Some(base_raw)) = base.get_tile(i64::from(zoom), i64::from(x), tms_row)
@@ -1818,7 +1845,17 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
                     let m_per_unit = (center_lat.to_radians().cos() * 40_075_016.686
                         / f64::from(1u32 << zoom)
                         / EXTENT) as f32;
-                    match annotate_base_tile(&base_raw, &field, &tunnel_field, m_per_unit) {
+                    let global_offset = (
+                        (x as i64 - origin.0 as i64) as f32 * EXTENT as f32,
+                        (y as i64 - origin.1 as i64) as f32 * EXTENT as f32,
+                    );
+                    match annotate_base_tile(
+                        &base_raw,
+                        &field,
+                        &tunnel_field,
+                        m_per_unit,
+                        global_offset,
+                    ) {
                         Ok(mut annotated) => {
                             base_annotated += annotated.len();
                             features.append(&mut annotated);
@@ -1830,6 +1867,7 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
                 }
             }
             if !features.is_empty() {
+                let stats = SolveStats::default();
                 jobs.push(TileJob { z: zoom, x, y, features, stats });
             }
         }
@@ -2128,7 +2166,9 @@ mod probe_amstelveenseweg {
             }
         }
         let mut ahn = Ahn::open(Some(Path::new("../../examples/map/local/ahn")));
-        let (features, stats, _field, _tunnel_field) = solve_tile(14, 8413, 5386, &decoded, &mut ahn);
+        let (per_tile, stats, _field, _tunnel_field) =
+            solve_bbox(14, (8412, 5385), (8413, 5386, 8413, 5386), &decoded, &mut ahn);
+        let features = per_tile.get(&(8413, 5386)).cloned().unwrap_or_default();
         eprintln!(
             "solved: {} ways {} crossings {} measured {} baked",
             stats.ways, stats.crossings, stats.measured, stats.baked
@@ -2206,7 +2246,8 @@ mod probe_amstelveenseweg {
             }
         }
         let mut ahn = Ahn::open(Some(Path::new("../../examples/map/local/ahn")));
-        let (_features, _stats, field, _tunnel_field) = solve_tile(14, 8415, 5387, &decoded, &mut ahn);
+        let (_per_tile, _stats, field, _tunnel_field) =
+            solve_bbox(14, (8414, 5386), (8415, 5387, 8415, 5387), &decoded, &mut ahn);
         // Field height right at the seam where the metro crosses:
         for probe in [(64.0f32, 960.0f32), (10.0, 990.0), (200.0, 900.0), (400.0, 850.0)] {
             let ungated = field.sample(probe.0, probe.1, None, 3.0);
