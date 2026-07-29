@@ -1678,6 +1678,34 @@ fn annotate_base_tiles(
                 }
             }
         }
+        // Second chance: gore twins. Split ways duplicate a carriageway
+        // with a slightly OFFSET centerline — the twin fails the
+        // direction/median gates and would bake lower than its sibling
+        // (two overlapping slabs at different heights). A twin lies within
+        // a lane of the accepted profile: resample ungated with a tight
+        // cap and require a consistent tight match; frontage streets sit
+        // farther out and still reject.
+        if !base_path.is_polygon && dz.iter().all(|&v| v == 0.0) && count >= 2 {
+            let mut twin = vec![0.0f32; count];
+            let mut dists: Vec<f32> = Vec::new();
+            for index in 0..count {
+                let (px, py) = points[index];
+                let (gx, gy) = (px + global_offset.0, py + global_offset.1);
+                if let Some((height, dist, _)) = field.sample(gx, gy, None, 2.5) {
+                    if height > 0.2 {
+                        twin[index] = height;
+                        dists.push(dist);
+                    }
+                }
+            }
+            if dists.len() * 10 >= count * 6 {
+                let mut sorted = dists.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                if sorted[sorted.len() / 2] <= 2.0 {
+                    dz = twin;
+                }
+            }
+        }
         sampled_paths.push(Some(dz));
     }
     // Pass 2: junction continuity. Split ways share endpoint coordinates;
