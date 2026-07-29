@@ -1381,8 +1381,10 @@ struct TileProfiler {
 impl TileProfiler {
     fn new() -> TileProfiler {
         let now = std::time::Instant::now();
+        // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
-            on: std::env::var_os("MP_TILE_PROFILE").is_some(),
+            on: std::env::var_os("MP_TILE_PROFILE").is_some()
+                || std::path::Path::new("/tmp/mp_tile_profile").exists(),
             last: now,
             start: now,
         }
@@ -2755,8 +2757,9 @@ fn build_tile_buffers_from_features(
                 rings: rings
                     .into_iter()
                     .map(|(ring, dz)| {
+                        let min_dz = dz.iter().copied().fold(f32::MAX, f32::min);
                         let max_dz = dz.iter().copied().fold(0.0f32, f32::max);
-                        (ring, max_dz)
+                        (ring, if min_dz == f32::MAX { 0.0 } else { min_dz }, max_dz)
                     })
                     .collect(),
             });
@@ -2842,8 +2845,9 @@ fn build_tile_buffers_from_features(
                 rings: rings
                     .into_iter()
                     .map(|(ring, dz)| {
+                        let min_dz = dz.iter().copied().fold(f32::MAX, f32::min);
                         let max_dz = dz.iter().copied().fold(0.0f32, f32::max);
-                        (ring, max_dz)
+                        (ring, if min_dz == f32::MAX { 0.0 } else { min_dz }, max_dz)
                     })
                     .collect(),
             });
@@ -2853,7 +2857,7 @@ fn build_tile_buffers_from_features(
         let ring_count: usize = groups.iter().map(|group| group.rings.len()).sum();
         let ring_verts: usize = groups
             .iter()
-            .flat_map(|group| group.rings.iter().map(|(ring, _)| ring.len()))
+            .flat_map(|group| group.rings.iter().map(|(ring, _, _)| ring.len()))
             .sum();
         profiler.lap(
             "rings+fields",
@@ -2863,7 +2867,7 @@ fn build_tile_buffers_from_features(
     let faces = if groups.is_empty() {
         Vec::new()
     } else {
-        overlay_paint_groups(&groups, &mut tess, tolerance)
+        overlay_paint_groups(&groups, &mut tess, tolerance, aa_units)
     };
     if profiler.on {
         let face_verts: usize = faces.iter().map(|face| face.verts.len()).sum();
@@ -3072,6 +3076,46 @@ fn build_tile_buffers_from_features(
                     deck.as_deref(),
                 );
                 casing_zbias += VECTOR_ZBIAS_STEP;
+                // AA skirt: same slot, next zbias step — blends this face's
+                // boundary over whatever the ladder painted below it.
+                if !face.fringe_verts.is_empty() {
+                    let mut fringe_verts;
+                    let mut fringe_indices;
+                    let (fr_verts, fr_indices, fr_deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
+                        match field {
+                            Some(field) if deck.is_some() => {
+                                fringe_verts = face.fringe_verts.clone();
+                                fringe_indices = face.fringe_indices.clone();
+                                subdivide_face_mesh(
+                                    &mut fringe_verts,
+                                    &mut fringe_indices,
+                                    3.0,
+                                    field,
+                                );
+                                let fr_deck: Vec<f32> = fringe_verts
+                                    .iter()
+                                    .map(|v| field.sample(v.x, v.y))
+                                    .collect();
+                                (&fringe_verts, &fringe_indices, Some(fr_deck))
+                            }
+                            _ => (&face.fringe_verts, &face.fringe_indices, None),
+                        };
+                    append_tessellated_geometry_decked(
+                        fr_verts,
+                        fr_indices,
+                        &mut casing_vertices,
+                        &mut casing_indices,
+                        VectorRenderParams {
+                            color: face.color,
+                            stroke_mult: 1.0,
+                            shape_id: 0.0,
+                            params: [0.0, 0.0, 0.0, 0.0, 0.0, ladder_param5],
+                            zbias: casing_zbias,
+                        },
+                        fr_deck.as_deref(),
+                    );
+                    casing_zbias += VECTOR_ZBIAS_STEP;
+                }
                 feature_count += 1;
             }
             RoadPaintEvent::Stroke {
