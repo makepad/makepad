@@ -30,6 +30,16 @@ pub struct Splash {
     body: ArcStringMut,
     #[live]
     allow_net: bool,
+    /// Mount the body on the host's MAIN script VM instead of a private isolate.
+    ///
+    /// Default `false` keeps the current behaviour: every `Splash` allocates its
+    /// own sandboxed VM, which is the right choice for untrusted or streamed
+    /// content. Set `true` only for trusted content the app itself generated that
+    /// needs the host's live theme, heap and widget templates — a fresh isolate
+    /// re-runs setup and comes up with the default theme, and its separate heap
+    /// makes a main-VM widget animator (e.g. `TextInput`) index out of bounds.
+    #[live]
+    main_vm: bool,
     #[rust]
     vm_id: SplashVmId,
 }
@@ -50,7 +60,10 @@ impl Splash {
             return;
         }
 
-        if self.vm_id == MAIN_SPLASH_VM_ID {
+        // `main_vm` opts out of isolation: leaving `vm_id == MAIN_SPLASH_VM_ID`
+        // makes `with_script_vm_id` below route the eval onto the host's main VM
+        // instead of a private isolate (shared theme, heap and widget templates).
+        if !self.main_vm && self.vm_id == MAIN_SPLASH_VM_ID {
             self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
         }
 
