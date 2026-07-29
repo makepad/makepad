@@ -1154,3 +1154,60 @@ pub fn define_edit_menu_interaction_delegate() -> *const Class {
 
     return decl.register();
 }
+
+/// Delegate for `UIDocumentPickerViewController` file/folder selection.
+pub fn define_document_picker_delegate() -> *const Class {
+    let mut decl = ClassDecl::new("MakepadDocumentPickerDelegate", class!(NSObject)).unwrap();
+
+    extern "C" fn did_pick_documents(_this: &Object, _: Sel, _controller: ObjcId, urls: ObjcId) {
+        unsafe {
+            let mut paths = Vec::new();
+            if urls != nil {
+                let count: usize = msg_send![urls, count];
+                for index in 0..count {
+                    let url: ObjcId = msg_send![urls, objectAtIndex: index];
+                    if url == nil {
+                        continue;
+                    }
+                    // For folder picks (`asCopy:NO`) keep the security-scoped resource
+                    // open for the process lifetime so the returned path stays readable.
+                    let _: bool = msg_send![url, startAccessingSecurityScopedResource];
+                    let path: ObjcId = msg_send![url, path];
+                    if path != nil {
+                        let path = crate::os::apple::apple_util::nsstring_to_string(path);
+                        if !path.is_empty() {
+                            paths.push(path);
+                        }
+                    }
+                }
+            }
+            IosApp::finish_file_dialog(
+                crate::file_dialogs::FileDialogResultEvent::ok(
+                    &crate::file_dialogs::FileDialog::new(),
+                    paths,
+                    crate::file_dialogs::FileDialogPathKind::Filesystem,
+                ),
+            );
+        }
+    }
+
+    extern "C" fn was_cancelled(_this: &Object, _: Sel, _controller: ObjcId) {
+        IosApp::finish_file_dialog(crate::file_dialogs::FileDialogResultEvent::cancelled());
+    }
+
+    unsafe {
+        if let Some(protocol) = Protocol::get("UIDocumentPickerDelegate") {
+            decl.add_protocol(protocol);
+        }
+        decl.add_method(
+            sel!(documentPicker:didPickDocumentsAtURLs:),
+            did_pick_documents as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(documentPickerWasCancelled:),
+            was_cancelled as extern "C" fn(&Object, Sel, ObjcId),
+        );
+    }
+
+    decl.register()
+}

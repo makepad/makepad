@@ -181,6 +181,10 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
+        file_dialogs::{
+            FileDialog, FileDialogIoError, FileDialogKind, FileDialogPathKind,
+            FileDialogResultEvent, FileDialogStatus, Filter,
+        },
         game_input::*,
         geometry::{Geometry, GeometryId},
         gpu_info::GpuPerformance,

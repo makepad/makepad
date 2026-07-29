@@ -160,6 +160,10 @@ extern "C" {
     pub fn CGImageDestinationFinalize(dest: ObjcId) -> bool;
 }
 
+#[cfg(target_os = "ios")]
+#[link(name = "UniformTypeIdentifiers", kind = "framework")]
+extern "C" {}
+
 #[cfg(target_os = "macos")]
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {

@@ -190,6 +190,33 @@ impl ArkTsObjRef {
         ret
     }
 
+    /// Call an ArkTS method with a single string argument (kept alive for the call).
+    pub fn call_js_function_string(
+        &mut self,
+        name: &str,
+        arg: &str,
+    ) -> Result<napi_value, ArkTsObjErr> {
+        let js_arg = oh_util::create_string_utf8(self.raw_env, arg)
+            .ok_or(ArkTsObjErr::InvalidStringValue)?;
+        let argv = [js_arg];
+        self.call_js_function(name, 1, argv.as_ptr())
+    }
+
+    /// Call an ArkTS method with two string arguments.
+    pub fn call_js_function_string2(
+        &mut self,
+        name: &str,
+        arg0: &str,
+        arg1: &str,
+    ) -> Result<napi_value, ArkTsObjErr> {
+        let js0 = oh_util::create_string_utf8(self.raw_env, arg0)
+            .ok_or(ArkTsObjErr::InvalidStringValue)?;
+        let js1 = oh_util::create_string_utf8(self.raw_env, arg1)
+            .ok_or(ArkTsObjErr::InvalidStringValue)?;
+        let argv = [js0, js1];
+        self.call_js_function(name, 2, argv.as_ptr())
+    }
+
     pub fn raw(&self) -> napi_env {
         self.raw_env
     }

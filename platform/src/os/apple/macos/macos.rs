@@ -1376,19 +1376,55 @@ impl Cx {
                     }
                 }
                 CxOsOp::SaveFileDialog(settings) => {
-                    with_macos_app(|app| app.open_save_file_dialog(settings));
+                    let paths =
+                        crate::os::apple::macos::macos_file_dialog::open_save_file_dialog(&settings);
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
                 }
 
                 CxOsOp::SelectFileDialog(settings) => {
-                    with_macos_app(|app| app.open_select_file_dialog(settings));
+                    let paths = crate::os::apple::macos::macos_file_dialog::open_select_file_dialog(
+                        &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
                 }
 
                 CxOsOp::SaveFolderDialog(settings) => {
-                    with_macos_app(|app| app.open_save_folder_dialog(settings));
+                    let paths = crate::os::apple::macos::macos_file_dialog::open_save_folder_dialog(
+                        &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
                 }
 
                 CxOsOp::SelectFolderDialog(settings) => {
-                    with_macos_app(|app| app.open_select_folder_dialog(settings));
+                    let paths =
+                        crate::os::apple::macos::macos_file_dialog::open_select_folder_dialog(
+                            &settings,
+                        );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
                 }
                 CxOsOp::ShowInDock(show) => {
                     with_macos_app(|app| app.show_in_dock(show));

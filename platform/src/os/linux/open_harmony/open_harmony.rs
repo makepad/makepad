@@ -269,6 +269,29 @@ impl Cx {
                     ))
                 }
             }
+            FromOhosMessage::FileDialogResult {
+                paths,
+                cancelled,
+                unsupported,
+            } => {
+                let settings = self
+                    .os
+                    .pending_file_dialog
+                    .take()
+                    .unwrap_or_else(crate::file_dialogs::FileDialog::new);
+                let result = if unsupported {
+                    crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                        &settings,
+                        "FileDialog",
+                    )
+                } else if cancelled {
+                    crate::file_dialogs::FileDialogResultEvent::cancelled_from(&settings)
+                } else {
+                    // DocumentViewPicker returns grant URIs, not plain filesystem paths.
+                    crate::file_dialogs::FileDialogResultEvent::ok_content_uris(&settings, paths)
+                };
+                self.call_event_handler(&Event::FileDialogResult(result));
+            }
             _ => {}
         }
     }
@@ -591,6 +614,75 @@ impl Cx {
                     //self.os.keyboard_visible = false;
                     //unsafe {android_jni::to_java_show_keyboard(false);}
                 }
+                CxOsOp::SelectFileDialog(settings) => {
+                    let accept = crate::file_dialogs::accept_for_filters(&settings.filters);
+                    self.os.pending_file_dialog = Some(settings.clone());
+                    if let Err(err) = self
+                        .os
+                        .arkts_obj
+                        .as_mut()
+                        .unwrap()
+                        .call_js_function_string("openFileDialog", &accept)
+                    {
+                        crate::error!("openFileDialog failed: {:?}", err);
+                        let settings = self.os.pending_file_dialog.take().unwrap_or(settings);
+                        self.call_event_handler(&Event::FileDialogResult(
+                            crate::file_dialogs::FileDialogResultEvent::error_from(
+                                &settings,
+                                "openFileDialog NAPI call failed",
+                            ),
+                        ));
+                    }
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    let filename = settings
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| "untitled".to_string());
+                    let accept = crate::file_dialogs::accept_for_filters(&settings.filters);
+                    self.os.pending_file_dialog = Some(settings.clone());
+                    if let Err(err) = self
+                        .os
+                        .arkts_obj
+                        .as_mut()
+                        .unwrap()
+                        .call_js_function_string2("saveFileDialog", &filename, &accept)
+                    {
+                        crate::error!("saveFileDialog failed: {:?}", err);
+                        let settings = self.os.pending_file_dialog.take().unwrap_or(settings);
+                        self.call_event_handler(&Event::FileDialogResult(
+                            crate::file_dialogs::FileDialogResultEvent::error_from(
+                                &settings,
+                                "saveFileDialog NAPI call failed",
+                            ),
+                        ));
+                    }
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    self.os.pending_file_dialog = Some(settings.clone());
+                    if let Err(err) = self.os.arkts_obj.as_mut().unwrap().call_js_function(
+                        "openFolderDialog",
+                        0,
+                        std::ptr::null_mut(),
+                    ) {
+                        crate::error!("openFolderDialog failed: {:?}", err);
+                        let settings = self.os.pending_file_dialog.take().unwrap_or(settings);
+                        self.call_event_handler(&Event::FileDialogResult(
+                            crate::file_dialogs::FileDialogResultEvent::error_from(
+                                &settings,
+                                "openFolderDialog NAPI call failed",
+                            ),
+                        ));
+                    }
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFolderDialog",
+                        ),
+                    ));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -645,6 +737,8 @@ pub struct CxOs {
     pub arkts_obj: Option<ArkTsObjRef>,
     pub(crate) start_time: Instant,
     pub(crate) display: Option<CxOhosDisplay>,
+    /// Correlates the in-flight DocumentViewPicker with the result event.
+    pub(crate) pending_file_dialog: Option<crate::file_dialogs::FileDialog>,
 }
 
 impl CxOs {
@@ -666,6 +760,7 @@ impl Default for CxOs {
             arkts_obj: None,
             start_time: Instant::now(),
             display: None,
+            pending_file_dialog: None,
         }
     }
 }

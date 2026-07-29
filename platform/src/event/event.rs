@@ -258,6 +258,13 @@ pub enum Event {
     /// Permission check or request result
     PermissionResult(PermissionResult),
 
+    /// Result of a system file open/save dialog (`Cx::open_system_openfile_dialog`, etc.).
+    ///
+    /// Check [`FileDialogResultEvent::status`] — `Cancelled` is user dismiss,
+    /// `Unsupported` means this dialog kind is not available on the platform.
+    /// On Android, [`FileDialogPathKind::ContentUri`] paths are not usable with `std::fs`.
+    FileDialogResult(crate::file_dialogs::FileDialogResultEvent),
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -339,6 +346,7 @@ impl Event {
             52 => "Actions",
             53 => "BackPressed",
             54 => "PermissionResult",
+            69 => "FileDialogResult",
 
             #[cfg(target_arch = "wasm32")]
             55 => "ToWasmMsg",
@@ -428,6 +436,7 @@ impl Event {
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,
             Self::PermissionResult(_) => 54,
+            Self::FileDialogResult(_) => 69,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,

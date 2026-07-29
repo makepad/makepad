@@ -5,6 +5,7 @@ use crate::{
         SelectionHandleDragEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
         TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
     },
+    file_dialogs::FileDialogResultEvent,
     permission::PermissionResult,
     window::WindowId,
 };
@@ -40,4 +41,5 @@ pub enum IosEvent {
     TextCut(TextClipboardEvent),
     Timer(TimerEvent),
     PermissionResult(PermissionResult),
+    FileDialogResult(FileDialogResultEvent),
 }

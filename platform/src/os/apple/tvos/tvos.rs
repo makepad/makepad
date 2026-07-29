@@ -253,6 +253,38 @@ impl Cx {
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
                 CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::SelectFileDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SelectFileDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFileDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SelectFolderDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFolderDialog",
+                        ),
+                    ));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }

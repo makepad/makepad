@@ -92,6 +92,7 @@ pub struct Cx {
     pub(crate) timer_id: u64,
     pub(crate) next_frame_id: u64,
     pub(crate) permissions_request_id: i32,
+    pub(crate) file_dialog_id: u64,
 
     pub keyboard: CxKeyboard,
     pub fingers: CxFingers,
@@ -450,6 +451,7 @@ impl Cx {
             timer_id: 1,
             next_frame_id: 1,
             permissions_request_id: 0,
+            file_dialog_id: 1,
 
             keyboard: Default::default(),
             fingers: Default::default(),

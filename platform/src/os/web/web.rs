@@ -371,6 +371,31 @@ impl Cx {
                         status,
                     }));
                 }
+                live_id!(ToWasmFileDialogResult) => {
+                    let tw = ToWasmFileDialogResult::read_to_wasm(&mut to_wasm);
+                    let settings = self
+                        .os
+                        .pending_file_dialog
+                        .take()
+                        .unwrap_or_else(crate::file_dialogs::FileDialog::new);
+                    let result = match tw.cancelled {
+                        0 => crate::file_dialogs::FileDialogResultEvent::ok_inline(
+                            &settings,
+                            vec![tw.name],
+                            vec![tw.body.into_vec_u8()],
+                        ),
+                        2 => crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "FileDialog",
+                        ),
+                        3 => crate::file_dialogs::FileDialogResultEvent::error_from(
+                            &settings,
+                            "failed to read selected file",
+                        ),
+                        _ => crate::file_dialogs::FileDialogResultEvent::cancelled_from(&settings),
+                    };
+                    self.call_event_handler(&Event::FileDialogResult(result));
+                }
                 /*
                 live_id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
@@ -849,6 +874,35 @@ impl Cx {
                 CxOsOp::SetVideoVolume(_, _) => {}
                 CxOsOp::SetVideoPlaybackRate(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
+                CxOsOp::SelectFileDialog(settings) => {
+                    let accept = crate::file_dialogs::accept_for_filters(&settings.filters);
+                    self.os.pending_file_dialog = Some(settings);
+                    self.os.from_wasm(FromWasmSelectFileDialog { accept });
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFileDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SelectFolderDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFolderDialog",
+                        ),
+                    ));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -912,6 +966,7 @@ impl CxOsApi for Cx {
             ToWasmHttpResponseProgress::to_js_code(),
             ToWasmHttpUploadProgress::to_js_code(),
             ToWasmPermissionResult::to_js_code(),
+            ToWasmFileDialogResult::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -961,6 +1016,7 @@ impl CxOsApi for Cx {
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
+            FromWasmSelectFileDialog::to_js_code(),
             FromWasmBrowserUpdateUrl::to_js_code(),
             FromWasmBrowserHistoryGo::to_js_code(),
             FromWasmUseMidiInputs::to_js_code(),
@@ -1126,6 +1182,8 @@ pub struct CxOs {
     pub(crate) from_wasm_js: Vec<String>,
 
     pub(crate) media: CxWebMedia,
+    /// Correlates the in-flight `<input type=file>` picker with the result event.
+    pub(crate) pending_file_dialog: Option<crate::file_dialogs::FileDialog>,
 }
 
 impl Default for CxOs {
@@ -1143,6 +1201,7 @@ impl Default for CxOs {
             from_wasm_js: Vec::new(),
 
             media: CxWebMedia::default(),
+            pending_file_dialog: None,
         }
     }
 }

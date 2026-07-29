@@ -822,6 +822,70 @@ impl Cx {
                 | CxOsOp::DetachCameraNativePreview { .. } => {
                     // Native camera preview is emulated via composited texture path on Windows.
                 }
+                CxOsOp::SelectFileDialog(settings) => {
+                    let hwnd = d3d11_windows
+                        .first()
+                        .map(|w| w.win32_window.hwnd)
+                        .unwrap_or_default();
+                    let paths = crate::os::windows::win32_file_dialog::open_select_file_dialog(
+                        hwnd, &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFileDialog(settings) => {
+                    let hwnd = d3d11_windows
+                        .first()
+                        .map(|w| w.win32_window.hwnd)
+                        .unwrap_or_default();
+                    let paths = crate::os::windows::win32_file_dialog::open_save_file_dialog(
+                        hwnd, &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    let hwnd = d3d11_windows
+                        .first()
+                        .map(|w| w.win32_window.hwnd)
+                        .unwrap_or_default();
+                    let paths = crate::os::windows::win32_file_dialog::open_save_folder_dialog(
+                        hwnd, &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    let hwnd = d3d11_windows
+                        .first()
+                        .map(|w| w.win32_window.hwnd)
+                        .unwrap_or_default();
+                    let paths = crate::os::windows::win32_file_dialog::open_select_folder_dialog(
+                        hwnd, &settings,
+                    );
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
+                    ));
+                }
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {
                     // TODO: implement Windows audio-only playback
                 }
