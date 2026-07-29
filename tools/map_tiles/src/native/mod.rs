@@ -1,5 +1,5 @@
 mod geom;
-mod mvt;
+pub(crate) mod mvt;
 mod spool;
 mod store;
 

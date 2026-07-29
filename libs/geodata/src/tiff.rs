@@ -1,5 +1,6 @@
 //! GeoTIFF subset reader for the raster sources we actually use (Copernicus
-//! GLO-30 COGs, JRC flood hazard, RIVM noise): classic TIFF, single image
+//! GLO-30 COGs, JRC flood hazard, RIVM noise, AHN BigTIFF): classic TIFF and
+//! BigTIFF, single image
 //! (first IFD), tiled or striped, compression none/LZW/deflate, predictor
 //! 1/2/3, sample formats uint/int/float 8-64 bit, single band (extra bands
 //! ignored). Everything is surfaced as f32 with an optional nodata value.
@@ -46,35 +47,61 @@ impl Tiff {
             _ => return Err("not a tiff".into()),
         };
         let magic = read_u16(&header[2..4], le);
-        if magic == 43 {
-            return Err("BigTIFF not supported yet".into());
-        }
-        if magic != 42 {
+        // BigTIFF (magic 43): 8-byte offsets, u64 IFD count, 20-byte entries.
+        let big = magic == 43;
+        if !big && magic != 42 {
             return Err("bad tiff magic".into());
         }
-        let ifd_offset = u64::from(read_u32(&header[4..8], le));
+        let ifd_offset = if big {
+            let mut rest = [0u8; 8];
+            file.read_exact(&mut rest)
+                .map_err(|e| format!("bigtiff header: {e}"))?;
+            if read_u16(&header[4..6], le) != 8 || read_u16(&header[6..8], le) != 0 {
+                return Err("bad bigtiff header".into());
+            }
+            read_u64(&rest, le)
+        } else {
+            u64::from(read_u32(&header[4..8], le))
+        };
 
         let mut tags: HashMap<u16, (u16, u64, Vec<u8>)> = HashMap::new();
         file.seek(SeekFrom::Start(ifd_offset))
             .map_err(|e| format!("seek ifd: {e}"))?;
-        let mut count_buf = [0u8; 2];
-        file.read_exact(&mut count_buf)
-            .map_err(|e| format!("ifd count: {e}"))?;
-        let entry_count = read_u16(&count_buf, le);
-        let mut entries = vec![0u8; entry_count as usize * 12];
+        let entry_count = if big {
+            let mut count_buf = [0u8; 8];
+            file.read_exact(&mut count_buf)
+                .map_err(|e| format!("ifd count: {e}"))?;
+            read_u64(&count_buf, le)
+        } else {
+            let mut count_buf = [0u8; 2];
+            file.read_exact(&mut count_buf)
+                .map_err(|e| format!("ifd count: {e}"))?;
+            u64::from(read_u16(&count_buf, le))
+        };
+        let entry_size = if big { 20 } else { 12 };
+        let inline_max = if big { 8 } else { 4 };
+        let mut entries = vec![0u8; entry_count as usize * entry_size];
         file.read_exact(&mut entries)
             .map_err(|e| format!("ifd entries: {e}"))?;
-        for chunk in entries.chunks_exact(12) {
+        for chunk in entries.chunks_exact(entry_size) {
             let tag = read_u16(&chunk[0..2], le);
             let field_type = read_u16(&chunk[2..4], le);
-            let count = u64::from(read_u32(&chunk[4..8], le));
+            let count = if big {
+                read_u64(&chunk[4..12], le)
+            } else {
+                u64::from(read_u32(&chunk[4..8], le))
+            };
             let type_size = tiff_type_size(field_type);
             let total = count * type_size;
-            let inline = &chunk[8..12];
-            let data = if total <= 4 {
-                inline[..total.min(4) as usize].to_vec()
+            let inline = if big { &chunk[12..20] } else { &chunk[8..12] };
+            let data = if total <= inline_max {
+                inline[..total.min(inline_max) as usize].to_vec()
             } else {
-                let offset = u64::from(read_u32(inline, le));
+                let offset = if big {
+                    read_u64(inline, le)
+                } else {
+                    u64::from(read_u32(inline, le))
+                };
                 let mut buf = vec![0u8; total as usize];
                 file.seek(SeekFrom::Start(offset))
                     .map_err(|e| format!("seek tag {tag}: {e}"))?;
@@ -474,6 +501,7 @@ fn tiff_type_size(field_type: u16) -> u64 {
         3 | 8 => 2,         // short
         4 | 9 | 11 => 4,    // long, slong, float
         5 | 10 | 12 => 8,   // rational, srational, double
+        16 | 17 | 18 => 8,  // long8, slong8, ifd8 (BigTIFF)
         _ => 1,
     }
 }
@@ -507,6 +535,7 @@ fn read_tag_values(field_type: u16, data: &[u8], le: bool) -> Vec<f64> {
                     f64::from(num) / f64::from(den)
                 }
             }
+            16 | 17 | 18 => read_u64(chunk, le) as f64,
             _ => 0.0,
         })
         .collect()
@@ -531,5 +560,37 @@ fn read_u32(data: &[u8], le: bool) -> u32 {
         u32::from_le_bytes(bytes)
     } else {
         u32::from_be_bytes(bytes)
+    }
+}
+
+fn read_u64(data: &[u8], le: bool) -> u64 {
+    let bytes: [u8; 8] = data[0..8].try_into().unwrap();
+    if le {
+        u64::from_le_bytes(bytes)
+    } else {
+        u64::from_be_bytes(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // needs local AHN download
+    fn probe_ahn_bigtiff() {
+        for name in ["M_25GN1", "R_25GN1"] {
+            let path = format!("../../examples/map/local/ahn/{name}.tif");
+            let mut t = Tiff::open(std::path::Path::new(&path)).unwrap();
+            eprintln!(
+                "{name}: {}x{} block {}x{} comp {} pred {} bits {} fmt {} geo {:?} nodata {:?}",
+                t.width, t.height, t.block_w, t.block_h, t.compression, t.predictor,
+                t.bits, t.sample_format, t.geo, t.nodata
+            );
+            // Dam square ~ RD (121350, 487350); Oosterdok water ~ (122400, 487650)
+            eprintln!("  dam {:?} water {:?}",
+                t.sample_geo(121350.0, 487350.0),
+                t.sample_geo(122400.0, 487650.0));
+        }
     }
 }
