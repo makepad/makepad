@@ -208,6 +208,8 @@ struct StrokeDrawJob {
     union_road: bool,
     /// Per-point deck heights (base_dz join), aligned with `points`.
     dz: Option<Vec<f32>>,
+    /// Road semantics retained for safe 3D split/merge reconciliation.
+    join_meta: RoadJoinMeta,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -242,6 +244,434 @@ impl From<StrokeStyle> for StrokeStyleKey {
             center: StrokePassKey::from(value.center),
         }
     }
+}
+
+type RoadTierEnd = (StrokeStyleKey, usize, bool);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RoadJoinFamily {
+    #[default]
+    Unknown,
+    Motorway,
+    Trunk,
+    Primary,
+    Secondary,
+    Tertiary,
+    Unclassified,
+    Residential,
+    Service,
+    LivingStreet,
+    Pedestrian,
+    Footway,
+    Cycleway,
+    Path,
+    Track,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RoadJoinMeta {
+    family: RoadJoinFamily,
+    is_link: bool,
+    is_bridge: bool,
+}
+
+impl RoadJoinMeta {
+    fn from_tags(tags: &HashMap<String, String>) -> Self {
+        let highway = tags.get("highway").map(String::as_str);
+        let family = match highway {
+            Some("motorway" | "motorway_link") => RoadJoinFamily::Motorway,
+            Some("trunk" | "trunk_link") => RoadJoinFamily::Trunk,
+            Some("primary" | "primary_link") => RoadJoinFamily::Primary,
+            Some("secondary" | "secondary_link") => RoadJoinFamily::Secondary,
+            Some("tertiary" | "tertiary_link") => RoadJoinFamily::Tertiary,
+            Some("unclassified") => RoadJoinFamily::Unclassified,
+            Some("residential") => RoadJoinFamily::Residential,
+            Some("service") => RoadJoinFamily::Service,
+            Some("living_street") => RoadJoinFamily::LivingStreet,
+            Some("pedestrian") => RoadJoinFamily::Pedestrian,
+            Some("footway") => RoadJoinFamily::Footway,
+            Some("cycleway") => RoadJoinFamily::Cycleway,
+            Some("path") => RoadJoinFamily::Path,
+            Some("track") => RoadJoinFamily::Track,
+            _ => RoadJoinFamily::Unknown,
+        };
+        Self {
+            family,
+            is_link: tag_is_truthy(tags, "link")
+                || highway.is_some_and(|kind| kind.ends_with("_link")),
+            is_bridge: tag_is_truthy(tags, "bridge"),
+        }
+    }
+
+    fn same_known_family(self, other: Self) -> bool {
+        self.family != RoadJoinFamily::Unknown && self.family == other.family
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RoadTierJoinWay {
+    key: StrokeStyleKey,
+    way_index: usize,
+    points: Vec<(f32, f32)>,
+    dz: Vec<f32>,
+    half_width: f32,
+    meta: RoadJoinMeta,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoadTierGradeCorrection {
+    end: RoadTierEnd,
+    target_dz: f32,
+}
+
+/// Find lower-rank road ends which geometrically merge into the INTERIOR
+/// of a wider/higher-rank through road. Vector-tile feature splitting does
+/// not guarantee that such a merge shares an exact node: the link can end
+/// against the middle of the mainline's segment. In that case independent
+/// dz profiles leave the link deck below the mainline and expose its round
+/// fascia as a ledge.
+///
+/// This deliberately requires an acute, overlapping endpoint-to-through
+/// relationship. Perpendicular crossings, target endpoints, and same-tier
+/// carriageways are rejected. Large height differences are accepted only
+/// for a typed link joining a non-link road of the same family.
+fn endpoint_to_through_grade_corrections(
+    ways: &[RoadTierJoinWay],
+) -> Vec<RoadTierGradeCorrection> {
+    const MIN_TANGENT_DOT: f32 = 0.72;
+    const LARGE_JOIN_TANGENT_DOT: f32 = 0.90;
+    const MAX_RAISE_M: f32 = 3.0;
+    const MAX_TYPED_RAISE_M: f32 = 40.0;
+    const DZ_EPSILON_M: f32 = 0.05;
+
+    let mut corrections = Vec::new();
+    for source in ways {
+        if source.points.len() < 2 || source.dz.len() != source.points.len() {
+            continue;
+        }
+        for is_start in [true, false] {
+            let (end_index, inner_index) = if is_start {
+                (0, 1)
+            } else {
+                (source.points.len() - 1, source.points.len() - 2)
+            };
+            let point = source.points[end_index];
+            // Buffered MVT copies can end outside their owning tile. Let
+            // the tile that owns the real endpoint repair the merge; doing
+            // it again on a padded copy can create a new cross-tile grade.
+            if point.0 < 0.0
+                || point.0 > TILE_SIZE as f32
+                || point.1 < 0.0
+                || point.1 > TILE_SIZE as f32
+            {
+                continue;
+            }
+            let inner = source.points[inner_index];
+            let (out_x, out_y) = (point.0 - inner.0, point.1 - inner.1);
+            let out_len = (out_x * out_x + out_y * out_y).sqrt();
+            if out_len <= 1e-5 {
+                continue;
+            }
+            let outward = (out_x / out_len, out_y / out_len);
+            let source_dz = source.dz[end_index];
+            let mut best: Option<(f32, f32)> = None;
+
+            for target in ways {
+                if target.key == source.key
+                    || target.points.len() < 2
+                    || target.dz.len() != target.points.len()
+                {
+                    continue;
+                }
+                // A link inherits from its mainline, never the reverse.
+                // Width handles styles whose painter ranks happen to tie.
+                if target.key.sort_rank <= source.key.sort_rank
+                    && target.half_width <= source.half_width * 1.1
+                {
+                    continue;
+                }
+
+                let total_len: f32 = target
+                    .points
+                    .windows(2)
+                    .map(|pair| {
+                        let dx = pair[1].0 - pair[0].0;
+                        let dy = pair[1].1 - pair[0].1;
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .sum();
+                if total_len <= 1e-4 {
+                    continue;
+                }
+                // The projection must have usable mainline on BOTH sides.
+                // Scaling the margin by ribbon width rejects a target cap
+                // while still accepting a projection onto an interior
+                // polyline vertex.
+                let through_margin = (target.half_width * 0.5)
+                    .max(0.25)
+                    .min(total_len * 0.25);
+                let overlap_distance =
+                    (source.half_width + target.half_width - 0.05).max(0.05);
+                let overlap_sq = overlap_distance * overlap_distance;
+                let mut along_before = 0.0;
+
+                for segment_index in 0..target.points.len() - 1 {
+                    let a = target.points[segment_index];
+                    let b = target.points[segment_index + 1];
+                    let (seg_x, seg_y) = (b.0 - a.0, b.1 - a.1);
+                    let seg_sq = seg_x * seg_x + seg_y * seg_y;
+                    if seg_sq <= 1e-8 {
+                        continue;
+                    }
+                    let seg_len = seg_sq.sqrt();
+                    let t = (((point.0 - a.0) * seg_x + (point.1 - a.1) * seg_y)
+                        / seg_sq)
+                        .clamp(0.0, 1.0);
+                    let projection = (a.0 + seg_x * t, a.1 + seg_y * t);
+                    let (off_x, off_y) = (point.0 - projection.0, point.1 - projection.1);
+                    let distance_sq = off_x * off_x + off_y * off_y;
+                    let along = along_before + seg_len * t;
+                    along_before += seg_len;
+                    if distance_sq >= overlap_sq
+                        || along <= through_margin
+                        || total_len - along <= through_margin
+                    {
+                        continue;
+                    }
+                    let tangent_dot =
+                        ((outward.0 * seg_x + outward.1 * seg_y) / seg_len).abs();
+                    if tangent_dot < MIN_TANGENT_DOT {
+                        continue;
+                    }
+                    let target_dz = target.dz[segment_index]
+                        + (target.dz[segment_index + 1] - target.dz[segment_index]) * t;
+                    let raise = target_dz - source_dz;
+                    let typed_link_join = source.meta.is_link
+                        && !target.meta.is_link
+                        && source.meta.same_known_family(target.meta);
+                    let max_raise = if typed_link_join {
+                        MAX_TYPED_RAISE_M
+                    } else {
+                        MAX_RAISE_M
+                    };
+                    if raise < -DZ_EPSILON_M || raise > max_raise {
+                        continue;
+                    }
+                    // An 8-40 m correction is safe only at the actual nose
+                    // of a typed gore. Merely overlapping wide ribbons or
+                    // running parallel nearby must not hoist another deck.
+                    let large_join_gap = (source.half_width * 0.25).max(0.35);
+                    if raise > MAX_RAISE_M
+                        && (tangent_dot < LARGE_JOIN_TANGENT_DOT
+                            || target.key.sort_rank <= source.key.sort_rank
+                            || target.half_width <= source.half_width * 1.1
+                            || distance_sq > large_join_gap * large_join_gap)
+                    {
+                        continue;
+                    }
+                    // Prefer the deepest overlap and the most collinear
+                    // through segment. A tiny height term makes an already
+                    // matching continuation win over an unrelated upper
+                    // parallel road when the geometry is otherwise tied.
+                    let score = distance_sq / overlap_sq
+                        + (1.0 - tangent_dot) * 0.5
+                        + raise.max(0.0) * 0.01;
+                    if best.is_none_or(|(best_score, _)| score < best_score) {
+                        best = Some((score, target_dz));
+                    }
+                }
+            }
+            if let Some((_, target_dz)) = best {
+                corrections.push(RoadTierGradeCorrection {
+                    end: (source.key, source.way_index, is_start),
+                    target_dz,
+                });
+            }
+        }
+    }
+    corrections
+}
+
+/// Repair an exact style split whose two centerlines are one collinear road
+/// but whose baked endpoint heights disagree. Same-family bridge splits may
+/// inherit a large deck correction in either direction. Other road-class
+/// transitions are limited to a small correction and must already be lifted,
+/// preventing a chance ground/deck coincidence from joining stacked roads.
+fn endpoint_continuation_grade_corrections(
+    ways: &[RoadTierJoinWay],
+) -> Vec<RoadTierGradeCorrection> {
+    const MAX_CROSS_STYLE_RAISE_M: f32 = 3.0;
+    const MAX_BRIDGE_RAISE_M: f32 = 40.0;
+    const MAX_NODE_DISTANCE: f32 = 0.20;
+    const MAX_WIDTH_RATIO: f32 = 1.25;
+    const MAX_DIRECTION_DOT: f32 = -0.90;
+    const DZ_EPSILON_M: f32 = 0.05;
+
+    #[derive(Clone, Copy)]
+    struct Endpoint {
+        end: RoadTierEnd,
+        point: (f32, f32),
+        outward: (f32, f32),
+        dz: f32,
+        half_width: f32,
+        meta: RoadJoinMeta,
+    }
+
+    let mut nodes: HashMap<(i32, i32), Vec<Endpoint>> = HashMap::new();
+    for way in ways {
+        if way.points.len() < 2 || way.dz.len() != way.points.len() {
+            continue;
+        }
+        for is_start in [true, false] {
+            let (end_index, inner_index) = if is_start {
+                (0, 1)
+            } else {
+                (way.points.len() - 1, way.points.len() - 2)
+            };
+            let point = way.points[end_index];
+            if point.0 < 0.0
+                || point.0 > TILE_SIZE as f32
+                || point.1 < 0.0
+                || point.1 > TILE_SIZE as f32
+            {
+                continue;
+            }
+            let inner = way.points[inner_index];
+            let (dx, dy) = (point.0 - inner.0, point.1 - inner.1);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= 1e-5 {
+                continue;
+            }
+            nodes
+                .entry(((point.0 * 4.0).round() as i32, (point.1 * 4.0).round() as i32))
+                .or_default()
+                .push(Endpoint {
+                    end: (way.key, way.way_index, is_start),
+                    point,
+                    outward: (dx / len, dy / len),
+                    dz: way.dz[end_index],
+                    half_width: way.half_width,
+                    meta: way.meta,
+                });
+        }
+    }
+
+    let mut by_end = HashMap::<RoadTierEnd, f32>::new();
+    for entries in nodes.values() {
+        for (index, a) in entries.iter().enumerate() {
+            for b in entries.iter().skip(index + 1) {
+                if a.end.0 == b.end.0 || a.meta.is_link != b.meta.is_link {
+                    continue;
+                }
+                let (node_dx, node_dy) = (a.point.0 - b.point.0, a.point.1 - b.point.1);
+                if node_dx * node_dx + node_dy * node_dy
+                    > MAX_NODE_DISTANCE * MAX_NODE_DISTANCE
+                {
+                    continue;
+                }
+                let width_ratio = a.half_width.max(b.half_width)
+                    / a.half_width.min(b.half_width).max(0.05);
+                if width_ratio > MAX_WIDTH_RATIO
+                    || a.outward.0 * b.outward.0 + a.outward.1 * b.outward.1
+                        > MAX_DIRECTION_DOT
+                {
+                    continue;
+                }
+                let (lower, higher) = if a.dz <= b.dz { (a, b) } else { (b, a) };
+                let raise = higher.dz - lower.dz;
+                let bridge_continuation = a.meta.is_bridge != b.meta.is_bridge
+                    && a.meta.same_known_family(b.meta);
+                let max_raise = if bridge_continuation {
+                    MAX_BRIDGE_RAISE_M
+                } else {
+                    MAX_CROSS_STYLE_RAISE_M
+                };
+                if raise <= DZ_EPSILON_M
+                    || raise > max_raise
+                    || (!bridge_continuation
+                        && (a.meta.family == RoadJoinFamily::Unknown
+                            || b.meta.family == RoadJoinFamily::Unknown
+                            || a.dz <= 0.2
+                            || b.dz <= 0.2))
+                {
+                    continue;
+                }
+                by_end
+                    .entry(lower.end)
+                    .and_modify(|target| *target = target.max(higher.dz))
+                    .or_insert(higher.dz);
+            }
+        }
+    }
+    by_end
+        .into_iter()
+        .map(|(end, target_dz)| RoadTierGradeCorrection { end, target_dz })
+        .collect()
+}
+
+/// Raise one endpoint to a through-road deck and taper that correction
+/// smoothly back into the source profile. Both ends of the blend have zero
+/// derivative from the correction term, avoiding a new grade kink.
+fn apply_endpoint_grade_correction(
+    points: &[(f32, f32)],
+    dz: &mut [f32],
+    is_start: bool,
+    target_dz: f32,
+    half_width: f32,
+) {
+    if points.len() < 2 || dz.len() != points.len() {
+        return;
+    }
+    let endpoint_index = if is_start { 0 } else { points.len() - 1 };
+    let delta = target_dz - dz[endpoint_index];
+    if delta <= 0.001 {
+        return;
+    }
+    let total_len: f32 = points
+        .windows(2)
+        .map(|pair| {
+            let dx = pair[1].0 - pair[0].0;
+            let dy = pair[1].1 - pair[0].1;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum();
+    if total_len <= 1e-5 {
+        dz[endpoint_index] = target_dz;
+        return;
+    }
+    // At z14 one tile unit is several metres. Keep ordinary 0.5-3 m join
+    // corrections local while still bounding the longer taper needed by a
+    // trusted typed bridge/link correction, without dragging either through
+    // a whole ramp.
+    let blend_len = (delta * 3.0 + half_width * 2.0)
+        .clamp(3.0, 96.0)
+        .min(total_len);
+    let mut distances = vec![0.0f32; points.len()];
+    if is_start {
+        for index in 1..points.len() {
+            let dx = points[index].0 - points[index - 1].0;
+            let dy = points[index].1 - points[index - 1].1;
+            distances[index] = distances[index - 1] + (dx * dx + dy * dy).sqrt();
+        }
+    } else {
+        for index in (0..points.len() - 1).rev() {
+            let dx = points[index + 1].0 - points[index].0;
+            let dy = points[index + 1].1 - points[index].1;
+            distances[index] = distances[index + 1] + (dx * dx + dy * dy).sqrt();
+        }
+    }
+    for (value, distance) in dz.iter_mut().zip(distances) {
+        if distance > blend_len {
+            continue;
+        }
+        let t = (distance / blend_len).clamp(0.0, 1.0);
+        let weight = 1.0 - t * t * (3.0 - 2.0 * t);
+        let original = *value;
+        // Existing interior samples may already equal (or exceed) the
+        // mainline height. Never turn a corrected endpoint into a hump.
+        *value = (original + delta * weight).min(target_dz.max(original));
+    }
+    dz[endpoint_index] = target_dz;
 }
 
 #[derive(Clone, Debug)]
@@ -2646,6 +3076,7 @@ fn build_tile_buffers_from_features(
                     points: prepared_way.points.clone(),
                     union_road: false,
                     dz: None,
+                    join_meta: RoadJoinMeta::default(),
                 });
             }
             // Solid road geometry joins the per-tier union mesh: one
@@ -2663,6 +3094,7 @@ fn build_tile_buffers_from_features(
                 points: prepared_way.points.clone(),
                 union_road,
                 dz: if union_road { way.dz.clone() } else { None },
+                join_meta: RoadJoinMeta::from_tags(&way.tags),
             });
         }
     }
@@ -2671,12 +3103,14 @@ fn build_tile_buffers_from_features(
 
     let mut union_tiers =
         HashMap::<StrokeStyleKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
+    let mut union_way_meta = HashMap::<StrokeStyleKey, Vec<RoadJoinMeta>>::new();
     let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in stroke_jobs {
         let key = StrokeStyleKey::from(job.style);
         if job.union_road {
             let entry = union_tiers.entry(key).or_insert((job.style, Vec::new()));
             entry.1.push((job.points, job.dz));
+            union_way_meta.entry(key).or_default().push(job.join_meta);
             continue;
         }
         let entry = grouped_strokes.entry(key).or_insert((job.style, Vec::new()));
@@ -2692,6 +3126,7 @@ fn build_tile_buffers_from_features(
                 points,
                 union_road: false,
                 dz: None,
+                join_meta: RoadJoinMeta::default(),
             });
         }
     }
@@ -2735,6 +3170,85 @@ fn build_tile_buffers_from_features(
         .map(|(style, _)| style.sort_rank)
         .max()
         .unwrap_or(i16::MIN);
+
+    // Repair endpoint-to-interior merges BEFORE smoothing, unioning, and
+    // DzField construction so every later consumer sees one continuous
+    // deck profile. MVT feature boundaries often put a slip-road endpoint
+    // against the middle of its mainline's segment rather than at a shared
+    // node, so the exact-node joint pass below cannot discover this case.
+    let join_ways: Vec<RoadTierJoinWay> = union_tiers
+        .iter()
+        .flat_map(|(key, (style, ways))| {
+            let half_width = style
+                .casing
+                .map_or(style.center.width, |casing| {
+                    casing.width.max(style.center.width)
+                })
+                * 0.5;
+            let metas = union_way_meta.get(key);
+            ways
+                .iter()
+                .enumerate()
+                .map(move |(way_index, (points, dz))| {
+                    let dz = dz
+                        .as_ref()
+                        .filter(|values| values.len() == points.len())
+                        .cloned()
+                        .unwrap_or_else(|| vec![0.0; points.len()]);
+                    RoadTierJoinWay {
+                        key: *key,
+                        way_index,
+                        points: points.clone(),
+                        dz,
+                        half_width,
+                        meta: metas
+                            .and_then(|metas| metas.get(way_index))
+                            .copied()
+                            .unwrap_or_default(),
+                    }
+                })
+        })
+        .collect();
+    let mut endpoint_grade_corrections = endpoint_to_through_grade_corrections(&join_ways);
+    let interior_fascia_ends: std::collections::HashSet<RoadTierEnd> =
+        endpoint_grade_corrections
+            .iter()
+            .map(|correction| correction.end)
+            .collect();
+    for correction in endpoint_continuation_grade_corrections(&join_ways) {
+        if let Some(existing) = endpoint_grade_corrections
+            .iter_mut()
+            .find(|existing| existing.end == correction.end)
+        {
+            existing.target_dz = existing.target_dz.max(correction.target_dz);
+        } else {
+            endpoint_grade_corrections.push(correction);
+        }
+    }
+    for correction in endpoint_grade_corrections {
+        let Some((style, ways)) = union_tiers.get_mut(&correction.end.0) else {
+            continue;
+        };
+        let Some((points, dz)) = ways.get_mut(correction.end.1) else {
+            continue;
+        };
+        if dz.as_ref().is_none_or(|values| values.len() != points.len()) {
+            *dz = Some(vec![0.0; points.len()]);
+        }
+        let half_width = style
+            .casing
+            .map_or(style.center.width, |casing| {
+                casing.width.max(style.center.width)
+            })
+            * 0.5;
+        apply_endpoint_grade_correction(
+            points,
+            dz.as_mut().unwrap(),
+            correction.end.2,
+            correction.target_dz,
+            half_width,
+        );
+    }
 
     profiler.lap("stroke-prep", "");
 
@@ -2783,7 +3297,7 @@ fn build_tile_buffers_from_features(
                 phase: 0,
                 rank: i16::MIN,
                 field: 0,
-                butt_points: Vec::new(),
+                skirt_joints: Vec::new(),
                 half_width: 1.0,
                 rings: rings
                     .into_iter()
@@ -2800,19 +3314,26 @@ fn build_tile_buffers_from_features(
     // keys end on the same node (bridge/approach style splits — the layer
     // rank bias puts a deck in another tier than its own road). These get
     // flush butt joints: no cap discs, no walls across.
-    // (tier key, unit direction INTO the node) per way endpoint.
-    let mut endpoint_tiers: HashMap<(i32, i32), Vec<(StrokeStyleKey, (f32, f32), f32)>> =
+    // (tier key + exact way end, unit direction OUT of the way into the
+    // node, endpoint dz) per node. Identity matters at forks: one valid
+    // continuation must not turn every branch at that node into a butt end.
+    let mut endpoint_tiers: HashMap<(i32, i32), Vec<(RoadTierEnd, (f32, f32), f32)>> =
         HashMap::new();
     for (key, (_, ways)) in union_tiers.iter() {
-        for (points, dz) in ways {
+        for (way_index, (points, dz)) in ways.iter().enumerate() {
             if points.len() < 2 {
                 continue;
             }
             let ends = [
-                (0usize, points[0], points[1]),
-                (points.len() - 1, points[points.len() - 1], points[points.len() - 2]),
+                (true, 0usize, points[0], points[1]),
+                (
+                    false,
+                    points.len() - 1,
+                    points[points.len() - 1],
+                    points[points.len() - 2],
+                ),
             ];
-            for (index, end, inner) in ends {
+            for (is_start, index, end, inner) in ends {
                 let node = ((end.0 * 4.0).round() as i32, (end.1 * 4.0).round() as i32);
                 let (dx, dy) = (end.0 - inner.0, end.1 - inner.1);
                 let len = (dx * dx + dy * dy).sqrt().max(1e-6);
@@ -2823,7 +3344,7 @@ fn build_tile_buffers_from_features(
                 endpoint_tiers
                     .entry(node)
                     .or_default()
-                    .push((*key, (dx / len, dy / len), end_dz));
+                    .push(((*key, way_index, is_start), (dx / len, dy / len), end_dz));
             }
         }
     }
@@ -2834,19 +3355,27 @@ fn build_tile_buffers_from_features(
     // its grounded continuation) a flush butt would TEAR open; those
     // joints keep their round caps so the overlap hides the step. Forks
     // and T-junctions keep caps as well.
-    let tier_joints: std::collections::HashSet<(i32, i32)> = endpoint_tiers
-        .iter()
-        .filter(|(_, entries)| {
-            entries.iter().enumerate().any(|(i, (key_a, dir_a, dz_a))| {
-                entries.iter().skip(i + 1).any(|(key_b, dir_b, dz_b)| {
-                    key_a != key_b
-                        && dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1 < -0.7
-                        && (dz_a - dz_b).abs() < 0.3
-                })
-            })
-        })
-        .map(|(node, _)| *node)
-        .collect();
+    let mut tier_joint_ends: std::collections::HashSet<RoadTierEnd> =
+        std::collections::HashSet::new();
+    // Same-height cross-tier endpoints also suppress a round-cap FASCIA at
+    // acute slip-road merges, while retaining the top cap itself. Flush,
+    // near-opposite continuations additionally become true butt ends.
+    let mut fascia_joint_ends = interior_fascia_ends;
+    for entries in endpoint_tiers.values() {
+        for (index, (end_a, dir_a, dz_a)) in entries.iter().enumerate() {
+            for (end_b, dir_b, dz_b) in entries.iter().skip(index + 1) {
+                if end_a.0 == end_b.0 || (dz_a - dz_b).abs() >= 0.3 {
+                    continue;
+                }
+                fascia_joint_ends.insert(*end_a);
+                fascia_joint_ends.insert(*end_b);
+                if dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1 < -0.7 {
+                    tier_joint_ends.insert(*end_a);
+                    tier_joint_ends.insert(*end_b);
+                }
+            }
+        }
+    }
 
     // Endpoints of tunnel ways: a surface way ending on one of these nodes
     // stops with a BUTT end (its continuation dives into the tunnel).
@@ -2917,6 +3446,7 @@ fn build_tile_buffers_from_features(
     }
     for pass in 0..2u8 {
         for (tier_index, (style, ways)) in smoothed_tiers.iter().enumerate() {
+            let tier_key = StrokeStyleKey::from(*style);
             let (color, width) = if pass == 0 {
                 let Some(casing) = style.casing else { continue };
                 (casing.color, casing.width)
@@ -2925,52 +3455,94 @@ fn build_tile_buffers_from_features(
             };
             let ribbons: Vec<RoadRibbon> = ways
                 .iter()
-                .map(|(points, dz)| {
-                    let butt = |point: Option<&(f32, f32)>| {
+                .enumerate()
+                .map(|(way_index, (points, dz))| {
+                    let butt = |point: Option<&(f32, f32)>, is_start: bool| {
                         point.is_some_and(|&(x, y)| {
                             let node = ((x * 4.0).round() as i32, (y * 4.0).round() as i32);
-                            tunnel_portals.contains(&node) || tier_joints.contains(&node)
+                            road_endpoint_is_clip_cut((x, y), union_clip)
+                                || tunnel_portals.contains(&node)
+                                || tier_joint_ends.contains(&(tier_key, way_index, is_start))
                         })
                     };
                     RoadRibbon {
                         points,
                         dz: dz.as_deref(),
                         closed_ring: false,
-                        start_disc: !butt(points.first()),
-                        end_disc: !butt(points.last()),
+                        start_disc: !butt(points.first(), true),
+                        end_disc: !butt(points.last(), false),
                     }
                 })
                 .collect();
             let rings =
                 road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), aa_units, union_clip);
-            let butt_points: Vec<(f32, f32)> = ways
+            let skirt_joints: Vec<RoadSkirtJoint> = ways
                 .iter()
-                .flat_map(|(points, _)| {
-                    [points.first(), points.last()]
-                        .into_iter()
-                        .flatten()
-                        .filter(|&&(x, y)| {
-                            let node =
-                                ((x * 4.0).round() as i32, (y * 4.0).round() as i32);
-                            tier_joints.contains(&node)
+                .enumerate()
+                .flat_map(|(way_index, (points, _))| {
+                    if points.len() < 2 {
+                        return Vec::new();
+                    }
+                    [
+                        (true, points[0], points[1]),
+                        (
+                            false,
+                            points[points.len() - 1],
+                            points[points.len() - 2],
+                        ),
+                    ]
+                    .into_iter()
+                    .filter_map(|(is_start, point, inner)| {
+                        let end = (tier_key, way_index, is_start);
+                        let round_cap = !tier_joint_ends.contains(&end)
+                            && fascia_joint_ends.contains(&end);
+                        if !round_cap && !tier_joint_ends.contains(&end) {
+                            return None;
+                        }
+                        let (dx, dy) = (point.0 - inner.0, point.1 - inner.1);
+                        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                        Some(RoadSkirtJoint {
+                            point,
+                            outward: (dx / len, dy / len),
+                            round_cap,
                         })
-                        .copied()
-                        .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
                 })
                 .collect();
+            let field = dz_fields
+                .get(1 + tier_index)
+                .and_then(|field| field.as_ref());
             groups.push(PaintGroup {
                 color: hex_to_premul_rgba(color, 1.0),
                 param5: 0.0,
                 phase: 1 + pass,
                 rank: style.sort_rank,
                 field: (1 + tier_index) as u16,
-                butt_points,
+                skirt_joints,
                 half_width: (width * 0.5).max(0.05),
                 rings: rings
                     .into_iter()
                     .map(|(ring, dz)| {
-                        let min_dz = dz.iter().copied().fold(f32::MAX, f32::min);
-                        let max_dz = dz.iter().copied().fold(0.0f32, f32::max);
+                        // Classify with the SAME nearest-way field that will
+                        // displace the final face. Copied ribbon dz can
+                        // disagree inside overlapping twins/gores, causing a
+                        // nominally grounded cover to punch a hole and then
+                        // lift away from it at draw time.
+                        let mut min_dz = f32::MAX;
+                        let mut max_dz = f32::MIN;
+                        if let Some(field) = field {
+                            for &(x, y) in &ring {
+                                let value = field.sample(x, y);
+                                min_dz = min_dz.min(value);
+                                max_dz = max_dz.max(value);
+                            }
+                        } else {
+                            for value in dz {
+                                min_dz = min_dz.min(value);
+                                max_dz = max_dz.max(value);
+                            }
+                        }
                         (ring, if min_dz == f32::MAX { 0.0 } else { min_dz }, max_dz)
                     })
                     .collect(),
@@ -3208,11 +3780,12 @@ fn build_tile_buffers_from_features(
                             .iter()
                             .map(|v| {
                                 let deck = field.sample(v.x, v.y);
-                                if v.v > 0.5 {
-                                    (deck - DECK_FASCIA_M).max(0.0)
-                                } else {
-                                    deck
-                                }
+                                // Subdivision creates intermediate v values
+                                // on the top-to-bottom diagonal. Interpolate
+                                // the fascia height continuously; snapping
+                                // v<=0.5 to the top folded each quad into
+                                // opposing triangles ("scissor" holes).
+                                (deck - DECK_FASCIA_M * v.v.clamp(0.0, 1.0)).max(0.0)
                             })
                             .collect();
                         if sk_deck.iter().any(|&d| d > 0.05) {
@@ -4966,6 +5539,211 @@ pub fn write_ppm(path: &str, size: usize, image: &[u8]) {
 
 #[cfg(test)]
 mod bridge_probe_tests {
+    use super::*;
+
+    fn join_test_key(rank: i16, width: f32, color: u32) -> StrokeStyleKey {
+        StrokeStyleKey {
+            sort_rank: rank,
+            casing: None,
+            center: StrokePassKey {
+                color,
+                width_bits: width.to_bits(),
+                shape_id_bits: 0,
+            },
+        }
+    }
+
+    fn join_test_meta(
+        family: RoadJoinFamily,
+        is_link: bool,
+        is_bridge: bool,
+    ) -> RoadJoinMeta {
+        RoadJoinMeta {
+            family,
+            is_link,
+            is_bridge,
+        }
+    }
+
+    #[test]
+    fn endpoint_to_through_merge_inherits_deck_with_smooth_grade() {
+        let link_key = join_test_key(10, 2.0, 1);
+        let main_key = join_test_key(20, 4.0, 2);
+        let crossing_key = join_test_key(11, 2.0, 3);
+        let link_meta = join_test_meta(RoadJoinFamily::Motorway, true, false);
+        let main_meta = join_test_meta(RoadJoinFamily::Motorway, false, false);
+        let ways = vec![
+            RoadTierJoinWay {
+                key: link_key,
+                way_index: 0,
+                // Start endpoint approaches the through road almost
+                // collinearly and its cap overlaps the mainline ribbon.
+                points: vec![(0.0, 0.0), (-4.0, -0.2), (-10.0, -0.2)],
+                dz: vec![2.0, 2.0, 2.0],
+                half_width: 1.0,
+                meta: link_meta,
+            },
+            RoadTierJoinWay {
+                key: crossing_key,
+                way_index: 0,
+                // A perpendicular fork at the same place must retain its
+                // independent profile.
+                points: vec![(0.0, 0.0), (0.0, -4.0), (0.0, -8.0)],
+                dz: vec![2.0, 2.0, 2.0],
+                half_width: 1.0,
+                meta: link_meta,
+            },
+            RoadTierJoinWay {
+                key: main_key,
+                way_index: 0,
+                points: vec![(-8.0, 0.05), (8.0, 0.05)],
+                dz: vec![4.0, 4.0],
+                half_width: 2.0,
+                meta: main_meta,
+            },
+        ];
+
+        let corrections = endpoint_to_through_grade_corrections(&ways);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].end, (link_key, 0, true));
+        assert!((corrections[0].target_dz - 4.0).abs() < 1e-5);
+
+        let mut corrected = ways[0].dz.clone();
+        apply_endpoint_grade_correction(
+            &ways[0].points,
+            &mut corrected,
+            true,
+            corrections[0].target_dz,
+            ways[0].half_width,
+        );
+        assert!((corrected[0] - 4.0).abs() < 1e-5);
+        assert!(corrected[1] > 2.0 && corrected[1] < 4.0);
+        assert!((corrected[2] - 2.0).abs() < 1e-5);
+
+        let mut already_on_grade = vec![2.0, 4.0, 4.0];
+        apply_endpoint_grade_correction(
+            &ways[0].points,
+            &mut already_on_grade,
+            true,
+            4.0,
+            ways[0].half_width,
+        );
+        assert_eq!(already_on_grade, vec![4.0, 4.0, 4.0]);
+
+        // Typed link-to-mainline semantics admit a larger correction at the
+        // same tightly aligned, interior merge.
+        let mut high_mainline = ways.clone();
+        high_mainline[0].dz.fill(0.0);
+        high_mainline[2].dz.fill(8.0);
+        let high_corrections = endpoint_to_through_grade_corrections(&high_mainline);
+        assert_eq!(high_corrections.len(), 1);
+        assert_eq!(high_corrections[0].end, (link_key, 0, true));
+        assert!((high_corrections[0].target_dz - 8.0).abs() < 1e-5);
+
+        // Without trusted link semantics the conservative 3 m cap remains:
+        // a merely aligned upper/lower pair must not be joined.
+        let mut grade_separated = ways.clone();
+        grade_separated[0].dz.fill(0.0);
+        grade_separated[2].dz.fill(8.0);
+        grade_separated[0].meta.is_link = false;
+        assert!(endpoint_to_through_grade_corrections(&grade_separated).is_empty());
+    }
+
+    #[test]
+    fn exact_bridge_continuation_inherits_deck_height() {
+        let approach_key = join_test_key(20, 4.0, 1);
+        let bridge_key = join_test_key(46, 4.0, 2);
+        let approach_meta = join_test_meta(RoadJoinFamily::Motorway, false, false);
+        let bridge_meta = join_test_meta(RoadJoinFamily::Motorway, false, true);
+        let ways = vec![
+            RoadTierJoinWay {
+                key: approach_key,
+                way_index: 0,
+                points: vec![(0.0, 0.0), (-5.0, 0.0), (-12.0, 0.0)],
+                dz: vec![0.0, 0.0, 0.0],
+                half_width: 2.0,
+                meta: approach_meta,
+            },
+            RoadTierJoinWay {
+                key: bridge_key,
+                way_index: 0,
+                points: vec![(0.0, 0.0), (5.0, 0.0)],
+                dz: vec![5.5, 5.5],
+                half_width: 2.0,
+                meta: bridge_meta,
+            },
+        ];
+
+        let corrections = endpoint_continuation_grade_corrections(&ways);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].end, (approach_key, 0, true));
+        assert!((corrections[0].target_dz - 5.5).abs() < 1e-5);
+
+        let mut corrected = ways[0].dz.clone();
+        apply_endpoint_grade_correction(
+            &ways[0].points,
+            &mut corrected,
+            true,
+            corrections[0].target_dz,
+            ways[0].half_width,
+        );
+        assert!((corrected[0] - 5.5).abs() < 1e-5);
+        assert!(corrected[1] > 0.0 && corrected[1] < 5.5);
+
+        // The physical continuation wins regardless of which side carries
+        // the bridge tag: a lower bridge segment must inherit the higher
+        // ordinary approach just as the reverse case does.
+        let mut reversed = ways.clone();
+        reversed[0].dz.fill(5.5);
+        reversed[1].dz.fill(4.3);
+        let reversed_corrections = endpoint_continuation_grade_corrections(&reversed);
+        assert_eq!(reversed_corrections.len(), 1);
+        assert_eq!(reversed_corrections[0].end, (bridge_key, 0, true));
+        assert!((reversed_corrections[0].target_dz - 5.5).abs() < 1e-5);
+
+        // A strict, already-elevated continuation may change road class and
+        // paint style at its exact node. Small bake disagreement is repaired
+        // so the white/yellow pieces form one deck.
+        let tertiary_key = join_test_key(10, 4.0, 3);
+        let secondary_key = join_test_key(20, 4.1, 4);
+        let class_transition = vec![
+            RoadTierJoinWay {
+                key: tertiary_key,
+                way_index: 0,
+                points: vec![(0.0, 0.0), (-5.0, 0.0)],
+                dz: vec![16.6, 16.6],
+                half_width: 2.0,
+                meta: join_test_meta(RoadJoinFamily::Tertiary, false, false),
+            },
+            RoadTierJoinWay {
+                key: secondary_key,
+                way_index: 0,
+                points: vec![(0.0, 0.0), (5.0, 0.0)],
+                dz: vec![18.0, 18.0],
+                half_width: 2.05,
+                meta: join_test_meta(RoadJoinFamily::Secondary, false, false),
+            },
+        ];
+        let class_corrections =
+            endpoint_continuation_grade_corrections(&class_transition);
+        assert_eq!(class_corrections.len(), 1);
+        assert_eq!(class_corrections[0].end, (tertiary_key, 0, true));
+        assert!((class_corrections[0].target_dz - 18.0).abs() < 1e-5);
+
+        let mut excessive_class_step = class_transition.clone();
+        excessive_class_step[0].dz.fill(14.0);
+        assert!(
+            endpoint_continuation_grade_corrections(&excessive_class_step).is_empty()
+        );
+        let mut grounded_class_step = class_transition.clone();
+        grounded_class_step[0].dz.fill(0.0);
+        assert!(endpoint_continuation_grade_corrections(&grounded_class_step).is_empty());
+
+        let mut crossing = ways.clone();
+        crossing[1].points = vec![(0.0, 0.0), (0.0, 5.0)];
+        assert!(endpoint_continuation_grade_corrections(&crossing).is_empty());
+    }
+
     /// Headless generator probe: build real tiles with the mirrored live
     /// theme, print per-stage timings (MP_TILE_PROFILE=1) and buffer sizes.
     /// Run: MP_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
@@ -4973,7 +5751,6 @@ mod bridge_probe_tests {
     #[test]
     #[ignore]
     fn union_perf_probe() {
-        use super::*;
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
@@ -4982,6 +5759,7 @@ mod bridge_probe_tests {
         let spots = [
             ("raampoort", 4.8785f64, 52.3798f64),
             ("europaboulevard", 4.8895f64, 52.3405f64),
+            ("watergraafsmeer", 4.96521f64, 52.35456f64),
         ];
         for (name, lon, lat) in spots {
             let z = 14u32;
@@ -5562,8 +6340,6 @@ mod bridge_probe_tests {
         parse_mvt_tile(&data, key, &mut Dump).unwrap();
     }
 
-    use super::*;
-
     #[test]
     #[ignore]
     fn westerkerk_probe() {
@@ -5865,4 +6641,5 @@ mod bridge_probe_tests {
             }
         }
     }
+
 }
