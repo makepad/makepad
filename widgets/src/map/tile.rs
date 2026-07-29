@@ -2772,6 +2772,8 @@ fn build_tile_buffers_from_features(
                     points,
                     dz: dz.as_deref(),
                     closed_ring: true,
+                    start_disc: true,
+                    end_disc: true,
                 })
                 .collect();
             let rings = road_ribbon_rings(&ribbons, 1.0, 0.0, union_clip);
@@ -2781,6 +2783,8 @@ fn build_tile_buffers_from_features(
                 phase: 0,
                 rank: i16::MIN,
                 field: 0,
+                butt_points: Vec::new(),
+                half_width: 1.0,
                 rings: rings
                     .into_iter()
                     .map(|(ring, dz)| {
@@ -2792,6 +2796,63 @@ fn build_tile_buffers_from_features(
             });
         }
     }
+    // Tier-transition joints: endpoints where ways from DIFFERENT tier
+    // keys end on the same node (bridge/approach style splits — the layer
+    // rank bias puts a deck in another tier than its own road). These get
+    // flush butt joints: no cap discs, no walls across.
+    // (tier key, unit direction INTO the node) per way endpoint.
+    let mut endpoint_tiers: HashMap<(i32, i32), Vec<(StrokeStyleKey, (f32, f32))>> =
+        HashMap::new();
+    for (key, (_, ways)) in union_tiers.iter() {
+        for (points, _) in ways {
+            if points.len() < 2 {
+                continue;
+            }
+            let ends = [
+                (points[0], points[1]),
+                (points[points.len() - 1], points[points.len() - 2]),
+            ];
+            for (end, inner) in ends {
+                let node = ((end.0 * 4.0).round() as i32, (end.1 * 4.0).round() as i32);
+                let (dx, dy) = (end.0 - inner.0, end.1 - inner.1);
+                let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                endpoint_tiers
+                    .entry(node)
+                    .or_default()
+                    .push((*key, (dx / len, dy / len)));
+            }
+        }
+    }
+    // A FLUSH joint is a CONTINUATION: two ways of different tiers ending
+    // at one node with (near-)opposite directions — a bridge continuing
+    // into its approach. Forks and T-junctions keep round caps and walls.
+    let tier_joints: std::collections::HashSet<(i32, i32)> = endpoint_tiers
+        .iter()
+        .filter(|(_, entries)| {
+            entries.iter().enumerate().any(|(i, (key_a, dir_a))| {
+                entries.iter().skip(i + 1).any(|(key_b, dir_b)| {
+                    key_a != key_b
+                        && dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1 < -0.7
+                })
+            })
+        })
+        .map(|(node, _)| *node)
+        .collect();
+
+    // Endpoints of tunnel ways: a surface way ending on one of these nodes
+    // stops with a BUTT end (its continuation dives into the tunnel).
+    let tunnel_portals: std::collections::HashSet<(i32, i32)> = tile_ways
+        .iter()
+        .filter(|way| !way.closed && tag_is_truthy(&way.tags, "tunnel"))
+        .flat_map(|way| {
+            [way.points.first(), way.points.last()]
+                .into_iter()
+                .flatten()
+                .map(|&(x, y)| ((x * 4.0).round() as i32, (y * 4.0).round() as i32))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     // Union ways get the same corner-cut smoothing as legacy strokes so
     // curve shapes stay identical between the two pipelines; dz rides
     // along through the cuts.
@@ -2855,20 +2916,47 @@ fn build_tile_buffers_from_features(
             };
             let ribbons: Vec<RoadRibbon> = ways
                 .iter()
-                .map(|(points, dz)| RoadRibbon {
-                    points,
-                    dz: dz.as_deref(),
-                    closed_ring: false,
+                .map(|(points, dz)| {
+                    let butt = |point: Option<&(f32, f32)>| {
+                        point.is_some_and(|&(x, y)| {
+                            let node = ((x * 4.0).round() as i32, (y * 4.0).round() as i32);
+                            tunnel_portals.contains(&node) || tier_joints.contains(&node)
+                        })
+                    };
+                    RoadRibbon {
+                        points,
+                        dz: dz.as_deref(),
+                        closed_ring: false,
+                        start_disc: !butt(points.first()),
+                        end_disc: !butt(points.last()),
+                    }
                 })
                 .collect();
             let rings =
                 road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), aa_units, union_clip);
+            let butt_points: Vec<(f32, f32)> = ways
+                .iter()
+                .flat_map(|(points, _)| {
+                    [points.first(), points.last()]
+                        .into_iter()
+                        .flatten()
+                        .filter(|&&(x, y)| {
+                            let node =
+                                ((x * 4.0).round() as i32, (y * 4.0).round() as i32);
+                            tier_joints.contains(&node)
+                        })
+                        .copied()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
             groups.push(PaintGroup {
                 color: hex_to_premul_rgba(color, 1.0),
                 param5: 0.0,
                 phase: 1 + pass,
                 rank: style.sort_rank,
                 field: (1 + tier_index) as u16,
+                butt_points,
+                half_width: (width * 0.5).max(0.05),
                 rings: rings
                     .into_iter()
                     .map(|(ring, dz)| {
@@ -3095,14 +3183,17 @@ fn build_tile_buffers_from_features(
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
                 // the crescents a displaced ramp leaves over its footprint.
-                if face.level == 1 && !face.skirt_verts.is_empty() {
+                if !face.skirt_verts.is_empty() {
                     if let Some(field) = field {
                         let mut sk_verts = face.skirt_verts.clone();
                         let mut sk_indices = face.skirt_indices.clone();
                         subdivide_face_mesh(&mut sk_verts, &mut sk_indices, 3.0, field);
-                        // Fascia, not full wall: the band hangs ~1.4 m
-                        // below the deck edge and the space underneath
-                        // stays OPEN — you can see through an underpass.
+                        // Fascia, not full wall: the road reads ~1.4 m
+                        // thick — the band hangs below the deck edge
+                        // (clamped at ground on low ramps) and the space
+                        // underneath stays OPEN for underpasses. Internal
+                        // seams are dropped by the probe below, so the
+                        // band can run the full elevated length.
                         const DECK_FASCIA_M: f32 = 1.4;
                         let sk_deck: Vec<f32> = sk_verts
                             .iter()
