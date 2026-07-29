@@ -287,6 +287,25 @@ impl MvtVal {
             MvtVal::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         }
     }
+
+    fn is_truthy(&self) -> bool {
+        match self {
+            MvtVal::Str(value) => {
+                !matches!(value.as_str(), "" | "0" | "no" | "false" | "False")
+            }
+            MvtVal::Num(value) => *value != 0.0,
+            MvtVal::Bool(value) => *value,
+        }
+    }
+
+    fn osm_layer(&self) -> Option<i32> {
+        let value = match self {
+            MvtVal::Str(value) => value.parse::<f32>().ok()?,
+            MvtVal::Num(value) => *value as f32,
+            MvtVal::Bool(_) => return None,
+        };
+        value.is_finite().then(|| value.round() as i32)
+    }
 }
 
 fn decode_layer(
@@ -493,6 +512,48 @@ struct SolveWay {
     src: (u32, u32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerticalClass {
+    Tunnel,
+    Surface,
+    Elevated,
+}
+
+impl VerticalClass {
+    fn normalized_layer(bridge: bool, tunnel: bool, osm_layer: Option<i32>) -> i32 {
+        match osm_layer {
+            Some(layer) if bridge && layer < 1 => 1,
+            Some(layer) if tunnel && layer > -1 => -1,
+            Some(layer) => layer,
+            None if bridge => 1,
+            None if tunnel => -1,
+            None => 0,
+        }
+    }
+
+    fn from_solve_way(bridge: bool, tunnel: bool, layer: i32) -> Self {
+        if tunnel || layer < 0 {
+            Self::Tunnel
+        } else if bridge || layer > 0 {
+            Self::Elevated
+        } else {
+            Self::Surface
+        }
+    }
+
+    fn from_base_feature(
+        layer: &str,
+        bridge: bool,
+        tunnel: bool,
+        osm_layer: Option<&MvtVal>,
+    ) -> Self {
+        let bridge = bridge || layer == "bridges";
+        let layer =
+            Self::normalized_layer(bridge, tunnel, osm_layer.and_then(MvtVal::osm_layer));
+        Self::from_solve_way(bridge, tunnel, layer)
+    }
+}
+
 #[derive(Default)]
 struct Graph {
     node_ids: HashMap<(i32, i32), u32>,
@@ -544,26 +605,7 @@ impl Graph {
         let osm_layer = tag(&way.tags, "osm_layer")
             .and_then(|v| v.parse::<f32>().ok())
             .map(|v| v.round() as i32);
-        let layer = match osm_layer {
-            Some(l) => {
-                if bridge && l < 1 {
-                    1
-                } else if tunnel && l > -1 {
-                    -1
-                } else {
-                    l
-                }
-            }
-            None => {
-                if bridge {
-                    1
-                } else if tunnel {
-                    -1
-                } else {
-                    0
-                }
-            }
-        };
+        let layer = VerticalClass::normalized_layer(bridge, tunnel, osm_layer);
         let half_width_m = tag(&way.tags, "width")
             .and_then(|v| v.parse::<f32>().ok())
             .map(|w| (w * 0.5 + 1.0).clamp(2.0, 16.0))
@@ -1415,6 +1457,7 @@ fn solve_bbox(
                 graph.pos[b].1,
                 z[a],
                 z[b],
+                VerticalClass::from_solve_way(way.bridge, way.tunnel, way.layer),
             );
         }
     }
@@ -1435,6 +1478,7 @@ fn solve_bbox(
                 graph.pos[b].1,
                 z[a].min(0.0),
                 z[b].min(0.0),
+                VerticalClass::from_solve_way(way.bridge, way.tunnel, way.layer),
             );
         }
     }
@@ -1443,22 +1487,42 @@ fn solve_bbox(
 
 /// Spatial index over the solved height segments of one tile solve, for
 /// annotating the base tile's own geometry.
+#[derive(Clone, Copy)]
+struct SolvedSegment {
+    geometry: [f32; 6],
+    vertical: VerticalClass,
+}
+
 #[derive(Default)]
 struct SolvedField {
-    grid: HashMap<(i32, i32), Vec<[f32; 6]>>,
+    grid: HashMap<(i32, i32), Vec<SolvedSegment>>,
 }
 
 const FIELD_CELL: f32 = 96.0;
+const VERTICAL_CLASS_AMBIGUITY: f32 = 0.75;
 
 impl SolvedField {
-    fn push(&mut self, ax: f32, ay: f32, bx: f32, by: f32, za: f32, zb: f32) {
+    fn push(
+        &mut self,
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+        za: f32,
+        zb: f32,
+        vertical: VerticalClass,
+    ) {
         let (min_x, max_x) = (ax.min(bx), ax.max(bx));
         let (min_y, max_y) = (ay.min(by), ay.max(by));
+        let solved = SolvedSegment {
+            geometry: [ax, ay, bx, by, za, zb],
+            vertical,
+        };
         let mut cy = (min_y / FIELD_CELL).floor() as i32;
         while cy <= (max_y / FIELD_CELL).floor() as i32 {
             let mut cx = (min_x / FIELD_CELL).floor() as i32;
             while cx <= (max_x / FIELD_CELL).floor() as i32 {
-                self.grid.entry((cx, cy)).or_default().push([ax, ay, bx, by, za, zb]);
+                self.grid.entry((cx, cy)).or_default().push(solved);
                 cx += 1;
             }
             cy += 1;
@@ -1469,8 +1533,15 @@ impl SolvedField {
     /// direction-gated (~35°) when `dir` is given. Returns (z, distance,
     /// side sign relative to the matched segment) — distance and side feed
     /// the way-level consistency filters in the annotator.
-    fn sample(&self, px: f32, py: f32, dir: Option<(f32, f32)>, cap: f32) -> Option<(f32, f32, f32)> {
-        self.sample_gated(px, py, dir, cap, 0.82)
+    fn sample(
+        &self,
+        px: f32,
+        py: f32,
+        dir: Option<(f32, f32)>,
+        cap: f32,
+        vertical: Option<VerticalClass>,
+    ) -> Option<(f32, f32, f32)> {
+        self.sample_gated(px, py, dir, cap, 0.82, vertical)
     }
 
     /// Highest z among PARALLEL segments with lateral distance in
@@ -1494,7 +1565,7 @@ impl SolvedField {
             for cx in cx0..=cx1 {
                 let Some(segs) = self.grid.get(&(cx, cy)) else { continue };
                 for seg in segs {
-                    let [ax, ay, bx, by, za, zb] = *seg;
+                    let [ax, ay, bx, by, za, zb] = seg.geometry;
                     let (ex, ey) = (bx - ax, by - ay);
                     let el2 = (ex * ex + ey * ey).max(1e-6);
                     if ((dir.0 * ex + dir.1 * ey) / (dl * el2.sqrt())).abs() < 0.82 {
@@ -1527,9 +1598,37 @@ impl SolvedField {
         dir: Option<(f32, f32)>,
         cap: f32,
         min_dot: f32,
+        vertical: Option<VerticalClass>,
     ) -> Option<(f32, f32, f32)> {
-        let mut best_dist = cap;
-        let mut best_z = None;
+        fn candidate_is_better(
+            candidate: (f32, f32, f32),
+            best: (f32, f32, f32),
+        ) -> bool {
+            match candidate.1.total_cmp(&best.1) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => match candidate
+                    .0
+                    .abs()
+                    .total_cmp(&best.0.abs())
+                {
+                    // Equal-distance duplicate profiles settle on the
+                    // larger vertical separation. This is max lift for
+                    // decks and max depth for tunnels, independent of
+                    // segment insertion/traversal order.
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => {
+                        candidate.0.total_cmp(&best.0).is_gt()
+                            || (candidate.0.total_cmp(&best.0).is_eq()
+                                && candidate.2.total_cmp(&best.2).is_gt())
+                    }
+                },
+            }
+        }
+
+        let mut best_any: Option<(f32, f32, f32)> = None;
+        let mut best_compatible: Option<(f32, f32, f32)> = None;
         let cy0 = ((py - cap) / FIELD_CELL).floor() as i32;
         let cy1 = ((py + cap) / FIELD_CELL).floor() as i32;
         let cx0 = ((px - cap) / FIELD_CELL).floor() as i32;
@@ -1538,7 +1637,7 @@ impl SolvedField {
             for cx in cx0..=cx1 {
                 let Some(segs) = self.grid.get(&(cx, cy)) else { continue };
                 for seg in segs {
-                    let [ax, ay, bx, by, za, zb] = *seg;
+                    let [ax, ay, bx, by, za, zb] = seg.geometry;
                     let (ex, ey) = (bx - ax, by - ay);
                     let el2 = (ex * ex + ey * ey).max(1e-6);
                     if let Some((dx, dy)) = dir {
@@ -1552,15 +1651,31 @@ impl SolvedField {
                     let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
                     let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
                     let dist = (qx * qx + qy * qy).sqrt();
-                    if dist < best_dist {
-                        best_dist = dist;
-                        let side = ex * (py - ay) - ey * (px - ax);
-                        best_z = Some((za * (1.0 - t) + zb * t, dist, side.signum()));
+                    if dist >= cap {
+                        continue;
+                    }
+                    let side = ex * (py - ay) - ey * (px - ax);
+                    let candidate = (za * (1.0 - t) + zb * t, dist, side.signum());
+                    if best_any.is_none_or(|best| candidate_is_better(candidate, best)) {
+                        best_any = Some(candidate);
+                    }
+                    if vertical == Some(seg.vertical)
+                        && best_compatible
+                            .is_none_or(|best| candidate_is_better(candidate, best))
+                    {
+                        best_compatible = Some(candidate);
                     }
                 }
             }
         }
-        best_z
+        match (best_compatible, best_any) {
+            (Some(compatible), Some(nearest))
+                if compatible.1 <= nearest.1 + VERTICAL_CLASS_AMBIGUITY =>
+            {
+                Some(compatible)
+            }
+            (_, nearest) => nearest,
+        }
     }
 }
 
@@ -1573,6 +1688,7 @@ struct BasePath {
     feature: u32,
     path: u32,
     is_polygon: bool,
+    vertical: VerticalClass,
     points: Vec<(f32, f32)>,
 }
 
@@ -1794,8 +1910,28 @@ fn reconcile_base_vertex_consensus(
     path_src: &[((u32, u32), (f32, f32))],
     final_dz: &mut [Option<Vec<f32>>],
 ) {
+    const MAX_CONTINUATION_STEP_M: f32 = 3.0;
+    const MAX_ENDPOINT_DOT: f32 = -0.90;
+    const MIN_THROUGH_DOT: f32 = 0.90;
+
+    #[derive(Clone, Copy)]
+    struct Endpoint {
+        path: usize,
+        vertex: usize,
+        outward: (f32, f32),
+    }
+
+    #[derive(Clone, Copy)]
+    struct ThroughVertex {
+        path: usize,
+        vertex: usize,
+        outgoing: [(f32, f32); 2],
+    }
+
     let mut consensus = HashMap::<(i32, i32), f32>::new();
     let mut edge_consensus = HashMap::<(i32, i32), f32>::new();
+    let mut endpoints = HashMap::<(i32, i32), Vec<Endpoint>>::new();
+    let mut through_vertices = HashMap::<(i32, i32), Vec<ThroughVertex>>::new();
     let extent = EXTENT as f32;
     for (path_index, base_path) in base_paths.iter().enumerate() {
         let Some(dz) = &final_dz[path_index] else { continue };
@@ -1817,6 +1953,129 @@ fn reconcile_base_vertex_consensus(
                 let entry = edge_consensus.entry(key).or_insert(value);
                 if value.abs() > entry.abs() {
                     *entry = value;
+                }
+            }
+        }
+        if base_path.points.len() >= 2 {
+            let last = base_path.points.len() - 1;
+            for (vertex, inner_vertex) in [(0, 1), (last, last - 1)] {
+                let point = base_path.points[vertex];
+                let inner = base_path.points[inner_vertex];
+                let (dx, dy) = (point.0 - inner.0, point.1 - inner.1);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len <= 1e-6 {
+                    continue;
+                }
+                let key = (
+                    ((point.0 + offset.0) * 4.0).round() as i32,
+                    ((point.1 + offset.1) * 4.0).round() as i32,
+                );
+                endpoints.entry(key).or_default().push(Endpoint {
+                    path: path_index,
+                    vertex,
+                    outward: (dx / len, dy / len),
+                });
+            }
+            for vertex in 1..last {
+                let point = base_path.points[vertex];
+                let direction = |neighbor: (f32, f32)| {
+                    let (dx, dy) = (neighbor.0 - point.0, neighbor.1 - point.1);
+                    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                    (dx / len, dy / len)
+                };
+                let key = (
+                    ((point.0 + offset.0) * 4.0).round() as i32,
+                    ((point.1 + offset.1) * 4.0).round() as i32,
+                );
+                through_vertices.entry(key).or_default().push(ThroughVertex {
+                    path: path_index,
+                    vertex,
+                    outgoing: [
+                        direction(base_path.points[vertex - 1]),
+                        direction(base_path.points[vertex + 1]),
+                    ],
+                });
+            }
+        }
+    }
+
+    // A short source way can be raised from its far endpoint by the first
+    // hold+grade pass after the earlier junction consensus. Reconcile only
+    // true, already-lifted continuations here: exact shared node, same
+    // source layer, compatible tangents, and a modest height step. Besides
+    // endpoint pairs, an endpoint may continue through an interior gore
+    // vertex. This joins semantic splits such as steps/footway bridge
+    // members and reversible lanes while leaving perpendicular branches
+    // and chance stacked crossings alone.
+    let mut endpoint_targets = HashMap::<(usize, usize), f32>::new();
+    for entries in endpoints.values() {
+        for (index, a) in entries.iter().enumerate() {
+            for b in entries.iter().skip(index + 1) {
+                if a.path == b.path
+                    || base_paths[a.path].layer != base_paths[b.path].layer
+                    || a.outward.0 * b.outward.0 + a.outward.1 * b.outward.1
+                        > MAX_ENDPOINT_DOT
+                {
+                    continue;
+                }
+                let Some(a_dz) = final_dz[a.path].as_ref() else { continue };
+                let Some(b_dz) = final_dz[b.path].as_ref() else { continue };
+                let (a_value, b_value) = (a_dz[a.vertex], b_dz[b.vertex]);
+                if a_value <= 0.2
+                    || b_value <= 0.2
+                    || (a_value - b_value).abs() > MAX_CONTINUATION_STEP_M
+                {
+                    continue;
+                }
+                let target = a_value.max(b_value);
+                for endpoint in [a, b] {
+                    endpoint_targets
+                        .entry((endpoint.path, endpoint.vertex))
+                        .and_modify(|value| *value = value.max(target))
+                        .or_insert(target);
+                }
+            }
+        }
+    }
+    for (key, endpoint_entries) in &endpoints {
+        let Some(through_entries) = through_vertices.get(key) else {
+            continue;
+        };
+        for endpoint in endpoint_entries {
+            for through in through_entries {
+                if endpoint.path == through.path
+                    || base_paths[endpoint.path].layer != base_paths[through.path].layer
+                    || !through.outgoing.iter().any(|direction| {
+                        endpoint.outward.0 * direction.0
+                            + endpoint.outward.1 * direction.1
+                            >= MIN_THROUGH_DOT
+                    })
+                {
+                    continue;
+                }
+                let Some(endpoint_dz) = final_dz[endpoint.path].as_ref() else {
+                    continue;
+                };
+                let Some(through_dz) = final_dz[through.path].as_ref() else {
+                    continue;
+                };
+                let (endpoint_value, through_value) =
+                    (endpoint_dz[endpoint.vertex], through_dz[through.vertex]);
+                if endpoint_value <= 0.2
+                    || through_value <= 0.2
+                    || (endpoint_value - through_value).abs() > MAX_CONTINUATION_STEP_M
+                {
+                    continue;
+                }
+                let target = endpoint_value.max(through_value);
+                for target_vertex in [
+                    (endpoint.path, endpoint.vertex),
+                    (through.path, through.vertex),
+                ] {
+                    endpoint_targets
+                        .entry(target_vertex)
+                        .and_modify(|value| *value = value.max(target))
+                        .or_insert(target);
                 }
             }
         }
@@ -1846,6 +2105,9 @@ fn reconcile_base_vertex_consensus(
                 if let Some(&target) = edge_consensus.get(&key) {
                     *value = target;
                 }
+            }
+            if let Some(&target) = endpoint_targets.get(&(path_index, vertex)) {
+                *value = value.max(target);
             }
         }
     }
@@ -2340,6 +2602,402 @@ fn reconcile_cross_tile_copies(
             }
         }
     }
+
+    reconcile_exact_continuation_endpoints(base_paths, path_src, final_dz, m_per_unit);
+    // Grade propagation above can change several owner-path samples. Copy
+    // that final profile into non-exact buffered duplicates last so the
+    // terminal repair cannot re-diverge adjacent tiles.
+    reconcile_wholly_padded_duplicates(base_paths, path_src, final_dz);
+}
+
+/// Cross-tile fitting is terminal profile surgery, so it can move an owner
+/// endpoint after the earlier shared-vertex consensus has run. Reassert only
+/// true exact continuations afterwards: two already-lifted line endpoints in
+/// the same rendered layer, at the same global node, with opposite tangents
+/// and a modest height disagreement. This also gives wholly-padding and owner
+/// copies the same final bridge-transition node without lifting branches.
+fn reconcile_exact_continuation_endpoints(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &mut [Option<Vec<f32>>],
+    m_per_unit: f32,
+) {
+    const MAX_CONTINUATION_STEP_M: f32 = 3.0;
+    const MAX_ENDPOINT_DOT: f32 = -0.90;
+    const MAX_GRADE: f32 = 0.08;
+    const ENDPOINT_HOLD_M: f32 = 12.0;
+
+    #[derive(Clone, Copy)]
+    struct Endpoint {
+        path: usize,
+        vertex: usize,
+        outward: (f32, f32),
+    }
+
+    let snapshot = final_dz.to_vec();
+    let mut endpoints = HashMap::<(i32, i32), Vec<Endpoint>>::new();
+    for (path_index, path) in base_paths.iter().enumerate() {
+        let Some(dz) = snapshot.get(path_index).and_then(|values| values.as_ref()) else {
+            continue;
+        };
+        if path.is_polygon || path.points.len() < 2 || dz.len() != path.points.len() {
+            continue;
+        }
+        let offset = path_src[path_index].1;
+        let last = path.points.len() - 1;
+        for (vertex, inner_vertex) in [(0, 1), (last, last - 1)] {
+            let point = path.points[vertex];
+            let inner = path.points[inner_vertex];
+            let (dx, dy) = (point.0 - inner.0, point.1 - inner.1);
+            let length = (dx * dx + dy * dy).sqrt();
+            if length <= 1e-6 {
+                continue;
+            }
+            let key = (
+                ((point.0 + offset.0) * 4.0).round() as i32,
+                ((point.1 + offset.1) * 4.0).round() as i32,
+            );
+            endpoints.entry(key).or_default().push(Endpoint {
+                path: path_index,
+                vertex,
+                outward: (dx / length, dy / length),
+            });
+        }
+    }
+
+    let mut targets = HashMap::<(usize, usize), f32>::new();
+    for entries in endpoints.values() {
+        for (index, a) in entries.iter().enumerate() {
+            for b in entries.iter().skip(index + 1) {
+                if a.path == b.path
+                    || base_paths[a.path].layer != base_paths[b.path].layer
+                    || a.outward.0 * b.outward.0 + a.outward.1 * b.outward.1
+                        > MAX_ENDPOINT_DOT
+                {
+                    continue;
+                }
+                let a_value = snapshot[a.path].as_ref().unwrap()[a.vertex];
+                let b_value = snapshot[b.path].as_ref().unwrap()[b.vertex];
+                if a_value <= 0.2
+                    || b_value <= 0.2
+                    || (a_value - b_value).abs() > MAX_CONTINUATION_STEP_M
+                {
+                    continue;
+                }
+                let target = a_value.max(b_value);
+                for endpoint in [a, b] {
+                    targets
+                        .entry((endpoint.path, endpoint.vertex))
+                        .and_modify(|value| *value = value.max(target))
+                        .or_insert(target);
+                }
+            }
+        }
+    }
+
+    for ((path, vertex), target) in targets {
+        if let Some(values) = final_dz[path].as_mut() {
+            values[vertex] = values[vertex].max(target);
+            let points = &base_paths[path].points;
+            let hold_units = ENDPOINT_HOLD_M / m_per_unit.max(1e-6);
+            let grade_per_unit = MAX_GRADE * m_per_unit;
+            let mut arc = 0.0f32;
+            if vertex == 0 {
+                for index in 1..points.len() {
+                    arc += distance(points[index - 1], points[index]);
+                    let required =
+                        target - grade_per_unit * (arc - hold_units).max(0.0);
+                    if required > values[index] {
+                        values[index] = required;
+                    }
+                }
+            } else {
+                for index in (0..vertex).rev() {
+                    arc += distance(points[index], points[index + 1]);
+                    let required =
+                        target - grade_per_unit * (arc - hold_units).max(0.0);
+                    if required > values[index] {
+                        values[index] = required;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replace an independently sampled path which lives wholly in one tile's
+/// clipping padding with the profile of its authoritative copy in the
+/// adjacent tile.
+///
+/// The ordinary seam pass above handles segments which cross the nominal
+/// edge. Shortbread can also emit a complete, short way in both tiles: all
+/// of one copy's vertices lie beyond 4096 while the adjacent copy lies
+/// inside 0..4096. There is then no seam crossing or near-edge terminal to
+/// pair, even though both ribbons are drawn from the buffered tiles.
+///
+/// This pass is intentionally stricter than ordinary geometry matching:
+/// the source must be wholly outside on exactly one side, every source
+/// vertex must match a locally parallel segment in the one owning neighbor,
+/// the layer and vertical class must agree, and the matched point must lie
+/// inside that neighbor's nominal tile. All proposals read from a snapshot,
+/// and ambiguous equal-distance profiles are accepted only when they agree,
+/// so input enumeration cannot choose the winning height.
+fn reconcile_wholly_padded_duplicates(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &mut [Option<Vec<f32>>],
+) {
+    const MAX_LATERAL_GAP: f32 = 0.75;
+    const MAX_ENDPOINT_GAP: f32 = 4.0;
+    const MIN_PARALLEL_DOT: f32 = 0.98;
+    const SCORE_TIE_EPSILON: f32 = 1e-4;
+    const MAX_TIED_HEIGHT_GAP_M: f32 = 0.2;
+
+    #[derive(Clone, Copy)]
+    enum PaddingSide {
+        West,
+        East,
+        North,
+        South,
+    }
+
+    fn padding_side(path: &BasePath) -> Option<PaddingSide> {
+        let extent = EXTENT as f32;
+        let west = path.points.iter().all(|point| point.0 < 0.0);
+        let east = path.points.iter().all(|point| point.0 > extent);
+        let north = path.points.iter().all(|point| point.1 < 0.0);
+        let south = path.points.iter().all(|point| point.1 > extent);
+        match (west, east, north, south) {
+            (true, false, false, false) => Some(PaddingSide::West),
+            (false, true, false, false) => Some(PaddingSide::East),
+            (false, false, true, false) => Some(PaddingSide::North),
+            (false, false, false, true) => Some(PaddingSide::South),
+            _ => None,
+        }
+    }
+
+    fn owner_tile(src: (u32, u32), side: PaddingSide) -> Option<(u32, u32)> {
+        match side {
+            PaddingSide::West => src.0.checked_sub(1).map(|x| (x, src.1)),
+            PaddingSide::East => src.0.checked_add(1).map(|x| (x, src.1)),
+            PaddingSide::North => src.1.checked_sub(1).map(|y| (src.0, y)),
+            PaddingSide::South => src.1.checked_add(1).map(|y| (src.0, y)),
+        }
+    }
+
+    fn vertex_direction(points: &[(f32, f32)], vertex: usize) -> Option<(f32, f32)> {
+        if points.len() < 2 {
+            return None;
+        }
+        let previous = points[vertex.saturating_sub(1)];
+        let next = points[(vertex + 1).min(points.len() - 1)];
+        let (dx, dy) = (next.0 - previous.0, next.1 - previous.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        (len > 1e-5).then_some((dx / len, dy / len))
+    }
+
+    let snapshot = final_dz.to_vec();
+    let extent = EXTENT as f32;
+    let max_gap_sq = MAX_LATERAL_GAP * MAX_LATERAL_GAP;
+    let mut replacements = Vec::<(usize, Vec<f32>)>::new();
+    let mut paths_by_source = HashMap::<(u32, u32), Vec<usize>>::new();
+    for (path_index, &(source, _)) in path_src.iter().enumerate() {
+        paths_by_source.entry(source).or_default().push(path_index);
+    }
+
+    for (padding_index, padding) in base_paths.iter().enumerate() {
+        let Some(side) = padding_side(padding) else {
+            continue;
+        };
+        let Some(padding_dz) = snapshot
+            .get(padding_index)
+            .and_then(|values| values.as_ref())
+            .filter(|values| values.len() == padding.points.len())
+        else {
+            continue;
+        };
+        if padding.is_polygon || padding.points.len() < 2 {
+            continue;
+        }
+        let Some(owner) = owner_tile(path_src[padding_index].0, side) else {
+            continue;
+        };
+        let padding_offset = path_src[padding_index].1;
+        let mut candidates = Vec::<(f32, Vec<f32>)>::new();
+
+        let Some(authority_indices) = paths_by_source.get(&owner) else {
+            continue;
+        };
+        for &authority_index in authority_indices {
+            let authority = &base_paths[authority_index];
+            if authority_index == padding_index
+                || authority.is_polygon
+                || authority.points.len() < 2
+                || path_src[authority_index].0 != owner
+                || authority.layer != padding.layer
+                || authority.vertical != padding.vertical
+                || !authority.points.iter().all(|point| {
+                    point.0 >= 0.0
+                        && point.0 <= extent
+                        && point.1 >= 0.0
+                        && point.1 <= extent
+                })
+            {
+                continue;
+            }
+            let Some(authority_dz) = snapshot
+                .get(authority_index)
+                .and_then(|values| values.as_ref())
+                .filter(|values| values.len() == authority.points.len())
+            else {
+                continue;
+            };
+            let authority_offset = path_src[authority_index].1;
+            let padding_endpoints = [padding.points[0], *padding.points.last().unwrap()]
+                .map(|point| {
+                    (
+                        point.0 + padding_offset.0,
+                        point.1 + padding_offset.1,
+                    )
+                });
+            let authority_endpoints = [
+                authority.points[0],
+                *authority.points.last().unwrap(),
+            ]
+            .map(|point| {
+                (
+                    point.0 + authority_offset.0,
+                    point.1 + authority_offset.1,
+                )
+            });
+            let endpoint_gap = |reversed: bool| {
+                let target = if reversed {
+                    [authority_endpoints[1], authority_endpoints[0]]
+                } else {
+                    authority_endpoints
+                };
+                distance(padding_endpoints[0], target[0])
+                    .max(distance(padding_endpoints[1], target[1]))
+            };
+            if endpoint_gap(false).min(endpoint_gap(true)) > MAX_ENDPOINT_GAP {
+                continue;
+            }
+            let mut score = 0.0f32;
+            let mut profile = Vec::with_capacity(padding.points.len());
+            let mut matches_all = true;
+
+            for (vertex, &local_point) in padding.points.iter().enumerate() {
+                let Some(direction) = vertex_direction(&padding.points, vertex) else {
+                    matches_all = false;
+                    break;
+                };
+                let point = (
+                    local_point.0 + padding_offset.0,
+                    local_point.1 + padding_offset.1,
+                );
+                let mut best_vertex_match: Option<(f32, f32)> = None;
+                for segment in 0..authority.points.len() - 1 {
+                    let local_a = authority.points[segment];
+                    let local_b = authority.points[segment + 1];
+                    let a = (
+                        local_a.0 + authority_offset.0,
+                        local_a.1 + authority_offset.1,
+                    );
+                    let b = (
+                        local_b.0 + authority_offset.0,
+                        local_b.1 + authority_offset.1,
+                    );
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let length_sq = dx * dx + dy * dy;
+                    if length_sq <= 1e-8 {
+                        continue;
+                    }
+                    let length = length_sq.sqrt();
+                    let tangent_dot =
+                        ((direction.0 * dx + direction.1 * dy) / length).abs();
+                    if tangent_dot < MIN_PARALLEL_DOT {
+                        continue;
+                    }
+                    let t = (((point.0 - a.0) * dx + (point.1 - a.1) * dy)
+                        / length_sq)
+                        .clamp(0.0, 1.0);
+                    let local_match = (
+                        local_a.0 + (local_b.0 - local_a.0) * t,
+                        local_a.1 + (local_b.1 - local_a.1) * t,
+                    );
+                    if local_match.0 < 0.0
+                        || local_match.0 > extent
+                        || local_match.1 < 0.0
+                        || local_match.1 > extent
+                    {
+                        continue;
+                    }
+                    let match_point = (a.0 + dx * t, a.1 + dy * t);
+                    let gap_x = match_point.0 - point.0;
+                    let gap_y = match_point.1 - point.1;
+                    let gap_sq = gap_x * gap_x + gap_y * gap_y;
+                    if gap_sq > max_gap_sq {
+                        continue;
+                    }
+                    let target =
+                        authority_dz[segment] * (1.0 - t) + authority_dz[segment + 1] * t;
+                    let candidate_score = gap_sq + (1.0 - tangent_dot) * 0.25;
+                    if best_vertex_match.is_none_or(|(best, _)| candidate_score < best) {
+                        best_vertex_match = Some((candidate_score, target));
+                    }
+                }
+                let Some((vertex_score, target)) = best_vertex_match else {
+                    matches_all = false;
+                    break;
+                };
+                score += vertex_score;
+                profile.push(target);
+            }
+            if !matches_all || profile.len() != padding_dz.len() {
+                continue;
+            }
+            score /= profile.len() as f32;
+            candidates.push((score, profile));
+        }
+
+        let best_score = candidates
+            .iter()
+            .map(|candidate| candidate.0)
+            .fold(f32::MAX, f32::min);
+        let tied_profiles: Vec<&Vec<f32>> = candidates
+            .iter()
+            .filter(|candidate| candidate.0 <= best_score + SCORE_TIE_EPSILON)
+            .map(|candidate| &candidate.1)
+            .collect();
+        if tied_profiles.is_empty() {
+            continue;
+        }
+        let mut replacement = Vec::with_capacity(padding.points.len());
+        let mut ambiguous = false;
+        for vertex in 0..padding.points.len() {
+            let mut values: Vec<f32> = tied_profiles
+                .iter()
+                .map(|profile| profile[vertex])
+                .collect();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let min = values[0];
+            let max = *values.last().unwrap();
+            if max - min > MAX_TIED_HEIGHT_GAP_M {
+                ambiguous = true;
+                break;
+            }
+            replacement.push(values.iter().sum::<f32>() / values.len() as f32);
+        }
+        if !ambiguous {
+            replacements.push((padding_index, replacement));
+        }
+    }
+
+    for (path, replacement) in replacements {
+        if let Some(target) = final_dz[path].as_mut() {
+            *target = replacement;
+        }
+    }
 }
 
 const BASE_DZ_LAYERS: &[&str] =
@@ -2370,6 +3028,8 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
     let mut offset = 0;
     let mut name = String::new();
     let mut extent = 4096u64;
+    let mut keys = Vec::<String>::new();
+    let mut values = Vec::<MvtVal>::new();
     let mut features = Vec::<&[u8]>::new();
     while offset < layer.len() {
         let (field, wire) = read_protobuf_key(layer, &mut offset)?;
@@ -2379,6 +3039,10 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
                     .to_string();
             }
             (2, 2) => features.push(read_protobuf_bytes(layer, &mut offset)?),
+            (3, 2) => keys.push(
+                String::from_utf8_lossy(read_protobuf_bytes(layer, &mut offset)?).to_string(),
+            ),
+            (4, 2) => values.push(decode_value(read_protobuf_bytes(layer, &mut offset)?)?),
             (5, 0) => extent = read_varint(layer, &mut offset)?,
             _ => skip_protobuf_value(layer, &mut offset, wire)?,
         }
@@ -2389,11 +3053,13 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
     let scale = EXTENT as f32 / extent.max(1) as f32;
     for (feature_index, feature) in features.iter().enumerate() {
         let mut fo = 0;
+        let mut packed_tags: &[u8] = &[];
         let mut geometry_type = 0u64;
         let mut geometry: &[u8] = &[];
         while fo < feature.len() {
             let (field, wire) = read_protobuf_key(feature, &mut fo)?;
             match (field, wire) {
+                (2, 2) => packed_tags = read_protobuf_bytes(feature, &mut fo)?,
                 (3, 0) => geometry_type = read_varint(feature, &mut fo)?,
                 (4, 2) => geometry = read_protobuf_bytes(feature, &mut fo)?,
                 _ => skip_protobuf_value(feature, &mut fo, wire)?,
@@ -2402,6 +3068,25 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
         if geometry_type != 2 && geometry_type != 3 {
             continue;
         }
+        let mut bridge = name == "bridges";
+        let mut tunnel = false;
+        let mut osm_layer = None;
+        let mut to = 0;
+        while to < packed_tags.len() {
+            let key_index = read_varint(packed_tags, &mut to)? as usize;
+            let value_index = read_varint(packed_tags, &mut to)? as usize;
+            let (Some(key), Some(value)) = (keys.get(key_index), values.get(value_index)) else {
+                continue;
+            };
+            match key.as_str() {
+                "bridge" => bridge |= value.is_truthy(),
+                "tunnel" => tunnel |= value.is_truthy(),
+                "osm_layer" => osm_layer = Some(value),
+                _ => {}
+            }
+        }
+        let vertical =
+            VerticalClass::from_base_feature(&name, bridge, tunnel, osm_layer);
         let mut paths: Vec<Vec<(f32, f32)>> = Vec::new();
         let mut path: Vec<(f32, f32)> = Vec::new();
         let (mut cx, mut cy) = (0i64, 0i64);
@@ -2444,6 +3129,7 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
                 feature: feature_index as u32,
                 path: path_index as u32,
                 is_polygon,
+                vertical,
                 points,
             });
         }
@@ -2494,15 +3180,25 @@ fn annotate_base_tiles(
             let (px, py) = points[index];
             let (gx, gy) = (px + global_offset.0, py + global_offset.1);
             let sampled = if base_path.is_polygon {
-                field.sample(gx, gy, None, 2.4)
+                field.sample(gx, gy, None, 2.4, Some(base_path.vertical))
             } else {
                 let endpoint = index == 0 || index == count - 1;
                 let previous = points[index.saturating_sub(1)];
                 let next = points[(index + 1).min(count - 1)];
                 let dir = (next.0 - previous.0, next.1 - previous.1);
-                let gated = field.sample(gx, gy, Some(dir), 1.2);
+                let gated =
+                    field.sample(gx, gy, Some(dir), 1.2, Some(base_path.vertical));
                 if endpoint {
-                    gated.or_else(|| field.sample_gated(gx, gy, Some(dir), 0.8, 0.5))
+                    gated.or_else(|| {
+                        field.sample_gated(
+                            gx,
+                            gy,
+                            Some(dir),
+                            0.8,
+                            0.5,
+                            Some(base_path.vertical),
+                        )
+                    })
                 } else {
                     gated
                 }
@@ -2552,9 +3248,19 @@ fn annotate_base_tiles(
                 let next = points[(index + 1).min(count - 1)];
                 let dir = (next.0 - previous.0, next.1 - previous.1);
                 let (gx, gy) = (px + global_offset.0, py + global_offset.1);
-                let gated = tunnel_field.sample(gx, gy, Some(dir), 1.2);
+                let gated =
+                    tunnel_field.sample(gx, gy, Some(dir), 1.2, Some(base_path.vertical));
                 let sampled = if endpoint {
-                    gated.or_else(|| tunnel_field.sample_gated(gx, gy, Some(dir), 0.8, 0.5))
+                    gated.or_else(|| {
+                        tunnel_field.sample_gated(
+                            gx,
+                            gy,
+                            Some(dir),
+                            0.8,
+                            0.5,
+                            Some(base_path.vertical),
+                        )
+                    })
                 } else {
                     gated
                 };
@@ -2623,7 +3329,9 @@ fn annotate_base_tiles(
             for index in 0..count {
                 let (px, py) = points[index];
                 let (gx, gy) = (px + global_offset.0, py + global_offset.1);
-                if let Some((height, dist, _)) = field.sample(gx, gy, None, 2.5) {
+                if let Some((height, dist, _)) =
+                    field.sample(gx, gy, None, 2.5, Some(base_path.vertical))
+                {
                     if height > 0.2 {
                         twin[index] = height;
                         dists.push(dist);
@@ -3159,12 +3867,260 @@ mod tests {
     use super::*;
 
     #[test]
+    fn base_vertical_class_parses_string_and_numeric_osm_layers() {
+        for layer in [
+            MvtVal::Str("-1".to_string()),
+            MvtVal::Num(-2.0),
+        ] {
+            assert_eq!(
+                VerticalClass::from_base_feature(
+                    "streets",
+                    false,
+                    false,
+                    Some(&layer)
+                ),
+                VerticalClass::Tunnel
+            );
+        }
+        for layer in [
+            MvtVal::Str("1".to_string()),
+            MvtVal::Num(2.0),
+        ] {
+            assert_eq!(
+                VerticalClass::from_base_feature(
+                    "streets",
+                    false,
+                    false,
+                    Some(&layer)
+                ),
+                VerticalClass::Elevated
+            );
+        }
+        for layer in [
+            MvtVal::Str("0".to_string()),
+            MvtVal::Num(0.0),
+        ] {
+            assert_eq!(
+                VerticalClass::from_base_feature(
+                    "streets",
+                    false,
+                    false,
+                    Some(&layer)
+                ),
+                VerticalClass::Surface
+            );
+        }
+        assert_eq!(
+            VerticalClass::from_base_feature("bridges", false, false, None),
+            VerticalClass::Elevated
+        );
+        assert_eq!(
+            VerticalClass::from_base_feature(
+                "streets",
+                true,
+                false,
+                Some(&MvtVal::Num(-1.0))
+            ),
+            VerticalClass::Elevated
+        );
+        assert_eq!(
+            VerticalClass::from_base_feature(
+                "streets",
+                false,
+                true,
+                Some(&MvtVal::Num(2.0))
+            ),
+            VerticalClass::Tunnel
+        );
+    }
+
+    #[test]
+    fn semantic_field_sampling_is_insertion_order_independent() {
+        for surface_first in [false, true] {
+            let mut field = SolvedField::default();
+            let push_surface = |field: &mut SolvedField| {
+                field.push(
+                    -10.0,
+                    1.0,
+                    10.0,
+                    -1.0,
+                    0.0,
+                    0.0,
+                    VerticalClass::Surface,
+                );
+            };
+            let push_bridge = |field: &mut SolvedField| {
+                field.push(
+                    -10.0,
+                    -1.0,
+                    10.0,
+                    1.0,
+                    6.5,
+                    6.5,
+                    VerticalClass::Elevated,
+                );
+            };
+            if surface_first {
+                push_surface(&mut field);
+                push_bridge(&mut field);
+            } else {
+                push_bridge(&mut field);
+                push_surface(&mut field);
+            }
+
+            let surface = field
+                .sample(
+                    0.0,
+                    0.0,
+                    Some((1.0, 0.0)),
+                    1.2,
+                    Some(VerticalClass::Surface),
+                )
+                .unwrap();
+            let elevated = field
+                .sample(
+                    0.0,
+                    0.0,
+                    Some((1.0, 0.0)),
+                    1.2,
+                    Some(VerticalClass::Elevated),
+                )
+                .unwrap();
+            assert!(surface.0.abs() < 1e-6);
+            assert!((elevated.0 - 6.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn semantic_field_same_class_equal_distance_is_order_independent() {
+        for high_first in [false, true] {
+            let mut field = SolvedField::default();
+            let push_low = |field: &mut SolvedField| {
+                field.push(
+                    -10.0,
+                    -1.0,
+                    10.0,
+                    -1.0,
+                    4.0,
+                    4.0,
+                    VerticalClass::Elevated,
+                );
+            };
+            let push_high = |field: &mut SolvedField| {
+                field.push(
+                    -10.0,
+                    1.0,
+                    10.0,
+                    1.0,
+                    7.0,
+                    7.0,
+                    VerticalClass::Elevated,
+                );
+            };
+            if high_first {
+                push_high(&mut field);
+                push_low(&mut field);
+            } else {
+                push_low(&mut field);
+                push_high(&mut field);
+            }
+            let sampled = field
+                .sample(
+                    0.0,
+                    0.0,
+                    Some((1.0, 0.0)),
+                    1.2,
+                    Some(VerticalClass::Elevated),
+                )
+                .unwrap();
+            assert!((sampled.0 - 7.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn semantic_field_sampling_keeps_nearest_fallback() {
+        let mut field = SolvedField::default();
+        field.push(
+            -10.0,
+            0.0,
+            10.0,
+            0.0,
+            6.5,
+            6.5,
+            VerticalClass::Elevated,
+        );
+        field.push(
+            -10.0,
+            1.0,
+            10.0,
+            1.0,
+            0.0,
+            0.0,
+            VerticalClass::Surface,
+        );
+
+        let sampled = field
+            .sample(
+                0.0,
+                0.0,
+                Some((1.0, 0.0)),
+                1.2,
+                Some(VerticalClass::Surface),
+            )
+            .unwrap();
+        assert!((sampled.0 - 6.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn semantic_sampling_survives_gore_twin_resample() {
+        let mut field = SolvedField::default();
+        field.push(
+            100.0,
+            100.0,
+            200.0,
+            100.0,
+            6.5,
+            6.5,
+            VerticalClass::Elevated,
+        );
+        field.push(
+            100.0,
+            100.5,
+            200.0,
+            100.5,
+            0.0,
+            0.0,
+            VerticalClass::Surface,
+        );
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 38,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(100.0, 100.0), (150.0, 100.0), (200.0, 100.0)],
+        };
+
+        let annotated = annotate_base_tiles(
+            vec![((1, 2), (0.0, 0.0), vec![base_path])],
+            &field,
+            &SolvedField::default(),
+            0.36,
+        );
+        assert!(
+            annotated.is_empty(),
+            "ordinary path was re-lifted by a later sampling pass"
+        );
+    }
+
+    #[test]
     fn reconciles_reversed_sibling_carriageways_only() {
         let path = |feature, points: &[(f32, f32)]| BasePath {
             layer: "streets".to_string(),
             feature,
             path: 0,
             is_polygon: false,
+            vertical: VerticalClass::Surface,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -3197,6 +4153,7 @@ mod tests {
             feature,
             path: 0,
             is_polygon: false,
+            vertical: VerticalClass::Surface,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -3251,12 +4208,330 @@ mod tests {
     }
 
     #[test]
+    fn reconciles_wholly_padded_duplicate_from_authoritative_neighbor() {
+        let path = |layer: &str, feature, points: &[(f32, f32)]| BasePath {
+            layer: layer.to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Elevated,
+            points: points.to_vec(),
+        };
+
+        for padding_first in [false, true] {
+            for padding_reversed in [false, true] {
+                let mut padding_points =
+                    vec![(3787.0, 4102.0), (3812.0, 4128.0), (3850.0, 4160.0)];
+                let mut padding_heights = vec![16.6, 16.8, 15.3];
+                if padding_reversed {
+                    padding_points.reverse();
+                    padding_heights.reverse();
+                }
+                let padding = || path("streets", 107, &padding_points);
+                let authority = || {
+                    path(
+                        "streets",
+                        168,
+                        &[(3787.0, 6.0), (3812.0, 32.0), (3853.0, 66.0)],
+                    )
+                };
+                let (paths, sources, mut dz) = if padding_first {
+                    (
+                        vec![padding(), authority()],
+                        vec![
+                            ((8415, 5382), (0.0, 0.0)),
+                            ((8415, 5383), (0.0, 4096.0)),
+                        ],
+                        vec![
+                            Some(padding_heights),
+                            Some(vec![17.6, 16.8, 15.2]),
+                        ],
+                    )
+                } else {
+                    (
+                        vec![authority(), padding()],
+                        vec![
+                            ((8415, 5383), (0.0, 4096.0)),
+                            ((8415, 5382), (0.0, 0.0)),
+                        ],
+                        vec![
+                            Some(vec![17.6, 16.8, 15.2]),
+                            Some(padding_heights),
+                        ],
+                    )
+                };
+
+                reconcile_wholly_padded_duplicates(&paths, &sources, &mut dz);
+
+                let padding_index =
+                    paths.iter().position(|path| path.feature == 107).unwrap();
+                let authority_index =
+                    paths.iter().position(|path| path.feature == 168).unwrap();
+                let reconciled = dz[padding_index].as_ref().unwrap();
+                let expected = if padding_reversed {
+                    vec![15.31, 16.8, 17.6]
+                } else {
+                    vec![17.6, 16.8, 15.31]
+                };
+                for (&actual, expected) in reconciled.iter().zip(expected) {
+                    assert!((actual - expected).abs() < 0.01);
+                }
+                assert_eq!(
+                    dz[authority_index].as_ref().unwrap(),
+                    &[17.6, 16.8, 15.2]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_padding_consensus_flushes_owner_and_padding_continuations() {
+        let path =
+            |feature, vertical, points: &[(f32, f32)]| BasePath {
+                layer: "streets".to_string(),
+                feature,
+                path: 0,
+                is_polygon: false,
+                vertical,
+                points: points.to_vec(),
+            };
+
+        for reversed_order in [false, true] {
+            let mut entries = vec![
+                (
+                    path(
+                        77,
+                        VerticalClass::Surface,
+                        &[(3777.0, 4087.0), (3787.0, 4102.0)],
+                    ),
+                    ((8415, 5382), (0.0, 0.0)),
+                    Some(vec![17.7, 17.7]),
+                ),
+                (
+                    path(
+                        107,
+                        VerticalClass::Elevated,
+                        &[(3787.0, 4102.0), (3812.0, 4128.0), (3850.0, 4160.0)],
+                    ),
+                    ((8415, 5382), (0.0, 0.0)),
+                    Some(vec![16.6, 16.8, 15.3]),
+                ),
+                (
+                    path(
+                        121,
+                        VerticalClass::Surface,
+                        &[(3777.0, -9.0), (3787.0, 6.0)],
+                    ),
+                    ((8415, 5383), (0.0, 4096.0)),
+                    Some(vec![17.7, 17.7]),
+                ),
+                (
+                    path(
+                        168,
+                        VerticalClass::Elevated,
+                        &[(3787.0, 6.0), (3812.0, 32.0), (3853.0, 66.0)],
+                    ),
+                    ((8415, 5383), (0.0, 4096.0)),
+                    Some(vec![16.9, 16.8, 15.2]),
+                ),
+            ];
+            if reversed_order {
+                entries.reverse();
+            }
+            let mut paths = Vec::new();
+            let mut sources = Vec::new();
+            let mut dz = Vec::new();
+            for (path, source, heights) in entries {
+                paths.push(path);
+                sources.push(source);
+                dz.push(heights);
+            }
+
+            reconcile_cross_tile_copies(&paths, &sources, &mut dz, 0.36472446);
+
+            let endpoint = |feature, at_start| {
+                let index = paths
+                    .iter()
+                    .position(|path| path.feature == feature)
+                    .unwrap();
+                let values = dz[index].as_ref().unwrap();
+                values[if at_start { 0 } else { values.len() - 1 }]
+            };
+            for value in [
+                endpoint(77, false),
+                endpoint(107, true),
+                endpoint(121, false),
+                endpoint(168, true),
+            ] {
+                assert!((value - 17.7).abs() < 0.001, "{value}");
+            }
+
+            // The exact-node repair raises and grade-blends the owner path.
+            // Its slightly drifted padding duplicate must receive that final
+            // profile, rather than retaining the pre-blend samples.
+            let profile = |feature| {
+                let index = paths
+                    .iter()
+                    .position(|path| path.feature == feature)
+                    .unwrap();
+                dz[index].as_ref().unwrap()
+            };
+            let padding = profile(107);
+            let authority = profile(168);
+            assert!((padding[0] - authority[0]).abs() < 0.001);
+            assert!((padding[1] - authority[1]).abs() < 0.001);
+            let t = (38.0 * 41.0 + 32.0 * 34.0) / (41.0 * 41.0 + 34.0 * 34.0);
+            let projected = authority[1] * (1.0 - t) + authority[2] * t;
+            assert!(
+                (padding[2] - projected).abs() < 0.01,
+                "final padding profile diverged: padding={padding:?} authority={authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_cross_tile_endpoint_consensus_blends_into_neighbors() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Elevated,
+            points: points.to_vec(),
+        };
+
+        for reversed_order in [false, true] {
+            let mut entries = vec![
+                (
+                    path(1, &[(0.0, 0.0), (20.0, 0.0)]),
+                    ((11, 20), (4096.0, 0.0)),
+                    Some(vec![6.0, 5.0]),
+                ),
+                (
+                    path(2, &[(4076.0, 0.0), (4096.0, 0.0)]),
+                    ((10, 20), (0.0, 0.0)),
+                    Some(vec![8.0, 8.0]),
+                ),
+            ];
+            if reversed_order {
+                entries.reverse();
+            }
+            let mut paths = Vec::new();
+            let mut sources = Vec::new();
+            let mut dz = Vec::new();
+            for (path, source, heights) in entries {
+                paths.push(path);
+                sources.push(source);
+                dz.push(heights);
+            }
+
+            reconcile_exact_continuation_endpoints(
+                &paths,
+                &sources,
+                &mut dz,
+                1.0,
+            );
+
+            let low_index =
+                paths.iter().position(|path| path.feature == 1).unwrap();
+            let high_index =
+                paths.iter().position(|path| path.feature == 2).unwrap();
+            let low = dz[low_index].as_ref().unwrap();
+            let high = dz[high_index].as_ref().unwrap();
+            assert!((low[0] - 8.0).abs() < 1e-6);
+            assert!((high[1] - 8.0).abs() < 1e-6);
+            assert!(
+                (low[1] - 7.36).abs() < 1e-5,
+                "endpoint adjustment did not blend inward: {low:?}"
+            );
+            assert!(
+                low[0] - low[1] <= 0.64 + 1e-5,
+                "terminal cliff survived: {low:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wholly_padded_reconciliation_rejects_parallel_and_other_layer_paths() {
+        let path =
+            |layer: &str, feature, vertical, points: &[(f32, f32)]| BasePath {
+                layer: layer.to_string(),
+                feature,
+                path: 0,
+                is_polygon: false,
+                vertical,
+                points: points.to_vec(),
+            };
+        let paths = vec![
+            path(
+                "streets",
+                107,
+                VerticalClass::Elevated,
+                &[(3787.0, 4102.0), (3812.0, 4128.0), (3850.0, 4160.0)],
+            ),
+            // A nearby parallel street in the owning tile is outside the
+            // sub-unit duplicate tolerance.
+            path(
+                "streets",
+                169,
+                VerticalClass::Elevated,
+                &[(3787.0, 8.0), (3812.0, 34.0), (3853.0, 68.0)],
+            ),
+            // Coincident label geometry is not the same physical layer.
+            path(
+                "street_labels",
+                170,
+                VerticalClass::Elevated,
+                &[(3787.0, 6.0), (3812.0, 32.0), (3853.0, 66.0)],
+            ),
+            // Coincident surface geometry is not the elevated duplicate.
+            path(
+                "streets",
+                171,
+                VerticalClass::Surface,
+                &[(3787.0, 6.0), (3812.0, 32.0), (3853.0, 66.0)],
+            ),
+            // A path crossing the nominal edge is handled by the ordinary
+            // seam pass and is never rewritten as wholly-padding geometry.
+            path(
+                "streets",
+                172,
+                VerticalClass::Elevated,
+                &[(3787.0, 4090.0), (3812.0, 4128.0)],
+            ),
+        ];
+        let sources = vec![
+            ((8415, 5382), (0.0, 0.0)),
+            ((8415, 5383), (0.0, 4096.0)),
+            ((8415, 5383), (0.0, 4096.0)),
+            ((8415, 5383), (0.0, 4096.0)),
+            ((8415, 5382), (0.0, 0.0)),
+        ];
+        let mut dz = vec![
+            Some(vec![16.6, 16.8, 15.3]),
+            Some(vec![30.0, 30.0, 30.0]),
+            Some(vec![25.0, 25.0, 25.0]),
+            Some(vec![20.0, 20.0, 20.0]),
+            Some(vec![7.0, 8.0]),
+        ];
+
+        reconcile_wholly_padded_duplicates(&paths, &sources, &mut dz);
+
+        assert_eq!(dz[0].as_ref().unwrap(), &[16.6, 16.8, 15.3]);
+        assert_eq!(dz[1].as_ref().unwrap(), &[30.0, 30.0, 30.0]);
+        assert_eq!(dz[2].as_ref().unwrap(), &[25.0, 25.0, 25.0]);
+        assert_eq!(dz[3].as_ref().unwrap(), &[20.0, 20.0, 20.0]);
+        assert_eq!(dz[4].as_ref().unwrap(), &[7.0, 8.0]);
+    }
+
+    #[test]
     fn reconciles_edge_consensus_before_cross_tile_plane() {
         let path = |feature, points: &[(f32, f32)]| BasePath {
             layer: "streets".to_string(),
             feature,
             path: 0,
             is_polygon: false,
+            vertical: VerticalClass::Surface,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -3301,12 +4576,79 @@ mod tests {
     }
 
     #[test]
+    fn reconciles_lifted_collinear_endpoint_continuations() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            path(1, &[(90.0, 100.0), (100.0, 100.0)]),
+            path(2, &[(100.0, 100.0), (110.0, 101.0)]),
+            path(3, &[(110.0, 101.0), (120.0, 102.0)]),
+            // A lifted perpendicular branch shares the first node but is
+            // not the physical continuation and must remain independent.
+            path(4, &[(100.0, 100.0), (100.0, 110.0)]),
+        ];
+        let sources = vec![((10, 20), (0.0, 0.0)); paths.len()];
+        let mut dz = vec![
+            Some(vec![3.0, 3.0]),
+            Some(vec![5.2, 5.5]),
+            Some(vec![7.0, 7.2]),
+            Some(vec![8.0, 8.0]),
+        ];
+
+        reconcile_base_vertex_consensus(&paths, &sources, &mut dz);
+
+        assert_eq!(dz[0].as_ref().unwrap(), &[3.0, 5.2]);
+        assert_eq!(dz[1].as_ref().unwrap(), &[5.2, 7.0]);
+        assert_eq!(dz[2].as_ref().unwrap(), &[7.0, 7.2]);
+        assert_eq!(dz[3].as_ref().unwrap(), &[8.0, 8.0]);
+    }
+
+    #[test]
+    fn reconciles_lifted_endpoint_into_interior_gore() {
+        let path = |feature, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            // A high road endpoint arrives from the north.
+            path(1, &[(100.0, 90.0), (100.0, 100.0)]),
+            // The lower continuation is an interior vertex of a narrow V.
+            path(2, &[(98.0, 110.0), (100.0, 100.0), (102.0, 110.0)]),
+            // An unrelated through road at the same node is perpendicular.
+            path(3, &[(90.0, 100.0), (100.0, 100.0), (110.0, 100.0)]),
+        ];
+        let sources = vec![((10, 20), (0.0, 0.0)); paths.len()];
+        let mut dz = vec![
+            Some(vec![8.5, 8.5]),
+            Some(vec![5.5, 5.5, 5.5]),
+            Some(vec![4.0, 4.0, 4.0]),
+        ];
+
+        reconcile_base_vertex_consensus(&paths, &sources, &mut dz);
+
+        assert_eq!(dz[0].as_ref().unwrap(), &[8.5, 8.5]);
+        assert_eq!(dz[1].as_ref().unwrap(), &[5.5, 8.5, 5.5]);
+        assert_eq!(dz[2].as_ref().unwrap(), &[4.0, 4.0, 4.0]);
+    }
+
+    #[test]
     fn reconciles_same_side_quantized_terminal_overlap() {
         let path = |layer: &str, feature, points: &[(f32, f32)]| BasePath {
             layer: layer.to_string(),
             feature,
             path: 0,
             is_polygon: false,
+            vertical: VerticalClass::Surface,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -3581,7 +4923,7 @@ mod probe_amstelveenseweg {
             solve_bbox(14, (8414, 5386), (8415, 5387, 8415, 5387), &decoded, &mut ahn);
         // Field height right at the seam where the metro crosses:
         for probe in [(64.0f32, 960.0f32), (10.0, 990.0), (200.0, 900.0), (400.0, 850.0)] {
-            let ungated = field.sample(probe.0, probe.1, None, 3.0);
+            let ungated = field.sample(probe.0, probe.1, None, 3.0, None);
             println!("field at {:?}: {:?}", probe, ungated);
         }
         // Base paths near the seam:
@@ -3607,7 +4949,11 @@ mod probe_amstelveenseweg {
                 let previous = path.points[index.saturating_sub(1)];
                 let next = path.points[(index + 1).min(count - 1)];
                 let dir = (next.0 - previous.0, next.1 - previous.1);
-                sampled.push(field.sample(px, py, Some(dir), 1.2).map(|(z, d, _)| (z, d)));
+                sampled.push(
+                    field
+                        .sample(px, py, Some(dir), 1.2, None)
+                        .map(|(z, d, _)| (z, d)),
+                );
             }
             println!(
                 "L={} F={} P={} pts {} first ({:.0},{:.0}) samples {:?}",

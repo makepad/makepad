@@ -289,7 +289,7 @@ impl RoadJoinMeta {
             Some("service") => RoadJoinFamily::Service,
             Some("living_street") => RoadJoinFamily::LivingStreet,
             Some("pedestrian") => RoadJoinFamily::Pedestrian,
-            Some("footway") => RoadJoinFamily::Footway,
+            Some("footway" | "steps") => RoadJoinFamily::Footway,
             Some("cycleway") => RoadJoinFamily::Cycleway,
             Some("path") => RoadJoinFamily::Path,
             Some("track") => RoadJoinFamily::Track,
@@ -328,21 +328,23 @@ struct RoadTierGradeCorrection {
 /// of a wider/higher-rank through road. Vector-tile feature splitting does
 /// not guarantee that such a merge shares an exact node: the link can end
 /// against the middle of the mainline's segment. In that case independent
-/// dz profiles leave the link deck below the mainline and expose its round
-/// fascia as a ledge.
+/// dz profiles can leave the link deck above or below the mainline and
+/// expose its round fascia as a ledge.
 ///
 /// This deliberately requires an acute, overlapping endpoint-to-through
 /// relationship. Perpendicular crossings, target endpoints, and same-tier
 /// carriageways are rejected. Large height differences are accepted only
-/// for a typed link joining a non-link road of the same family.
+/// for a typed link joining a non-link road of the same family. That typed
+/// relationship is also the only one allowed to lower an endpoint: the
+/// wider through road is authoritative in either direction.
 fn endpoint_to_through_grade_corrections(
     ways: &[RoadTierJoinWay],
 ) -> Vec<RoadTierGradeCorrection> {
     const MIN_TANGENT_DOT: f32 = 0.72;
     const LARGE_JOIN_TANGENT_DOT: f32 = 0.90;
     const MAX_RAISE_M: f32 = 3.0;
-    const MAX_TYPED_RAISE_M: f32 = 40.0;
-    const DZ_EPSILON_M: f32 = 0.05;
+    const MAX_TYPED_CORRECTION_M: f32 = 40.0;
+    const CORRECTION_EPSILON_M: f32 = 0.001;
 
     let mut corrections = Vec::new();
     for source in ways {
@@ -445,23 +447,28 @@ fn endpoint_to_through_grade_corrections(
                     }
                     let target_dz = target.dz[segment_index]
                         + (target.dz[segment_index + 1] - target.dz[segment_index]) * t;
-                    let raise = target_dz - source_dz;
+                    let delta = target_dz - source_dz;
                     let typed_link_join = source.meta.is_link
                         && !target.meta.is_link
                         && source.meta.same_known_family(target.meta);
-                    let max_raise = if typed_link_join {
-                        MAX_TYPED_RAISE_M
+                    if delta < -CORRECTION_EPSILON_M && !typed_link_join {
+                        continue;
+                    }
+                    let max_delta = if typed_link_join {
+                        MAX_TYPED_CORRECTION_M
                     } else {
                         MAX_RAISE_M
                     };
-                    if raise < -DZ_EPSILON_M || raise > max_raise {
+                    if delta.abs() > max_delta {
                         continue;
                     }
                     // An 8-40 m correction is safe only at the actual nose
-                    // of a typed gore. Merely overlapping wide ribbons or
-                    // running parallel nearby must not hoist another deck.
+                    // of a typed gore. A downward correction likewise needs
+                    // this stronger authority: merely overlapping wide
+                    // ribbons or running parallel nearby must not move
+                    // another deck.
                     let large_join_gap = (source.half_width * 0.25).max(0.35);
-                    if raise > MAX_RAISE_M
+                    if (delta < -CORRECTION_EPSILON_M || delta > MAX_RAISE_M)
                         && (tangent_dot < LARGE_JOIN_TANGENT_DOT
                             || target.key.sort_rank <= source.key.sort_rank
                             || target.half_width <= source.half_width * 1.1
@@ -475,7 +482,7 @@ fn endpoint_to_through_grade_corrections(
                     // parallel road when the geometry is otherwise tied.
                     let score = distance_sq / overlap_sq
                         + (1.0 - tangent_dot) * 0.5
-                        + raise.max(0.0) * 0.01;
+                        + delta.abs() * 0.01;
                     if best.is_none_or(|(best_score, _)| score < best_score) {
                         best = Some((score, target_dz));
                     }
@@ -490,6 +497,242 @@ fn endpoint_to_through_grade_corrections(
         }
     }
     corrections
+}
+
+/// Find same-height road ends which land on a physical continuation in
+/// another paint tier. Most joins land on the target's interior. A
+/// generalized link can instead stop beside the target's cap; that is still
+/// a safe butt joint when the target cap has its own exact, opposite
+/// continuation. The latter rule is deliberately one-way (typed link to
+/// same-family non-link) so nearby parallel decks cannot suppress each
+/// other's exposed ends.
+///
+fn endpoint_to_through_flush_ends(
+    ways: &[RoadTierJoinWay],
+) -> std::collections::HashSet<RoadTierEnd> {
+    const MIN_TANGENT_DOT: f32 = 0.90;
+    const MAX_DZ_GAP_M: f32 = 0.30;
+    const MIN_CENTERLINE_GAP: f32 = 0.35;
+    const MAX_NODE_DISTANCE: f32 = 0.20;
+    const MAX_CONTINUATION_DOT: f32 = -0.90;
+
+    #[derive(Clone, Copy)]
+    struct Endpoint {
+        point: (f32, f32),
+        outward: (f32, f32),
+        dz: f32,
+    }
+
+    let endpoints: Vec<[Option<Endpoint>; 2]> = ways
+        .iter()
+        .map(|way| {
+            if way.points.len() < 2 || way.dz.len() != way.points.len() {
+                return [None, None];
+            }
+            let endpoint = |is_start: bool| {
+                let (end_index, inner_index) = if is_start {
+                    (0, 1)
+                } else {
+                    (way.points.len() - 1, way.points.len() - 2)
+                };
+                let point = way.points[end_index];
+                let inner = way.points[inner_index];
+                let (out_x, out_y) = (point.0 - inner.0, point.1 - inner.1);
+                let out_len = (out_x * out_x + out_y * out_y).sqrt();
+                (out_len > 1e-5).then_some(Endpoint {
+                    point,
+                    outward: (out_x / out_len, out_y / out_len),
+                    dz: way.dz[end_index],
+                })
+            };
+            [endpoint(true), endpoint(false)]
+        })
+        .collect();
+
+    // Precompute the exact through proof once. Looking it up inside every
+    // source/target pair keeps this pass quadratic rather than rescanning all
+    // ways a third time for every candidate.
+    let continuations: Vec<[Vec<usize>; 2]> = ways
+        .iter()
+        .enumerate()
+        .map(|(target_index, target)| {
+            std::array::from_fn(|target_end_slot| {
+                let Some(target_end) = endpoints[target_index][target_end_slot] else {
+                    return Vec::new();
+                };
+                ways.iter()
+                    .enumerate()
+                    .filter(|(continuation_index, continuation)| {
+                        let min_width = target.half_width.min(continuation.half_width);
+                        let max_width = target.half_width.max(continuation.half_width);
+                        *continuation_index != target_index
+                            && target.meta.same_known_family(continuation.meta)
+                            && target.meta.is_link == continuation.meta.is_link
+                            && min_width > 1e-5
+                            && max_width / min_width <= 1.25
+                            && endpoints[*continuation_index]
+                                .iter()
+                                .flatten()
+                                .any(|continuation_end| {
+                                    let dx = continuation_end.point.0 - target_end.point.0;
+                                    let dy = continuation_end.point.1 - target_end.point.1;
+                                    dx * dx + dy * dy
+                                        <= MAX_NODE_DISTANCE * MAX_NODE_DISTANCE
+                                        && target_end.outward.0 * continuation_end.outward.0
+                                            + target_end.outward.1
+                                                * continuation_end.outward.1
+                                            <= MAX_CONTINUATION_DOT
+                                        && target_end.dz > 0.2
+                                        && continuation_end.dz > 0.2
+                                        && (target_end.dz - continuation_end.dz).abs()
+                                            < MAX_DZ_GAP_M
+                                })
+                    })
+                    .map(|(continuation_index, _)| continuation_index)
+                    .collect()
+            })
+        })
+        .collect();
+
+    let mut flush = std::collections::HashSet::new();
+    for (source_index, source) in ways.iter().enumerate() {
+        if source.points.len() < 2 || source.dz.len() != source.points.len() {
+            continue;
+        }
+        for is_start in [true, false] {
+            let (end_index, inner_index) = if is_start {
+                (0, 1)
+            } else {
+                (source.points.len() - 1, source.points.len() - 2)
+            };
+            let point = source.points[end_index];
+            if point.0 < 0.0
+                || point.0 > TILE_SIZE as f32
+                || point.1 < 0.0
+                || point.1 > TILE_SIZE as f32
+                || source.dz[end_index] <= 0.2
+            {
+                continue;
+            }
+            let inner = source.points[inner_index];
+            let (out_x, out_y) = (point.0 - inner.0, point.1 - inner.1);
+            let out_len = (out_x * out_x + out_y * out_y).sqrt();
+            if out_len <= 1e-5 {
+                continue;
+            }
+            let outward = (out_x / out_len, out_y / out_len);
+
+            'targets: for (target_index, target) in ways.iter().enumerate() {
+                if target.key == source.key
+                    || target.points.len() < 2
+                    || target.dz.len() != target.points.len()
+                    || !source.meta.same_known_family(target.meta)
+                {
+                    continue;
+                }
+
+                // A link may terminate beside a mainline CAP rather than on
+                // its centerline. Accept that generalized gore only when the
+                // cap is independently proven to be a through node by a
+                // third, exact opposite continuation at the same deck height.
+                // Only the link end becomes flush; the through-road pair
+                // already owns its ordinary exact-node joint.
+                if source.meta.is_link && !target.meta.is_link {
+                    let topology_reach =
+                        (source.half_width + target.half_width - 0.05)
+                        .max(0.05);
+                    let topology_reach_sq = topology_reach * topology_reach;
+                    for (target_end_slot, target_end) in
+                        endpoints[target_index].iter().enumerate()
+                    {
+                        let Some(target_end) = target_end else {
+                            continue;
+                        };
+                        let dx = point.0 - target_end.point.0;
+                        let dy = point.1 - target_end.point.1;
+                        let tangent_dot =
+                            (outward.0 * target_end.outward.0
+                                + outward.1 * target_end.outward.1)
+                                .abs();
+                        if dx * dx + dy * dy <= topology_reach_sq
+                            && tangent_dot >= MIN_TANGENT_DOT
+                            && target_end.dz > 0.2
+                            && (source.dz[end_index] - target_end.dz).abs()
+                                < MAX_DZ_GAP_M
+                            && continuations[target_index][target_end_slot]
+                                .iter()
+                                .any(|&continuation_index| {
+                                    continuation_index != source_index
+                                })
+                        {
+                            flush.insert((source.key, source.way_index, is_start));
+                            break 'targets;
+                        }
+                    }
+                }
+
+                let total_len: f32 = target
+                    .points
+                    .windows(2)
+                    .map(|pair| {
+                        let dx = pair[1].0 - pair[0].0;
+                        let dy = pair[1].1 - pair[0].1;
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .sum();
+                if total_len <= 1e-4 {
+                    continue;
+                }
+                let through_margin = (target.half_width * 0.5)
+                    .max(0.25)
+                    .min(total_len * 0.25);
+                let centerline_gap =
+                    MIN_CENTERLINE_GAP.max(source.half_width.min(target.half_width) * 0.25);
+                let centerline_gap_sq = centerline_gap * centerline_gap;
+                let mut along_before = 0.0;
+
+                for segment_index in 0..target.points.len() - 1 {
+                    let a = target.points[segment_index];
+                    let b = target.points[segment_index + 1];
+                    let (seg_x, seg_y) = (b.0 - a.0, b.1 - a.1);
+                    let seg_sq = seg_x * seg_x + seg_y * seg_y;
+                    if seg_sq <= 1e-8 {
+                        continue;
+                    }
+                    let seg_len = seg_sq.sqrt();
+                    let t = (((point.0 - a.0) * seg_x + (point.1 - a.1) * seg_y)
+                        / seg_sq)
+                        .clamp(0.0, 1.0);
+                    let projection = (a.0 + seg_x * t, a.1 + seg_y * t);
+                    let (off_x, off_y) = (point.0 - projection.0, point.1 - projection.1);
+                    let distance_sq = off_x * off_x + off_y * off_y;
+                    let along = along_before + seg_len * t;
+                    along_before += seg_len;
+                    if distance_sq > centerline_gap_sq
+                        || along <= through_margin
+                        || total_len - along <= through_margin
+                    {
+                        continue;
+                    }
+                    let tangent_dot =
+                        ((outward.0 * seg_x + outward.1 * seg_y) / seg_len).abs();
+                    if tangent_dot < MIN_TANGENT_DOT {
+                        continue;
+                    }
+                    let target_dz = target.dz[segment_index]
+                        + (target.dz[segment_index + 1] - target.dz[segment_index]) * t;
+                    if target_dz <= 0.2
+                        || (target_dz - source.dz[end_index]).abs() >= MAX_DZ_GAP_M
+                    {
+                        continue;
+                    }
+                    flush.insert((source.key, source.way_index, is_start));
+                    break 'targets;
+                }
+            }
+        }
+    }
+    flush
 }
 
 /// Repair an exact style split whose two centerlines are one collinear road
@@ -609,7 +852,7 @@ fn endpoint_continuation_grade_corrections(
         .collect()
 }
 
-/// Raise one endpoint to a through-road deck and taper that correction
+/// Move one endpoint to a through-road deck and taper that correction
 /// smoothly back into the source profile. Both ends of the blend have zero
 /// derivative from the correction term, avoiding a new grade kink.
 fn apply_endpoint_grade_correction(
@@ -624,7 +867,7 @@ fn apply_endpoint_grade_correction(
     }
     let endpoint_index = if is_start { 0 } else { points.len() - 1 };
     let delta = target_dz - dz[endpoint_index];
-    if delta <= 0.001 {
+    if delta.abs() <= 0.001 {
         return;
     }
     let total_len: f32 = points
@@ -643,7 +886,7 @@ fn apply_endpoint_grade_correction(
     // corrections local while still bounding the longer taper needed by a
     // trusted typed bridge/link correction, without dragging either through
     // a whole ramp.
-    let blend_len = (delta * 3.0 + half_width * 2.0)
+    let blend_len = (delta.abs() * 3.0 + half_width * 2.0)
         .clamp(3.0, 96.0)
         .min(total_len);
     let mut distances = vec![0.0f32; points.len()];
@@ -667,9 +910,15 @@ fn apply_endpoint_grade_correction(
         let t = (distance / blend_len).clamp(0.0, 1.0);
         let weight = 1.0 - t * t * (3.0 - 2.0 * t);
         let original = *value;
-        // Existing interior samples may already equal (or exceed) the
-        // mainline height. Never turn a corrected endpoint into a hump.
-        *value = (original + delta * weight).min(target_dz.max(original));
+        // Existing interior samples may already be on the far side of the
+        // mainline height. Never turn a corrected endpoint into a hump or
+        // a trough.
+        let corrected = original + delta * weight;
+        *value = if delta > 0.0 {
+            corrected.min(target_dz.max(original))
+        } else {
+            corrected.max(target_dz.min(original))
+        };
     }
     dz[endpoint_index] = target_dz;
 }
@@ -3176,7 +3425,7 @@ fn build_tile_buffers_from_features(
     // deck profile. MVT feature boundaries often put a slip-road endpoint
     // against the middle of its mainline's segment rather than at a shared
     // node, so the exact-node joint pass below cannot discover this case.
-    let join_ways: Vec<RoadTierJoinWay> = union_tiers
+    let mut join_ways: Vec<RoadTierJoinWay> = union_tiers
         .iter()
         .flat_map(|(key, (style, ways))| {
             let half_width = style
@@ -3248,7 +3497,25 @@ fn build_tile_buffers_from_features(
             correction.target_dz,
             half_width,
         );
+        // Keep the already-built join snapshot in sync so the flush-joint
+        // classifier can consume the corrected profiles without cloning
+        // every road geometry a second time.
+        if let Some(join_way) = join_ways.iter_mut().find(|way| {
+            way.key == correction.end.0 && way.way_index == correction.end.1
+        }) {
+            apply_endpoint_grade_correction(
+                &join_way.points,
+                &mut join_way.dz,
+                correction.end.2,
+                correction.target_dz,
+                join_way.half_width,
+            );
+        }
     }
+    // Classify flush endpoint-to-interior joins only after all dz
+    // corrections have landed; their safety gate requires the final two
+    // deck profiles to agree at the contact point.
+    let endpoint_through_flush_ends = endpoint_to_through_flush_ends(&join_ways);
 
     profiler.lap("stroke-prep", "");
 
@@ -3355,8 +3622,7 @@ fn build_tile_buffers_from_features(
     // its grounded continuation) a flush butt would TEAR open; those
     // joints keep their round caps so the overlap hides the step. Forks
     // and T-junctions keep caps as well.
-    let mut tier_joint_ends: std::collections::HashSet<RoadTierEnd> =
-        std::collections::HashSet::new();
+    let mut tier_joint_ends = endpoint_through_flush_ends;
     // Same-height cross-tier endpoints also suppress a round-cap FASCIA at
     // acute slip-road merges, while retaining the top cap itself. Flush,
     // near-opposite continuations additionally become true butt ends.
@@ -5566,6 +5832,21 @@ mod bridge_probe_tests {
     }
 
     #[test]
+    fn steps_and_footways_share_a_join_family() {
+        let tags = |highway: &str| {
+            HashMap::from([("highway".to_string(), highway.to_string())])
+        };
+        assert_eq!(
+            RoadJoinMeta::from_tags(&tags("steps")).family,
+            RoadJoinMeta::from_tags(&tags("footway")).family
+        );
+        assert_eq!(
+            RoadJoinMeta::from_tags(&tags("steps")).family,
+            RoadJoinFamily::Footway
+        );
+    }
+
+    #[test]
     fn endpoint_to_through_merge_inherits_deck_with_smooth_grade() {
         let link_key = join_test_key(10, 2.0, 1);
         let main_key = join_test_key(20, 4.0, 2);
@@ -5647,6 +5928,272 @@ mod bridge_probe_tests {
         grade_separated[2].dz.fill(8.0);
         grade_separated[0].meta.is_link = false;
         assert!(endpoint_to_through_grade_corrections(&grade_separated).is_empty());
+    }
+
+    #[test]
+    fn high_typed_link_lowers_to_bridge_mainline_and_becomes_flush() {
+        let link_key = join_test_key(716, 0.65625, 1);
+        let main_key = join_test_key(726, 0.9375, 2);
+        let link_meta = join_test_meta(RoadJoinFamily::Motorway, true, true);
+        let main_meta = join_test_meta(RoadJoinFamily::Motorway, false, true);
+        let source = RoadTierJoinWay {
+            key: link_key,
+            way_index: 0,
+            points: vec![
+                (119.8125, 4.9375),
+                (119.7, 2.5),
+                (119.5, 0.0),
+                (119.25, -5.0),
+            ],
+            dz: vec![5.5; 4],
+            half_width: 0.39375,
+            meta: link_meta,
+        };
+        let target = RoadTierJoinWay {
+            key: main_key,
+            way_index: 0,
+            points: vec![(119.3125, -4.0), (120.0, 9.0)],
+            dz: vec![5.2, 4.7],
+            half_width: 0.5625,
+            meta: main_meta,
+        };
+
+        let corrections =
+            endpoint_to_through_grade_corrections(&[source.clone(), target.clone()]);
+        assert_eq!(corrections.len(), 1);
+        assert_eq!(corrections[0].end, (link_key, 0, true));
+        assert!((corrections[0].target_dz - 4.85625).abs() < 0.001);
+
+        let mut corrected_dz = source.dz.clone();
+        apply_endpoint_grade_correction(
+            &source.points,
+            &mut corrected_dz,
+            true,
+            corrections[0].target_dz,
+            source.half_width,
+        );
+        assert!((corrected_dz[0] - corrections[0].target_dz).abs() < 1e-5);
+        assert!(corrected_dz[1] > corrections[0].target_dz && corrected_dz[1] < 5.5);
+        assert!((corrected_dz[2] - 5.5).abs() < 1e-5);
+
+        let mut corrected_source = source.clone();
+        corrected_source.dz = corrected_dz;
+        let flush =
+            endpoint_to_through_flush_ends(&[corrected_source.clone(), target.clone()]);
+        assert!(flush.contains(&(link_key, 0, true)));
+
+        // Geometry alone is not enough to lower one independent deck onto
+        // another; the link-to-mainline relationship is the authority.
+        corrected_source.meta.is_link = false;
+        corrected_source.dz = source.dz;
+        assert!(endpoint_to_through_grade_corrections(&[
+            corrected_source,
+            target
+        ])
+        .is_empty());
+    }
+
+    #[test]
+    fn same_height_endpoint_to_interior_is_a_flush_joint() {
+        let link_key = join_test_key(10, 2.0, 1);
+        let main_key = join_test_key(20, 4.0, 2);
+        let motorway_link = join_test_meta(RoadJoinFamily::Motorway, true, false);
+        let motorway = join_test_meta(RoadJoinFamily::Motorway, false, false);
+        let source = RoadTierJoinWay {
+            key: main_key,
+            way_index: 0,
+            points: vec![(0.0, 0.0), (0.0, -8.0)],
+            dz: vec![8.5, 8.5],
+            half_width: 2.0,
+            meta: motorway,
+        };
+        let target = RoadTierJoinWay {
+            key: link_key,
+            way_index: 0,
+            points: vec![(-1.0, 8.0), (0.0, 0.0), (1.0, 8.0)],
+            dz: vec![8.5, 8.5, 8.5],
+            half_width: 1.0,
+            meta: motorway_link,
+        };
+
+        let flush = endpoint_to_through_flush_ends(&[source.clone(), target.clone()]);
+        assert_eq!(flush.len(), 1);
+        assert!(flush.contains(&(main_key, 0, true)));
+        // This is topology-only: rank/width direction must not invent a
+        // grade correction when both profiles already agree.
+        assert!(endpoint_to_through_grade_corrections(&[
+            source.clone(),
+            target.clone()
+        ])
+        .is_empty());
+
+        let mut mismatch = target.clone();
+        mismatch.dz.fill(8.0);
+        assert!(endpoint_to_through_flush_ends(&[source.clone(), mismatch]).is_empty());
+
+        let mut perpendicular = target.clone();
+        perpendicular.points = vec![(-8.0, 0.0), (0.0, 0.0), (8.0, 0.0)];
+        assert!(
+            endpoint_to_through_flush_ends(&[source.clone(), perpendicular]).is_empty()
+        );
+
+        let mut offset = target.clone();
+        offset.points = vec![(0.0, 8.0), (1.0, 0.0), (2.0, 8.0)];
+        assert!(endpoint_to_through_flush_ends(&[source.clone(), offset]).is_empty());
+
+        let mut other_family = target.clone();
+        other_family.meta.family = RoadJoinFamily::Primary;
+        assert!(
+            endpoint_to_through_flush_ends(&[source.clone(), other_family]).is_empty()
+        );
+
+        let mut terminal = target;
+        terminal.points = vec![(0.0, 0.0), (0.0, 8.0)];
+        terminal.dz = vec![8.5, 8.5];
+        assert!(endpoint_to_through_flush_ends(&[source, terminal]).is_empty());
+    }
+
+    fn a9_near_cap_join_fixture(
+    ) -> (RoadTierJoinWay, RoadTierJoinWay, RoadTierJoinWay, StrokeStyleKey) {
+        let link_key = join_test_key(690, 0.7875, 1);
+        let main_key = join_test_key(700, 1.125, 2);
+        let continuation_key = join_test_key(726, 1.125, 3);
+        let motorway_link = join_test_meta(RoadJoinFamily::Motorway, true, false);
+        let motorway = join_test_meta(RoadJoinFamily::Motorway, false, false);
+        let bridge_motorway = join_test_meta(RoadJoinFamily::Motorway, false, true);
+
+        // z14/8417/5389 source geometry, scaled from the MVT's 4096 extent
+        // into the renderer's 256-unit tile.
+        let source = RoadTierJoinWay {
+            key: link_key,
+            way_index: 0,
+            points: vec![
+                (41.6875, 167.4375),
+                (52.5625, 163.6875),
+                (58.25, 161.0625),
+                (62.1875, 159.8125),
+            ],
+            dz: vec![5.5, 1.1, 0.0, 0.0],
+            half_width: 0.39375,
+            meta: motorway_link,
+        };
+        let target = RoadTierJoinWay {
+            key: main_key,
+            way_index: 0,
+            points: vec![(41.6875, 167.4375), (89.125, 140.875)],
+            dz: vec![5.5, 5.9],
+            half_width: 0.5625,
+            meta: motorway,
+        };
+        let continuation = RoadTierJoinWay {
+            key: continuation_key,
+            way_index: 0,
+            points: vec![(34.8125, 171.25), (41.6875, 167.4375)],
+            dz: vec![5.5, 5.5],
+            half_width: 0.5625,
+            meta: bridge_motorway,
+        };
+        (source, target, continuation, link_key)
+    }
+
+    #[test]
+    fn near_cap_link_to_proven_mainline_is_flush() {
+        let (source, target, continuation, link_key) = a9_near_cap_join_fixture();
+        let ways = [source.clone(), target.clone(), continuation.clone()];
+        let flush = endpoint_to_through_flush_ends(&ways);
+
+        assert_eq!(flush.len(), 1);
+        assert!(flush.contains(&(link_key, 0, true)));
+
+        // A small MVT-generalization offset still lies inside the two
+        // ribbons and uses the same independently proven mainline cap.
+        let mut near_source = source.clone();
+        near_source.points[0] = (41.5875, 167.6375);
+        let near_ways = [near_source, target.clone(), continuation.clone()];
+        let near_flush = endpoint_to_through_flush_ends(&near_ways);
+        assert_eq!(near_flush.len(), 1);
+        assert!(near_flush.contains(&(link_key, 0, true)));
+
+        // The decks already agree. The near-cap rule removes only the
+        // internal top/fascia cap; it does not invent a grade correction.
+        assert!(
+            !endpoint_to_through_grade_corrections(&near_ways)
+                .iter()
+                .any(|correction| correction.end == (link_key, 0, true))
+        );
+    }
+
+    #[test]
+    fn near_cap_link_requires_semantics_height_overlap_and_through_proof() {
+        let (source, target, continuation, _) = a9_near_cap_join_fixture();
+
+        // A target cap without a third road proving continuation is a real
+        // terminal and must retain its cap.
+        assert!(endpoint_to_through_flush_ends(&[source.clone(), target.clone()]).is_empty());
+
+        let mut perpendicular_continuation = continuation.clone();
+        perpendicular_continuation.points =
+            vec![(41.6875, 150.0), (41.6875, 167.4375)];
+        assert!(endpoint_to_through_flush_ends(&[
+            source.clone(),
+            target.clone(),
+            perpendicular_continuation,
+        ])
+        .is_empty());
+
+        let mut other_family = continuation.clone();
+        other_family.meta.family = RoadJoinFamily::Primary;
+        assert!(endpoint_to_through_flush_ends(&[
+            source.clone(),
+            target.clone(),
+            other_family,
+        ])
+        .is_empty());
+
+        let mut height_mismatch = source.clone();
+        height_mismatch.dz[0] = 4.9;
+        assert!(endpoint_to_through_flush_ends(&[
+            height_mismatch,
+            target.clone(),
+            continuation.clone(),
+        ])
+        .is_empty());
+
+        let mut untyped_source = source.clone();
+        untyped_source.meta.is_link = false;
+        assert!(endpoint_to_through_flush_ends(&[
+            untyped_source,
+            target.clone(),
+            continuation.clone(),
+        ])
+        .is_empty());
+
+        let mut link_target = target.clone();
+        link_target.meta.is_link = true;
+        let mut link_continuation = continuation.clone();
+        link_continuation.meta.is_link = true;
+        assert!(endpoint_to_through_flush_ends(&[
+            source.clone(),
+            link_target,
+            link_continuation,
+        ])
+        .is_empty());
+
+        // The neighboring F87/P3 nose has the same semantics and height but
+        // is about three tile units from this cap. Its styled ribbons do not
+        // overlap, so the topology proof must not bridge that real gore gap.
+        let mut distant_sibling = source;
+        distant_sibling.points = vec![
+            (43.125, 170.0625),
+            (52.5625, 164.875),
+            (58.625, 161.9375),
+            (60.3125, 161.3125),
+            (62.1875, 159.8125),
+        ];
+        distant_sibling.dz = vec![5.5, 1.4, 0.0, 0.0, 0.0];
+        assert!(
+            endpoint_to_through_flush_ends(&[distant_sibling, target, continuation]).is_empty()
+        );
     }
 
     #[test]
