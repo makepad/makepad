@@ -1557,21 +1557,32 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
 /// Annotate one base tile against the solved field: base_dz features keyed
 /// (L, F, P) with per-raw-vertex dz. The renderer joins these to the exact
 /// features it draws — no geometry matching at render time.
-fn annotate_base_tile(
-    base_raw: &[u8],
+fn annotate_base_tiles(
+    tile_paths: Vec<((u32, u32), (f32, f32), Vec<BasePath>)>,
     field: &SolvedField,
     tunnel_field: &SolvedField,
     m_per_unit: f32,
-    global_offset: (f32, f32),
-) -> Result<Vec<TileFeature>, String> {
-    let base_paths = decode_base_paths(base_raw)?;
+) -> HashMap<(u32, u32), Vec<TileFeature>> {
+    // Flatten with per-path source tile + global offset: sampling AND the
+    // junction consensus run in GLOBAL coordinates, so the overlapping
+    // clip copies of one road in adjacent tiles anneal to identical
+    // heights instead of per-tile-blended almost-identical ones.
+    let mut base_paths: Vec<BasePath> = Vec::new();
+    let mut path_src: Vec<((u32, u32), (f32, f32))> = Vec::new();
+    for (src, offset, paths) in tile_paths {
+        for base_path in paths {
+            base_paths.push(base_path);
+            path_src.push((src, offset));
+        }
+    }
     // Pass 1: sample every path. Interior line vertices gate by direction
     // (a road under a viaduct must not sample the deck above); ENDPOINTS
     // sample ungated with a small cap — a way meeting a deck at a junction
     // joins it at any angle, and a gated miss there tears the ramp chain
     // apart at every OSM way split.
     let mut sampled_paths: Vec<Option<Vec<f32>>> = Vec::with_capacity(base_paths.len());
-    for base_path in &base_paths {
+    for (flat_index, base_path) in base_paths.iter().enumerate() {
+        let global_offset = path_src[flat_index].1;
         let points = &base_path.points;
         if points.len() < 2 {
             sampled_paths.push(None);
@@ -1685,12 +1696,16 @@ fn annotate_base_tile(
         if base_path.is_polygon {
             continue;
         }
+        let offset = path_src[path_index].1;
         for (vertex, &height) in dz.iter().enumerate() {
             if height <= 0.2 {
                 continue;
             }
             let (px, py) = base_path.points[vertex];
-            let key = ((px * 4.0).round() as i32, (py * 4.0).round() as i32);
+            let key = (
+                ((px + offset.0) * 4.0).round() as i32,
+                ((py + offset.1) * 4.0).round() as i32,
+            );
             let entry = junction.entry(key).or_insert(0.0);
             if height > *entry {
                 *entry = height;
@@ -1698,15 +1713,19 @@ fn annotate_base_tile(
         }
     }
     let grade_per_unit = 0.08 * m_per_unit;
-    let mut features = Vec::new();
+    let mut final_dz: Vec<Option<Vec<f32>>> = vec![None; base_paths.len()];
     for (path_index, base_path) in base_paths.iter().enumerate() {
         let Some(mut dz) = sampled_paths[path_index].clone() else { continue };
+        let offset = path_src[path_index].1;
         let points = &base_path.points;
         let count = points.len();
         if !base_path.is_polygon {
             for vertex in 0..count {
                 let (px, py) = points[vertex];
-                let key = ((px * 4.0).round() as i32, (py * 4.0).round() as i32);
+                let key = (
+                    ((px + offset.0) * 4.0).round() as i32,
+                    ((py + offset.1) * 4.0).round() as i32,
+                );
                 if let Some(&height) = junction.get(&key) {
                     // Take the consensus only where this way already
                     // carries height at or next to the vertex — a grounded
@@ -1738,23 +1757,66 @@ fn annotate_base_tile(
                 }
             }
         }
+        // Close single-vertex dropouts (cap-boundary flutter along a deck).
+        if count >= 3 {
+            for index in 1..count - 1 {
+                let fill = dz[index - 1].min(dz[index + 1]);
+                if fill > dz[index] + 0.05 {
+                    dz[index] = fill;
+                }
+            }
+        }
+        final_dz[path_index] = Some(dz);
+    }
+    // Final pass: EXACT consensus over coincident line vertices across all
+    // tiles — overlap clip copies of one road share their inner vertices,
+    // and after per-path blending they can differ by centimeters, which a
+    // tilted camera renders as doubled slabs. Largest |dz| wins.
+    let mut vertex_consensus: HashMap<(i32, i32), f32> = HashMap::new();
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some(dz) = &final_dz[path_index] else { continue };
+        if base_path.is_polygon {
+            continue;
+        }
+        let offset = path_src[path_index].1;
+        for (vertex, &value) in dz.iter().enumerate() {
+            let (px, py) = base_path.points[vertex];
+            let key = (
+                ((px + offset.0) * 4.0).round() as i32,
+                ((py + offset.1) * 4.0).round() as i32,
+            );
+            let entry = vertex_consensus.entry(key).or_insert(value);
+            if value.abs() > entry.abs() {
+                *entry = value;
+            }
+        }
+    }
+    let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some(mut dz) = final_dz[path_index].take() else { continue };
+        let (src, offset) = path_src[path_index];
+        if !base_path.is_polygon {
+            for (vertex, value) in dz.iter_mut().enumerate() {
+                let (px, py) = base_path.points[vertex];
+                let key = (
+                    ((px + offset.0) * 4.0).round() as i32,
+                    ((py + offset.1) * 4.0).round() as i32,
+                );
+                if let Some(&consensus) = vertex_consensus.get(&key) {
+                    *value = consensus;
+                }
+            }
+        }
         let any = dz.iter().any(|&v| v.abs() > 0.2);
         if !any {
             continue;
-        }
-        // Close single-vertex dropouts (cap-boundary flutter along a deck).
-        for index in 1..count - 1 {
-            let fill = dz[index - 1].min(dz[index + 1]);
-            if fill > dz[index] + 0.05 {
-                dz[index] = fill;
-            }
         }
         let dz_tag = dz
             .iter()
             .map(|v| ((v * 10.0).round() as i64).to_string())
             .collect::<Vec<_>>()
             .join(",");
-        features.push(TileFeature {
+        per_tile.entry(src).or_default().push(TileFeature {
             layer: Layer::BaseDz,
             geometry_type: GeometryType::LineString,
             osm_type: OsmType::Way,
@@ -1766,13 +1828,14 @@ fn annotate_base_tile(
                 ("P".to_string(), base_path.path.to_string()),
                 ("dz".to_string(), dz_tag),
             ],
-            paths: vec![points
+            paths: vec![base_path
+                .points
                 .iter()
                 .map(|&(px, py)| TilePoint { x: px.round() as i32, y: py.round() as i32 })
                 .collect()],
         });
     }
-    Ok(features)
+    per_tile
 }
 
 fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -1834,37 +1897,43 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
     );
     let (mut per_tile_features, totals, field, tunnel_field) =
         solve_bbox(zoom, origin, (x0, y0, x1, y1), &decoded, &mut ahn);
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let mut features = per_tile_features.remove(&(x, y)).unwrap_or_default();
-            if let Some(base) = base_reader.as_mut() {
+    // Decode every base tile up front: annotation runs as ONE global pass
+    // so overlap clip copies anneal to identical heights.
+    let mut tile_paths: Vec<((u32, u32), (f32, f32), Vec<BasePath>)> = Vec::new();
+    if let Some(base) = base_reader.as_mut() {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 let tms_row = axis - 1 - i64::from(y);
                 if let Ok(Some(base_raw)) = base.get_tile(i64::from(zoom), i64::from(x), tms_row)
                 {
-                    let center_lat = tile_y_to_lat(f64::from(y) + 0.5, zoom);
-                    let m_per_unit = (center_lat.to_radians().cos() * 40_075_016.686
-                        / f64::from(1u32 << zoom)
-                        / EXTENT) as f32;
-                    let global_offset = (
-                        (x as i64 - origin.0 as i64) as f32 * EXTENT as f32,
-                        (y as i64 - origin.1 as i64) as f32 * EXTENT as f32,
-                    );
-                    match annotate_base_tile(
-                        &base_raw,
-                        &field,
-                        &tunnel_field,
-                        m_per_unit,
-                        global_offset,
-                    ) {
-                        Ok(mut annotated) => {
-                            base_annotated += annotated.len();
-                            features.append(&mut annotated);
+                    match decode_base_paths(&base_raw) {
+                        Ok(paths) => {
+                            let offset = (
+                                (x as i64 - origin.0 as i64) as f32 * EXTENT as f32,
+                                (y as i64 - origin.1 as i64) as f32 * EXTENT as f32,
+                            );
+                            tile_paths.push(((x, y), offset, paths));
                         }
                         Err(error) => {
-                            eprintln!("bridge-bake: annotate z{zoom}/{x}/{y}: {error}")
+                            eprintln!("bridge-bake: decode base z{zoom}/{x}/{y}: {error}")
                         }
                     }
                 }
+            }
+        }
+    }
+    let bbox_center_lat = tile_y_to_lat((f64::from(y0) + f64::from(y1)) * 0.5 + 0.5, zoom);
+    let m_per_unit_global = (bbox_center_lat.to_radians().cos() * 40_075_016.686
+        / f64::from(1u32 << zoom)
+        / EXTENT) as f32;
+    let mut annotated_per_tile =
+        annotate_base_tiles(tile_paths, &field, &tunnel_field, m_per_unit_global);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let mut features = per_tile_features.remove(&(x, y)).unwrap_or_default();
+            if let Some(mut annotated) = annotated_per_tile.remove(&(x, y)) {
+                base_annotated += annotated.len();
+                features.append(&mut annotated);
             }
             if !features.is_empty() {
                 let stats = SolveStats::default();
