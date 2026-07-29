@@ -2208,6 +2208,12 @@ fn build_tile_buffers_from_features(
         let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
         // Light from the north-west; walls shade by their outward normal.
         let (light_x, light_y) = (-0.55_f32, -0.835_f32);
+        // Wall LOD: per-edge quads dominate 3D tile size (30-56 MB observed
+        // on dense tiles) while sub-pixel footprint detail cannot show in a
+        // wall silhouette. Collapse wall edges under ~1.2 screen px and drop
+        // wall rings for courtyards under ~5 px; roofs keep full detail.
+        let wall_min_edge = 1.2 / render_scale;
+        let wall_min_hole_extent = 5.0 / render_scale;
         for job in &building_jobs {
             // Building-age layer tints the 3D model itself (walls shade
             // from the same hue via the normal lighting math).
@@ -2215,11 +2221,31 @@ fn build_tile_buffers_from_features(
             if job.height_m <= 0.05 {
                 // Flattened outline: footprint fill only, no walls.
             } else {
-            for ring in &job.polygon {
+            for source_ring in &job.polygon {
                 // Outward normal needs ring orientation; positive shoelace
                 // in y-down tile space = exterior winding, holes come
                 // opposite so their normals flip into the courtyard.
-                let clockwise = polygon_signed_area(ring) > 0.0;
+                let clockwise = polygon_signed_area(source_ring) > 0.0;
+                if !clockwise {
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for &(x, y) in source_ring {
+                        min_x = min_x.min(x);
+                        min_y = min_y.min(y);
+                        max_x = max_x.max(x);
+                        max_y = max_y.max(y);
+                    }
+                    if (max_x - min_x).max(max_y - min_y) < wall_min_hole_extent {
+                        continue;
+                    }
+                }
+                let wall_ring = simplify_wall_ring(source_ring, wall_min_edge);
+                if wall_ring.len() < 3 {
+                    continue;
+                }
+                let ring = &wall_ring;
                 let n = ring.len();
                 // South-most edges last so they paint over northern walls.
                 let mut edge_order: Vec<usize> = (0..n).collect();
@@ -2265,6 +2291,9 @@ fn build_tile_buffers_from_features(
             for ring in &job.polygon {
                 emit_path(&mut path, ring, true);
             }
+            // No AA fringe on roofs: the fringe doubles the vertex count
+            // across thousands of buildings, and a lifted roof edge meets
+            // its own wall, not the background it would blend against.
             tessellate_path_fill(
                 &mut path,
                 &mut tess,
@@ -2272,7 +2301,7 @@ fn build_tile_buffers_from_features(
                 &mut tess_indices,
                 LineJoin::Miter,
                 4.0,
-                aa_units,
+                0.0,
                 false,
                 tolerance,
             );
@@ -2309,6 +2338,17 @@ fn build_tile_buffers_from_features(
         let trunk_color = hex_to_premul_rgba(0x8a6b4a, 1.0);
         let canopy_color = hex_to_premul_rgba(0x4a7d44, 1.0);
         let arm = 0.7 * units_per_m;
+        // Canopy LOD by screen size: park tiles carry thousands of trees
+        // and a 16x8 ball per ~14 px canopy was the single largest buffer
+        // in dense tiles.
+        let canopy_px = 2.9 * units_per_m * render_scale;
+        let (canopy_segs_u, canopy_segs_v) = if canopy_px >= 24.0 {
+            (12, 6)
+        } else if canopy_px >= 12.0 {
+            (8, 4)
+        } else {
+            (6, 3)
+        };
 
         for (x, y) in &tree_points_3d {
             append_wall_quad(
@@ -2340,8 +2380,8 @@ fn build_tile_buffers_from_features(
                 4.0,
                 7.5,
                 canopy_color,
-                16,
-                8,
+                canopy_segs_u,
+                canopy_segs_v,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3295,6 +3335,33 @@ fn build_tile_buffers_from_features(
 /// Shape id telling the map vertex shader to treat (param1, param2) as a
 /// screen-px offset added AFTER the map transform (zoom-constant symbols).
 pub const ICON_SHAPE_ID: f32 = 20.0;
+
+/// Wall-LOD ring simplification: drop vertices closer than `min_edge` to
+/// the last kept one. The roof keeps the detailed ring; a wall silhouette
+/// offset by under a pixel is invisible.
+fn simplify_wall_ring(ring: &[(f32, f32)], min_edge: f32) -> Vec<(f32, f32)> {
+    if ring.len() <= 4 {
+        return ring.to_vec();
+    }
+    let min_sq = min_edge * min_edge;
+    let mut out = Vec::with_capacity(ring.len());
+    out.push(ring[0]);
+    for &point in &ring[1..] {
+        let last = *out.last().unwrap();
+        let d2 = (point.0 - last.0).powi(2) + (point.1 - last.1).powi(2);
+        if d2 >= min_sq {
+            out.push(point);
+        }
+    }
+    if out.len() >= 2 {
+        let first = out[0];
+        let last = *out.last().unwrap();
+        if (first.0 - last.0).powi(2) + (first.1 - last.1).powi(2) < min_sq {
+            out.pop();
+        }
+    }
+    out
+}
 
 fn ring_centroid(ring: &[(f32, f32)]) -> (f32, f32) {
     if ring.is_empty() {
