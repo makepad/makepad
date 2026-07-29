@@ -1639,47 +1639,8 @@ impl MatchEvent for App {
     }
 }
 
-/// Debug watchdog while the tiler runaway is hunted: sample our own stacks
-/// (the culprit thread lands in /tmp/mp_watchdog_sample.txt) and abort
-/// before the machine drowns. 1 Hz `ps` polling — this is a tripwire, not
-/// telemetry.
-fn spawn_memory_watchdog() {
-    const LIMIT_KB: u64 = 14 * 1024 * 1024;
-    let pid = std::process::id();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let rss_kb = std::process::Command::new("ps")
-            .args(["-o", "rss=", "-p", &pid.to_string()])
-            .output()
-            .ok()
-            .and_then(|out| {
-                String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            })
-            .unwrap_or(0);
-        if rss_kb > LIMIT_KB {
-            eprintln!(
-                "MEMORY WATCHDOG: rss {:.1} GB — sampling stacks, then aborting",
-                rss_kb as f64 / 1048576.0
-            );
-            let _ = std::process::Command::new("sample")
-                .args([
-                    &pid.to_string(),
-                    "2",
-                    "-f",
-                    "/tmp/mp_watchdog_sample.txt",
-                ])
-                .output();
-            std::process::abort();
-        }
-    });
-}
-
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        spawn_memory_watchdog();
         crate::makepad_widgets::script_mod(vm);
         crate::elev_graph::script_mod(vm);
         self::script_mod(vm)
