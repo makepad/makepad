@@ -26,6 +26,9 @@ pub struct StrokePassStyle {
     /// strokes (rail over road) by more than the depth-buffer quantum while
     /// staying far below one ground pixel of view depth.
     pub depth_micro: f32,
+    /// 3D bridge deck height in meters (0 = grounded). Tapered to zero at
+    /// the segment ends by the stroke appender so approaches read as ramps.
+    pub deck_m: f32,
 }
 
 /// Micro-depth per unit of sort rank (rank 710 rail → 0.0014).
@@ -383,7 +386,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
         casing: if rule.casing_width > 0.0 {
-            Some(StrokePassStyle {
+            Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
@@ -393,7 +396,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
         } else {
             None
         },
-        center: StrokePassStyle {
+        center: StrokePassStyle { deck_m: 0.0,
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
@@ -408,7 +411,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
         casing: if rule.casing_width > 0.0 {
-            Some(StrokePassStyle {
+            Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
@@ -418,7 +421,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
         } else {
             None
         },
-        center: StrokePassStyle {
+        center: StrokePassStyle { deck_m: 0.0,
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
@@ -433,7 +436,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
     StrokeTemplate {
         sort_rank: clamp_u32_to_i16(rule.sort_rank),
         casing: if rule.casing_width > 0.0 {
-            Some(StrokePassStyle {
+            Some(StrokePassStyle { deck_m: 0.0,
                 color: vec4_to_rgb_hex(rule.casing_color),
                 width: rule.casing_width,
                 shape_id: rule.casing_shape_id,
@@ -443,7 +446,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
         } else {
             None
         },
-        center: StrokePassStyle {
+        center: StrokePassStyle { deck_m: 0.0,
             color: vec4_to_rgb_hex(rule.center_color),
             width: rule.center_width,
             shape_id: rule.center_shape_id,
@@ -777,7 +780,7 @@ pub fn stroke_style_for_tags(
             return Some(StrokeStyle {
                 sort_rank: 135,
                 casing: None,
-                center: StrokePassStyle {
+                center: StrokePassStyle { deck_m: 0.0,
                     color: edge,
                     width: 0.8 * px_to_units,
                     shape_id: 0.0,
@@ -823,7 +826,7 @@ pub fn stroke_style_for_tags(
         return Some(StrokeStyle {
             sort_rank: 155,
             casing: None,
-            center: StrokePassStyle {
+            center: StrokePassStyle { deck_m: 0.0,
                 color,
                 width: width * px_to_units,
                 shape_id: 0.0,
@@ -837,7 +840,7 @@ pub fn stroke_style_for_tags(
         return Some(StrokeStyle {
             sort_rank: 150,
             casing: None,
-            center: StrokePassStyle {
+            center: StrokePassStyle { deck_m: 0.0,
                 color: 0xa383a3,
                 width: 1.6 * px_to_units,
                 shape_id: 0.0,
@@ -873,14 +876,14 @@ pub fn stroke_style_for_tags(
             };
             return Some(StrokeStyle {
                 sort_rank: 730,
-                casing: Some(StrokePassStyle {
+                casing: Some(StrokePassStyle { deck_m: 0.0,
                     color: 0xffffff,
                     width: (width + 2.0) * px_to_units,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 729.0 * DEPTH_MICRO_PER_RANK,
                 }),
-                center: StrokePassStyle {
+                center: StrokePassStyle { deck_m: 0.0,
                     color,
                     width: width * px_to_units,
                     shape_id: 0.0,
@@ -893,7 +896,7 @@ pub fn stroke_style_for_tags(
             return Some(StrokeStyle {
                 sort_rank: 240,
                 casing: None,
-                center: StrokePassStyle {
+                center: StrokePassStyle { deck_m: 0.0,
                     color: 0x2e8b57,
                     width: 1.3 * px_to_units,
                     shape_id: 0.0,
@@ -917,7 +920,7 @@ pub fn stroke_style_for_tags(
             return Some(StrokeStyle {
                 sort_rank: 380,
                 casing: None,
-                center: StrokePassStyle {
+                center: StrokePassStyle { deck_m: 0.0,
                     color: 0x8a4e9e,
                     width: width * px_to_units,
                     shape_id: 11.0,
@@ -937,7 +940,7 @@ pub fn stroke_style_for_tags(
         return Some(StrokeStyle {
             sort_rank: 140,
             casing: None,
-            center: StrokePassStyle {
+            center: StrokePassStyle { deck_m: 0.0,
                 color: edge,
                 width: 0.8 * px_to_units,
                 shape_id: 0.0,
@@ -957,8 +960,14 @@ pub fn stroke_style_for_tags(
     if tag_is_truthy(tags, "tunnel") {
         rank_bias -= 22;
     }
+    let mut deck_m = 0.0f32;
     if tag_is_truthy(tags, "bridge") {
         rank_bias += 26;
+        // 3D deck clearance. Slightly exaggerated vs reality (like every
+        // nav renderer) so crossings read at overview zooms; OSM's layer
+        // attr is shadowed by the MVT layer-name tag, so stacked decks
+        // share a height for now.
+        deck_m = 9.0;
     }
 
     if let Some(highway) = tags.get("highway") {
@@ -1032,14 +1041,14 @@ pub fn stroke_style_for_tags(
                     .or(theme.bridge_area_fill)
                     .unwrap_or(0xf8f8f8);
                 let dot_width = style.center.width;
-                style.casing = Some(StrokePassStyle {
+                style.casing = Some(StrokePassStyle { deck_m: 0.0,
                     color: contrast_edge(deck),
                     width: dot_width * 3.0,
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - 2.0 * DEPTH_MICRO_PER_RANK,
                 });
-                style.center = StrokePassStyle {
+                style.center = StrokePassStyle { deck_m: 0.0,
                     color: deck,
                     width: dot_width * 2.2,
                     shape_id: 0.0,
@@ -1064,7 +1073,7 @@ pub fn stroke_style_for_tags(
             let width = style
                 .casing
                 .map_or(style.center.width * 1.35, |casing| casing.width);
-            style.casing = Some(StrokePassStyle {
+            style.casing = Some(StrokePassStyle { deck_m: 0.0,
                 color: 0x4a4a4a,
                 width,
                 shape_id: 0.0,
@@ -1078,6 +1087,12 @@ pub fn stroke_style_for_tags(
             style.center.shape_id = 11.0;
             if let Some(casing) = style.casing.as_mut() {
                 casing.shape_id = 11.0;
+            }
+        }
+        if deck_m > 0.0 {
+            style.center.deck_m = deck_m;
+            if let Some(casing) = style.casing.as_mut() {
+                casing.deck_m = deck_m;
             }
         }
         return Some(style);
@@ -1224,7 +1239,7 @@ fn rail_stroke_style(
         } else {
             template.center.color
         };
-        template.casing = Some(StrokePassStyle {
+        template.casing = Some(StrokePassStyle { deck_m: 0.0,
             // The theme's rail line color becomes the casing band.
             color: casing_color,
             width: if service { 2.0 } else { 2.4 },
@@ -1232,7 +1247,7 @@ fn rail_stroke_style(
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK,
         });
-        template.center = StrokePassStyle {
+        template.center = StrokePassStyle { deck_m: 0.0,
             color: 0xf7f7f7,
             width: if service { 1.0 } else { 1.2 },
             shape_id: 12.0,
@@ -1240,5 +1255,12 @@ fn rail_stroke_style(
             depth_micro: rank * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
         };
     }
-    scaled_style(template, rank_bias, width_scale)
+    let mut style = scaled_style(template, rank_bias, width_scale);
+    if tag_is_truthy(tags, "bridge") {
+        style.center.deck_m = 9.0;
+        if let Some(casing) = style.casing.as_mut() {
+            casing.deck_m = 9.0;
+        }
+    }
+    style
 }
