@@ -640,3 +640,13 @@ pub struct ToWasmVideoPlaybackResourcesReleased {
     pub video_id_lo: u32,
     pub video_id_hi: u32,
 }
+
+#[derive(ToWasm)]
+pub struct ToWasmFileDialogResult {
+    /// 0 = ok, 1 = cancelled, 2 = unsupported on this browser, 3 = error
+    pub cancelled: u32,
+    /// Display name / suggested filename (empty when cancelled).
+    pub name: String,
+    /// File bytes for open; empty for cancel/unsupported or save-path-only results.
+    pub body: WasmDataU8,
+}

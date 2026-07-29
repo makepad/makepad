@@ -195,6 +195,8 @@ pub struct IosApp {
     pub view_controller: Option<ObjcId>,
     /// Retained while a document picker is presented.
     document_picker_delegate: Option<ObjcId>,
+    /// Correlates async document-picker results with the originating request.
+    pending_file_dialog: Option<(u64, crate::file_dialogs::FileDialogKind)>,
     /// Native camera preview layers keyed by video_id.
     pub camera_preview_layers: HashMap<u64, ObjcId>,
     /// Selection handles overlayed over the MTK view (iOS 15+ custom implementation).
@@ -283,6 +285,7 @@ impl IosApp {
                 last_keyboard_config: None,
                 view_controller: None,
                 document_picker_delegate: None,
+                pending_file_dialog: None,
                 camera_preview_layers: HashMap::new(),
                 selection_handle_start_view: None,
                 selection_handle_end_view: None,
@@ -1364,25 +1367,38 @@ impl IosApp {
             .flatten();
 
         let Some(view_controller) = view_controller else {
-            Self::finish_file_dialog(Vec::new(), true);
+            Self::finish_file_dialog(crate::file_dialogs::FileDialogResultEvent::error_from(
+                settings,
+                "no view controller to present document picker",
+            ));
             return;
         };
 
         unsafe {
             let types = Self::build_content_types(settings, folders_only);
             if types == nil {
-                Self::finish_file_dialog(Vec::new(), true);
+                Self::finish_file_dialog(crate::file_dialogs::FileDialogResultEvent::error_from(
+                    settings,
+                    "failed to build content types for document picker",
+                ));
                 return;
             }
 
+            // Files: import a sandbox copy (`asCopy:YES`) so `std::fs` works.
+            // Folders: keep a security-scoped reference (`asCopy:NO`) — copies of
+            // directory trees are impractical.
+            let as_copy = if folders_only { NO } else { YES };
             let picker: ObjcId = msg_send![class!(UIDocumentPickerViewController), alloc];
             let picker: ObjcId = msg_send![
                 picker,
                 initForOpeningContentTypes: types
-                asCopy: YES
+                asCopy: as_copy
             ];
             if picker == nil {
-                Self::finish_file_dialog(Vec::new(), true);
+                Self::finish_file_dialog(crate::file_dialogs::FileDialogResultEvent::error_from(
+                    settings,
+                    "failed to create UIDocumentPickerViewController",
+                ));
                 return;
             }
 
@@ -1399,6 +1415,7 @@ impl IosApp {
                     let () = msg_send![old, release];
                 }
                 app.document_picker_delegate = Some(delegate);
+                app.pending_file_dialog = Some((settings.request_id, settings.kind));
             });
 
             let () = msg_send![
@@ -1461,17 +1478,23 @@ impl IosApp {
     }
 
     /// Called from the document-picker delegate when the sheet finishes.
-    pub fn finish_file_dialog(paths: Vec<String>, cancelled: bool) {
+    pub fn finish_file_dialog(mut result: crate::file_dialogs::FileDialogResultEvent) {
         // Drop retained delegate outside of the event callback.
-        let old = with_ios_app(|app| app.document_picker_delegate.take());
+        let (old, pending) = with_ios_app(|app| {
+            (
+                app.document_picker_delegate.take(),
+                app.pending_file_dialog.take(),
+            )
+        });
+        if let Some((request_id, kind)) = pending {
+            result = result.with_meta(request_id, kind);
+        }
         if let Some(old) = old {
             unsafe {
                 let () = msg_send![old, release];
             }
         }
-        IosApp::do_callback(IosEvent::FileDialogResult(
-            crate::file_dialogs::FileDialogResultEvent { paths, cancelled },
-        ));
+        IosApp::do_callback(IosEvent::FileDialogResult(result));
     }
 
     pub fn paste_from_clipboard(&self) -> String {

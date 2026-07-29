@@ -1378,12 +1378,12 @@ impl Cx {
                 CxOsOp::SaveFileDialog(settings) => {
                     let paths =
                         crate::os::apple::macos::macos_file_dialog::open_save_file_dialog(&settings);
-                    let cancelled = paths.is_none();
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: paths.unwrap_or_default(),
-                            cancelled,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
                     ));
                 }
 
@@ -1391,12 +1391,12 @@ impl Cx {
                     let paths = crate::os::apple::macos::macos_file_dialog::open_select_file_dialog(
                         &settings,
                     );
-                    let cancelled = paths.is_none();
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: paths.unwrap_or_default(),
-                            cancelled,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
                     ));
                 }
 
@@ -1404,12 +1404,12 @@ impl Cx {
                     let paths = crate::os::apple::macos::macos_file_dialog::open_save_folder_dialog(
                         &settings,
                     );
-                    let cancelled = paths.is_none();
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: paths.unwrap_or_default(),
-                            cancelled,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
                     ));
                 }
 
@@ -1418,12 +1418,12 @@ impl Cx {
                         crate::os::apple::macos::macos_file_dialog::open_select_folder_dialog(
                             &settings,
                         );
-                    let cancelled = paths.is_none();
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: paths.unwrap_or_default(),
-                            cancelled,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::from_option(
+                            &settings,
+                            paths,
+                            crate::file_dialogs::FileDialogPathKind::Filesystem,
+                        ),
                     ));
                 }
                 CxOsOp::ShowInDock(show) => {

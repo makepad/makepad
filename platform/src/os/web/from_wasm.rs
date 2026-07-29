@@ -406,3 +406,9 @@ pub struct FromWasmCleanupVideoPlaybackResources {
     pub video_id_lo: u32,
     pub video_id_hi: u32,
 }
+
+#[derive(FromWasm)]
+pub struct FromWasmSelectFileDialog {
+    /// HTML accept string, e.g. `.png,.jpg` or empty for any file.
+    pub accept: String,
+}

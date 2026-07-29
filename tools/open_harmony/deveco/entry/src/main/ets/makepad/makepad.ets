@@ -1,9 +1,11 @@
 import display from '@ohos.display';
 import deviceInfo from '@ohos.deviceInfo';
 import inputMethod from '@ohos.inputMethod';
+import picker from '@ohos.file.picker';
 import { window } from '@kit.ArkUI';
 import common from '@ohos.app.ability.common';
 import resourceManager from '@ohos.resourceManager';
+import makepadNative from 'libmakepad.so';
 
 declare type Any = ESObject;
 
@@ -12,6 +14,7 @@ export interface MakepadXComponentInterface{
   handleInsertTextEvent(text:String):void;
   handleDeleteLeftEvent(length: number):void;
   handleKeyboardStatus(isOpen:boolean, keyboardHeight:number):void;
+  handleFileDialogResult(paths: Array<string>, cancelled: boolean, unsupported: boolean):void;
 }
 
 
@@ -34,6 +37,20 @@ function getDeviceType(): string {
     console.info("Device type is " + device_type)
   }
   return device_type;
+}
+
+function parseAcceptFilters(accept: string): Array<string> {
+  if (!accept || accept.length === 0) {
+    return [];
+  }
+  let parts: Array<string> = [];
+  accept.split(',').forEach((item: string) => {
+    let trimmed = item.trim();
+    if (trimmed.length > 0) {
+      parts.push(trimmed);
+    }
+  });
+  return parts;
 }
 
 export class ArkGlue{
@@ -87,6 +104,98 @@ export class ArkGlue{
 
   hideKeyBoard(): void {
     this.hideTextInput();
+  }
+
+  private emitFileDialogResult(paths: Array<string>, cancelled: boolean, unsupported: boolean): void {
+    try {
+      if (this.xComponentContext) {
+        this.xComponentContext.handleFileDialogResult(paths, cancelled, unsupported);
+      } else {
+        // Fallback when the XComponent context is not yet bound.
+        makepadNative.handleFileDialogResult(paths, cancelled, unsupported);
+      }
+    } catch (err) {
+      console.error("handleFileDialogResult failed:" + JSON.stringify(err));
+    }
+  }
+
+  openFileDialog(accept: string): void {
+    try {
+      let documentViewPicker = new picker.DocumentViewPicker(this.context);
+      let options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      let filters = parseAcceptFilters(accept);
+      if (filters.length > 0) {
+        options.fileSuffixFilters = filters;
+      }
+      documentViewPicker.select(options).then((uris: Array<string>) => {
+        if (!uris || uris.length === 0) {
+          this.emitFileDialogResult([], true, false);
+        } else {
+          this.emitFileDialogResult(uris, false, false);
+        }
+      }).catch((err: Any) => {
+        console.info("openFileDialog cancelled/failed:" + JSON.stringify(err));
+        this.emitFileDialogResult([], true, false);
+      });
+    } catch (err) {
+      console.error("openFileDialog unsupported:" + JSON.stringify(err));
+      this.emitFileDialogResult([], false, true);
+    }
+  }
+
+  saveFileDialog(filename: string, accept: string): void {
+    try {
+      let documentViewPicker = new picker.DocumentViewPicker(this.context);
+      let options = new picker.DocumentSaveOptions();
+      options.newFileNames = [filename && filename.length > 0 ? filename : 'untitled'];
+      let filters = parseAcceptFilters(accept);
+      if (filters.length > 0) {
+        // strip leading dots for fileSuffixChoices when present
+        options.fileSuffixChoices = filters.map((f: string) => f.startsWith('.') ? f.substring(1) : f);
+      }
+      documentViewPicker.save(options).then((uris: Array<string>) => {
+        if (!uris || uris.length === 0) {
+          this.emitFileDialogResult([], true, false);
+        } else {
+          this.emitFileDialogResult(uris, false, false);
+        }
+      }).catch((err: Any) => {
+        console.info("saveFileDialog cancelled/failed:" + JSON.stringify(err));
+        this.emitFileDialogResult([], true, false);
+      });
+    } catch (err) {
+      console.error("saveFileDialog unsupported:" + JSON.stringify(err));
+      this.emitFileDialogResult([], false, true);
+    }
+  }
+
+  openFolderDialog(): void {
+    try {
+      let documentViewPicker = new picker.DocumentViewPicker(this.context);
+      let options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      // API 12+: DocumentSelectMode.FOLDER. Fall back to unsupported if missing.
+      let mode = (picker as Any).DocumentSelectMode;
+      if (mode === undefined || mode.FOLDER === undefined) {
+        this.emitFileDialogResult([], false, true);
+        return;
+      }
+      options.selectMode = mode.FOLDER;
+      documentViewPicker.select(options).then((uris: Array<string>) => {
+        if (!uris || uris.length === 0) {
+          this.emitFileDialogResult([], true, false);
+        } else {
+          this.emitFileDialogResult(uris, false, false);
+        }
+      }).catch((err: Any) => {
+        console.info("openFolderDialog cancelled/failed:" + JSON.stringify(err));
+        this.emitFileDialogResult([], true, false);
+      });
+    } catch (err) {
+      console.error("openFolderDialog unsupported:" + JSON.stringify(err));
+      this.emitFileDialogResult([], false, true);
+    }
   }
 
   private async showTextInput(): Promise<void> {

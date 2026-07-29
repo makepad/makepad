@@ -275,6 +275,66 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    FromWasmSelectFileDialog(args) {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.style.display = "none";
+        if (args.accept) {
+            input.accept = args.accept;
+        }
+        let settled = false;
+        let reading = false;
+        const finish = (status, name, body) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            window.removeEventListener("focus", onFocus);
+            try {
+                if (input.parentNode) {
+                    input.parentNode.removeChild(input);
+                }
+            } catch (_) {}
+            this.to_wasm.ToWasmFileDialogResult({
+                cancelled: status,
+                name: name || "",
+                body: body || new Uint8Array(0),
+            });
+            this.do_wasm_pump();
+        };
+        // Cancel only after focus returns *and* no file was chosen. Wait long
+        // enough that a slow `change` + `arrayBuffer()` cannot race into a
+        // false cancel; skip while a read is in progress.
+        const onFocus = () => {
+            setTimeout(() => {
+                if (!settled && !reading && (!input.files || input.files.length === 0)) {
+                    finish(1, "", null);
+                }
+            }, 1500);
+        };
+        input.addEventListener("cancel", () => {
+            finish(1, "", null);
+        });
+        input.addEventListener("change", async () => {
+            const file = input.files && input.files[0];
+            if (!file) {
+                finish(1, "", null);
+                return;
+            }
+            reading = true;
+            try {
+                const buffer = await file.arrayBuffer();
+                finish(0, file.name || "file", new Uint8Array(buffer));
+            } catch (e) {
+                console.error("FromWasmSelectFileDialog read failed", e);
+                finish(3, "", null);
+            }
+        });
+        window.addEventListener("focus", onFocus);
+        document.body.appendChild(input);
+        input.click();
+    }
+
     FromWasmBrowserUpdateUrl(args) {
         const next = new URL(args.url || "", window.location.href);
         const nextHref = next.pathname + next.search + next.hash;

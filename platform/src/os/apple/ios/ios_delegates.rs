@@ -1169,7 +1169,9 @@ pub fn define_document_picker_delegate() -> *const Class {
                     if url == nil {
                         continue;
                     }
-                    // Presented with asCopy:YES so the URL is an app-owned import copy.
+                    // For folder picks (`asCopy:NO`) keep the security-scoped resource
+                    // open for the process lifetime so the returned path stays readable.
+                    let _: bool = msg_send![url, startAccessingSecurityScopedResource];
                     let path: ObjcId = msg_send![url, path];
                     if path != nil {
                         let path = crate::os::apple::apple_util::nsstring_to_string(path);
@@ -1179,12 +1181,18 @@ pub fn define_document_picker_delegate() -> *const Class {
                     }
                 }
             }
-            IosApp::finish_file_dialog(paths, false);
+            IosApp::finish_file_dialog(
+                crate::file_dialogs::FileDialogResultEvent::ok(
+                    &crate::file_dialogs::FileDialog::new(),
+                    paths,
+                    crate::file_dialogs::FileDialogPathKind::Filesystem,
+                ),
+            );
         }
     }
 
     extern "C" fn was_cancelled(_this: &Object, _: Sel, _controller: ObjcId) {
-        IosApp::finish_file_dialog(Vec::new(), true);
+        IosApp::finish_file_dialog(crate::file_dialogs::FileDialogResultEvent::cancelled());
     }
 
     unsafe {

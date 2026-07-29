@@ -1687,28 +1687,73 @@ impl Cx {
     }
 
     pub fn open_system_savefile_dialog(&mut self) {
-        self.platform_ops
-            .push(CxOsOp::SaveFileDialog(FileDialog::new()));
+        self.open_system_savefile_dialog_with(FileDialog::new());
     }
 
     pub fn open_system_openfile_dialog(&mut self) {
-        self.platform_ops
-            .push(CxOsOp::SelectFileDialog(FileDialog::new()));
+        self.open_system_openfile_dialog_with(FileDialog::new());
     }
 
     /// Opens a system file picker with custom title/filters.
+    ///
+    /// Result arrives as [`Event::FileDialogResult`].
+    /// - Android / OpenHarmony: content URIs (`path_kind = ContentUri`)
+    /// - Web: display names + inlined bytes (`path_kind = Inline`, see `contents`)
+    ///
+    /// Prefer [`FileDialogResultEvent::read_bytes`] for portable reads when possible.
     pub fn open_system_openfile_dialog_with(&mut self, dialog: FileDialog) {
-        self.platform_ops.push(CxOsOp::SelectFileDialog(dialog));
+        let dialog = self.prepare_file_dialog(
+            dialog,
+            crate::file_dialogs::FileDialogKind::OpenFile,
+        );
+        self.platform_ops
+            .push(CxOsOp::SelectFileDialog(dialog));
+    }
+
+    pub fn open_system_savefile_dialog_with(&mut self, dialog: FileDialog) {
+        let dialog = self.prepare_file_dialog(
+            dialog,
+            crate::file_dialogs::FileDialogKind::SaveFile,
+        );
+        self.platform_ops
+            .push(CxOsOp::SaveFileDialog(dialog));
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {
-        self.platform_ops
-            .push(CxOsOp::SaveFolderDialog(FileDialog::new()));
+        self.open_system_savefolder_dialog_with(FileDialog::new());
     }
 
     pub fn open_system_openfolder_dialog(&mut self) {
+        self.open_system_openfolder_dialog_with(FileDialog::new());
+    }
+
+    pub fn open_system_savefolder_dialog_with(&mut self, dialog: FileDialog) {
+        let dialog = self.prepare_file_dialog(
+            dialog,
+            crate::file_dialogs::FileDialogKind::SaveFolder,
+        );
         self.platform_ops
-            .push(CxOsOp::SelectFolderDialog(FileDialog::new()));
+            .push(CxOsOp::SaveFolderDialog(dialog));
+    }
+
+    pub fn open_system_openfolder_dialog_with(&mut self, dialog: FileDialog) {
+        let dialog = self.prepare_file_dialog(
+            dialog,
+            crate::file_dialogs::FileDialogKind::OpenFolder,
+        );
+        self.platform_ops
+            .push(CxOsOp::SelectFolderDialog(dialog));
+    }
+
+    fn prepare_file_dialog(
+        &mut self,
+        mut dialog: FileDialog,
+        kind: crate::file_dialogs::FileDialogKind,
+    ) -> FileDialog {
+        dialog.kind = kind;
+        dialog.request_id = self.file_dialog_id;
+        self.file_dialog_id = self.file_dialog_id.wrapping_add(1);
+        dialog
     }
 
     pub fn event_id(&self) -> u64 {

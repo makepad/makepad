@@ -58,6 +58,20 @@ pub fn handle_keyboard_status(is_open: bool, keyboard_height: i32) -> napi_ohos:
     Ok(())
 }
 
+#[napi]
+pub fn handle_file_dialog_result(
+    paths: Vec<String>,
+    cancelled: bool,
+    unsupported: bool,
+) -> napi_ohos::Result<()> {
+    send_from_ohos_message(FromOhosMessage::FileDialogResult {
+        paths,
+        cancelled,
+        unsupported,
+    });
+    Ok(())
+}
+
 #[no_mangle]
 extern "C" fn on_surface_created_cb(xcomponent: *mut OH_NativeXComponent, window: *mut c_void) {
     let mut width: u64 = 0;
@@ -271,5 +285,10 @@ pub enum FromOhosMessage {
     TextInput(TextInputEvent),
     DeleteLeft(i32),
     ResizeTextIME(bool, i32),
+    FileDialogResult {
+        paths: Vec<String>,
+        cancelled: bool,
+        unsupported: bool,
+    },
 }
 //TODO DIP

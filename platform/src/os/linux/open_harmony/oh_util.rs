@@ -18,6 +18,18 @@ fn value_type_to_string(val_type: &napi_valuetype) -> String {
     }
 }
 
+pub fn create_string_utf8(raw_env: napi_env, s: &str) -> Option<napi_value> {
+    let c = CString::new(s).ok()?;
+    let mut result = null_mut();
+    let status =
+        unsafe { napi_create_string_utf8(raw_env, c.as_ptr(), s.len(), &mut result) };
+    if status != Status::napi_ok {
+        crate::error!("failed to create utf8 string napi_value");
+        return None;
+    }
+    Some(result)
+}
+
 pub fn get_value_string(raw_env: napi_env, str_value: napi_value) -> Option<String> {
     let mut len = 0;
     let napi_status =

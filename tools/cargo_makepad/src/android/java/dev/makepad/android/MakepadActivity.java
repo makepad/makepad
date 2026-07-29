@@ -1467,7 +1467,9 @@ public class MakepadActivity
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         //% MAIN_ACTIVITY_ON_ACTIVITY_RESULT
-        if (requestCode == FILE_DIALOG_REQUEST_CODE) {
+        if (requestCode == FILE_DIALOG_OPEN_REQUEST_CODE
+                || requestCode == FILE_DIALOG_SAVE_REQUEST_CODE
+                || requestCode == FILE_DIALOG_FOLDER_REQUEST_CODE) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
                 android.net.Uri uri = data.getData();
                 try {
@@ -1476,28 +1478,78 @@ public class MakepadActivity
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                     getContentResolver().takePersistableUriPermission(uri, takeFlags);
                 } catch (Throwable ignored) {}
-                MakepadNative.onFileDialogResult(new String[]{ uri.toString() }, false);
+                MakepadNative.onFileDialogResult(new String[]{ uri.toString() }, 0);
             } else {
-                MakepadNative.onFileDialogResult(new String[0], true);
+                MakepadNative.onFileDialogResult(new String[0], 1);
             }
             return;
         }
     }
 
-    private static final int FILE_DIALOG_REQUEST_CODE = 0x4D4B4644; // 'MKFD'
+    private static final int FILE_DIALOG_OPEN_REQUEST_CODE = 0x4D4B4644; // 'MKFD'
+    private static final int FILE_DIALOG_SAVE_REQUEST_CODE = 0x4D4B4653; // 'MKFS'
+    private static final int FILE_DIALOG_FOLDER_REQUEST_CODE = 0x4D4B464C; // 'MKFL'
 
-    public void openFileDialog(String mimeType) {
+    private static void applyMimeTypes(Intent intent, String[] mimeTypes) {
+        if (mimeTypes == null || mimeTypes.length == 0) {
+            intent.setType("*/*");
+            return;
+        }
+        if (mimeTypes.length == 1) {
+            intent.setType(mimeTypes[0] != null && !mimeTypes[0].isEmpty() ? mimeTypes[0] : "*/*");
+            return;
+        }
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+    }
+
+    public void openFileDialog(String[] mimeTypes) {
         runOnUiThread(() -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType(mimeType != null && !mimeType.isEmpty() ? mimeType : "*/*");
+            applyMimeTypes(intent, mimeTypes);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             try {
-                startActivityForResult(intent, FILE_DIALOG_REQUEST_CODE);
+                startActivityForResult(intent, FILE_DIALOG_OPEN_REQUEST_CODE);
             } catch (Throwable e) {
                 Log.e("Makepad", "openFileDialog failed", e);
-                MakepadNative.onFileDialogResult(new String[0], true);
+                MakepadNative.onFileDialogResult(new String[0], 2);
+            }
+        });
+    }
+
+    public void saveFileDialog(String[] mimeTypes, String title) {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            applyMimeTypes(intent, mimeTypes);
+            if (title != null && !title.isEmpty()) {
+                intent.putExtra(Intent.EXTRA_TITLE, title);
+            }
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, FILE_DIALOG_SAVE_REQUEST_CODE);
+            } catch (Throwable e) {
+                Log.e("Makepad", "saveFileDialog failed", e);
+                MakepadNative.onFileDialogResult(new String[0], 2);
+            }
+        });
+    }
+
+    public void openFolderDialog() {
+        runOnUiThread(() -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            try {
+                startActivityForResult(intent, FILE_DIALOG_FOLDER_REQUEST_CODE);
+            } catch (Throwable e) {
+                Log.e("Makepad", "openFolderDialog failed", e);
+                MakepadNative.onFileDialogResult(new String[0], 2);
             }
         });
     }

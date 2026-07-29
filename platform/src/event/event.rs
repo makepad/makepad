@@ -259,6 +259,10 @@ pub enum Event {
     PermissionResult(PermissionResult),
 
     /// Result of a system file open/save dialog (`Cx::open_system_openfile_dialog`, etc.).
+    ///
+    /// Check [`FileDialogResultEvent::status`] — `Cancelled` is user dismiss,
+    /// `Unsupported` means this dialog kind is not available on the platform.
+    /// On Android, [`FileDialogPathKind::ContentUri`] paths are not usable with `std::fs`.
     FileDialogResult(crate::file_dialogs::FileDialogResultEvent),
 
     #[cfg(target_arch = "wasm32")]

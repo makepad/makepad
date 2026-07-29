@@ -176,7 +176,8 @@ pub enum FromJavaMessage {
     },
     FileDialogResult {
         paths: Vec<String>,
-        cancelled: bool,
+        /// 0 = ok, 1 = cancelled, 2 = error
+        status: i32,
     },
     VideoPlaybackPrepared {
         video_id: u64,
@@ -1201,7 +1202,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResu
     env: *mut jni_sys::JNIEnv,
     _: jni_sys::jclass,
     paths: jni_sys::jobjectArray,
-    cancelled: jni_sys::jboolean,
+    status: jni_sys::jint,
 ) {
     let mut out = Vec::new();
     if !paths.is_null() {
@@ -1216,7 +1217,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResu
     }
     send_from_java_message(FromJavaMessage::FileDialogResult {
         paths: out,
-        cancelled: cancelled != 0,
+        status,
     });
 }
 
@@ -1983,18 +1984,64 @@ pub unsafe fn to_java_cleanup_video_decoder_ref(
     (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
 }
 
-pub unsafe fn to_java_open_file_dialog(mime_type: &str) {
+pub unsafe fn to_java_open_file_dialog(mime_types: &[&str]) {
     let env = attach_jni_env();
-    let mime = CString::new(mime_type).unwrap_or_else(|_| CString::new("").unwrap());
-    let mime_j = ((**env).NewStringUTF.unwrap())(env, mime.as_ptr());
+    let array = mime_types_to_jarray(env, mime_types);
     ndk_utils::call_void_method!(
         env,
         get_activity(),
         "openFileDialog",
-        "(Ljava/lang/String;)V",
-        mime_j
+        "([Ljava/lang/String;)V",
+        array
     );
-    (**env).DeleteLocalRef.unwrap()(env, mime_j);
+    (**env).DeleteLocalRef.unwrap()(env, array);
+}
+
+pub unsafe fn to_java_save_file_dialog(mime_types: &[&str], title: &str) {
+    let env = attach_jni_env();
+    let array = mime_types_to_jarray(env, mime_types);
+    let title = CString::new(title).unwrap_or_else(|_| CString::new("").unwrap());
+    let title_j = ((**env).NewStringUTF.unwrap())(env, title.as_ptr());
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "saveFileDialog",
+        "([Ljava/lang/String;Ljava/lang/String;)V",
+        array,
+        title_j
+    );
+    (**env).DeleteLocalRef.unwrap()(env, array);
+    (**env).DeleteLocalRef.unwrap()(env, title_j);
+}
+
+pub unsafe fn to_java_open_folder_dialog() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "openFolderDialog", "()V");
+}
+
+unsafe fn mime_types_to_jarray(
+    env: *mut jni_sys::JNIEnv,
+    mime_types: &[&str],
+) -> jni_sys::jobjectArray {
+    let class_name = CString::new("java/lang/String").unwrap();
+    let string_class = ((**env).FindClass.unwrap())(env, class_name.as_ptr());
+    let len = mime_types.len().max(1) as jni_sys::jsize;
+    let array = ((**env).NewObjectArray.unwrap())(env, len, string_class, std::ptr::null_mut());
+    if mime_types.is_empty() {
+        let s = CString::new("*/*").unwrap();
+        let j = ((**env).NewStringUTF.unwrap())(env, s.as_ptr());
+        ((**env).SetObjectArrayElement.unwrap())(env, array, 0, j);
+        (**env).DeleteLocalRef.unwrap()(env, j);
+    } else {
+        for (i, mime) in mime_types.iter().enumerate() {
+            let s = CString::new(*mime).unwrap_or_else(|_| CString::new("*/*").unwrap());
+            let j = ((**env).NewStringUTF.unwrap())(env, s.as_ptr());
+            ((**env).SetObjectArrayElement.unwrap())(env, array, i as jni_sys::jsize, j);
+            (**env).DeleteLocalRef.unwrap()(env, j);
+        }
+    }
+    (**env).DeleteLocalRef.unwrap()(env, string_class);
+    array
 }
 
 pub unsafe fn to_java_check_permission(permission: &str) -> i32 {

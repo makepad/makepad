@@ -1077,10 +1077,23 @@ impl Cx {
                     ));
                 }
             }
-            FromJavaMessage::FileDialogResult { paths, cancelled } => {
-                self.call_event_handler(&Event::FileDialogResult(
-                    crate::file_dialogs::FileDialogResultEvent { paths, cancelled },
-                ));
+            FromJavaMessage::FileDialogResult { paths, status } => {
+                let settings = self
+                    .os
+                    .pending_file_dialog
+                    .take()
+                    .unwrap_or_else(crate::file_dialogs::FileDialog::new);
+                let result = match status {
+                    0 => crate::file_dialogs::FileDialogResultEvent::ok_content_uris(
+                        &settings, paths,
+                    ),
+                    2 => crate::file_dialogs::FileDialogResultEvent::error_from(
+                        &settings,
+                        "Android file dialog failed to start or complete",
+                    ),
+                    _ => crate::file_dialogs::FileDialogResultEvent::cancelled_from(&settings),
+                };
+                self.call_event_handler(&Event::FileDialogResult(result));
             }
             FromJavaMessage::VideoPlaybackPrepared {
                 video_id,
@@ -2896,32 +2909,37 @@ impl Cx {
                     self.os.internal_drag_items = Some(Arc::new(items));
                 }
                 CxOsOp::SelectFileDialog(settings) => {
-                    let mime = if settings.filters.iter().any(|f| {
-                        f.extensions.iter().any(|e| {
-                            let e = e.trim_start_matches('.').to_ascii_lowercase();
-                            matches!(
-                                e.as_str(),
-                                "mp4" | "mkv" | "webm" | "mov" | "m4v" | "3gp" | "avi" | "flv"
-                                    | "ts" | "wmv" | "mpg" | "mpeg"
-                            )
-                        })
-                    }) {
-                        "video/*"
-                    } else {
-                        "*/*"
-                    };
+                    let mimes = crate::file_dialogs::mime_types_for_filters(&settings.filters);
+                    self.os.pending_file_dialog = Some(settings);
                     unsafe {
-                        android_jni::to_java_open_file_dialog(mime);
+                        android_jni::to_java_open_file_dialog(&mimes);
                     }
                 }
-                CxOsOp::SaveFileDialog(_)
-                | CxOsOp::SaveFolderDialog(_)
-                | CxOsOp::SelectFolderDialog(_) => {
+                CxOsOp::SaveFileDialog(settings) => {
+                    let mimes = crate::file_dialogs::mime_types_for_filters(&settings.filters);
+                    let title = settings
+                        .filename
+                        .as_deref()
+                        .or(settings.title.as_deref())
+                        .unwrap_or("untitled")
+                        .to_string();
+                    self.os.pending_file_dialog = Some(settings);
+                    unsafe {
+                        android_jni::to_java_save_file_dialog(&mimes, &title);
+                    }
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    self.os.pending_file_dialog = Some(settings);
+                    unsafe {
+                        android_jni::to_java_open_folder_dialog();
+                    }
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: Vec::new(),
-                            cancelled: true,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFolderDialog",
+                        ),
                     ));
                 }
                 e => {
@@ -3219,6 +3237,7 @@ impl Default for CxOs {
             #[cfg(use_vulkan)]
             xr_pending_surface_height: 0,
             xr_retry_surface_after_destroy: false,
+            pending_file_dialog: None,
         }
     }
 }
@@ -3326,6 +3345,8 @@ pub struct CxOs {
     #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_height: i32,
     pub(crate) xr_retry_surface_after_destroy: bool,
+    /// Correlates the in-flight SAF picker with [`Event::FileDialogResult`].
+    pub(crate) pending_file_dialog: Option<crate::file_dialogs::FileDialog>,
 }
 
 impl CxOs {

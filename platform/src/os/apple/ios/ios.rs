@@ -1432,12 +1432,20 @@ impl Cx {
                 CxOsOp::SelectFolderDialog(settings) => {
                     IosApp::open_select_folder_dialog(&settings);
                 }
-                CxOsOp::SaveFileDialog(_) | CxOsOp::SaveFolderDialog(_) => {
+                CxOsOp::SaveFileDialog(settings) => {
                     self.call_event_handler(&Event::FileDialogResult(
-                        crate::file_dialogs::FileDialogResultEvent {
-                            paths: Vec::new(),
-                            cancelled: true,
-                        },
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFileDialog",
+                        ),
+                    ));
+                }
+                CxOsOp::SaveFolderDialog(settings) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent::unsupported_from(
+                            &settings,
+                            "SaveFolderDialog",
+                        ),
                     ));
                 }
                 e => {
