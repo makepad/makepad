@@ -2104,6 +2104,7 @@ pub struct PaintFace {
 fn append_ring_fringe(
     ring: &[[f64; 2]],
     aa: f32,
+    straddle: bool,
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -2133,13 +2134,25 @@ fn append_ring_fringe(
         let ml = (mx * mx + my * my).sqrt().max(1e-6);
         mx /= ml;
         my /= ml;
-        // Miter clamp: sharp corners cap the rim reach at 2x aa.
+        // Miter clamp: sharp corners cap the rim reach at 2x aa. The skirt
+        // STRADDLES the boundary — coverage crosses 50% exactly at the
+        // face edge (the legacy convention); the inner half paints face
+        // color over face color, a no-op.
         let cos_half = (mx * n1x + my * n1y).max(0.5);
-        let reach = aa / cos_half * out_sign;
+        // Translucent faces must not overpaint themselves (premultiplied
+        // double-blend darkens the band): their skirt starts AT the
+        // boundary and only ramps outward. Opaque faces straddle so
+        // coverage crosses 50% exactly at the edge.
+        let reach = if straddle {
+            aa * 0.5 / cos_half * out_sign
+        } else {
+            aa / cos_half * out_sign
+        };
+        let inner = if straddle { reach } else { 0.0 };
         let (px, py) = (p[0] as f32, p[1] as f32);
         verts.push(VVertex {
-            x: px,
-            y: py,
+            x: px - mx * inner,
+            y: py - my * inner,
             u: 0.5,
             v: 0.0,
             stroke_dist: 0.0,
@@ -2217,11 +2230,26 @@ pub fn overlay_paint_groups(
         Some(out)
     };
     let to_paths = |group: &PaintGroup, grounded_only: bool| -> Vec<Vec<[f64; 2]>> {
+        // Opaque groups: rings straddling the lift threshold join BOTH
+        // level parts so the meshes overlap at transitions (double-draw of
+        // an opaque color is invisible). Translucent groups must never
+        // draw twice — each ring goes to exactly one level.
+        let translucent = group.color[3] < 0.999;
         group
             .rings
             .iter()
-            .filter(|(ring, min_dz, _)| {
-                ring.len() >= 3 && (!grounded_only || *min_dz < LIFT_COVER_M)
+            .filter(|(ring, min_dz, max_dz)| {
+                if ring.len() < 3 {
+                    return false;
+                }
+                if !grounded_only {
+                    return true;
+                }
+                if translucent {
+                    *max_dz < LIFT_COVER_M
+                } else {
+                    *min_dz < LIFT_COVER_M
+                }
             })
             .filter_map(|(ring, _, _)| snap_ring(ring))
             .collect()
@@ -2458,9 +2486,16 @@ pub fn overlay_paint_groups(
             let mut fringe_verts: Vec<VVertex> = Vec::new();
             let mut fringe_indices: Vec<u32> = Vec::new();
             if aa > 0.0 {
+                let straddle = group.color[3] >= 0.999;
                 for shape in &visible {
                     for ring in shape {
-                        append_ring_fringe(ring, aa, &mut fringe_verts, &mut fringe_indices);
+                        append_ring_fringe(
+                            ring,
+                            aa,
+                            straddle,
+                            &mut fringe_verts,
+                            &mut fringe_indices,
+                        );
                     }
                 }
             }
