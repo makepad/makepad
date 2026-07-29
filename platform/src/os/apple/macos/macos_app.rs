@@ -589,6 +589,16 @@ impl MacosApp {
                 if window_delegate == nil {
                     return;
                 }
+                // Foreign windows land in this event loop too (the macOS
+                // screen-capture overlay's TUINSWindow among them) and their
+                // delegates don't carry our ivar — skip them, don't panic.
+                if (*window_delegate)
+                    .class()
+                    .instance_variable("macos_window_ptr")
+                    .is_none()
+                {
+                    return;
+                }
                 let ptr: *mut c_void = *(*window_delegate).get_ivar("macos_window_ptr");
                 let cocoa_window = &mut *(ptr as *mut MacosWindow);
                 let dx: f64 = msg_send![ns_event, scrollingDeltaX];
