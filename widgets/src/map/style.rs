@@ -763,7 +763,7 @@ fn scaled_style(template: StrokeTemplate, rank_bias: i16, width_scale: f32) -> S
 pub fn stroke_style_for_tags(
     theme: &CompiledMapTheme,
     tags: &HashMap<String, String>,
-    tile_zoom: u32,
+    _tile_zoom: u32,
     render_zoom: u32,
     zoom_mult: f32,
     px_to_units: f32,
@@ -792,6 +792,10 @@ pub fn stroke_style_for_tags(
         return None;
     }
 
+    // Label-source geometry exists only to place text. In particular,
+    // `street_labels` duplicates/simplifies the physical `streets` ways
+    // and does not preserve their bridge segmentation, so admitting it as
+    // a stroke creates a second ground-level road beneath elevated decks.
     if matches!(
         layer,
         "street_labels"
@@ -803,17 +807,6 @@ pub fn stroke_style_for_tags(
             | "boundary_labels"
             | "place_labels"
     ) {
-        if !(layer == "street_labels" && tile_zoom < 14) {
-            return None;
-        }
-    }
-
-    if matches!(layer, "street_labels_points" | "streets_polygons_labels") {
-        return None;
-    }
-    // Water label layers carry name geometry only; the water_lines /
-    // water_polygons layers own the visible geometry.
-    if matches!(layer, "water_lines_labels" | "water_polygons_labels") {
         return None;
     }
     // Walls/fences dark thin, hedges green (detail archive).
@@ -1364,4 +1357,40 @@ pub fn probe_compiled_theme() -> CompiledMapTheme {
         center_shape_id: 0.0,
     });
     style.compile()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn motorway_tags(layer: &str) -> HashMap<String, String> {
+        HashMap::from([
+            ("layer".to_string(), layer.to_string()),
+            ("highway".to_string(), "motorway".to_string()),
+        ])
+    }
+
+    #[test]
+    fn street_label_geometry_never_produces_a_road_stroke() {
+        let theme = probe_compiled_theme();
+        let tags = motorway_tags("street_labels");
+
+        for tile_zoom in [0, 13, 14, 22] {
+            assert!(
+                stroke_style_for_tags(&theme, &tags, tile_zoom, 18, zoom_width_mult(18), 1.0)
+                    .is_none(),
+                "street-label geometry emitted a physical stroke at z{tile_zoom}"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_street_geometry_still_produces_a_low_zoom_road_stroke() {
+        let theme = probe_compiled_theme();
+        let tags = motorway_tags("streets");
+
+        assert!(
+            stroke_style_for_tags(&theme, &tags, 13, 18, zoom_width_mult(18), 1.0).is_some()
+        );
+    }
 }
