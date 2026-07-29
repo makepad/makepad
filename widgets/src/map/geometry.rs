@@ -1998,6 +1998,16 @@ pub fn tile_clip_bounds(padding: f32) -> GeoBounds {
     }
 }
 
+/// Whether a buffered MVT endpoint is an artificial cut at the renderer's
+/// padded tile boundary. Such ends must be butt-capped: a round disc extends
+/// into the neighboring tile and exposes overlapping slabs in tilted views.
+pub fn road_endpoint_is_clip_cut(point: (f32, f32), clip: GeoBounds) -> bool {
+    point.0 <= clip.min.x + 0.6
+        || point.0 >= clip.max.x - 0.6
+        || point.1 <= clip.min.y + 0.6
+        || point.1 >= clip.max.y - 0.6
+}
+
 // --- Shared tag helpers ---
 
 pub fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
@@ -2073,6 +2083,23 @@ mod tests {
 /// Sentinel for a paint group with no dz field (grounded tier).
 pub const DZ_FIELD_NONE: u16 = u16::MAX;
 
+/// Road paint groups are clipped to a small padded tile rectangle before
+/// boolean overlay. Its border is an implementation cut, not a physical
+/// road edge, so an elevated ribbon must not grow a fascia across it.
+///
+/// Keep this aligned with the road-union clip padding in `map::tile`.
+const ROAD_PAINT_CLIP_PADDING: f32 = 3.0;
+
+#[derive(Clone, Copy)]
+pub struct RoadSkirtJoint {
+    pub point: (f32, f32),
+    /// Unit direction from the road interior toward its endpoint.
+    pub outward: (f32, f32),
+    /// A round terminal cap that overlaps another same-height road. Its
+    /// forward arc is internal to the joined deck and must not grow a wall.
+    pub round_cap: bool,
+}
+
 pub struct PaintGroup {
     pub color: [f32; 4],
     pub param5: f32,
@@ -2086,7 +2113,7 @@ pub struct PaintGroup {
     /// way in another tier — bridge/approach splits): skirt walls and caps
     /// are suppressed within `half_width` of these points so the deck
     /// reads as ONE continuous body across the style change.
-    pub butt_points: Vec<(f32, f32)>,
+    pub skirt_joints: Vec<RoadSkirtJoint>,
     pub half_width: f32,
     /// (ring, min corner dz, max corner dz). Lifted rings stay visible but
     /// do NOT punch holes in the groups below: the road continues under a
@@ -2127,8 +2154,9 @@ pub struct PaintFace {
 /// Vertical wall quads along one boundary ring of a lifted face.
 fn append_ring_skirt(
     ring: &[[f64; 2]],
-    butt_points: &[(f32, f32)],
+    skirt_joints: &[RoadSkirtJoint],
     butt_reach: f32,
+    clip: GeoBounds,
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -2179,14 +2207,55 @@ fn append_ring_skirt(
     let reach_sq = butt_reach * butt_reach;
     for i in 0..n {
         let j = (i + 1) % n;
+        let a = ring[i];
+        let b = ring[j];
+        // Boolean outlines include straight edges introduced solely by the
+        // padded tile clip. A wall there appears as a transverse ledge in
+        // the overlap with the neighboring tile. Require BOTH endpoints on
+        // the same clip side: a real longitudinal road edge that merely
+        // reaches/crosses the boundary must remain skirted.
+        const CLIP_EPS: f64 = 1e-6;
+        let on_same_clip_side =
+            ((a[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS
+                && (b[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS)
+                || ((a[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS
+                    && (b[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS)
+                || ((a[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS
+                    && (b[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS)
+                || ((a[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS
+                    && (b[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS);
+        if on_same_clip_side {
+            continue;
+        }
         let mid = (
-            ((ring[i][0] + ring[j][0]) * 0.5) as f32,
-            ((ring[i][1] + ring[j][1]) * 0.5) as f32,
+            ((a[0] + b[0]) * 0.5) as f32,
+            ((a[1] + b[1]) * 0.5) as f32,
         );
-        // No wall across a flush joint: the deck continues there.
-        let at_joint = butt_points.iter().any(|&(bx, by)| {
-            let (dx, dy) = (mid.0 - bx, mid.1 - by);
-            dx * dx + dy * dy < reach_sq
+        let edge = (
+            (b[0] - a[0]) as f32,
+            (b[1] - a[1]) as f32,
+        );
+        let edge_len = (edge.0 * edge.0 + edge.1 * edge.1).sqrt().max(1e-6);
+        // Only remove the INTERNAL end boundary. The old radial test deleted
+        // every edge near the endpoint, including the longitudinal road
+        // sides, which opened the large triangular "scissor" holes.
+        let at_joint = skirt_joints.iter().any(|joint| {
+            let (dx, dy) = (mid.0 - joint.point.0, mid.1 - joint.point.1);
+            if dx * dx + dy * dy >= reach_sq {
+                return false;
+            }
+            let along = dx * joint.outward.0 + dy * joint.outward.1;
+            if joint.round_cap {
+                // A round end contributes only its forward semicircle after
+                // union with the segment rectangle.
+                along >= -0.05
+            } else {
+                // A flush butt contributes one cross-road edge. Preserve
+                // nearby side edges, which run parallel to the road.
+                let tangent_dot =
+                    (edge.0 * joint.outward.0 + edge.1 * joint.outward.1).abs() / edge_len;
+                along.abs() <= 0.75 && tangent_dot < 0.5
+            }
         });
         if at_joint {
             continue;
@@ -2754,8 +2823,9 @@ pub fn overlay_paint_groups(
                     for ring in shape {
                         append_ring_skirt(
                             ring,
-                            &group.butt_points,
+                            &group.skirt_joints,
                             group.half_width + 0.75,
+                            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
                             &mut skirt_verts,
                             &mut skirt_indices,
                         );
@@ -2839,16 +2909,21 @@ impl DzField {
                 let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
                 if cap_reach > 0.0 && len > 0.5 {
                     let (ux, uy) = ((bx - ax) / len, (by - ay) / len);
+                    // Buffered MVT lines commonly end just OUTSIDE the
+                    // padded render clip (-4/260 for a -3/259 clip). Those
+                    // are clip cuts too: extending them as true caps makes
+                    // neighboring tiles sample different ramp heights
+                    // throughout their overlap band.
                     if i == 0
                         && dza.abs() > 0.2
-                        && !point_on_bounds((ax, ay), clip, 0.6)
+                        && !road_endpoint_is_clip_cut((ax, ay), clip)
                     {
                         ax -= ux * cap_reach;
                         ay -= uy * cap_reach;
                     }
                     if i + 2 == points.len()
                         && dzb.abs() > 0.2
-                        && !point_on_bounds((bx, by), clip, 0.6)
+                        && !road_endpoint_is_clip_cut((bx, by), clip)
                     {
                         bx += ux * cap_reach;
                         by += uy * cap_reach;
@@ -3036,6 +3111,41 @@ pub fn subdivide_face_mesh(
 mod overlay_tests {
     use super::*;
 
+    #[test]
+    fn buffered_mvt_endpoints_are_clip_cuts() {
+        let clip = tile_clip_bounds(3.0);
+        assert!(road_endpoint_is_clip_cut((-4.0, 128.0), clip));
+        assert!(road_endpoint_is_clip_cut((260.0, 128.0), clip));
+        assert!(road_endpoint_is_clip_cut((128.0, -4.0), clip));
+        assert!(road_endpoint_is_clip_cut((128.0, 260.0), clip));
+        assert!(!road_endpoint_is_clip_cut((128.0, 128.0), clip));
+        assert!(!road_endpoint_is_clip_cut((255.0, 128.0), clip));
+    }
+
+    #[test]
+    fn skirt_drops_only_the_artificial_clip_edge() {
+        let clip = tile_clip_bounds(ROAD_PAINT_CLIP_PADDING);
+        // The right edge lies on the padded tile cut. The left edge is the
+        // real longitudinal side of the elevated road and must survive.
+        let ring = [
+            [250.0, 100.0],
+            [f64::from(clip.max.x), 100.0],
+            [f64::from(clip.max.x), 110.0],
+            [250.0, 110.0],
+        ];
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        append_ring_skirt(&ring, &[], 4.0, clip, &mut verts, &mut indices);
+
+        assert_eq!(verts.len(), 8);
+        assert_eq!(indices.len(), 18, "exactly one of four wall quads is omitted");
+        assert_eq!(
+            &indices[12..],
+            &[6, 7, 1, 6, 1, 0],
+            "the real longitudinal side opposite the clip cut remains"
+        );
+    }
+
     /// Rasterize triangles (constant color per set) over a background —
     /// shared by ground truth and unified rendering.
     fn raster(
@@ -3117,7 +3227,7 @@ mod overlay_tests {
                 phase: 0,
                 rank: 0,
                 field: DZ_FIELD_NONE,
-                butt_points: Vec::new(),
+                skirt_joints: Vec::new(),
                 half_width: 1.0,
                 rings,
             });
