@@ -937,6 +937,9 @@ impl Cx {
             IosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
+            IosEvent::FileDialogResult(result) => {
+                self.call_event_handler(&Event::FileDialogResult(result))
+            }
         }
 
         // After every event, drain any pending re-apply. The cheap gate
@@ -1422,6 +1425,20 @@ impl Cx {
                 }
                 CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
                     IosApp::set_status_bar_dark_icons(dark_icons);
+                }
+                CxOsOp::SelectFileDialog(settings) => {
+                    IosApp::open_select_file_dialog(&settings);
+                }
+                CxOsOp::SelectFolderDialog(settings) => {
+                    IosApp::open_select_folder_dialog(&settings);
+                }
+                CxOsOp::SaveFileDialog(_) | CxOsOp::SaveFolderDialog(_) => {
+                    self.call_event_handler(&Event::FileDialogResult(
+                        crate::file_dialogs::FileDialogResultEvent {
+                            paths: Vec::new(),
+                            cancelled: true,
+                        },
+                    ));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);

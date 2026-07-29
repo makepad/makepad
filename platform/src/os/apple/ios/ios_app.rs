@@ -126,6 +126,7 @@ pub struct IosClasses {
     pub textfield_delegate: *const Class,
     pub timer_delegate: *const Class,
     pub edit_menu_delegate: *const Class,
+    pub document_picker_delegate: *const Class,
     // UITextInput protocol classes for IME support
     pub makepad_text_view: *const Class,
 }
@@ -141,6 +142,7 @@ impl IosClasses {
             textfield_delegate: define_textfield_delegate(),
             timer_delegate: define_ios_timer_delegate(),
             edit_menu_delegate: define_edit_menu_interaction_delegate(),
+            document_picker_delegate: define_document_picker_delegate(),
             // All UITextInput classes enabled
             makepad_text_view: define_makepad_text_view(),
         }
@@ -191,6 +193,8 @@ pub struct IosApp {
     last_keyboard_config: Option<crate::ime::TextInputConfig>,
     /// Root view controller for status bar / home indicator control
     pub view_controller: Option<ObjcId>,
+    /// Retained while a document picker is presented.
+    document_picker_delegate: Option<ObjcId>,
     /// Native camera preview layers keyed by video_id.
     pub camera_preview_layers: HashMap<u64, ObjcId>,
     /// Selection handles overlayed over the MTK view (iOS 15+ custom implementation).
@@ -278,6 +282,7 @@ impl IosApp {
                 physical_keyboard_connected,
                 last_keyboard_config: None,
                 view_controller: None,
+                document_picker_delegate: None,
                 camera_preview_layers: HashMap::new(),
                 selection_handle_start_view: None,
                 selection_handle_end_view: None,
@@ -1335,6 +1340,138 @@ impl IosApp {
             let pasteboard: ObjcId = self.pasteboard;
             let _: () = msg_send![pasteboard, setString: nsstring];
         }
+    }
+
+    /// Present `UIDocumentPickerViewController` for opening a local file.
+    pub fn open_select_file_dialog(settings: &crate::file_dialogs::FileDialog) {
+        Self::present_document_picker(settings, false);
+    }
+
+    /// Present `UIDocumentPickerViewController` for opening a folder.
+    pub fn open_select_folder_dialog(settings: &crate::file_dialogs::FileDialog) {
+        Self::present_document_picker(settings, true);
+    }
+
+    fn present_document_picker(settings: &crate::file_dialogs::FileDialog, folders_only: bool) {
+        // Grab view controller without holding the borrow across UIKit presentation.
+        let view_controller = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+
+        let Some(view_controller) = view_controller else {
+            Self::finish_file_dialog(Vec::new(), true);
+            return;
+        };
+
+        unsafe {
+            let types = Self::build_content_types(settings, folders_only);
+            if types == nil {
+                Self::finish_file_dialog(Vec::new(), true);
+                return;
+            }
+
+            let picker: ObjcId = msg_send![class!(UIDocumentPickerViewController), alloc];
+            let picker: ObjcId = msg_send![
+                picker,
+                initForOpeningContentTypes: types
+                asCopy: YES
+            ];
+            if picker == nil {
+                Self::finish_file_dialog(Vec::new(), true);
+                return;
+            }
+
+            let () = msg_send![picker, setAllowsMultipleSelection: NO];
+            if let Some(title) = &settings.title {
+                let () = msg_send![picker, setTitle: str_to_nsstring(title)];
+            }
+
+            let delegate: ObjcId = msg_send![get_ios_class_global().document_picker_delegate, new];
+            let () = msg_send![picker, setDelegate: delegate];
+
+            with_ios_app(|app| {
+                if let Some(old) = app.document_picker_delegate.take() {
+                    let () = msg_send![old, release];
+                }
+                app.document_picker_delegate = Some(delegate);
+            });
+
+            let () = msg_send![
+                view_controller,
+                presentViewController: picker
+                animated: YES
+                completion: nil
+            ];
+            let () = msg_send![picker, release];
+        }
+    }
+
+    unsafe fn build_content_types(
+        settings: &crate::file_dialogs::FileDialog,
+        folders_only: bool,
+    ) -> ObjcId {
+        let mut types: Vec<ObjcId> = Vec::new();
+        if folders_only {
+            let folder_id = str_to_nsstring("public.folder");
+            let ut: ObjcId = msg_send![class!(UTType), typeWithIdentifier: folder_id];
+            if ut != nil {
+                types.push(ut);
+            }
+        } else if settings.filters.is_empty() {
+            let item_id = str_to_nsstring("public.item");
+            let ut: ObjcId = msg_send![class!(UTType), typeWithIdentifier: item_id];
+            if ut != nil {
+                types.push(ut);
+            }
+        } else {
+            for filter in &settings.filters {
+                for ext in &filter.extensions {
+                    let trimmed = ext.trim_start_matches('.');
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let ns_ext = str_to_nsstring(trimmed);
+                    let ut: ObjcId = msg_send![class!(UTType), typeWithFilenameExtension: ns_ext];
+                    if ut != nil {
+                        types.push(ut);
+                    }
+                }
+            }
+            if types.is_empty() {
+                let item_id = str_to_nsstring("public.item");
+                let ut: ObjcId = msg_send![class!(UTType), typeWithIdentifier: item_id];
+                if ut != nil {
+                    types.push(ut);
+                }
+            }
+        }
+        if types.is_empty() {
+            return nil;
+        }
+        msg_send![
+            class!(NSArray),
+            arrayWithObjects: types.as_ptr()
+            count: types.len()
+        ]
+    }
+
+    /// Called from the document-picker delegate when the sheet finishes.
+    pub fn finish_file_dialog(paths: Vec<String>, cancelled: bool) {
+        // Drop retained delegate outside of the event callback.
+        let old = with_ios_app(|app| app.document_picker_delegate.take());
+        if let Some(old) = old {
+            unsafe {
+                let () = msg_send![old, release];
+            }
+        }
+        IosApp::do_callback(IosEvent::FileDialogResult(
+            crate::file_dialogs::FileDialogResultEvent { paths, cancelled },
+        ));
     }
 
     pub fn paste_from_clipboard(&self) -> String {
