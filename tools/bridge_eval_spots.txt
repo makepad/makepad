@@ -1,0 +1,10 @@
+# name lon lat zoom rot tilt — close SIDE views along structures (artifacts
+# hide from high viewpoints; look along/across decks at ramp feet).
+dees-postmabrug 4.8880 52.3898 17.2 -35 64
+basisweg-side 4.8330 52.3937 17.0 60 64
+amstelveenseweg-side 4.8565 52.3385 17.2 70 64
+sloterdijk-side 4.8390 52.3888 17.0 -60 64
+utrechtboog-side 4.9005 52.3438 17.0 90 64
+rai-side 4.8895 52.3400 17.2 -70 64
+voorburgstraat 4.8310 52.3760 17.0 20 62
+nieuwemeer-side 4.8270 52.3352 16.8 40 64
