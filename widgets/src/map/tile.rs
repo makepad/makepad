@@ -3062,6 +3062,51 @@ fn build_tile_buffers_from_features(
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
+                // Deck side walls first (under the face): top verts (v=0)
+                // ride the deck field, bottom verts (v=1) stay grounded —
+                // flat mode collapses them, tilt reveals the wall. Closes
+                // the crescents a displaced ramp leaves over its footprint.
+                if face.lifted && !face.skirt_verts.is_empty() {
+                    if let Some(field) = field {
+                        let mut sk_verts = face.skirt_verts.clone();
+                        let mut sk_indices = face.skirt_indices.clone();
+                        subdivide_face_mesh(&mut sk_verts, &mut sk_indices, 3.0, field);
+                        let sk_deck: Vec<f32> = sk_verts
+                            .iter()
+                            .map(|v| if v.v > 0.5 { 0.0 } else { field.sample(v.x, v.y) })
+                            .collect();
+                        if sk_deck.iter().any(|&d| d > 0.05) {
+                            let wall = [
+                                face.color[0] * 0.72,
+                                face.color[1] * 0.72,
+                                face.color[2] * 0.72,
+                                face.color[3],
+                            ];
+                            append_tessellated_geometry_decked(
+                                &sk_verts,
+                                &sk_indices,
+                                &mut casing_vertices,
+                                &mut casing_indices,
+                                VectorRenderParams {
+                                    color: wall,
+                                    stroke_mult: 1e6,
+                                    shape_id: 0.0,
+                                    params: [
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        0.0,
+                                        (ladder_param5 - ladder_step * 0.25).max(0.06),
+                                    ],
+                                    zbias: casing_zbias,
+                                },
+                                Some(&sk_deck),
+                            );
+                            casing_zbias += VECTOR_ZBIAS_STEP;
+                        }
+                    }
+                }
                 append_tessellated_geometry_decked(
                     verts,
                     indices,

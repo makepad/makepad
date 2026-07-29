@@ -2096,6 +2096,52 @@ pub struct PaintFace {
     /// right after the face, so painter-order AA falls out of the ladder.
     pub fringe_verts: Vec<VVertex>,
     pub fringe_indices: Vec<u32>,
+    /// This face is a lifted level part (deck geometry).
+    pub lifted: bool,
+    /// Deck side walls: vertical quads along the lifted boundary — top
+    /// vertex (v=0) rides the deck dz, bottom vertex (v=1) stays grounded.
+    /// Flat mode degenerates them to zero area; tilt reveals the wall.
+    /// Closes the ramp-displacement crescents and reads as deck volume.
+    pub skirt_verts: Vec<VVertex>,
+    pub skirt_indices: Vec<u32>,
+}
+
+/// Vertical wall quads along one boundary ring of a lifted face.
+fn append_ring_skirt(
+    ring: &[[f64; 2]],
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let n = ring.len();
+    if n < 3 {
+        return;
+    }
+    let base = verts.len() as u32;
+    for p in ring {
+        let (px, py) = (p[0] as f32, p[1] as f32);
+        verts.push(VVertex {
+            x: px,
+            y: py,
+            u: 0.5,
+            v: 0.0,
+            stroke_dist: 0.0,
+            clip_radius: 4.0,
+        });
+        verts.push(VVertex {
+            x: px,
+            y: py,
+            u: 0.5,
+            v: 1.0,
+            stroke_dist: 0.0,
+            clip_radius: 4.0,
+        });
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a_top, a_bottom) = (base + i as u32 * 2, base + i as u32 * 2 + 1);
+        let (b_top, b_bottom) = (base + j as u32 * 2, base + j as u32 * 2 + 1);
+        indices.extend_from_slice(&[a_top, a_bottom, b_bottom, a_top, b_bottom, b_top]);
+    }
 }
 
 /// One ring's AA skirt: per-vertex miter offsets to the un-filled side.
@@ -2477,7 +2523,8 @@ pub fn overlay_paint_groups(
     for (group, (visible_grounded, visible_lifted)) in groups.iter().zip(visibles) {
         // Grounded and lifted parts become separate faces with identical
         // metadata; their seam overlap renders identically on both sides.
-        for visible in [visible_grounded, visible_lifted] {
+        for (part_index, visible) in [visible_grounded, visible_lifted].into_iter().enumerate() {
+            let lifted = part_index == 1;
             if visible.is_empty() {
                 continue;
             }
@@ -2511,10 +2558,12 @@ pub fn overlay_paint_groups(
             }
             let mut fringe_verts: Vec<VVertex> = Vec::new();
             let mut fringe_indices: Vec<u32> = Vec::new();
-            if aa > 0.0 {
-                let straddle = group.color[3] >= 0.999;
-                for shape in &visible {
-                    for ring in shape {
+            let mut skirt_verts: Vec<VVertex> = Vec::new();
+            let mut skirt_indices: Vec<u32> = Vec::new();
+            let straddle = group.color[3] >= 0.999;
+            for shape in &visible {
+                for ring in shape {
+                    if aa > 0.0 {
                         append_ring_fringe(
                             ring,
                             aa,
@@ -2522,6 +2571,9 @@ pub fn overlay_paint_groups(
                             &mut fringe_verts,
                             &mut fringe_indices,
                         );
+                    }
+                    if lifted {
+                        append_ring_skirt(ring, &mut skirt_verts, &mut skirt_indices);
                     }
                 }
             }
@@ -2535,6 +2587,9 @@ pub fn overlay_paint_groups(
                 indices: tess_indices.clone(),
                 fringe_verts,
                 fringe_indices,
+                lifted,
+                skirt_verts,
+                skirt_indices,
             });
         }
     }
