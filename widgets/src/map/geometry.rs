@@ -2150,11 +2150,14 @@ fn append_ring_fringe(
         };
         let inner = if straddle { reach } else { 0.0 };
         let (px, py) = (p[0] as f32, p[1] as f32);
+        // v = 1.0: the stroke-mode pixel shader multiplies by a cap mask
+        // driven by tcoord.y (smoothstep from 0) — v of 0 renders the
+        // whole skirt invisible.
         verts.push(VVertex {
             x: px - mx * inner,
             y: py - my * inner,
             u: 0.5,
-            v: 0.0,
+            v: 1.0,
             stroke_dist: 0.0,
             clip_radius: aa * 4.0,
         });
@@ -2162,7 +2165,7 @@ fn append_ring_fringe(
             x: px + mx * reach,
             y: py + my * reach,
             u: 0.0,
-            v: 0.0,
+            v: 1.0,
             stroke_dist: 0.0,
             clip_radius: aa * 4.0,
         });
@@ -2229,11 +2232,20 @@ pub fn overlay_paint_groups(
         }
         Some(out)
     };
-    let to_paths = |group: &PaintGroup, grounded_only: bool| -> Vec<Vec<[f64; 2]>> {
-        // Opaque groups: rings straddling the lift threshold join BOTH
-        // level parts so the meshes overlap at transitions (double-draw of
-        // an opaque color is invisible). Translucent groups must never
-        // draw twice — each ring goes to exactly one level.
+    // Ring sets per group. Straddling rings (min < threshold <= max — a
+    // ramp segment) are VISIBLE in both level parts so the meshes overlap
+    // at transitions, but they must join NEITHER cover as grounded: a
+    // partially lifted deck segment cutting the road underneath was the
+    // under-the-overpass hole. Translucent groups never draw a ring twice
+    // (premultiplied double-blend darkens), so their visible set is strict.
+    #[derive(Clone, Copy, PartialEq)]
+    enum RingSet {
+        All,
+        VisibleGrounded,
+        CoverGrounded,
+        Lifted,
+    }
+    let to_paths = |group: &PaintGroup, set: RingSet| -> Vec<Vec<[f64; 2]>> {
         let translucent = group.color[3] < 0.999;
         group
             .rings
@@ -2242,13 +2254,17 @@ pub fn overlay_paint_groups(
                 if ring.len() < 3 {
                     return false;
                 }
-                if !grounded_only {
-                    return true;
-                }
-                if translucent {
-                    *max_dz < LIFT_COVER_M
-                } else {
-                    *min_dz < LIFT_COVER_M
+                match set {
+                    RingSet::All => true,
+                    RingSet::VisibleGrounded => {
+                        if translucent {
+                            *max_dz < LIFT_COVER_M
+                        } else {
+                            *min_dz < LIFT_COVER_M
+                        }
+                    }
+                    RingSet::CoverGrounded => *max_dz < LIFT_COVER_M,
+                    RingSet::Lifted => *max_dz >= LIFT_COVER_M,
                 }
             })
             .filter_map(|(ring, _, _)| snap_ring(ring))
@@ -2272,6 +2288,9 @@ pub fn overlay_paint_groups(
     struct GroupOutline {
         grounded_shapes: Shapes,
         grounded_paths: Vec<Vec<[f64; 2]>>,
+        /// Strictly grounded outline (no straddling rings) — the only part
+        /// allowed to cut content below in the cascade.
+        cover_grounded_paths: Vec<Vec<[f64; 2]>>,
         lifted_shapes: Shapes,
         lifted_paths: Vec<Vec<[f64; 2]>>,
         bbox: (f64, f64, f64, f64),
@@ -2343,15 +2362,21 @@ pub fn overlay_paint_groups(
                 .rings
                 .iter()
                 .any(|(_, _, max_dz)| *max_dz >= LIFT_COVER_M);
-            let (grounded_shapes, grounded_paths) = dissolve(to_paths(group, true));
+            let has_straddler = group
+                .rings
+                .iter()
+                .any(|(_, min_dz, max_dz)| {
+                    *min_dz < LIFT_COVER_M && *max_dz >= LIFT_COVER_M
+                });
+            let (grounded_shapes, grounded_paths) =
+                dissolve(to_paths(group, RingSet::VisibleGrounded));
+            let cover_grounded_paths = if has_straddler {
+                dissolve(to_paths(group, RingSet::CoverGrounded)).1
+            } else {
+                grounded_paths.clone()
+            };
             let (lifted_shapes, lifted_paths) = if has_lifted {
-                let lifted_rings: Vec<Vec<[f64; 2]>> = group
-                    .rings
-                    .iter()
-                    .filter(|(ring, _, max_dz)| ring.len() >= 3 && *max_dz >= LIFT_COVER_M)
-                    .filter_map(|(ring, _, _)| snap_ring(ring))
-                    .collect();
-                dissolve(lifted_rings)
+                dissolve(to_paths(group, RingSet::Lifted))
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -2367,6 +2392,7 @@ pub fn overlay_paint_groups(
             GroupOutline {
                 grounded_shapes,
                 grounded_paths,
+                cover_grounded_paths,
                 lifted_shapes,
                 lifted_paths,
                 bbox,
@@ -2412,13 +2438,13 @@ pub fn overlay_paint_groups(
             ),
             visible_part(&outline.lifted_paths, &outline.lifted_shapes, &cover_lifted),
         );
-        if !outline.grounded_paths.is_empty() {
+        if !outline.cover_grounded_paths.is_empty() {
             if debug_dump {
-                let mut all = outline.grounded_paths.clone();
+                let mut all = outline.cover_grounded_paths.clone();
                 all.extend(cover_grounded.iter().flat_map(|shape| shape.iter().cloned()));
                 dump_paths("union-grounded", &all);
             }
-            cover_grounded = outline.grounded_paths.overlay(
+            cover_grounded = outline.cover_grounded_paths.overlay(
                 &cover_grounded,
                 OverlayRule::Union,
                 IoFillRule::NonZero,

@@ -1385,6 +1385,25 @@ impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.start_worker();
         self.set_status(cx, "Loading navigation data…");
+        // Debug: /tmp/mp_start_cam holds "lon lat zoom [rot] [tilt]" — boot
+        // straight into a benchmark viewport (env vars don't reach
+        // studio-launched runs; the file does).
+        if let Ok(text) = std::fs::read_to_string("/tmp/mp_start_cam") {
+            let vals: Vec<f64> = text
+                .split_whitespace()
+                .filter_map(|v| v.parse::<f64>().ok())
+                .collect();
+            if vals.len() >= 3 {
+                let map = self.map(cx);
+                map.set_center(cx, vals[0], vals[1]);
+                map.set_map_zoom(cx, vals[2]);
+                map.set_rotation(cx, vals.get(3).copied().unwrap_or(0.0));
+                let tilt = vals.get(4).copied().unwrap_or(0.0);
+                map.set_tilt(cx, tilt);
+                self.tilt_target = tilt;
+                self.tilt_current = tilt;
+            }
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
