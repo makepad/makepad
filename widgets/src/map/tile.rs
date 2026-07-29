@@ -2893,7 +2893,7 @@ fn build_tile_buffers_from_features(
                     .map(|(points, dz)| (points.as_slice(), dz.as_deref())),
             );
         }
-        dz_fields.push(DzField::build(&plaza_ways, 6.0));
+        dz_fields.push(DzField::build(&plaza_ways, 6.0, union_clip));
     }
     for (style, ways) in &smoothed_tiers {
         let half_width = style
@@ -2904,7 +2904,7 @@ fn build_tile_buffers_from_features(
             .iter()
             .map(|(points, dz)| (points.as_slice(), dz.as_deref()))
             .collect();
-        dz_fields.push(DzField::build(&ways_ref, half_width + 2.0));
+        dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
     for pass in 0..2u8 {
         for (tier_index, (style, ways)) in smoothed_tiers.iter().enumerate() {
