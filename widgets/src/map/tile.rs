@@ -3,7 +3,8 @@ use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, append_tessellated_geometry_decked, tessellate_path_fill,
+    append_fringe_geometry, append_tessellated_geometry, append_tessellated_geometry_decked,
+    tessellate_path_fill,
     LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
 };
@@ -3100,16 +3101,36 @@ fn build_tile_buffers_from_features(
                             }
                             _ => (&face.fringe_verts, &face.fringe_indices, None),
                         };
-                    append_tessellated_geometry_decked(
+                    // Fill-mode carrier (stroke_mult > 1e5): the skirt uses
+                    // the same fwidth coverage formula as the faces — no
+                    // stroke cap/dash gates to fight.
+                    // /tmp/mp_fringe_debug: draw skirts opaque magenta to
+                    // bisect "not rendering" vs "too subtle".
+                    let fringe_debug = std::path::Path::new("/tmp/mp_fringe_debug").exists();
+                    append_fringe_geometry(
                         fr_verts,
                         fr_indices,
                         &mut casing_vertices,
                         &mut casing_indices,
                         VectorRenderParams {
-                            color: face.color,
-                            stroke_mult: 1.0,
+                            color: if fringe_debug {
+                                [1.0, 0.0, 1.0, 1.0]
+                            } else {
+                                face.color
+                            },
+                            stroke_mult: 1e6,
                             shape_id: 0.0,
-                            params: [0.0, 0.0, 0.0, 0.0, 0.0, ladder_param5],
+                            // Half a ladder step above the own face: in tilt
+                            // the up-screen skirt half otherwise loses the
+                            // depth tie to the content it must blend over.
+                            params: [
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                ladder_param5 + ladder_step * 0.5,
+                            ],
                             zbias: casing_zbias,
                         },
                         fr_deck.as_deref(),
