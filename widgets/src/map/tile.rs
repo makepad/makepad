@@ -1088,6 +1088,87 @@ fn chaikin_smooth(points: &[(f32, f32)], rounds: usize, cut_below: f32) -> Vec<(
     pts
 }
 
+/// `chaikin_smooth` with the bridge-dz channel riding along: dz lerps with
+/// the same 0.25 corner cuts so lifted geometry keeps its ramp profile
+/// through the smoothing.
+fn chaikin_smooth_dz(
+    points: &[(f32, f32)],
+    dz: Option<&[f32]>,
+    rounds: usize,
+    cut_below: f32,
+) -> (Vec<(f32, f32)>, Option<Vec<f32>>) {
+    let Some(dz) = dz else {
+        return (chaikin_smooth(points, rounds, cut_below), None);
+    };
+    if rounds == 0 || points.len() < 3 || points.len() > 2000 || dz.len() != points.len() {
+        return (points.to_vec(), Some(dz.to_vec()));
+    }
+    let closed = points.first() == points.last();
+    let mut pts: Vec<(f32, f32, f32)> = points
+        .iter()
+        .zip(dz)
+        .map(|(&(x, y), &d)| (x, y, d))
+        .collect();
+    if closed {
+        pts.pop();
+    }
+    let cut_below_sq = cut_below * cut_below;
+    let seg_sq = |a: (f32, f32, f32), b: (f32, f32, f32)| {
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        dx * dx + dy * dy
+    };
+    let lerp = |a: (f32, f32, f32), b: (f32, f32, f32), t: f32| {
+        (
+            a.0 + (b.0 - a.0) * t,
+            a.1 + (b.1 - a.1) * t,
+            a.2 + (b.2 - a.2) * t,
+        )
+    };
+    for _ in 0..rounds {
+        if pts.len() < 3 {
+            break;
+        }
+        let n = pts.len();
+        let mut out = Vec::with_capacity(n * 2 + 2);
+        let range = if closed { 0..n } else { 1..n - 1 };
+        if !closed {
+            out.push(pts[0]);
+        }
+        for i in range {
+            let prev = pts[(i + n - 1) % n];
+            let v = pts[i];
+            let next = pts[(i + 1) % n];
+            let a = (v.0 - prev.0, v.1 - prev.1);
+            let b = (next.0 - v.0, next.1 - v.1);
+            let dot = (a.0 * b.0 + a.1 * b.1) as f64;
+            let len = ((a.0 as f64 * a.0 as f64 + a.1 as f64 * a.1 as f64)
+                * (b.0 as f64 * b.0 as f64 + b.1 as f64 * b.1 as f64))
+                .sqrt();
+            let gentle = len > 1e-12 && dot / len > 0.866;
+            if gentle && seg_sq(prev, v) < cut_below_sq && seg_sq(v, next) < cut_below_sq {
+                out.push(lerp(v, prev, 0.25));
+                out.push(lerp(v, next, 0.25));
+            } else {
+                out.push(v);
+            }
+        }
+        if !closed {
+            out.push(*pts.last().unwrap());
+        }
+        pts = out;
+    }
+    if closed {
+        if let Some(&first) = pts.first() {
+            pts.push(first);
+        }
+    }
+    (
+        pts.iter().map(|&(x, y, _)| (x, y)).collect(),
+        Some(pts.iter().map(|&(_, _, d)| d).collect()),
+    )
+}
+
 /// Building height in meters from OSM tags: explicit `height`, else
 /// `building:levels` × 3m + roof allowance, else a modest default.
 fn building_height_m(tags: &HashMap<String, String>) -> f32 {
@@ -1958,6 +2039,7 @@ fn build_tile_buffers_from_features(
                             aa_units,
                             tolerance,
                             &mut fill_zbias,
+                            stroke_pass_param5(&outline_style),
                         );
                     }
                 }
@@ -2518,46 +2600,304 @@ fn build_tile_buffers_from_features(
         .max()
         .unwrap_or(i16::MIN);
 
-    // Pass 1: all casings into their own buffer so the view can draw every
-    // tile's casings before any tile's centers (carto roads-casing layer).
+    // Road paint ladder: union faces and legacy strokes merge into ONE
+    // ordered sequence — plazas, then all casings by rank, then all centers
+    // by rank — exactly the reference painter. Legacy strokes no longer sit
+    // wholesale under the faces: a park path draws above the plaza it
+    // crosses, a cycle lane above the road it rides, and higher road faces
+    // still cover both. Flat mode is buffer order; tilt follows the same
+    // order through the param5 ladder. Only centers ranked above the top
+    // road tier (trams, rails) stay in the stroke buffer above everything.
+    let union_clip = clip_bounds;
+    let mut tier_list: Vec<&(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)> =
+        union_tiers.values().collect();
+    tier_list.sort_by_key(|entry| {
+        (
+            entry.0.sort_rank,
+            entry.0.center.color,
+            entry.0.center.width.to_bits(),
+        )
+    });
+    let mut groups: Vec<PaintGroup> = Vec::new();
+    {
+        let mut plaza_keys: Vec<(u32, u32)> = plaza_rings
+            .iter()
+            .map(|(color, alpha, _, _)| (*color, alpha.to_bits()))
+            .collect();
+        plaza_keys.sort_unstable();
+        plaza_keys.dedup();
+        for (color, alpha_bits) in plaza_keys {
+            let ribbons: Vec<RoadRibbon> = plaza_rings
+                .iter()
+                .filter(|(c, a, _, _)| *c == color && a.to_bits() == alpha_bits)
+                .map(|(_, _, points, dz)| RoadRibbon {
+                    points,
+                    dz: dz.as_deref(),
+                    closed_ring: true,
+                })
+                .collect();
+            let rings = road_ribbon_rings(&ribbons, 1.0, 0.0, union_clip);
+            groups.push(PaintGroup {
+                color: hex_to_premul_rgba(color, f32::from_bits(alpha_bits)),
+                param5: 0.0,
+                phase: 0,
+                rank: i16::MIN,
+                field: 0,
+                rings: rings
+                    .into_iter()
+                    .map(|(ring, dz)| {
+                        let max_dz = dz.iter().copied().fold(0.0f32, f32::max);
+                        (ring, max_dz)
+                    })
+                    .collect(),
+            });
+        }
+    }
+    // Union ways get the same corner-cut smoothing as legacy strokes so
+    // curve shapes stay identical between the two pipelines; dz rides
+    // along through the cuts.
+    let smoothed_tiers: Vec<(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)> = tier_list
+        .iter()
+        .map(|entry| {
+            (
+                entry.0,
+                entry
+                    .1
+                    .iter()
+                    .map(|(points, dz)| {
+                        chaikin_smooth_dz(
+                            points,
+                            dz.as_deref(),
+                            chaikin_rounds,
+                            chaikin_cut_below,
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    // Per-tier deck fields: index 0 is the plaza field, tier i lives at
+    // 1 + i. Casing and center faces of one tier share one field, so both
+    // displace identically in tilt — no more detached outlines on ramps.
+    let mut dz_fields: Vec<Option<DzField>> = Vec::new();
+    {
+        // Plazas ride their own ring dz AND any road lifting through them
+        // (a bridge deck crossing a quay), so the road ways join the field.
+        let mut plaza_ways: Vec<(&[(f32, f32)], Option<&[f32]>)> = plaza_rings
+            .iter()
+            .map(|(_, _, points, dz)| (points.as_slice(), dz.as_deref()))
+            .collect();
+        for (_, ways) in &smoothed_tiers {
+            plaza_ways.extend(
+                ways.iter()
+                    .map(|(points, dz)| (points.as_slice(), dz.as_deref())),
+            );
+        }
+        dz_fields.push(DzField::build(&plaza_ways, 6.0));
+    }
+    for (style, ways) in &smoothed_tiers {
+        let half_width = style
+            .casing
+            .map_or(style.center.width, |casing| casing.width.max(style.center.width))
+            * 0.5;
+        let ways_ref: Vec<(&[(f32, f32)], Option<&[f32]>)> = ways
+            .iter()
+            .map(|(points, dz)| (points.as_slice(), dz.as_deref()))
+            .collect();
+        dz_fields.push(DzField::build(&ways_ref, half_width + 2.0));
+    }
+    for pass in 0..2u8 {
+        for (tier_index, (style, ways)) in smoothed_tiers.iter().enumerate() {
+            let (color, width) = if pass == 0 {
+                let Some(casing) = style.casing else { continue };
+                (casing.color, casing.width)
+            } else {
+                (style.center.color, style.center.width)
+            };
+            let ribbons: Vec<RoadRibbon> = ways
+                .iter()
+                .map(|(points, dz)| RoadRibbon {
+                    points,
+                    dz: dz.as_deref(),
+                    closed_ring: false,
+                })
+                .collect();
+            let rings =
+                road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), aa_units, union_clip);
+            groups.push(PaintGroup {
+                color: hex_to_premul_rgba(color, 1.0),
+                param5: 0.0,
+                phase: 1 + pass,
+                rank: style.sort_rank,
+                field: (1 + tier_index) as u16,
+                rings: rings
+                    .into_iter()
+                    .map(|(ring, dz)| {
+                        let max_dz = dz.iter().copied().fold(0.0f32, f32::max);
+                        (ring, max_dz)
+                    })
+                    .collect(),
+            });
+        }
+    }
+    let faces = if groups.is_empty() {
+        Vec::new()
+    } else {
+        overlay_paint_groups(&groups, &mut tess, tolerance)
+    };
+
+    enum RoadPaintEvent<'a> {
+        Face(usize),
+        Stroke {
+            pass: StrokePassStyle,
+            part: &'a [(f32, f32)],
+            start_cap: LineCap,
+            end_cap: LineCap,
+        },
+    }
+    // Round caps blend same-color segments at junctions and give dead ends
+    // the carto nub — but ends produced by the tile clip must stay butt, or
+    // the cap disc overpaints the neighbor tile's content.
+    let cap_eps = 0.05_f32;
+    let mut events: Vec<((u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
+    for (face_index, face) in faces.iter().enumerate() {
+        events.push((
+            (face.phase, face.rank, 1, face_index as u32),
+            RoadPaintEvent::Face(face_index),
+        ));
+    }
+    let mut stroke_seq = 0u32;
     for (style, parts) in &merged_stroke_parts {
-        let Some(casing) = style.casing else {
-            continue;
-        };
         for part in parts {
             if part.len() < 2 {
                 continue;
             }
-            append_stroke_pass(
-                &mut path,
+            if let Some(casing) = style.casing {
+                events.push((
+                    (1, style.sort_rank, 0, stroke_seq),
+                    RoadPaintEvent::Stroke {
+                        pass: casing,
+                        part,
+                        start_cap: LineCap::Butt,
+                        end_cap: LineCap::Butt,
+                    },
+                ));
+                stroke_seq += 1;
+            }
+            if style.sort_rank <= max_tier_rank {
+                let start_cap = if point_on_bounds(part[0], clip_bounds, cap_eps) {
+                    LineCap::Butt
+                } else {
+                    LineCap::Round
+                };
+                let end_cap = if point_on_bounds(part[part.len() - 1], clip_bounds, cap_eps) {
+                    LineCap::Butt
+                } else {
+                    LineCap::Round
+                };
+                events.push((
+                    (2, style.sort_rank, 0, stroke_seq),
+                    RoadPaintEvent::Stroke {
+                        pass: style.center,
+                        part,
+                        start_cap,
+                        end_cap,
+                    },
+                ));
+                stroke_seq += 1;
+            }
+        }
+    }
+    events.sort_by_key(|(key, _)| *key);
+
+    let ladder_step =
+        (4.0 * DEPTH_MICRO_PER_RANK).min(0.44 / events.len().max(1) as f32);
+    for (event_index, (_, event)) in events.iter().enumerate() {
+        let ladder_param5 = 0.06 + event_index as f32 * ladder_step;
+        match event {
+            RoadPaintEvent::Face(face_index) => {
+                let face = &faces[*face_index];
+                // 3D: faces re-acquire deck height from their tier's dz
+                // field — height never needs to survive the boolean. The
+                // mesh is refined near lifted geometry first, so ramps
+                // interpolate as smoothly as the legacy dense strokes.
+                let field = dz_fields
+                    .get(face.field as usize)
+                    .and_then(|field| field.as_ref());
+                let mut sub_verts;
+                let mut sub_indices;
+                let (verts, indices, deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
+                    match field {
+                        Some(field) => {
+                            sub_verts = face.verts.clone();
+                            sub_indices = face.indices.clone();
+                            subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            let deck: Vec<f32> = sub_verts
+                                .iter()
+                                .map(|v| field.sample(v.x, v.y))
+                                .collect();
+                            let lifted = deck.iter().any(|&d| d > 0.05);
+                            (&sub_verts, &sub_indices, lifted.then_some(deck))
+                        }
+                        None => (&face.verts, &face.indices, None),
+                    };
+                append_tessellated_geometry_decked(
+                    verts,
+                    indices,
+                    &mut casing_vertices,
+                    &mut casing_indices,
+                    VectorRenderParams {
+                        color: face.color,
+                        stroke_mult: 1e6,
+                        shape_id: 0.0,
+                        params: [0.0, 0.0, 0.0, 0.0, 0.0, ladder_param5],
+                        zbias: casing_zbias,
+                    },
+                    deck.as_deref(),
+                );
+                casing_zbias += VECTOR_ZBIAS_STEP;
+                feature_count += 1;
+            }
+            RoadPaintEvent::Stroke {
+                pass,
                 part,
-                false,
-                stroke_corridors_available.then(|| {
-                    if bridge_dz_covered { &own_profiles[..] } else { &bridge_corridors[..] }
-                }),
-                &mut tess,
-                &mut tess_verts,
-                &mut tess_indices,
-                &mut casing_vertices,
-                &mut casing_indices,
-                casing,
-                LineCap::Butt,
-                LineCap::Butt,
-                LineJoin::Round,
-                aa_units,
-                tolerance,
-                &mut casing_zbias,
-            );
-            feature_count += 1;
+                start_cap,
+                end_cap,
+            } => {
+                // Tunnels keep their fixed under-everything depth slot.
+                let param5 = if pass.deck_m < 0.0 { 0.05 } else { ladder_param5 };
+                append_stroke_pass(
+                    &mut path,
+                    part,
+                    false,
+                    stroke_corridors_available.then(|| {
+                        if bridge_dz_covered { &own_profiles[..] } else { &bridge_corridors[..] }
+                    }),
+                    &mut tess,
+                    &mut tess_verts,
+                    &mut tess_indices,
+                    &mut casing_vertices,
+                    &mut casing_indices,
+                    *pass,
+                    *start_cap,
+                    *end_cap,
+                    LineJoin::Round,
+                    aa_units,
+                    tolerance,
+                    &mut casing_zbias,
+                    param5,
+                );
+                feature_count += 1;
+            }
         }
     }
 
-    // Pass 2: centers. Round caps blend same-color segments at junctions and
-    // give dead ends the carto nub — but ends produced by the tile clip must
-    // stay butt, or the cap disc overpaints the neighbor tile's content
-    // (e.g. white road caps stamped over the tram tracks at seams).
-    let cap_eps = 0.05_f32;
+    // Centers ranked above the topmost road tier (trams, rails): stroke
+    // buffer, above every face and interleaved stroke.
     for (style, parts) in &merged_stroke_parts {
+        if style.sort_rank <= max_tier_rank {
+            continue;
+        }
         for part in parts {
             if part.len() < 2 {
                 continue;
@@ -2572,12 +2912,6 @@ fn build_tile_buffers_from_features(
             } else {
                 LineCap::Round
             };
-            let under_faces = style.sort_rank <= max_tier_rank;
-            let (target_verts, target_indices, target_zbias) = if under_faces {
-                (&mut casing_vertices, &mut casing_indices, &mut casing_zbias)
-            } else {
-                (&mut stroke_vertices, &mut stroke_indices, &mut stroke_zbias)
-            };
             append_stroke_pass(
                 &mut path,
                 part,
@@ -2588,15 +2922,16 @@ fn build_tile_buffers_from_features(
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
-                target_verts,
-                target_indices,
+                &mut stroke_vertices,
+                &mut stroke_indices,
                 style.center,
                 start_cap,
                 end_cap,
                 LineJoin::Round,
                 aa_units,
                 tolerance,
-                target_zbias,
+                &mut stroke_zbias,
+                stroke_pass_param5(&style.center),
             );
             feature_count += 1;
         }
@@ -2652,111 +2987,6 @@ fn build_tile_buffers_from_features(
             }
         }
         let _ = (kw, stalls);
-        feature_count += 1;
-    }
-
-    // Painter-order overlay: the road surface is built as DISJOINT faces
-    // (overlay_paint_groups) from the bottom-to-top paint sequence —
-    // plazas, then tier casings by rank, then tier centers by rank. Flat
-    // rendering is pixel-equal to painting in order; tilt cannot reorder
-    // anything because nothing overlaps. Faces go into the CASING buffer:
-    // after fills, under the legacy stroke buffer (tram dashes, rails).
-    let union_clip = tile_clip_bounds(ROAD_CLIP_PADDING);
-    let mut tier_list: Vec<&(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)> =
-        union_tiers.values().collect();
-    tier_list.sort_by_key(|entry| {
-        (
-            entry.0.sort_rank,
-            entry.0.center.color,
-            entry.0.center.width.to_bits(),
-        )
-    });
-    let mut groups: Vec<PaintGroup> = Vec::new();
-    {
-        let mut plaza_keys: Vec<(u32, u32)> = plaza_rings
-            .iter()
-            .map(|(color, alpha, _, _)| (*color, alpha.to_bits()))
-            .collect();
-        plaza_keys.sort_unstable();
-        plaza_keys.dedup();
-        for (color, alpha_bits) in plaza_keys {
-            let ribbons: Vec<RoadRibbon> = plaza_rings
-                .iter()
-                .filter(|(c, a, _, _)| *c == color && a.to_bits() == alpha_bits)
-                .map(|(_, _, points, dz)| RoadRibbon {
-                    points,
-                    dz: dz.as_deref(),
-                    closed_ring: true,
-                })
-                .collect();
-            let rings = road_ribbon_rings(&ribbons, 1.0, 0.0, union_clip);
-            groups.push(PaintGroup {
-                color: hex_to_premul_rgba(color, f32::from_bits(alpha_bits)),
-                param5: 0.0,
-                rings: rings.into_iter().map(|(ring, _)| ring).collect(),
-            });
-        }
-    }
-    for pass in 0..2 {
-        for entry in &tier_list {
-            let (style, ways) = (&entry.0, &entry.1);
-            let (color, width) = if pass == 0 {
-                let Some(casing) = style.casing else { continue };
-                (casing.color, casing.width)
-            } else {
-                (style.center.color, style.center.width)
-            };
-            let ribbons: Vec<RoadRibbon> = ways
-                .iter()
-                .map(|(points, dz)| RoadRibbon {
-                    points,
-                    dz: dz.as_deref(),
-                    closed_ring: false,
-                })
-                .collect();
-            let rings =
-                road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), aa_units, union_clip);
-            groups.push(PaintGroup {
-                color: hex_to_premul_rgba(color, 1.0),
-                param5: 0.0,
-                rings: rings.into_iter().map(|(ring, _)| ring).collect(),
-            });
-        }
-    }
-    let faces = overlay_paint_groups(&groups, &mut tess, tolerance);
-    for (face_index, face) in faces.iter().enumerate() {
-        // 3D: faces re-acquire deck height by sampling the way profiles —
-        // height never needs to survive the boolean.
-        let deck: Option<Vec<f32>> = (bridge_dz_covered && !own_profiles.is_empty())
-            .then(|| {
-                face.verts
-                    .iter()
-                    .map(|v| corridor_deck_at_point(v.x, v.y, &own_profiles))
-                    .collect::<Vec<f32>>()
-            })
-            .filter(|deck| deck.iter().any(|&d| d > 0.05));
-        append_tessellated_geometry_decked(
-            &face.verts,
-            &face.indices,
-            &mut casing_vertices,
-            &mut casing_indices,
-            VectorRenderParams {
-                color: face.color,
-                stroke_mult: 1e6,
-                shape_id: 0.0,
-                params: [
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.06 + face_index as f32 * 4.0 * DEPTH_MICRO_PER_RANK,
-                ],
-                zbias: casing_zbias,
-            },
-            deck.as_deref(),
-        );
-        casing_zbias += VECTOR_ZBIAS_STEP;
         feature_count += 1;
     }
 

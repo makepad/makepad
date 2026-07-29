@@ -237,7 +237,14 @@ script_mod! {
                 self.draw_depth + self.tilt_params.w
                     + mix(
                         self.draw_call.zbias + self.geom.zbias,
-                        self.geom.param5 + ground_rel_y * self.tilt_params.z,
+                        // Lifted geometry carries its lift into depth: a
+                        // deck 2.5 m up must beat the water/ground drawn at
+                        // its DISPLAY position, and the required margin is
+                        // exactly lift_px * depth-per-ground-px — constant
+                        // bumps can't track zoom.
+                        self.geom.param5
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
                         sign(self.tilt_params.z)
                     )
                 1.
