@@ -668,7 +668,7 @@ fn solve_tile(
     y: u32,
     decoded: &HashMap<(u32, u32), Vec<RawWay>>,
     ahn: &mut Ahn,
-) -> (Vec<TileFeature>, SolveStats, SolvedField) {
+) -> (Vec<TileFeature>, SolveStats, SolvedField, SolvedField) {
     let mut stats = SolveStats::default();
     let axis = 1u32 << z;
     let center_lat = tile_y_to_lat(f64::from(y) + 0.5, z);
@@ -695,7 +695,7 @@ fn solve_tile(
     }
     stats.ways = graph.ways.len();
     if graph.ways.is_empty() {
-        return (Vec::new(), stats, SolvedField::default());
+        return (Vec::new(), stats, SolvedField::default(), SolvedField::default());
     }
 
     // Ground init from the AHN DTM (bare earth, NAP). Water and structures
@@ -1169,6 +1169,136 @@ fn solve_tile(
         stats.baked += 1;
     }
 
+    // Tunnel sink solve — the downward mirror of the lift solve. A tunnel
+    // clears the surface by TUNNEL_CLEAR_M at every 2D crossing with a
+    // non-tunnel way, holds that depth for TUNNEL_HOLD_M around the
+    // crossing, ramps at road grade, and surfaces exactly at its portals
+    // (nodes shared with surface ways).
+    const TUNNEL_CLEAR_M: f32 = 5.5;
+    const TUNNEL_HOLD_M: f32 = 30.0;
+    let mut sink = vec![0.0f32; z.len()];
+    let mut is_surface_node = vec![false; z.len()];
+    for way in &graph.ways {
+        if !way.tunnel {
+            for &node in &way.nodes {
+                is_surface_node[node as usize] = true;
+            }
+        }
+    }
+    for (way_index, way) in graph.ways.iter().enumerate() {
+        if !way.tunnel || way.nodes.len() < 2 {
+            continue;
+        }
+        for seg in 0..way.nodes.len() - 1 {
+            let a0 = graph.pos[way.nodes[seg] as usize];
+            let a1 = graph.pos[way.nodes[seg + 1] as usize];
+            let (min_x, max_x) = (a0.0.min(a1.0), a0.0.max(a1.0));
+            let (min_y, max_y) = (a0.1.min(a1.1), a0.1.max(a1.1));
+            let mut hit = false;
+            let mut cell_y = (min_y / CELL).floor() as i32;
+            'outer: while cell_y <= (max_y / CELL).floor() as i32 {
+                let mut cell_x = (min_x / CELL).floor() as i32;
+                while cell_x <= (max_x / CELL).floor() as i32 {
+                    if let Some(bucket) = grid.get(&(cell_x, cell_y)) {
+                        for &(other_index, other_seg) in bucket {
+                            if other_index == way_index {
+                                continue;
+                            }
+                            let other = &graph.ways[other_index];
+                            if other.tunnel {
+                                continue;
+                            }
+                            let shared = way.nodes[seg] == other.nodes[other_seg]
+                                || way.nodes[seg] == other.nodes[other_seg + 1]
+                                || way.nodes[seg + 1] == other.nodes[other_seg]
+                                || way.nodes[seg + 1] == other.nodes[other_seg + 1];
+                            if shared {
+                                continue;
+                            }
+                            let b0 = graph.pos[other.nodes[other_seg] as usize];
+                            let b1 = graph.pos[other.nodes[other_seg + 1] as usize];
+                            if segments_intersect(a0, a1, b0, b1).is_some() {
+                                hit = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    cell_x += 1;
+                }
+                cell_y += 1;
+            }
+            if !hit {
+                continue;
+            }
+            // Hold depth around the crossing segment, both directions.
+            let mut arc = 0.0f32;
+            let mut index = seg;
+            loop {
+                let node = way.nodes[index] as usize;
+                sink[node] = sink[node].max(TUNNEL_CLEAR_M);
+                if index == 0 {
+                    break;
+                }
+                arc += way.seg_m[index - 1];
+                if arc > TUNNEL_HOLD_M {
+                    break;
+                }
+                index -= 1;
+            }
+            arc = 0.0;
+            index = seg + 1;
+            loop {
+                let node = way.nodes[index] as usize;
+                sink[node] = sink[node].max(TUNNEL_CLEAR_M);
+                if index + 1 >= way.nodes.len() {
+                    break;
+                }
+                arc += way.seg_m[index];
+                if arc > TUNNEL_HOLD_M {
+                    break;
+                }
+                index += 1;
+            }
+        }
+    }
+    // Grade ramps along tunnel ways; portals pinned to the surface.
+    for _ in 0..3 {
+        for way in &graph.ways {
+            if !way.tunnel || way.nodes.len() < 2 {
+                continue;
+            }
+            for seg in 0..way.nodes.len() - 1 {
+                let a = way.nodes[seg] as usize;
+                let b = way.nodes[seg + 1] as usize;
+                let reach = way.grade * way.seg_m[seg].max(0.1);
+                sink[b] = sink[b].max(sink[a] - reach);
+                sink[a] = sink[a].max(sink[b] - reach);
+            }
+        }
+        for way in &graph.ways {
+            if !way.tunnel {
+                continue;
+            }
+            for &node in &way.nodes {
+                if is_surface_node[node as usize] {
+                    sink[node as usize] = 0.0;
+                }
+            }
+        }
+    }
+    for way in &graph.ways {
+        if !way.tunnel {
+            continue;
+        }
+        for &node in &way.nodes {
+            let node = node as usize;
+            if sink[node] > 0.05 {
+                z[node] = z[node].min(-sink[node]);
+                stats.crossings += 1;
+            }
+        }
+    }
+
     // The solved field itself, for sampling base-tile geometry.
     let mut field = SolvedField::default();
     for way in &graph.ways {
@@ -1191,7 +1321,27 @@ fn solve_tile(
             );
         }
     }
-    (features, stats, field)
+    // Tunnel ways get their own field (never mixed into the surface one:
+    // a street directly above a tunnel line must not inherit the sink).
+    let mut tunnel_field = SolvedField::default();
+    for way in &graph.ways {
+        if !way.tunnel {
+            continue;
+        }
+        for seg in 0..way.nodes.len() - 1 {
+            let a = way.nodes[seg] as usize;
+            let b = way.nodes[seg + 1] as usize;
+            tunnel_field.push(
+                graph.pos[a].0,
+                graph.pos[a].1,
+                graph.pos[b].0,
+                graph.pos[b].1,
+                z[a].min(0.0),
+                z[b].min(0.0),
+            );
+        }
+    }
+    (features, stats, field, tunnel_field)
 }
 
 /// Spatial index over the solved height segments of one tile solve, for
@@ -1386,6 +1536,7 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
 fn annotate_base_tile(
     base_raw: &[u8],
     field: &SolvedField,
+    tunnel_field: &SolvedField,
     m_per_unit: f32,
 ) -> Result<Vec<TileFeature>, String> {
     let base_paths = decode_base_paths(base_raw)?;
@@ -1452,6 +1603,40 @@ fn annotate_base_tile(
             if reject {
                 for value in dz.iter_mut() {
                     *value = 0.0;
+                }
+            }
+        }
+        // Tunnel pass: paths with no deck lift try the (negative) tunnel
+        // field with the same gating — its own centerline matches tight,
+        // parallel surface streets are median-rejected exactly like decks.
+        if !base_path.is_polygon && dz.iter().all(|&v| v == 0.0) {
+            let mut tunnel_dists: Vec<f32> = Vec::new();
+            for index in 0..count {
+                let (px, py) = points[index];
+                let endpoint = index == 0 || index == count - 1;
+                let previous = points[index.saturating_sub(1)];
+                let next = points[(index + 1).min(count - 1)];
+                let dir = (next.0 - previous.0, next.1 - previous.1);
+                let gated = tunnel_field.sample(px, py, Some(dir), 1.2);
+                let sampled = if endpoint {
+                    gated.or_else(|| tunnel_field.sample(px, py, None, 0.8))
+                } else {
+                    gated
+                };
+                if let Some((depth, dist, _)) = sampled {
+                    if depth < -0.2 {
+                        dz[index] = depth;
+                        tunnel_dists.push(dist);
+                    }
+                }
+            }
+            if !tunnel_dists.is_empty() {
+                let mut sorted = tunnel_dists.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                if sorted[sorted.len() / 2] > 1.0 {
+                    for value in dz.iter_mut() {
+                        *value = 0.0;
+                    }
                 }
             }
         }
@@ -1526,7 +1711,7 @@ fn annotate_base_tile(
                 }
             }
         }
-        let any = dz.iter().any(|&v| v > 0.2);
+        let any = dz.iter().any(|&v| v.abs() > 0.2);
         if !any {
             continue;
         }
@@ -1619,7 +1804,8 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
     let mut base_annotated = 0usize;
     for y in y0..=y1 {
         for x in x0..=x1 {
-            let (mut features, stats, field) = solve_tile(zoom, x, y, &decoded, &mut ahn);
+            let (mut features, stats, field, tunnel_field) =
+                solve_tile(zoom, x, y, &decoded, &mut ahn);
             totals.ways += stats.ways;
             totals.crossings += stats.crossings;
             totals.measured += stats.measured;
@@ -1632,7 +1818,7 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
                     let m_per_unit = (center_lat.to_radians().cos() * 40_075_016.686
                         / f64::from(1u32 << zoom)
                         / EXTENT) as f32;
-                    match annotate_base_tile(&base_raw, &field, m_per_unit) {
+                    match annotate_base_tile(&base_raw, &field, &tunnel_field, m_per_unit) {
                         Ok(mut annotated) => {
                             base_annotated += annotated.len();
                             features.append(&mut annotated);
@@ -1857,7 +2043,7 @@ mod probe_amstelveenseweg {
             }
         }
         let mut ahn = Ahn::open(Some(Path::new("../../examples/map/local/ahn")));
-        let (features, stats, _field) = solve_tile(14, 8413, 5386, &decoded, &mut ahn);
+        let (features, stats, _field, _tunnel_field) = solve_tile(14, 8413, 5386, &decoded, &mut ahn);
         eprintln!(
             "solved: {} ways {} crossings {} measured {} baked",
             stats.ways, stats.crossings, stats.measured, stats.baked
@@ -1935,7 +2121,7 @@ mod probe_amstelveenseweg {
             }
         }
         let mut ahn = Ahn::open(Some(Path::new("../../examples/map/local/ahn")));
-        let (_features, _stats, field) = solve_tile(14, 8415, 5387, &decoded, &mut ahn);
+        let (_features, _stats, field, _tunnel_field) = solve_tile(14, 8415, 5387, &decoded, &mut ahn);
         // Field height right at the seam where the metro crosses:
         for probe in [(64.0f32, 960.0f32), (10.0, 990.0), (200.0, 900.0), (400.0, 850.0)] {
             let ungated = field.sample(probe.0, probe.1, None, 3.0);

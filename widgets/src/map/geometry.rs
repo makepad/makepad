@@ -2096,8 +2096,8 @@ pub struct PaintFace {
     /// right after the face, so painter-order AA falls out of the ladder.
     pub fringe_verts: Vec<VVertex>,
     pub fringe_indices: Vec<u32>,
-    /// This face is a lifted level part (deck geometry).
-    pub lifted: bool,
+    /// Level part: -1 sunk (tunnel), 0 grounded, 1 lifted (deck).
+    pub level: i8,
     /// Deck side walls: vertical quads along the lifted boundary — top
     /// vertex (v=0) rides the deck dz, bottom vertex (v=1) stays grounded.
     /// Flat mode degenerates them to zero area; tilt reveals the wall.
@@ -2290,6 +2290,8 @@ pub fn overlay_paint_groups(
         VisibleGrounded,
         CoverGrounded,
         Lifted,
+        Sunk,
+        CoverSunk,
     }
     let to_paths = |group: &PaintGroup, set: RingSet| -> Vec<Vec<[f64; 2]>> {
         let translucent = group.color[3] < 0.999;
@@ -2304,13 +2306,18 @@ pub fn overlay_paint_groups(
                     RingSet::All => true,
                     RingSet::VisibleGrounded => {
                         if translucent {
-                            *max_dz < LIFT_COVER_M
+                            *max_dz < LIFT_COVER_M && *min_dz > -LIFT_COVER_M
                         } else {
-                            *min_dz < LIFT_COVER_M
+                            // Touches the grounded band (straddlers join).
+                            *min_dz < LIFT_COVER_M && *max_dz > -LIFT_COVER_M
                         }
                     }
-                    RingSet::CoverGrounded => *max_dz < LIFT_COVER_M,
+                    RingSet::CoverGrounded => {
+                        *max_dz < LIFT_COVER_M && *min_dz > -LIFT_COVER_M
+                    }
                     RingSet::Lifted => *max_dz >= LIFT_COVER_M,
+                    RingSet::Sunk => *min_dz <= -LIFT_COVER_M,
+                    RingSet::CoverSunk => *max_dz <= -LIFT_COVER_M,
                 }
             })
             .filter_map(|(ring, _, _)| snap_ring(ring))
@@ -2339,6 +2346,9 @@ pub fn overlay_paint_groups(
         cover_grounded_paths: Vec<Vec<[f64; 2]>>,
         lifted_shapes: Shapes,
         lifted_paths: Vec<Vec<[f64; 2]>>,
+        sunk_shapes: Shapes,
+        sunk_paths: Vec<Vec<[f64; 2]>>,
+        cover_sunk_paths: Vec<Vec<[f64; 2]>>,
         bbox: (f64, f64, f64, f64),
     }
     // Hang forensics: with /tmp/mp_boolean_debug present, every boolean's
@@ -2408,11 +2418,16 @@ pub fn overlay_paint_groups(
                 .rings
                 .iter()
                 .any(|(_, _, max_dz)| *max_dz >= LIFT_COVER_M);
+            let has_sunk = group
+                .rings
+                .iter()
+                .any(|(_, min_dz, _)| *min_dz <= -LIFT_COVER_M);
             let has_straddler = group
                 .rings
                 .iter()
                 .any(|(_, min_dz, max_dz)| {
-                    *min_dz < LIFT_COVER_M && *max_dz >= LIFT_COVER_M
+                    (*min_dz < LIFT_COVER_M && *max_dz >= LIFT_COVER_M)
+                        || (*max_dz > -LIFT_COVER_M && *min_dz <= -LIFT_COVER_M)
                 });
             let (grounded_shapes, grounded_paths) =
                 dissolve(to_paths(group, RingSet::VisibleGrounded));
@@ -2426,8 +2441,26 @@ pub fn overlay_paint_groups(
             } else {
                 (Vec::new(), Vec::new())
             };
+            let (sunk_shapes, sunk_paths) = if has_sunk {
+                dissolve(to_paths(group, RingSet::Sunk))
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let cover_sunk_paths = if has_sunk {
+                if has_straddler {
+                    dissolve(to_paths(group, RingSet::CoverSunk)).1
+                } else {
+                    sunk_paths.clone()
+                }
+            } else {
+                Vec::new()
+            };
             let mut bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-            for path in grounded_paths.iter().chain(lifted_paths.iter()) {
+            for path in grounded_paths
+                .iter()
+                .chain(lifted_paths.iter())
+                .chain(sunk_paths.iter())
+            {
                 for p in path {
                     bbox.0 = bbox.0.min(p[0]);
                     bbox.1 = bbox.1.min(p[1]);
@@ -2441,6 +2474,9 @@ pub fn overlay_paint_groups(
                 cover_grounded_paths,
                 lifted_shapes,
                 lifted_paths,
+                sunk_shapes,
+                sunk_paths,
+                cover_sunk_paths,
                 bbox,
             }
         })
@@ -2449,9 +2485,10 @@ pub fn overlay_paint_groups(
     // Incremental cascade per level, all operands dissolved outlines.
     let mut cover_grounded: Shapes = Vec::new();
     let mut cover_lifted: Shapes = Vec::new();
+    let mut cover_sunk: Shapes = Vec::new();
     let mut cover_bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    let mut visibles: Vec<(Shapes, Shapes)> =
-        vec![(Vec::new(), Vec::new()); outlines.len()];
+    let mut visibles: Vec<(Shapes, Shapes, Shapes)> =
+        vec![(Vec::new(), Vec::new(), Vec::new()); outlines.len()];
     for k in (0..outlines.len()).rev() {
         let outline = &outlines[k];
         let bbox = outline.bbox;
@@ -2483,6 +2520,7 @@ pub fn overlay_paint_groups(
                 &cover_grounded,
             ),
             visible_part(&outline.lifted_paths, &outline.lifted_shapes, &cover_lifted),
+            visible_part(&outline.sunk_paths, &outline.sunk_shapes, &cover_sunk),
         );
         if !outline.cover_grounded_paths.is_empty() {
             if debug_dump {
@@ -2508,7 +2546,17 @@ pub fn overlay_paint_groups(
                 IoFillRule::NonZero,
             );
         }
-        if !outline.grounded_paths.is_empty() || !outline.lifted_paths.is_empty() {
+        if !outline.cover_sunk_paths.is_empty() {
+            cover_sunk = outline.cover_sunk_paths.overlay(
+                &cover_sunk,
+                OverlayRule::Union,
+                IoFillRule::NonZero,
+            );
+        }
+        if !outline.grounded_paths.is_empty()
+            || !outline.lifted_paths.is_empty()
+            || !outline.sunk_paths.is_empty()
+        {
             cover_bbox.0 = cover_bbox.0.min(bbox.0);
             cover_bbox.1 = cover_bbox.1.min(bbox.1);
             cover_bbox.2 = cover_bbox.2.max(bbox.2);
@@ -2520,11 +2568,21 @@ pub fn overlay_paint_groups(
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
     let mut tess_indices: Vec<u32> = Vec::new();
-    for (group, (visible_grounded, visible_lifted)) in groups.iter().zip(visibles) {
-        // Grounded and lifted parts become separate faces with identical
-        // metadata; their seam overlap renders identically on both sides.
-        for (part_index, visible) in [visible_grounded, visible_lifted].into_iter().enumerate() {
-            let lifted = part_index == 1;
+    for (group, (visible_grounded, visible_lifted, visible_sunk)) in
+        groups.iter().zip(visibles)
+    {
+        // Level parts become separate faces with identical metadata; their
+        // seam overlap renders identically on both sides.
+        for (part_index, visible) in [visible_grounded, visible_lifted, visible_sunk]
+            .into_iter()
+            .enumerate()
+        {
+            let level: i8 = match part_index {
+                1 => 1,
+                2 => -1,
+                _ => 0,
+            };
+            let lifted = level == 1;
             if visible.is_empty() {
                 continue;
             }
@@ -2587,7 +2645,7 @@ pub fn overlay_paint_groups(
                 indices: tess_indices.clone(),
                 fringe_verts,
                 fringe_indices,
-                lifted,
+                level,
                 skirt_verts,
                 skirt_indices,
             });
@@ -2618,7 +2676,7 @@ impl DzField {
     pub fn build(ways: &[(&[(f32, f32)], Option<&[f32]>)], radius: f32) -> Option<DzField> {
         if !ways
             .iter()
-            .any(|(_, dz)| dz.is_some_and(|dz| dz.iter().any(|&v| v > 0.01)))
+            .any(|(_, dz)| dz.is_some_and(|dz| dz.iter().any(|&v| v.abs() > 0.01)))
         {
             return None;
         }
@@ -2647,11 +2705,11 @@ impl DzField {
                 let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
                 if cap_reach > 0.0 && len > 0.5 {
                     let (ux, uy) = ((bx - ax) / len, (by - ay) / len);
-                    if i == 0 && dza > 0.2 {
+                    if i == 0 && dza.abs() > 0.2 {
                         ax -= ux * cap_reach;
                         ay -= uy * cap_reach;
                     }
-                    if i + 2 == points.len() && dzb > 0.2 {
+                    if i + 2 == points.len() && dzb.abs() > 0.2 {
                         bx += ux * cap_reach;
                         by += uy * cap_reach;
                     }
@@ -2670,7 +2728,7 @@ impl DzField {
                 for cx in min_cx..=max_cx {
                     for cy in min_cy..=max_cy {
                         field.grid.entry((cx, cy)).or_default().push(id);
-                        if dza > 0.01 || dzb > 0.01 {
+                        if dza.abs() > 0.01 || dzb.abs() > 0.01 {
                             field.active.insert((cx, cy));
                         }
                     }
@@ -2722,7 +2780,7 @@ impl DzField {
                 best_dz = dza + (dzb - dza) * t;
             }
         }
-        if best_dz <= 0.0 || best_d2 >= self.radius * self.radius {
+        if best_dz == 0.0 || best_d2 >= self.radius * self.radius {
             return 0.0;
         }
         let d = best_d2.sqrt();
