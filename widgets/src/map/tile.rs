@@ -76,6 +76,11 @@ pub struct TileEntry {
     pub state: TileLoadState,
     pub last_used: u64,
     pub attempts: u8,
+    /// Geometry buffer footprint (CPU-side floats at bake time; the GPU
+    /// copy is the same order of magnitude). Drives byte-budget eviction —
+    /// 3D building tiles reach 60-90 MB each, so a tile-count cap alone
+    /// lets the cache take the machine out.
+    pub bytes: usize,
     /// View-zoom bucket the geometry was styled for; stale buckets stay
     /// drawable while a rebuild is in flight.
     pub bucket: u32,
@@ -175,6 +180,21 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
+}
+
+impl TileBuffers {
+    /// Geometry byte footprint (vertex + index data).
+    pub fn byte_size(&self) -> usize {
+        (self.fill_indices.len()
+            + self.fill_vertices.len()
+            + self.casing_indices.len()
+            + self.casing_vertices.len()
+            + self.stroke_indices.len()
+            + self.stroke_vertices.len()
+            + self.icon_indices.len()
+            + self.icon_vertices.len())
+            * 4
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1350,6 +1370,48 @@ pub struct TileWay {
     pub dz: Option<Vec<f32>>,
 }
 
+/// Stage clock for MP_TILE_PROFILE=1: per-stage wall time to stderr, so the
+/// generator's cost distribution is measurable headless and in-app alike.
+struct TileProfiler {
+    on: bool,
+    last: std::time::Instant,
+    start: std::time::Instant,
+}
+
+impl TileProfiler {
+    fn new() -> TileProfiler {
+        let now = std::time::Instant::now();
+        TileProfiler {
+            on: std::env::var_os("MP_TILE_PROFILE").is_some(),
+            last: now,
+            start: now,
+        }
+    }
+    fn lap(&mut self, name: &str, extra: &str) {
+        if !self.on {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "MPPROF {name} {:.1}ms {extra}",
+            (now - self.last).as_secs_f64() * 1000.0
+        );
+        self.last = now;
+    }
+    fn total(&self, tile_key: TileKey, extra: &str) {
+        if !self.on {
+            return;
+        }
+        eprintln!(
+            "MPPROF TOTAL z{}/{}/{} {:.1}ms {extra}",
+            tile_key.z,
+            tile_key.x,
+            tile_key.y,
+            self.start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
     tile_ways: Vec<TileWay>,
@@ -1362,6 +1424,7 @@ fn build_tile_buffers_from_features(
     union_roads: bool,
     have_charger_overlay: bool,
 ) -> TileBuffers {
+    let mut profiler = TileProfiler::new();
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -2047,6 +2110,8 @@ fn build_tile_buffers_from_features(
         }
     }
 
+    profiler.lap("fills", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+
     // 2.5D building extrusion: per-edge flat-shaded walls (exterior rings
     // AND courtyard holes), then the roof with holes preserved, lifted by
     // height (the tilt shader does the lifting per frame, so tilt animates
@@ -2533,6 +2598,8 @@ fn build_tile_buffers_from_features(
         }
     }
 
+    profiler.lap("buildings", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+
     let mut union_tiers =
         HashMap::<StrokeStyleKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
     let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
@@ -2599,6 +2666,8 @@ fn build_tile_buffers_from_features(
         .map(|(style, _)| style.sort_rank)
         .max()
         .unwrap_or(i16::MIN);
+
+    profiler.lap("stroke-prep", "");
 
     // Road paint ladder: union faces and legacy strokes merge into ONE
     // ordered sequence — plazas, then all casings by rank, then all centers
@@ -2740,11 +2809,29 @@ fn build_tile_buffers_from_features(
             });
         }
     }
+    if profiler.on {
+        let ring_count: usize = groups.iter().map(|group| group.rings.len()).sum();
+        let ring_verts: usize = groups
+            .iter()
+            .flat_map(|group| group.rings.iter().map(|(ring, _)| ring.len()))
+            .sum();
+        profiler.lap(
+            "rings+fields",
+            &format!("groups={} rings={} ring_verts={}", groups.len(), ring_count, ring_verts),
+        );
+    }
     let faces = if groups.is_empty() {
         Vec::new()
     } else {
         overlay_paint_groups(&groups, &mut tess, tolerance)
     };
+    if profiler.on {
+        let face_verts: usize = faces.iter().map(|face| face.verts.len()).sum();
+        profiler.lap(
+            "boolean",
+            &format!("faces={} face_verts={}", faces.len(), face_verts),
+        );
+    }
 
     enum RoadPaintEvent<'a> {
         Face(usize),
@@ -2810,10 +2897,77 @@ fn build_tile_buffers_from_features(
     }
     events.sort_by_key(|(key, _)| *key);
 
+    // Corridor bbox prefilter: deck matching is O(verts x corridors) per
+    // stroke, and most strokes are nowhere near a bridge. One cheap bbox
+    // pass decides which strokes pay for corridor matching at all.
+    let corridor_set: &[BridgeCorridor] =
+        if bridge_dz_covered { &own_profiles } else { &bridge_corridors };
+    let corridor_boxes: Vec<(f32, f32, f32, f32)> = corridor_set
+        .iter()
+        .map(|corridor| {
+            let reach = corridor.half_width + CORRIDOR_FEATHER + 2.0;
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            for &(x, y) in &corridor.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            (min_x - reach, min_y - reach, max_x + reach, max_y + reach)
+        })
+        .collect();
+    let corridors_near = |part: &[(f32, f32)]| -> bool {
+        if corridor_boxes.is_empty() {
+            return false;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for &(x, y) in part {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        corridor_boxes.iter().any(|&(bx0, by0, bx1, by1)| {
+            min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0
+        })
+    };
+
+    // Depth slots, not per-event steps: every face gets its own slot (faces
+    // of one rank can overlap since the dissolve-only boolean), strokes
+    // share one slot per (phase, rank) — the pre-union regime. Fewer slots
+    // = coarser, safer depth separation between coplanar overlaps.
+    let mut event_slots = Vec::with_capacity(events.len());
+    let mut slot_count = 0usize;
+    let mut last_stroke_slot: Option<(u8, i16)> = None;
+    for ((phase, rank, _, _), event) in &events {
+        match event {
+            RoadPaintEvent::Face(_) => {
+                slot_count += 1;
+                last_stroke_slot = None;
+                event_slots.push(slot_count);
+            }
+            RoadPaintEvent::Stroke { .. } => {
+                if last_stroke_slot != Some((*phase, *rank)) {
+                    slot_count += 1;
+                    last_stroke_slot = Some((*phase, *rank));
+                }
+                event_slots.push(slot_count);
+            }
+        }
+    }
+    let mut prof_subdiv_ms = 0.0f64;
+    let mut prof_sample_ms = 0.0f64;
+    let mut prof_face_verts_out = 0usize;
     let ladder_step =
-        (4.0 * DEPTH_MICRO_PER_RANK).min(0.44 / events.len().max(1) as f32);
+        (4.0 * DEPTH_MICRO_PER_RANK).min(0.44 / slot_count.max(1) as f32);
     for (event_index, (_, event)) in events.iter().enumerate() {
-        let ladder_param5 = 0.06 + event_index as f32 * ladder_step;
+        let ladder_param5 = 0.06 + event_slots[event_index] as f32 * ladder_step;
         match event {
             RoadPaintEvent::Face(face_index) => {
                 let face = &faces[*face_index];
@@ -2828,18 +2982,40 @@ fn build_tile_buffers_from_features(
                 let mut sub_indices;
                 let (verts, indices, deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
                     match field {
-                        Some(field) => {
+                        // Only faces whose bbox touches lifted cells pay the
+                        // clone + refine + per-vertex sample; a tier with one
+                        // bridge must not tax its every face tile-wide.
+                        Some(field)
+                            if !face.verts.is_empty() && {
+                                let mut min_x = f32::MAX;
+                                let mut min_y = f32::MAX;
+                                let mut max_x = f32::MIN;
+                                let mut max_y = f32::MIN;
+                                for v in &face.verts {
+                                    min_x = min_x.min(v.x);
+                                    min_y = min_y.min(v.y);
+                                    max_x = max_x.max(v.x);
+                                    max_y = max_y.max(v.y);
+                                }
+                                field.active_near(min_x, min_y, max_x, max_y)
+                            } =>
+                        {
+                            let clock = std::time::Instant::now();
                             sub_verts = face.verts.clone();
                             sub_indices = face.indices.clone();
                             subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            prof_subdiv_ms += clock.elapsed().as_secs_f64() * 1000.0;
+                            let clock = std::time::Instant::now();
                             let deck: Vec<f32> = sub_verts
                                 .iter()
                                 .map(|v| field.sample(v.x, v.y))
                                 .collect();
+                            prof_sample_ms += clock.elapsed().as_secs_f64() * 1000.0;
+                            prof_face_verts_out += sub_verts.len();
                             let lifted = deck.iter().any(|&d| d > 0.05);
                             (&sub_verts, &sub_indices, lifted.then_some(deck))
                         }
-                        None => (&face.verts, &face.indices, None),
+                        _ => (&face.verts, &face.indices, None),
                     };
                 append_tessellated_geometry_decked(
                     verts,
@@ -2870,9 +3046,8 @@ fn build_tile_buffers_from_features(
                     &mut path,
                     part,
                     false,
-                    stroke_corridors_available.then(|| {
-                        if bridge_dz_covered { &own_profiles[..] } else { &bridge_corridors[..] }
-                    }),
+                    (stroke_corridors_available && corridors_near(part))
+                        .then_some(corridor_set),
                     &mut tess,
                     &mut tess_verts,
                     &mut tess_indices,
@@ -2891,6 +3066,17 @@ fn build_tile_buffers_from_features(
             }
         }
     }
+
+    profiler.lap(
+        "emit",
+        &format!(
+            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={}",
+            events.len(),
+            prof_subdiv_ms,
+            prof_sample_ms,
+            prof_face_verts_out
+        ),
+    );
 
     // Centers ranked above the topmost road tier (trams, rails): stroke
     // buffer, above every face and interleaved stroke.
@@ -2916,9 +3102,8 @@ fn build_tile_buffers_from_features(
                 &mut path,
                 part,
                 false,
-                stroke_corridors_available.then(|| {
-                    if bridge_dz_covered { &own_profiles[..] } else { &bridge_corridors[..] }
-                }),
+                (stroke_corridors_available && corridors_near(part))
+                    .then_some(corridor_set),
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
@@ -3077,6 +3262,19 @@ fn build_tile_buffers_from_features(
     }
 
     compact_tile_labels(&mut labels);
+
+    profiler.lap("tail", "");
+    profiler.total(
+        tile_key,
+        &format!(
+            "rz{} fill={}KB casing={}KB stroke={}KB icon={}KB",
+            render_zoom,
+            (fill_vertices.len() + fill_indices.len()) * 4 / 1024,
+            (casing_vertices.len() + casing_indices.len()) * 4 / 1024,
+            (stroke_vertices.len() + stroke_indices.len()) * 4 / 1024,
+            (icon_vertices.len() + icon_indices.len()) * 4 / 1024,
+        ),
+    );
 
     TileBuffers {
         pin_hits,
@@ -4451,6 +4649,62 @@ pub fn write_ppm(path: &str, size: usize, image: &[u8]) {
 
 #[cfg(test)]
 mod bridge_probe_tests {
+    /// Headless generator probe: build real tiles with the mirrored live
+    /// theme, print per-stage timings (MP_TILE_PROFILE=1) and buffer sizes.
+    /// Run: MP_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
+    ///   --release union_perf_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn union_perf_probe() {
+        use super::*;
+        let maps = Path::new("../examples/map/local/maps");
+        let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
+        let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let theme = crate::map::style::probe_compiled_theme();
+        let spots = [
+            ("raampoort", 4.8785f64, 52.3798f64),
+            ("europaboulevard", 4.8895f64, 52.3405f64),
+        ];
+        for (name, lon, lat) in spots {
+            let z = 14u32;
+            let n = (1u64 << z) as f64;
+            let nx = (lon + 180.0) / 360.0;
+            let r = lat.to_radians();
+            let ny = (1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0;
+            let (tx, ty) = ((nx * n) as i64, (ny * n) as i64);
+            let tms = (1i64 << z) - 1 - ty;
+            let raw = base.get_tile(z as i64, tx, tms).unwrap().unwrap();
+            let det = detail.get_tile(z as i64, tx, tms).ok().flatten();
+            let dzt = dz.get_tile(z as i64, tx, tms).ok().flatten();
+            for render_zoom in [14u32, 17] {
+                let key = TileKey { z, x: tx as i32, y: ty as i32 };
+                let clock = std::time::Instant::now();
+                let buffers = build_tile_buffers_from_mvt(
+                    key,
+                    &raw,
+                    det.as_deref(),
+                    dzt.as_deref(),
+                    dzt.is_some(),
+                    &[],
+                    &theme,
+                    render_zoom,
+                    true,
+                    true,
+                )
+                .unwrap();
+                println!(
+                    "PROBE {name} z14/{tx}/{ty} rz{render_zoom}: {:.0}ms fill={}KB casing={}KB stroke={}KB icon={}KB",
+                    clock.elapsed().as_secs_f64() * 1000.0,
+                    (buffers.fill_vertices.len() + buffers.fill_indices.len()) * 4 / 1024,
+                    (buffers.casing_vertices.len() + buffers.casing_indices.len()) * 4 / 1024,
+                    (buffers.stroke_vertices.len() + buffers.stroke_indices.len()) * 4 / 1024,
+                    (buffers.icon_vertices.len() + buffers.icon_indices.len()) * 4 / 1024,
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn probe_rai_detail_tags() {

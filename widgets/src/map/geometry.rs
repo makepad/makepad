@@ -2102,6 +2102,7 @@ pub fn overlay_paint_groups(
 ) -> Vec<PaintFace> {
     use i_overlay::core::fill_rule::FillRule as IoFillRule;
     use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::simplify::SimplifyShape;
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
@@ -2120,70 +2121,184 @@ pub fn overlay_paint_groups(
             .collect()
     };
 
-    let mut cover: Shapes = Vec::new();
-    let mut visibles: Vec<Shapes> = Vec::with_capacity(groups.len());
-    for group in groups.iter().rev() {
-        let paths = to_paths(group, false);
-        if paths.is_empty() {
-            visibles.push(Vec::new());
-            continue;
-        }
-        let visible: Shapes = paths.overlay(&cover, OverlayRule::Difference, IoFillRule::NonZero);
-        // Only grounded rings join the cover: a lifted deck must not cut
-        // the road running underneath it out of the map.
-        let grounded = to_paths(group, true);
-        if !grounded.is_empty() {
-            cover = grounded.overlay(&cover, OverlayRule::Union, IoFillRule::NonZero);
-        }
-        visibles.push(visible);
+    // The output must be DISJOINT faces per LEVEL — one flat continuous
+    // triangulation with no overlapping geometry among content at the same
+    // height: coplanar overlaps cannot be separated reliably in tilt
+    // (independently-triangulated faces interpolate dz differently, so a
+    // casing bleeds through its own center). Two covers realize that:
+    // grounded content subtracts the grounded cover above it, lifted
+    // content subtracts the lifted cover above it — a deck therefore cuts
+    // its own casing (both lifted) but never cuts the road running
+    // underneath (grounded), and ramp feet (grounded ends of a deck) still
+    // cut the streets they meet. Each group first DISSOLVES its ring soup
+    // per level with one local self-union, so the cross-group cascade only
+    // ever sees clean outlines. The grounded/lifted parts of one group may
+    // overlap at level-transition seams: same color, same depth slot,
+    // same dz field — identical pixels, so the tie is invisible.
+    struct GroupOutline {
+        grounded_shapes: Shapes,
+        grounded_paths: Vec<Vec<[f64; 2]>>,
+        lifted_shapes: Shapes,
+        lifted_paths: Vec<Vec<[f64; 2]>>,
+        bbox: (f64, f64, f64, f64),
     }
-    visibles.reverse();
+    let dissolve = |paths: Vec<Vec<[f64; 2]>>| -> (Shapes, Vec<Vec<[f64; 2]>>) {
+        if paths.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let shapes: Shapes = paths.simplify_shape(IoFillRule::NonZero);
+        let flat = shapes
+            .iter()
+            .flat_map(|shape| shape.iter().cloned())
+            .collect();
+        (shapes, flat)
+    };
+    let outlines: Vec<GroupOutline> = groups
+        .iter()
+        .map(|group| {
+            let has_lifted = group
+                .rings
+                .iter()
+                .any(|(_, max_dz)| *max_dz >= LIFT_COVER_M);
+            let (grounded_shapes, grounded_paths) = dissolve(to_paths(group, true));
+            let (lifted_shapes, lifted_paths) = if has_lifted {
+                let lifted_rings: Vec<Vec<[f64; 2]>> = group
+                    .rings
+                    .iter()
+                    .filter(|(ring, max_dz)| ring.len() >= 3 && *max_dz >= LIFT_COVER_M)
+                    .map(|(ring, _)| {
+                        ring.iter()
+                            .map(|&(x, y)| [f64::from(x), f64::from(y)])
+                            .collect()
+                    })
+                    .collect();
+                dissolve(lifted_rings)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let mut bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for path in grounded_paths.iter().chain(lifted_paths.iter()) {
+                for p in path {
+                    bbox.0 = bbox.0.min(p[0]);
+                    bbox.1 = bbox.1.min(p[1]);
+                    bbox.2 = bbox.2.max(p[0]);
+                    bbox.3 = bbox.3.max(p[1]);
+                }
+            }
+            GroupOutline {
+                grounded_shapes,
+                grounded_paths,
+                lifted_shapes,
+                lifted_paths,
+                bbox,
+            }
+        })
+        .collect();
+
+    // Incremental cascade per level, all operands dissolved outlines.
+    let mut cover_grounded: Shapes = Vec::new();
+    let mut cover_lifted: Shapes = Vec::new();
+    let mut cover_bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut visibles: Vec<(Shapes, Shapes)> =
+        vec![(Vec::new(), Vec::new()); outlines.len()];
+    for k in (0..outlines.len()).rev() {
+        let outline = &outlines[k];
+        let bbox = outline.bbox;
+        let overlaps_cover = bbox.0 <= cover_bbox.2
+            && bbox.2 >= cover_bbox.0
+            && bbox.1 <= cover_bbox.3
+            && bbox.3 >= cover_bbox.1;
+        let visible_part = |part_paths: &Vec<Vec<[f64; 2]>>,
+                            part_shapes: &Shapes,
+                            cover: &Shapes|
+         -> Shapes {
+            if part_paths.is_empty() {
+                Vec::new()
+            } else if overlaps_cover && !cover.is_empty() {
+                part_paths.overlay(cover, OverlayRule::Difference, IoFillRule::NonZero)
+            } else {
+                part_shapes.clone()
+            }
+        };
+        visibles[k] = (
+            visible_part(
+                &outline.grounded_paths,
+                &outline.grounded_shapes,
+                &cover_grounded,
+            ),
+            visible_part(&outline.lifted_paths, &outline.lifted_shapes, &cover_lifted),
+        );
+        if !outline.grounded_paths.is_empty() {
+            cover_grounded = outline.grounded_paths.overlay(
+                &cover_grounded,
+                OverlayRule::Union,
+                IoFillRule::NonZero,
+            );
+        }
+        if !outline.lifted_paths.is_empty() {
+            cover_lifted = outline.lifted_paths.overlay(
+                &cover_lifted,
+                OverlayRule::Union,
+                IoFillRule::NonZero,
+            );
+        }
+        if !outline.grounded_paths.is_empty() || !outline.lifted_paths.is_empty() {
+            cover_bbox.0 = cover_bbox.0.min(bbox.0);
+            cover_bbox.1 = cover_bbox.1.min(bbox.1);
+            cover_bbox.2 = cover_bbox.2.max(bbox.2);
+            cover_bbox.3 = cover_bbox.3.max(bbox.3);
+        }
+    }
 
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
     let mut tess_indices: Vec<u32> = Vec::new();
-    for (group, visible) in groups.iter().zip(visibles) {
-        if visible.is_empty() {
-            continue;
-        }
-        // Each shape = outer ring + holes; contours are crossing-free, so
-        // even-odd (no explicit winding) fills holes correctly.
-        for shape in &visible {
-            for ring in shape {
-                if ring.len() < 3 {
-                    continue;
-                }
-                path.move_to(ring[0][0] as f32, ring[0][1] as f32);
-                for point in ring.iter().skip(1) {
-                    path.line_to(point[0] as f32, point[1] as f32);
-                }
-                path.close();
+    for (group, (visible_grounded, visible_lifted)) in groups.iter().zip(visibles) {
+        // Grounded and lifted parts become separate faces with identical
+        // metadata; their seam overlap renders identically on both sides.
+        for visible in [visible_grounded, visible_lifted] {
+            if visible.is_empty() {
+                continue;
             }
+            // Each shape = outer ring + holes; contours are crossing-free,
+            // so even-odd (no explicit winding) fills holes correctly.
+            for shape in &visible {
+                for ring in shape {
+                    if ring.len() < 3 {
+                        continue;
+                    }
+                    path.move_to(ring[0][0] as f32, ring[0][1] as f32);
+                    for point in ring.iter().skip(1) {
+                        path.line_to(point[0] as f32, point[1] as f32);
+                    }
+                    path.close();
+                }
+            }
+            tessellate_path_fill(
+                &mut path,
+                tess,
+                &mut tess_verts,
+                &mut tess_indices,
+                LineJoin::Miter,
+                4.0,
+                0.0,
+                false,
+                tolerance,
+            );
+            if tess_verts.is_empty() || tess_indices.is_empty() {
+                continue;
+            }
+            faces.push(PaintFace {
+                color: group.color,
+                param5: group.param5,
+                phase: group.phase,
+                rank: group.rank,
+                field: group.field,
+                verts: tess_verts.clone(),
+                indices: tess_indices.clone(),
+            });
         }
-        tessellate_path_fill(
-            &mut path,
-            tess,
-            &mut tess_verts,
-            &mut tess_indices,
-            LineJoin::Miter,
-            4.0,
-            0.0,
-            false,
-            tolerance,
-        );
-        if tess_verts.is_empty() || tess_indices.is_empty() {
-            continue;
-        }
-        faces.push(PaintFace {
-            color: group.color,
-            param5: group.param5,
-            phase: group.phase,
-            rank: group.rank,
-            field: group.field,
-            verts: tess_verts.clone(),
-            indices: tess_indices.clone(),
-        });
     }
     faces
 }

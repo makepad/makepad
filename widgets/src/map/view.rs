@@ -2001,6 +2001,7 @@ impl MapView {
     }
 
     fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, buffers: TileBuffers) {
+        let tile_bytes = buffers.byte_size();
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
@@ -2089,12 +2090,30 @@ impl MapView {
                 },
                 last_used: self.frame_counter,
                 attempts: 0,
+                bytes: tile_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
                 fade,
             },
         );
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
+    }
+
+    /// The upload queue drains only 2 tiles per frame; a fast pan across 3D
+    /// building tiles can park gigabytes of baked buffers here. Drop the
+    /// oldest queued bakes beyond a byte budget — they were about to be
+    /// stale anyway.
+    fn cap_pending_ready_tiles(&mut self) {
+        const PENDING_BYTE_BUDGET: usize = 384_000_000;
+        let mut total: usize = self
+            .pending_ready_tiles
+            .iter()
+            .map(|(_, buffers)| buffers.byte_size())
+            .sum();
+        while total > PENDING_BYTE_BUDGET && self.pending_ready_tiles.len() > 1 {
+            let (_, dropped) = self.pending_ready_tiles.remove(0);
+            total -= dropped.byte_size();
+        }
     }
 
     fn handle_tile_worker_messages(&mut self, cx: &mut Cx) {
@@ -2129,6 +2148,7 @@ impl MapView {
                             .retain(|(key, _)| *key != tile.tile_key);
                         self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
                     }
+                    self.cap_pending_ready_tiles();
                     if !empty_feature_tiles.is_empty() {
                         empty_feature_tiles.sort_unstable();
                         log!("MapView: local mbtiles loaded {} tile(s) with 0 rendered features sample:{}", empty_feature_tiles.len(), format_tile_key_sample(&empty_feature_tiles, 8));
@@ -2177,6 +2197,7 @@ impl MapView {
                     }
                     self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
                     self.pending_ready_tiles.push((tile_key, buffers));
+                    self.cap_pending_ready_tiles();
                     redraw = true;
                 }
                 TileWorkerMessage::NetworkTileParseFailed {
@@ -2333,6 +2354,7 @@ impl MapView {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
                         attempts: prev_attempts,
+                        bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
                         fade: None,
@@ -2409,6 +2431,7 @@ impl MapView {
                 state: TileLoadState::Failed { retry_after },
                 last_used: self.frame_counter,
                 attempts,
+                bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
                 fade: None,
@@ -2585,6 +2608,35 @@ impl MapView {
                 }
                 frame_counter.saturating_sub(entry.last_used) <= 120
             });
+        }
+        // Byte budget on top of the count heuristic: 3D building bakes run
+        // 60-90 MB per tile (CPU floats AND a GPU copy), so even a modest
+        // resident set can eat the machine. Evict least-recently-used
+        // non-visible tiles until the geometry footprint fits.
+        const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
+        let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
+        if total_bytes > TILE_CACHE_BYTE_BUDGET {
+            let mut evictable: Vec<(TileKey, u64, usize)> = self
+                .tiles
+                .iter()
+                .filter(|(key, entry)| {
+                    !visible_set.contains(key)
+                        && !matches!(
+                            entry.state,
+                            TileLoadState::LoadingNetwork | TileLoadState::LoadingLocal
+                        )
+                })
+                .map(|(key, entry)| (*key, entry.last_used, entry.bytes))
+                .collect();
+            evictable.sort_unstable_by_key(|&(_, last_used, _)| last_used);
+            let mut remaining = total_bytes;
+            for (key, _, bytes) in evictable {
+                if remaining <= TILE_CACHE_BYTE_BUDGET {
+                    break;
+                }
+                self.tiles.remove(&key);
+                remaining -= bytes;
+            }
         }
         self.update_status_text();
     }
@@ -2778,6 +2830,7 @@ impl MapView {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
                         attempts: 0,
+                        bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
                         fade: None,
@@ -2834,6 +2887,7 @@ impl MapView {
                 state: TileLoadState::LoadingNetwork,
                 last_used: self.frame_counter,
                 attempts,
+                bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
                 fade: None,
