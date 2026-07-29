@@ -2340,9 +2340,26 @@ impl DzField {
         };
         for (points, dz) in ways {
             for i in 0..points.len().saturating_sub(1) {
-                let (ax, ay) = points[i];
-                let (bx, by) = points[i + 1];
+                let (mut ax, mut ay) = points[i];
+                let (mut bx, mut by) = points[i + 1];
                 let (dza, dzb) = dz.map_or((0.0, 0.0), |d| (d[i], d[i + 1]));
+                // A lifted way END (tile clip or data end mid-deck) renders
+                // a round cap past the endpoint; extend the terminal
+                // segment so the cap sits at full deck height instead of
+                // drooping through the distance fade.
+                let cap_reach = (radius - 2.0).max(0.0);
+                if cap_reach > 0.0 {
+                    let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt().max(1e-6);
+                    let (ux, uy) = ((bx - ax) / len, (by - ay) / len);
+                    if i == 0 && dza > 0.2 {
+                        ax -= ux * cap_reach;
+                        ay -= uy * cap_reach;
+                    }
+                    if i + 2 == points.len() && dzb > 0.2 {
+                        bx += ux * cap_reach;
+                        by += uy * cap_reach;
+                    }
+                }
                 let id = field.segs.len() as u32;
                 field.segs.push([ax, ay, bx, by, dza, dzb]);
                 let min_cx = ((ax.min(bx) - radius) / cell).floor() as i32;
