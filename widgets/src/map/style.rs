@@ -1264,3 +1264,104 @@ fn rail_stroke_style(
     }
     style
 }
+
+/// The live light-theme rules mirrored without the script VM: headless
+/// profiling and A/B probes build real tiles from unit tests, where the
+/// DSL theme cannot be compiled. Keep in sync with the `style:` block in
+/// view.rs when road classes change materially.
+pub fn probe_compiled_theme() -> CompiledMapTheme {
+    fn road(
+        kind: &str,
+        sort_rank: u32,
+        casing: Option<(u32, f32)>,
+        center: (u32, f32),
+        center_shape_id: f32,
+        min_zoom: f32,
+    ) -> MapRoadRule {
+        MapRoadRule {
+            source: Default::default(),
+            kind: kind.to_string(),
+            sort_rank,
+            casing_color: Vec4f::from_u32(casing.map_or(0, |(color, _)| (color << 8) | 0xff)),
+            casing_width: casing.map_or(0.0, |(_, width)| width),
+            casing_shape_id: 0.0,
+            center_color: Vec4f::from_u32((center.0 << 8) | 0xff),
+            center_width: center.1,
+            center_shape_id,
+            min_zoom,
+        }
+    }
+    fn fill(group: &str, value: &str, color: u32) -> MapFillRule {
+        MapFillRule {
+            source: Default::default(),
+            group: group.to_string(),
+            value: value.to_string(),
+            color: Vec4f::from_u32((color << 8) | 0xff),
+        }
+    }
+    fn waterway(kind: &str, width: f32, min_zoom: f32) -> MapWaterwayRule {
+        MapWaterwayRule {
+            source: Default::default(),
+            kind: kind.to_string(),
+            sort_rank: 140,
+            casing_color: Vec4f::from_u32(0),
+            casing_width: 0.0,
+            casing_shape_id: 0.0,
+            center_color: Vec4f::from_u32(0xaad3dfff),
+            center_width: width,
+            center_shape_id: 0.0,
+            min_zoom,
+        }
+    }
+    let mut style = MapThemeStyle::default();
+    style.fill_rules = vec![
+        fill("building", "", 0xd9d0c9),
+        fill("building_outline", "", 0xb5aa9b),
+        fill("street_area", "", 0xdddde8),
+        fill("bridge_area", "", 0xb8b8b8),
+        fill("water", "", 0xaad3df),
+        fill("landuse", "residential", 0xe0dfdf),
+        fill("landuse", "forest", 0xadd19e),
+        fill("landuse", "grass", 0xcdebb0),
+        fill("landuse", "*", 0xe8e7e2),
+        fill("leisure", "park", 0xc8facc),
+        fill("leisure", "*", 0xc8facc),
+    ];
+    style.road_rules = vec![
+        road("motorway", 700, Some((0xdc2a67, 7.2)), (0xe892a2, 6.0), 0.0, 0.0),
+        road("trunk", 640, Some((0xc84e2f, 7.2)), (0xf9b29c, 6.0), 0.0, 0.0),
+        road("primary", 560, Some((0xa06b00, 6.4)), (0xfcd6a4, 5.0), 0.0, 0.0),
+        road("secondary", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 0.0),
+        road("busway", 470, Some((0x707d05, 6.4)), (0xf7fabf, 5.0), 0.0, 0.0),
+        road("tertiary", 390, Some((0x8f8f8f, 6.2)), (0xffffff, 5.0), 0.0, 0.0),
+        road("residential", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 0.0),
+        road("unclassified", 310, Some((0xbbbbbb, 4.2)), (0xffffff, 3.0), 0.0, 0.0),
+        road("living_street", 310, Some((0xbbbbbb, 4.0)), (0xededed, 3.0), 0.0, 0.0),
+        road("service", 240, Some((0xbbbbbb, 3.0)), (0xffffff, 2.0), 0.0, 0.0),
+        road("pedestrian", 240, Some((0x999999, 4.0)), (0xdddde8, 3.0), 0.0, 0.0),
+        road("pedestrian", 300, Some((0xb5b5b5, 4.0)), (0xfdfdfd, 2.8), 0.0, 14.0),
+        road("cycleway", 160, None, (0x6262ff, 0.9), 10.0, 14.0),
+        road("footway", 160, None, (0xaaa8a5, 0.9), 10.0, 15.0),
+        road("path", 160, None, (0xaaa8a5, 0.8), 10.0, 15.0),
+        road("steps", 160, None, (0xaaa8a5, 2.0), 10.0, 15.0),
+        road("track", 160, None, (0xaaa8a5, 1.0), 10.0, 14.0),
+        road("*", 280, Some((0xbbbbbb, 3.6)), (0xffffff, 2.5), 0.0, 0.0),
+    ];
+    style.waterway_rules = vec![
+        waterway("river", 4.0, 0.0),
+        waterway("canal", 3.0, 12.0),
+        waterway("stream", 1.4, 13.0),
+        waterway("*", 1.2, 13.0),
+    ];
+    style.railway_rule = Some(MapRailRule {
+        source: Default::default(),
+        sort_rank: 710,
+        casing_color: Vec4f::from_u32(0),
+        casing_width: 0.0,
+        casing_shape_id: 0.0,
+        center_color: Vec4f::from_u32(0x6e6e6eff),
+        center_width: 1.0,
+        center_shape_id: 0.0,
+    });
+    style.compile()
+}
