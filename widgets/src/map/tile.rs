@@ -634,7 +634,8 @@ fn parse_base_dz_map(
         let decks: Vec<f32> = dz
             .split(',')
             .filter_map(|v| v.parse::<f32>().ok())
-            .map(|dm| (dm * 0.1).max(0.0))
+            // Signed: positive = deck lift, negative = tunnel sink.
+            .map(|dm| dm * 0.1)
             .collect();
         map.insert((layer.clone(), fidx, pidx), decks);
     }
@@ -1439,12 +1440,19 @@ fn build_tile_buffers_from_features(
         .iter()
         .filter(|way| !way.closed)
         .filter_map(|way| {
-            way.dz.as_ref().map(|dz| BridgeCorridor {
-                points: way.points.clone(),
-                decks: dz.clone(),
-                half_width: 2.0,
-                solved: true,
-            })
+            // Sunk (tunnel) ways stay OUT of the stroke/arrow corridors: a
+            // surface stroke directly above a tunnel line would otherwise
+            // match it at distance ~0 and sink with it. Tunnel union faces
+            // get their dz from the per-tier field instead.
+            way.dz
+                .as_ref()
+                .filter(|dz| !dz.iter().any(|&d| d < -0.05))
+                .map(|dz| BridgeCorridor {
+                    points: way.points.clone(),
+                    decks: dz.clone(),
+                    half_width: 2.0,
+                    solved: true,
+                })
         })
         .collect();
     // Inside baked coverage: only own profiles lift strokes. Outside:
@@ -2585,8 +2593,26 @@ fn build_tile_buffers_from_features(
                 tag_is_truthy(&way.tags, "oneway_reverse"),
             ));
         }
+        // A tunnel with baked negative dz becomes a real SUNK road in 3D
+        // bakes: styled as its solid road class (no dash), joining the
+        // union as a sunk level part. Flat bakes keep the carto dashes.
+        let sunk_3d = buildings_3d
+            && tag_is_truthy(&way.tags, "tunnel")
+            && way
+                .dz
+                .as_ref()
+                .is_some_and(|dz| dz.iter().any(|&d| d < -0.05));
+        let stripped_tags;
+        let style_tags = if sunk_3d {
+            let mut tags = way.tags.clone();
+            tags.remove("tunnel");
+            stripped_tags = tags;
+            &stripped_tags
+        } else {
+            &way.tags
+        };
         if let Some(mut style) =
-            stroke_style_for_tags(theme, &way.tags, tile_key.z, render_zoom, zoom_mult, px_to_units)
+            stroke_style_for_tags(theme, style_tags, tile_key.z, render_zoom, zoom_mult, px_to_units)
         {
             // Inside baked bridge-dz coverage the solved corridor profile
             // is the only lift source — shortbread bridge tags are the
@@ -2601,7 +2627,7 @@ fn build_tile_buffers_from_features(
             // running parallel to a bridge (IJtunnel next to Zouthavenbrug)
             // passes the direction gate and would hoist above ground.
             // deck_m < 0 is the "never deck" sentinel for the stroke pass.
-            if tag_is_truthy(&way.tags, "tunnel") {
+            if tag_is_truthy(&way.tags, "tunnel") && !sunk_3d {
                 style.center.deck_m = -1.0;
                 if let Some(casing) = style.casing.as_mut() {
                     casing.deck_m = -1.0;
@@ -2628,7 +2654,7 @@ fn build_tile_buffers_from_features(
             let union_road = union_roads
                 && way.tags.contains_key("highway")
                 && !tag_is_truthy(&way.tags, "rail")
-                && !tag_is_truthy(&way.tags, "tunnel")
+                && (sunk_3d || !tag_is_truthy(&way.tags, "tunnel"))
                 && style.center.shape_id == 0.0
                 && style.casing.map_or(true, |casing| casing.shape_id == 0.0);
             stroke_jobs.push(StrokeDrawJob {
@@ -2891,10 +2917,13 @@ fn build_tile_buffers_from_features(
     // the carto nub — but ends produced by the tile clip must stay butt, or
     // the cap disc overpaints the neighbor tile's content.
     let cap_eps = 0.05_f32;
-    let mut events: Vec<((u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
+    // Sort key gains a level-class prefix: sunk faces (tunnels) paint
+    // before ALL surface content — under plazas, casings, everything.
+    let mut events: Vec<((u8, u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
     for (face_index, face) in faces.iter().enumerate() {
+        let level_class = if face.level < 0 { 0u8 } else { 1 };
         events.push((
-            (face.phase, face.rank, 1, face_index as u32),
+            (level_class, face.phase, face.rank, 1, face_index as u32),
             RoadPaintEvent::Face(face_index),
         ));
     }
@@ -2906,7 +2935,7 @@ fn build_tile_buffers_from_features(
             }
             if let Some(casing) = style.casing {
                 events.push((
-                    (1, style.sort_rank, 0, stroke_seq),
+                    (1, 1, style.sort_rank, 0, stroke_seq),
                     RoadPaintEvent::Stroke {
                         pass: casing,
                         part,
@@ -2928,7 +2957,7 @@ fn build_tile_buffers_from_features(
                     LineCap::Round
                 };
                 events.push((
-                    (2, style.sort_rank, 0, stroke_seq),
+                    (1, 2, style.sort_rank, 0, stroke_seq),
                     RoadPaintEvent::Stroke {
                         pass: style.center,
                         part,
@@ -2990,7 +3019,7 @@ fn build_tile_buffers_from_features(
     let mut event_slots = Vec::with_capacity(events.len());
     let mut slot_count = 0usize;
     let mut last_stroke_slot: Option<(u8, i16)> = None;
-    for ((phase, rank, _, _), event) in &events {
+    for ((_, phase, rank, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(_) => {
                 slot_count += 1;
@@ -3066,14 +3095,25 @@ fn build_tile_buffers_from_features(
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
                 // the crescents a displaced ramp leaves over its footprint.
-                if face.lifted && !face.skirt_verts.is_empty() {
+                if face.level == 1 && !face.skirt_verts.is_empty() {
                     if let Some(field) = field {
                         let mut sk_verts = face.skirt_verts.clone();
                         let mut sk_indices = face.skirt_indices.clone();
                         subdivide_face_mesh(&mut sk_verts, &mut sk_indices, 3.0, field);
+                        // Fascia, not full wall: the band hangs ~1.4 m
+                        // below the deck edge and the space underneath
+                        // stays OPEN — you can see through an underpass.
+                        const DECK_FASCIA_M: f32 = 1.4;
                         let sk_deck: Vec<f32> = sk_verts
                             .iter()
-                            .map(|v| if v.v > 0.5 { 0.0 } else { field.sample(v.x, v.y) })
+                            .map(|v| {
+                                let deck = field.sample(v.x, v.y);
+                                if v.v > 0.5 {
+                                    (deck - DECK_FASCIA_M).max(0.0)
+                                } else {
+                                    deck
+                                }
+                            })
                             .collect();
                         if sk_deck.iter().any(|&d| d > 0.05) {
                             let wall = [
