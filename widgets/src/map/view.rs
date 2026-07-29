@@ -154,6 +154,10 @@ script_mod! {
                         off.x * self.view_rot.x - off.y * self.view_rot.y,
                         off.x * self.view_rot.y + off.y * self.view_rot.x
                     );
+                    // Map-aligned glyphs (oneway arrows) lie ON the ground
+                    // plane: their screen offset foreshortens with the tilt
+                    // like the road under them, instead of billboarding.
+                    off.y = off.y * self.tilt_params.x;
                 }
                 transformed = transformed + off;
             }

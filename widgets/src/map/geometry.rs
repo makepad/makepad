@@ -2070,10 +2070,13 @@ pub struct PaintGroup {
     pub rank: i16,
     /// Index of this group's DzField (DZ_FIELD_NONE = grounded).
     pub field: u16,
-    /// (ring, max corner dz). Lifted rings stay visible but do NOT punch
-    /// holes in the groups below: the road continues underneath a deck —
-    /// paint order hides it flat, real depth hides it tilted.
-    pub rings: Vec<(Vec<(f32, f32)>, f32)>,
+    /// (ring, min corner dz, max corner dz). Lifted rings stay visible but
+    /// do NOT punch holes in the groups below: the road continues under a
+    /// deck — paint order hides it flat, real depth hides it tilted. Rings
+    /// whose dz range straddles LIFT_COVER_M join BOTH level parts, so the
+    /// grounded and lifted meshes overlap at every transition instead of
+    /// meeting at an epsilon-fragile shared edge.
+    pub rings: Vec<(Vec<(f32, f32)>, f32, f32)>,
 }
 
 /// Rings lifted beyond this stop covering (subtracting from) lower groups.
@@ -2088,6 +2091,75 @@ pub struct PaintFace {
     pub field: u16,
     pub verts: Vec<VVertex>,
     pub indices: Vec<u32>,
+    /// Antialiasing skirt along this face's outer boundary: u ramps
+    /// 0.5 -> 0.0 outward over one screen px; drawn with stroke_mult 1.0
+    /// right after the face, so painter-order AA falls out of the ladder.
+    pub fringe_verts: Vec<VVertex>,
+    pub fringe_indices: Vec<u32>,
+}
+
+/// One ring's AA skirt: per-vertex miter offsets to the un-filled side.
+/// Hole rings carry opposite orientation, so their skirts flip into the
+/// courtyard automatically.
+fn append_ring_fringe(
+    ring: &[[f64; 2]],
+    aa: f32,
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let n = ring.len();
+    if n < 3 {
+        return;
+    }
+    let mut area2 = 0.0f64;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        area2 += a[0] * b[1] - b[0] * a[1];
+    }
+    let out_sign = if area2 > 0.0 { 1.0f32 } else { -1.0 };
+    let base = verts.len() as u32;
+    for i in 0..n {
+        let p = ring[i];
+        let prev = ring[(i + n - 1) % n];
+        let next = ring[(i + 1) % n];
+        let (e0x, e0y) = ((p[0] - prev[0]) as f32, (p[1] - prev[1]) as f32);
+        let (e1x, e1y) = ((next[0] - p[0]) as f32, (next[1] - p[1]) as f32);
+        let l0 = (e0x * e0x + e0y * e0y).sqrt().max(1e-6);
+        let l1 = (e1x * e1x + e1y * e1y).sqrt().max(1e-6);
+        let (n0x, n0y) = (-e0y / l0, e0x / l0);
+        let (n1x, n1y) = (-e1y / l1, e1x / l1);
+        let (mut mx, mut my) = (n0x + n1x, n0y + n1y);
+        let ml = (mx * mx + my * my).sqrt().max(1e-6);
+        mx /= ml;
+        my /= ml;
+        // Miter clamp: sharp corners cap the rim reach at 2x aa.
+        let cos_half = (mx * n1x + my * n1y).max(0.5);
+        let reach = aa / cos_half * out_sign;
+        let (px, py) = (p[0] as f32, p[1] as f32);
+        verts.push(VVertex {
+            x: px,
+            y: py,
+            u: 0.5,
+            v: 0.0,
+            stroke_dist: 0.0,
+            clip_radius: aa * 4.0,
+        });
+        verts.push(VVertex {
+            x: px + mx * reach,
+            y: py + my * reach,
+            u: 0.0,
+            v: 0.0,
+            stroke_dist: 0.0,
+            clip_radius: aa * 4.0,
+        });
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a_in, a_out) = (base + i as u32 * 2, base + i as u32 * 2 + 1);
+        let (b_in, b_out) = (base + j as u32 * 2, base + j as u32 * 2 + 1);
+        indices.extend_from_slice(&[a_in, a_out, b_out, a_in, b_out, b_in]);
+    }
 }
 
 /// Painter's algorithm as geometry: top-down subtraction cascade over the
@@ -2099,6 +2171,7 @@ pub fn overlay_paint_groups(
     groups: &[PaintGroup],
     tess: &mut Tessellator,
     tolerance: f32,
+    aa: f32,
 ) -> Vec<PaintFace> {
     use i_overlay::core::fill_rule::FillRule as IoFillRule;
     use i_overlay::core::overlay_rule::OverlayRule;
@@ -2106,18 +2179,51 @@ pub fn overlay_paint_groups(
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
+    // Boolean input hygiene — the runaway fix. The extraction stage of the
+    // boolean solver can spin forever chasing a contour cycle fed by
+    // near-coincident / near-degenerate ring geometry (sliver bevel wedges,
+    // float-noise twin edges). Snapping every coordinate to a 1/64-unit
+    // grid turns "almost identical" into EXACTLY identical — which NonZero
+    // winding resolves trivially — and post-snap degenerate rings are
+    // dropped before they ever reach the solver.
+    const SNAP: f64 = 64.0;
+    let snap_ring = |ring: &[(f32, f32)]| -> Option<Vec<[f64; 2]>> {
+        let mut out: Vec<[f64; 2]> = Vec::with_capacity(ring.len());
+        for &(x, y) in ring {
+            let p = [
+                (f64::from(x) * SNAP).round() / SNAP,
+                (f64::from(y) * SNAP).round() / SNAP,
+            ];
+            if out.last().is_some_and(|last| *last == p) {
+                continue;
+            }
+            out.push(p);
+        }
+        while out.len() >= 2 && out.first() == out.last() {
+            out.pop();
+        }
+        if out.len() < 3 {
+            return None;
+        }
+        let mut area2 = 0.0f64;
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = out[(i + 1) % out.len()];
+            area2 += a[0] * b[1] - b[0] * a[1];
+        }
+        if area2.abs() < 1e-3 {
+            return None;
+        }
+        Some(out)
+    };
     let to_paths = |group: &PaintGroup, grounded_only: bool| -> Vec<Vec<[f64; 2]>> {
         group
             .rings
             .iter()
-            .filter(|(ring, max_dz)| {
-                ring.len() >= 3 && (!grounded_only || *max_dz < LIFT_COVER_M)
+            .filter(|(ring, min_dz, _)| {
+                ring.len() >= 3 && (!grounded_only || *min_dz < LIFT_COVER_M)
             })
-            .map(|(ring, _)| {
-                ring.iter()
-                    .map(|&(x, y)| [f64::from(x), f64::from(y)])
-                    .collect()
-            })
+            .filter_map(|(ring, _, _)| snap_ring(ring))
             .collect()
     };
 
@@ -2142,11 +2248,60 @@ pub fn overlay_paint_groups(
         lifted_paths: Vec<Vec<[f64; 2]>>,
         bbox: (f64, f64, f64, f64),
     }
+    // Hang forensics: with /tmp/mp_boolean_debug present, every boolean's
+    // input is written BEFORE the call — when the solver spins forever and
+    // the memory watchdog shoots the process, the last file on disk IS the
+    // repro (replayed by the boolean_repro test).
+    let debug_dump = std::path::Path::new("/tmp/mp_boolean_debug").exists();
+    let dump_paths = |tag: &str, paths: &[Vec<[f64; 2]>]| {
+        if !debug_dump {
+            return;
+        }
+        use std::io::Write as _;
+        let name = format!(
+            "/tmp/mp_boolean_last_{:?}.txt",
+            std::thread::current().id()
+        );
+        if let Ok(mut file) = std::fs::File::create(&name) {
+            let _ = writeln!(file, "# {tag}");
+            for ring in paths {
+                let line: Vec<String> = ring
+                    .iter()
+                    .map(|p| format!("{:.6},{:.6}", p[0], p[1]))
+                    .collect();
+                let _ = writeln!(file, "{}", line.join(" "));
+            }
+        }
+    };
+    // Chunked dissolve: the solver's contour extraction degenerates on
+    // ring soups past a few thousand rings (dense residential tiers at
+    // high overzoom reach 20k — measured spinning >25s and allocating
+    // unboundedly). Dissolving bounded chunks and unioning the clean
+    // outlines keeps every single call in solver-friendly territory.
+    const DISSOLVE_CHUNK: usize = 3000;
     let dissolve = |paths: Vec<Vec<[f64; 2]>>| -> (Shapes, Vec<Vec<[f64; 2]>>) {
         if paths.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        let shapes: Shapes = paths.simplify_shape(IoFillRule::NonZero);
+        dump_paths("simplify", &paths);
+        let shapes: Shapes = if paths.len() <= DISSOLVE_CHUNK {
+            paths.simplify_shape(IoFillRule::NonZero)
+        } else {
+            let mut acc: Shapes = Vec::new();
+            for chunk in paths.chunks(DISSOLVE_CHUNK) {
+                let part: Shapes = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+                if acc.is_empty() {
+                    acc = part;
+                } else {
+                    let part_paths: Vec<Vec<[f64; 2]>> = part
+                        .iter()
+                        .flat_map(|shape| shape.iter().cloned())
+                        .collect();
+                    acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
+                }
+            }
+            acc
+        };
         let flat = shapes
             .iter()
             .flat_map(|shape| shape.iter().cloned())
@@ -2159,18 +2314,14 @@ pub fn overlay_paint_groups(
             let has_lifted = group
                 .rings
                 .iter()
-                .any(|(_, max_dz)| *max_dz >= LIFT_COVER_M);
+                .any(|(_, _, max_dz)| *max_dz >= LIFT_COVER_M);
             let (grounded_shapes, grounded_paths) = dissolve(to_paths(group, true));
             let (lifted_shapes, lifted_paths) = if has_lifted {
                 let lifted_rings: Vec<Vec<[f64; 2]>> = group
                     .rings
                     .iter()
-                    .filter(|(ring, max_dz)| ring.len() >= 3 && *max_dz >= LIFT_COVER_M)
-                    .map(|(ring, _)| {
-                        ring.iter()
-                            .map(|&(x, y)| [f64::from(x), f64::from(y)])
-                            .collect()
-                    })
+                    .filter(|(ring, _, max_dz)| ring.len() >= 3 && *max_dz >= LIFT_COVER_M)
+                    .filter_map(|(ring, _, _)| snap_ring(ring))
                     .collect();
                 dissolve(lifted_rings)
             } else {
@@ -2215,6 +2366,11 @@ pub fn overlay_paint_groups(
             if part_paths.is_empty() {
                 Vec::new()
             } else if overlaps_cover && !cover.is_empty() {
+                if debug_dump {
+                    let mut all = part_paths.clone();
+                    all.extend(cover.iter().flat_map(|shape| shape.iter().cloned()));
+                    dump_paths("difference", &all);
+                }
                 part_paths.overlay(cover, OverlayRule::Difference, IoFillRule::NonZero)
             } else {
                 part_shapes.clone()
@@ -2229,6 +2385,11 @@ pub fn overlay_paint_groups(
             visible_part(&outline.lifted_paths, &outline.lifted_shapes, &cover_lifted),
         );
         if !outline.grounded_paths.is_empty() {
+            if debug_dump {
+                let mut all = outline.grounded_paths.clone();
+                all.extend(cover_grounded.iter().flat_map(|shape| shape.iter().cloned()));
+                dump_paths("union-grounded", &all);
+            }
             cover_grounded = outline.grounded_paths.overlay(
                 &cover_grounded,
                 OverlayRule::Union,
@@ -2236,6 +2397,11 @@ pub fn overlay_paint_groups(
             );
         }
         if !outline.lifted_paths.is_empty() {
+            if debug_dump {
+                let mut all = outline.lifted_paths.clone();
+                all.extend(cover_lifted.iter().flat_map(|shape| shape.iter().cloned()));
+                dump_paths("union-lifted", &all);
+            }
             cover_lifted = outline.lifted_paths.overlay(
                 &cover_lifted,
                 OverlayRule::Union,
@@ -2289,6 +2455,15 @@ pub fn overlay_paint_groups(
             if tess_verts.is_empty() || tess_indices.is_empty() {
                 continue;
             }
+            let mut fringe_verts: Vec<VVertex> = Vec::new();
+            let mut fringe_indices: Vec<u32> = Vec::new();
+            if aa > 0.0 {
+                for shape in &visible {
+                    for ring in shape {
+                        append_ring_fringe(ring, aa, &mut fringe_verts, &mut fringe_indices);
+                    }
+                }
+            }
             faces.push(PaintFace {
                 color: group.color,
                 param5: group.param5,
@@ -2297,6 +2472,8 @@ pub fn overlay_paint_groups(
                 field: group.field,
                 verts: tess_verts.clone(),
                 indices: tess_indices.clone(),
+                fringe_verts,
+                fringe_indices,
             });
         }
     }
@@ -2346,10 +2523,13 @@ impl DzField {
                 // A lifted way END (tile clip or data end mid-deck) renders
                 // a round cap past the endpoint; extend the terminal
                 // segment so the cap sits at full deck height instead of
-                // drooping through the distance fade.
+                // drooping through the distance fade. A degenerate terminal
+                // segment must NOT be extended: normalizing its near-zero
+                // direction shoots the endpoint astronomically far out and
+                // the grid insertion below then walks billions of cells.
                 let cap_reach = (radius - 2.0).max(0.0);
-                if cap_reach > 0.0 {
-                    let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt().max(1e-6);
+                let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+                if cap_reach > 0.0 && len > 0.5 {
                     let (ux, uy) = ((bx - ax) / len, (by - ay) / len);
                     if i == 0 && dza > 0.2 {
                         ax -= ux * cap_reach;
@@ -2362,10 +2542,15 @@ impl DzField {
                 }
                 let id = field.segs.len() as u32;
                 field.segs.push([ax, ay, bx, by, dza, dzb]);
-                let min_cx = ((ax.min(bx) - radius) / cell).floor() as i32;
-                let max_cx = ((ax.max(bx) + radius) / cell).floor() as i32;
-                let min_cy = ((ay.min(by) - radius) / cell).floor() as i32;
-                let max_cy = ((ay.max(by) + radius) / cell).floor() as i32;
+                // Hard clamp: tile-local coords live within a few hundred
+                // units — any garbage (NaN, inf, un-guarded math upstream)
+                // must not turn this insertion into a multi-billion-cell
+                // walk that hangs the worker while allocating endlessly.
+                let clamp_cell = |v: f32| ((v / cell).floor() as i32).clamp(-1024, 1024);
+                let min_cx = clamp_cell(ax.min(bx) - radius);
+                let max_cx = clamp_cell(ax.max(bx) + radius);
+                let min_cy = clamp_cell(ay.min(by) - radius);
+                let max_cy = clamp_cell(ay.max(by) + radius);
                 for cx in min_cx..=max_cx {
                     for cy in min_cy..=max_cy {
                         field.grid.entry((cx, cy)).or_default().push(id);
@@ -2381,10 +2566,11 @@ impl DzField {
 
     /// Does this bbox touch any cell within reach of a lifted segment?
     pub fn active_near(&self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> bool {
-        let min_cx = (min_x / self.cell).floor() as i32;
-        let max_cx = (max_x / self.cell).floor() as i32;
-        let min_cy = (min_y / self.cell).floor() as i32;
-        let max_cy = (max_y / self.cell).floor() as i32;
+        let clamp_cell = |v: f32| ((v / self.cell).floor() as i32).clamp(-1024, 1024);
+        let min_cx = clamp_cell(min_x);
+        let max_cx = clamp_cell(max_x);
+        let min_cy = clamp_cell(min_y);
+        let max_cy = clamp_cell(max_y);
         for cx in min_cx..=max_cx {
             for cy in min_cy..=max_cy {
                 if self.active.contains(&(cx, cy)) {
@@ -2607,7 +2793,7 @@ mod overlay_tests {
                 }
                 let ribbon = [RoadRibbon { points, dz: None, closed_ring: false }];
                 for (ring, _) in road_ribbon_rings(&ribbon, width * 0.5, 0.0, clip) {
-                    rings.push((ring, 0.0));
+                    rings.push((ring, 0.0, 0.0));
                 }
             }
             let _ = pass;
@@ -2624,7 +2810,7 @@ mod overlay_tests {
         // Ground truth: tessellate each ring separately, paint in order.
         let mut truth_sets: Vec<(Vec<VVertex>, Vec<u32>, [f32; 4])> = Vec::new();
         for group in &groups {
-            for (ring, _) in &group.rings {
+            for (ring, _, _) in &group.rings {
                 let mut path = VectorPath::new();
                 path.move_to(ring[0].0, ring[0].1);
                 for point in ring.iter().skip(1) {
@@ -2648,7 +2834,7 @@ mod overlay_tests {
             }
         }
         // Unified: overlay cascade.
-        let faces = overlay_paint_groups(&groups, &mut tess, 0.25);
+        let faces = overlay_paint_groups(&groups, &mut tess, 0.25, 0.0);
         let truth_refs: Vec<(&[VVertex], &[u32], [f32; 4])> = truth_sets
             .iter()
             .map(|(v, i, c)| (v.as_slice(), i.as_slice(), *c))
@@ -2673,5 +2859,82 @@ mod overlay_tests {
         println!("overlay vs painter: {wrong} px wrong ({pct:.3}%)");
         // Tolerance: edge rasterization jitter only.
         assert!(pct < 0.2, "unified overlay diverges from painter order: {pct:.2}%");
+    }
+}
+
+#[cfg(test)]
+mod boolean_repro_tests {
+    /// Replay a hang capture from /tmp/mp_boolean_last_*.txt (written when
+    /// /tmp/mp_boolean_debug exists). Run manually:
+    ///   MP_REPRO=/tmp/mp_boolean_last_ThreadId(7).txt cargo test -p \
+    ///   makepad-widgets --features maps --release boolean_repro -- \
+    ///   --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn boolean_repro() {
+        use i_overlay::core::fill_rule::FillRule;
+        use i_overlay::core::overlay_rule::OverlayRule;
+        use i_overlay::float::simplify::SimplifyShape;
+        use i_overlay::float::single::SingleFloatOverlay;
+        let path = std::env::var("MP_REPRO").expect("set MP_REPRO to a capture file");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut tag = String::new();
+        let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("# ") {
+                tag = rest.to_string();
+                continue;
+            }
+            let ring: Vec<[f64; 2]> = line
+                .split_whitespace()
+                .filter_map(|pair| {
+                    let (x, y) = pair.split_once(',')?;
+                    Some([x.parse().ok()?, y.parse().ok()?])
+                })
+                .collect();
+            if ring.len() >= 3 {
+                rings.push(ring);
+            }
+        }
+        println!("repro: tag={} rings={}", tag, rings.len());
+        let clock = std::time::Instant::now();
+        let result = match tag.as_str() {
+            "simplify" => {
+                // Mirror production chunking (DISSOLVE_CHUNK).
+                const CHUNK: usize = 3000;
+                if rings.len() <= CHUNK {
+                    rings.simplify_shape(FillRule::NonZero)
+                } else {
+                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+                    for chunk in rings.chunks(CHUNK) {
+                        let part = chunk.to_vec().simplify_shape(FillRule::NonZero);
+                        if acc.is_empty() {
+                            acc = part;
+                        } else {
+                            let part_paths: Vec<Vec<[f64; 2]>> = part
+                                .iter()
+                                .flat_map(|shape| shape.iter().cloned())
+                                .collect();
+                            acc = part_paths.overlay(&acc, OverlayRule::Union, FillRule::NonZero);
+                        }
+                    }
+                    acc
+                }
+            }
+            _ => {
+                let empty: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+                let _ = empty;
+                rings.overlay(
+                    &Vec::<Vec<Vec<[f64; 2]>>>::new(),
+                    if tag.starts_with("union") { OverlayRule::Union } else { OverlayRule::Difference },
+                    FillRule::NonZero,
+                )
+            }
+        };
+        println!(
+            "repro: done in {:.1}ms, {} shapes",
+            clock.elapsed().as_secs_f64() * 1000.0,
+            result.len()
+        );
     }
 }
