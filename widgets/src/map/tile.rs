@@ -5013,6 +5013,139 @@ mod bridge_probe_tests {
         }
     }
 
+    /// Forensic: dump lifted casing-buffer vertices in the doubled-slab
+    /// region of the Gooiseknoop seam sliver. p5 (ladder slot) identifies
+    /// which face each copy belongs to.
+    #[test]
+    #[ignore]
+    fn seam_probe() {
+        use super::*;
+        let maps = Path::new("../examples/map/local/maps");
+        let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
+        let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let theme = crate::map::style::probe_compiled_theme();
+        let (z, tx, ty) = (14u32, 8414i64, 5386i64);
+        let tms = (1i64 << z) - 1 - ty;
+        let raw = base.get_tile(z as i64, tx, tms).unwrap().unwrap();
+        let det = detail.get_tile(z as i64, tx, tms).ok().flatten();
+        let dzt = dz.get_tile(z as i64, tx, tms).ok().flatten();
+        let buffers = build_tile_buffers_from_mvt(
+            TileKey { z, x: tx as i32, y: ty as i32 },
+            &raw,
+            det.as_deref(),
+            dzt.as_deref(),
+            dzt.is_some(),
+            &[],
+            &theme,
+            18,
+            true,
+            true,
+        )
+        .unwrap();
+        let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
+        for chunk in buffers.casing_vertices.chunks_exact(19) {
+            let (x, y, deck, p5) = (chunk[0], chunk[1], chunk[15], chunk[16]);
+            let color = ((chunk[4] * 255.0) as u32) << 16
+                | ((chunk[5] * 255.0) as u32) << 8
+                | (chunk[6] * 255.0) as u32;
+            if deck > 0.3 && (120.0..262.0).contains(&x) && (170.0..255.0).contains(&y) {
+                rows.push((
+                    x.round() as i32,
+                    y.round() as i32,
+                    deck,
+                    (p5 * 1000.0).round() as i32,
+                    color,
+                ));
+            }
+        }
+        rows.sort_by(|a, b| (a.1, a.0).cmp(&(b.1, b.0)));
+        println!("rows: {}", rows.len());
+        // Histogram: (color, p5 bucket) -> count + deck range
+        let mut hist: HashMap<(u32, i32), (usize, f32, f32)> = HashMap::new();
+        for &(_, _, deck, p5, color) in &rows {
+            let entry = hist
+                .entry((color, p5))
+                .or_insert((0, f32::MAX, f32::MIN));
+            entry.0 += 1;
+            entry.1 = entry.1.min(deck);
+            entry.2 = entry.2.max(deck);
+        }
+        let mut hist: Vec<_> = hist.into_iter().collect();
+        hist.sort_by_key(|&((color, p5), _)| (color, p5));
+        for ((color, p5), (count, lo, hi)) in hist {
+            println!(
+                "face color={color:06x} p5={:.3} verts={count} deck {lo:.2}..{hi:.2}",
+                p5 as f32 / 1000.0
+            );
+        }
+        // Coincident-location double coverage: same (x,y) cell, different p5
+        let mut cells: HashMap<(i32, i32), Vec<(f32, i32, u32)>> = HashMap::new();
+        for &(x, y, deck, p5, color) in &rows {
+            cells.entry((x / 2, y / 2)).or_default().push((deck, p5, color));
+        }
+        let mut doubles = 0;
+        for ((cx, cy), entries) in cells.iter() {
+            let mut decks: Vec<f32> = entries.iter().map(|e| e.0).collect();
+            decks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if decks.last().unwrap() - decks.first().unwrap() > 0.6 {
+                doubles += 1;
+                if doubles <= 12 {
+                    println!("DOUBLE at ({},{}) -> {:?}", cx * 2, cy * 2, entries);
+                }
+            }
+        }
+        println!("double-height cells: {doubles}");
+
+        // Cross-tile: build the EAST neighbor and compare road-surface
+        // heights inside the shared clip-overlap band (global coords).
+        let raw_b = base.get_tile(z as i64, tx + 1, tms).unwrap().unwrap();
+        let det_b = detail.get_tile(z as i64, tx + 1, tms).ok().flatten();
+        let dzt_b = dz.get_tile(z as i64, tx + 1, tms).ok().flatten();
+        let buffers_b = build_tile_buffers_from_mvt(
+            TileKey { z, x: (tx + 1) as i32, y: ty as i32 },
+            &raw_b,
+            det_b.as_deref(),
+            dzt_b.as_deref(),
+            dzt_b.is_some(),
+            &[],
+            &theme,
+            18,
+            true,
+            true,
+        )
+        .unwrap();
+        let mut band: Vec<(char, f32, f32, f32, u32)> = Vec::new();
+        for (tag, buffers, x_off) in
+            [('A', &buffers, 0.0f32), ('B', &buffers_b, 256.0)]
+        {
+            for chunk in buffers.casing_vertices.chunks_exact(19) {
+                let (x, y, deck) = (chunk[0], chunk[1], chunk[15]);
+                let gx = x + x_off;
+                let color = ((chunk[4] * 255.0) as u32) << 16
+                    | ((chunk[5] * 255.0) as u32) << 8
+                    | (chunk[6] * 255.0) as u32;
+                // Road surface colors only (motorway center + casing).
+                if deck > 0.3
+                    && (252.0..261.0).contains(&gx)
+                    && (color == 0x00e892a2
+                        || color == 0x00dc2a67
+                        || color == 0x00f9b29c
+                        || color == 0x00c84e2f)
+                {
+                    band.push((tag, gx, y, deck, color));
+                }
+            }
+        }
+        band.sort_by(|a, b| {
+            (a.2 as i32, a.1 as i32, a.0).cmp(&(b.2 as i32, b.1 as i32, b.0))
+        });
+        println!("band rows: {}", band.len());
+        for (tag, gx, y, deck, color) in band.iter().take(120) {
+            println!("{tag} gx={gx:.1} y={y:.1} deck={deck:.2} c={color:06x}");
+        }
+    }
+
     #[test]
     #[ignore]
     fn probe_rai_detail_tags() {
