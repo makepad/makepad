@@ -1839,6 +1839,91 @@ pub fn bake(options: BakeOptions) -> Result<(), String> {
         totals.ways, totals.crossings, totals.measured, totals.baked, base_annotated, jobs.len()
     );
 
+    // Cross-tile boundary consensus: every tile solves with only 1-ring
+    // context, so the same way can bake slightly different heights on the
+    // two sides of a tile seam — a visible step mid-deck. Unify base_dz
+    // vertices lying ON tile edges by the largest-|dz| value seen across
+    // tiles (bridge continuity favors the lift, tunnels the sink).
+    {
+        let near_edge = |v: f64| -> bool { v <= 2.0 || v >= EXTENT - 2.0 };
+        let global_key = |job_x: u32, job_y: u32, px: f64, py: f64| -> (i64, i64) {
+            (
+                i64::from(job_x) * EXTENT as i64 * 4 + (px * 4.0).round() as i64,
+                i64::from(job_y) * EXTENT as i64 * 4 + (py * 4.0).round() as i64,
+            )
+        };
+        let mut consensus: HashMap<(i64, i64), f32> = HashMap::new();
+        for job in &jobs {
+            for feature in &job.features {
+                if !matches!(feature.layer, Layer::BaseDz) {
+                    continue;
+                }
+                let Some(dz_tag) = feature.tags.iter().find(|(k, _)| k == "dz") else {
+                    continue;
+                };
+                let values: Vec<f32> = dz_tag
+                    .1
+                    .split(',')
+                    .filter_map(|v| v.parse::<f32>().ok())
+                    .collect();
+                for (point, &value) in feature.paths[0].iter().zip(values.iter()) {
+                    let (px, py) = (f64::from(point.x), f64::from(point.y));
+                    if near_edge(px) || near_edge(py) {
+                        let key = global_key(job.x, job.y, px, py);
+                        let entry = consensus.entry(key).or_insert(value);
+                        if value.abs() > entry.abs() {
+                            *entry = value;
+                        }
+                    }
+                }
+            }
+        }
+        let mut patched = 0usize;
+        for job in &mut jobs {
+            let (job_x, job_y) = (job.x, job.y);
+            for feature in &mut job.features {
+                if !matches!(feature.layer, Layer::BaseDz) {
+                    continue;
+                }
+                let points: Vec<(f64, f64)> = feature.paths[0]
+                    .iter()
+                    .map(|p| (f64::from(p.x), f64::from(p.y)))
+                    .collect();
+                let Some(dz_tag) = feature.tags.iter_mut().find(|(k, _)| k == "dz") else {
+                    continue;
+                };
+                let mut values: Vec<i64> = dz_tag
+                    .1
+                    .split(',')
+                    .filter_map(|v| v.parse::<i64>().ok())
+                    .collect();
+                let mut changed = false;
+                for (index, &(px, py)) in points.iter().enumerate() {
+                    if index >= values.len() || !(near_edge(px) || near_edge(py)) {
+                        continue;
+                    }
+                    if let Some(&value) = consensus.get(&global_key(job_x, job_y, px, py)) {
+                        // Tag values are decimeters already.
+                        let dm = value.round() as i64;
+                        if dm != values[index] {
+                            values[index] = dm;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    patched += 1;
+                    dz_tag.1 = values
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                }
+            }
+        }
+        eprintln!("bridge-bake: boundary consensus patched {patched} paths");
+    }
+
     if options.output.exists() {
         std::fs::remove_file(&options.output)
             .map_err(|e| format!("remove {}: {e}", options.output.display()))?;
