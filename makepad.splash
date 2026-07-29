@@ -91,6 +91,7 @@ hub.set_run_items([
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}
+    RunStudioRelease{name: "makepad-example-file-dialog"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-bugfix"}
     RunStudioRelease{name: "makepad-example-move-after-draw"}
