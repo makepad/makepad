@@ -1836,7 +1836,29 @@ impl Widget for MapView {
         }
 
         self.update_status_text();
-        // self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 10.0, rect.pos.y + 16.0), &self.status);
+        // Viewport debug readout: the exact @cam command for this view, so
+        // a screenshot alone is enough to recreate the camera.
+        {
+            let center = self.center_norm;
+            let lon = center.x * 360.0 - 180.0;
+            let lat = (std::f64::consts::PI * (1.0 - 2.0 * center.y))
+                .sinh()
+                .atan()
+                .to_degrees();
+            let cam = format!(
+                "@cam {:.5} {:.5} {:.2} {:.0} {:.0}",
+                lon,
+                lat,
+                self.view_zoom(),
+                self.rotation,
+                self.tilt
+            );
+            self.draw_text.draw_abs(
+                cx,
+                dvec2(rect.pos.x + rect.size.x - 260.0, rect.pos.y + rect.size.y - 64.0),
+                &cam,
+            );
+        }
         DrawStep::done()
     }
 }
