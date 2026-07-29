@@ -2801,38 +2801,47 @@ fn build_tile_buffers_from_features(
     // rank bias puts a deck in another tier than its own road). These get
     // flush butt joints: no cap discs, no walls across.
     // (tier key, unit direction INTO the node) per way endpoint.
-    let mut endpoint_tiers: HashMap<(i32, i32), Vec<(StrokeStyleKey, (f32, f32))>> =
+    let mut endpoint_tiers: HashMap<(i32, i32), Vec<(StrokeStyleKey, (f32, f32), f32)>> =
         HashMap::new();
     for (key, (_, ways)) in union_tiers.iter() {
-        for (points, _) in ways {
+        for (points, dz) in ways {
             if points.len() < 2 {
                 continue;
             }
             let ends = [
-                (points[0], points[1]),
-                (points[points.len() - 1], points[points.len() - 2]),
+                (0usize, points[0], points[1]),
+                (points.len() - 1, points[points.len() - 1], points[points.len() - 2]),
             ];
-            for (end, inner) in ends {
+            for (index, end, inner) in ends {
                 let node = ((end.0 * 4.0).round() as i32, (end.1 * 4.0).round() as i32);
                 let (dx, dy) = (end.0 - inner.0, end.1 - inner.1);
                 let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                let end_dz = dz
+                    .as_ref()
+                    .and_then(|dz| dz.get(index).copied())
+                    .unwrap_or(0.0);
                 endpoint_tiers
                     .entry(node)
                     .or_default()
-                    .push((*key, (dx / len, dy / len)));
+                    .push((*key, (dx / len, dy / len), end_dz));
             }
         }
     }
-    // A FLUSH joint is a CONTINUATION: two ways of different tiers ending
-    // at one node with (near-)opposite directions — a bridge continuing
-    // into its approach. Forks and T-junctions keep round caps and walls.
+    // A FLUSH joint is a CONTINUATION AT ONE HEIGHT: two ways of different
+    // tiers ending at one node with (near-)opposite directions AND
+    // agreeing endpoint dz — a bridge continuing into its approach at the
+    // shared level. Where the heights genuinely differ (a deck rising off
+    // its grounded continuation) a flush butt would TEAR open; those
+    // joints keep their round caps so the overlap hides the step. Forks
+    // and T-junctions keep caps as well.
     let tier_joints: std::collections::HashSet<(i32, i32)> = endpoint_tiers
         .iter()
         .filter(|(_, entries)| {
-            entries.iter().enumerate().any(|(i, (key_a, dir_a))| {
-                entries.iter().skip(i + 1).any(|(key_b, dir_b)| {
+            entries.iter().enumerate().any(|(i, (key_a, dir_a, dz_a))| {
+                entries.iter().skip(i + 1).any(|(key_b, dir_b, dz_b)| {
                     key_a != key_b
                         && dir_a.0 * dir_b.0 + dir_a.1 * dir_b.1 < -0.7
+                        && (dz_a - dz_b).abs() < 0.3
                 })
             })
         })
@@ -5008,6 +5017,69 @@ mod bridge_probe_tests {
                     (buffers.casing_vertices.len() + buffers.casing_indices.len()) * 4 / 1024,
                     (buffers.stroke_vertices.len() + buffers.stroke_indices.len()) * 4 / 1024,
                     (buffers.icon_vertices.len() + buffers.icon_indices.len()) * 4 / 1024,
+                );
+            }
+        }
+    }
+
+    /// Forensic: dump baked base_dz ways near a lon/lat — endpoint coords
+    /// and full dz profiles, to identify detached/outlier pieces.
+    #[test]
+    #[ignore]
+    fn dump_base_dz_at() {
+        use super::*;
+        let (lon, lat) = (4.9445f64, 52.3382f64);
+        let maps = Path::new("../examples/map/local/maps");
+        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let z = 14u32;
+        let n = (1u64 << z) as f64;
+        let nx = (lon + 180.0) / 360.0 * n;
+        let r = lat.to_radians();
+        let ny = (1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0 * n;
+        for (tx, ty) in [(nx.floor() as i64, ny.floor() as i64), (nx.floor() as i64 + 1, ny.floor() as i64)] {
+            let lx = ((nx - tx as f64) * 256.0) as f32;
+            let ly = ((ny - ty as f64) * 256.0) as f32;
+            let tms = (1i64 << z) - 1 - ty;
+            let Some(raw) = dz.get_tile(z as i64, tx, tms).ok().flatten() else {
+                println!("tile {tx}/{ty}: none");
+                continue;
+            };
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z, x: tx as i32, y: ty as i32 };
+            let mut collector = MvtLocalCollector::new(1.0);
+            parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+            println!("=== tile {tx}/{ty} target local ({lx:.0},{ly:.0})");
+            for way in &collector.ways {
+                if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+                    continue;
+                }
+                let near = way.points.iter().any(|&(px, py)| {
+                    (px - lx).abs() < 18.0 && (py - ly).abs() < 18.0
+                });
+                if !near {
+                    continue;
+                }
+                let decks: Vec<f32> = way
+                    .tags
+                    .get("dz")
+                    .map(|s| s.split(',').filter_map(|v| v.parse::<f32>().ok()).map(|d| d * 0.1).collect())
+                    .unwrap_or_default();
+                let max = decks.iter().copied().fold(0.0f32, f32::max);
+                if max < 0.3 {
+                    continue;
+                }
+                println!(
+                    "L={} F={} P={} closed={} pts={} start=({:.0},{:.0}) end=({:.0},{:.0}) dz={:?}",
+                    way.tags.get("L").map(|v| v.as_str()).unwrap_or(""),
+                    way.tags.get("F").map(|v| v.as_str()).unwrap_or(""),
+                    way.tags.get("P").map(|v| v.as_str()).unwrap_or(""),
+                    way.closed,
+                    way.points.len(),
+                    way.points.first().map(|p| p.0).unwrap_or(0.0),
+                    way.points.first().map(|p| p.1).unwrap_or(0.0),
+                    way.points.last().map(|p| p.0).unwrap_or(0.0),
+                    way.points.last().map(|p| p.1).unwrap_or(0.0),
+                    decks.iter().map(|d| (d * 10.0).round() / 10.0).collect::<Vec<_>>()
                 );
             }
         }
