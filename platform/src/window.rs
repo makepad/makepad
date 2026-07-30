@@ -316,6 +316,18 @@ impl ScriptApply for WindowHandle {
     }
 }
 
+/// Linux desktops match a window to its `.desktop` file by app id, and packagers
+/// name that file after the binary, so that's the best default we have.
+pub(crate) fn default_app_id() -> String {
+    std::env::args_os()
+        .next()
+        .as_ref()
+        .and_then(|arg0| std::path::Path::new(arg0).file_name())
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "Makepad".to_string())
+}
+
 impl WindowHandle {
     pub fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
@@ -324,7 +336,7 @@ impl WindowHandle {
         cxwindow.create_title = "Makepad".to_string();
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
-        cxwindow.create_app_id = "Makepad".to_string();
+        cxwindow.create_app_id = default_app_id();
         cxwindow.is_popup = false;
         cxwindow.popup_parent = None;
         cxwindow.popup_position = None;
@@ -350,7 +362,7 @@ impl WindowHandle {
             cxwindow.create_title = "Makepad Popup".to_string();
             cxwindow.create_inner_size = Some(size);
             cxwindow.create_position = Some(position);
-            cxwindow.create_app_id = "Makepad".to_string();
+            cxwindow.create_app_id = default_app_id();
             cxwindow.is_popup = true;
             cxwindow.popup_parent = Some(parent);
             cxwindow.popup_position = Some(position);
@@ -375,6 +387,10 @@ pub struct ScriptWindowHandle {
     pub handle: WindowHandle,
     #[live]
     pub title: String,
+    /// Wayland `app_id` and X11 WM_CLASS; must match the installed `.desktop`
+    /// file's basename or desktops can't find the app's icon. Defaults to argv[0].
+    #[live]
+    pub app_id: String,
     #[live]
     pub inner_size: Option<Vec2d>,
     #[live]
@@ -421,6 +437,9 @@ impl ScriptHook for ScriptWindowHandle {
         let window_id = self.handle.window_id();
         if !self.title.is_empty() {
             cx.windows[window_id].create_title = self.title.clone();
+        }
+        if !self.app_id.is_empty() {
+            cx.windows[window_id].create_app_id = self.app_id.clone();
         }
         if self.inner_size.is_some() {
             cx.windows[window_id].create_inner_size = self.inner_size;
@@ -996,6 +1015,7 @@ mod tests {
         let mut script_window = ScriptWindowHandle {
             handle,
             title: "Floating Panel".to_string(),
+            app_id: "floating-panel".to_string(),
             inner_size: Some(dvec2(320.0, 80.0)),
             position: Some(dvec2(40.0, 50.0)),
             kind_id: 7,
@@ -1013,6 +1033,7 @@ mod tests {
         let cx = vm.cx_mut();
         let cx_window = &cx.windows[window_id];
         assert_eq!(cx_window.create_title, "Floating Panel");
+        assert_eq!(cx_window.create_app_id, "floating-panel");
         assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
         assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));
         assert_eq!(cx_window.kind_id, 7);

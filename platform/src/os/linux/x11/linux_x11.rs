@@ -577,6 +577,7 @@ impl X11Cx {
                         window.create_inner_size.unwrap_or(dvec2(800., 600.)),
                         window.create_position,
                         &window.create_title,
+                        &window.create_app_id,
                         window.is_fullscreen,
                     );
                     let window = &mut cx.windows[window_id];

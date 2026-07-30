@@ -345,6 +345,7 @@ impl OpenglWindow {
         inner_size: Vec2d,
         position: Option<Vec2d>,
         title: &str,
+        app_id: &str,
         is_fullscreen: bool,
     ) -> OpenglWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
@@ -389,6 +390,7 @@ impl OpenglWindow {
         let custom_window_chrome = false;
         xlib_window.init(
             title,
+            app_id,
             inner_size,
             position,
             is_fullscreen,
