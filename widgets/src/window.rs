@@ -69,26 +69,24 @@ script_mod! {
     set_type_default() do #(DrawGaussUpsample::script_shader(vm)){
         ..mod.draw.DrawQuad
         source_texture: texture_2d(float)
-        detail_texture: texture_2d(float)
-        detail_mix: uniform(0.82)
 
         sample_source: fn(uv: vec2) -> vec4 {
             return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
 
-        sample_detail: fn(uv: vec2) -> vec4 {
-            return self.detail_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
-        }
-
         pixel: fn() {
+            // Tent offsets are HALF a source texel (one target texel at 2x upsample). The
+            // exposed pyramid levels must keep a ratio-2 sigma ladder for the glass/tilt
+            // log2(radius) mapping to stay smooth; full-texel offsets widen each re-home
+            // stage enough to inflate deep levels ~35%, opening a visible blur jump at the
+            // raw->re-homed level boundary.
             let size = self.source_texture.size()
             let texel = vec2(
-                1.0 / max(size.x, 1.0),
-                1.0 / max(size.y, 1.0)
+                0.5 / max(size.x, 1.0),
+                0.5 / max(size.y, 1.0)
             )
             let uv = self.pos
-            let smooth =
-                self.sample_source(uv) * 0.25
+            return self.sample_source(uv) * 0.25
                 + (
                     self.sample_source(uv + texel * vec2(1.0, 0.0))
                     + self.sample_source(uv + texel * vec2(-1.0, 0.0))
@@ -101,7 +99,6 @@ script_mod! {
                     + self.sample_source(uv + texel * vec2(1.0, -1.0))
                     + self.sample_source(uv + texel * vec2(-1.0, -1.0))
                 ) * 0.0625
-            return smooth.mix(self.sample_detail(uv), clamp(self.detail_mix, 0.0, 1.0))
         }
     }
 
@@ -399,6 +396,11 @@ pub enum WindowAction {
 
 const GAUSS_STACK_LEVELS: usize = GAUSS_VIEW_LEVELS;
 const GAUSS_SMOOTH_LEVEL_START: usize = 3;
+/// Deep mips are re-homed (tent-upsampled back) to this level's resolution before the glass
+/// samples them. Without this, blur level 5/6 samples a 1/64-res texture stretched over the
+/// window — the texel lattice and clamp-to-edge bands are clearly visible. With the floor at
+/// 1/8 res, no on-screen sample ever comes from a texture coarser than 8 device px per texel.
+const GAUSS_FLOOR_LEVEL: usize = 2;
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
@@ -446,13 +448,20 @@ fn supersample_factor() -> f64 {
     })
 }
 
+struct GaussSmoothStage {
+    pass: DrawPass,
+    draw_list: DrawList2d,
+    texture: Texture,
+}
+
 struct GaussStackLevel {
     pass: DrawPass,
     draw_list: DrawList2d,
     texture: Texture,
-    smooth_pass: DrawPass,
-    smooth_draw_list: DrawList2d,
-    smooth_texture: Texture,
+    // One tent-upsample per resolution doubling from this level's own size back up to the
+    // floor size; the last stage's texture is what the snapshot exposes. Empty for levels
+    // at or above the floor resolution.
+    smooth_stages: Vec<GaussSmoothStage>,
 }
 
 struct GaussStack {
@@ -499,21 +508,33 @@ impl GaussStack {
                 &texture,
                 DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
             );
-            let smooth_pass = DrawPass::new_with_name(cx, &format!("gauss_smooth_mip_{index}"));
-            let smooth_draw_list = DrawList2d::new(cx);
-            let smooth_texture = Self::new_render_texture(cx);
-            smooth_pass.set_color_texture(
-                cx,
-                &smooth_texture,
-                DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
-            );
+            let stage_count = if index >= GAUSS_SMOOTH_LEVEL_START {
+                index - GAUSS_FLOOR_LEVEL
+            } else {
+                0
+            };
+            let mut smooth_stages = Vec::with_capacity(stage_count);
+            for stage in 0..stage_count {
+                let smooth_pass =
+                    DrawPass::new_with_name(cx, &format!("gauss_smooth_mip_{index}_{stage}"));
+                let smooth_draw_list = DrawList2d::new(cx);
+                let smooth_texture = Self::new_render_texture(cx);
+                smooth_pass.set_color_texture(
+                    cx,
+                    &smooth_texture,
+                    DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+                );
+                smooth_stages.push(GaussSmoothStage {
+                    pass: smooth_pass,
+                    draw_list: smooth_draw_list,
+                    texture: smooth_texture,
+                });
+            }
             levels.push(GaussStackLevel {
                 pass,
                 draw_list,
                 texture,
-                smooth_pass,
-                smooth_draw_list,
-                smooth_texture,
+                smooth_stages,
             });
         }
 
@@ -556,10 +577,9 @@ impl GaussStack {
             mip_textures: self
                 .levels
                 .iter()
-                .enumerate()
-                .map(|(index, level)| {
-                    if index >= GAUSS_SMOOTH_LEVEL_START {
-                        level.smooth_texture.clone()
+                .map(|level| {
+                    if let Some(stage) = level.smooth_stages.last() {
+                        stage.texture.clone()
                     } else {
                         level.texture.clone()
                     }
@@ -615,51 +635,43 @@ impl GaussStack {
         }
     }
 
+    // Re-home each deep mip at the floor resolution: starting from the level's own raw mip,
+    // tent-upsample one resolution doubling at a time until the floor size is reached. The
+    // progressive doubling matters — a single stretch from 1/64 straight to 1/8 would keep the
+    // source's texel lattice; each doubling convolves another tent on top and gaussianizes it.
     fn draw_high_blur_chain(
         &mut self,
         cx: &mut Cx2d,
         upsample: &mut DrawGaussUpsample,
         root_size: Vec2d,
     ) {
-        if self.levels.is_empty() || GAUSS_SMOOTH_LEVEL_START >= self.levels.len() {
-            return;
-        }
-
         let dpi = cx.current_dpi_factor();
-        let mut source_texture = self.levels[self.levels.len() - 1].texture.clone();
-
-        for index in (GAUSS_SMOOTH_LEVEL_START..self.levels.len()).rev() {
-            let level_size = Self::level_size(root_size, dpi, index);
+        for index in GAUSS_SMOOTH_LEVEL_START..self.levels.len() {
             let level = &mut self.levels[index];
-            level.smooth_pass.set_size(cx, level_size);
-            cx.make_child_pass(&level.smooth_pass);
-            cx.begin_pass(&level.smooth_pass, Some(dpi));
-            level.smooth_draw_list.begin_always(cx);
+            let mut source_texture = level.texture.clone();
+            for (stage_index, stage) in level.smooth_stages.iter_mut().enumerate() {
+                let stage_size = Self::level_size(root_size, dpi, index - 1 - stage_index);
+                stage.pass.set_size(cx, stage_size);
+                cx.make_child_pass(&stage.pass);
+                cx.begin_pass(&stage.pass, Some(dpi));
+                stage.draw_list.begin_always(cx);
 
-            let pass_size = cx.current_pass_size();
-            cx.begin_root_turtle(pass_size, Layout::flow_overlay());
-            upsample.draw_vars.set_texture(0, &source_texture);
-            upsample.draw_vars.set_texture(1, &level.texture);
-            let detail_mix = if index == GAUSS_SMOOTH_LEVEL_START {
-                0.90
-            } else {
-                0.78
-            };
-            upsample
-                .draw_vars
-                .set_uniform(cx, live_id!(detail_mix), &[detail_mix]);
-            upsample.draw_abs(
-                cx,
-                Rect {
-                    pos: dvec2(0.0, 0.0),
-                    size: pass_size,
-                },
-            );
-            cx.end_pass_sized_turtle();
+                let pass_size = cx.current_pass_size();
+                cx.begin_root_turtle(pass_size, Layout::flow_overlay());
+                upsample.draw_vars.set_texture(0, &source_texture);
+                upsample.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(0.0, 0.0),
+                        size: pass_size,
+                    },
+                );
+                cx.end_pass_sized_turtle();
 
-            level.smooth_draw_list.end(cx);
-            cx.end_pass(&level.smooth_pass);
-            source_texture = level.smooth_texture.clone();
+                stage.draw_list.end(cx);
+                cx.end_pass(&stage.pass);
+                source_texture = stage.texture.clone();
+            }
         }
     }
 
