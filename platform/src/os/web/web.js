@@ -351,6 +351,45 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    FromWasmStartLocationUpdates() {
+        if (this.geo_watch_id !== undefined) {
+            return; // already watching
+        }
+        if (!navigator.geolocation) {
+            this.to_wasm.ToWasmLocationError({ code: 0, message: "geolocation API unavailable" });
+            this.do_wasm_pump();
+            return;
+        }
+        this.geo_watch_id = navigator.geolocation.watchPosition(
+            (pos) => {
+                let c = pos.coords;
+                // Option<f64> encodes as undefined; browser nulls must convert
+                this.to_wasm.ToWasmLocationUpdate({
+                    lon: c.longitude,
+                    lat: c.latitude,
+                    accuracy_m: c.accuracy,
+                    altitude_m: c.altitude === null ? undefined : c.altitude,
+                    speed_mps: c.speed === null ? undefined : c.speed,
+                    heading_deg: (c.heading === null || isNaN(c.heading)) ? undefined : c.heading,
+                    time: pos.timestamp / 1000.0,
+                });
+                this.do_wasm_pump();
+            },
+            (err) => {
+                this.to_wasm.ToWasmLocationError({ code: err.code, message: err.message });
+                this.do_wasm_pump();
+            },
+            { enableHighAccuracy: true, maximumAge: 1000 }
+        );
+    }
+
+    FromWasmStopLocationUpdates() {
+        if (this.geo_watch_id !== undefined) {
+            navigator.geolocation.clearWatch(this.geo_watch_id);
+            this.geo_watch_id = undefined;
+        }
+    }
+
     FromWasmFullScreen() {
         if (document.body.requestFullscreen) {
             document.body.requestFullscreen();
@@ -1039,7 +1078,7 @@ export class WasmWebBrowser extends WasmBridge {
 
     async FromWasmCheckPermission(args) {
         try {
-            if (args.permission === 'microphone' || args.permission === 'camera') {
+            if (args.permission === 'microphone' || args.permission === 'camera' || args.permission === 'geolocation') {
                 // Check if Permissions API is available
                 if (navigator.permissions && navigator.permissions.query) {
                     const result = await navigator.permissions.query({ name: args.permission });
@@ -1060,6 +1099,13 @@ export class WasmWebBrowser extends WasmBridge {
                         permission: args.permission,
                         request_id: args.request_id,
                         status: status
+                    });
+                } else if (args.permission === 'geolocation') {
+                    // No Permissions API — cannot check without prompting
+                    this.to_wasm.ToWasmPermissionResult({
+                        permission: args.permission,
+                        request_id: args.request_id,
+                        status: 0 // NotDetermined
                     });
                 } else {
                     // Fallback: try to check if we already have a stream
@@ -1136,6 +1182,29 @@ export class WasmWebBrowser extends WasmBridge {
                         status: status
                     });
                 }
+            } else if (args.permission === 'geolocation' && navigator.geolocation) {
+                // One-shot position read triggers the browser prompt;
+                // callbacks pump for themselves.
+                navigator.geolocation.getCurrentPosition(
+                    (_pos) => {
+                        this.to_wasm.ToWasmPermissionResult({
+                            permission: args.permission,
+                            request_id: args.request_id,
+                            status: 1 // Granted
+                        });
+                        this.do_wasm_pump();
+                    },
+                    (err) => {
+                        this.to_wasm.ToWasmPermissionResult({
+                            permission: args.permission,
+                            request_id: args.request_id,
+                            status: err.code === 1 ? 3 : 2 // denied : retryable
+                        });
+                        this.do_wasm_pump();
+                    },
+                    { timeout: 30000 }
+                );
+                return;
             } else {
                 // Unknown permission type
                 this.to_wasm.ToWasmPermissionResult({

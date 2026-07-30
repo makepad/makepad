@@ -353,6 +353,7 @@ impl Cx {
                     let permission = match tw.permission.as_str() {
                         "microphone" => Permission::AudioInput,
                         "camera" => Permission::Camera,
+                        "geolocation" => Permission::Location,
                         _ => {
                             crate::log!("Unknown web permission: {}", tw.permission);
                             continue;
@@ -370,6 +371,29 @@ impl Cx {
                         request_id: tw.request_id as i32,
                         status,
                     }));
+                }
+                live_id!(ToWasmLocationUpdate) => {
+                    let tw = ToWasmLocationUpdate::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&Event::LocationUpdate(
+                        crate::event::LocationUpdateEvent {
+                            lon: tw.lon,
+                            lat: tw.lat,
+                            accuracy_m: tw.accuracy_m,
+                            altitude_m: tw.altitude_m,
+                            speed_mps: tw.speed_mps,
+                            heading_deg: tw.heading_deg,
+                            time: tw.time,
+                        },
+                    ));
+                }
+                live_id!(ToWasmLocationError) => {
+                    let tw = ToWasmLocationError::read_to_wasm(&mut to_wasm);
+                    let error = if tw.code == 1 {
+                        crate::event::LocationErrorEvent::PermissionDenied
+                    } else {
+                        crate::event::LocationErrorEvent::Unavailable(tw.message)
+                    };
+                    self.call_event_handler(&Event::LocationError(error));
                 }
                 /*
                 live_id!(ToWasmWebSocketClose) => {
@@ -679,6 +703,12 @@ impl Cx {
                         timer_id: timer_id as f64,
                     });
                 }
+                CxOsOp::StartLocationUpdates => {
+                    self.os.from_wasm(FromWasmStartLocationUpdates {});
+                }
+                CxOsOp::StopLocationUpdates => {
+                    self.os.from_wasm(FromWasmStopLocationUpdates {});
+                }
                 CxOsOp::HttpRequest {
                     request_id,
                     request,
@@ -705,10 +735,11 @@ impl Cx {
                     permission,
                     request_id,
                 } => match permission {
-                    Permission::AudioInput | Permission::Camera => {
+                    Permission::AudioInput | Permission::Camera | Permission::Location => {
                         let permission_str = match permission {
                             Permission::AudioInput => "microphone",
                             Permission::Camera => "camera",
+                            Permission::Location => "geolocation",
                             Permission::HeadsetCamera | Permission::SceneAccess => unreachable!(),
                         };
                         self.os.from_wasm(FromWasmCheckPermission {
@@ -728,10 +759,11 @@ impl Cx {
                     permission,
                     request_id,
                 } => match permission {
-                    Permission::AudioInput | Permission::Camera => {
+                    Permission::AudioInput | Permission::Camera | Permission::Location => {
                         let permission_str = match permission {
                             Permission::AudioInput => "microphone",
                             Permission::Camera => "camera",
+                            Permission::Location => "geolocation",
                             Permission::HeadsetCamera | Permission::SceneAccess => unreachable!(),
                         };
                         self.os.from_wasm(FromWasmRequestPermission {
@@ -912,6 +944,8 @@ impl CxOsApi for Cx {
             ToWasmHttpResponseProgress::to_js_code(),
             ToWasmHttpUploadProgress::to_js_code(),
             ToWasmPermissionResult::to_js_code(),
+            ToWasmLocationUpdate::to_js_code(),
+            ToWasmLocationError::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -943,6 +977,8 @@ impl CxOsApi for Cx {
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
             FromWasmRequestPermission::to_js_code(),
+            FromWasmStartLocationUpdates::to_js_code(),
+            FromWasmStopLocationUpdates::to_js_code(),
             /*FromWasmWebSocketOpen::to_js_code(),
             FromWasmWebSocketSendString::to_js_code(),
             FromWasmWebSocketSendBinary::to_js_code(),*/

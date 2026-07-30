@@ -174,6 +174,19 @@ pub enum FromJavaMessage {
         request_id: i32,
         status: i32, // 0=NotDetermined, 1=Granted, 2=DeniedCanRetry, 3=DeniedPermanent
     },
+    LocationUpdate {
+        lon: f64,
+        lat: f64,
+        accuracy_m: f32,
+        altitude_m: Option<f64>,
+        speed_mps: Option<f32>,
+        heading_deg: Option<f32>,
+        time_ms: i64,
+    },
+    LocationError {
+        code: i32, // 1 = permission denied, 2 = unavailable
+        message: String,
+    },
     VideoPlaybackPrepared {
         video_id: u64,
         video_width: u32,
@@ -1193,6 +1206,45 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionResu
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onLocationUpdate(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    longitude: jni_sys::jdouble,
+    latitude: jni_sys::jdouble,
+    accuracy: jni_sys::jfloat,
+    has_altitude: jni_sys::jboolean,
+    altitude: jni_sys::jdouble,
+    has_speed: jni_sys::jboolean,
+    speed: jni_sys::jfloat,
+    has_bearing: jni_sys::jboolean,
+    bearing: jni_sys::jfloat,
+    time_millis: jni_sys::jlong,
+) {
+    send_from_java_message(FromJavaMessage::LocationUpdate {
+        lon: longitude,
+        lat: latitude,
+        accuracy_m: accuracy,
+        altitude_m: if has_altitude != 0 { Some(altitude) } else { None },
+        speed_mps: if has_speed != 0 { Some(speed) } else { None },
+        heading_deg: if has_bearing != 0 { Some(bearing) } else { None },
+        time_ms: time_millis,
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onLocationError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    code: jni_sys::jint,
+    message: jni_sys::jstring,
+) {
+    send_from_java_message(FromJavaMessage::LocationError {
+        code,
+        message: jstring_to_string(env, message),
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onPermissionDenied(
     env: *mut jni_sys::JNIEnv,
     class: jni_sys::jclass,
@@ -1970,6 +2022,23 @@ pub unsafe fn to_java_check_permission(permission: &str) -> i32 {
 
     (**env).DeleteLocalRef.unwrap()(env, permission_jstr);
     result
+}
+
+pub unsafe fn to_java_start_location_updates(min_interval_ms: i64, min_distance_m: f32) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "startLocationUpdates",
+        "(JF)V",
+        min_interval_ms as jni_sys::jlong,
+        min_distance_m as std::os::raw::c_double
+    );
+}
+
+pub unsafe fn to_java_stop_location_updates() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(env, get_activity(), "stopLocationUpdates", "()V");
 }
 
 pub unsafe fn to_java_request_permission(permission: &str, request_id: i32) {

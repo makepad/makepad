@@ -18,6 +18,12 @@ pub struct FromWasmStopTimer {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmStartLocationUpdates {}
+
+#[derive(FromWasm)]
+pub struct FromWasmStopLocationUpdates {}
+
+#[derive(FromWasm)]
 pub struct FromWasmFullScreen {}
 
 #[derive(FromWasm)]

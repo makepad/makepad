@@ -8,8 +8,8 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            drag_drop::*, finger::*, game_input::*, keyboard::*, network::*, video_playback::*,
-            window::*, xr::*,
+            drag_drop::*, finger::*, game_input::*, keyboard::*, location::*, network::*,
+            video_playback::*, window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
@@ -258,6 +258,12 @@ pub enum Event {
     /// Permission check or request result
     PermissionResult(PermissionResult),
 
+    /// A position fix from the platform location service
+    /// (see [`Cx::start_location_updates`]).
+    LocationUpdate(LocationUpdateEvent),
+    /// Location updates cannot be delivered (permission denied / no service).
+    LocationError(LocationErrorEvent),
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -349,6 +355,8 @@ impl Event {
             61 => "PopupDismissed",
             62 => "SelectionHandleDrag",
             66 => "ScriptReapply",
+            69 => "LocationUpdate",
+            70 => "LocationError",
             _ => panic!(),
         }
     }
@@ -428,6 +436,8 @@ impl Event {
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,
             Self::PermissionResult(_) => 54,
+            Self::LocationUpdate(_) => 69,
+            Self::LocationError(_) => 70,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,

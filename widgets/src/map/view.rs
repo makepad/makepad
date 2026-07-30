@@ -1531,6 +1531,10 @@ pub struct MapView {
     rain_bbox: (f64, f64, f64, f64),
     #[rust]
     rain_tex_size: (usize, usize),
+    /// Hi-res dual-radar composite shown in place of animation frame 0 (the
+    /// "now" frame): texture + its own pixel size (bbox is rain_bbox).
+    #[rust]
+    rain_now_hires: Option<(Texture, (usize, usize))>,
     #[rust(0.35)]
     rain_interval_current: f64,
     #[rust]
@@ -1804,11 +1808,9 @@ impl Widget for MapView {
             }
         }
 
-        if let Event::KeyDown(ke) = event {
-            if ke.key_code == KeyCode::KeyT {
-                self.set_dark_theme(cx, !self.dark_theme);
-            }
-        }
+        // No global hotkeys: a raw KeyDown match here fires even while the
+        // user types in a text input elsewhere (the old 'T' theme toggle).
+        // Theme/layer switching is app UI now.
 
         if self.fly_timer.is_event(event).is_some() {
             self.tick_fly(cx);
@@ -2344,15 +2346,21 @@ impl Widget for MapView {
             let c1 = camera.norm_to_screen(ne) + lift;
             let c2 = camera.norm_to_screen(se) + lift;
             let c3 = camera.norm_to_screen(sw) + lift;
-            let texture = self.rain_frames[self.rain_frame_index % self.rain_frames.len()].clone();
+            let frame_index = self.rain_frame_index % self.rain_frames.len();
+            // The "now" frame swaps in the hi-res dual-radar composite when
+            // one is loaded; forecast frames stay at nowcast resolution.
+            let (texture, tex_size) = match (frame_index, &self.rain_now_hires) {
+                (0, Some((texture, size))) => (texture.clone(), *size),
+                _ => (self.rain_frames[frame_index].clone(), self.rain_tex_size),
+            };
             self.draw_rain.draw_super.draw_vars.set_texture(0, &texture);
             self.draw_rain.c0 = Vec2f { x: c0.x as f32, y: c0.y as f32 };
             self.draw_rain.c1 = Vec2f { x: c1.x as f32, y: c1.y as f32 };
             self.draw_rain.c2 = Vec2f { x: c2.x as f32, y: c2.y as f32 };
             self.draw_rain.c3 = Vec2f { x: c3.x as f32, y: c3.y as f32 };
             self.draw_rain.texel = Vec2f {
-                x: 1.0 / self.rain_tex_size.0 as f32,
-                y: 1.0 / self.rain_tex_size.1 as f32,
+                x: 1.0 / tex_size.0 as f32,
+                y: 1.0 / tex_size.1 as f32,
             };
             let min_x = c0.x.min(c1.x).min(c2.x).min(c3.x);
             let min_y = c0.y.min(c1.y).min(c2.y).min(c3.y);
@@ -2605,7 +2613,10 @@ impl MapView {
             return;
         }
         self.theme_select = theme;
-        self.dark_theme = theme == 1;
+        // Circuit (2) is a dark background too: label classes, halos and
+        // the other dark_theme-gated rendering must use the dark palette
+        // (style choice itself follows theme_select, not this flag).
+        self.dark_theme = theme != 0;
         self.applied_dark_theme = Some(self.dark_theme);
         self.apply_theme_palette();
         self.restyle_tiles_keep_stale(cx);
@@ -5474,7 +5485,33 @@ impl MapView {
             let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
             self.rain_interval_current = interval;
             self.rain_timer = cx.start_interval(interval);
+        } else {
+            self.rain_now_hires = None;
         }
+        self.redraw(cx);
+    }
+
+    /// Install (or clear) the hi-res dual-radar "now" image, drawn instead of
+    /// animation frame 0. Covers the same bbox as the animation frames.
+    pub fn set_rain_now_hires(
+        &mut self,
+        cx: &mut Cx,
+        texels: Option<(Vec<u32>, usize, usize)>,
+    ) {
+        self.rain_now_hires = texels.map(|(data, width, height)| {
+            (
+                Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        data: Some(data),
+                        width,
+                        height,
+                        updated: TextureUpdated::Full,
+                    },
+                ),
+                (width.max(1), height.max(1)),
+            )
+        });
         self.redraw(cx);
     }
 
@@ -5705,6 +5742,12 @@ impl MapViewRef {
         }
     }
 
+    pub fn set_rain_now_hires(&self, cx: &mut Cx, texels: Option<(Vec<u32>, usize, usize)>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_rain_now_hires(cx, texels);
+        }
+    }
+
     pub fn set_terrain_overlay(&self, cx: &mut Cx, data: TerrainOverlayData) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_terrain_overlay(cx, data);
@@ -5811,7 +5854,9 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_WATER, true) => Vec4f::from_u32(0x7fb2d9ff),
         (LABEL_CLASS_PIN, _) => Vec4f::from_u32(0xffffffff),
         (LABEL_CLASS_EXIT, false) => Vec4f::from_u32(0x960000ff),
-        (LABEL_CLASS_EXIT, true) => Vec4f::from_u32(0xe07070ff),
+        // Bright rose: exit labels sit ON the amber motorway ribbon in the
+        // dark themes — salmon (0xe07070) vanished against it.
+        (LABEL_CLASS_EXIT, true) => Vec4f::from_u32(0xffc4c4ff),
         (LABEL_CLASS_ADMIN, false) => Vec4f::from_u32(0x6a5b8eff),
         (LABEL_CLASS_ADMIN, true) => Vec4f::from_u32(0xb3a5d6ff),
         _ => default_color,

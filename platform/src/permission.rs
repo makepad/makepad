@@ -22,6 +22,11 @@ pub enum Permission {
     /// Unsupported on: iOS, macOS, Web
     /// Auto-granted on: Windows, Linux
     SceneAccess,
+    /// Permission to access the device location (precise).
+    ///
+    /// Required on: iOS, Android, macOS, Web
+    /// Auto-granted on: Windows, Linux (no location service there yet)
+    Location,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

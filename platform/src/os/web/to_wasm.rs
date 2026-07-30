@@ -120,6 +120,25 @@ pub struct ToWasmTimerFired {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmLocationUpdate {
+    pub lon: f64,
+    pub lat: f64,
+    pub accuracy_m: f64,
+    pub altitude_m: Option<f64>,
+    pub speed_mps: Option<f64>,
+    pub heading_deg: Option<f64>,
+    pub time: f64,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmLocationError {
+    /// GeolocationPositionError code: 1 = permission denied,
+    /// 2 = position unavailable, 3 = timeout, 0 = no geolocation API.
+    pub code: u32,
+    pub message: String,
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmSignal {
     pub flags: u32,
 }

@@ -66,6 +66,15 @@ public class MakepadNative {
     // permissions
     public native static void onPermissionResult(String permission, int requestId, int status);
 
+    // location
+    public native static void onLocationUpdate(
+        double longitude, double latitude, float accuracy,
+        boolean hasAltitude, double altitude,
+        boolean hasSpeed, float speed,
+        boolean hasBearing, float bearing,
+        long timeMillis);
+    public native static void onLocationError(int code, String message);
+
     // video playback
     public static native void onVideoPlaybackPrepared(long videoId, int videoWidth, int videoHeight, long duration, VideoPlayer surfaceTexture);
     public static native void onVideoPlaybackCompleted(long videoId);

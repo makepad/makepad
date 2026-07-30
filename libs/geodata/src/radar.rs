@@ -35,6 +35,12 @@ pub enum RadarDataset {
     /// +2h precipitation nowcast, refreshed every 5 minutes (whole animation
     /// in one file) — the most useful single file for the map app.
     Forecast,
+    /// Raw polar volume of the Herwijnen radar (RAD_NL62, ~21 MB / 5 min):
+    /// 223.5 m range bins on the low scans — the hi-res "now" source.
+    VolumeHerwijnen,
+    /// Raw polar volume of the Den Helder radar (RAD_NL61, ~31 MB / 5 min).
+    /// NB the current dataset version is 2.0 (1.0 is gone).
+    VolumeDenHelder,
 }
 
 impl RadarDataset {
@@ -42,12 +48,16 @@ impl RadarDataset {
         match self {
             RadarDataset::ReflectivityComposite => ("radar_reflectivity_composites", "2.0"),
             RadarDataset::Forecast => ("radar_forecast", "1.0"),
+            RadarDataset::VolumeHerwijnen => ("radar_volume_full_herwijnen", "1.0"),
+            RadarDataset::VolumeDenHelder => ("radar_volume_denhelder", "2.0"),
         }
     }
     fn cache_subdir(&self) -> &'static str {
         match self {
             RadarDataset::ReflectivityComposite => "reflectivity",
             RadarDataset::Forecast => "forecast",
+            RadarDataset::VolumeHerwijnen => "volume_herwijnen",
+            RadarDataset::VolumeDenHelder => "volume_denhelder",
         }
     }
 }
@@ -85,6 +95,16 @@ impl RadarConfig {
             config.max_frames = 13; // ~1 hour of 5-min frames
         }
         config
+    }
+
+    /// Newest frame of both radar volumes; the hi-res compositor wants the
+    /// same-timestamp pair, so keep two frames per radar for the swap window.
+    pub fn volume_pair(cache_dir: impl Into<PathBuf>) -> (Self, Self) {
+        let cache_dir = cache_dir.into();
+        (
+            Self::for_dataset(cache_dir.clone(), RadarDataset::VolumeHerwijnen),
+            Self::for_dataset(cache_dir, RadarDataset::VolumeDenHelder),
+        )
     }
     fn resolved_key(&self) -> String {
         self.api_key
