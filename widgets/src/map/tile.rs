@@ -2647,6 +2647,48 @@ fn emit_shadow_shapes(
     }
 }
 
+/// Miter-offset a positively wound ring outward by `amount` (tile units).
+/// Used to dilate the footprints subtracted from the shadow union: real
+/// sub-meter slits between abutting building sections otherwise collect
+/// shadow and read as dark hairline spikes between the walls.
+fn dilate_ring(ring: &[(f32, f32)], amount: f32) -> Vec<(f32, f32)> {
+    let n = ring.len();
+    if n < 3 || amount <= 0.0 {
+        return ring.to_vec();
+    }
+    let edge_normal = |i: usize| -> Option<(f32, f32)> {
+        let a = ring[i % n];
+        let b = ring[(i + 1) % n];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-4 {
+            return None;
+        }
+        // Outward normal of a positively wound (y-down clockwise) ring.
+        Some((dy / len, -dx / len))
+    };
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = (0..n)
+            .map(|k| (i + n - 1 - k) % n)
+            .find_map(edge_normal)
+            .unwrap_or((0.0, 0.0));
+        let next = (0..n).map(|k| (i + k) % n).find_map(edge_normal).unwrap_or(prev);
+        let (mx, my) = (prev.0 + next.0, prev.1 + next.1);
+        let len = (mx * mx + my * my).sqrt();
+        if len < 1e-4 {
+            out.push(ring[i]);
+            continue;
+        }
+        let scale = (2.0 / len).min(2.0);
+        out.push((
+            ring[i].0 + mx / len * amount * scale,
+            ring[i].1 + my / len * amount * scale,
+        ));
+    }
+    out
+}
+
 /// Even-odd point-in-shapes over i_overlay output (outer rings + holes):
 /// used to drop contact-shadow discs for trees already standing inside a
 /// building's cast shadow (stacked decals double-darken and z-fight).
@@ -3830,6 +3872,11 @@ fn build_tile_buffers_from_features(
                         if ring.len() < 3 {
                             continue;
                         }
+                        // Dilate ~0.5 m: sub-meter slits between abutting
+                        // sections must not collect shadow (they render as
+                        // dark vertical spikes between the walls). The
+                        // matching pull-back at real wall bases is ~2 px.
+                        let ring = dilate_ring(&ring, 0.5 * building_units_per_m);
                         let mut fp: Vec<[f64; 2]> = ring
                             .iter()
                             .map(|p| [p.0 as f64, p.1 as f64])
@@ -3866,6 +3913,23 @@ fn build_tile_buffers_from_features(
                     tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
                 // ~1.2 m analytic AA fringe softens the shadow edge.
                 let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
+                // Morphological opening (~0.35 m erode + dilate): the
+                // boolean leaves hair-thin shadow tendrils ATTACHED to the
+                // main body wherever walls run nearly parallel across a
+                // narrow passage — per-ring sliver filters can't touch
+                // welded appendages, an opening removes anything under
+                // ~0.7 m wide wherever it hides.
+                {
+                    use i_overlay::mesh::outline::offset::OutlineOffset;
+                    use i_overlay::mesh::style::OutlineStyle;
+                    let open_r = (0.5 * building_units_per_m) as f64;
+                    let eroded = shapes.outline(&OutlineStyle::new(-open_r));
+                    if !eroded.is_empty() {
+                        shapes = eroded.outline(&OutlineStyle::new(open_r));
+                    } else {
+                        shapes = Vec::new();
+                    }
+                }
                 building_shadow_shapes = shapes.clone();
                 emit_shadow_shapes(
                     shapes,
@@ -5316,7 +5380,12 @@ fn build_tile_buffers_from_features(
                                 (deck - DECK_FASCIA_M * v.v.clamp(0.0, 1.0)).max(0.0)
                             })
                             .collect();
-                        if sk_deck.iter().any(|&d| d > 0.05) {
+                        // Only decks that read as real structures hang a
+                        // fascia: quay humps (solved profiles peak at
+                        // exactly 1.0 m here) rendered 1 px dark hairs at
+                        // their stub ends ("shadow spikes" in review —
+                        // they weren't shadows at all).
+                        if sk_deck.iter().any(|&d| d > 1.0) {
                             let wall = [
                                 face.color[0] * 0.72,
                                 face.color[1] * 0.72,
