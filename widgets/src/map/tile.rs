@@ -2595,7 +2595,8 @@ fn emit_shadow_shapes(
                 perimeter +=
                     (((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1)) as f64).sqrt();
             }
-            if area.abs() < 0.02 || area.abs() / perimeter.max(1e-6) < 0.05 {
+            let min_width = (aa as f64 * 0.8).max(0.05);
+            if area.abs() < 0.02 || area.abs() / perimeter.max(1e-6) < min_width {
                 if ring_index == 0 {
                     break;
                 }
@@ -3753,62 +3754,35 @@ fn build_tile_buffers_from_features(
                         .map(|p| [p.0 as f64, p.1 as f64])
                         .collect();
                     push_positive(&mut scratch);
-                    // Silhouette chain sweep, not a per-edge quad soup:
-                    // only contiguous runs of edges facing along the
-                    // shadow direction sweep, one clean polygon per run.
-                    // Per-edge quads left hairline slivers welded to the
-                    // union wherever an edge ran near-parallel to the
-                    // shadow (the "needle pins" from review).
-                    let casts: Vec<bool> = (0..n)
-                        .map(|i| {
-                            let a = ring[i];
-                            let b = ring[(i + 1) % n];
-                            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                            let len = (dx * dx + dy * dy).sqrt();
-                            if len < 1e-4 {
-                                return false;
-                            }
-                            // Outward normal of a positively-wound ring.
-                            (dy / len) * sx + (-dx / len) * sy > 0.06
-                        })
-                        .collect();
-                    let anchor = (0..n).find(|&i| !casts[i]);
-                    let mut sweep = |run: &[usize]| {
-                        if run.is_empty() {
-                            return;
+                    // Per-edge sweep quads, gated to edges genuinely facing
+                    // along the shadow direction. Adjacent quads of a chain
+                    // share their translated edge exactly, so the union is
+                    // seamless; near-parallel edges (the hairline-needle
+                    // source) are skipped, and unlike whole-chain sweep
+                    // polygons a quad can never self-intersect (curved
+                    // chains made sweeps fold over into big spikes).
+                    for i in 0..n {
+                        let a = ring[i];
+                        let b = ring[(i + 1) % n];
+                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                        let len = (dx * dx + dy * dy).sqrt();
+                        if len < 1e-4 {
+                            continue;
                         }
-                        let mut poly: Vec<[f64; 2]> = Vec::with_capacity(run.len() * 2 + 2);
-                        let first = ring[run[0]];
-                        poly.push([first.0 as f64, first.1 as f64]);
-                        for &edge in run {
-                            let b = ring[(edge + 1) % n];
-                            poly.push([b.0 as f64, b.1 as f64]);
+                        // Outward normal of a positively-wound ring. The
+                        // gate is deliberately wide (~14 degrees): edges
+                        // nearly parallel to the shadow sweep hair-thin
+                        // parallelograms that stick out as spike lines.
+                        if (dy / len) * sx + (-dx / len) * sy <= 0.25 {
+                            continue;
                         }
-                        for &edge in run.iter().rev() {
-                            let b = ring[(edge + 1) % n];
-                            poly.push([(b.0 + sx * d) as f64, (b.1 + sy * d) as f64]);
-                        }
-                        poly.push([(first.0 + sx * d) as f64, (first.1 + sy * d) as f64]);
-                        push_positive(&mut poly);
-                    };
-                    match anchor {
-                        None => {
-                            // Every edge casts (degenerate tiny ring):
-                            // sweep the whole outline in one go.
-                            sweep(&(0..n).collect::<Vec<_>>());
-                        }
-                        Some(s0) => {
-                            let mut run: Vec<usize> = Vec::new();
-                            for k in 1..=n {
-                                let edge = (s0 + k) % n;
-                                if casts[edge] {
-                                    run.push(edge);
-                                } else if !run.is_empty() {
-                                    sweep(&std::mem::take(&mut run));
-                                }
-                            }
-                            sweep(&run);
-                        }
+                        let mut quad = vec![
+                            [a.0 as f64, a.1 as f64],
+                            [b.0 as f64, b.1 as f64],
+                            [(b.0 + sx * d) as f64, (b.1 + sy * d) as f64],
+                            [(a.0 + sx * d) as f64, (a.1 + sy * d) as f64],
+                        ];
+                        push_positive(&mut quad);
                     }
                 }
             }
@@ -4837,17 +4811,27 @@ fn build_tile_buffers_from_features(
     {
         // Plazas ride their own ring dz AND any road lifting through them
         // (a bridge deck crossing a quay), so the road ways join the field.
-        let mut plaza_ways: Vec<(&[(f32, f32)], Option<&[f32]>)> = plaza_rings
+        // PER-WAY reach: ring sources span the whole quay slab, but a road
+        // only lifts the plaza across its own deck width — one shared wide
+        // radius let a 1 m bridge hump raise half of Weesperplein and
+        // shear the square over its grounded surroundings.
+        let mut plaza_ways: Vec<(&[(f32, f32)], Option<&[f32]>, f32)> = plaza_rings
             .iter()
-            .map(|(_, _, points, dz)| (points.as_slice(), dz.as_deref()))
+            .map(|(_, _, points, dz)| (points.as_slice(), dz.as_deref(), 6.0f32))
             .collect();
-        for (_, _, ways) in &smoothed_tiers {
+        for (_, style, ways) in &smoothed_tiers {
+            let reach = (style
+                .casing
+                .map_or(style.center.width, |casing| casing.width.max(style.center.width))
+                * 0.5
+                + 1.0)
+                .max(1.5);
             plaza_ways.extend(
                 ways.iter()
-                    .map(|(points, dz)| (points.as_slice(), dz.as_deref())),
+                    .map(|(points, dz)| (points.as_slice(), dz.as_deref(), reach)),
             );
         }
-        dz_fields.push(DzField::build(&plaza_ways, 6.0, union_clip));
+        dz_fields.push(DzField::build_with_radii(&plaza_ways, union_clip));
     }
     for (_, style, ways) in &smoothed_tiers {
         let half_width = style
@@ -4921,8 +4905,14 @@ fn build_tile_buffers_from_features(
                     for (points, dz) in ways.iter() {
                         let Some(dz) = dz.as_ref() else { continue };
                         for i in 0..points.len().saturating_sub(1) {
-                            let (da, db) = (dz[i], dz[i + 1]);
+                            // Cap the projected height: solver outliers
+                            // (20 m+ dz spikes exist in the archive) turned
+                            // one segment into a canal-spanning slab.
+                            let (da, db) = (dz[i].min(6.0), dz[i + 1].min(6.0));
                             if da < 0.5 && db < 0.5 {
+                                continue;
+                            }
+                            if dz[i] > 12.0 || dz[i + 1] > 12.0 {
                                 continue;
                             }
                             let a = points[i];
@@ -8928,6 +8918,140 @@ mod bridge_probe_tests {
             buffers.labels.len(),
             buffers.feature_count
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn weesperplein_tear_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
+        let dz_name = std::env::var("TEAR_DZ")
+            .unwrap_or_else(|_| "../local/maps/ams-bridge-dz.mbtiles".to_string());
+        let dz = std::path::Path::new(&dz_name);
+        if !base.exists() || !detail.exists() || !dz.exists() {
+            println!("no archives");
+            return;
+        }
+        let mut base_reader = makepad_mbtile_reader::MbtilesReader::open(base).unwrap();
+        let mut detail_reader = makepad_mbtile_reader::MbtilesReader::open(detail).unwrap();
+        let mut dz_reader = makepad_mbtile_reader::MbtilesReader::open(dz).unwrap();
+        let tile_spec = std::env::var("TEAR_TILE").unwrap_or_else(|_| "8415,5384".to_string());
+        let mut ts = tile_spec.split(',').map(|v| v.parse::<i64>().unwrap());
+        let (x, y) = (ts.next().unwrap(), ts.next().unwrap());
+        let key = TileKey { z: 14, x: x as i32, y: y as i32 };
+        let raw = base_reader.get_tile(14, x, 16383 - y).unwrap().unwrap();
+        let det = detail_reader.get_tile(14, x, 16383 - y).unwrap();
+        let dzt = dz_reader.get_tile(14, x, 16383 - y).unwrap();
+        let mut theme = probe_compiled_theme();
+        theme.shiny.bake_shadows = true;
+        theme.shiny.bake_ao = true;
+        let buffers = build_tile_buffers_from_mvt(
+            key,
+            &raw,
+            det.as_deref(),
+            dzt.as_deref(),
+            dzt.is_some(),
+            &[],
+            &theme,
+            std::env::var("TEAR_ZOOM")
+                .ok()
+                .and_then(|z| z.parse().ok())
+                .unwrap_or(17),
+            true,
+            true,
+        )
+        .unwrap();
+        // Group decked vertices (param4 > 0.3) per buffer by quantized
+        // color + param5, print bbox + deck range — who lifts where.
+        for (name, verts) in [
+            ("casing", &buffers.casing_vertices),
+            ("stroke", &buffers.stroke_vertices),
+        ] {
+            use std::collections::HashMap;
+            let mut groups: HashMap<(u32, u32, u32), (f32, f32, f32, f32, f32, f32, usize)> =
+                HashMap::new();
+            for v in verts.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+                let deck = v[15];
+                // Weesperplein plaza window; report every vertex incl.
+                // grounded so the full layer stack is visible.
+                let win = std::env::var("TEAR_WIN").unwrap_or_else(|_| "88,118,86,120".to_string());
+                let mut wv = win.split(',').map(|v| v.parse::<f32>().unwrap());
+                let (wx0, wx1, wy0, wy1) = (wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap());
+                if v[0] < wx0 || v[0] > wx1 || v[1] < wy0 || v[1] > wy1 {
+                    continue;
+                }
+                let _ = deck;
+                let color_key = ((v[4] * 15.0) as u32) << 8
+                    | ((v[5] * 15.0) as u32) << 4
+                    | (v[6] * 15.0) as u32;
+                let p5_key = (v[16] * 1000.0) as u32;
+                let shape_key = v[10] as u32;
+                let entry = groups
+                    .entry((color_key, p5_key, shape_key))
+                    .or_insert((f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MAX, f32::MIN, 0));
+                entry.0 = entry.0.min(v[0]);
+                entry.1 = entry.1.min(v[1]);
+                entry.2 = entry.2.max(v[0]);
+                entry.3 = entry.3.max(v[1]);
+                entry.4 = entry.4.min(deck);
+                entry.5 = entry.5.max(deck);
+                entry.6 += 1;
+            }
+            let mut rows: Vec<_> = groups.into_iter().collect();
+            rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.6));
+            for ((color, p5, shape), (x0, y0, x1, y1, d0, d1, count)) in rows.iter().take(14) {
+                println!(
+                    "{name}: color {color:03x} p5 {:.3} shape {shape} verts {count} bbox ({x0:.0},{y0:.0})-({x1:.0},{y1:.0}) deck {d0:.2}..{d1:.2}",
+                    *p5 as f32 / 1000.0
+                );
+            }
+            println!("-- {name} total verts {}", verts.len() / VECTOR_FLOATS_PER_VERTEX);
+        }
+        // SVG dump of the window's triangles in draw order (casing pass):
+        // the tear must show as literal holes/overdraw in here.
+        {
+            use std::fmt::Write as _;
+            let (verts, indices) = (&buffers.casing_vertices, &buffers.casing_indices);
+            let vb_env = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
+            let mut svg = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{vb_env}' width='1440' height='1600'>\n",
+            );
+            let mut tris = 0usize;
+            for tri in indices.chunks_exact(3) {
+                let v0 = &verts[tri[0] as usize * VECTOR_FLOATS_PER_VERTEX..];
+                let v1 = &verts[tri[1] as usize * VECTOR_FLOATS_PER_VERTEX..];
+                let v2 = &verts[tri[2] as usize * VECTOR_FLOATS_PER_VERTEX..];
+                let vb = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
+                let mut vbv = vb.split(' ').map(|v| v.parse::<f32>().unwrap());
+                let (bx, by, bw, bh) = (vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap());
+                let inside = |v: &[f32]| {
+                    v[0] > bx && v[0] < bx + bw && v[1] > by && v[1] < by + bh
+                };
+                if !(inside(v0) || inside(v1) || inside(v2)) {
+                    continue;
+                }
+                let a = v0[7].max(0.001);
+                let rgb = (
+                    (v0[4] / a * 255.0).min(255.0) as u8,
+                    (v0[5] / a * 255.0).min(255.0) as u8,
+                    (v0[6] / a * 255.0).min(255.0) as u8,
+                );
+                let _ = write!(
+                    svg,
+                    "<polygon points='{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}' fill='rgb({},{},{})' fill-opacity='{:.2}'/>\n",
+                    v0[0], v0[1], v1[0], v1[1], v2[0], v2[1], rgb.0, rgb.1, rgb.2, a
+                );
+                tris += 1;
+            }
+            svg.push_str("</svg>\n");
+            let out = format!(
+                "/private/tmp/claude-501/-Users-admin-makepad-makepad/dc97c21e-85e9-41f6-a8d1-03d180e6bf12/scratchpad/weesperplein_{}.svg",
+                std::env::var("TEAR_TAG").unwrap_or_else(|_| "casing".to_string())
+            );
+            let out = out.as_str();
+            std::fs::write(out, svg).unwrap();
+            println!("svg: {tris} triangles -> {out}");
+        }
     }
 
     #[test]

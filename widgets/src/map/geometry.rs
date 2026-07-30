@@ -2270,7 +2270,7 @@ pub struct DzField {
     grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
     /// Cells within reach of a lifted segment — the "needs subdivision" set.
     active: std::collections::HashSet<(i32, i32)>,
-    segs: Vec<[f32; 6]>,
+    segs: Vec<[f32; 7]>,
 }
 
 impl DzField {
@@ -2284,22 +2284,41 @@ impl DzField {
         radius: f32,
         clip: GeoBounds,
     ) -> Option<DzField> {
+        let with_radii: Vec<(&[(f32, f32)], Option<&[f32]>, f32)> = ways
+            .iter()
+            .map(|&(points, dz)| (points, dz, radius))
+            .collect();
+        DzField::build_with_radii(&with_radii, clip)
+    }
+
+    /// Per-way reach variant: the plaza field wants its own RING sources
+    /// to reach across wide quay slabs, while road ways passing through
+    /// must only lift the plaza across the deck's width — one shared wide
+    /// radius let a 1 m bridge hump raise half of Weesperplein.
+    pub fn build_with_radii(
+        ways: &[(&[(f32, f32)], Option<&[f32]>, f32)],
+        clip: GeoBounds,
+    ) -> Option<DzField> {
         if !ways
             .iter()
-            .any(|(_, dz)| dz.is_some_and(|dz| dz.iter().any(|&v| v.abs() > 0.01)))
+            .any(|(_, dz, _)| dz.is_some_and(|dz| dz.iter().any(|&v| v.abs() > 0.01)))
         {
             return None;
         }
-        let radius = radius.max(1.0);
-        let cell = radius * 2.0;
+        let max_radius = ways
+            .iter()
+            .map(|(_, _, r)| *r)
+            .fold(1.0f32, f32::max);
+        let cell = max_radius * 2.0;
         let mut field = DzField {
             cell,
-            radius,
+            radius: max_radius,
             grid: Default::default(),
             active: Default::default(),
             segs: Vec::new(),
         };
-        for (points, dz) in ways {
+        for (points, dz, way_radius) in ways {
+            let radius = way_radius.max(1.0);
             for i in 0..points.len().saturating_sub(1) {
                 let (mut ax, mut ay) = points[i];
                 let (mut bx, mut by) = points[i + 1];
@@ -2336,7 +2355,7 @@ impl DzField {
                     }
                 }
                 let id = field.segs.len() as u32;
-                field.segs.push([ax, ay, bx, by, dza, dzb]);
+                field.segs.push([ax, ay, bx, by, dza, dzb, radius]);
                 // Hard clamp: tile-local coords live within a few hundred
                 // units — any garbage (NaN, inf, un-guarded math upstream)
                 // must not turn this insertion into a multi-billion-cell
@@ -2389,25 +2408,29 @@ impl DzField {
         };
         let mut best_d2 = f32::MAX;
         let mut best_dz = 0.0f32;
+        let mut best_r = self.radius;
         for &id in ids {
-            let [ax, ay, bx, by, dza, dzb] = self.segs[id as usize];
+            let [ax, ay, bx, by, dza, dzb, seg_r] = self.segs[id as usize];
             let (ex, ey) = (bx - ax, by - ay);
             let el2 = (ex * ex + ey * ey).max(1e-9);
             let t = (((x - ax) * ex + (y - ay) * ey) / el2).clamp(0.0, 1.0);
             let (qx, qy) = (ax + ex * t - x, ay + ey * t - y);
             let d2 = qx * qx + qy * qy;
-            if d2 < best_d2 {
+            // Nearest ELIGIBLE segment: each source only reaches its own
+            // radius (a road through a plaza lifts a deck-wide band, the
+            // plaza's ring sources still cover the wide slab).
+            if d2 < best_d2 && d2 < seg_r * seg_r {
                 best_d2 = d2;
                 best_dz = dza + (dzb - dza) * t;
+                best_r = seg_r;
             }
         }
-        if best_dz == 0.0 || best_d2 >= self.radius * self.radius {
+        if best_dz == 0.0 || best_d2 >= best_r * best_r {
             return 0.0;
         }
         let d = best_d2.sqrt();
-        let fade_start = (self.radius - 1.5).max(0.0);
-        let fade =
-            1.0 - ((d - fade_start) / (self.radius - fade_start).max(1e-3)).clamp(0.0, 1.0);
+        let fade_start = (best_r - 1.5).max(0.0);
+        let fade = 1.0 - ((d - fade_start) / (best_r - fade_start).max(1e-3)).clamp(0.0, 1.0);
         best_dz * fade
     }
 }

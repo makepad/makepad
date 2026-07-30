@@ -6301,6 +6301,57 @@ mod probe_duivendrecht {
 
     #[test]
     #[ignore] // needs local bake output
+    fn weesperplein_dz_ab() {
+        // Nieuwe Achtergracht x Weesperstraat: renderer tile z14 8415/5384
+        // local (88,106)/256 -> baker units (1408,1696). Compare solved dz
+        // profiles between the current and pre-stairfix archives.
+        for name in [
+            "../../examples/map/local/maps/ams-bridge-dz.mbtiles",
+            "../../examples/map/local/maps/ams-bridge-dz.mbtiles.pre-stairfix",
+        ] {
+            let Ok(mut baked) = MbtilesReader::open(Path::new(name)) else {
+                println!("no archive {name}");
+                continue;
+            };
+            println!("== {name}");
+            for (x, y, wy) in [(8415i64, 5384i64, 12.0f32), (8415, 5383, 4084.0)] {
+            let Ok(Some(raw)) = baked.get_tile(14, x, (1 << 14) - 1 - y) else {
+                println!("  no tile {x}/{y}");
+                continue;
+            };
+            println!("  -- tile {x}/{y}");
+            for layer in ["base_dz", "bridge_dz"] {
+                let ways = decode_line_ways(&raw, layer).unwrap_or_default();
+                for way in &ways {
+                    let near = way.paths.iter().flatten().any(|&(px, py)| {
+                        (px - 1413.0).abs() < 260.0 && (py - wy).abs() < 260.0
+                    });
+                    if !near {
+                        continue;
+                    }
+                    let dz = tag(&way.tags, "dz").unwrap_or("");
+                    let max = dz
+                        .split(',')
+                        .filter_map(|v| v.parse::<f32>().ok())
+                        .fold(0.0f32, f32::max)
+                        / 10.0;
+                    if max <= 0.2 {
+                        continue;
+                    }
+                    println!(
+                        "  {layer} id {} L={:?} max {max:.1} dz {}",
+                        way.id,
+                        tag(&way.tags, "L"),
+                        &dz[..dz.len().min(160)]
+                    );
+                }
+            }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // needs local bake output
     fn baked_floats() {
         let mut baked = MbtilesReader::open(Path::new(
             "../../examples/map/local/maps/ams-bridge-dz.mbtiles",
