@@ -1,3 +1,4 @@
+pub mod drape;
 pub mod geometry;
 pub(crate) mod icons;
 pub(crate) mod label;

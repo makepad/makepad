@@ -7,13 +7,16 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", features = ["maps"] }
+makepad-map-nav = { path = "../../libs/map_nav" }          # M1: route.* tools (search + A* graph)
+makepad-geodata = { path = "../../libs/geodata" }          # M1: geo.* corridor queries, rain radar
+makepad-mbtile-reader = { path = "../../libs/mbtile_reader" } # terrain drape landcover source
+makepad-ai      = { path = "../../libs/makepad_ai" }       # M1: cloud agent + tool definitions
+serde_json      = "1"                                      # geodata FeatureHit attrs
+
+makepad-llama   = { path = "../../libs/llama" }            # M2: local dispatcher LLM (pure-Rust ggml)
 
 # Planned wiring (see route.md milestones) — enable as each phase lands:
-# makepad-map-nav = { path = "../../libs/map_nav" }        # M1: route.* tools (search + A* graph)
-# makepad-geodata = { path = "../../libs/geodata" }        # M1: geo.* corridor queries, rain radar
-# makepad-ai      = { path = "../../libs/makepad_ai" }     # M1: cloud agent + tool definitions
 # makepad-converse = { path = "../../libs/converse" }      # M3: voice loop (VAD/STT/filter/TTS)
-# makepad-llama   = { path = "../../libs/llama" }          # M2: local dispatcher LLM + VLM
 # makepad-tesla   = { path = "../../libs/tesla" }          # M5: vehicle SoC / charge state
 
 [dev-dependencies]
