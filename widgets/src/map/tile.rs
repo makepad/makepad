@@ -2585,6 +2585,22 @@ fn emit_shadow_shapes(
                 continue;
             }
             let area = polygon_signed_area(&clipped);
+            // Needle filter: the boolean leaves hair-thin slivers where a
+            // projected edge grazes a footprint. Average width below ~a
+            // decimeter of tile space reads as a dark pin — drop it.
+            let mut perimeter = 0.0f64;
+            for i in 0..clipped.len() {
+                let a = clipped[i];
+                let b = clipped[(i + 1) % clipped.len()];
+                perimeter +=
+                    (((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1)) as f64).sqrt();
+            }
+            if area.abs() < 0.02 || area.abs() / perimeter.max(1e-6) < 0.05 {
+                if ring_index == 0 {
+                    break;
+                }
+                continue;
+            }
             if (ring_index == 0 && area < 0.0) || (ring_index > 0 && area > 0.0) {
                 clipped.reverse();
             }
@@ -2594,13 +2610,16 @@ fn emit_shadow_shapes(
         if !any_ring {
             continue;
         }
+        // Bevel joins: after the footprint subtraction the shadow boundary
+        // meets building corners at acute angles, and a miter fringe
+        // extrudes long dark spikes past the silhouette.
         tessellate_path_fill(
             path,
             tess,
             tess_verts,
             tess_indices,
-            LineJoin::Miter,
-            4.0,
+            LineJoin::Bevel,
+            1.0,
             aa,
             false,
             tolerance,
@@ -3518,6 +3537,7 @@ fn build_tile_buffers_from_features(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 46.0 * DEPTH_MICRO_PER_RANK,
+                    emissive: 0.0,
                 };
                 for ring in &polygon {
                     let mut closed_points = ring.clone();
@@ -3687,7 +3707,10 @@ fn build_tile_buffers_from_features(
             use i_overlay::float::single::SingleFloatOverlay;
             let len_per_m = theme.shiny.sun.shadow_len_per_m();
             let (sx, sy) = (-sun_2d.x, -sun_2d.y);
-            let shadow_min_edge = 1.2 / render_scale;
+            // Floor the silhouette simplification: shadows never need
+            // footprint micro-detail, and sub-meter edges spawn needle
+            // slivers out of the boolean at high overzoom.
+            let shadow_min_edge = (1.2 / render_scale).max(0.35);
             let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
             let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
                 // NonZero dissolve: every contributing path must wind
@@ -3995,8 +4018,8 @@ fn build_tile_buffers_from_features(
         // tile-local units per meter at this latitude
         let units_per_m =
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
-        let trunk_color = hex_to_premul_rgba(0x8a6b4a, 1.0);
-        let canopy_color = hex_to_premul_rgba(0x4a7d44, 1.0);
+        let trunk_color = hex_to_premul_rgba(theme.tree_trunk.unwrap_or(0x8a6b4a), 1.0);
+        let canopy_color = hex_to_premul_rgba(theme.tree_canopy.unwrap_or(0x4a7d44), 1.0);
         let arm = 0.7 * units_per_m;
         // Canopy LOD by screen size: park tiles carry thousands of trees
         // and a 16x8 ball per ~14 px canopy was the single largest buffer
@@ -4637,6 +4660,7 @@ fn build_tile_buffers_from_features(
             let rings = road_ribbon_rings(&ribbons, 1.0, union_clip);
             groups.push(PaintGroup {
                 color: hex_to_premul_rgba(color, f32::from_bits(alpha_bits)),
+                emissive: 0.0,
                 phase: 0,
                 rank: i16::MIN,
                 depth_micro: 0.0,
@@ -4929,6 +4953,9 @@ fn build_tile_buffers_from_features(
                 .and_then(|field| field.as_ref());
             groups.push(PaintGroup {
                 color: hex_to_premul_rgba(color, 1.0),
+                // Only center faces glow: the emissive class draws as a
+                // filament core, casings stay plain.
+                emissive: if pass == 1 { style.center.emissive } else { 0.0 },
                 phase: 1 + pass,
                 rank: style.sort_rank,
                 depth_micro,
@@ -5295,7 +5322,14 @@ fn build_tile_buffers_from_features(
                         color: face.color,
                         stroke_mult: 1e6,
                         shape_id: 0.0,
-                        params: [0.0, 0.0, 0.0, 0.0, 0.0, face_param5],
+                        params: [
+                            0.0,
+                            face.emissive,
+                            0.0,
+                            if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
+                            0.0,
+                            face_param5,
+                        ],
                         zbias: casing_zbias,
                     },
                     deck.as_deref(),
@@ -5349,9 +5383,9 @@ fn build_tile_buffers_from_features(
                             // its own face without making depth tile-local.
                             params: [
                                 0.0,
+                                face.emissive,
                                 0.0,
-                                0.0,
-                                0.0,
+                                if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
                                 0.0,
                                 face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
                             ],
