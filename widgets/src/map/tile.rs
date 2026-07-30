@@ -3749,18 +3749,23 @@ fn build_tile_buffers_from_features(
                     if n < 3 {
                         continue;
                     }
+                    // The swept hull needs all three parts: footprint,
+                    // TRANSLATED footprint, and the connecting edge quads.
+                    // Without the translated ring the far side is stitched
+                    // only from quads, and any facing gate then leaves
+                    // grid-aligned buildings with sheared wedge shadows;
+                    // with it, thin near-parallel quads are interior to
+                    // the hull and can never show as spikes.
                     let mut scratch: Vec<[f64; 2]> = ring
                         .iter()
                         .map(|p| [p.0 as f64, p.1 as f64])
                         .collect();
                     push_positive(&mut scratch);
-                    // Per-edge sweep quads, gated to edges genuinely facing
-                    // along the shadow direction. Adjacent quads of a chain
-                    // share their translated edge exactly, so the union is
-                    // seamless; near-parallel edges (the hairline-needle
-                    // source) are skipped, and unlike whole-chain sweep
-                    // polygons a quad can never self-intersect (curved
-                    // chains made sweeps fold over into big spikes).
+                    let mut roof: Vec<[f64; 2]> = ring
+                        .iter()
+                        .map(|p| [(p.0 + sx * d) as f64, (p.1 + sy * d) as f64])
+                        .collect();
+                    push_positive(&mut roof);
                     for i in 0..n {
                         let a = ring[i];
                         let b = ring[(i + 1) % n];
@@ -3769,11 +3774,10 @@ fn build_tile_buffers_from_features(
                         if len < 1e-4 {
                             continue;
                         }
-                        // Outward normal of a positively-wound ring. The
-                        // gate is deliberately wide (~14 degrees): edges
-                        // nearly parallel to the shadow sweep hair-thin
-                        // parallelograms that stick out as spike lines.
-                        if (dy / len) * sx + (-dx / len) * sy <= 0.25 {
+                        // Outward normal of a positively-wound ring: only
+                        // skip true degenerates — coverage comes from the
+                        // two rings, quads just connect them.
+                        if (dy / len) * sx + (-dx / len) * sy <= 0.02 {
                             continue;
                         }
                         let mut quad = vec![
