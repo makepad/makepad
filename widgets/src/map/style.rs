@@ -30,6 +30,10 @@ pub struct StrokePassStyle {
     /// 3D bridge deck height in meters (0 = grounded). Tapered to zero at
     /// the segment ends by the stroke appender so approaches read as ramps.
     pub deck_m: f32,
+    /// shiny.md Circuit City: emissive strength 0..1. Road-union faces of
+    /// an emissive class carry MAT_ROUTE_GLOW and the shader pushes their
+    /// color white-hot — glowing filaments on a dark theme.
+    pub emissive: f32,
 }
 
 /// Micro-depth per unit of sort rank (rank 710 rail → 0.0014).
@@ -101,6 +105,10 @@ pub struct CompiledMapTheme {
     pub label_halo: Vec4f,
     building_fill: Option<u32>,
     pub building_outline: Option<u32>,
+    /// 3D street-tree colors; None = the classic daylight greens. Dark
+    /// themes override so trees don't blaze against a night palette.
+    pub tree_canopy: Option<u32>,
+    pub tree_trunk: Option<u32>,
     street_area_fill: Option<u32>,
     bridge_area_fill: Option<u32>,
     water_fill: Option<u32>,
@@ -128,6 +136,8 @@ impl Default for CompiledMapTheme {
             label_halo: Vec4f::from_u32(0xffffffff),
             building_fill: None,
             building_outline: None,
+            tree_canopy: None,
+            tree_trunk: None,
             street_area_fill: None,
             bridge_area_fill: None,
             water_fill: None,
@@ -174,6 +184,9 @@ pub struct MapShinyStyle {
     pub bloom: bool,
     #[live(false)]
     pub tilt_shift: bool,
+    /// Specular gloss for building_sheen (dark themes go high).
+    #[live(0.55)]
+    pub gloss: f32,
     /// Local solar time driving the sun position; negative keeps the
     /// legacy fixed NW sun (today's exact look).
     #[live(-1.0)]
@@ -200,6 +213,7 @@ impl Default for MapShinyStyle {
             route_glow: false,
             bloom: false,
             tilt_shift: false,
+            gloss: 0.55,
             sun_hours: -1.0,
             sun_latitude: 52.0,
             shadow_alpha: -1.0,
@@ -225,6 +239,7 @@ impl MapShinyStyle {
             dynamic_sun: self.dynamic_sun,
             water_fx: self.water_fx,
             building_sheen: self.building_sheen,
+            gloss: self.gloss.clamp(0.0, 2.0),
             foliage_fx: self.foliage_fx,
             route_glow: self.route_glow,
             bloom: self.bloom,
@@ -270,6 +285,9 @@ pub struct MapRoadRule {
     /// Hidden below this render zoom (0 = always visible).
     #[live]
     pub min_zoom: f32,
+    /// Emissive glow strength (Circuit City roads), 0 = plain.
+    #[live(0.0)]
+    pub emissive: f32,
 }
 
 #[derive(Script, ScriptHook, Clone, Default)]
@@ -433,6 +451,8 @@ impl MapThemeStyle {
             match group.as_str() {
                 "building" => compiled.building_fill = Some(color),
                 "building_outline" => compiled.building_outline = Some(color),
+                "tree_canopy" => compiled.tree_canopy = Some(color),
+                "tree_trunk" => compiled.tree_trunk = Some(color),
                 "street_area" => compiled.street_area_fill = Some(color),
                 "bridge_area" => compiled.bridge_area_fill = Some(color),
                 "water" => compiled.water_fill = Some(color),
@@ -492,6 +512,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_ROAD,
                 depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             })
         } else {
             None
@@ -502,6 +523,7 @@ fn stroke_template_from_road_rule(rule: &MapRoadRule) -> StrokeTemplate {
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_ROAD,
             depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
+            emissive: rule.emissive.clamp(0.0, 1.0),
         },
         min_zoom: rule.min_zoom,
     }
@@ -517,6 +539,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_WATER,
                 depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             })
         } else {
             None
@@ -527,6 +550,7 @@ fn stroke_template_from_waterway_rule(rule: &MapWaterwayRule) -> StrokeTemplate 
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_WATER,
             depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
         },
         min_zoom: rule.min_zoom,
     }
@@ -542,6 +566,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
                 shape_id: rule.casing_shape_id,
                 expand_class: EXPAND_CLASS_THIN,
                 depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             })
         } else {
             None
@@ -552,6 +577,7 @@ fn stroke_template_from_rail_rule(rule: &MapRailRule) -> StrokeTemplate {
             shape_id: rule.center_shape_id,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rule.sort_rank as f32 * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
         },
         min_zoom: 0.0,
     }
@@ -927,6 +953,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 135.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 },
             });
         }
@@ -966,6 +993,7 @@ pub fn stroke_style_for_tags(
                 shape_id: 0.0,
                 expand_class: EXPAND_CLASS_CONST_PX,
                 depth_micro: 155.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             },
         });
     }
@@ -980,6 +1008,7 @@ pub fn stroke_style_for_tags(
                 shape_id: 0.0,
                 expand_class: EXPAND_CLASS_CONST_PX,
                 depth_micro: 150.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             },
         });
     }
@@ -1016,6 +1045,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 729.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 }),
                 center: StrokePassStyle { deck_m: 0.0,
                     color,
@@ -1023,6 +1053,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 730.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 },
             });
         }
@@ -1036,6 +1067,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 240.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 },
             });
         }
@@ -1060,6 +1092,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 11.0,
                     expand_class: EXPAND_CLASS_CONST_PX,
                     depth_micro: 380.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 },
             });
         }
@@ -1080,6 +1113,7 @@ pub fn stroke_style_for_tags(
                 shape_id: 0.0,
                 expand_class: EXPAND_CLASS_CONST_PX,
                 depth_micro: 140.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             },
         });
     }
@@ -1196,6 +1230,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - 2.0 * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 });
                 style.center = StrokePassStyle { deck_m: 0.0,
                     color: deck,
@@ -1203,6 +1238,7 @@ pub fn stroke_style_for_tags(
                     shape_id: 0.0,
                     expand_class: EXPAND_CLASS_THIN,
                     depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
                 };
             }
         }
@@ -1230,6 +1266,7 @@ pub fn stroke_style_for_tags(
                 // One step under the center: a tie would let the dark edge
                 // noise-win over the road fill (black bridges).
                 depth_micro: style.center.depth_micro - DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
             });
         }
         if tag_is_truthy(tags, "tunnel") {
@@ -1395,6 +1432,7 @@ fn rail_stroke_style(
             shape_id: 0.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
         });
         template.center = StrokePassStyle { deck_m: 0.0,
             color: 0xf7f7f7,
@@ -1402,6 +1440,7 @@ fn rail_stroke_style(
             shape_id: 12.0,
             expand_class: EXPAND_CLASS_THIN,
             depth_micro: rank * DEPTH_MICRO_PER_RANK + DEPTH_MICRO_PER_RANK,
+            emissive: 0.0,
         };
     }
     let mut style = scaled_style(template, rank_bias, width_scale);
@@ -1437,6 +1476,7 @@ pub fn probe_compiled_theme() -> CompiledMapTheme {
             center_width: center.1,
             center_shape_id,
             min_zoom,
+            emissive: 0.0,
         }
     }
     fn fill(group: &str, value: &str, color: u32) -> MapFillRule {

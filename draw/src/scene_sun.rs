@@ -119,6 +119,9 @@ pub struct ShinyConfig {
     pub dynamic_sun: bool,
     pub water_fx: bool,
     pub building_sheen: bool,
+    /// Specular gloss strength when `building_sheen` is on (0..~1.2);
+    /// dark themes push it high for the glossy-miniature look.
+    pub gloss: f32,
     pub foliage_fx: bool,
     pub route_glow: bool,
     // Pass-level (pass not allocated/scheduled when off).
@@ -138,6 +141,7 @@ impl Default for ShinyConfig {
             dynamic_sun: false,
             water_fx: false,
             building_sheen: false,
+            gloss: 0.55,
             foliage_fx: false,
             route_glow: false,
             bloom: false,
