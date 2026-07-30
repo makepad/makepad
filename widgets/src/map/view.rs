@@ -261,14 +261,24 @@ script_mod! {
                 if mat > 1.5 {
                     // Roofs: nudge the half-vector by screen position — a
                     // fake linear environment gradient instead of one flat
-                    // spec value per roof.
-                    h = normalize(h + vec3(self.v_world * 0.0004, 0.0));
+                    // spec value per roof. Clamped: an unbounded nudge let
+                    // whole roof fields align with the sun on wide views
+                    // and bloom out white.
+                    let nudge = clamp(
+                        self.v_world * 0.0004,
+                        vec2(-0.18, -0.18),
+                        vec2(0.18, 0.18)
+                    );
+                    h = normalize(h + vec3(nudge, 0.0));
                 }
                 var spec = pow(max(dot(n, h), 0.0), 24.0) * gloss;
                 if mat < 1.5 {
                     // Bloom toward rooflines (v_param4 = meters up the wall).
                     spec = spec * clamp(self.v_param4 * 0.05, 0.15, 1.0);
                 }
+                // Sheen is a close-range material: fade it out toward the
+                // regional zooms so distant roof fields stay matte.
+                spec = spec * clamp(2.2 - self.shiny_gates2.w, 0.0, 1.0);
                 return vec4(color.xyz + self.sun_color * spec * color.w, color.w)
             }
             // 4: tree canopy — leaf-clump noise + sun-side rim (T5),
