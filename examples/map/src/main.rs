@@ -275,6 +275,9 @@ script_mod! {
                                 layer_rain := LayerCheck{text: "Rain radar"}
                                 layer_wind := LayerCheck{text: "Wind"}
                                 layer_terrain := LayerCheck{text: "Terrain"}
+                                Hr{}
+                                layer_night := LayerCheck{text: "Night theme"}
+                                layer_circuit := LayerCheck{text: "Circuit City"}
                                 PanelText{
                                     margin: Inset{top: 6}
                                     text: "Noise · Flood: soon"
@@ -1518,6 +1521,23 @@ impl MatchEvent for App {
         }
         if layers_changed {
             self.apply_overlay_selection(cx);
+        }
+        // Theme rows behave as radio buttons: circuit wins, then night.
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_night)).changed(actions) {
+            if value {
+                self.ui.check_box(cx, ids!(layer_circuit)).set_active(cx, false, Animate::No);
+                self.map(cx).set_theme(cx, 1);
+            } else {
+                self.map(cx).set_theme(cx, 0);
+            }
+        }
+        if let Some(value) = self.ui.check_box(cx, ids!(layer_circuit)).changed(actions) {
+            if value {
+                self.ui.check_box(cx, ids!(layer_night)).set_active(cx, false, Animate::No);
+                self.map(cx).set_theme(cx, 2);
+            } else {
+                self.map(cx).set_theme(cx, 0);
+            }
         }
         if self.ui.button(cx, ids!(tilt_button)).clicked(actions) {
             self.tilt_target = if self.tilt_target > 0.0 { 0.0 } else { 42.0 };
