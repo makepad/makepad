@@ -90,6 +90,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-isolate"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
+    RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudioRelease{name: "makepad-example-glass"}
     RunStudioRelease{name: "makepad-example-bugfix"}

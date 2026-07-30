@@ -9,12 +9,12 @@
 
 use crate::knmi_hdf5::KnmiFrame;
 
-const A_KM: f64 = 6378.14;
-const B_KM: f64 = 6356.75;
-const ROW_OFFSET: f64 = 3649.9795;
+pub(crate) const A_KM: f64 = 6378.14;
+pub(crate) const B_KM: f64 = 6356.75;
+pub(crate) const ROW_OFFSET: f64 = 3649.9795;
 const COL_OFFSET: f64 = 0.0;
-const GRID_COLS: usize = 700;
-const GRID_ROWS: usize = 765;
+pub(crate) const GRID_COLS: usize = 700;
+pub(crate) const GRID_ROWS: usize = 765;
 
 /// Geographic cover of the produced texture (the radar grid's bounding box
 /// in lon/lat, slightly inset to skip out-of-image corners).
@@ -28,13 +28,13 @@ fn mercator_y(lat_deg: f64) -> f64 {
     (lat.tan() + 1.0 / lat.cos()).ln()
 }
 
-struct Stereo {
+pub(crate) struct Stereo {
     e: f64,
     k0m: f64,
 }
 
 impl Stereo {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let e2 = 1.0 - (B_KM * B_KM) / (A_KM * A_KM);
         let e = e2.sqrt();
         let lat_ts = 60.0_f64.to_radians();
@@ -48,7 +48,7 @@ impl Stereo {
     }
 
     /// lon/lat (deg) → radar grid col/row (f64).
-    fn forward(&self, lon_deg: f64, lat_deg: f64) -> (f64, f64) {
+    pub(crate) fn forward(&self, lon_deg: f64, lat_deg: f64) -> (f64, f64) {
         let lam = lon_deg.to_radians();
         let phi = lat_deg.to_radians();
         let t = (std::f64::consts::FRAC_PI_4 - phi / 2.0).tan()
@@ -57,6 +57,22 @@ impl Stereo {
         let x = rho * lam.sin();
         let y = -rho * lam.cos();
         (x - COL_OFFSET, -y - ROW_OFFSET)
+    }
+
+    /// Radar grid col/row (km units) → lon/lat (deg): inverse of `forward`.
+    pub(crate) fn inverse(&self, col: f64, row: f64) -> (f64, f64) {
+        let x = col + COL_OFFSET;
+        let y_neg = ROW_OFFSET + row; // = -y
+        let rho = x.hypot(y_neg);
+        let lam = x.atan2(y_neg);
+        let t = rho / self.k0m;
+        let mut phi = std::f64::consts::FRAC_PI_2 - 2.0 * t.atan();
+        for _ in 0..4 {
+            let s = self.e * phi.sin();
+            phi = std::f64::consts::FRAC_PI_2
+                - 2.0 * (t * ((1.0 - s) / (1.0 + s)).powf(self.e / 2.0)).atan();
+        }
+        (lam.to_degrees(), phi.to_degrees())
     }
 }
 
@@ -106,14 +122,14 @@ impl RadarProjection {
         }
     }
 
-    /// Bilinear sample of the raw value field; 255 (out of image) reads as
+    /// Bilinear sample of a raw value grid; 255 (out of image) reads as
     /// dry so coastal cells don't smear a phantom band.
-    fn sample_value(frame: &KnmiFrame, col: f32, row: f32) -> f32 {
+    fn sample_grid(values: &[u8], cols: usize, rows: usize, col: f32, row: f32) -> f32 {
         let value_at = |c: i64, r: i64| -> f32 {
-            if c < 0 || c >= frame.cols as i64 || r < 0 || r >= frame.rows as i64 {
+            if c < 0 || c >= cols as i64 || r < 0 || r >= rows as i64 {
                 return 0.0;
             }
-            let v = frame.values[r as usize * frame.cols + c as usize];
+            let v = values[r as usize * cols + c as usize];
             if v == 255 {
                 0.0
             } else {
@@ -128,6 +144,10 @@ impl RadarProjection {
         let top = value_at(c0, r0) * (1.0 - fx) + value_at(c0 + 1, r0) * fx;
         let bottom = value_at(c0, r0 + 1) * (1.0 - fx) + value_at(c0 + 1, r0 + 1) * fx;
         top * (1.0 - fy) + bottom * fy
+    }
+
+    fn sample_value(frame: &KnmiFrame, col: f32, row: f32) -> f32 {
+        Self::sample_grid(&frame.values, frame.cols, frame.rows, col, row)
     }
 
 
@@ -148,6 +168,37 @@ impl RadarProjection {
             let value = Self::sample_value(frame, col, self.src_row[i])
                 .round()
                 .clamp(0.0, 254.0) as u8;
+            let px = &mut out[i * 4..i * 4 + 4];
+            px[0] = value;
+            px[1] = value;
+            px[2] = value;
+            px[3] = 255;
+        }
+        out
+    }
+
+    /// Same as `frame_to_rgba` for a hi-res volume composite: the LUT is in
+    /// 1 km grid units, the composite has `scale` cells per km.
+    pub fn composite_to_rgba(&self, frame: &crate::radar_volume::CompositeFrame) -> Vec<u8> {
+        let mut out = vec![0u8; self.width * self.height * 4];
+        if frame.cols != GRID_COLS * frame.scale || frame.rows != GRID_ROWS * frame.scale {
+            return out;
+        }
+        let scale = frame.scale as f32;
+        for i in 0..self.src_col.len() {
+            let col = self.src_col[i];
+            if col.is_nan() {
+                continue;
+            }
+            let value = Self::sample_grid(
+                &frame.values,
+                frame.cols,
+                frame.rows,
+                col * scale,
+                self.src_row[i] * scale,
+            )
+            .round()
+            .clamp(0.0, 254.0) as u8;
             let px = &mut out[i * 4..i * 4 + 4];
             px[0] = value;
             px[1] = value;

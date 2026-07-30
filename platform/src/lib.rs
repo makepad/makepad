@@ -47,6 +47,7 @@ pub mod ime;
 mod live_reload;
 mod macos_menu;
 mod performance_stats;
+pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod permission;
 mod texture;
@@ -147,6 +148,8 @@ pub use {
             KeyFocusEvent,
             KeyModifiers,
             MouseButton,
+            LocationErrorEvent,
+            LocationUpdateEvent,
             MouseDownEvent,
             MouseMoveEvent,
             MouseUpEvent,
@@ -198,6 +201,7 @@ pub use {
             MseDecodedFrame, MseEngineOutput, MseInitMetadata, MsePlaybackEngine,
             MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
         },
+        memory_watchdog::*,
         midi::*,
         os::*,
         perf_monitor::*,

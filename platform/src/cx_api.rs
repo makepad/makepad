@@ -314,6 +314,9 @@ pub enum CxOsOp {
         request_id: i32,
     },
 
+    StartLocationUpdates,
+    StopLocationUpdates,
+
     HttpRequest {
         request_id: LiveId,
         request: HttpRequest,
@@ -447,6 +450,8 @@ impl std::fmt::Debug for CxOsOp {
 
             Self::CheckPermission { .. } => write!(f, "CheckPermission"),
             Self::RequestPermission { .. } => write!(f, "RequestPermission"),
+            Self::StartLocationUpdates => write!(f, "StartLocationUpdates"),
+            Self::StopLocationUpdates => write!(f, "StopLocationUpdates"),
 
             Self::HttpRequest { .. } => write!(f, "HttpRequest"),
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
@@ -1167,6 +1172,21 @@ impl Cx {
             permission,
         });
         self.permissions_request_id
+    }
+
+    /// Start streaming position fixes from the platform location service
+    /// (CoreLocation on macOS/iOS, LocationManager on Android,
+    /// `navigator.geolocation` on web). Fixes arrive as
+    /// [`Event::LocationUpdate`]; permission prompts are handled by the
+    /// platform, failures arrive as [`Event::LocationError`]. Platforms
+    /// without a location service log an error and stay silent.
+    pub fn start_location_updates(&mut self) {
+        self.platform_ops.push(CxOsOp::StartLocationUpdates);
+    }
+
+    /// Stop streaming position fixes.
+    pub fn stop_location_updates(&mut self) {
+        self.platform_ops.push(CxOsOp::StopLocationUpdates);
     }
 
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {

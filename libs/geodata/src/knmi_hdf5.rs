@@ -15,6 +15,37 @@ pub struct Hdf5File<'a> {
     data: &'a [u8],
 }
 
+/// Decoded HDF5 attribute value (KNMI files use f32/i32 arrays and strings).
+#[derive(Debug, Clone)]
+pub enum AttrValue {
+    Floats(Vec<f64>),
+    Ints(Vec<i64>),
+    Text(String),
+}
+
+impl AttrValue {
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            AttrValue::Floats(v) => v.first().copied(),
+            AttrValue::Ints(v) => v.first().map(|&i| i as f64),
+            AttrValue::Text(_) => None,
+        }
+    }
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            AttrValue::Ints(v) => v.first().copied(),
+            AttrValue::Floats(v) => v.first().map(|&f| f as i64),
+            AttrValue::Text(_) => None,
+        }
+    }
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            AttrValue::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DatasetInfo {
     /// (rows, cols) from the dataspace message.
@@ -295,6 +326,99 @@ impl<'a> Hdf5File<'a> {
         }
     }
 
+    /// Parse one v1 attribute message body into (name, value).
+    fn parse_attribute(body: &[u8]) -> Option<(String, AttrValue)> {
+        if body.len() < 8 || body[0] != 1 {
+            return None;
+        }
+        let name_size = u16le(body, 2) as usize;
+        let datatype_size = u16le(body, 4) as usize;
+        let dataspace_size = u16le(body, 6) as usize;
+        let pad8 = |n: usize| (n + 7) & !7;
+        let name_start = 8;
+        let dt_start = name_start + pad8(name_size);
+        let ds_start = dt_start + pad8(datatype_size);
+        let data_start = ds_start + pad8(dataspace_size);
+        if data_start > body.len() {
+            return None;
+        }
+        let name_bytes = &body[name_start..name_start + name_size.min(body.len() - name_start)];
+        let name_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+        let name = std::str::from_utf8(&name_bytes[..name_end]).ok()?.to_string();
+        // Datatype: byte0 = (version<<4)|class, bytes 4..8 = element size.
+        let dt = &body[dt_start..dt_start + datatype_size.min(body.len() - dt_start)];
+        if dt.len() < 8 {
+            return None;
+        }
+        let class = dt[0] & 0x0f;
+        let elem_size = u32le(dt, 4) as usize;
+        // Dataspace v1: version(1) rank(1) flags(1) reserved(5) dims[rank]*8.
+        let ds = &body[ds_start..ds_start + dataspace_size.min(body.len() - ds_start)];
+        let mut count = 1usize;
+        if ds.len() >= 8 && ds[0] == 1 {
+            let rank = ds[1] as usize;
+            if ds.len() >= 8 + rank * 8 {
+                for dim in 0..rank {
+                    count *= u64le(ds, 8 + dim * 8) as usize;
+                }
+            }
+        }
+        let data = &body[data_start..];
+        if data.len() < count * elem_size {
+            return None;
+        }
+        match class {
+            0 => {
+                // Fixed-point (KNMI writes i32).
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    let o = index * elem_size;
+                    values.push(match elem_size {
+                        4 => u32le(data, o) as i32 as i64,
+                        8 => u64le(data, o) as i64,
+                        2 => u16le(data, o) as i16 as i64,
+                        1 => data[o] as i8 as i64,
+                        _ => return None,
+                    });
+                }
+                Some((name, AttrValue::Ints(values)))
+            }
+            1 => {
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    let o = index * elem_size;
+                    values.push(match elem_size {
+                        4 => f32::from_bits(u32le(data, o)) as f64,
+                        8 => f64::from_bits(u64le(data, o)),
+                        _ => return None,
+                    });
+                }
+                Some((name, AttrValue::Floats(values)))
+            }
+            3 => {
+                let text = &data[..count * elem_size];
+                let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
+                Some((name, AttrValue::Text(String::from_utf8_lossy(&text[..end]).into_owned())))
+            }
+            _ => None,
+        }
+    }
+
+    /// Look up one attribute of the object at `header_addr` by name.
+    pub fn attr(&self, header_addr: u64, name: &str) -> Result<Option<AttrValue>, String> {
+        let mut found = None;
+        self.walk_object_header(header_addr, &mut |msg_type, body| {
+            if msg_type == 0x000C && found.is_none() {
+                if let Some((attr_name, value)) = Self::parse_attribute(body) {
+                    if attr_name == name {
+                        found = Some(value);
+                    }
+                }
+            }
+        })?;
+        Ok(found)
+    }
+
     /// Read + (if needed) inflate the dataset's single chunk.
     pub fn read_dataset(&self, info: &DatasetInfo) -> Result<Vec<u8>, String> {
         let start = info.chunk_offset as usize;
@@ -310,9 +434,22 @@ impl<'a> Hdf5File<'a> {
             Ok(raw.to_vec())
         }
     }
+
+    /// Read a dataset of little-endian u16 values (radar volume scan data).
+    pub fn read_dataset_u16(&self, info: &DatasetInfo) -> Result<Vec<u16>, String> {
+        let bytes = self.read_dataset(info)?;
+        if bytes.len() % 2 != 0 {
+            return Err(format!("odd byte count {} for u16 dataset", bytes.len()));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect())
+    }
 }
 
 /// One decoded nowcast frame: 765x700 raw pixel values (0.5*PV-32 dBZ).
+#[derive(Clone)]
 pub struct KnmiFrame {
     pub minutes_offset: u32,
     pub rows: usize,
@@ -357,6 +494,38 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<KnmiFrame>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_volume_attributes() {
+        let path =
+            "../../local/overlays/radar_test/RAD_NL62_VOL_NA_202607301810.h5";
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        let file = Hdf5File::open(&data).unwrap();
+        let radar = file.find_path(&["radar1"]).unwrap().unwrap();
+        // Reference values from h5py over the same file.
+        let loc = file.attr(radar, "radar_location").unwrap().unwrap();
+        let AttrValue::Floats(loc) = loc else {
+            panic!("radar_location not floats")
+        };
+        assert!((loc[0] - 5.1381).abs() < 1e-3 && (loc[1] - 51.8369).abs() < 1e-3);
+        let name = file.attr(radar, "radar_name").unwrap().unwrap();
+        assert_eq!(name.as_text(), Some("Herwijnen"));
+        let scan = file.find_path(&["scan6"]).unwrap().unwrap();
+        assert!((file.attr(scan, "scan_elevation").unwrap().unwrap().as_f64().unwrap() - 0.8).abs() < 1e-4);
+        assert!((file.attr(scan, "scan_range_bin").unwrap().unwrap().as_f64().unwrap() - 0.2235).abs() < 1e-5);
+        assert_eq!(file.attr(scan, "scan_number_range").unwrap().unwrap().as_i64(), Some(838));
+        assert_eq!(file.attr(scan, "scan_number_azim").unwrap().unwrap().as_i64(), Some(360));
+        let cal = file.find_path(&["scan6", "calibration"]).unwrap().unwrap();
+        let formula = file.attr(cal, "calibration_Z_formulas").unwrap().unwrap();
+        assert_eq!(formula.as_text(), Some("GEO=0.00193793*PV+-31.5019"));
+        let ds = file.find_path(&["scan6", "scan_Z_data"]).unwrap().unwrap();
+        let info = file.dataset_info(ds).unwrap();
+        assert_eq!(info.dims, (360, 838));
+        let values = file.read_dataset_u16(&info).unwrap();
+        assert_eq!(values.len(), 360 * 838);
+    }
 
     #[test]
     fn decodes_cached_forecast_file() {
