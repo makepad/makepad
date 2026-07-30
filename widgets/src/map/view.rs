@@ -857,8 +857,8 @@ script_mod! {
 
             shiny: MapShinyStyle{
                 bake_ao: true
-                bake_shadows: true
-                terrain_shadows: true
+                // No sun-cast shadows at night; baked AO keeps the
+                // buildings grounded.
                 water_fx: true
                 foliage_fx: true
                 // Dark volumes + glossy highlights read as the miniature
@@ -928,14 +928,13 @@ script_mod! {
 
             shiny: MapShinyStyle{
                 bake_ao: true
-                bake_shadows: true
-                terrain_shadows: true
+                // Night board: no sun, no cast shadows — the glow does
+                // the depth work.
                 water_fx: true
                 foliage_fx: true
                 building_sheen: true
                 gloss: 1.1
                 route_glow: true
-                shadow_alpha: 0.35
             }
 
             MapFillRule{group: "building" color: #x15181d}
