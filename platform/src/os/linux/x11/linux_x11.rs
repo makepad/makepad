@@ -1061,7 +1061,7 @@ impl X11Cx {
                         crate::os::linux::linux_file_dialog::open_select_file_dialog(&settings),
                         "SelectFileDialog (install zenity or kdialog)",
                     );
-                    self.call_event_handler(&Event::FileDialogResult(result));
+                    cx.call_event_handler(&Event::FileDialogResult(result));
                 }
                 CxOsOp::SaveFileDialog(settings) => {
                     let result = crate::os::linux::linux_file_dialog::result_from_helper(
@@ -1069,7 +1069,7 @@ impl X11Cx {
                         crate::os::linux::linux_file_dialog::open_save_file_dialog(&settings),
                         "SaveFileDialog (install zenity or kdialog)",
                     );
-                    self.call_event_handler(&Event::FileDialogResult(result));
+                    cx.call_event_handler(&Event::FileDialogResult(result));
                 }
                 CxOsOp::SelectFolderDialog(settings) => {
                     let result = crate::os::linux::linux_file_dialog::result_from_helper(
@@ -1077,7 +1077,7 @@ impl X11Cx {
                         crate::os::linux::linux_file_dialog::open_select_folder_dialog(&settings),
                         "SelectFolderDialog (install zenity or kdialog)",
                     );
-                    self.call_event_handler(&Event::FileDialogResult(result));
+                    cx.call_event_handler(&Event::FileDialogResult(result));
                 }
                 CxOsOp::SaveFolderDialog(settings) => {
                     let result = crate::os::linux::linux_file_dialog::result_from_helper(
@@ -1085,7 +1085,7 @@ impl X11Cx {
                         crate::os::linux::linux_file_dialog::open_save_folder_dialog(&settings),
                         "SaveFolderDialog (install zenity or kdialog)",
                     );
-                    self.call_event_handler(&Event::FileDialogResult(result));
+                    cx.call_event_handler(&Event::FileDialogResult(result));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
