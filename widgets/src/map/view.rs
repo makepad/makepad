@@ -631,7 +631,11 @@ script_mod! {
                 if shrub_amount < 0.01 {
                     return vec4(legacy_f, legacy_f, legacy_f, 1.0)
                 }
-                let w = clamp(self.shiny_gates2.w, 0.25, 4.0)
+                // Full physical anchoring down to the deepest zooms: a
+                // frozen clamp here let the lattice swim against the map
+                // past z18 (crowns are ~8 m physical objects; they simply
+                // get big up close).
+                let w = clamp(self.shiny_gates2.w, 0.03, 4.0)
                 let uv = vec2(self.v_param1, self.v_param2) * w
                 // FOREST, not polkadot: three staggered crown lattices so
                 // canopies overlap and cover most of the ground; the
