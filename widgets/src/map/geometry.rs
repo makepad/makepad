@@ -1,6 +1,6 @@
 use super::style::StrokePassStyle;
 use crate::makepad_draw::vector::{
-    append_expanded_stroke_geometry, tessellate_path_fill,
+    append_expanded_stroke_geometry, compute_clip_radii, tessellate_path_fill,
     tessellate_path_stroke_ends_anchored, LineCap, LineJoin, Tessellator, VVertex, VectorPath,
     VectorRenderParams, VECTOR_ZBIAS_STEP,
 };
@@ -2126,6 +2126,10 @@ pub struct PaintGroup {
 
 /// Rings lifted beyond this stop covering (subtracting from) lower groups.
 pub const LIFT_COVER_M: f32 = 0.2;
+/// Raster support reserved for the signed analytic fringe at the styled
+/// bucket. Four pixels still span at least half a physical pixel under the
+/// maximum 78° pitch and half-bucket underscale.
+pub const ANALYTIC_FRINGE_CARRIER_PX: f32 = 4.0;
 
 /// A triangulated visible region of one paint group.
 pub struct PaintFace {
@@ -2136,9 +2140,11 @@ pub struct PaintFace {
     pub field: u16,
     pub verts: Vec<VVertex>,
     pub indices: Vec<u32>,
-    /// Antialiasing skirt along this face's outer boundary: u ramps
-    /// 0.5 -> 0.0 outward over one screen px; drawn with stroke_mult 1.0
-    /// right after the face, so painter-order AA falls out of the ladder.
+    /// One-sided antialiasing carrier outside this face's boundary: signed
+    /// u runs from 0 at the nominal edge to -1 at the carrier's outer edge.
+    /// DrawVector converts u/fwidth(u) back to device-pixel distance, so the
+    /// carrier can survive steep projection while visible coverage remains
+    /// exactly one pixel.
     pub fringe_verts: Vec<VVertex>,
     pub fringe_indices: Vec<u32>,
     /// Level part: -1 sunk (tunnel), 0 grounded, 1 lifted (deck).
@@ -2149,6 +2155,22 @@ pub struct PaintFace {
     /// Closes the ramp-displacement crescents and reads as deck volume.
     pub skirt_verts: Vec<VVertex>,
     pub skirt_indices: Vec<u32>,
+}
+
+/// Boolean outlines inherit straight edges from the padded tile clip. They
+/// are implementation cuts, not visible contours: the neighboring tile's
+/// body overlaps them. Reuse one exact predicate for both the deck fascia
+/// and the AA carrier so neither can reveal that hidden cut.
+fn edge_on_same_clip_side(a: [f64; 2], b: [f64; 2], clip: GeoBounds) -> bool {
+    const CLIP_EPS: f64 = 1e-6;
+    ((a[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS
+        && (b[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS)
+        || ((a[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS
+            && (b[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS)
+        || ((a[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS
+            && (b[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS)
+        || ((a[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS
+            && (b[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS)
 }
 
 /// Vertical wall quads along one boundary ring of a lifted face.
@@ -2164,13 +2186,6 @@ fn append_ring_skirt(
     if n < 3 {
         return;
     }
-    let mut area2 = 0.0f64;
-    for i in 0..n {
-        let a = ring[i];
-        let b = ring[(i + 1) % n];
-        area2 += a[0] * b[1] - b[0] * a[1];
-    }
-    let out_sign = if area2 > 0.0 { 1.0f32 } else { -1.0 };
     let base = verts.len() as u32;
     for i in 0..n {
         let p = ring[i];
@@ -2184,8 +2199,11 @@ fn append_ring_skirt(
         let ml = (mx * mx + my * my).sqrt().max(1e-6);
         mx /= ml;
         my /= ml;
-        // stroke_dist = outward normal angle for the seam probe.
-        let out_angle = (my * out_sign).atan2(mx * out_sign);
+        // i_overlay's canonical contours keep the filled side on the left:
+        // outer rings are CCW and holes are CW. The averaged left normal
+        // therefore always points into road paint; negate it for the
+        // unfilled-side seam probe.
+        let out_angle = (-my).atan2(-mx);
         let (px, py) = (p[0] as f32, p[1] as f32);
         verts.push(VVertex {
             x: px,
@@ -2214,17 +2232,7 @@ fn append_ring_skirt(
         // the overlap with the neighboring tile. Require BOTH endpoints on
         // the same clip side: a real longitudinal road edge that merely
         // reaches/crosses the boundary must remain skirted.
-        const CLIP_EPS: f64 = 1e-6;
-        let on_same_clip_side =
-            ((a[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS
-                && (b[0] - f64::from(clip.min.x)).abs() <= CLIP_EPS)
-                || ((a[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS
-                    && (b[0] - f64::from(clip.max.x)).abs() <= CLIP_EPS)
-                || ((a[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS
-                    && (b[1] - f64::from(clip.min.y)).abs() <= CLIP_EPS)
-                || ((a[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS
-                    && (b[1] - f64::from(clip.max.y)).abs() <= CLIP_EPS);
-        if on_same_clip_side {
+        if edge_on_same_clip_side(a, b, clip) {
             continue;
         }
         let mid = (
@@ -2272,7 +2280,7 @@ fn append_ring_skirt(
 fn append_ring_fringe(
     ring: &[[f64; 2]],
     aa: f32,
-    straddle: bool,
+    clip: GeoBounds,
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
 ) {
@@ -2280,13 +2288,6 @@ fn append_ring_fringe(
     if n < 3 {
         return;
     }
-    let mut area2 = 0.0f64;
-    for i in 0..n {
-        let a = ring[i];
-        let b = ring[(i + 1) % n];
-        area2 += a[0] * b[1] - b[0] * a[1];
-    }
-    let out_sign = if area2 > 0.0 { 1.0f32 } else { -1.0 };
     let base = verts.len() as u32;
     for i in 0..n {
         let p = ring[i];
@@ -2302,41 +2303,31 @@ fn append_ring_fringe(
         let ml = (mx * mx + my * my).sqrt().max(1e-6);
         mx /= ml;
         my /= ml;
-        // Miter clamp: sharp corners cap the rim reach at 2x aa. The skirt
-        // STRADDLES the boundary — coverage crosses 50% exactly at the
-        // face edge (the legacy convention); the inner half paints face
-        // color over face color, a no-op.
+        // Miter clamp: sharp corners cap the carrier reach at 2x aa.
         let cos_half = (mx * n1x + my * n1y).max(0.5);
-        // Translucent faces must not overpaint themselves (premultiplied
-        // double-blend darkens the band): their skirt starts AT the
-        // boundary and only ramps outward. Opaque faces straddle so
-        // coverage crosses 50% exactly at the edge.
-        let reach = if straddle {
-            aa * 0.5 / cos_half * out_sign
-        } else {
-            aa / cos_half * out_sign
-        };
-        let inner = if straddle { reach } else { 0.0 };
+        // The hard body already supplies the filled side. Keep the analytic
+        // carrier entirely on the unfilled side for opaque and translucent
+        // faces alike: this avoids double blending and permits a generously
+        // wide carrier that cannot collapse under camera tilt.
+        let reach = aa / cos_half;
         let (px, py) = (p[0] as f32, p[1] as f32);
-        // stroke_dist carries the OUTWARD normal angle: the emitter probes
-        // the dz field outside each edge to drop internal seams (way-split
-        // cap arcs mid-deck must not draw fringes or walls).
-        let out_angle = (my * out_sign).atan2(mx * out_sign);
-        // v = 1.0: the stroke-mode pixel shader multiplies by a cap mask
-        // driven by tcoord.y (smoothstep from 0) — v of 0 renders the
-        // whole skirt invisible.
+        // i_overlay emits outer rings CCW and holes CW, so the filled side
+        // is always the averaged LEFT normal `m`; `-m` is always unfilled.
+        let out_angle = (-my).atan2(-mx);
+        // Analytic-fringe mode interprets u as a signed edge coordinate.
+        // Zero is the exact paint boundary; -1 is safely outside it.
         verts.push(VVertex {
-            x: px - mx * inner,
-            y: py - my * inner,
-            u: 0.5,
+            x: px,
+            y: py,
+            u: 0.0,
             v: 1.0,
             stroke_dist: out_angle,
             clip_radius: aa * 4.0,
         });
         verts.push(VVertex {
-            x: px + mx * reach,
-            y: py + my * reach,
-            u: 0.0,
+            x: px - mx * reach,
+            y: py - my * reach,
+            u: -1.0,
             v: 1.0,
             stroke_dist: out_angle,
             clip_radius: aa * 4.0,
@@ -2344,6 +2335,12 @@ fn append_ring_fringe(
     }
     for i in 0..n {
         let j = (i + 1) % n;
+        // The body overlap, not a fading edge, joins neighboring tiles.
+        // Emitting a carrier here can expose two independently displaced
+        // clip copies as short hairline fragments at steep pitch.
+        if edge_on_same_clip_side(ring[i], ring[j], clip) {
+            continue;
+        }
         let (a_in, a_out) = (base + i as u32 * 2, base + i as u32 * 2 + 1);
         let (b_in, b_out) = (base + j as u32 * 2, base + j as u32 * 2 + 1);
         indices.extend_from_slice(&[a_in, a_out, b_out, a_in, b_out, b_in]);
@@ -2804,14 +2801,13 @@ pub fn overlay_paint_groups(
             let mut fringe_indices: Vec<u32> = Vec::new();
             let mut skirt_verts: Vec<VVertex> = Vec::new();
             let mut skirt_indices: Vec<u32> = Vec::new();
-            let straddle = group.color[3] >= 0.999;
             for shape in &visible {
                 for ring in shape {
                     if aa > 0.0 {
                         append_ring_fringe(
                             ring,
                             aa,
-                            straddle,
+                            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
                             &mut fringe_verts,
                             &mut fringe_indices,
                         );
@@ -2832,6 +2828,12 @@ pub fn overlay_paint_groups(
                     }
                 }
             }
+            // Manual meshes do not pass through the tessellator's clip
+            // radius finalizer. Long boundary triangles can cross the
+            // viewport while every endpoint is outside it, so derive the
+            // conservative per-vertex span from the actual index buffers.
+            compute_clip_radii(&mut fringe_verts, &fringe_indices);
+            compute_clip_radii(&mut skirt_verts, &skirt_indices);
             faces.push(PaintFace {
                 color: group.color,
                 param5: group.param5,
@@ -3017,6 +3019,31 @@ pub fn subdivide_face_mesh(
     max_edge: f32,
     field: &DzField,
 ) {
+    subdivide_face_mesh_impl(verts, indices, None, max_edge, field);
+}
+
+/// `subdivide_face_mesh` with a scalar channel riding on every generated
+/// midpoint. The fringe uses this for deck height: its outer carrier vertex
+/// inherits the nominal boundary height, and refinement must preserve that
+/// value instead of re-sampling the field outside the road corridor.
+pub fn subdivide_face_mesh_decked(
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+    decks: &mut Vec<f32>,
+    max_edge: f32,
+    field: &DzField,
+) {
+    assert_eq!(verts.len(), decks.len());
+    subdivide_face_mesh_impl(verts, indices, Some(decks), max_edge, field);
+}
+
+fn subdivide_face_mesh_impl(
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+    mut values: Option<&mut Vec<f32>>,
+    max_edge: f32,
+    field: &DzField,
+) {
     use std::collections::HashMap;
     let max_edge_sq = max_edge * max_edge;
     for _pass in 0..10 {
@@ -3063,18 +3090,27 @@ pub fn subdivide_face_mesh(
             }
             let mut mid = |i: u32, j: u32, verts: &mut Vec<VVertex>| -> u32 {
                 let key = (i.min(j), i.max(j));
-                *midpoints.entry(key).or_insert_with(|| {
-                    let (vi, vj) = (verts[i as usize], verts[j as usize]);
-                    verts.push(VVertex {
-                        x: (vi.x + vj.x) * 0.5,
-                        y: (vi.y + vj.y) * 0.5,
-                        u: (vi.u + vj.u) * 0.5,
-                        v: (vi.v + vj.v) * 0.5,
-                        stroke_dist: (vi.stroke_dist + vj.stroke_dist) * 0.5,
-                        clip_radius: vi.clip_radius.max(vj.clip_radius),
-                    });
-                    (verts.len() - 1) as u32
-                })
+                if let Some(&midpoint) = midpoints.get(&key) {
+                    return midpoint;
+                }
+                let (vi, vj) = (verts[i as usize], verts[j as usize]);
+                let value = values
+                    .as_deref()
+                    .map(|values| (values[i as usize] + values[j as usize]) * 0.5);
+                verts.push(VVertex {
+                    x: (vi.x + vj.x) * 0.5,
+                    y: (vi.y + vj.y) * 0.5,
+                    u: (vi.u + vj.u) * 0.5,
+                    v: (vi.v + vj.v) * 0.5,
+                    stroke_dist: (vi.stroke_dist + vj.stroke_dist) * 0.5,
+                    clip_radius: vi.clip_radius.max(vj.clip_radius),
+                });
+                if let Some(value) = value {
+                    values.as_deref_mut().unwrap().push(value);
+                }
+                let midpoint = (verts.len() - 1) as u32;
+                midpoints.insert(key, midpoint);
+                midpoint
             };
             match (sab, sbc, sca) {
                 (false, false, false) => out.extend_from_slice(&[a, b, c]),
@@ -3110,6 +3146,198 @@ pub fn subdivide_face_mesh(
 #[cfg(test)]
 mod overlay_tests {
     use super::*;
+
+    #[test]
+    fn fringe_carrier_runs_from_boundary_to_unfilled_side() {
+        let outer_ccw = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ];
+        let hole_cw = [
+            [0.0, 0.0],
+            [0.0, 10.0],
+            [10.0, 10.0],
+            [10.0, 0.0],
+        ];
+
+        let mut outer_verts = Vec::new();
+        let mut outer_indices = Vec::new();
+        append_ring_fringe(
+            &outer_ccw,
+            1.0,
+            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
+            &mut outer_verts,
+            &mut outer_indices,
+        );
+        assert_eq!(outer_verts[0].u, 0.0);
+        assert_eq!(outer_verts[1].u, -1.0);
+        assert!(
+            outer_verts[0].x == 0.0 && outer_verts[0].y == 0.0,
+            "outer-ring carrier must start exactly on the paint boundary"
+        );
+        assert!(
+            outer_verts[1].x < 0.0 && outer_verts[1].y < 0.0,
+            "outer-ring zero coverage must move out of the filled square"
+        );
+
+        let mut hole_verts = Vec::new();
+        let mut hole_indices = Vec::new();
+        append_ring_fringe(
+            &hole_cw,
+            1.0,
+            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
+            &mut hole_verts,
+            &mut hole_indices,
+        );
+        assert_eq!(hole_verts[0].u, 0.0);
+        assert_eq!(hole_verts[1].u, -1.0);
+        assert!(
+            hole_verts[0].x == 0.0 && hole_verts[0].y == 0.0,
+            "hole-ring carrier must start exactly on the paint boundary"
+        );
+        assert!(
+            hole_verts[1].x > 0.0 && hole_verts[1].y > 0.0,
+            "hole-ring zero coverage must move into the unfilled courtyard"
+        );
+
+        let mut translucent_verts = Vec::new();
+        let mut translucent_indices = Vec::new();
+        append_ring_fringe(
+            &outer_ccw,
+            1.0,
+            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
+            &mut translucent_verts,
+            &mut translucent_indices,
+        );
+        assert_eq!(
+            (translucent_verts[0].x, translucent_verts[0].y),
+            (0.0, 0.0),
+            "a translucent fringe must not double-blend inside its face"
+        );
+        assert!(
+            translucent_verts[1].x < 0.0 && translucent_verts[1].y < 0.0,
+            "a translucent fringe must still fade into the unfilled exterior"
+        );
+    }
+
+    #[test]
+    fn analytic_fringe_keeps_raster_support_at_max_pitch() {
+        let worst_bucket_scale = 2.0_f32.powf(-0.5);
+        let projected =
+            ANALYTIC_FRINGE_CARRIER_PX * worst_bucket_scale * 78.0_f32.to_radians().cos();
+        assert!(
+            projected >= 0.5,
+            "carrier can disappear before the pixel shader runs: {projected:.3}px"
+        );
+    }
+
+    #[test]
+    fn fringe_omits_only_artificial_padded_clip_edge() {
+        let clip = GeoBounds {
+            min: GeoPoint { x: 0.0, y: 0.0 },
+            max: GeoPoint { x: 10.0, y: 10.0 },
+        };
+        // Only the right edge lies on the clip. The other three are real
+        // visible contours and must keep their AA quads.
+        let ring = [
+            [2.0, 2.0],
+            [10.0, 2.0],
+            [10.0, 8.0],
+            [2.0, 8.0],
+        ];
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        append_ring_fringe(&ring, 1.0, clip, &mut verts, &mut indices);
+
+        assert_eq!(verts.len(), ring.len() * 2);
+        assert_eq!(indices.len(), (ring.len() - 1) * 6);
+        let clipped_edge = [2u32, 3, 5, 2, 5, 4];
+        assert!(
+            !indices
+                .windows(clipped_edge.len())
+                .any(|window| window == clipped_edge),
+            "the implementation clip edge acquired a visible AA carrier"
+        );
+        assert!(
+            indices.starts_with(&[0, 1, 3, 0, 3, 2])
+                && indices.ends_with(&[6, 7, 1, 6, 1, 0]),
+            "real contour edges lost their AA carrier"
+        );
+    }
+
+    #[test]
+    fn concave_fringe_miters_are_finite_bounded_and_clip_safe() {
+        let concave_ccw = [
+            [0.0, 0.0],
+            [40.0, 0.0],
+            [40.0, 40.0],
+            [20.0, 20.001],
+            [0.0, 40.0],
+        ];
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        append_ring_fringe(
+            &concave_ccw,
+            ANALYTIC_FRINGE_CARRIER_PX,
+            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
+            &mut verts,
+            &mut indices,
+        );
+        assert!(verts.iter().all(|v| {
+            v.x.is_finite()
+                && v.y.is_finite()
+                && v.u.is_finite()
+                && (v.u == 0.0 || v.u == -1.0)
+        }));
+        for pair in verts.chunks_exact(2) {
+            let reach = ((pair[1].x - pair[0].x).powi(2)
+                + (pair[1].y - pair[0].y).powi(2))
+            .sqrt();
+            assert!(reach <= ANALYTIC_FRINGE_CARRIER_PX * 2.001);
+        }
+        compute_clip_radii(&mut verts, &indices);
+        assert!(
+            verts.iter().all(|v| v.clip_radius >= 8.0),
+            "manual long-edge carrier did not receive conservative clip radii"
+        );
+    }
+
+    #[test]
+    fn fringe_subdivision_preserves_boundary_deck_plane() {
+        let points = [(-10.0, 0.0), (30.0, 0.0)];
+        let decks = [5.5, 5.5];
+        let field = DzField::build(
+            &[(&points, Some(&decks))],
+            2.0,
+            tile_clip_bounds(ROAD_PAINT_CLIP_PADDING),
+        )
+        .unwrap();
+        let vertex = |x, y, u| VVertex {
+            x,
+            y,
+            u,
+            v: 1.0,
+            stroke_dist: 0.0,
+            clip_radius: 24.0,
+        };
+        let mut verts = vec![
+            vertex(0.0, 0.0, 0.0),
+            vertex(0.0, -4.0, -1.0),
+            vertex(20.0, 0.0, 0.0),
+            vertex(20.0, -4.0, -1.0),
+        ];
+        let mut indices = vec![0, 1, 3, 0, 3, 2];
+        let mut values = vec![5.5; verts.len()];
+        subdivide_face_mesh_decked(&mut verts, &mut indices, &mut values, 1.0, &field);
+        assert!(verts.len() > 4);
+        assert_eq!(verts.len(), values.len());
+        assert!(
+            values.iter().all(|height| (*height - 5.5).abs() < 1e-6),
+            "outer carrier vertices sagged away from the boundary deck"
+        );
+    }
 
     #[test]
     fn buffered_mvt_endpoints_are_clip_cuts() {

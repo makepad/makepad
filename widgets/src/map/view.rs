@@ -66,6 +66,8 @@ script_mod! {
             var shape_id = self.geom.shape_id;
             var expanded = 0.0;
             var expand_slack = 0.0;
+            var surface_decal = 0.0;
+            var terrain_pos = pos * self.map_scale + self.map_offset;
             // shape >= 100: GPU re-expandable stroke — the position is the
             // centerline anchor, param1/2 the baked half-width offset and
             // param3 the width-growth class. The per-class correction turns
@@ -86,14 +88,26 @@ script_mod! {
                 transformed = transformed + off * self.map_scale * corr;
                 expand_slack = length(off) * (corr + 1.0);
             }
+            // shape-20/param3=2 is a zoom-constant road-surface decal
+            // (currently oneway arrows). Put its screen-px vertex offset
+            // into the MAP plane before camera rotation and tilt. This
+            // gives every glyph vertex the same projection/depth basis as
+            // the road directly beneath it instead of rotating a flat card
+            // around one lifted anchor.
+            if shape_id > 19.5 && shape_id < 20.5 && self.geom.param3 > 1.5 {
+                let off = vec2(self.geom.param1, self.geom.param2);
+                transformed = transformed + off;
+                terrain_pos = terrain_pos + off;
+                surface_decal = 1.0;
+            }
             // 3D terrain: every vertex lifts by the ground elevation under
             // it, so roads/fills/buildings ride the displaced surface.
             // Sampled at the centerline anchor (pre width-expansion): the
-            // casing and center of one road must lift identically.
+            // casing and center of one road must lift identically. Surface
+            // decals instead sample at their actual offset vertex.
             var ground_m = 0.0;
             if self.terrain_span.x > 0.5 {
-                let anchor_pos = pos * self.map_scale + self.map_offset;
-                let tuv = (anchor_pos - self.terrain_org) / self.terrain_span;
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
                 if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
                     let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
                     let enc = self.terrain_tex.sample_lod(fit, 0.0);
@@ -124,19 +138,25 @@ script_mod! {
             }
             var lift_m = self.geom.param4 * self.height_grow + ground_fill;
             if shape_id > 19.5 && shape_id < 20.5 {
-                // Icon param4 = zoom_floor + pin_lift_m*100: markers fly at
-                // their encoded height (0 for grounded icons).
-                let icon_floor = modf(self.geom.param4, 100.0);
-                lift_m = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow
-                    + ground_m;
+                if surface_decal > 0.5 {
+                    // Surface-decal param4 is exact signed deck meters per
+                    // vertex. No 0.25m icon-height quantization: the two
+                    // triangles follow a ramp's local slope continuously.
+                    lift_m = self.geom.param4 * self.height_grow + ground_m;
+                } else {
+                    // Icon param4 = zoom_floor + pin_lift_m*100: markers fly
+                    // at their encoded height (0 for grounded icons).
+                    let icon_floor = modf(self.geom.param4, 100.0);
+                    lift_m = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow
+                        + ground_m;
+                }
             }
             transformed.y = self.rot_pivot.y
                 + ground_rel_y * self.tilt_params.x
                 - lift_m * self.tilt_params.y;
-            // shape 20: zoom-constant symbol — position is the anchor point,
-            // param1/2 the vertex offset in screen px added after the
-            // transform. POI symbols stay upright; map-aligned glyphs like
-            // oneway arrows (param3 flag) rotate with the camera.
+            // shape 20: zoom-constant symbol. POI symbols stay upright and
+            // add their offset here; surface decals were already projected
+            // through the map plane above.
             if shape_id > 19.5 && shape_id < 20.5 {
                 // 0.6 grace below the floor: markers fade out on a zoom
                 // gesture instead of vanishing the instant the tier line
@@ -144,22 +164,23 @@ script_mod! {
                 // FAIL-OPEN: if the icon_zoom uniform hasn't landed (reads
                 // ~0 — seen when a startup DSL override re-parses this
                 // shader), the gate disarms instead of hiding every icon.
-                if self.icon_zoom > 1.0 && modf(self.geom.param4, 100.0) > self.icon_zoom + 0.6 {
+                if surface_decal < 0.5
+                    && self.icon_zoom > 1.0
+                    && modf(self.geom.param4, 100.0) > self.icon_zoom + 0.6 {
                     self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
                     return
                 }
-                var off = vec2(self.geom.param1, self.geom.param2);
-                if self.geom.param3 > 0.5 {
-                    off = vec2(
-                        off.x * self.view_rot.x - off.y * self.view_rot.y,
-                        off.x * self.view_rot.y + off.y * self.view_rot.x
-                    );
-                    // Map-aligned glyphs (oneway arrows) lie ON the ground
-                    // plane: their screen offset foreshortens with the tilt
-                    // like the road under them, instead of billboarding.
-                    off.y = off.y * self.tilt_params.x;
+                if surface_decal < 0.5 {
+                    var off = vec2(self.geom.param1, self.geom.param2);
+                    if self.geom.param3 > 0.5 {
+                        off = vec2(
+                            off.x * self.view_rot.x - off.y * self.view_rot.y,
+                            off.x * self.view_rot.y + off.y * self.view_rot.x
+                        );
+                        off.y = off.y * self.tilt_params.x;
+                    }
+                    transformed = transformed + off;
                 }
-                transformed = transformed + off;
             }
 
             self.v_tcoord = vec2(self.geom.u, self.geom.v);

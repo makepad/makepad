@@ -3,10 +3,10 @@ use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
-    append_fringe_geometry, append_tessellated_geometry, append_tessellated_geometry_decked,
-    tessellate_path_fill,
+    append_tessellated_geometry, append_tessellated_geometry_decked, tessellate_path_fill,
     LineCap, LineJoin, Tessellator, VVertex,
-    VectorPath, VectorRenderParams, VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
+    VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
+    VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
 };
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
@@ -44,11 +44,17 @@ pub const EARCUT_MAX_RINGS: usize = 500;
 const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
 const MVT_INTERNAL_RING_INDEX_KEY: &str = "__mp_ring";
 /// Tilt-mode road ladder: all union casings under all union centers under
-/// rails/dashes (legacy strokes get +ROAD_LEGACY_OVER in append) under
-/// arrows (0.85). Deck bump (0.30 per 2 m in triangulate) exceeds the
-/// casing/center split so an elevated deck occludes grounded centers.
+/// rails/dashes (legacy strokes get +ROAD_LEGACY_OVER in append). Oneway
+/// arrows reuse their own surface slot with a tiny decal epsilon; they do
+/// not occupy a global layer above every road. Deck bump (0.30 per 2 m in
+/// triangulate) exceeds the casing/center split so an elevated deck
+/// occludes grounded centers and their arrows.
 pub const ROAD_UNION_CASING_DEPTH: f32 = 0.10;
 pub const ROAD_UNION_CENTER_DEPTH: f32 = 0.20;
+// The icon draw call is +0.04 above the casing call in MapView. Subtract it
+// from arrow param5, then restore only this tiny own-surface decal epsilon.
+const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
+const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.004;
 const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
 const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
 
@@ -212,6 +218,27 @@ struct StrokeDrawJob {
     join_meta: RoadJoinMeta,
 }
 
+/// The road-surface depth slot an oneway arrow must decal onto. Union
+/// surfaces acquire their final slot after boolean painting; legacy strokes
+/// already carry a stable param5.
+#[derive(Clone, Copy, Debug)]
+enum ArrowSurfaceDepth {
+    Union(StrokeStyleKey),
+    Legacy { param5: f32, sort_rank: i16 },
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+struct ArrowDrawJob {
+    points: Vec<(f32, f32)>,
+    reverse: bool,
+    /// Dense, signed deck profile aligned with `points`. Keeping this on the
+    /// source way prevents a nearby parallel/crossing road from lending its
+    /// height to the arrow.
+    dz: Option<Vec<f32>>,
+    surface_depth: ArrowSurfaceDepth,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct StrokePassKey {
     color: u32,
@@ -244,6 +271,26 @@ impl From<StrokeStyle> for StrokeStyleKey {
             center: StrokePassKey::from(value.center),
         }
     }
+}
+
+/// Whether a styled way is physical solid road surface handled by the
+/// flattened road-paint union. This deliberately ignores color and rank:
+/// those select paint groups inside the shared boolean pipeline, not a
+/// different geometry path. Patterned/dashed passes remain legacy overlays.
+fn road_uses_union_mesh(
+    union_roads: bool,
+    tags: &HashMap<String, String>,
+    sunk_3d: bool,
+    style: &StrokeStyle,
+) -> bool {
+    union_roads
+        && tags.contains_key("highway")
+        && !tag_is_truthy(tags, "rail")
+        && (sunk_3d || !tag_is_truthy(tags, "tunnel"))
+        && style.center.shape_id == 0.0
+        && style
+            .casing
+            .is_none_or(|casing| casing.shape_id == 0.0)
 }
 
 type RoadTierEnd = (StrokeStyleKey, usize, bool);
@@ -1156,8 +1203,9 @@ pub fn build_tile_buffers_from_mvt(
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
     let mut collector = MvtLocalCollector::new(render_scale);
-    // Baked base_dz overlay: per-vertex deck heights for this exact base
-    // tile's features, joined during collection (no geometry matching).
+    // Baked base_dz overlay: dense solved height profiles keyed to this
+    // tile's exact base features. The profile geometry replaces sparse base
+    // edges during collection after an endpoint identity check.
     if let Some(dz_data) = bridge_dz_tile_data {
         match parse_base_dz_map(dz_data, tile_key) {
             Ok(map) => collector.base_dz = map,
@@ -1285,40 +1333,157 @@ impl MvtSink for BridgeDzCollector {
     }
 }
 
+#[derive(Clone, Debug)]
+struct BaseDzProfile {
+    points: Vec<(f32, f32)>,
+    decks: Vec<f32>,
+}
+
+fn base_dz_profile_from_way(
+    way: TileWay,
+) -> Option<((String, u32, u32), BaseDzProfile)> {
+    if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+        return None;
+    }
+    let (Some(layer), Some(fidx), Some(pidx), Some(dz)) = (
+        way.tags.get("L"),
+        way.tags.get("F"),
+        way.tags.get("P"),
+        way.tags.get("dz"),
+    ) else {
+        return None;
+    };
+    let (Ok(fidx), Ok(pidx)) = (fidx.parse::<u32>(), pidx.parse::<u32>()) else {
+        return None;
+    };
+    let Ok(decks): Result<Vec<f32>, _> = dz
+        .split(',')
+        .map(|value| value.parse::<f32>().map(|dm| dm * 0.1))
+        .collect()
+    else {
+        return None;
+    };
+    if decks.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    if way.points.len() < 2 || decks.len() != way.points.len() {
+        return None;
+    }
+    Some((
+        (layer.clone(), fidx, pidx),
+        BaseDzProfile { points: way.points, decks },
+    ))
+}
+
 /// Decode the base_dz layer of a bake overlay tile into the join map:
-/// (source layer, feature index, path index) -> per-raw-vertex deck meters.
+/// (source layer, feature index, path index) -> dense geometry + deck meters.
 fn parse_base_dz_map(
     dz_tile_data: &[u8],
     tile_key: TileKey,
-) -> Result<HashMap<(String, u32, u32), Vec<f32>>, String> {
+) -> Result<HashMap<(String, u32, u32), BaseDzProfile>, String> {
     let pbf_data = decode_vector_tile_payload(dz_tile_data)?;
     let mut collector = BridgeDzCollector { next_feature_id: 1, ways: Vec::new() };
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let mut map = HashMap::new();
     for way in collector.ways {
-        if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
-            continue;
+        if let Some((key, profile)) = base_dz_profile_from_way(way) {
+            map.insert(key, profile);
         }
-        let (Some(layer), Some(fidx), Some(pidx), Some(dz)) = (
-            way.tags.get("L"),
-            way.tags.get("F"),
-            way.tags.get("P"),
-            way.tags.get("dz"),
-        ) else {
-            continue;
-        };
-        let (Ok(fidx), Ok(pidx)) = (fidx.parse::<u32>(), pidx.parse::<u32>()) else {
-            continue;
-        };
-        let decks: Vec<f32> = dz
-            .split(',')
-            .filter_map(|v| v.parse::<f32>().ok())
-            // Signed: positive = deck lift, negative = tunnel sink.
-            .map(|dm| dm * 0.1)
-            .collect();
-        map.insert((layer.clone(), fidx, pidx), decks);
     }
     Ok(map)
+}
+
+fn base_dz_profile_projected_points(
+    profile: &BaseDzProfile,
+    raw_points: &[(i32, i32)],
+    raw_scale: f32,
+    close: bool,
+) -> Option<Vec<(f32, f32)>> {
+    if profile.points.len() < 2
+        || profile.points.len() != profile.decks.len()
+        || raw_points.len() < 2
+    {
+        return None;
+    }
+    const POINT_EPSILON: f32 = 0.05;
+    let near = |a: (f32, f32), b: (f32, f32)| {
+        let dx = a.0 - b.0;
+        let dy = a.1 - b.1;
+        dx * dx + dy * dy <= POINT_EPSILON * POINT_EPSILON
+    };
+    let mut raw_scaled: Vec<(f32, f32)> = raw_points
+        .iter()
+        .map(|&(x, y)| (x as f32 * raw_scale, y as f32 * raw_scale))
+        .collect();
+    if close && !near(raw_scaled[0], raw_scaled[raw_scaled.len() - 1]) {
+        raw_scaled.push(raw_scaled[0]);
+    }
+    let raw_first = raw_scaled[0];
+    let raw_last = raw_scaled[raw_scaled.len() - 1];
+    if !near(profile.points[0], raw_first)
+        || !near(profile.points[profile.points.len() - 1], raw_last)
+        || (close && !near(profile.points[0], profile.points[profile.points.len() - 1]))
+    {
+        return None;
+    }
+
+    // Dense profiles preserve every raw vertex in order. Checking the full
+    // subsequence (rather than endpoints alone) makes a stale overlay fail
+    // closed when the source path acquires or moves an interior bend.
+    let mut profile_index = 0usize;
+    let mut previous_raw: Option<(f32, f32)> = None;
+    let mut anchors = Vec::with_capacity(raw_scaled.len());
+    for &raw in &raw_scaled {
+        if previous_raw.is_some_and(|previous| near(previous, raw))
+            && profile_index > 0
+            && near(profile.points[profile_index - 1], raw)
+        {
+            anchors.push(profile_index - 1);
+            previous_raw = Some(raw);
+            continue;
+        }
+        while profile_index < profile.points.len()
+            && !near(profile.points[profile_index], raw)
+        {
+            profile_index += 1;
+        }
+        if profile_index == profile.points.len() {
+            return None;
+        }
+        anchors.push(profile_index);
+        profile_index += 1;
+        previous_raw = Some(raw);
+    }
+
+    // Overlay MVT quantization must not redefine the base road's XY shape:
+    // at high overzoom, a half-extent-unit error would become a many-pixel
+    // zig-zag. Snap every dense knot onto its containing validated raw
+    // segment while retaining the profile's deck-value cardinality.
+    let mut projected = profile.points.clone();
+    for raw_segment in 0..raw_scaled.len() - 1 {
+        let start = anchors[raw_segment];
+        let end = anchors[raw_segment + 1];
+        if start > end {
+            return None;
+        }
+        let a = raw_scaled[raw_segment];
+        let b = raw_scaled[raw_segment + 1];
+        let direction = (b.0 - a.0, b.1 - a.1);
+        let length_squared = direction.0 * direction.0 + direction.1 * direction.1;
+        for index in start..=end {
+            projected[index] = if length_squared <= 1e-9 {
+                a
+            } else {
+                let source = profile.points[index];
+                let t = (((source.0 - a.0) * direction.0
+                    + (source.1 - a.1) * direction.1)
+                    / length_squared)
+                    .clamp(0.0, 1.0);
+                (a.0 + direction.0 * t, a.1 + direction.1 * t)
+            };
+        }
+    }
+    Some(projected)
 }
 
 /// Decode a bridge-bake overlay tile into per-point-deck corridors. Tags:
@@ -2145,6 +2310,12 @@ fn build_tile_buffers_from_features(
     let zoom_mult = zoom_width_mult(render_zoom);
     let px_to_units = 1.0 / render_scale;
     let aa_units = 1.0 / render_scale;
+    // A one-device-pixel carrier can collapse below a fragment at stale
+    // overzoom and steep pitch before the pixel shader ever gets to run.
+    // Four bucket pixels still project to at least ~0.59 px at the maximum
+    // 78-degree pitch (including half-bucket underscale); signed-u/fwidth
+    // keeps only the final one-pixel coverage ramp visible.
+    let analytic_fringe_units = ANALYTIC_FRINGE_CARRIER_PX / render_scale;
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
     let mut labels = Vec::<TileLabel>::new();
@@ -3247,7 +3418,7 @@ fn build_tile_buffers_from_features(
 
     // Stroke pass
     let mut stroke_jobs = Vec::<StrokeDrawJob>::new();
-    let mut arrow_jobs = Vec::<(Vec<(f32, f32)>, bool)>::new();
+    let mut arrow_jobs = Vec::<ArrowDrawJob>::new();
     for prepared_way in &prepared {
         let way = &tile_ways[prepared_way.way_index];
         if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
@@ -3262,16 +3433,12 @@ fn build_tile_buffers_from_features(
             way.tags.get("junction").map(|v| v.as_str()),
             Some("roundabout") | Some("circular")
         );
-        if render_zoom >= 15
+        let arrow_reverse = (render_zoom >= 15
             && (tag_is_truthy(&way.tags, "oneway") || implicit_oneway)
             && way.tags.contains_key("highway")
-            && !tag_is_truthy(&way.tags, "rail")
-        {
-            arrow_jobs.push((
-                prepared_way.points.clone(),
-                tag_is_truthy(&way.tags, "oneway_reverse"),
-            ));
-        }
+            && !tag_is_truthy(&way.tags, "rail"))
+        .then(|| tag_is_truthy(&way.tags, "oneway_reverse"));
+        let mut arrow_surface_depth = ArrowSurfaceDepth::Unknown;
         // A tunnel with baked negative dz becomes a real SUNK road in 3D
         // bakes: styled as its solid road class (no dash), joining the
         // union as a sunk level part. Flat bakes keep the carto dashes.
@@ -3331,12 +3498,17 @@ fn build_tile_buffers_from_features(
             // Solid road geometry joins the per-tier union mesh: one
             // seamless surface per class, identical flat and tilted. Dashed
             // shapes (rails, tunnels' dash patterns) keep the stroke path.
-            let union_road = union_roads
-                && way.tags.contains_key("highway")
-                && !tag_is_truthy(&way.tags, "rail")
-                && (sunk_3d || !tag_is_truthy(&way.tags, "tunnel"))
-                && style.center.shape_id == 0.0
-                && style.casing.map_or(true, |casing| casing.shape_id == 0.0);
+            let union_road = road_uses_union_mesh(union_roads, &way.tags, sunk_3d, &style);
+            if arrow_reverse.is_some() {
+                arrow_surface_depth = if union_road {
+                    ArrowSurfaceDepth::Union(StrokeStyleKey::from(style))
+                } else {
+                    ArrowSurfaceDepth::Legacy {
+                        param5: stroke_pass_param5(&style.center),
+                        sort_rank: style.sort_rank,
+                    }
+                };
+            }
             stroke_jobs.push(StrokeDrawJob {
                 sort_rank: style.sort_rank,
                 style,
@@ -3344,6 +3516,18 @@ fn build_tile_buffers_from_features(
                 union_road,
                 dz: if union_road { way.dz.clone() } else { None },
                 join_meta: RoadJoinMeta::from_tags(&way.tags),
+            });
+        }
+        if let Some(reverse) = arrow_reverse {
+            arrow_jobs.push(ArrowDrawJob {
+                points: prepared_way.points.clone(),
+                reverse,
+                dz: way
+                    .dz
+                    .as_ref()
+                    .filter(|dz| dz.len() == prepared_way.points.len())
+                    .cloned(),
+                surface_depth: arrow_surface_depth,
             });
         }
     }
@@ -3829,7 +4013,7 @@ fn build_tile_buffers_from_features(
     let faces = if groups.is_empty() {
         Vec::new()
     } else {
-        overlay_paint_groups(&groups, &mut tess, tolerance, aa_units)
+        overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units)
     };
     if profiler.on {
         let face_verts: usize = faces.iter().map(|face| face.verts.len()).sum();
@@ -4111,38 +4295,39 @@ fn build_tile_buffers_from_features(
                             Some(field) if deck.is_some() => {
                                 fringe_verts = face.fringe_verts.clone();
                                 fringe_indices = face.fringe_indices.clone();
-                                subdivide_face_mesh(
+                                // Every boundary/outer pair must remain on
+                                // one vertical plane. Sampling the moved
+                                // outer XY lets DzField's corridor feather
+                                // pull a wide AA carrier toward the ground,
+                                // producing a visible sloped curtain.
+                                let mut fr_deck = Vec::with_capacity(fringe_verts.len());
+                                for pair in fringe_verts.chunks_exact(2) {
+                                    let height = field.sample(pair[0].x, pair[0].y);
+                                    fr_deck.extend_from_slice(&[height, height]);
+                                }
+                                debug_assert_eq!(fr_deck.len(), fringe_verts.len());
+                                subdivide_face_mesh_decked(
                                     &mut fringe_verts,
                                     &mut fringe_indices,
+                                    &mut fr_deck,
                                     3.0,
                                     field,
                                 );
-                                let fr_deck: Vec<f32> = fringe_verts
-                                    .iter()
-                                    .map(|v| field.sample(v.x, v.y))
-                                    .collect();
                                 (&fringe_verts, &fringe_indices, Some(fr_deck))
                             }
                             _ => (&face.fringe_verts, &face.fringe_indices, None),
                         };
-                    // Fill-mode carrier (stroke_mult > 1e5): the skirt uses
-                    // the same fwidth coverage formula as the faces — no
-                    // stroke cap/dash gates to fight.
-                    // /tmp/mp_fringe_debug: draw skirts opaque magenta to
-                    // bisect "not rendering" vs "too subtle".
-                    let fringe_debug = std::path::Path::new("/tmp/mp_fringe_debug").exists();
-                    append_fringe_geometry(
+                    // Signed u runs 0 -> -1 from the exact road edge through
+                    // a wide, outside-only carrier. DrawVector divides by
+                    // its screen derivative to recover device-pixel distance.
+                    append_tessellated_geometry_decked(
                         fr_verts,
                         fr_indices,
                         &mut casing_vertices,
                         &mut casing_indices,
                         VectorRenderParams {
-                            color: if fringe_debug {
-                                [1.0, 0.0, 1.0, 1.0]
-                            } else {
-                                face.color
-                            },
-                            stroke_mult: 1e6,
+                            color: face.color,
+                            stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
                             shape_id: 0.0,
                             // Half a ladder step above the own face: in tilt
                             // the up-screen skirt half otherwise loses the
@@ -4305,12 +4490,61 @@ fn build_tile_buffers_from_features(
     }
 
     // Oneway arrows: zoom-constant glyphs spaced along the way, offsets
-    // pre-rotated into the travel direction (carto-style).
+    // pre-rotated into the travel direction (carto-style). Resolve each
+    // union tier to the exact center-face depth it was painted with. The
+    // icon pass itself contributes +0.04, so append_oneway_arrow subtracts
+    // that global pass lift and leaves only a tiny own-surface decal bias.
     let arrow_color = hex_to_premul_rgba(0x8a8a8a, 1.0);
     let arrow_interval = 170.0 / render_scale;
-    let mut arrow_debug_appended = 0usize;
-    for (points, reverse) in &arrow_jobs {
-        for part in build_polyline_parts(points, clip_bounds, false, 0.0) {
+    let arrow_union_fields: HashMap<StrokeStyleKey, u16> = smoothed_tiers
+        .iter()
+        .enumerate()
+        .map(|(index, (style, _))| (StrokeStyleKey::from(*style), (index + 1) as u16))
+        .collect();
+    let arrow_face_slots: Vec<(usize, usize)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(event_index, (_, event))| match event {
+            RoadPaintEvent::Face(face_index) => {
+                Some((*face_index, event_slots[event_index]))
+            }
+            RoadPaintEvent::Stroke { .. } => None,
+        })
+        .collect();
+    let arrow_surface_depth_at =
+        |surface: ArrowSurfaceDepth, anchor: (f32, f32)| -> f32 {
+            match surface {
+                ArrowSurfaceDepth::Union(key) => {
+                    let Some(field) = arrow_union_fields.get(&key).copied() else {
+                        return ROAD_UNION_CENTER_DEPTH;
+                    };
+                    arrow_union_surface_param5(
+                        field,
+                        anchor,
+                        &faces,
+                        &arrow_face_slots,
+                        ladder_step,
+                    )
+                    .unwrap_or(ROAD_UNION_CENTER_DEPTH)
+                }
+                ArrowSurfaceDepth::Legacy { param5, sort_rank } => {
+                    // Centers interleaved below/within the road ladder live
+                    // in the casing pass. Only centers above the top union
+                    // tier move to the stroke pass (+0.02).
+                    param5 + if sort_rank > max_tier_rank { 0.02 } else { 0.0 }
+                }
+                ArrowSurfaceDepth::Unknown => ROAD_UNION_CENTER_DEPTH,
+            }
+        };
+    for job in &arrow_jobs {
+        let final_surface_field = match job.surface_depth {
+            ArrowSurfaceDepth::Union(key) => arrow_union_fields
+                .get(&key)
+                .and_then(|field| dz_fields.get(*field as usize))
+                .and_then(|field| field.as_ref()),
+            ArrowSurfaceDepth::Legacy { .. } | ArrowSurfaceDepth::Unknown => None,
+        };
+        for part in build_polyline_parts(&job.points, clip_bounds, false, 0.0) {
             let mut cumulative = Vec::<f32>::with_capacity(part.len());
             let mut total = 0.0_f32;
             cumulative.push(0.0);
@@ -4337,56 +4571,35 @@ fn build_tile_buffers_from_features(
                 let anchor = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
                 let mut dir_x = (b.0 - a.0) / seg_len;
                 let mut dir_y = (b.1 - a.1) / seg_len;
-                if *reverse {
+                if job.reverse {
                     dir_x = -dir_x;
                     dir_y = -dir_y;
                 }
-                // Arrows on a lifted deck ride it (direction-gated, so a
-                // road under a viaduct keeps its arrows on the ground).
-                let arrow_corridors: &[BridgeCorridor] =
-                    if bridge_dz_covered { &own_profiles } else { &bridge_corridors };
-                let lift_m = if arrow_corridors.is_empty() {
-                    0.0
+                // The baked profile on THIS source way is authoritative,
+                // including signed tunnel depths. Outside baked coverage,
+                // direction-gated heuristic corridors remain the fallback.
+                let fallback_corridors: &[BridgeCorridor] = if bridge_dz_covered {
+                    &[]
                 } else {
-                    corridor_deck_at_point_dir(
-                        anchor.0,
-                        anchor.1,
-                        (dir_x, dir_y),
-                        arrow_corridors,
-                    )
+                    &bridge_corridors
                 };
                 append_oneway_arrow(
                     anchor,
                     dir_x,
                     dir_y,
-                    lift_m,
+                    render_scale,
+                    &job.points,
+                    job.dz.as_deref(),
+                    final_surface_field,
+                    fallback_corridors,
+                    arrow_surface_depth_at(job.surface_depth, anchor),
                     arrow_color,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
                 );
-                arrow_debug_appended += 1;
                 distance += arrow_interval;
             }
-        }
-    }
-
-    // Arrow debug: enabled by the presence of /tmp/mp_arrow_debug (worker
-    // log! doesn't surface through the studio bridge, and env vars don't
-    // reach a studio-launched app).
-    if std::path::Path::new("/tmp/mp_arrow_debug").exists() {
-        use std::io::Write as _;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/mp_arrow_debug/log.txt")
-        {
-            let _ = writeln!(
-                file,
-                "z{} x{} y{} rz{} rs{:.1}: jobs {} appended {} interval {:.1}",
-                tile_key.z, tile_key.x, tile_key.y, render_zoom, render_scale,
-                arrow_jobs.len(), arrow_debug_appended, arrow_interval
-            );
         }
     }
 
@@ -4422,7 +4635,8 @@ fn build_tile_buffers_from_features(
 }
 
 /// Shape id telling the map vertex shader to treat (param1, param2) as a
-/// screen-px offset added AFTER the map transform (zoom-constant symbols).
+/// screen-px offset (zoom-constant symbols). Regular icons add it after the
+/// map transform; surface decals (param3 = 2) project it with the road plane.
 pub const ICON_SHAPE_ID: f32 = 20.0;
 
 /// Wall-LOD ring simplification: drop vertices closer than `min_edge` to
@@ -4464,47 +4678,181 @@ fn ring_centroid(ring: &[(f32, f32)]) -> (f32, f32) {
     (sum.0 / ring.len() as f32, sum.1 / ring.len() as f32)
 }
 
+fn paint_face_contains_point(face: &PaintFace, point: (f32, f32)) -> bool {
+    for tri in face.indices.chunks_exact(3) {
+        let Some(a) = face.verts.get(tri[0] as usize) else {
+            continue;
+        };
+        let Some(b) = face.verts.get(tri[1] as usize) else {
+            continue;
+        };
+        let Some(c) = face.verts.get(tri[2] as usize) else {
+            continue;
+        };
+        let edge = |p: &VVertex, q: &VVertex| {
+            (q.x - p.x) * (point.1 - p.y) - (q.y - p.y) * (point.0 - p.x)
+        };
+        let ab = edge(a, b);
+        let bc = edge(b, c);
+        let ca = edge(c, a);
+        const EPSILON: f32 = 1e-4;
+        if (ab >= -EPSILON && bc >= -EPSILON && ca >= -EPSILON)
+            || (ab <= EPSILON && bc <= EPSILON && ca <= EPSILON)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Recover the exact center-face slot beneath an arrow anchor. A union tier
+/// can dissolve into several independently slotted faces, so using the
+/// tier's global maximum would recreate an always-on-top arrow layer.
+fn arrow_union_surface_param5(
+    field: u16,
+    anchor: (f32, f32),
+    faces: &[PaintFace],
+    face_slots: &[(usize, usize)],
+    ladder_step: f32,
+) -> Option<f32> {
+    let mut exact: Option<f32> = None;
+    for &(face_index, slot) in face_slots {
+        let Some(face) = faces.get(face_index) else {
+            continue;
+        };
+        if face.phase != 2 || face.field != field {
+            continue;
+        }
+        let depth = 0.06 + slot as f32 * ladder_step;
+        if paint_face_contains_point(face, anchor) {
+            exact = Some(exact.map_or(depth, |old| old.max(depth)));
+        }
+    }
+    exact
+}
+
+fn deck_profile_at_point_dir(
+    point: (f32, f32),
+    dir: (f32, f32),
+    points: &[(f32, f32)],
+    dz: &[f32],
+) -> Option<f32> {
+    if points.len() < 2 || points.len() != dz.len() {
+        return None;
+    }
+    let dir_len = (dir.0 * dir.0 + dir.1 * dir.1).sqrt().max(1e-6);
+    let mut nearest: Option<(f32, f32)> = None;
+    for (index, segment) in points.windows(2).enumerate() {
+        let a = segment[0];
+        let b = segment[1];
+        let edge = (b.0 - a.0, b.1 - a.1);
+        let edge_len_sq = edge.0 * edge.0 + edge.1 * edge.1;
+        if edge_len_sq <= 1e-9
+            || (dir.0 * edge.0 + dir.1 * edge.1).abs()
+                < 0.82 * dir_len * edge_len_sq.sqrt()
+        {
+            continue;
+        }
+        let t = (((point.0 - a.0) * edge.0 + (point.1 - a.1) * edge.1)
+            / edge_len_sq)
+            .clamp(0.0, 1.0);
+        let nearest_point = (a.0 + edge.0 * t, a.1 + edge.1 * t);
+        let dx = point.0 - nearest_point.0;
+        let dy = point.1 - nearest_point.1;
+        let dist_sq = dx * dx + dy * dy;
+        if nearest.is_none_or(|(best_dist_sq, _)| dist_sq < best_dist_sq) {
+            nearest = Some((dist_sq, dz[index] * (1.0 - t) + dz[index + 1] * t));
+        }
+    }
+    nearest.map(|(_, deck)| deck)
+}
+
+const ONEWAY_ARROW_SHAPE: [(f32, f32); 7] = [
+    (-6.0, -0.9),
+    (0.5, -0.9),
+    (0.5, 0.9),
+    (-6.0, 0.9),
+    (0.5, -3.0),
+    (6.0, 0.0),
+    (0.5, 3.0),
+];
+const ONEWAY_ARROW_INDICES: [u32; 9] = [0, 1, 2, 0, 2, 3, 4, 5, 6];
+
 /// Screen-px arrow glyph (shaft + head, +x = travel direction) as
-/// zoom-constant anchor+offset vertices like the POI symbols.
+/// zoom-constant anchor+offset vertices. Each vertex samples the source
+/// road profile under its own map-plane position so a ramp arrow shares the
+/// road's slope rather than hovering on a quantized horizontal card.
+#[allow(clippy::too_many_arguments)]
 fn append_oneway_arrow(
     anchor: (f32, f32),
     dir_x: f32,
     dir_y: f32,
-    lift_m: f32,
+    render_scale: f32,
+    profile_points: &[(f32, f32)],
+    profile_dz: Option<&[f32]>,
+    final_surface_field: Option<&DzField>,
+    fallback_corridors: &[BridgeCorridor],
+    surface_param5: f32,
     color: [f32; 4],
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    const SHAPE: [(f32, f32); 7] = [
-        (-6.0, -0.9),
-        (0.5, -0.9),
-        (0.5, 0.9),
-        (-6.0, 0.9),
-        (0.5, -3.0),
-        (6.0, 0.0),
-        (0.5, 3.0),
-    ];
-    const INDICES: [u32; 9] = [0, 1, 2, 0, 2, 3, 4, 5, 6];
-    // Icon param4 encodes zoom_floor + lift-quanta*100 (0.25 m each). Ceil
-    // to the next quantum: arrows hug the deck from just above instead of
-    // floating up to a meter over it.
-    let lift_encoded = (lift_m.max(0.0) * 4.0).ceil() * 100.0;
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (x, y) in SHAPE {
+    for (x, y) in ONEWAY_ARROW_SHAPE {
         let ox = x * dir_x - y * dir_y;
         let oy = x * dir_y + y * dir_x;
-        // param3 = 1.0: the offset is map-aligned (road direction) and must
-        // rotate with the camera, unlike upright billboard POI symbols.
-        // Above every road surface tier and deck bump — arrows behave
-        // like 2D icons (always over the roads), which is the flat-mode
-        // semantics we mirror.
+        // Tile geometry is baked at render_scale while the shader keeps the
+        // glyph screen-constant through fractional zoom. Buckets are at
+        // most half a zoom apart; over this six-pixel glyph, the baker's
+        // grade limit bounds the profile discrepancy to only a few cm.
+        // Terrain itself is sampled at the exact live offset in the shader.
+        let sample = (
+            anchor.0 + ox / render_scale.max(1e-3),
+            anchor.1 + oy / render_scale.max(1e-3),
+        );
+        let lift_m = if let Some(field) = final_surface_field {
+            // Same post-junction-correction, post-smoothing field used by
+            // the emitted union face.
+            field.sample(sample.0, sample.1)
+        } else {
+            profile_dz
+                .and_then(|dz| {
+                    deck_profile_at_point_dir(
+                        sample,
+                        (dir_x, dir_y),
+                        profile_points,
+                        dz,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    corridor_deck_at_point_dir(
+                        sample.0,
+                        sample.1,
+                        (dir_x, dir_y),
+                        fallback_corridors,
+                    )
+                })
+        };
+        // param3 = 2.0 identifies a road-surface decal: the shader projects
+        // this offset through map rotation/tilt, terrain-samples at the
+        // offset point, and interprets param4 as exact signed meters.
+        // Match the road's own depth bump, then cancel the icon pass's
+        // global +0.04 so only ARROW_DECAL_DEPTH_EPSILON remains.
+        let deck_depth = if lift_m > 0.0 {
+            0.30 * (lift_m / 2.0).min(1.0)
+        } else {
+            0.0
+        };
+        let arrow_param5 = surface_param5 + deck_depth
+            - ARROW_ICON_PASS_DEPTH_OFFSET
+            + ARROW_DECAL_DEPTH_EPSILON;
         out_vertices.extend_from_slice(&[
             anchor.0, anchor.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0,
-            ICON_SHAPE_ID, 0.0, ox, oy, 1.0, lift_encoded, 0.85, 16.0, *zbias,
+            ICON_SHAPE_ID, 0.0, ox, oy, 2.0, lift_m, arrow_param5, 16.0, *zbias,
         ]);
     }
-    for index in INDICES {
+    for index in ONEWAY_ARROW_INDICES {
         out_indices.push(base + index);
     }
     *zbias += VECTOR_ZBIAS_STEP;
@@ -5012,9 +5360,9 @@ struct MvtLocalCollector {
     next_feature_id: u64,
     ways: Vec<TileWay>,
     points: Vec<((f32, f32), HashMap<String, String>)>,
-    /// Baked per-vertex deck heights keyed (source layer, feature index,
-    /// path index) — joined to paths during collection.
-    base_dz: HashMap<(String, u32, u32), Vec<f32>>,
+    /// Baked dense deck profiles keyed (source layer, feature index, path
+    /// index) — validated and substituted during collection.
+    base_dz: HashMap<(String, u32, u32), BaseDzProfile>,
 }
 
 impl MvtLocalCollector {
@@ -5048,34 +5396,52 @@ impl MvtSink for MvtLocalCollector {
         if points.len() < 2 {
             return;
         }
-        // Baked per-vertex dz joins on (source layer, feature idx, path
-        // idx) — the exact geometry this path decodes to, no matching.
+        // Baked dz joins on (source layer, feature idx, path idx). Its dense
+        // geometry replaces the sparse base path only when both raw
+        // endpoints still match, so a stale bake fails closed.
         let feature_index = tags.remove(MVT_INTERNAL_FIDX_KEY);
         let path_index = tags.remove(MVT_INTERNAL_PIDX_KEY);
-        let dz_raw: Option<&Vec<f32>> = if self.base_dz.is_empty() {
+        let scale = TILE_SIZE as f32 / extent.max(1) as f32;
+        let profile = if self.base_dz.is_empty() {
             None
         } else {
             match (tags.get("layer"), feature_index, path_index) {
                 (Some(layer), Some(fidx), Some(pidx)) => {
                     match (fidx.parse::<u32>(), pidx.parse::<u32>()) {
-                        (Ok(fidx), Ok(pidx)) => {
-                            let dz = self.base_dz.get(&(layer.clone(), fidx, pidx));
-                            // Length must match the raw path or the bake
-                            // enumeration diverged — refuse silently.
-                            dz.filter(|dz| dz.len() == points.len())
-                        }
+                        (Ok(fidx), Ok(pidx)) => self
+                            .base_dz
+                            .get(&(layer.clone(), fidx, pidx))
+                            .and_then(|profile| {
+                                base_dz_profile_projected_points(
+                                    profile, points, scale, close,
+                                )
+                                .map(|projected| BaseDzProfile {
+                                    points: projected,
+                                    decks: profile.decks.clone(),
+                                })
+                            }),
                         _ => None,
                     }
                 }
                 _ => None,
             }
         };
-        let scale = TILE_SIZE as f32 / extent.max(1) as f32;
-        let mut out = Vec::<(f32, f32)>::with_capacity(points.len() + 1);
+        let source: Vec<((f32, f32), Option<f32>)> = if let Some(profile) = profile {
+            profile
+                .points
+                .into_iter()
+                .zip(profile.decks.into_iter().map(Some))
+                .collect()
+        } else {
+            points
+                .iter()
+                .map(|&(x, y)| ((x as f32 * scale, y as f32 * scale), None))
+                .collect()
+        };
+        let mut out = Vec::<(f32, f32)>::with_capacity(source.len() + 1);
         let mut out_dz = Vec::<f32>::new();
         let mut last: Option<(f32, f32)> = None;
-        for (index, &(x, y)) in points.iter().enumerate() {
-            let point = (x as f32 * scale, y as f32 * scale);
+        for (point, deck) in source {
             if let Some(prev) = last {
                 let dx = point.0 - prev.0;
                 let dy = point.1 - prev.1;
@@ -5084,8 +5450,8 @@ impl MvtSink for MvtLocalCollector {
                 }
             }
             out.push(point);
-            if let Some(dz) = dz_raw {
-                out_dz.push(dz[index]);
+            if let Some(deck) = deck {
+                out_dz.push(deck);
             }
             last = Some(point);
         }
@@ -5103,7 +5469,8 @@ impl MvtSink for MvtLocalCollector {
                 return;
             }
         }
-        let dz = (dz_raw.is_some() && out_dz.iter().any(|&v| v > 0.05)).then_some(out_dz);
+        let dz = (!out_dz.is_empty() && out_dz.iter().any(|&v| v.abs() > 0.05))
+            .then_some(out_dz);
         self.ways.push(TileWay {
             points: out,
             tags,
@@ -5727,7 +6094,7 @@ pub fn raster_buffers(buffers: &TileBuffers, px_per_unit: f32) -> (usize, Vec<u8
                 ps[k] = [x * px_per_unit, y * px_per_unit];
                 rgba = [v[4], v[5], v[6], v[7]];
                 us[k] = v[2];
-                stroke_mult = v[8].min(1e6);
+                stroke_mult = v[8];
             }
             if rgba[3] <= 0.004 {
                 continue;
@@ -5750,6 +6117,17 @@ pub fn raster_buffers(buffers: &TileBuffers, px_per_unit: f32) -> (usize, Vec<u8
             if area.abs() < 1e-6 {
                 continue;
             }
+            let analytic_fringe_fw = if stroke_mult > 1.5e6 {
+                let du_dx = ((us[1] - us[0]) * (ps[2][1] - ps[0][1])
+                    - (us[2] - us[0]) * (ps[1][1] - ps[0][1]))
+                    / area;
+                let du_dy = ((ps[1][0] - ps[0][0]) * (us[2] - us[0])
+                    - (ps[2][0] - ps[0][0]) * (us[1] - us[0]))
+                    / area;
+                (du_dx * du_dx + du_dy * du_dy).sqrt().max(0.001)
+            } else {
+                0.0
+            };
             for py in min_y..=max_y {
                 for px in min_x..=max_x {
                     let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
@@ -5777,8 +6155,13 @@ pub fn raster_buffers(buffers: &TileBuffers, px_per_unit: f32) -> (usize, Vec<u8
                     let wsum = (ws[0] + ws[1] + ws[2]).max(1e-9);
                     let u_pix =
                         (ws[0] * us[0] + ws[1] * us[1] + ws[2] * us[2]) / wsum;
-                    let across = 1.0 - (u_pix * 2.0 - 1.0).abs();
-                    let alpha = rgba[3] * (across * stroke_mult).clamp(0.0, 1.0);
+                    let coverage = if stroke_mult > 1.5e6 {
+                        (0.5 + u_pix / analytic_fringe_fw).clamp(0.0, 1.0)
+                    } else {
+                        let across = 1.0 - (u_pix * 2.0 - 1.0).abs();
+                        (across * stroke_mult).clamp(0.0, 1.0)
+                    };
+                    let alpha = rgba[3] * coverage;
                     if alpha <= 0.004 {
                         continue;
                     }
@@ -5806,6 +6189,415 @@ pub fn write_ppm(path: &str, size: usize, image: &[u8]) {
 #[cfg(test)]
 mod bridge_probe_tests {
     use super::*;
+
+    #[test]
+    fn built_in_solid_road_colors_share_union_mesh_pipeline() {
+        let theme = probe_compiled_theme();
+        let zoom_mult = zoom_width_mult(18);
+        let ordinary = [
+            "motorway",
+            "trunk",
+            "primary",
+            "secondary",
+            "busway",
+            "tertiary",
+            "residential",
+            "unclassified",
+            "living_street",
+            "service",
+            "pedestrian",
+            // Exercises the compiled wildcard road rule too.
+            "other_ordinary_road",
+        ];
+
+        for highway in ordinary {
+            let tags = HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), highway.to_string()),
+            ]);
+            let mut style =
+                stroke_style_for_tags(&theme, &tags, 14, 18, zoom_mult, 1.0).unwrap();
+            assert!(
+                road_uses_union_mesh(true, &tags, false, &style),
+                "{highway} bypassed the solid-road union"
+            );
+
+            // Paint identity must not select a different renderer.
+            style.center.color ^= 0x00ff_ffff;
+            if let Some(casing) = style.casing.as_mut() {
+                casing.color ^= 0x005a_a55a;
+            }
+            assert!(
+                road_uses_union_mesh(true, &tags, false, &style),
+                "{highway} union eligibility depended on color"
+            );
+        }
+    }
+
+    #[test]
+    fn patterned_and_nonroad_strokes_stay_out_of_road_union() {
+        let theme = probe_compiled_theme();
+        let zoom_mult = zoom_width_mult(18);
+        let tags_for = |highway: &str| {
+            HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), highway.to_string()),
+            ])
+        };
+
+        let cycleway = tags_for("cycleway");
+        let cycleway_style =
+            stroke_style_for_tags(&theme, &cycleway, 14, 18, zoom_mult, 1.0).unwrap();
+        assert!(!road_uses_union_mesh(
+            true,
+            &cycleway,
+            false,
+            &cycleway_style
+        ));
+
+        let mut rail = tags_for("tram");
+        rail.insert("rail".to_string(), "true".to_string());
+        let rail_style =
+            stroke_style_for_tags(&theme, &rail, 14, 18, zoom_mult, 1.0).unwrap();
+        assert!(!road_uses_union_mesh(true, &rail, false, &rail_style));
+
+        let mut tunnel = tags_for("primary");
+        tunnel.insert("tunnel".to_string(), "true".to_string());
+        let tunnel_style =
+            stroke_style_for_tags(&theme, &tunnel, 14, 18, zoom_mult, 1.0).unwrap();
+        assert!(!road_uses_union_mesh(
+            true,
+            &tunnel,
+            false,
+            &tunnel_style
+        ));
+
+        let solid = tags_for("primary");
+        let solid_style =
+            stroke_style_for_tags(&theme, &solid, 14, 18, zoom_mult, 1.0).unwrap();
+        assert!(!road_uses_union_mesh(
+            false,
+            &solid,
+            false,
+            &solid_style
+        ));
+    }
+
+    #[test]
+    fn arrow_profile_sampling_is_signed_and_direction_gated() {
+        let points = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let dz = [-2.0, 3.0, 9.0];
+        let deck = deck_profile_at_point_dir((5.0, 0.2), (1.0, 0.0), &points, &dz)
+            .expect("horizontal source segment");
+        assert!((deck - 0.5).abs() < 1e-6);
+        let reverse = deck_profile_at_point_dir((5.0, 0.2), (-1.0, 0.0), &points, &dz)
+            .expect("reverse travel follows the same surface");
+        assert!((reverse - deck).abs() < 1e-6);
+    }
+
+    #[test]
+    fn union_arrow_uses_containing_face_slot_not_tier_maximum() {
+        let face = |min_x: f32, max_x: f32| PaintFace {
+            color: [1.0; 4],
+            param5: 0.0,
+            phase: 2,
+            rank: 500,
+            field: 7,
+            verts: vec![
+                VVertex {
+                    x: min_x,
+                    y: 0.0,
+                    ..Default::default()
+                },
+                VVertex {
+                    x: max_x,
+                    y: 0.0,
+                    ..Default::default()
+                },
+                VVertex {
+                    x: max_x,
+                    y: 10.0,
+                    ..Default::default()
+                },
+                VVertex {
+                    x: min_x,
+                    y: 10.0,
+                    ..Default::default()
+                },
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            fringe_verts: Vec::new(),
+            fringe_indices: Vec::new(),
+            level: 0,
+            skirt_verts: Vec::new(),
+            skirt_indices: Vec::new(),
+        };
+        let faces = [face(0.0, 10.0), face(20.0, 30.0)];
+        let slots = [(0, 2), (1, 9)];
+        let exact = arrow_union_surface_param5(7, (5.0, 5.0), &faces, &slots, 0.01)
+            .expect("containing face");
+        assert!((exact - 0.08).abs() < 1e-6);
+        assert!(
+            arrow_union_surface_param5(7, (15.0, 5.0), &faces, &slots, 0.01).is_none(),
+            "an anchor outside visible own faces must not inherit the tier-wide maximum"
+        );
+    }
+
+    #[test]
+    fn oneway_arrow_encodes_exact_per_vertex_surface_and_decal_depth() {
+        let points = [(0.0, 0.0), (20.0, 0.0)];
+        let dz = [0.0, 1.0];
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut zbias = 0.0;
+        let surface_param5 = 0.25;
+        append_oneway_arrow(
+            (10.0, 0.0),
+            1.0,
+            0.0,
+            1.0,
+            &points,
+            Some(&dz),
+            None,
+            &[],
+            surface_param5,
+            [0.5, 0.5, 0.5, 1.0],
+            &mut vertices,
+            &mut indices,
+            &mut zbias,
+        );
+        assert_eq!(indices, ONEWAY_ARROW_INDICES);
+        assert_eq!(vertices.len(), ONEWAY_ARROW_SHAPE.len() * VECTOR_FLOATS_PER_VERTEX);
+        for (vertex, &(x, _)) in vertices
+            .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+            .zip(ONEWAY_ARROW_SHAPE.iter())
+        {
+            let expected_lift = (10.0 + x) / 20.0;
+            assert_eq!(vertex[10], ICON_SHAPE_ID);
+            assert_eq!(vertex[14], 2.0);
+            assert!(
+                (vertex[15] - expected_lift).abs() < 1e-6,
+                "lift {} != {expected_lift}",
+                vertex[15]
+            );
+            let expected_depth = surface_param5
+                + 0.30 * (expected_lift / 2.0).min(1.0)
+                - ARROW_ICON_PASS_DEPTH_OFFSET
+                + ARROW_DECAL_DEPTH_EPSILON;
+            assert!(
+                (vertex[16] - expected_depth).abs() < 1e-6,
+                "depth {} != {expected_depth}",
+                vertex[16]
+            );
+            let total_arrow_depth = vertex[16] + ARROW_ICON_PASS_DEPTH_OFFSET;
+            let own_surface_depth =
+                surface_param5 + 0.30 * (expected_lift / 2.0).min(1.0);
+            assert!(
+                (total_arrow_depth - own_surface_depth - ARROW_DECAL_DEPTH_EPSILON).abs()
+                    < 1e-6,
+                "icon-pass compensation left a global depth lift"
+            );
+        }
+    }
+
+    fn test_mvt_varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn test_mvt_field_varint(field: u64, value: u64, out: &mut Vec<u8>) {
+        test_mvt_varint(field << 3, out);
+        test_mvt_varint(value, out);
+    }
+
+    fn test_mvt_field_bytes(field: u64, value: &[u8], out: &mut Vec<u8>) {
+        test_mvt_varint((field << 3) | 2, out);
+        test_mvt_varint(value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn test_base_dz_mvt(points: &[(i32, i32)], dz: &str) -> Vec<u8> {
+        let keys = ["L", "F", "P", "dz"];
+        let values = ["streets", "7", "2", dz];
+        let mut feature = Vec::new();
+        let mut tags = Vec::new();
+        for index in 0..keys.len() {
+            test_mvt_varint(index as u64, &mut tags);
+            test_mvt_varint(index as u64, &mut tags);
+        }
+        test_mvt_field_bytes(2, &tags, &mut feature);
+        test_mvt_field_varint(3, 2, &mut feature);
+        let mut geometry = Vec::new();
+        test_mvt_varint(9, &mut geometry);
+        let zigzag = |value: i32| ((value << 1) ^ (value >> 31)) as u64;
+        test_mvt_varint(zigzag(points[0].0), &mut geometry);
+        test_mvt_varint(zigzag(points[0].1), &mut geometry);
+        test_mvt_varint((((points.len() - 1) as u64) << 3) | 2, &mut geometry);
+        for pair in points.windows(2) {
+            test_mvt_varint(zigzag(pair[1].0 - pair[0].0), &mut geometry);
+            test_mvt_varint(zigzag(pair[1].1 - pair[0].1), &mut geometry);
+        }
+        test_mvt_field_bytes(4, &geometry, &mut feature);
+
+        let mut layer = Vec::new();
+        test_mvt_field_bytes(1, b"base_dz", &mut layer);
+        test_mvt_field_bytes(2, &feature, &mut layer);
+        for key in keys {
+            test_mvt_field_bytes(3, key.as_bytes(), &mut layer);
+        }
+        for value in values {
+            let mut message = Vec::new();
+            test_mvt_field_bytes(1, value.as_bytes(), &mut message);
+            test_mvt_field_bytes(4, &message, &mut layer);
+        }
+        test_mvt_field_varint(5, 4096, &mut layer);
+        test_mvt_field_varint(15, 2, &mut layer);
+        let mut tile = Vec::new();
+        test_mvt_field_bytes(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn base_dz_codec_keeps_dense_profile_geometry_aligned() {
+        let encoded =
+            test_base_dz_mvt(&[(-64, 0), (0, 8), (2048, 16), (4096, 0)], "-55,-31,0,55");
+        let mut profiles =
+            parse_base_dz_map(&encoded, TileKey { z: 14, x: 0, y: 0 }).unwrap();
+        let key = ("streets".to_string(), 7, 2);
+        let profile = profiles.remove(&key).unwrap();
+        assert_eq!(key, ("streets".to_string(), 7, 2));
+        assert_eq!(
+            profile.points,
+            [(-4.0, 0.0), (0.0, 0.5), (128.0, 1.0), (256.0, 0.0)]
+        );
+        assert_eq!(profile.decks, [-5.5, -3.1000001, 0.0, 5.5]);
+    }
+
+    #[test]
+    fn base_dz_codec_rejects_malformed_or_non_finite_decks() {
+        for dz in ["55,bad,0", "55,NaN,0"] {
+            let encoded = test_base_dz_mvt(&[(0, 0), (2048, 0), (4096, 0)], dz);
+            let profiles =
+                parse_base_dz_map(&encoded, TileKey { z: 14, x: 0, y: 0 }).unwrap();
+            assert!(profiles.is_empty(), "accepted malformed dz={dz}");
+        }
+    }
+
+    #[test]
+    fn collector_substitutes_valid_dense_base_dz_and_rejects_stale_endpoints() {
+        let key = ("streets".to_string(), 0, 0);
+        let profile = BaseDzProfile {
+            points: vec![(0.0, 0.0), (64.0, 0.0), (128.0, 0.0)],
+            decks: vec![5.5, 0.0, 5.5],
+        };
+        let tags = || {
+            HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                (MVT_INTERNAL_FIDX_KEY.to_string(), "0".to_string()),
+                (MVT_INTERNAL_PIDX_KEY.to_string(), "0".to_string()),
+            ])
+        };
+        let raw = [(0, 0), (2048, 0)];
+
+        let mut collector = MvtLocalCollector::new(1.0);
+        collector.base_dz.insert(key.clone(), profile.clone());
+        collector.add_path(TileKey { z: 14, x: 0, y: 0 }, 4096, &raw, tags(), false);
+        assert_eq!(collector.ways[0].points, profile.points);
+        assert_eq!(collector.ways[0].dz.as_deref(), Some(profile.decks.as_slice()));
+
+        let mut stale_endpoint = MvtLocalCollector::new(1.0);
+        stale_endpoint.base_dz.insert(
+            key.clone(),
+            BaseDzProfile {
+                points: vec![(0.0, 0.0), (64.0, 0.0), (120.0, 0.0)],
+                decks: vec![5.5, 0.0, 5.5],
+            },
+        );
+        stale_endpoint.add_path(
+            TileKey { z: 14, x: 0, y: 0 },
+            4096,
+            &raw,
+            tags(),
+            false,
+        );
+        assert_eq!(stale_endpoint.ways[0].points, [(0.0, 0.0), (128.0, 0.0)]);
+        assert!(stale_endpoint.ways[0].dz.is_none());
+
+        let bent_raw = [(0, 0), (2048, 256), (4096, 0)];
+        let mut stale_bend = MvtLocalCollector::new(1.0);
+        stale_bend.base_dz.insert(
+            key,
+            BaseDzProfile {
+                points: vec![(0.0, 0.0), (64.0, 0.0), (128.0, 0.0)],
+                decks: vec![5.5, 0.0, 5.5],
+            },
+        );
+        stale_bend.add_path(
+            TileKey { z: 14, x: 0, y: 0 },
+            4096,
+            &bent_raw,
+            tags(),
+            false,
+        );
+        assert_eq!(
+            stale_bend.ways[0].points,
+            [(0.0, 0.0), (128.0, 16.0), (256.0, 0.0)]
+        );
+        assert!(stale_bend.ways[0].dz.is_none());
+
+        let diagonal_raw = [(0, 0), (4096, 4096)];
+        let diagonal_profile = BaseDzProfile {
+            points: vec![
+                (0.0, 0.0),
+                (64.0, 64.04),
+                (128.0, 127.97),
+                (256.0, 256.0),
+            ],
+            decks: vec![5.5, 3.0, 1.0, 0.0],
+        };
+        let mut diagonal = MvtLocalCollector::new(1.0);
+        diagonal.base_dz.insert(
+            ("streets".to_string(), 0, 0),
+            diagonal_profile.clone(),
+        );
+        diagonal.add_path(
+            TileKey { z: 14, x: 0, y: 0 },
+            4096,
+            &diagonal_raw,
+            tags(),
+            false,
+        );
+        assert_eq!(
+            diagonal.ways[0].dz.as_deref(),
+            Some(diagonal_profile.decks.as_slice())
+        );
+        assert!(
+            diagonal.ways[0]
+                .points
+                .iter()
+                .all(|point| (point.0 - point.1).abs() < 1e-4),
+            "quantized dense knots were not snapped back to the raw line"
+        );
+
+        let closed_profile = BaseDzProfile {
+            points: vec![
+                (0.0, 0.0),
+                (256.0, 0.0),
+                (256.0, 256.0),
+                (0.0, 256.0),
+                (0.0, 0.0),
+            ],
+            decks: vec![5.5; 5],
+        };
+        let closed_raw = [(0, 0), (4096, 0), (4096, 4096), (0, 4096)];
+        let projected =
+            base_dz_profile_projected_points(&closed_profile, &closed_raw, 1.0 / 16.0, true)
+                .unwrap();
+        assert_eq!(projected.first(), projected.last());
+    }
 
     fn join_test_key(rank: i16, width: f32, color: u32) -> StrokeStyleKey {
         StrokeStyleKey {
@@ -6666,9 +7458,9 @@ mod bridge_probe_tests {
         let map = parse_base_dz_map(&raw2, key).unwrap();
         println!("base_dz map entries: {}", map.len());
         struct JoinProbe {
-            map: HashMap<(String, u32, u32), Vec<f32>>,
+            map: HashMap<(String, u32, u32), BaseDzProfile>,
             hit: usize,
-            len_mismatch: usize,
+            invalid_profile: usize,
             miss: usize,
             oneway: usize,
             oneway_values: Vec<String>,
@@ -6706,14 +7498,24 @@ mod bridge_probe_tests {
                     }
                 }
                 match self.map.get(&key) {
-                    Some(dz) if dz.len() == points.len() => self.hit += 1,
-                    Some(dz) => {
-                        self.len_mismatch += 1;
-                        if self.len_mismatch <= 5 {
+                    Some(profile)
+                        if base_dz_profile_projected_points(
+                            profile,
+                            points,
+                            TILE_SIZE as f32 / 4096.0,
+                            false,
+                        )
+                        .is_some() =>
+                    {
+                        self.hit += 1;
+                    }
+                    Some(profile) => {
+                        self.invalid_profile += 1;
+                        if self.invalid_profile <= 5 {
                             println!(
-                                "  len mismatch {:?}: dz {} vs points {}",
+                                "  invalid profile {:?}: profile {} vs raw {}",
                                 key,
-                                dz.len(),
+                                profile.points.len(),
                                 points.len()
                             );
                         }
@@ -6733,7 +7535,7 @@ mod bridge_probe_tests {
         let mut probe = JoinProbe {
             map,
             hit: 0,
-            len_mismatch: 0,
+            invalid_profile: 0,
             miss: 0,
             oneway: 0,
             oneway_values: Vec::new(),
@@ -6748,8 +7550,8 @@ mod bridge_probe_tests {
         let base_pbf = decode_vector_tile_payload(&base_raw).unwrap();
         parse_mvt_tile(&base_pbf, key, &mut probe).unwrap();
         println!(
-            "join: hit {} len_mismatch {} miss {} oneway {} values {:?}",
-            probe.hit, probe.len_mismatch, probe.miss, probe.oneway, probe.oneway_values
+            "join: hit {} invalid_profile {} miss {} oneway {} values {:?}",
+            probe.hit, probe.invalid_profile, probe.miss, probe.oneway, probe.oneway_values
         );
 
         // Oneway arrows: count map-aligned icon glyphs and their lifts.
@@ -6759,9 +7561,9 @@ mod bridge_probe_tests {
             let shape = chunk[10];
             let param3 = chunk[14];
             let param4 = chunk[15];
-            if (shape - 20.0).abs() < 0.1 && (param3 - 1.0).abs() < 0.1 {
+            if (shape - 20.0).abs() < 0.1 && (param3 - 2.0).abs() < 0.1 {
                 arrows += 1;
-                if param4 >= 100.0 {
+                if param4.abs() > 0.05 {
                     lifted_arrows += 1;
                 }
             }
