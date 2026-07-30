@@ -1009,10 +1009,6 @@ pub struct MapView {
     /// re-bakes tiles (extrusions only exist in the 3D bake).
     #[rust]
     baked_3d_mode: bool,
-    /// Road union-mesh generator toggle (debug A/B vs the legacy per-way
-    /// stroke path; "@roads 0/1" in the search box).
-    #[rust(true)]
-    union_roads: bool,
     #[rust]
     compiled_style_light: CompiledMapTheme,
     #[rust]
@@ -2427,7 +2423,6 @@ impl MapView {
             // Extruded buildings only bake while the camera is tilted; flat
             // mode keeps the classic 2D building style with outlines.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
-            let union_roads = self.union_roads;
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
                 let detail_path = (!detail_path.is_empty()).then_some(detail_path);
@@ -2441,7 +2436,6 @@ impl MapView {
                     &theme_style,
                     bucket,
                     buildings_3d,
-                    union_roads,
                 );
             match result {
                 Ok((loaded, failed)) => {
@@ -4281,18 +4275,6 @@ impl MapView {
     /// Crossing between flat and tilted rebakes tiles: flat mode uses the
     /// true 2D building style (base fills + outlines), tilted mode the
     /// extruded detail buildings.
-    /// The live compiled theme, for headless A/B harnesses.
-    pub fn compiled_style(&self) -> CompiledMapTheme {
-        self.active_style().clone()
-    }
-
-    pub fn set_union_roads(&mut self, cx: &mut Cx, enabled: bool) {
-        if self.union_roads != enabled {
-            self.union_roads = enabled;
-            self.restyle_tiles_keep_stale(cx);
-        }
-    }
-
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
         let tilt = tilt_deg.clamp(0.0, TILT_MAX_DEG);
         if (tilt - self.tilt).abs() < 1e-9 {
@@ -4965,17 +4947,6 @@ impl MapViewRef {
             inner.set_tilt(cx, tilt_deg);
         }
     }
-    pub fn compiled_style(&self) -> Option<CompiledMapTheme> {
-        self.borrow().map(|view| view.compiled_style())
-    }
-
-    pub fn set_union_roads(&self, cx: &mut Cx, enabled: bool) {
-        if let Some(mut view) = self.borrow_mut() {
-            view.set_union_roads(cx, enabled);
-        }
-    }
-
-
     pub fn tilt(&self) -> f64 {
         self.borrow().map(|inner| inner.tilt()).unwrap_or(0.0)
     }

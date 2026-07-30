@@ -4,7 +4,6 @@ use crate::makepad_draw::vector::{
     tessellate_path_stroke_ends_anchored, LineCap, LineJoin, Tessellator, VVertex, VectorPath,
     VectorRenderParams, VECTOR_ZBIAS_STEP,
 };
-use crate::makepad_draw::vector::Winding;
 use crate::makepad_draw::*;
 
 /// Curve flattening tolerance for map tile geometry, in tile-local units.
@@ -951,272 +950,14 @@ pub struct RoadRibbon<'a> {
     pub end_disc: bool,
 }
 
-/// The road geometry generator: every ribbon of a paint tier becomes
-/// per-segment rectangle contours (square caps so joins are covered by
-/// overlap) in ONE path, and the sweep tessellator's non-zero winding rule
-/// merges them into a single seamless surface mesh — junctions, gores and
-/// parallel carriageways unify by construction instead of by draw order,
-/// so flat and tilted views are geometrically identical. Deck heights ride
-/// per contour vertex (projected through clipping) into params[4].
-
-
-/// Insert a vertex at every transversal crossing between (and within) the
-/// rings, lerping the per-vertex deck heights. The downstream sweep
-/// tessellator handles crossings only when they coincide with vertices.
-fn precross_rings(rings: &mut Vec<(Vec<(f32, f32)>, Vec<f32>)>) {
-    const CELL: f32 = 8.0;
-    // Everything on a 1/64-unit grid: canonical intersection points can
-    // only be shared if the endpoints they lerp from are themselves exact.
-    for (points, heights) in rings.iter_mut() {
-        let mut write = 0usize;
-        for read in 0..points.len() {
-            let snapped = (
-                (points[read].0 * 64.0).round() / 64.0,
-                (points[read].1 * 64.0).round() / 64.0,
-            );
-            if write > 0 && points[write - 1] == snapped {
-                continue;
-            }
-            points[write] = snapped;
-            heights[write] = heights[read];
-            write += 1;
-        }
-        points.truncate(write);
-        heights.truncate(write);
-    }
-    rings.retain(|(points, _)| points.len() >= 3);
-    // Global segment table: (ring, seg index) with bbox grid.
-    struct Seg {
-        ring: usize,
-        index: usize,
-        a: (f32, f32),
-        b: (f32, f32),
-    }
-    let mut segs: Vec<Seg> = Vec::new();
-    let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> =
-        std::collections::HashMap::new();
-    for (ring_index, (points, _)) in rings.iter().enumerate() {
-        for index in 0..points.len() {
-            let a = points[index];
-            let b = points[(index + 1) % points.len()];
-            let seg_id = segs.len();
-            segs.push(Seg { ring: ring_index, index, a, b });
-            let (min_x, max_x) = (a.0.min(b.0), a.0.max(b.0));
-            let (min_y, max_y) = (a.1.min(b.1), a.1.max(b.1));
-            let mut cy = (min_y / CELL).floor() as i32;
-            while cy <= (max_y / CELL).floor() as i32 {
-                let mut cx = (min_x / CELL).floor() as i32;
-                while cx <= (max_x / CELL).floor() as i32 {
-                    grid.entry((cx, cy)).or_default().push(seg_id);
-                    cx += 1;
-                }
-                cy += 1;
-            }
-        }
-    }
-    // Collect splits per segment. THE CANONICAL-POINT INVARIANT: one
-    // crossing = ONE point, bit-identical in both rings — the sweep merges
-    // events by exact equality, and a pair of lerp results that differ by
-    // float noise leaves the crossing unresolved (wedges / dropouts).
-    let mut splits: Vec<Vec<(f32, (f32, f32))>> = vec![Vec::new(); segs.len()];
-    let snap = |v: f32| (v * 64.0).round() / 64.0;
-    for bucket in grid.values() {
-        for i in 0..bucket.len() {
-            for j in i + 1..bucket.len() {
-                let (s1, s2) = (&segs[bucket[i]], &segs[bucket[j]]);
-                if s1.ring == s2.ring
-                    && ((s1.index as i32 - s2.index as i32).abs() <= 1
-                        || (s1.index == 0 || s2.index == 0)
-                            && s1.index.max(s2.index)
-                                == rings[s1.ring].0.len().saturating_sub(1))
-                {
-                    continue;
-                }
-                let d1 = (s1.b.0 - s1.a.0, s1.b.1 - s1.a.1);
-                let d2 = (s2.b.0 - s2.a.0, s2.b.1 - s2.a.1);
-                let denom = d1.0 * d2.1 - d1.1 * d2.0;
-                if denom.abs() < 1e-9 {
-                    continue;
-                }
-                let dx = s2.a.0 - s1.a.0;
-                let dy = s2.a.1 - s1.a.1;
-                let t = (dx * d2.1 - dy * d2.0) / denom;
-                let u = (dx * d1.1 - dy * d1.0) / denom;
-                if !(-0.0001..=1.0001).contains(&t) || !(-0.0001..=1.0001).contains(&u) {
-                    continue;
-                }
-                // One snapped point, shared verbatim by both segments.
-                let point = (
-                    snap(s1.a.0 + d1.0 * t.clamp(0.0, 1.0)),
-                    snap(s1.a.1 + d1.1 * t.clamp(0.0, 1.0)),
-                );
-                splits[bucket[i]].push((t.clamp(0.0, 1.0), point));
-                splits[bucket[j]].push((u.clamp(0.0, 1.0), point));
-            }
-        }
-    }
-    // Rebuild rings with inserted vertices (per ring, per segment, sorted t).
-    let mut per_ring: Vec<Vec<(usize, f32, (f32, f32))>> = vec![Vec::new(); rings.len()];
-    for (seg_id, seg) in segs.iter().enumerate() {
-        for &(t, point) in &splits[seg_id] {
-            per_ring[seg.ring].push((seg.index, t, point));
-        }
-    }
-    for (ring_index, inserts) in per_ring.iter_mut().enumerate() {
-        if inserts.is_empty() {
-            continue;
-        }
-        inserts.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
-        let (points, heights) = &rings[ring_index];
-        let count = points.len();
-        let mut new_points = Vec::with_capacity(count + inserts.len());
-        let mut new_heights = Vec::with_capacity(count + inserts.len());
-        let mut cursor = 0usize;
-        for index in 0..count {
-            new_points.push(points[index]);
-            new_heights.push(heights[index]);
-            let a = points[index];
-            let b = points[(index + 1) % count];
-            let ha = heights[index];
-            let hb = heights[(index + 1) % count];
-            while cursor < inserts.len() && inserts[cursor].0 == index {
-                let (t, point) = (inserts[cursor].1, inserts[cursor].2);
-                cursor += 1;
-                // Skip points that snapped onto an existing vertex.
-                if new_points
-                    .last()
-                    .is_some_and(|&last: &(f32, f32)| last == point)
-                    || point == (b.0, b.1)
-                {
-                    continue;
-                }
-                new_points.push(point);
-                new_heights.push(ha + (hb - ha) * t);
-            }
-        }
-        rings[ring_index] = (new_points, new_heights);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_ribbon_contour(
-    center_in: &[(f32, f32)],
-    center_dz_in: &[f32],
-    half_width: f32,
-    clip: GeoBounds,
-    rings_out: &mut Vec<(Vec<(f32, f32)>, Vec<f32>)>,
-    ring: &mut Vec<(f32, f32)>,
-    ring_dz: &mut Vec<f32>,
-) {
-    if center_in.len() < 2 {
-        return;
-    }
-    let mut center = center_in.to_vec();
-    let center_dz = center_dz_in;
-    {
-        let (ax, ay) = center[0];
-        let (bx, by) = center[1];
-        let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt().max(1e-3);
-        center[0] = (
-            ax - (bx - ax) / len * half_width,
-            ay - (by - ay) / len * half_width,
-        );
-        let last = center.len() - 1;
-        let (ax, ay) = center[last - 1];
-        let (bx, by) = center[last];
-        let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt().max(1e-3);
-        center[last] = (
-            bx + (bx - ax) / len * half_width,
-            by + (by - ay) / len * half_width,
-        );
-    }
-    let count = center.len();
-    ring.clear();
-    ring_dz.clear();
-    for side in 0..2 {
-        for step in 0..count {
-            let index = if side == 0 { step } else { count - 1 - step };
-            let previous = center[index.saturating_sub(1)];
-            let next = center[(index + 1).min(count - 1)];
-            let (ex, ey) = (next.0 - previous.0, next.1 - previous.1);
-            let len = (ex * ex + ey * ey).sqrt().max(1e-3);
-            let (mut nx, mut ny) = (-ey / len, ex / len);
-            let (p0x, p0y) = center[index];
-            let (ax, ay) = (p0x - previous.0, p0y - previous.1);
-            let (bx, by) = (next.0 - p0x, next.1 - p0y);
-            let al = (ax * ax + ay * ay).sqrt().max(1e-3);
-            let bl = (bx * bx + by * by).sqrt().max(1e-3);
-            let cos_half =
-                (((ax / al + bx / bl).powi(2) + (ay / al + by / bl).powi(2)).sqrt() * 0.5)
-                    .max(0.5);
-            let scale = (1.0 / cos_half).min(2.0);
-            nx *= half_width * scale;
-            ny *= half_width * scale;
-            let point = if side == 0 {
-                (p0x + nx, p0y + ny)
-            } else {
-                (p0x - nx, p0y - ny)
-            };
-            ring.push(point);
-            ring_dz.push(center_dz[index]);
-        }
-    }
-    if ring.len() < 3 {
-        return;
-    }
-    let mut area = 0.0f32;
-    for i in 0..ring.len() {
-        let j = (i + 1) % ring.len();
-        area += ring[i].0 * ring[j].1 - ring[j].0 * ring[i].1;
-    }
-    if area < 0.0 {
-        ring.reverse();
-        ring_dz.reverse();
-    }
-    let clipped = clip_ring_to_rect(ring, clip);
-    if clipped.len() < 3 {
-        return;
-    }
-    let clip_changed = clipped.len() != ring.len();
-    let mut out_dz: Vec<f32> = Vec::with_capacity(clipped.len());
-    if clip_changed {
-        for &(px, py) in &clipped {
-            let mut best = f32::MAX;
-            let mut best_dz = 0.0f32;
-            for i in 0..ring.len() {
-                let j = (i + 1) % ring.len();
-                let (ax, ay) = ring[i];
-                let (bx, by) = ring[j];
-                let (ex, ey) = (bx - ax, by - ay);
-                let el2 = (ex * ex + ey * ey).max(1e-6);
-                let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
-                let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
-                let d2 = qx * qx + qy * qy;
-                if d2 < best {
-                    best = d2;
-                    best_dz = ring_dz[i] * (1.0 - t) + ring_dz[j] * t;
-                }
-            }
-            out_dz.push(best_dz);
-        }
-    } else {
-        out_dz.extend_from_slice(ring_dz);
-    }
-    rings_out.push((clipped, out_dz));
-}
-
 /// Ribbon outline rings for a set of ways (plus verbatim closed rings),
 /// with per-vertex deck heights. Crossings between rings are left as-is —
 /// the boolean overlay downstream resolves them robustly.
 pub fn road_ribbon_rings(
     ribbons: &[RoadRibbon],
     half_width: f32,
-    aa: f32,
     clip: GeoBounds,
 ) -> Vec<(Vec<(f32, f32)>, Vec<f32>)> {
-    // Geometry-first: hard face edge at half_width, the legacy 50%-alpha
-    // point. (AA fringe returns as a later pass; `aa` reserved for it.)
-    let _ = aa;
     let half_width = half_width.max(0.05);
     let mut rings_out: Vec<(Vec<(f32, f32)>, Vec<f32>)> = Vec::new();
     let mut ring: Vec<(f32, f32)> = Vec::new();
@@ -1287,7 +1028,7 @@ pub fn road_ribbon_rings(
             continue;
         }
         // Segment rectangles + vertex discs: the union absorbs the overlap
-        // into round joins and round dead-end caps (the legacy look), with
+        // into round joins and round dead-end caps (the cartographic look), with
         // no miter mathematics to go wrong at sharp bends.
         for seg in 0..center.len() - 1 {
             let (ax, ay) = center[seg];
@@ -1417,306 +1158,6 @@ fn push_clipped_ring(
         out_dz.push(best_dz);
     }
     rings_out.push((clipped, out_dz));
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn append_road_union(
-    ribbons: &[RoadRibbon],
-    half_width: f32,
-    clip: GeoBounds,
-    tess: &mut Tessellator,
-    tess_verts: &mut Vec<VVertex>,
-    tess_indices: &mut Vec<u32>,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    color: [f32; 4],
-    param5: f32,
-    zbias: &mut f32,
-    aa: f32,
-    tolerance: f32,
-) {
-    if half_width <= 0.0 {
-        return;
-    }
-    // The legacy stroke's 50%-alpha edge sits at half_width exactly; a hard
-    // outline at half_width plus an outward fringe would read one aa/2
-    // wider. Inset the body so body + fringe centers its ramp on the same
-    // visual edge.
-    let half_width = (half_width - aa * 0.5).max(0.05);
-    let mut path = VectorPath::new();
-    let mut contour_dz: Vec<f32> = Vec::new();
-    let mut contours = 0usize;
-    let mut ring: Vec<(f32, f32)> = Vec::new();
-    let mut ring_dz: Vec<f32> = Vec::new();
-    let mut rings_out: Vec<(Vec<(f32, f32)>, Vec<f32>)> = Vec::new();
-    for ribbon in ribbons {
-        if ribbon.closed_ring {
-            ring.clear();
-            ring_dz.clear();
-            for (index, &point) in ribbon.points.iter().enumerate() {
-                if ring.last().is_some_and(|&(lx, ly): &(f32, f32)| {
-                    (lx - point.0).abs() < 1e-3 && (ly - point.1).abs() < 1e-3
-                }) {
-                    continue;
-                }
-                ring.push(point);
-                ring_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
-            }
-            // Drop an explicit closing duplicate.
-            if ring.len() >= 2 && ring.first() == ring.last() {
-                ring.pop();
-                ring_dz.pop();
-            }
-            if ring.len() < 3 {
-                continue;
-            }
-            let mut area = 0.0f32;
-            for i in 0..ring.len() {
-                let j = (i + 1) % ring.len();
-                area += ring[i].0 * ring[j].1 - ring[j].0 * ring[i].1;
-            }
-            if area < 0.0 {
-                ring.reverse();
-                ring_dz.reverse();
-            }
-            let clipped = clip_ring_to_rect(&ring, clip);
-            if clipped.len() < 3 {
-                continue;
-            }
-            if clipped.len() == ring.len() {
-                rings_out.push((clipped, ring_dz.clone()));
-            } else {
-                let mut out_dz = Vec::with_capacity(clipped.len());
-                for &(px, py) in &clipped {
-                    let mut best = f32::MAX;
-                    let mut best_dz = 0.0f32;
-                    for i in 0..ring.len() {
-                        let j = (i + 1) % ring.len();
-                        let (ax, ay) = ring[i];
-                        let (bx, by) = ring[j];
-                        let (ex, ey) = (bx - ax, by - ay);
-                        let el2 = (ex * ex + ey * ey).max(1e-6);
-                        let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
-                        let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
-                        let d2 = qx * qx + qy * qy;
-                        if d2 < best {
-                            best = d2;
-                            best_dz = ring_dz[i] * (1.0 - t) + ring_dz[j] * t;
-                        }
-                    }
-                    out_dz.push(best_dz);
-                }
-                rings_out.push((clipped, out_dz));
-            }
-            continue;
-        }
-        // Dedup + square-cap extend the centerline, carrying dz.
-        let mut center: Vec<(f32, f32)> = Vec::with_capacity(ribbon.points.len() + 2);
-        let mut center_dz: Vec<f32> = Vec::with_capacity(ribbon.points.len() + 2);
-        for (index, &point) in ribbon.points.iter().enumerate() {
-            if center.last().is_some_and(|&(lx, ly): &(f32, f32)| {
-                (lx - point.0).abs() < 1e-3 && (ly - point.1).abs() < 1e-3
-            }) {
-                continue;
-            }
-            center.push(point);
-            center_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
-        }
-        if center.len() < 2 {
-            continue;
-        }
-        // A way doubling back on itself folds the ribbon outline into a
-        // bowtie whose negative lobe bites the union — split into runs at
-        // sharp reversals and ribbon each run separately.
-        let mut split_at: Vec<usize> = Vec::new();
-        for index in 1..center.len() - 1 {
-            let (ax, ay) = center[index - 1];
-            let (bx, by) = center[index];
-            let (cx2, cy2) = center[index + 1];
-            let (ux, uy) = (bx - ax, by - ay);
-            let (vx, vy) = (cx2 - bx, cy2 - by);
-            let ul = (ux * ux + uy * uy).sqrt().max(1e-3);
-            let vl = (vx * vx + vy * vy).sqrt().max(1e-3);
-            if (ux * vx + uy * vy) / (ul * vl) < -0.17 {
-                split_at.push(index);
-            }
-        }
-        if !split_at.is_empty() {
-            let mut runs: Vec<(Vec<(f32, f32)>, Vec<f32>)> = Vec::new();
-            let mut begin = 0usize;
-            for &cut in split_at.iter().chain(std::iter::once(&(center.len() - 1))) {
-                if cut > begin {
-                    runs.push((
-                        center[begin..=cut].to_vec(),
-                        center_dz[begin..=cut].to_vec(),
-                    ));
-                }
-                begin = cut;
-            }
-            // Re-enter each run through the same path by queueing them as
-            // pseudo-ribbons: emit inline below via recursion-free loop.
-            for (run_points, run_dz) in &runs {
-                emit_ribbon_contour(
-                    run_points,
-                    run_dz,
-                    half_width,
-                    clip,
-                    &mut rings_out,
-                    &mut ring,
-                    &mut ring_dz,
-                );
-            }
-            continue;
-        }
-        emit_ribbon_contour(
-            &center,
-            &center_dz,
-            half_width,
-            clip,
-            &mut rings_out,
-            &mut ring,
-            &mut ring_dz,
-        );
-    }
-    // The sweep tessellator only splits edges at event VERTICES — it never
-    // computes transversal crossings, so overlapping ribbon outlines (every
-    // junction) misclassify unless every crossing IS a vertex. Pre-cross
-    // all rings on the CPU, inserting intersection vertices with lerped dz.
-    precross_rings(&mut rings_out);
-    for (ring_points, ring_heights) in &rings_out {
-        if ring_points.len() < 3 {
-            continue;
-        }
-        path.move_to(ring_points[0].0, ring_points[0].1);
-        path.winding(Winding::CCW);
-        for point in ring_points.iter().skip(1) {
-            path.line_to(point.0, point.1);
-        }
-        path.close();
-        contour_dz.extend_from_slice(ring_heights);
-        contours += 1;
-    }
-    if contours == 0 {
-        return;
-    }
-    // aa = 0 through the tessellator: its fringe would also run along
-    // contour edges INTERIOR to the union (both sides filled) and read as
-    // seams. The outer-boundary fringe is rebuilt below from unpaired
-    // triangle edges instead.
-    tessellate_path_fill(
-        &mut path,
-        tess,
-        tess_verts,
-        tess_indices,
-        LineJoin::Miter,
-        4.0,
-        0.0,
-        false,
-        tolerance,
-    );
-    if tess_verts.is_empty() || tess_indices.is_empty() {
-        return;
-    }
-    let dz_aligned = tess_verts.len() == contour_dz.len();
-    if !dz_aligned {
-        contour_dz.clear();
-        contour_dz.resize(tess_verts.len(), 0.0);
-    }
-    // Outer-only AA fringe: a boundary edge of the union is a triangle
-    // edge that appears exactly once; skirt it with a 1-aa quad fading
-    // out, normal oriented away from the owning triangle.
-    let mut fringe_verts: Vec<VVertex> = Vec::new();
-    let mut fringe_indices: Vec<u32> = Vec::new();
-    let mut fringe_dz: Vec<f32> = Vec::new();
-    if aa > 0.0 {
-        let mut edge_owner: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
-        for tri in tess_indices.chunks_exact(3) {
-            for (a, b, c) in [
-                (tri[0], tri[1], tri[2]),
-                (tri[1], tri[2], tri[0]),
-                (tri[2], tri[0], tri[1]),
-            ] {
-                let key = (a.min(b), a.max(b));
-                edge_owner
-                    .entry(key)
-                    .and_modify(|entry| entry.1 += 1)
-                    .or_insert((c, 1));
-            }
-        }
-        for (&(a, b), &(c, count)) in &edge_owner {
-            if count != 1 {
-                continue;
-            }
-            let pa = tess_verts[a as usize];
-            let pb = tess_verts[b as usize];
-            let pc = tess_verts[c as usize];
-            let (ex, ey) = (pb.x - pa.x, pb.y - pa.y);
-            let len = (ex * ex + ey * ey).sqrt().max(1e-4);
-            let (mut nx, mut ny) = (-ey / len * aa, ex / len * aa);
-            if nx * (pc.x - pa.x) + ny * (pc.y - pa.y) > 0.0 {
-                nx = -nx;
-                ny = -ny;
-            }
-            let base = fringe_verts.len() as u32;
-            let fringe_vertex = |x: f32, y: f32, u: f32| VVertex {
-                x,
-                y,
-                u,
-                v: 1.0,
-                stroke_dist: 0.0,
-                clip_radius: aa * 2.0,
-            };
-            // u encodes across-coverage: 0.5 (full) at the body edge, 0 at
-            // the outer rim; drawn with stroke_mult 1 so the shader's
-            // across*mult model yields a true aa ramp.
-            fringe_verts.push(fringe_vertex(pa.x, pa.y, 0.5));
-            fringe_verts.push(fringe_vertex(pb.x, pb.y, 0.5));
-            fringe_verts.push(fringe_vertex(pa.x + nx, pa.y + ny, 0.0));
-            fringe_verts.push(fringe_vertex(pb.x + nx, pb.y + ny, 0.0));
-            let dz_a = if dz_aligned { contour_dz[a as usize] } else { 0.0 };
-            let dz_b = if dz_aligned { contour_dz[b as usize] } else { 0.0 };
-            fringe_dz.extend_from_slice(&[dz_a, dz_b, dz_a, dz_b]);
-            fringe_indices
-                .extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
-        }
-    }
-    // dz rides only if the tessellator kept our emit order 1:1.
-    let deck: Option<&[f32]> =
-        (dz_aligned && contour_dz.iter().any(|&v| v > 0.05)).then_some(&contour_dz[..]);
-    crate::makepad_draw::vector::append_tessellated_geometry_decked(
-        tess_verts,
-        tess_indices,
-        out_vertices,
-        out_indices,
-        VectorRenderParams {
-            color,
-            stroke_mult: 1e6,
-            shape_id: 0.0,
-            params: [0.0, 0.0, 0.0, 0.0, 0.0, param5],
-            zbias: *zbias,
-        },
-        deck,
-    );
-    *zbias += VECTOR_ZBIAS_STEP;
-    if !fringe_indices.is_empty() {
-        let fringe_deck: Option<&[f32]> =
-            (dz_aligned && fringe_dz.iter().any(|&v| v > 0.05)).then_some(&fringe_dz[..]);
-        crate::makepad_draw::vector::append_tessellated_geometry_decked(
-            &fringe_verts,
-            &fringe_indices,
-            out_vertices,
-            out_indices,
-            VectorRenderParams {
-                color,
-                stroke_mult: 1.0,
-                shape_id: 0.0,
-                params: [0.0, 0.0, 0.0, 0.0, 0.0, param5],
-                zbias: *zbias,
-            },
-            fringe_deck,
-        );
-        *zbias += VECTOR_ZBIAS_STEP;
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2078,17 +1519,12 @@ mod tests {
 
 // --- Painter-order overlay unifier (no-overdraw road triangulation) ---
 
-/// One paint group, bottom-to-top: everything that would have been painted
-/// with this color at this position in the 2D painter sequence.
-/// Sentinel for a paint group with no dz field (grounded tier).
-pub const DZ_FIELD_NONE: u16 = u16::MAX;
-
 /// Road paint groups are clipped to a small padded tile rectangle before
 /// boolean overlay. Its border is an implementation cut, not a physical
 /// road edge, so an elevated ribbon must not grow a fascia across it.
-///
-/// Keep this aligned with the road-union clip padding in `map::tile`.
-const ROAD_PAINT_CLIP_PADDING: f32 = 3.0;
+/// This stays below the MVT generator's approximately four-unit buffer so
+/// the renderer owns the detectable cut and can suppress artificial caps.
+pub const ROAD_PAINT_CLIP_PADDING: f32 = 3.0;
 
 #[derive(Clone, Copy)]
 pub struct RoadSkirtJoint {
@@ -2102,12 +1538,11 @@ pub struct RoadSkirtJoint {
 
 pub struct PaintGroup {
     pub color: [f32; 4],
-    pub param5: f32,
     /// Paint phase: 0 = plaza fills, 1 = casings, 2 = centers. Carried onto
-    /// the output face so legacy strokes can interleave at their true rank.
+    /// the output face so patterned strokes can interleave at their true rank.
     pub phase: u8,
     pub rank: i16,
-    /// Index of this group's DzField (DZ_FIELD_NONE = grounded).
+    /// Index into the caller's per-tier elevation-field table.
     pub field: u16,
     /// Flush tier-transition joints (way ends butt-joined to a same-class
     /// way in another tier — bridge/approach splits): skirt walls and caps
@@ -2134,7 +1569,6 @@ pub const ANALYTIC_FRINGE_CARRIER_PX: f32 = 4.0;
 /// A triangulated visible region of one paint group.
 pub struct PaintFace {
     pub color: [f32; 4],
-    pub param5: f32,
     pub phase: u8,
     pub rank: i16,
     pub field: u16,
@@ -2409,12 +1843,10 @@ pub fn overlay_paint_groups(
     // (premultiplied double-blend darkens), so their visible set is strict.
     #[derive(Clone, Copy, PartialEq)]
     enum RingSet {
-        All,
         VisibleGrounded,
         CoverGrounded,
         Lifted,
         Sunk,
-        CoverSunk,
         Surface,
     }
     let to_paths = |group: &PaintGroup, set: RingSet| -> Vec<Vec<[f64; 2]>> {
@@ -2427,7 +1859,6 @@ pub fn overlay_paint_groups(
                     return false;
                 }
                 match set {
-                    RingSet::All => true,
                     RingSet::VisibleGrounded => {
                         if translucent {
                             *max_dz < LIFT_COVER_M && *min_dz > -LIFT_COVER_M
@@ -2441,7 +1872,6 @@ pub fn overlay_paint_groups(
                     }
                     RingSet::Lifted => *max_dz >= LIFT_COVER_M,
                     RingSet::Sunk => *min_dz <= -LIFT_COVER_M,
-                    RingSet::CoverSunk => *max_dz <= -LIFT_COVER_M,
                     RingSet::Surface => *max_dz > -LIFT_COVER_M,
                 }
             })
@@ -2479,7 +1909,6 @@ pub fn overlay_paint_groups(
         lifted_paths: Vec<Vec<[f64; 2]>>,
         sunk_shapes: Shapes,
         sunk_paths: Vec<Vec<[f64; 2]>>,
-        cover_sunk_paths: Vec<Vec<[f64; 2]>>,
         bbox: (f64, f64, f64, f64),
     }
     // Hang forensics: with /tmp/mp_boolean_debug present, every boolean's
@@ -2582,15 +2011,6 @@ pub fn overlay_paint_groups(
             } else {
                 (Vec::new(), Vec::new())
             };
-            let cover_sunk_paths = if has_sunk {
-                if has_straddler {
-                    dissolve(to_paths(group, RingSet::CoverSunk)).1
-                } else {
-                    sunk_paths.clone()
-                }
-            } else {
-                Vec::new()
-            };
             let mut bbox = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for path in grounded_paths
                 .iter()
@@ -2614,7 +2034,6 @@ pub fn overlay_paint_groups(
                 lifted_paths,
                 sunk_shapes,
                 sunk_paths,
-                cover_sunk_paths,
                 bbox,
             }
         })
@@ -2836,7 +2255,6 @@ pub fn overlay_paint_groups(
             compute_clip_radii(&mut skirt_verts, &skirt_indices);
             faces.push(PaintFace {
                 color: group.color,
-                param5: group.param5,
                 phase: group.phase,
                 rank: group.rank,
                 field: group.field,
@@ -3012,7 +2430,7 @@ impl DzField {
 /// longer than `max_edge` that touches the field's active area is split at
 /// its midpoint — shared midpoints via the edge map, so neighboring
 /// triangles always agree and no T-junctions appear. Runs to a fixpoint so
-/// deck ramps interpolate as smoothly as the legacy dense strokes did.
+/// deck ramps interpolate as smoothly as densely sampled stroke meshes.
 pub fn subdivide_face_mesh(
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
@@ -3444,17 +2862,16 @@ mod overlay_tests {
                     continue;
                 }
                 let ribbon = [RoadRibbon { points, dz: None, closed_ring: false, start_disc: true, end_disc: true }];
-                for (ring, _) in road_ribbon_rings(&ribbon, width * 0.5, 0.0, clip) {
+                for (ring, _) in road_ribbon_rings(&ribbon, width * 0.5, clip) {
                     rings.push((ring, 0.0, 0.0));
                 }
             }
             let _ = pass;
             groups.push(PaintGroup {
                 color,
-                param5: 0.0,
                 phase: 0,
                 rank: 0,
-                field: DZ_FIELD_NONE,
+                field: 0,
                 skirt_joints: Vec::new(),
                 half_width: 1.0,
                 rings,
