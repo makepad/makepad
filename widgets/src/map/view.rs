@@ -78,6 +78,15 @@ script_mod! {
             self.fb0 = depth_clip(self.v_world_clip, color, self.depth_clip)
         }
 
+        // Textured materials fade to the plain 2D carto look as the camera
+        // returns to top-down: tilt drives the blend, so dragging the view
+        // flat IS the fade animation (flat green, flat blue, ring trees).
+        mat_fade: fn() -> float {
+            let ctp = clamp(self.tilt_params.x, 0.0, 1.0)
+            let stp = sqrt(max(1.0 - ctp * ctp, 0.0))
+            return smoothstep(0.04, 0.32, stp)
+        }
+
         // Cheap value noise for water/foliage (no LUT texture: a handful
         // of ALU on minority-material pixels only).
         mat_hash: fn(p: vec2) -> float {
@@ -149,7 +158,9 @@ script_mod! {
                 let ct = clamp(self.tilt_params.x, 0.0, 1.0)
                 let st = sqrt(max(1.0 - ct * ct, 0.0))
                 let closeness = clamp(1.6 - k, 0.0, 1.0)
-                let drama = (0.22 + 0.78 * st) * (0.35 + 0.65 * closeness)
+                // mat_fade: at top-down the surface returns fully to the
+                // flat 2D water color.
+                let drama = (0.22 + 0.78 * st) * (0.35 + 0.65 * closeness) * self.mat_fade()
                 // High-frequency octaves fade before they go sub-pixel.
                 let cut1 = clamp(2.0 - k * 1.2, 0.0, 1.0)
                 let cut2 = clamp(2.0 - k * 1.6, 0.0, 1.0)
@@ -248,18 +259,23 @@ script_mod! {
                 }
                 return vec4(color.xyz + self.sun_color * spec * color.w, color.w)
             }
-            // 4: tree canopy — leaf-clump noise + sun-side rim (T5).
+            // 4: tree canopy — leaf-clump noise + sun-side rim (T5),
+            // fading to the plain Gouraud ball at top-down.
             if mat > 3.5 && mat < 4.5 {
                 if self.shiny_gates.z < 0.5 {
                     return color
                 }
+                let fade = self.mat_fade()
+                if fade < 0.01 {
+                    return color
+                }
                 let n = self.mat_noise(self.v_world * 0.45)
-                let clump = 0.88 + 0.24 * n
+                let clump = 1.0 + (0.24 * n - 0.12) * fade
                 let rim = max(
                     dot(normalize(vec3(self.v_param1, self.v_param2, 0.4)), self.sun_dir),
                     0.0
                 )
-                let add = self.sun_color * rim * rim * 0.06 * color.w
+                let add = self.sun_color * rim * rim * 0.06 * fade * color.w
                 return vec4(color.xyz * clump + add, color.w)
             }
             // 5: green areas — grass (T5). Grass at map scale is FINE,
@@ -271,6 +287,10 @@ script_mod! {
             // keep gaining detail instead of magnifying blobs.
             if mat > 4.5 && mat < 5.5 {
                 if self.shiny_gates.z < 0.5 {
+                    return color
+                }
+                let fade = self.mat_fade()
+                if fade < 0.01 {
                     return color
                 }
                 let k = self.shiny_gates2.z
@@ -308,6 +328,8 @@ script_mod! {
                         f = f + speck * 0.45 * gate1
                     }
                 }
+                // Top-down returns to flat carto green.
+                f = mix(1.0, f, fade)
                 return vec4(color.xyz * f, color.w)
             }
             return color
@@ -566,41 +588,52 @@ script_mod! {
                 return vec4(f, f, f, 1.0)
             }
             // 32: woods/cemeteries. Legacy: staggered open tree rings.
-            // With foliage_fx on: plump shaded canopy blobs — each cell a
-            // jittered disc lit from the sun side with a dark under-rim,
-            // so the area reads as a little forest of round shrubs.
+            // With foliage_fx on and the camera tilted in close: plump
+            // shaded canopy blobs, anchored map-PHYSICALLY across the full
+            // zoom range (the wide uv factor) so they scale with the map
+            // instead of sliding at constant screen size. Far out or
+            // top-down the pattern blends back to the classic rings.
             if self.v_shape_id > 31.5 && self.v_shape_id < 32.5 {
+                let legacy_uv = vec2(self.v_param1, self.v_param2)
+                let lrow = floor(legacy_uv.y / 12.0)
+                let lsx = legacy_uv.x + fract(lrow * 0.5) * 12.0
+                let lcell = fract(vec2(lsx, legacy_uv.y) / 12.0) - vec2(0.5, 0.5)
+                let ld = length(lcell) * 12.0
+                let ring = 1.0 - smoothstep(0.45, 0.85, abs(ld - 2.4))
+                let legacy_f = 1.0 - 0.15 * ring
+                var shrub_amount = 0.0
                 if self.shiny_gates.z > 0.5 {
-                    let uv = vec2(self.v_param1, self.v_param2) * max(self.shiny_gates2.z, 0.35)
-                    let period = 11.0
-                    let row = floor(uv.y / period)
-                    let sx = uv.x + fract(row * 0.5) * period
-                    let cell_id = vec2(floor(sx / period), row)
-                    let jitter = vec2(
-                        self.mat_hash(cell_id) - 0.5,
-                        self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
-                    ) * 3.5
-                    let cell = (fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)) * period - jitter
-                    let r = 3.4 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 1.4
-                    let d = length(cell)
-                    let body = 1.0 - smoothstep(r - 0.8, r + 0.4, d)
-                    // Sun-side highlight / shade-side dark inside the blob.
-                    let lit = clamp(0.5 - dot(cell, vec2(0.16, 0.20)) / r, 0.0, 1.0)
-                    // Ground between shrubs stays slightly dark.
-                    var f = 0.90
-                    if body > 0.01 {
-                        f = mix(0.90, 0.82 + 0.34 * lit, body)
-                    }
-                    return vec4(f, f, f, 1.0)
+                    let w = self.shiny_gates2.w
+                    shrub_amount = clamp((3.2 - w) / 1.2, 0.0, 1.0) * self.mat_fade()
                 }
-                let uv = vec2(self.v_param1, self.v_param2)
+                if shrub_amount < 0.01 {
+                    return vec4(legacy_f, legacy_f, legacy_f, 1.0)
+                }
+                let w = clamp(self.shiny_gates2.w, 0.25, 4.0)
+                let uv = vec2(self.v_param1, self.v_param2) * w
+                // Same lattice period as the legacy rings, so at the
+                // blend zoom the shrubs sit where the circles sat and at
+                // matching size — closer in they grow map-physically.
                 let period = 12.0
                 let row = floor(uv.y / period)
                 let sx = uv.x + fract(row * 0.5) * period
-                let cell = fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)
-                let d = length(cell) * period
-                let ring = 1.0 - smoothstep(0.45, 0.85, abs(d - 2.4))
-                let f = 1.0 - 0.15 * ring
+                let cell_id = vec2(floor(sx / period), row)
+                let jitter = vec2(
+                    self.mat_hash(cell_id) - 0.5,
+                    self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
+                ) * 3.5
+                let cell = (fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)) * period - jitter
+                let r = 3.1 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 1.3
+                let d = length(cell)
+                let body = 1.0 - smoothstep(r - 0.8, r + 0.4, d)
+                // Sun-side highlight / shade-side dark inside the blob.
+                let lit = clamp(0.5 - dot(cell, vec2(0.16, 0.20)) / r, 0.0, 1.0)
+                // Ground between shrubs stays slightly dark.
+                var f = 0.90
+                if body > 0.01 {
+                    f = mix(0.90, 0.82 + 0.34 * lit, body)
+                }
+                f = mix(legacy_f, f, shrub_amount)
                 return vec4(f, f, f, 1.0)
             }
             return vec4(1.0, 1.0, 1.0, 1.0)
@@ -1160,6 +1193,9 @@ impl DrawMapVector {
         // past z20 (the shaders gate their finest octaves on this value);
         // the upper bound keeps far-out zooms from going sub-pixel.
         let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.03, 1.25);
+        // Wide-range variant for patterns that stay physical further out
+        // (shrub fills) and want to know the true zoom for LOD blending.
+        let mat_uv_wide = (16.0 - icon_zoom).exp2().clamp(0.03, 8.0);
         self.draw_super.draw_vars.set_uniform(
             cx.cx,
             live_id!(shiny_gates2),
@@ -1167,7 +1203,7 @@ impl DrawMapVector {
                 if shiny.dynamic_sun { 1.0 } else { 0.0 },
                 shiny.sun.shadow_alpha,
                 mat_uv_scale,
-                0.0,
+                mat_uv_wide,
             ],
         );
         let sun = &shiny.sun;
