@@ -1514,6 +1514,8 @@ pub struct RoadSkirtJoint {
 
 pub struct PaintGroup {
     pub color: [f32; 4],
+    /// shiny.md Circuit City: emissive strength carried onto faces.
+    pub emissive: f32,
     /// Paint phase: 0 = plaza fills, 1 = casings, 2 = centers. Carried onto
     /// the output face so patterned strokes can interleave at their true rank.
     pub phase: u8,
@@ -1548,6 +1550,8 @@ pub const ANALYTIC_FRINGE_CARRIER_PX: f32 = 4.0;
 /// A triangulated visible region of one paint group.
 pub struct PaintFace {
     pub color: [f32; 4],
+    /// Emissive strength inherited from the group (Circuit City glow).
+    pub emissive: f32,
     pub phase: u8,
     pub rank: i16,
     pub depth_micro: f32,
@@ -2235,6 +2239,7 @@ pub fn overlay_paint_groups(
             compute_clip_radii(&mut skirt_verts, &skirt_indices);
             faces.push(PaintFace {
                 color: group.color,
+                emissive: group.emissive,
                 phase: group.phase,
                 rank: group.rank,
                 depth_micro: group.depth_micro,
@@ -2945,6 +2950,7 @@ mod overlay_tests {
             let _ = pass;
             groups.push(PaintGroup {
                 color,
+                emissive: 0.0,
                 phase: 0,
                 rank: 0,
                 depth_micro: 0.0,
