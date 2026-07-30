@@ -95,6 +95,26 @@ script_mod! {
             return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
         }
 
+        // Value noise WITH analytic slope (x = value, yz = d/dxy): the
+        // water FBM sums slopes directly — fractal wave normals without
+        // finite-difference re-taps.
+        mat_noise_d: fn(p: vec2) -> vec3 {
+            let i = floor(p)
+            let f = fract(p)
+            let u = f * f * (vec2(3.0, 3.0) - 2.0 * f)
+            let du = 6.0 * f * (vec2(1.0, 1.0) - f)
+            let a = self.mat_hash(i)
+            let b = self.mat_hash(i + vec2(1.0, 0.0))
+            let c = self.mat_hash(i + vec2(0.0, 1.0))
+            let d = self.mat_hash(i + vec2(1.0, 1.0))
+            let k = a - b - c + d
+            return vec3(
+                mix(mix(a, b, u.x), mix(c, d, u.x), u.y),
+                (b - a + k * u.y) * du.x,
+                (c - a + k * u.x) * du.y
+            )
+        }
+
         // shiny.md material dispatch on param3 of shape-0 geometry. Every
         // branch sits behind a uniform gate; all-gates-zero returns the
         // input color untouched (screenshot-diffs to zero).
@@ -111,21 +131,69 @@ script_mod! {
             if mat > 5.5 && mat < 6.5 {
                 return color * self.shiny_gates2.y
             }
-            // 3: water — animated micro-noise sheen + sun glint (T4).
+            // 3: water surface (T4), shadertoy-style: a fractal slope FBM
+            // (value noise with ANALYTIC derivatives, rotated octaves,
+            // each octave shimmering in place on its own drift phase — no
+            // sliding-sheet look, no directional seams), chopped into
+            // crests and lit with a Blinn-Phong sun glint + fresnel sky.
+            // Camera is part of the material: cos(tilt) (tilt_params.x)
+            // and the physical zoom factor scale the drama, so top-down /
+            // far views stay the flat 2D theme color.
             if mat > 2.5 && mat < 3.5 {
                 if self.shiny_gates.x < 0.5 {
                     return color
                 }
-                let uv = vec2(self.v_param1, self.v_param2)
+                let k = self.shiny_gates2.z
+                let uv = vec2(self.v_param1, self.v_param2) * k
                 let t = self.draw_pass.time
-                let n1 = self.mat_noise(uv * 0.11 + vec2(t * 9.0, t * 4.0))
-                let n2 = self.mat_noise(uv * 0.31 - vec2(t * 5.0, t * 7.5))
-                let n = n1 * 0.62 + n2 * 0.38
-                // Broad sheen: gentle brightness swell + a sky tint push.
-                let shade = 0.94 + 0.12 * n
-                // Tight sparkle where the combined noise crests.
-                let glint = pow(clamp((n - 0.68) / 0.32, 0.0, 1.0), 4.0)
-                let add = (self.sun_sky * 0.05 + self.sun_color * glint * 0.30) * color.w
+                let ct = clamp(self.tilt_params.x, 0.0, 1.0)
+                let st = sqrt(max(1.0 - ct * ct, 0.0))
+                let closeness = clamp(1.6 - k, 0.0, 1.0)
+                let drama = (0.22 + 0.78 * st) * (0.35 + 0.65 * closeness)
+                // High-frequency octaves fade before they go sub-pixel.
+                let cut1 = clamp(2.0 - k * 1.2, 0.0, 1.0)
+                let cut2 = clamp(2.0 - k * 1.6, 0.0, 1.0)
+                var slope = vec2(0.0, 0.0)
+                var pp = uv * 0.16
+                var nd = self.mat_noise_d(pp + vec2(t * 0.10, t * 0.07))
+                slope = slope + nd.yz * 0.16
+                pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(4.7, 9.2)
+                nd = self.mat_noise_d(pp + vec2(0.0 - t * 0.16, t * 0.12))
+                slope = slope + nd.yz * 0.20
+                pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(8.1, 2.6)
+                nd = self.mat_noise_d(pp + vec2(t * 0.23, 0.0 - t * 0.19))
+                slope = slope + nd.yz * 0.26 * cut1
+                pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(1.9, 6.3)
+                nd = self.mat_noise_d(pp + vec2(0.0 - t * 0.31, 0.0 - t * 0.26))
+                slope = slope + nd.yz * 0.32 * cut2
+                // Chop: steepen the crests so the glint breaks into the
+                // irregular sparkle real water has.
+                slope = slope * (1.0 + 1.4 * length(slope))
+                // Static broad tone patch so big water is not uniform.
+                let patch = self.mat_noise(uv * 0.02)
+                let n = normalize(vec3(0.0 - slope.x, 0.0 - slope.y, 1.0))
+                // Heading rotation into screen space (sun stays
+                // geo-anchored); the 2.5D view vector tilts with the
+                // camera so grazing angles stretch and brighten the glint.
+                let rc = self.view_rot.x
+                let rs = self.view_rot.y
+                let ns = vec3(n.x * rc - n.y * rs, n.x * rs + n.y * rc, n.z)
+                let sd = vec3(
+                    self.sun_dir.x * rc - self.sun_dir.y * rs,
+                    self.sun_dir.x * rs + self.sun_dir.y * rc,
+                    self.sun_dir.z
+                )
+                let view = normalize(vec3(0.0, st * 0.8, max(ct, 0.30)))
+                let h = normalize(sd + view)
+                let ndh = max(dot(ns, h), 0.0)
+                // The sharp glint belongs to the tilted, grazing view —
+                // straight overhead keeps only a whisper of it.
+                let spec = (pow(ndh, 90.0) * 1.1 + pow(ndh, 16.0) * 0.20)
+                    * (0.18 + 0.82 * st)
+                let fres = 0.05 + 0.45 * pow(1.0 - clamp(dot(ns, view), 0.0, 1.0), 3.0)
+                let diffuse = 0.90 + 0.13 * clamp(dot(ns, sd), 0.0, 1.0) + 0.05 * patch
+                let shade = mix(1.0, diffuse, drama)
+                let add = (self.sun_sky * fres * 0.35 + self.sun_color * spec) * drama * color.w
                 return vec4(color.xyz * shade + add, color.w)
             }
             // 1/2: building wall/roof specular sheen (T4b). Normals are
@@ -179,14 +247,35 @@ script_mod! {
                 let add = self.sun_color * rim * rim * 0.06 * color.w
                 return vec4(color.xyz * clump + add, color.w)
             }
-            // 5: green areas — low-frequency two-tone patchiness (T5).
+            // 5: green areas — wavy grass (T5): patch tones + fine
+            // anisotropic blade noise whose domain sways with a slow
+            // traveling wave, so meadows read as grass moving in wind.
+            // Map-physical anchoring like water.
             if mat > 4.5 && mat < 5.5 {
                 if self.shiny_gates.z < 0.5 {
                     return color
                 }
-                let uv = vec2(self.v_param1, self.v_param2)
-                let n = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
-                let f = 0.93 + 0.12 * n
+                let uv = vec2(self.v_param1, self.v_param2) * self.shiny_gates2.z
+                let t = self.draw_pass.time
+                let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
+                // Blade detail only matters when zoomed in (small uv
+                // scale); fade it out so far views keep calm patch tones.
+                let detail = clamp(1.3 - self.shiny_gates2.z, 0.0, 1.0)
+                var f = 0.92 + 0.13 * patch
+                if detail > 0.01 {
+                    let sway = sin(uv.x * 0.11 + uv.y * 0.07 + t * 1.1)
+                        + 0.5 * sin(uv.y * 0.19 - t * 0.7)
+                    let blades = self.mat_noise(vec2(uv.x * 0.7, (uv.y + sway * 1.4) * 0.45))
+                    f = f + (blades - 0.5) * 0.10 * detail
+                    // Sparse pale speckles: daisies in the lawn.
+                    let cell = floor(uv * 0.35)
+                    let h = self.mat_hash(cell)
+                    if h > 0.986 {
+                        let fpos = fract(uv * 0.35) - vec2(0.5, 0.5)
+                        let speck = 1.0 - smoothstep(0.05, 0.16, length(fpos))
+                        f = f + speck * 0.5 * detail
+                    }
+                }
                 return vec4(color.xyz * f, color.w)
             }
             return color
@@ -444,8 +533,34 @@ script_mod! {
                 let f = 1.0 - 0.12 * line
                 return vec4(f, f, f, 1.0)
             }
-            // 32: staggered open circles (woods, cemeteries — tree rings).
+            // 32: woods/cemeteries. Legacy: staggered open tree rings.
+            // With foliage_fx on: plump shaded canopy blobs — each cell a
+            // jittered disc lit from the sun side with a dark under-rim,
+            // so the area reads as a little forest of round shrubs.
             if self.v_shape_id > 31.5 && self.v_shape_id < 32.5 {
+                if self.shiny_gates.z > 0.5 {
+                    let uv = vec2(self.v_param1, self.v_param2) * max(self.shiny_gates2.z, 0.35)
+                    let period = 11.0
+                    let row = floor(uv.y / period)
+                    let sx = uv.x + fract(row * 0.5) * period
+                    let cell_id = vec2(floor(sx / period), row)
+                    let jitter = vec2(
+                        self.mat_hash(cell_id) - 0.5,
+                        self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
+                    ) * 3.5
+                    let cell = (fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)) * period - jitter
+                    let r = 3.4 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 1.4
+                    let d = length(cell)
+                    let body = 1.0 - smoothstep(r - 0.8, r + 0.4, d)
+                    // Sun-side highlight / shade-side dark inside the blob.
+                    let lit = clamp(0.5 - dot(cell, vec2(0.16, 0.20)) / r, 0.0, 1.0)
+                    // Ground between shrubs stays slightly dark.
+                    var f = 0.90
+                    if body > 0.01 {
+                        f = mix(0.90, 0.82 + 0.34 * lit, body)
+                    }
+                    return vec4(f, f, f, 1.0)
+                }
                 let uv = vec2(self.v_param1, self.v_param2)
                 let period = 12.0
                 let row = floor(uv.y / period)
@@ -1007,13 +1122,18 @@ impl DrawMapVector {
                 if shiny.route_glow { 1.0 } else { 0.0 },
             ],
         );
+        // Water/green noise anchors physically to the map: scale the
+        // baked view-px UV by exp2(16 - view_zoom) so ripple size tracks
+        // meters, not screen pixels. Clamped so far-out zooms don't push
+        // the finest octave sub-pixel (shimmer).
+        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.12, 1.25);
         self.draw_super.draw_vars.set_uniform(
             cx.cx,
             live_id!(shiny_gates2),
             &[
                 if shiny.dynamic_sun { 1.0 } else { 0.0 },
                 shiny.sun.shadow_alpha,
-                0.0,
+                mat_uv_scale,
                 0.0,
             ],
         );
@@ -1356,6 +1476,13 @@ pub struct MapView {
     last_tap_count: u32,
     #[rust]
     pending_viewport_changed: bool,
+    /// shiny.md: gentle idle heartbeat so time-driven materials (water
+    /// flow, grass sway) animate without interaction. Only runs while an
+    /// animated material is on and the view is close enough to show it.
+    #[rust]
+    shiny_anim_timer: Timer,
+    #[rust]
+    shiny_anim_on: bool,
 }
 
 impl ScriptHook for MapView {
@@ -1411,6 +1538,22 @@ impl Widget for MapView {
 
         if self.wind_timer.is_event(event).is_some() && self.wind_field.is_some() {
             self.tick_wind();
+            self.redraw(cx);
+        }
+        // Animated shiny materials: keep a modest heartbeat while they can
+        // actually show (close zoom, feature on); stop it otherwise.
+        {
+            let shiny = &self.active_style().shiny;
+            let want = (shiny.water_fx || shiny.foliage_fx) && self.render_bucket() >= 14;
+            if want != self.shiny_anim_on {
+                self.shiny_anim_on = want;
+                cx.stop_timer(self.shiny_anim_timer);
+                if want {
+                    self.shiny_anim_timer = cx.start_interval(1.0 / 20.0);
+                }
+            }
+        }
+        if self.shiny_anim_timer.is_event(event).is_some() {
             self.redraw(cx);
         }
         if self.rain_timer.is_event(event).is_some() && !self.rain_frames.is_empty() {
