@@ -140,6 +140,18 @@ script_mod! {
             if mat > 5.5 && mat < 6.5 {
                 return color * self.shiny_gates2.y
             }
+            // 7: emissive road (Circuit City) — push the theme's line
+            // color toward white-hot by the baked class strength; the
+            // dark ground around it does the rest of the glow illusion.
+            if mat > 6.5 && mat < 7.5 {
+                if self.shiny_gates.w < 0.5 {
+                    return color
+                }
+                let e = clamp(self.v_param1, 0.0, 1.0)
+                let wcap = vec3(color.w, color.w, color.w)
+                let boosted = color.xyz * (1.0 + 1.5 * e) + wcap * (0.20 * e)
+                return vec4(min(boosted, wcap), color.w)
+            }
             // 3: water surface (T4), shadertoy-style: a fractal slope FBM
             // (value noise with ANALYTIC derivatives, rotated octaves,
             // each octave shimmering in place on its own drift phase — no
@@ -846,6 +858,8 @@ script_mod! {
 
             MapFillRule{group: "building" color: #x383d46}
             MapFillRule{group: "building_outline" color: #x262a31}
+            MapFillRule{group: "tree_canopy" color: #x2c4a33}
+            MapFillRule{group: "tree_trunk" color: #x3a2f24}
             MapFillRule{group: "street_area" color: #x3a3f4a}
             MapFillRule{group: "bridge_area" color: #x3a3f47}
             MapFillRule{group: "water" color: #x204f74}
@@ -891,6 +905,77 @@ script_mod! {
             MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #x204f74 center_width: 1.4 min_zoom: 13.0}
             MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #x204f74 center_width: 1.2 min_zoom: 13.0}
             MapRailRule{sort_rank: 710 center_color: #x8a919d center_width: 1.0}
+        }
+        // "Circuit City" (shiny.md showcase): the sci-fi night board —
+        // near-black ground, matte charcoal volumes with a hard specular
+        // sheen, dark reflective water, and every road an emissive amber
+        // filament, class-weighted in width and brightness.
+        style_circuit: MapThemeStyle{
+            background: #x05070a
+            status_text: #x76879a
+            label: #x8fa3ba
+            label_halo: #x05070a
+
+            shiny: MapShinyStyle{
+                bake_ao: true
+                bake_shadows: true
+                terrain_shadows: true
+                water_fx: true
+                foliage_fx: true
+                building_sheen: true
+                gloss: 1.1
+                route_glow: true
+                shadow_alpha: 0.35
+            }
+
+            MapFillRule{group: "building" color: #x15181d}
+            MapFillRule{group: "building_outline" color: #x05070a}
+            MapFillRule{group: "tree_canopy" color: #x18332a}
+            MapFillRule{group: "tree_trunk" color: #x1c1712}
+            MapFillRule{group: "street_area" color: #x0c0f13}
+            MapFillRule{group: "bridge_area" color: #x111419}
+            MapFillRule{group: "water" color: #x071019}
+            MapFillRule{group: "landuse" value: "residential" color: #x090c10}
+            MapFillRule{group: "landuse" value: "commercial" color: #x0b0d12}
+            MapFillRule{group: "landuse" value: "retail" color: #x0b0d12}
+            MapFillRule{group: "landuse" value: "industrial" color: #x0a0c10}
+            MapFillRule{group: "landuse" value: "forest" color: #x0a1410}
+            MapFillRule{group: "landuse" value: "grass" color: #x0c1712}
+            MapFillRule{group: "landuse" value: "meadow" color: #x0c1712}
+            MapFillRule{group: "landuse" value: "farmland" color: #x0b100d}
+            MapFillRule{group: "landuse" value: "railway" color: #x0c0e14}
+            MapFillRule{group: "landuse" value: "cemetery" color: #x0b1410}
+            MapFillRule{group: "landuse" value: "sand" color: #x14120c}
+            MapFillRule{group: "landuse" value: "*" color: #x0a0d11}
+            MapFillRule{group: "leisure" value: "park" color: #x0c1a12}
+            MapFillRule{group: "leisure" value: "garden" color: #x0c1712}
+            MapFillRule{group: "leisure" value: "golf_course" color: #x0c1712}
+            MapFillRule{group: "leisure" value: "pitch" color: #x0e1f16}
+            MapFillRule{group: "leisure" value: "*" color: #x0c1a12}
+
+            MapRoadRule{kind: "motorway" sort_rank: 700 center_color: #xffc76a center_width: 6.0 emissive: 1.0}
+            MapRoadRule{kind: "trunk" sort_rank: 640 center_color: #xffb95c center_width: 6.0 emissive: 0.95}
+            MapRoadRule{kind: "primary" sort_rank: 560 center_color: #xffab4e center_width: 5.0 emissive: 0.85}
+            MapRoadRule{kind: "secondary" sort_rank: 470 center_color: #xf29a45 center_width: 5.0 emissive: 0.7}
+            MapRoadRule{kind: "busway" sort_rank: 470 center_color: #xf29a45 center_width: 5.0 emissive: 0.7}
+            MapRoadRule{kind: "tertiary" sort_rank: 390 center_color: #xd9883f center_width: 5.0 emissive: 0.6}
+            MapRoadRule{kind: "residential" sort_rank: 310 center_color: #xa8763f center_width: 3.0 emissive: 0.45}
+            MapRoadRule{kind: "unclassified" sort_rank: 310 center_color: #xa8763f center_width: 3.0 emissive: 0.45}
+            MapRoadRule{kind: "living_street" sort_rank: 310 center_color: #x976b3b center_width: 3.0 emissive: 0.4}
+            MapRoadRule{kind: "service" sort_rank: 240 center_color: #x6e5433 center_width: 2.0 emissive: 0.3}
+            MapRoadRule{kind: "pedestrian" sort_rank: 240 center_color: #x4c4f58 center_width: 3.0 emissive: 0.15}
+            MapRoadRule{kind: "cycleway" sort_rank: 160 center_color: #x2e6f96 center_width: 0.9 center_shape_id: 10.0 min_zoom: 14.0 emissive: 0.35}
+            MapRoadRule{kind: "footway" sort_rank: 160 center_color: #x474f58 center_width: 0.9 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "path" sort_rank: 160 center_color: #x474f58 center_width: 0.8 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "steps" sort_rank: 160 center_color: #x474f58 center_width: 2.0 center_shape_id: 10.0 min_zoom: 15.0}
+            MapRoadRule{kind: "track" sort_rank: 160 center_color: #x474f58 center_width: 1.0 center_shape_id: 10.0 min_zoom: 14.0}
+            MapRoadRule{kind: "*" sort_rank: 280 center_color: #x8a6b3f center_width: 2.5 emissive: 0.4}
+
+            MapWaterwayRule{kind: "river" sort_rank: 140 center_color: #x0a2030 center_width: 4.0}
+            MapWaterwayRule{kind: "canal" sort_rank: 140 center_color: #x0a2030 center_width: 3.0 min_zoom: 12.0}
+            MapWaterwayRule{kind: "stream" sort_rank: 140 center_color: #x0a2030 center_width: 1.4 min_zoom: 13.0}
+            MapWaterwayRule{kind: "*" sort_rank: 140 center_color: #x0a2030 center_width: 1.2 min_zoom: 13.0}
+            MapRailRule{sort_rank: 710 center_color: #x424c5c center_width: 1.0}
         }
 
         draw_bg +: {
@@ -1182,7 +1267,7 @@ impl DrawMapVector {
             live_id!(shiny_gates),
             &[
                 if shiny.water_fx { 1.0 } else { 0.0 },
-                if shiny.building_sheen { 0.55 } else { 0.0 },
+                if shiny.building_sheen { shiny.gloss } else { 0.0 },
                 if shiny.foliage_fx { 1.0 } else { 0.0 },
                 if shiny.route_glow { 1.0 } else { 0.0 },
             ],
@@ -1289,10 +1374,18 @@ pub struct MapView {
     buildings_3d: bool,
     #[live(false)]
     dark_theme: bool,
+    /// Active theme: 0 = light, 1 = dark, 2 = circuit city. `dark_theme`
+    /// stays as the boolean shorthand for 0/1.
+    #[live(0)]
+    theme_select: u32,
     #[live]
     style_light: MapThemeStyle,
     #[live]
     style_dark: MapThemeStyle,
+    /// "Circuit City": the sci-fi night preset — near-black ground,
+    /// emissive amber road filaments, glossy dark buildings.
+    #[live]
+    style_circuit: MapThemeStyle,
     #[live(true)]
     use_network: bool,
     #[live(true)]
@@ -1419,6 +1512,8 @@ pub struct MapView {
     compiled_style_light: CompiledMapTheme,
     #[rust]
     compiled_style_dark: CompiledMapTheme,
+    #[rust]
+    compiled_style_circuit: CompiledMapTheme,
     #[rust]
     path_glyphs: Vec<PathGlyphInstance>,
     // Scratch buffers reused across frames to avoid per-frame allocations
@@ -1575,9 +1670,11 @@ impl ScriptHook for MapView {
 
         let previous_light = self.compiled_style_light.clone();
         let previous_dark = self.compiled_style_dark.clone();
+        let previous_circuit = self.compiled_style_circuit.clone();
         self.rebuild_compiled_styles();
         let styles_changed = previous_light != self.compiled_style_light
-            || previous_dark != self.compiled_style_dark;
+            || previous_dark != self.compiled_style_dark
+            || previous_circuit != self.compiled_style_circuit;
         if self.style_epoch == 0 {
             self.style_epoch = 1;
         }
@@ -2419,14 +2516,42 @@ impl MapView {
     fn rebuild_compiled_styles(&mut self) {
         self.compiled_style_light = self.style_light.compile();
         self.compiled_style_dark = self.style_dark.compile();
+        self.compiled_style_circuit = self.style_circuit.compile();
+    }
+
+    fn effective_theme(&self) -> u32 {
+        if self.theme_select > 0 {
+            self.theme_select.min(2)
+        } else if self.dark_theme {
+            1
+        } else {
+            0
+        }
     }
 
     fn active_style(&self) -> &CompiledMapTheme {
-        if self.dark_theme {
-            &self.compiled_style_dark
-        } else {
-            &self.compiled_style_light
+        match self.effective_theme() {
+            2 => &self.compiled_style_circuit,
+            1 => &self.compiled_style_dark,
+            _ => &self.compiled_style_light,
         }
+    }
+
+    /// Switch the active theme (0 light, 1 dark, 2 circuit city) with the
+    /// keep-stale restyle: resident tiles keep drawing in the old palette
+    /// and cross-fade per tile as their rebake lands.
+    pub fn set_theme(&mut self, cx: &mut Cx, theme: u32) {
+        let theme = theme.min(2);
+        if self.effective_theme() == theme {
+            return;
+        }
+        self.theme_select = theme;
+        self.dark_theme = theme == 1;
+        self.applied_dark_theme = Some(self.dark_theme);
+        self.apply_theme_palette();
+        self.restyle_tiles_keep_stale(cx);
+        self.update_status_text();
+        self.redraw(cx);
     }
 
     fn normalize_source_mode(&mut self) {
@@ -2443,6 +2568,7 @@ impl MapView {
         if self.dark_theme == dark_theme {
             return;
         }
+        self.theme_select = if dark_theme { 1 } else { 0 };
         self.dark_theme = dark_theme;
         self.apply_theme_change();
         self.applied_dark_theme = Some(self.dark_theme);
@@ -4864,6 +4990,7 @@ impl MapView {
     pub fn update_shiny(&mut self, cx: &mut Cx, update: impl Fn(&mut MapShinyStyle)) {
         update(&mut self.style_light.shiny);
         update(&mut self.style_dark.shiny);
+        update(&mut self.style_circuit.shiny);
         self.rebuild_compiled_styles();
         self.restyle_tiles_keep_stale(cx);
     }
@@ -5469,6 +5596,13 @@ impl MapViewRef {
     pub fn update_shiny(&self, cx: &mut Cx, update: impl Fn(&mut MapShinyStyle)) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.update_shiny(cx, update);
+        }
+    }
+
+    /// Switch theme (0 light, 1 dark, 2 circuit city), per-tile crossfade.
+    pub fn set_theme(&self, cx: &mut Cx, theme: u32) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_theme(cx, theme);
         }
     }
 
