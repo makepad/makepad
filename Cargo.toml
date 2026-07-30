@@ -95,6 +95,11 @@ workspace.exclude = [
     "libs/csg/csg_primitives",
     # vendored third-party libs (tests require external dev-deps)
     "libs/ab_glyph_rasterizer",
+    "libs/i_float",
+    "libs/i_key_sort",
+    "libs/i_overlay",
+    "libs/i_shape",
+    "libs/i_tree",
     "libs/adler2",
     "libs/bitflags",
     "libs/bytemuck",
