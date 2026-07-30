@@ -1101,7 +1101,11 @@ impl ShaderFnCompiler {
                 ShaderBackend::Glsl | ShaderBackend::Wgsl | ShaderBackend::Hlsl => {
                     write!(out, "discard").ok()
                 }
-                ShaderBackend::Rust => write!(out, "{{ rcx.discard = 1.0; return }}").ok(),
+                // Rust: the JIT'd fn returns a value (vec4f for io_pixel), so the early
+                // return must produce one; the caller ignores it when rcx.discard is set.
+                ShaderBackend::Rust => {
+                    write!(out, "{{ rcx.discard = 1.0; return Default::default() }}").ok()
+                }
             };
             self.stack
                 .push(self.trap.pass(), ShaderType::Pod(builtins.pod_void), out);
