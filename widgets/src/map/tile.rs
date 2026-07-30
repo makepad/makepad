@@ -55,6 +55,11 @@ const ROAD_STROKE_PASS_DEPTH_OFFSET: f32 = 0.02;
 // The icon draw call is +0.04 above the casing call in MapView. Subtract it
 // from arrow param5, then restore only this tiny own-surface decal epsilon.
 const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
+/// Baked shadow decals (T3): above the entire grounded road micro-depth
+/// ladder (strokes reach 0.22 + 0.146 rank micro) so shadows darken the
+/// streets they fall across, but below lifted bridge decks (param5 + 0.30
+/// bumps) so a deck still draws over the shadow pooling under it.
+const SHADOW_DECAL_DEPTH: f32 = 0.40;
 const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.0001;
 const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
 const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
@@ -2494,6 +2499,54 @@ fn append_wall_quad(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
+/// T3 contact-shadow decal: a radial-gradient dark disc on the ground
+/// (alpha `strength` at center, 0 at the rim), material 6 so its darkness
+/// rides the live shadow uniform. A triangle fan — no tessellator involved.
+fn append_ground_shadow_disc(
+    center: (f32, f32),
+    radius_units: f32,
+    strength: f32,
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    const SEGS: u32 = 10;
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    let mut push_vertex = |x: f32, y: f32, alpha: f32| {
+        out_vertices.extend_from_slice(&[
+            x,
+            y,
+            0.5,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            alpha,
+            1e6,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            MAT_SHADOW,
+            0.0,
+            SHADOW_DECAL_DEPTH,
+            radius_units * 2.0,
+            *zbias,
+        ]);
+    };
+    push_vertex(center.0, center.1, strength);
+    for seg in 0..SEGS {
+        let a = seg as f32 / SEGS as f32 * std::f32::consts::TAU;
+        push_vertex(center.0 + a.cos() * radius_units, center.1 + a.sin() * radius_units, 0.0);
+    }
+    for seg in 0..SEGS {
+        let next = (seg + 1) % SEGS;
+        out_indices.extend_from_slice(&[base, base + 1 + seg, base + 1 + next]);
+    }
+    *zbias += VECTOR_ZBIAS_STEP;
+}
+
 /// T2 roof-edge/parapet AO: a gradient quad strip hugging the roof outline,
 /// dark at the edge fading to the plain roof color ~1.5 m inward. Drawn on
 /// top of the roof fill (micro-depth one rank above), so the roof reads as
@@ -3503,6 +3556,163 @@ fn build_tile_buffers_from_features(
         // horizontal direction (defaults reproduce the legacy NW sun).
         let sun_2d = theme.shiny.sun.dir_2d();
         let (light_x, light_y) = (sun_2d.x, sun_2d.y);
+        // T3 building shadows: no shadow map, no second scene pass —
+        // project each exterior roof ring along the sun's ground direction
+        // by height * shadow_len, dissolve footprint + projection +
+        // silhouette quads for the whole tile into ONE union (overlapping
+        // shadows must not double-darken), and emit it as an ordinary
+        // ground fill, material 6, whose alpha rides the live shadow
+        // uniform. Drawn before the walls/roofs so buildings paint over
+        // their own footprint's shadow.
+        if theme.shiny.bake_shadows && buildings_3d && render_zoom >= 14 {
+            use i_overlay::core::fill_rule::FillRule as IoFillRule;
+            use i_overlay::core::overlay_rule::OverlayRule;
+            use i_overlay::float::simplify::SimplifyShape;
+            use i_overlay::float::single::SingleFloatOverlay;
+            let len_per_m = theme.shiny.sun.shadow_len_per_m();
+            let (sx, sy) = (-sun_2d.x, -sun_2d.y);
+            let shadow_min_edge = 1.2 / render_scale;
+            let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
+            let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
+                // NonZero dissolve: every contributing path must wind
+                // positive or it would subtract instead of add.
+                let mut area = 0.0f64;
+                for i in 0..ring.len() {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % ring.len()];
+                    area += a[0] * b[1] - b[0] * a[1];
+                }
+                if area < 0.0 {
+                    ring.reverse();
+                }
+                paths.push(std::mem::take(ring));
+            };
+            for job in &building_jobs {
+                let height = job.height_m;
+                if height <= 0.5 {
+                    continue;
+                }
+                let d = len_per_m * height * building_units_per_m;
+                // LOD: shadows that could not show at this magnification
+                // don't earn their union cost.
+                if d * render_scale < 2.0 {
+                    continue;
+                }
+                for ring in &job.polygon {
+                    // Courtyard holes: skip — at casting sun angles the
+                    // court is mostly self-shadowed anyway.
+                    if polygon_signed_area(ring) <= 0.0 {
+                        continue;
+                    }
+                    let ring = simplify_wall_ring(ring, shadow_min_edge);
+                    let n = ring.len();
+                    if n < 3 {
+                        continue;
+                    }
+                    let mut scratch: Vec<[f64; 2]> = ring
+                        .iter()
+                        .map(|p| [p.0 as f64, p.1 as f64])
+                        .collect();
+                    push_positive(&mut scratch);
+                    let mut roof: Vec<[f64; 2]> = ring
+                        .iter()
+                        .map(|p| [(p.0 + sx * d) as f64, (p.1 + sy * d) as f64])
+                        .collect();
+                    push_positive(&mut roof);
+                    for i in 0..n {
+                        let a = ring[i];
+                        let b = ring[(i + 1) % n];
+                        let mut quad = vec![
+                            [a.0 as f64, a.1 as f64],
+                            [b.0 as f64, b.1 as f64],
+                            [(b.0 + sx * d) as f64, (b.1 + sy * d) as f64],
+                            [(a.0 + sx * d) as f64, (a.1 + sy * d) as f64],
+                        ];
+                        push_positive(&mut quad);
+                    }
+                }
+            }
+            if !paths.is_empty() {
+                // Chunked dissolve (union-mesh lesson: the solver
+                // degenerates on ring soups past a few thousand rings).
+                const SHADOW_DISSOLVE_CHUNK: usize = 3000;
+                let shapes = if paths.len() <= SHADOW_DISSOLVE_CHUNK {
+                    paths.simplify_shape(IoFillRule::NonZero)
+                } else {
+                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+                    for chunk in paths.chunks(SHADOW_DISSOLVE_CHUNK) {
+                        let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+                        if acc.is_empty() {
+                            acc = part;
+                        } else {
+                            let part_paths: Vec<Vec<[f64; 2]>> = part
+                                .iter()
+                                .flat_map(|shape| shape.iter().cloned())
+                                .collect();
+                            acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
+                        }
+                    }
+                    acc
+                };
+                let fill_clip_bounds =
+                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+                // ~1.2 m analytic AA fringe softens the shadow edge.
+                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
+                for shape in shapes {
+                    let mut any_ring = false;
+                    for ring in &shape {
+                        let pts: Vec<(f32, f32)> = ring
+                            .iter()
+                            .map(|p| (p[0] as f32, p[1] as f32))
+                            .collect();
+                        let clipped = clip_ring_to_rect(&pts, fill_clip_bounds);
+                        if clipped.len() < 3 {
+                            continue;
+                        }
+                        emit_path(&mut path, &clipped, true);
+                        any_ring = true;
+                    }
+                    if !any_ring {
+                        continue;
+                    }
+                    tessellate_path_fill(
+                        &mut path,
+                        &mut tess,
+                        &mut tess_verts,
+                        &mut tess_indices,
+                        LineJoin::Miter,
+                        4.0,
+                        shadow_aa,
+                        false,
+                        tolerance,
+                    );
+                    // ICON buffer (pass 3, after the road strokes), like
+                    // the district tints: in a city almost all ground
+                    // between buildings is road surface, and a shadow in
+                    // the fill pass would be painted over by every street.
+                    // Micro-depth above the road unions so tilt mode
+                    // depth-resolves the same way.
+                    append_tessellated_geometry(
+                        &tess_verts,
+                        &tess_indices,
+                        &mut icon_vertices,
+                        &mut icon_indices,
+                        VectorRenderParams {
+                            // Full-dark premultiplied black; the material-6
+                            // shader branch scales it by the live
+                            // shadow_alpha uniform (fade without rebake).
+                            color: [0.0, 0.0, 0.0, 1.0],
+                            stroke_mult: 1e6,
+                            shape_id: 0.0,
+                            params: [0.0, 0.0, 0.0, MAT_SHADOW, 0.0, SHADOW_DECAL_DEPTH],
+                            zbias: icon_zbias,
+                        },
+                    );
+                    icon_zbias += VECTOR_ZBIAS_STEP;
+                    feature_count += 1;
+                }
+            }
+        }
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -3673,6 +3883,25 @@ fn build_tile_buffers_from_features(
         };
 
         let trunk_ao = if theme.shiny.bake_ao { 0.78 } else { 1.0 };
+        // T3 tree contact shadows: a soft dark disc under each canopy,
+        // nudged along the shadow direction — "the tree stands on the
+        // ground" for a dozen vertices per tree.
+        if theme.shiny.bake_shadows {
+            let sun_2d = theme.shiny.sun.dir_2d();
+            for (x, y) in &tree_points_3d {
+                append_ground_shadow_disc(
+                    (
+                        *x - sun_2d.x * 1.2 * units_per_m,
+                        *y - sun_2d.y * 1.2 * units_per_m,
+                    ),
+                    2.4 * units_per_m,
+                    0.55,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+            }
+        }
         for (x, y) in &tree_points_3d {
             append_wall_quad(
                 (*x - arm, *y),
@@ -8345,6 +8574,50 @@ mod bridge_probe_tests {
             buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
             buffers.labels.len(),
             buffers.feature_count
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn shadow_bake_probe() {
+        let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
+        let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
+        if !base.exists() || !detail.exists() {
+            println!("no archives");
+            return;
+        }
+        let mut base_reader = makepad_mbtile_reader::MbtilesReader::open(base).unwrap();
+        let mut detail_reader = makepad_mbtile_reader::MbtilesReader::open(detail).unwrap();
+        let (x, y) = (8412i64, 5380i64);
+        let key = TileKey { z: 14, x: x as i32, y: y as i32 };
+        let raw = base_reader.get_tile(14, x, 16383 - y).unwrap().unwrap();
+        let det = detail_reader.get_tile(14, x, 16383 - y).unwrap();
+        let mut theme = CompiledMapTheme::default();
+        theme.shiny.bake_shadows = true;
+        theme.shiny.bake_ao = true;
+        let buffers = build_tile_buffers_from_mvt(
+            key,
+            &raw,
+            det.as_deref(),
+            None,
+            false,
+            &[],
+            &theme,
+            17,
+            true,
+            true,
+        )
+        .unwrap();
+        let shadow_verts = buffers
+            .icon_vertices
+            .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+            .filter(|v| v[14] > 5.5 && v[14] < 6.5)
+            .count();
+        println!(
+            "fill verts {} icon verts {} shadow verts {}",
+            buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            shadow_verts
         );
     }
 
