@@ -3,6 +3,11 @@ use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
 
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
 pub const VECTOR_ZBIAS_STEP: f32 = 0.000001;
+/// Selects DrawVector's signed-coordinate analytic fill fringe. Ordinary
+/// fills use `1e6`; a distinct sentinel lets the same vertex format carry a
+/// deliberately wide raster carrier while its visible coverage remains one
+/// device pixel.
+pub const VECTOR_ANALYTIC_FRINGE_STROKE_MULT: f32 = 2e6;
 
 #[derive(Clone, Copy, Debug)]
 pub struct VectorRenderParams {
@@ -220,60 +225,6 @@ pub fn append_tessellated_geometry(
     params: VectorRenderParams,
 ) {
     append_tessellated_geometry_decked(verts, indices, acc_verts, acc_indices, params, None)
-}
-
-/// AA fringe variant: the coverage ramp lives in per-vertex COLOR alpha
-/// (premultiplied color scaled by u*2, so inner u=0.5 verts carry the full
-/// color and outer u=0 verts are transparent) while the written u is 0.5 —
-/// full shader coverage. Vertex color interpolates linearly across the
-/// skirt at ANY magnification, unlike the fwidth-normalized shader ramp
-/// which pins to one device pixel and leaves magnified geometry stairs
-/// visible.
-pub fn append_fringe_geometry(
-    verts: &[VVertex],
-    indices: &[u32],
-    acc_verts: &mut Vec<f32>,
-    acc_indices: &mut Vec<u32>,
-    params: VectorRenderParams,
-    deck_override: Option<&[f32]>,
-) {
-    if verts.is_empty() || indices.is_empty() {
-        return;
-    }
-    let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (vi, v) in verts.iter().enumerate() {
-        let deck_v = match deck_override {
-            Some(decks) => decks.get(vi).copied().unwrap_or(0.0),
-            None => params.params[4],
-        };
-        let fade = (v.u * 2.0).clamp(0.0, 1.0);
-        acc_verts.push(v.x);
-        acc_verts.push(v.y);
-        acc_verts.push(0.5);
-        acc_verts.push(v.v);
-        acc_verts.push(params.color[0] * fade);
-        acc_verts.push(params.color[1] * fade);
-        acc_verts.push(params.color[2] * fade);
-        acc_verts.push(params.color[3] * fade);
-        acc_verts.push(params.stroke_mult);
-        acc_verts.push(v.stroke_dist);
-        acc_verts.push(params.shape_id);
-        acc_verts.push(params.params[0]);
-        acc_verts.push(params.params[1]);
-        acc_verts.push(params.params[2]);
-        acc_verts.push(params.params[3]);
-        acc_verts.push(deck_v);
-        acc_verts.push(if deck_v > 0.0 {
-            params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
-        } else {
-            params.params[5]
-        });
-        acc_verts.push(v.clip_radius);
-        acc_verts.push(params.zbias);
-    }
-    for &idx in indices {
-        acc_indices.push(base + idx);
-    }
 }
 
 /// Fill variant with a per-vertex deck override (meters, parallel to

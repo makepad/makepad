@@ -1600,6 +1600,34 @@ impl SolvedField {
         min_dot: f32,
         vertical: Option<VerticalClass>,
     ) -> Option<(f32, f32, f32)> {
+        self.sample_gated_mode(px, py, dir, cap, min_dot, vertical, false)
+    }
+
+    /// Direction-gated sample which never falls back to a different
+    /// vertical class. Dense base profiles use this stricter form because
+    /// their sparse endpoint support has already been reconciled; a nearby
+    /// parallel deck must not invent a new interior hump.
+    fn sample_compatible(
+        &self,
+        px: f32,
+        py: f32,
+        dir: Option<(f32, f32)>,
+        cap: f32,
+        vertical: VerticalClass,
+    ) -> Option<(f32, f32, f32)> {
+        self.sample_gated_mode(px, py, dir, cap, 0.82, Some(vertical), true)
+    }
+
+    fn sample_gated_mode(
+        &self,
+        px: f32,
+        py: f32,
+        dir: Option<(f32, f32)>,
+        cap: f32,
+        min_dot: f32,
+        vertical: Option<VerticalClass>,
+        require_compatible: bool,
+    ) -> Option<(f32, f32, f32)> {
         fn candidate_is_better(
             candidate: (f32, f32, f32),
             best: (f32, f32, f32),
@@ -1667,6 +1695,9 @@ impl SolvedField {
                     }
                 }
             }
+        }
+        if require_compatible {
+            return best_compatible;
         }
         match (best_compatible, best_any) {
             (Some(compatible), Some(nearest))
@@ -3563,7 +3594,16 @@ fn annotate_base_tiles(
 
     let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
     for (path_index, base_path) in base_paths.iter().enumerate() {
-        let Some(dz) = final_dz[path_index].take() else { continue };
+        let Some(raw_dz) = final_dz[path_index].take() else { continue };
+        let offset = path_src[path_index].1;
+        let (profile_points, dz) = dense_base_dz_profile(
+            base_path,
+            &raw_dz,
+            offset,
+            field,
+            tunnel_field,
+            m_per_unit,
+        );
         let src = path_src[path_index].0;
         let any = dz.iter().any(|&v| v.abs() > 0.2);
         if !any {
@@ -3586,14 +3626,138 @@ fn annotate_base_tiles(
                 ("P".to_string(), base_path.path.to_string()),
                 ("dz".to_string(), dz_tag),
             ],
-            paths: vec![base_path
-                .points
+            paths: vec![profile_points
                 .iter()
                 .map(|&(px, py)| TilePoint { x: px.round() as i32, y: py.round() as i32 })
                 .collect()],
         });
     }
     per_tile
+}
+
+/// Build the geometry carried by one base_dz feature. Raw base vertices are
+/// retained exactly as junction/seam authorities; long edges gain regular
+/// metric knots sampled from the dense solved field. The renderer consumes
+/// this geometry directly instead of stretching the endpoint dz values over
+/// the source base edge.
+fn dense_base_dz_profile(
+    base_path: &BasePath,
+    raw_dz: &[f32],
+    global_offset: (f32, f32),
+    field: &SolvedField,
+    tunnel_field: &SolvedField,
+    m_per_unit: f32,
+) -> (Vec<(f32, f32)>, Vec<f32>) {
+    const PROFILE_SPACING_M: f32 = 12.0;
+    const MAX_BASE_GRADE: f32 = 0.08;
+    const ENCODE_ENDPOINT_GUARD_UNITS: f32 = 1.5;
+    let m_per_unit = m_per_unit.max(1e-6);
+    let spacing_units = PROFILE_SPACING_M / m_per_unit;
+    let probe_cap_units = (1.0 / m_per_unit).clamp(1.2, 4.0);
+    if base_path.points.len() < 2 || raw_dz.len() != base_path.points.len() {
+        return (base_path.points.clone(), raw_dz.to_vec());
+    }
+    let profile_is_tunnel = base_path.vertical == VerticalClass::Tunnel
+        || (raw_dz.iter().any(|&height| height < -0.2)
+            && !raw_dz.iter().any(|&height| height > 0.2));
+    let sample_vertical = if profile_is_tunnel {
+        VerticalClass::Tunnel
+    } else {
+        base_path.vertical
+    };
+    let sample_field = if profile_is_tunnel { tunnel_field } else { field };
+    let grade_per_unit = MAX_BASE_GRADE * m_per_unit;
+
+    let mut points = Vec::new();
+    let mut dz = Vec::new();
+    points.push(base_path.points[0]);
+    dz.push(raw_dz[0]);
+    for segment in 0..base_path.points.len() - 1 {
+        let a = base_path.points[segment];
+        let b = base_path.points[segment + 1];
+        let segment_units = distance(a, b);
+        if segment_units <= 1e-6 {
+            continue;
+        }
+        let direction = (b.0 - a.0, b.1 - a.1);
+        let mut canonical = (
+            direction.0 / segment_units,
+            direction.1 / segment_units,
+        );
+        if canonical.0 < -1e-6 || (canonical.0.abs() <= 1e-6 && canonical.1 < 0.0) {
+            canonical = (-canonical.0, -canonical.1);
+        }
+        let global_a = (a.0 + global_offset.0, a.1 + global_offset.1);
+        let phase =
+            (global_a.0 * canonical.0 + global_a.1 * canonical.1).rem_euclid(spacing_units);
+        let forward = direction.0 * canonical.0 + direction.1 * canonical.1 > 0.0;
+        let mut advance = if forward {
+            spacing_units - phase
+        } else {
+            phase
+        };
+        if advance <= 1e-4 || advance >= spacing_units - 1e-4 {
+            advance = spacing_units;
+        }
+        while advance <= ENCODE_ENDPOINT_GUARD_UNITS {
+            advance += spacing_units;
+        }
+
+        let segment_start = points.len() - 1;
+        let allow_positive = base_path.vertical == VerticalClass::Elevated
+            || raw_dz[segment] > 0.2
+            || raw_dz[segment + 1] > 0.2;
+        let allow_negative = profile_is_tunnel
+            || raw_dz[segment] < -0.2
+            || raw_dz[segment + 1] < -0.2;
+        while advance < segment_units - ENCODE_ENDPOINT_GUARD_UNITS {
+            let t = advance / segment_units;
+            let point = (a.0 + direction.0 * t, a.1 + direction.1 * t);
+            let fallback = raw_dz[segment] * (1.0 - t) + raw_dz[segment + 1] * t;
+            let mut height = sample_field
+                .sample_compatible(
+                    point.0 + global_offset.0,
+                    point.1 + global_offset.1,
+                    Some(direction),
+                    probe_cap_units,
+                    sample_vertical,
+                )
+                .map_or(fallback, |sample| sample.0);
+            if (height > 0.2 && !allow_positive) || (height < -0.2 && !allow_negative) {
+                height = fallback;
+            }
+            // Explicit elevated/tunnel geometry remains authoritative when
+            // its compatible field has a local sampling hole.
+            match base_path.vertical {
+                VerticalClass::Elevated => height = height.max(fallback),
+                VerticalClass::Tunnel => height = height.min(fallback),
+                VerticalClass::Surface => {}
+            }
+            points.push(point);
+            dz.push(height);
+            advance += spacing_units;
+        }
+        points.push(b);
+        dz.push(raw_dz[segment + 1]);
+
+        // Clamp only inserted knots. Raw vertices were already reconciled
+        // across junctions and tile copies and remain exact authorities.
+        // The two fixed-endpoint passes enforce the grade envelope locally,
+        // preventing one sampled peak from propagating into later segments.
+        let segment_end = dz.len() - 1;
+        for index in segment_start + 1..segment_end {
+            let limit =
+                grade_per_unit * distance(points[index - 1], points[index]);
+            dz[index] = dz[index].clamp(dz[index - 1] - limit, dz[index - 1] + limit);
+        }
+        for index in (segment_start + 1..segment_end).rev() {
+            let limit =
+                grade_per_unit * distance(points[index], points[index + 1]);
+            dz[index] = dz[index].clamp(dz[index + 1] - limit, dz[index + 1] + limit);
+        }
+    }
+
+    (points, dz)
 }
 
 fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -4111,6 +4275,405 @@ mod tests {
             annotated.is_empty(),
             "ordinary path was re-lifted by a later sampling pass"
         );
+    }
+
+    #[test]
+    fn dense_surface_profile_ramps_remote_lifted_ends_into_grounded_middle() {
+        let mut field = SolvedField::default();
+        // Two independent elevated approaches at the ends of one heavily
+        // generalized base edge, with a long authoritative ground run
+        // between them.
+        field.push(
+            0.0,
+            0.0,
+            30.0,
+            0.0,
+            5.5,
+            5.5,
+            VerticalClass::Surface,
+        );
+        field.push(
+            30.0,
+            0.0,
+            270.0,
+            0.0,
+            0.0,
+            0.0,
+            VerticalClass::Surface,
+        );
+        field.push(
+            270.0,
+            0.0,
+            300.0,
+            0.0,
+            5.5,
+            5.5,
+            VerticalClass::Surface,
+        );
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 1,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(0.0, 0.0), (300.0, 0.0)],
+        };
+
+        let annotated = annotate_base_tiles(
+            vec![((1, 2), (0.0, 0.0), vec![base_path])],
+            &field,
+            &SolvedField::default(),
+            1.0,
+        );
+        let feature = &annotated[&(1, 2)][0];
+        let decks: Vec<f32> = feature
+            .tags
+            .iter()
+            .find_map(|(key, value)| (key == "dz").then_some(value))
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse::<f32>().unwrap() * 0.1)
+            .collect();
+        let points = &feature.paths[0];
+        assert_eq!(points.len(), decks.len());
+        assert!(points.len() > 20, "profile was not densely encoded");
+        assert!((decks[0] - 5.5).abs() < 0.01);
+        assert!((decks[decks.len() - 1] - 5.5).abs() < 0.01);
+        assert!(
+            decks[decks.len() / 2].abs() < 0.01,
+            "remote endpoint lift still smeared through the middle: {decks:?}"
+        );
+        for index in 1..decks.len() {
+            let run = distance(
+                (points[index - 1].x as f32, points[index - 1].y as f32),
+                (points[index].x as f32, points[index].y as f32),
+            );
+            assert!(
+                (decks[index] - decks[index - 1]).abs() <= 0.08 * run + 0.11,
+                "grade envelope broke at {index}: {decks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_authoritative_deck_remains_flat_and_lifted() {
+        fn encoded_decks(features: &HashMap<(u32, u32), Vec<TileFeature>>) -> Vec<f32> {
+            features[&(1, 2)][0]
+                .tags
+                .iter()
+                .find_map(|(key, value)| (key == "dz").then_some(value.as_str()))
+                .unwrap()
+                .split(',')
+                .map(|value| value.parse::<f32>().unwrap() * 0.1)
+                .collect()
+        }
+
+        for vertical in [VerticalClass::Surface, VerticalClass::Elevated] {
+            let mut field = SolvedField::default();
+            field.push(0.0, 0.0, 300.0, 0.0, 5.5, 5.5, vertical);
+            let base_path = BasePath {
+                layer: "streets".to_string(),
+                feature: 2,
+                path: 0,
+                is_polygon: false,
+                vertical,
+                points: vec![(0.0, 0.0), (300.0, 0.0)],
+            };
+
+            let annotated = annotate_base_tiles(
+                vec![((1, 2), (0.0, 0.0), vec![base_path])],
+                &field,
+                &SolvedField::default(),
+                1.0,
+            );
+
+            let feature = &annotated[&(1, 2)][0];
+            let decks = encoded_decks(&annotated);
+            assert_eq!(feature.paths[0].len(), decks.len());
+            assert!(decks.len() > 20);
+            assert!(decks.iter().all(|height| (*height - 5.5).abs() < 0.01));
+        }
+    }
+
+    #[test]
+    fn dense_authoritative_tunnel_remains_flat_and_sunk() {
+        let mut tunnel_field = SolvedField::default();
+        tunnel_field.push(
+            0.0,
+            0.0,
+            300.0,
+            0.0,
+            -5.5,
+            -5.5,
+            VerticalClass::Tunnel,
+        );
+        let base_path = BasePath {
+            layer: "transportation".to_string(),
+            feature: 0,
+            path: 0,
+            is_polygon: false,
+            points: vec![(0.0, 0.0), (300.0, 0.0)],
+            vertical: VerticalClass::Tunnel,
+        };
+
+        let (points, dz) = dense_base_dz_profile(
+            &base_path,
+            &[-5.5, -5.5],
+            (0.0, 0.0),
+            &SolvedField::default(),
+            &tunnel_field,
+            1.0,
+        );
+
+        assert!(points.len() > 20);
+        assert_eq!(points.len(), dz.len());
+        assert!(dz.iter().all(|height| (*height + 5.5).abs() < 1.0e-4));
+        for (point_pair, dz_pair) in points.windows(2).zip(dz.windows(2)) {
+            let distance =
+                ((point_pair[1].0 - point_pair[0].0).powi(2)
+                    + (point_pair[1].1 - point_pair[0].1).powi(2))
+                .sqrt();
+            assert!((dz_pair[1] - dz_pair[0]).abs() <= 0.08 * distance + 1.0e-4);
+        }
+    }
+
+    #[test]
+    fn dense_profile_preserves_raw_vertices_and_caps_sampled_peak() {
+        let mut field = SolvedField::default();
+        field.push(
+            0.0,
+            0.0,
+            50.0,
+            0.0,
+            0.3,
+            5.5,
+            VerticalClass::Surface,
+        );
+        field.push(
+            50.0,
+            0.0,
+            100.0,
+            0.0,
+            5.5,
+            0.3,
+            VerticalClass::Surface,
+        );
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 3,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
+        };
+        let raw = [0.3, 4.0, 0.3];
+        let (points, dz) = dense_base_dz_profile(
+            &base_path,
+            &raw,
+            (0.0, 0.0),
+            &field,
+            &SolvedField::default(),
+            1.0,
+        );
+
+        for (raw_point, raw_height) in base_path.points.iter().zip(raw) {
+            let index = points.iter().position(|point| point == raw_point).unwrap();
+            assert!((dz[index] - raw_height).abs() < 1e-6);
+        }
+        for index in 1..dz.len() {
+            let run = distance(points[index - 1], points[index]);
+            assert!(
+                (dz[index] - dz[index - 1]).abs() <= 0.08 * run + 1e-4,
+                "unbounded grade at {index}: {dz:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_profile_does_not_quantize_knot_over_raw_anchor() {
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 30,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(0.0, 0.0), (12.4, 0.0)],
+        };
+        let (points, dz) = dense_base_dz_profile(
+            &base_path,
+            &[5.5, 0.0],
+            (0.0, 0.0),
+            &SolvedField::default(),
+            &SolvedField::default(),
+            1.0,
+        );
+        assert_eq!(points, base_path.points);
+        assert_eq!(dz, [5.5, 0.0]);
+    }
+
+    #[test]
+    fn dense_surface_profile_uses_negative_tunnel_support() {
+        let mut tunnel_field = SolvedField::default();
+        tunnel_field.push(
+            0.0,
+            0.0,
+            50.0,
+            0.0,
+            -5.5,
+            -5.5,
+            VerticalClass::Tunnel,
+        );
+        tunnel_field.push(
+            50.0,
+            0.0,
+            100.0,
+            0.0,
+            -5.5,
+            0.0,
+            VerticalClass::Tunnel,
+        );
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 4,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(0.0, 0.0), (100.0, 0.0)],
+        };
+        let (points, dz) = dense_base_dz_profile(
+            &base_path,
+            &[-5.5, 0.0],
+            (0.0, 0.0),
+            &SolvedField::default(),
+            &tunnel_field,
+            1.0,
+        );
+
+        assert_eq!(points.first(), Some(&(0.0, 0.0)));
+        assert_eq!(points.last(), Some(&(100.0, 0.0)));
+        assert!((dz[0] + 5.5).abs() < 1e-6);
+        assert!(dz[dz.len() / 4] < -5.0, "tunnel support was ignored: {dz:?}");
+        assert!(dz[dz.len() - 1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn dense_zero_surface_profile_rejects_unsupported_parallel_lift() {
+        let mut field = SolvedField::default();
+        field.push(
+            0.0,
+            0.0,
+            100.0,
+            0.0,
+            5.5,
+            5.5,
+            VerticalClass::Elevated,
+        );
+        field.push(
+            0.0,
+            0.5,
+            100.0,
+            0.5,
+            5.5,
+            5.5,
+            VerticalClass::Surface,
+        );
+        let base_path = BasePath {
+            layer: "streets".to_string(),
+            feature: 5,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(0.0, 0.0), (100.0, 0.0)],
+        };
+        let (_, dz) = dense_base_dz_profile(
+            &base_path,
+            &[0.0, 0.0],
+            (0.0, 0.0),
+            &field,
+            &SolvedField::default(),
+            1.0,
+        );
+        assert!(dz.iter().all(|height| height.abs() < 1e-6));
+    }
+
+    #[test]
+    fn dense_adjacent_clips_share_global_knots_and_seam_height() {
+        fn height_at(points: &[(f32, f32)], dz: &[f32], x: f32) -> f32 {
+            for index in 1..points.len() {
+                let min_x = points[index - 1].0.min(points[index].0);
+                let max_x = points[index - 1].0.max(points[index].0);
+                if x >= min_x && x <= max_x {
+                    let run = points[index].0 - points[index - 1].0;
+                    let t = if run.abs() < 1e-6 {
+                        0.0
+                    } else {
+                        (x - points[index - 1].0) / run
+                    };
+                    return dz[index - 1] * (1.0 - t) + dz[index] * t;
+                }
+            }
+            panic!("x={x} outside profile");
+        }
+
+        let mut field = SolvedField::default();
+        field.push(
+            3800.0,
+            0.0,
+            4200.0,
+            0.0,
+            5.5,
+            0.0,
+            VerticalClass::Surface,
+        );
+        let left = BasePath {
+            layer: "streets".to_string(),
+            feature: 6,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(3800.0, 0.0), (4160.0, 0.0)],
+        };
+        let right = BasePath {
+            layer: "streets".to_string(),
+            feature: 6,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            points: vec![(-64.0, 0.0), (104.0, 0.0)],
+        };
+        let solved_height = |x: f32| 5.5 * (1.0 - (x - 3800.0) / 400.0);
+        let (left_points, left_dz) = dense_base_dz_profile(
+            &left,
+            &[solved_height(3800.0), solved_height(4160.0)],
+            (0.0, 0.0),
+            &field,
+            &SolvedField::default(),
+            1.0,
+        );
+        let (mut right_points, right_dz) = dense_base_dz_profile(
+            &right,
+            &[solved_height(4032.0), solved_height(4200.0)],
+            (4096.0, 0.0),
+            &field,
+            &SolvedField::default(),
+            1.0,
+        );
+        for point in &mut right_points {
+            point.0 += 4096.0;
+        }
+
+        let left_overlap: Vec<f32> = left_points
+            .iter()
+            .filter_map(|point| (4032.0..=4152.0).contains(&point.0).then_some(point.0))
+            .collect();
+        let right_overlap: Vec<f32> = right_points
+            .iter()
+            .filter_map(|point| (4032.0..=4152.0).contains(&point.0).then_some(point.0))
+            .collect();
+        assert_eq!(left_overlap, right_overlap);
+        let left_seam = height_at(&left_points, &left_dz, 4096.0);
+        let right_seam = height_at(&right_points, &right_dz, 4096.0);
+        assert!((left_seam - right_seam).abs() < 1e-5);
     }
 
     #[test]
