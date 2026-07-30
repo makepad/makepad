@@ -243,7 +243,24 @@ script_mod! {
             }
             let color = self.get_color();
             var alpha = 0.0;
-            if self.v_stroke_mult > 1e5 {
+            // Wide analytic fill fringe. Its tcoord.x is signed across the
+            // nominal edge (0 exactly on the path, positive inside, negative
+            // outside). Dividing by its screen derivative recovers signed
+            // distance in device pixels, so the coverage remains one pixel
+            // wide under zoom, rotation and non-uniform projection. The
+            // carrier may be deliberately much wider than the visible ramp;
+            // discard its zero-coverage tail so it cannot write depth.
+            //
+            // stroke_mult = 2e6 is reserved for this mode. Ordinary fills
+            // keep their established 1e6 sentinel.
+            if self.v_stroke_mult > 1.5e6 {
+                let sd = self.v_tcoord.x;
+                let fw = length(vec2(dFdx(sd), dFdy(sd)));
+                alpha = clamp(0.5 + sd / max(fw, 0.001), 0.0, 1.0);
+                if alpha * color.w <= 0.004 {
+                    discard()
+                }
+            } else if self.v_stroke_mult > 1e5 {
                 let d = self.v_tcoord.x * 2.0;
                 let fw = length(vec2(dFdx(d), dFdy(d)));
                 alpha = clamp(d / max(fw, 0.001), 0.0, 1.0);
