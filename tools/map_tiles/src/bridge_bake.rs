@@ -616,11 +616,11 @@ impl Graph {
             }
             let mut nodes = Vec::new();
             let mut seg_m = Vec::new();
-            let mut push_point = |graph: &mut Graph,
-                                  nodes: &mut Vec<u32>,
-                                  seg_m: &mut Vec<f32>,
-                                  x: f32,
-                                  y: f32| {
+            let push_point = |graph: &mut Graph,
+                              nodes: &mut Vec<u32>,
+                              seg_m: &mut Vec<f32>,
+                              x: f32,
+                              y: f32| {
                 let id = graph.node(x + offset_units.0, y + offset_units.1);
                 if nodes.last() == Some(&id) {
                     return;
@@ -1544,49 +1544,6 @@ impl SolvedField {
         self.sample_gated(px, py, dir, cap, 0.82, vertical)
     }
 
-    /// Highest z among PARALLEL segments with lateral distance in
-    /// (min_dist, cap) — the own centerline (dist ~0) is excluded, so a
-    /// dual-carriageway twin's height is visible past one's own line.
-    fn parallel_max(
-        &self,
-        px: f32,
-        py: f32,
-        dir: (f32, f32),
-        min_dist: f32,
-        cap: f32,
-    ) -> Option<f32> {
-        let mut best: Option<f32> = None;
-        let cy0 = ((py - cap) / FIELD_CELL).floor() as i32;
-        let cy1 = ((py + cap) / FIELD_CELL).floor() as i32;
-        let cx0 = ((px - cap) / FIELD_CELL).floor() as i32;
-        let cx1 = ((px + cap) / FIELD_CELL).floor() as i32;
-        let dl = (dir.0 * dir.0 + dir.1 * dir.1).sqrt().max(1e-6);
-        for cy in cy0..=cy1 {
-            for cx in cx0..=cx1 {
-                let Some(segs) = self.grid.get(&(cx, cy)) else { continue };
-                for seg in segs {
-                    let [ax, ay, bx, by, za, zb] = seg.geometry;
-                    let (ex, ey) = (bx - ax, by - ay);
-                    let el2 = (ex * ex + ey * ey).max(1e-6);
-                    if ((dir.0 * ex + dir.1 * ey) / (dl * el2.sqrt())).abs() < 0.82 {
-                        continue;
-                    }
-                    let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
-                    let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
-                    let dist = (qx * qx + qy * qy).sqrt();
-                    if dist <= min_dist || dist >= cap {
-                        continue;
-                    }
-                    let height = za * (1.0 - t) + zb * t;
-                    if best.is_none_or(|b| height > b) {
-                        best = Some(height);
-                    }
-                }
-            }
-        }
-        best
-    }
-
     /// `min_dot` relaxes the direction gate: endpoint fallbacks use ~0.5 so
     /// angled merges still join their deck while a way SPLIT sitting under
     /// a crossing viaduct no longer grabs the deck overhead (that spike
@@ -1714,13 +1671,48 @@ impl SolvedField {
 /// uses: (layer name, feature index within layer, path index within
 /// feature). Geometry scaled to 4096 units, polygons closed the same way
 /// the renderer closes them.
+#[derive(Clone)]
 struct BasePath {
     layer: String,
     feature: u32,
     path: u32,
     is_polygon: bool,
     vertical: VerticalClass,
+    /// Coarse Shortbread paint/transport class used to prove physical
+    /// continuations across bridge tag splits, simplified link junctions,
+    /// and buffered tile copies. `kind` alone is not enough: motorway links
+    /// and rails can share a layer and geometry without sharing a deck.
+    continuity_class: Option<(String, bool, bool)>,
     points: Vec<(f32, f32)>,
+}
+
+/// A Shortbread bridge flag commonly splits one physical road into a tiny
+/// elevated member between two ordinary members. Its independently sampled
+/// endpoint can be several metres below the already-solved approach even
+/// though the exact node and opposing tangents prove that the surfaces meet.
+///
+/// Only widen the ordinary continuation tolerance when the encoded paint
+/// class also agrees and the vertical class changes exactly Surface↔Elevated.
+/// This keeps a coincident service road, rail, tunnel, or differently styled
+/// crossing from borrowing the higher deck.
+fn same_family_bridge_portal(a: &BasePath, b: &BasePath) -> bool {
+    matches!(
+        (a.vertical, b.vertical),
+        (VerticalClass::Surface, VerticalClass::Elevated)
+            | (VerticalClass::Elevated, VerticalClass::Surface)
+    ) && a
+        .continuity_class
+        .as_ref()
+        .is_some_and(|class| b.continuity_class.as_ref() == Some(class))
+}
+
+fn typed_link_to_through_road(source: &BasePath, target: &BasePath) -> bool {
+    match (&source.continuity_class, &target.continuity_class) {
+        (Some((source_kind, true, source_rail)), Some((target_kind, false, target_rail))) => {
+            source_kind == target_kind && source_rail == target_rail
+        }
+        _ => false,
+    }
 }
 
 /// Reconcile the two carriageways encoded as sibling paths of one base-map
@@ -1942,6 +1934,7 @@ fn reconcile_base_vertex_consensus(
     final_dz: &mut [Option<Vec<f32>>],
 ) {
     const MAX_CONTINUATION_STEP_M: f32 = 3.0;
+    const MAX_BRIDGE_PORTAL_STEP_M: f32 = 8.0;
     const MAX_ENDPOINT_DOT: f32 = -0.90;
     const MIN_THROUGH_DOT: f32 = 0.90;
 
@@ -2052,9 +2045,14 @@ fn reconcile_base_vertex_consensus(
                 let Some(a_dz) = final_dz[a.path].as_ref() else { continue };
                 let Some(b_dz) = final_dz[b.path].as_ref() else { continue };
                 let (a_value, b_value) = (a_dz[a.vertex], b_dz[b.vertex]);
+                let height_step = (a_value - b_value).abs();
+                let compatible_bridge_portal =
+                    same_family_bridge_portal(&base_paths[a.path], &base_paths[b.path])
+                        && height_step <= MAX_BRIDGE_PORTAL_STEP_M;
                 if a_value <= 0.2
                     || b_value <= 0.2
-                    || (a_value - b_value).abs() > MAX_CONTINUATION_STEP_M
+                    || (height_step > MAX_CONTINUATION_STEP_M
+                        && !compatible_bridge_portal)
                 {
                     continue;
                 }
@@ -2654,6 +2652,7 @@ fn reconcile_exact_continuation_endpoints(
     m_per_unit: f32,
 ) {
     const MAX_CONTINUATION_STEP_M: f32 = 3.0;
+    const MAX_BRIDGE_PORTAL_STEP_M: f32 = 8.0;
     const MAX_ENDPOINT_DOT: f32 = -0.90;
     const MAX_GRADE: f32 = 0.08;
     const ENDPOINT_HOLD_M: f32 = 12.0;
@@ -2709,9 +2708,14 @@ fn reconcile_exact_continuation_endpoints(
                 }
                 let a_value = snapshot[a.path].as_ref().unwrap()[a.vertex];
                 let b_value = snapshot[b.path].as_ref().unwrap()[b.vertex];
+                let height_step = (a_value - b_value).abs();
+                let compatible_bridge_portal =
+                    same_family_bridge_portal(&base_paths[a.path], &base_paths[b.path])
+                        && height_step <= MAX_BRIDGE_PORTAL_STEP_M;
                 if a_value <= 0.2
                     || b_value <= 0.2
-                    || (a_value - b_value).abs() > MAX_CONTINUATION_STEP_M
+                    || (height_step > MAX_CONTINUATION_STEP_M
+                        && !compatible_bridge_portal)
                 {
                     continue;
                 }
@@ -3102,6 +3106,9 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
         let mut bridge = name == "bridges";
         let mut tunnel = false;
         let mut osm_layer = None;
+        let mut kind = None;
+        let mut link = false;
+        let mut rail = false;
         let mut to = 0;
         while to < packed_tags.len() {
             let key_index = read_varint(packed_tags, &mut to)? as usize;
@@ -3113,6 +3120,9 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
                 "bridge" => bridge |= value.is_truthy(),
                 "tunnel" => tunnel |= value.is_truthy(),
                 "osm_layer" => osm_layer = Some(value),
+                "kind" | "highway" | "railway" => kind = Some(value.to_tag_string()),
+                "link" => link |= value.is_truthy(),
+                "rail" => rail |= value.is_truthy(),
                 _ => {}
             }
         }
@@ -3161,11 +3171,492 @@ fn decode_base_layer(layer: &[u8], out: &mut Vec<BasePath>) -> Result<(), String
                 path: path_index as u32,
                 is_polygon,
                 vertical,
+                continuity_class: kind.clone().map(|kind| (kind, link, rail)),
                 points,
             });
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ProjectedJunctionAnchor {
+    segment: usize,
+    t: f32,
+    height: f32,
+}
+
+/// Recover a junction vertex removed by base-tile simplification. Detail
+/// geometry still solves the joining way's exact endpoint, but a generalized
+/// mainline may pass through that node without carrying a vertex. Projecting
+/// the supported endpoint onto the compatible, tangential mainline makes it
+/// a fixed dense-profile knot instead of letting two surrounding samples
+/// interpolate underneath it.
+fn projected_junction_anchors(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    final_dz: &[Option<Vec<f32>>],
+    m_per_unit: f32,
+) -> Vec<Vec<ProjectedJunctionAnchor>> {
+    const CELL_UNITS: f32 = 32.0;
+    const MAX_GAP_M: f32 = 0.75;
+    const MIN_TANGENT_DOT: f32 = 0.80;
+    const MIN_INTERIOR_REACH_UNITS: f32 = 2.0;
+
+    let mut segment_grid = HashMap::<(i32, i32), Vec<(usize, usize)>>::new();
+    for (path_index, path) in base_paths.iter().enumerate() {
+        if path.is_polygon
+            || path.vertical == VerticalClass::Tunnel
+            || path.points.len() < 2
+            || final_dz[path_index]
+                .as_ref()
+                .is_none_or(|values| values.len() != path.points.len())
+        {
+            continue;
+        }
+        let offset = path_src[path_index].1;
+        for segment in 0..path.points.len() - 1 {
+            let a = (
+                path.points[segment].0 + offset.0,
+                path.points[segment].1 + offset.1,
+            );
+            let b = (
+                path.points[segment + 1].0 + offset.0,
+                path.points[segment + 1].1 + offset.1,
+            );
+            let x0 = (a.0.min(b.0) / CELL_UNITS).floor() as i32;
+            let x1 = (a.0.max(b.0) / CELL_UNITS).floor() as i32;
+            let y0 = (a.1.min(b.1) / CELL_UNITS).floor() as i32;
+            let y1 = (a.1.max(b.1) / CELL_UNITS).floor() as i32;
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    segment_grid
+                        .entry((cx, cy))
+                        .or_default()
+                        .push((path_index, segment));
+                }
+            }
+        }
+    }
+
+    let max_gap_units = MAX_GAP_M / m_per_unit.max(1e-6);
+    let max_gap_sq = max_gap_units * max_gap_units;
+    let cell_reach = (max_gap_units / CELL_UNITS).ceil() as i32;
+    let mut anchors: Vec<Vec<ProjectedJunctionAnchor>> =
+        vec![Vec::new(); base_paths.len()];
+    for (source_index, source) in base_paths.iter().enumerate() {
+        let Some(source_dz) = final_dz[source_index].as_ref() else {
+            continue;
+        };
+        if source.is_polygon
+            || source.vertical == VerticalClass::Tunnel
+            || source.points.len() < 2
+            || source_dz.len() != source.points.len()
+        {
+            continue;
+        }
+        let source_offset = path_src[source_index].1;
+        let last = source.points.len() - 1;
+        for (vertex, inner_vertex) in [(0, 1), (last, last - 1)] {
+            let source_height = source_dz[vertex];
+            if source_height <= 0.2 {
+                continue;
+            }
+            let local_endpoint = source.points[vertex];
+            let endpoint = (
+                local_endpoint.0 + source_offset.0,
+                local_endpoint.1 + source_offset.1,
+            );
+            let inner = source.points[inner_vertex];
+            let source_direction = (
+                local_endpoint.0 - inner.0,
+                local_endpoint.1 - inner.1,
+            );
+            let source_length =
+                (source_direction.0 * source_direction.0
+                    + source_direction.1 * source_direction.1)
+                    .sqrt()
+                    .max(1e-6);
+            let cell = (
+                (endpoint.0 / CELL_UNITS).floor() as i32,
+                (endpoint.1 / CELL_UNITS).floor() as i32,
+            );
+            for cy in cell.1 - cell_reach..=cell.1 + cell_reach {
+                for cx in cell.0 - cell_reach..=cell.0 + cell_reach {
+                    let Some(candidates) = segment_grid.get(&(cx, cy)) else {
+                        continue;
+                    };
+                    for &(target_index, segment) in candidates {
+                        let target = &base_paths[target_index];
+                        if target_index == source_index
+                            || target.layer != source.layer
+                            || target.vertical == VerticalClass::Tunnel
+                            || !typed_link_to_through_road(source, target)
+                        {
+                            continue;
+                        }
+                        let target_offset = path_src[target_index].1;
+                        let local_a = target.points[segment];
+                        let local_b = target.points[segment + 1];
+                        let a = (
+                            local_a.0 + target_offset.0,
+                            local_a.1 + target_offset.1,
+                        );
+                        let b = (
+                            local_b.0 + target_offset.0,
+                            local_b.1 + target_offset.1,
+                        );
+                        let direction = (b.0 - a.0, b.1 - a.1);
+                        let length_sq =
+                            direction.0 * direction.0 + direction.1 * direction.1;
+                        if length_sq <= 1e-6 {
+                            continue;
+                        }
+                        let length = length_sq.sqrt();
+                        let tangent_dot = ((source_direction.0 * direction.0
+                            + source_direction.1 * direction.1)
+                            / (source_length * length))
+                            .abs();
+                        if tangent_dot < MIN_TANGENT_DOT {
+                            continue;
+                        }
+                        let t = (((endpoint.0 - a.0) * direction.0
+                            + (endpoint.1 - a.1) * direction.1)
+                            / length_sq)
+                            .clamp(0.0, 1.0);
+                        if t * length < MIN_INTERIOR_REACH_UNITS
+                            || (1.0 - t) * length < MIN_INTERIOR_REACH_UNITS
+                        {
+                            continue;
+                        }
+                        let projected = (
+                            a.0 + direction.0 * t,
+                            a.1 + direction.1 * t,
+                        );
+                        let gap_x = projected.0 - endpoint.0;
+                        let gap_y = projected.1 - endpoint.1;
+                        if gap_x * gap_x + gap_y * gap_y > max_gap_sq {
+                            continue;
+                        }
+                        let target_dz = final_dz[target_index].as_ref().unwrap();
+                        let target_height =
+                            target_dz[segment] * (1.0 - t) + target_dz[segment + 1] * t;
+                        if target_height <= 0.2 || source_height <= target_height + 0.2 {
+                            continue;
+                        }
+                        let target_anchors = &mut anchors[target_index];
+                        if let Some(existing) = target_anchors.iter_mut().find(|anchor| {
+                            anchor.segment == segment && (anchor.t - t).abs() * length < 0.5
+                        }) {
+                            existing.height = existing.height.max(source_height);
+                        } else {
+                            target_anchors.push(ProjectedJunctionAnchor {
+                                segment,
+                                t,
+                                height: source_height,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    anchors
+}
+
+fn insert_projected_junction_anchors(
+    base_path: &BasePath,
+    raw_dz: &[f32],
+    anchors: &[ProjectedJunctionAnchor],
+    m_per_unit: f32,
+) -> (BasePath, Vec<f32>) {
+    if anchors.is_empty()
+        || base_path.points.len() < 2
+        || raw_dz.len() != base_path.points.len()
+    {
+        return (base_path.clone(), raw_dz.to_vec());
+    }
+    let mut by_segment = vec![Vec::<ProjectedJunctionAnchor>::new(); base_path.points.len() - 1];
+    for &anchor in anchors {
+        if let Some(segment) = by_segment.get_mut(anchor.segment) {
+            segment.push(anchor);
+        }
+    }
+    for segment in &mut by_segment {
+        segment.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
+    }
+
+    let mut points = vec![base_path.points[0]];
+    let mut dz = vec![raw_dz[0]];
+    let mut inserted = Vec::<(usize, f32)>::new();
+    for segment in 0..base_path.points.len() - 1 {
+        let a = base_path.points[segment];
+        let b = base_path.points[segment + 1];
+        for anchor in &by_segment[segment] {
+            let point = (
+                a.0 + (b.0 - a.0) * anchor.t,
+                a.1 + (b.1 - a.1) * anchor.t,
+            );
+            let fallback =
+                raw_dz[segment] * (1.0 - anchor.t) + raw_dz[segment + 1] * anchor.t;
+            if points.last().is_some_and(|last| distance(*last, point) < 0.25) {
+                let index = points.len() - 1;
+                dz[index] = dz[index].max(anchor.height).max(fallback);
+                inserted.push((index, anchor.height));
+            } else {
+                points.push(point);
+                dz.push(anchor.height.max(fallback));
+                inserted.push((points.len() - 1, anchor.height));
+            }
+        }
+        if points
+            .last()
+            .is_none_or(|last| distance(*last, b) >= 0.25)
+        {
+            points.push(b);
+            dz.push(raw_dz[segment + 1]);
+        } else {
+            let index = points.len() - 1;
+            dz[index] = dz[index].max(raw_dz[segment + 1]);
+        }
+    }
+
+    let grade_per_unit = 0.08 * m_per_unit.max(1e-6);
+    let hold_units = 12.0 / m_per_unit.max(1e-6);
+    for (anchor_index, height) in inserted {
+        let mut arc = 0.0f32;
+        for index in anchor_index + 1..points.len() {
+            arc += distance(points[index - 1], points[index]);
+            let required = height - grade_per_unit * (arc - hold_units).max(0.0);
+            if required > dz[index] {
+                dz[index] = required;
+            }
+        }
+        arc = 0.0;
+        for index in (0..anchor_index).rev() {
+            arc += distance(points[index], points[index + 1]);
+            let required = height - grade_per_unit * (arc - hold_units).max(0.0);
+            if required > dz[index] {
+                dz[index] = required;
+            }
+        }
+    }
+    let mut anchored = base_path.clone();
+    anchored.points = points;
+    (anchored, dz)
+}
+
+/// Dense knots are created after raw cross-tile reconciliation. Neighboring
+/// clipped copies can have different raw segment endpoints, so independently
+/// clamping the same global knot can make their overlap diverge again. Copy
+/// every padding-side dense vertex from the adjacent tile's authoritative
+/// in-tile profile. The nominal seam stays governed by the earlier common
+/// plane; each side of the overlap then has one unambiguous owner.
+fn reconcile_dense_padded_copies(
+    base_paths: &[BasePath],
+    path_src: &[((u32, u32), (f32, f32))],
+    dense: &mut [Option<(Vec<(f32, f32)>, Vec<f32>)>],
+    m_per_unit: f32,
+) {
+    const CELL_UNITS: f32 = 32.0;
+    const MAX_GAP_M: f32 = 1.25;
+    const MIN_PARALLEL_DOT: f32 = 0.98;
+    const SCORE_TIE_EPSILON: f32 = 1e-5;
+    const MAX_TIED_HEIGHT_GAP_M: f32 = 0.2;
+
+    let extent = EXTENT as f32;
+    let snapshot = dense.to_vec();
+    let mut grid =
+        HashMap::<((u32, u32), i32, i32), Vec<(usize, usize)>>::new();
+    for (path_index, profile) in snapshot.iter().enumerate() {
+        let Some((points, heights)) = profile else {
+            continue;
+        };
+        if points.len() < 2
+            || heights.len() != points.len()
+            || base_paths[path_index].is_polygon
+            || base_paths[path_index].continuity_class.is_none()
+        {
+            continue;
+        }
+        let (source, offset) = path_src[path_index];
+        for segment in 0..points.len() - 1 {
+            let a = points[segment];
+            let b = points[segment + 1];
+            // Only index segments which contain some authoritative interior.
+            if (a.0 < 0.0 && b.0 < 0.0)
+                || (a.0 > extent && b.0 > extent)
+                || (a.1 < 0.0 && b.1 < 0.0)
+                || (a.1 > extent && b.1 > extent)
+            {
+                continue;
+            }
+            let global_a = (a.0 + offset.0, a.1 + offset.1);
+            let global_b = (b.0 + offset.0, b.1 + offset.1);
+            let x0 = (global_a.0.min(global_b.0) / CELL_UNITS).floor() as i32;
+            let x1 = (global_a.0.max(global_b.0) / CELL_UNITS).floor() as i32;
+            let y0 = (global_a.1.min(global_b.1) / CELL_UNITS).floor() as i32;
+            let y1 = (global_a.1.max(global_b.1) / CELL_UNITS).floor() as i32;
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    grid.entry((source, cx, cy))
+                        .or_default()
+                        .push((path_index, segment));
+                }
+            }
+        }
+    }
+
+    let max_gap_units = MAX_GAP_M / m_per_unit.max(1e-6);
+    let max_gap_sq = max_gap_units * max_gap_units;
+    let cell_reach = (max_gap_units / CELL_UNITS).ceil() as i32;
+    let mut proposals = Vec::<(usize, usize, f32)>::new();
+    for (path_index, profile) in snapshot.iter().enumerate() {
+        let Some((points, heights)) = profile else {
+            continue;
+        };
+        if points.len() < 2
+            || heights.len() != points.len()
+            || base_paths[path_index].is_polygon
+        {
+            continue;
+        }
+        let Some(source_class) = base_paths[path_index].continuity_class.as_ref() else {
+            continue;
+        };
+        let (source, offset) = path_src[path_index];
+        for vertex in 0..points.len() {
+            let point = points[vertex];
+            let mut owner = None;
+            let mut side_count = 0;
+            if point.0 < 0.0 {
+                owner = source.0.checked_sub(1).map(|x| (x, source.1));
+                side_count += 1;
+            } else if point.0 > extent {
+                owner = source.0.checked_add(1).map(|x| (x, source.1));
+                side_count += 1;
+            }
+            if point.1 < 0.0 {
+                owner = source.1.checked_sub(1).map(|y| (source.0, y));
+                side_count += 1;
+            } else if point.1 > extent {
+                owner = source.1.checked_add(1).map(|y| (source.0, y));
+                side_count += 1;
+            }
+            let Some(owner) = owner.filter(|_| side_count == 1) else {
+                continue;
+            };
+            let previous = points[vertex.saturating_sub(1)];
+            let next = points[(vertex + 1).min(points.len() - 1)];
+            let direction = (next.0 - previous.0, next.1 - previous.1);
+            let direction_len =
+                (direction.0 * direction.0 + direction.1 * direction.1)
+                    .sqrt()
+                    .max(1e-6);
+            let global_point = (point.0 + offset.0, point.1 + offset.1);
+            let cell = (
+                (global_point.0 / CELL_UNITS).floor() as i32,
+                (global_point.1 / CELL_UNITS).floor() as i32,
+            );
+            let mut best_score = f32::MAX;
+            let mut tied_heights = Vec::<f32>::new();
+            for cy in cell.1 - cell_reach..=cell.1 + cell_reach {
+                for cx in cell.0 - cell_reach..=cell.0 + cell_reach {
+                    let Some(candidates) = grid.get(&(owner, cx, cy)) else {
+                        continue;
+                    };
+                    for &(target_index, segment) in candidates {
+                        let target = &base_paths[target_index];
+                        let Some(target_class) = target.continuity_class.as_ref() else {
+                            continue;
+                        };
+                        if target.layer != base_paths[path_index].layer
+                            || target.vertical != base_paths[path_index].vertical
+                            || target_class != source_class
+                        {
+                            continue;
+                        }
+                        let Some((target_points, target_heights)) = &snapshot[target_index]
+                        else {
+                            continue;
+                        };
+                        let target_offset = path_src[target_index].1;
+                        let local_a = target_points[segment];
+                        let local_b = target_points[segment + 1];
+                        let a = (
+                            local_a.0 + target_offset.0,
+                            local_a.1 + target_offset.1,
+                        );
+                        let b = (
+                            local_b.0 + target_offset.0,
+                            local_b.1 + target_offset.1,
+                        );
+                        let edge = (b.0 - a.0, b.1 - a.1);
+                        let edge_len_sq = edge.0 * edge.0 + edge.1 * edge.1;
+                        if edge_len_sq <= 1e-6 {
+                            continue;
+                        }
+                        let edge_len = edge_len_sq.sqrt();
+                        if ((direction.0 * edge.0 + direction.1 * edge.1)
+                            / (direction_len * edge_len))
+                            .abs()
+                            < MIN_PARALLEL_DOT
+                        {
+                            continue;
+                        }
+                        let t = (((global_point.0 - a.0) * edge.0
+                            + (global_point.1 - a.1) * edge.1)
+                            / edge_len_sq)
+                            .clamp(0.0, 1.0);
+                        let local_match = (
+                            local_a.0 + (local_b.0 - local_a.0) * t,
+                            local_a.1 + (local_b.1 - local_a.1) * t,
+                        );
+                        if local_match.0 < 0.0
+                            || local_match.0 > extent
+                            || local_match.1 < 0.0
+                            || local_match.1 > extent
+                        {
+                            continue;
+                        }
+                        let matched = (a.0 + edge.0 * t, a.1 + edge.1 * t);
+                        let gap_x = matched.0 - global_point.0;
+                        let gap_y = matched.1 - global_point.1;
+                        let score = gap_x * gap_x + gap_y * gap_y;
+                        if score > max_gap_sq {
+                            continue;
+                        }
+                        let height = target_heights[segment] * (1.0 - t)
+                            + target_heights[segment + 1] * t;
+                        if score + SCORE_TIE_EPSILON < best_score {
+                            best_score = score;
+                            tied_heights.clear();
+                            tied_heights.push(height);
+                        } else if (score - best_score).abs() <= SCORE_TIE_EPSILON {
+                            tied_heights.push(height);
+                        }
+                    }
+                }
+            }
+            if tied_heights.is_empty() {
+                continue;
+            }
+            let min = tied_heights.iter().copied().fold(f32::MAX, f32::min);
+            let max = tied_heights.iter().copied().fold(f32::MIN, f32::max);
+            if max - min <= MAX_TIED_HEIGHT_GAP_M {
+                proposals.push((
+                    path_index,
+                    vertex,
+                    tied_heights.iter().sum::<f32>() / tied_heights.len() as f32,
+                ));
+            }
+        }
+    }
+    for (path, vertex, height) in proposals {
+        if let Some((_, values)) = dense[path].as_mut() {
+            values[vertex] = height;
+        }
+    }
 }
 
 /// Annotate one base tile against the solved field: base_dz features keyed
@@ -3592,18 +4083,41 @@ fn annotate_base_tiles(
     // filling, and grade propagation have settled the inside anchors.
     reconcile_cross_tile_copies(&base_paths, &path_src, &mut final_dz, m_per_unit);
 
-    let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
+    let junction_anchors =
+        projected_junction_anchors(&base_paths, &path_src, &final_dz, m_per_unit);
+    let mut dense_profiles = vec![None; base_paths.len()];
     for (path_index, base_path) in base_paths.iter().enumerate() {
-        let Some(raw_dz) = final_dz[path_index].take() else { continue };
-        let offset = path_src[path_index].1;
-        let (profile_points, dz) = dense_base_dz_profile(
+        let Some(raw_dz) = final_dz[path_index].as_ref() else {
+            continue;
+        };
+        let (anchored_path, anchored_dz) = insert_projected_junction_anchors(
             base_path,
-            &raw_dz,
+            raw_dz,
+            &junction_anchors[path_index],
+            m_per_unit,
+        );
+        let offset = path_src[path_index].1;
+        dense_profiles[path_index] = Some(dense_base_dz_profile(
+            &anchored_path,
+            &anchored_dz,
             offset,
             field,
             tunnel_field,
             m_per_unit,
-        );
+        ));
+    }
+    reconcile_dense_padded_copies(
+        &base_paths,
+        &path_src,
+        &mut dense_profiles,
+        m_per_unit,
+    );
+
+    let mut per_tile: HashMap<(u32, u32), Vec<TileFeature>> = HashMap::new();
+    for (path_index, base_path) in base_paths.iter().enumerate() {
+        let Some((profile_points, dz)) = dense_profiles[path_index].take() else {
+            continue;
+        };
         let src = path_src[path_index].0;
         let any = dz.iter().any(|&v| v.abs() > 0.2);
         if !any {
@@ -4262,6 +4776,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(100.0, 100.0), (150.0, 100.0), (200.0, 100.0)],
         };
 
@@ -4316,6 +4831,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(0.0, 0.0), (300.0, 0.0)],
         };
 
@@ -4377,6 +4893,7 @@ mod tests {
                 path: 0,
                 is_polygon: false,
                 vertical,
+                continuity_class: None,
                 points: vec![(0.0, 0.0), (300.0, 0.0)],
             };
 
@@ -4414,6 +4931,7 @@ mod tests {
             is_polygon: false,
             points: vec![(0.0, 0.0), (300.0, 0.0)],
             vertical: VerticalClass::Tunnel,
+            continuity_class: None,
         };
 
         let (points, dz) = dense_base_dz_profile(
@@ -4464,6 +4982,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
         };
         let raw = [0.3, 4.0, 0.3];
@@ -4497,6 +5016,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(0.0, 0.0), (12.4, 0.0)],
         };
         let (points, dz) = dense_base_dz_profile(
@@ -4538,6 +5058,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(0.0, 0.0), (100.0, 0.0)],
         };
         let (points, dz) = dense_base_dz_profile(
@@ -4583,6 +5104,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(0.0, 0.0), (100.0, 0.0)],
         };
         let (_, dz) = dense_base_dz_profile(
@@ -4631,6 +5153,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(3800.0, 0.0), (4160.0, 0.0)],
         };
         let right = BasePath {
@@ -4639,6 +5162,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: vec![(-64.0, 0.0), (104.0, 0.0)],
         };
         let solved_height = |x: f32| 5.5 * (1.0 - (x - 3800.0) / 400.0);
@@ -4684,6 +5208,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -4717,6 +5242,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -4778,6 +5304,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Elevated,
+            continuity_class: None,
             points: points.to_vec(),
         };
 
@@ -4856,6 +5383,7 @@ mod tests {
                 path: 0,
                 is_polygon: false,
                 vertical,
+                continuity_class: None,
                 points: points.to_vec(),
             };
 
@@ -4960,6 +5488,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Elevated,
+            continuity_class: None,
             points: points.to_vec(),
         };
 
@@ -5015,6 +5544,204 @@ mod tests {
     }
 
     #[test]
+    fn same_family_bridge_portal_accepts_five_metre_endpoint_step() {
+        let path = |feature, vertical, class: &str, points: &[(f32, f32)]| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical,
+            continuity_class: Some((class.to_string(), false, false)),
+            points: points.to_vec(),
+        };
+        let paths = vec![
+            path(
+                1,
+                VerticalClass::Surface,
+                "motorway",
+                &[(0.0, 0.0), (10.0, 0.0)],
+            ),
+            path(
+                2,
+                VerticalClass::Elevated,
+                "motorway",
+                &[(10.0, 0.0), (20.0, 0.0)],
+            ),
+            // Exact geometry alone is insufficient when the paint/road
+            // family changes.
+            path(
+                3,
+                VerticalClass::Elevated,
+                "service",
+                &[(10.0, 0.0), (20.0, 0.0)],
+            ),
+        ];
+        let sources = vec![((1, 2), (0.0, 0.0)); paths.len()];
+        let mut dz = vec![
+            Some(vec![5.5, 5.5]),
+            Some(vec![0.5, 0.5]),
+            Some(vec![0.5, 0.5]),
+        ];
+
+        reconcile_exact_continuation_endpoints(&paths, &sources, &mut dz, 1.0);
+
+        assert_eq!(dz[0].as_ref().unwrap(), &[5.5, 5.5]);
+        assert_eq!(
+            dz[1].as_ref().unwrap(),
+            &[5.5, 5.5],
+            "short same-family bridge member did not inherit its deck"
+        );
+        assert_eq!(
+            dz[2].as_ref().unwrap(),
+            &[0.5, 0.5],
+            "different road family borrowed the bridge deck"
+        );
+    }
+
+    #[test]
+    fn projected_link_endpoint_becomes_fixed_mainline_knot() {
+        let road_class = |link| Some(("motorway".to_string(), link, false));
+        let paths = vec![
+            BasePath {
+                layer: "streets".to_string(),
+                feature: 1,
+                path: 0,
+                is_polygon: false,
+                vertical: VerticalClass::Surface,
+                continuity_class: road_class(false),
+                points: vec![(0.0, 0.0), (100.0, 0.0)],
+            },
+            BasePath {
+                layer: "streets".to_string(),
+                feature: 2,
+                path: 0,
+                is_polygon: false,
+                vertical: VerticalClass::Surface,
+                continuity_class: road_class(true),
+                points: vec![(30.0, 5.0), (50.0, 0.0)],
+            },
+            BasePath {
+                layer: "streets".to_string(),
+                feature: 3,
+                path: 0,
+                is_polygon: false,
+                vertical: VerticalClass::Surface,
+                continuity_class: road_class(true),
+                points: vec![(50.0, 10.0), (50.0, 0.0)],
+            },
+        ];
+        let sources = vec![((1, 2), (0.0, 0.0)); paths.len()];
+        let dz = vec![
+            Some(vec![4.0, 4.0]),
+            Some(vec![5.5, 5.5]),
+            Some(vec![7.0, 7.0]),
+        ];
+
+        let anchors = projected_junction_anchors(&paths, &sources, &dz, 1.0);
+        assert_eq!(anchors[0].len(), 1, "perpendicular branch was admitted");
+        let (anchored, heights) =
+            insert_projected_junction_anchors(&paths[0], dz[0].as_ref().unwrap(), &anchors[0], 1.0);
+        let knot = anchored
+            .points
+            .iter()
+            .position(|point| distance(*point, (50.0, 0.0)) < 1e-4)
+            .expect("simplified mainline did not gain the junction knot");
+        assert!((heights[knot] - 5.5).abs() < 1e-6);
+        for index in 1..heights.len() {
+            let run = distance(anchored.points[index - 1], anchored.points[index]);
+            assert!(
+                (heights[index] - heights[index - 1]).abs() <= 0.08 * run + 1e-5
+            );
+        }
+
+        let mut non_link_source = paths[1].clone();
+        non_link_source.continuity_class = road_class(false);
+        let non_link_paths = vec![paths[0].clone(), non_link_source];
+        let non_link_dz = vec![dz[0].clone(), dz[1].clone()];
+        assert!(
+            projected_junction_anchors(&non_link_paths, &sources[..2], &non_link_dz, 1.0)
+                [0]
+                .is_empty(),
+            "near-parallel non-link endpoint was treated as a junction link"
+        );
+
+        let mut link_target = paths[0].clone();
+        link_target.continuity_class = road_class(true);
+        let link_to_link_paths = vec![link_target, paths[1].clone()];
+        let link_to_link_dz = vec![dz[0].clone(), dz[1].clone()];
+        assert!(
+            projected_junction_anchors(
+                &link_to_link_paths,
+                &sources[..2],
+                &link_to_link_dz,
+                1.0,
+            )[0]
+                .is_empty(),
+            "link endpoint was allowed to lift another link"
+        );
+    }
+
+    #[test]
+    fn post_dense_padding_uses_neighbor_authoritative_profile() {
+        let path = |feature| BasePath {
+            layer: "streets".to_string(),
+            feature,
+            path: 0,
+            is_polygon: false,
+            vertical: VerticalClass::Surface,
+            continuity_class: Some(("motorway".to_string(), false, false)),
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+        };
+        let paths = vec![path(1), path(2)];
+        let sources = vec![
+            ((10, 20), (0.0, 0.0)),
+            ((10, 21), (0.0, 4096.0)),
+        ];
+        let north_points = vec![
+            (10.0, 4000.0),
+            (10.0, 4032.0),
+            (10.0, 4064.0),
+            (10.0, 4096.0),
+            (10.0, 4128.0),
+            (10.0, 4160.0),
+        ];
+        let south_points = vec![
+            (10.0, -64.0),
+            (10.0, -32.0),
+            (10.0, 0.0),
+            (10.0, 32.0),
+            (10.0, 64.0),
+            (10.0, 96.0),
+        ];
+        let mut dense = vec![
+            Some((north_points, vec![5.6, 5.4, 5.2, 4.8, 3.1, 3.0])),
+            Some((south_points, vec![3.2, 3.5, 4.8, 4.6, 4.4, 4.2])),
+        ];
+        let original_dense = dense.clone();
+
+        reconcile_dense_padded_copies(&paths, &sources, &mut dense, 1.0);
+
+        let north = &dense[0].as_ref().unwrap().1;
+        let south = &dense[1].as_ref().unwrap().1;
+        assert!((south[0] - north[1]).abs() < 1e-6);
+        assert!((south[1] - north[2]).abs() < 1e-6);
+        assert!((north[3] - south[2]).abs() < 1e-6);
+        assert!((north[4] - south[3]).abs() < 1e-6);
+        assert!((north[5] - south[4]).abs() < 1e-6);
+
+        let mut untyped_paths = paths.clone();
+        for path in &mut untyped_paths {
+            path.continuity_class = None;
+        }
+        let mut untyped_dense = original_dense.clone();
+        reconcile_dense_padded_copies(&untyped_paths, &sources, &mut untyped_dense, 1.0);
+        assert_eq!(
+            untyped_dense, original_dense,
+            "untyped padded paths borrowed an unrelated semantic profile"
+        );
+    }
+
+    #[test]
     fn wholly_padded_reconciliation_rejects_parallel_and_other_layer_paths() {
         let path =
             |layer: &str, feature, vertical, points: &[(f32, f32)]| BasePath {
@@ -5023,6 +5750,7 @@ mod tests {
                 path: 0,
                 is_polygon: false,
                 vertical,
+                continuity_class: None,
                 points: points.to_vec(),
             };
         let paths = vec![
@@ -5095,6 +5823,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -5146,6 +5875,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -5180,6 +5910,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
@@ -5212,6 +5943,7 @@ mod tests {
             path: 0,
             is_polygon: false,
             vertical: VerticalClass::Surface,
+            continuity_class: None,
             points: points.to_vec(),
         };
         let paths = vec![
