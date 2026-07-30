@@ -33,12 +33,28 @@ pub struct AlsaAudioAccess {
     audio_outputs: Arc<Mutex<Vec<AlsaAudioDeviceRef>>>,
     audio_inputs: Arc<Mutex<Vec<AlsaAudioDeviceRef>>>,
     device_descs: Vec<AlsaAudioDesc>,
-    failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    // input and output are tracked apart because both directions of one alsa pcm
+    // share a device id: a card without a microphone must not disable playback
+    failed_inputs: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    failed_outputs: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    /// Devices asked for by the last call, used to tell an explicit request
+    /// apart from the automatic re-selection that drives the retry loop.
+    last_input_request: Vec<AudioDeviceId>,
+    last_output_request: Vec<AudioDeviceId>,
     change_signal: SignalToUI,
 }
 
 #[derive(Debug)]
 pub struct AlsaError(String);
+
+/// The identity of an enumeration, used to tell a real device change from a
+/// repeated enumeration of the same devices.
+fn device_set(descs: &[AlsaAudioDesc]) -> HashSet<(AudioDeviceId, AudioDeviceType)> {
+    descs
+        .iter()
+        .map(|v| (v.desc.device_id, v.desc.device_type))
+        .collect()
+}
 
 macro_rules! alsa_error {
     ( $ call: expr) => {
@@ -73,7 +89,10 @@ impl AlsaAudioAccess {
 
         Arc::new(Mutex::new(AlsaAudioAccess {
             change_signal,
-            failed_devices: Default::default(),
+            failed_inputs: Default::default(),
+            failed_outputs: Default::default(),
+            last_input_request: Vec::new(),
+            last_output_request: Vec::new(),
             audio_input_cb: Default::default(),
             audio_output_cb: Default::default(),
             device_descs: Default::default(),
@@ -86,6 +105,8 @@ impl AlsaAudioAccess {
         // alright lets do it
         fn inner(alsa: &AlsaAudioAccess) -> Result<Vec<AlsaAudioDesc>, AlsaError> {
             let mut device_descs = Vec::new();
+            let failed_inputs = alsa.failed_inputs.lock().unwrap().clone();
+            let failed_outputs = alsa.failed_outputs.lock().unwrap().clone();
             let mut card_num = -1;
             unsafe {
                 loop {
@@ -97,49 +118,56 @@ impl AlsaAudioAccess {
                     let mut hints: *mut *mut c_void = 0 as *mut _;
                     alsa_error!(snd_device_name_hint(card_num, "pcm\0".as_ptr(), &mut hints))?;
 
-                    let mut index = 0;
-                    while *hints.offset(index) != std::ptr::null_mut() {
-                        let hint_ptr = *hints.offset(index);
-                        let name_str =
-                            from_alsa_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr()))
-                                .unwrap_or("".into());
-                        let desc_str =
-                            from_alsa_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr()))
-                                .unwrap_or("".into())
-                                .replace("\n", " ");
-                        let ioid =
-                            from_alsa_string(snd_device_name_get_hint(hint_ptr, "IOID\0".as_ptr()))
-                                .unwrap_or("".into());
-                        let device_id = AudioDeviceId(LiveId::from_str(&name_str));
-                        let desc = AudioDeviceDesc {
-                            has_failed: alsa.failed_devices.lock().unwrap().contains(&device_id),
-                            device_id,
-                            device_type: AudioDeviceType::Input,
-                            is_default: false,
-                            channel_count: 2,
-                            name: format!("[ALSA] {}", desc_str),
-                        };
-                        if ioid == "" || ioid == "Input" {
-                            device_descs.push(AlsaAudioDesc {
-                                name: name_str.clone(),
-                                desc: desc.clone(),
-                            });
-                        }
-                        if ioid == "" || ioid == "Output" {
-                            device_descs.push(AlsaAudioDesc {
-                                name: name_str,
-                                desc: AudioDeviceDesc {
-                                    device_type: AudioDeviceType::Output,
-                                    ..desc
-                                },
-                            });
-                        }
-                        index += 1;
+                let mut index = 0;
+                while *hints.offset(index) != std::ptr::null_mut() {
+                    let hint_ptr = *hints.offset(index);
+                    index += 1;
+                    let name_str =
+                        from_alsa_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr()))
+                            .unwrap_or("".into());
+                    let desc_str =
+                        from_alsa_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr()))
+                            .unwrap_or("".into())
+                            .replace("\n", " ");
+                    let ioid =
+                        from_alsa_string(snd_device_name_get_hint(hint_ptr, "IOID\0".as_ptr()))
+                            .unwrap_or("".into());
+                    let device_id = AudioDeviceId(LiveId::from_str(&name_str));
+                    let desc = AudioDeviceDesc {
+                        has_failed: false,
+                        device_id,
+                        device_type: AudioDeviceType::Input,
+                        is_default: false,
+                        channel_count: 2,
+                        name: format!("[ALSA] {}", desc_str),
+                    };
+                    if ioid == "" || ioid == "Input" {
+                        device_descs.push(AlsaAudioDesc {
+                            name: name_str.clone(),
+                            desc: AudioDeviceDesc {
+                                has_failed: failed_inputs.contains(&device_id),
+                                ..desc.clone()
+                            },
+                        });
                     }
+                    if ioid == "" || ioid == "Output" {
+                        device_descs.push(AlsaAudioDesc {
+                            name: name_str,
+                            desc: AudioDeviceDesc {
+                                device_type: AudioDeviceType::Output,
+                                has_failed: failed_outputs.contains(&device_id),
+                                ..desc
+                            },
+                        });
+                    }
+                }
                 }
             }
             Ok(device_descs)
         }
+        // taken before the clear below: it is what the new enumeration is
+        // compared against to decide whether anything actually changed
+        let previous_devices = device_set(&self.device_descs);
         self.device_descs.clear();
         match inner(self) {
             Err(e) => {
@@ -177,6 +205,19 @@ impl AlsaAudioAccess {
                     descs.desc.is_default = true;
                 }
 
+                // a device that failed to open is not tried again until
+                // something changes - the alsa equivalent of a hotplug event is
+                // the device list itself changing, so re-arm every failure then.
+                // that is what lets a card which was merely busy come back.
+                // compared as a set: a reordered enumeration is not a change,
+                // and treating it as one would resurrect the retry loop.
+                if device_set(&descs) != previous_devices {
+                    self.failed_inputs.lock().unwrap().clear();
+                    self.failed_outputs.lock().unwrap().clear();
+                    for v in descs.iter_mut() {
+                        v.desc.has_failed = false;
+                    }
+                }
                 self.device_descs = descs;
             }
         }
@@ -188,7 +229,9 @@ impl AlsaAudioAccess {
     }
 
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        self.rearm_on_explicit_request(devices, true);
         let new = {
+            let failed_inputs = self.failed_inputs.lock().unwrap().clone();
             let mut audio_inputs = self.audio_inputs.lock().unwrap();
             // lets shut down the ones we dont use
             audio_inputs.iter_mut().for_each(|v| {
@@ -199,6 +242,12 @@ impl AlsaAudioAccess {
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
+                // a device that already refused to open is reported back with
+                // has_failed; opening it again on every device change would
+                // spawn a thread per frame and never stop
+                if failed_inputs.contains(device_id) {
+                    continue;
+                }
                 if audio_inputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
@@ -218,13 +267,18 @@ impl AlsaAudioAccess {
         for (index, device_id, name) in new {
             let audio_input_cb = self.audio_input_cb[index].clone();
             let audio_inputs = self.audio_inputs.clone();
-            let failed_devices = self.failed_devices.clone();
+            let failed_inputs = self.failed_inputs.clone();
             let change_signal = self.change_signal.clone();
+            // published before the open, see the matching comment in
+            // use_audio_outputs
+            self.audio_inputs.lock().unwrap().push(AlsaAudioDeviceRef {
+                device_id,
+                is_terminated: false,
+            });
             std::thread::spawn(move || {
-                if let Ok((mut device, device_ref)) =
+                if let Ok((mut device, _device_ref)) =
                     AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_CAPTURE)
                 {
-                    audio_inputs.lock().unwrap().push(device_ref);
                     let mut audio_buffer = device.allocate_matching_buffer();
                     loop {
                         if audio_inputs
@@ -238,7 +292,10 @@ impl AlsaAudioAccess {
                         }
                         match device.read_input_buffer(&mut audio_buffer) {
                             Err(e) => {
-                                println!("Write output buffer error {}", e.0);
+                                // see the matching comment in use_audio_outputs
+                                crate::error!("ALSA: input device {} stopped: {}", name, e.0);
+                                failed_inputs.lock().unwrap().insert(device_id);
+                                change_signal.set();
                                 break;
                             }
                             Ok(_) => (),
@@ -257,16 +314,46 @@ impl AlsaAudioAccess {
                     let mut audio_inputs = audio_inputs.lock().unwrap();
                     audio_inputs.retain(|v| v.device_id != device_id);
                 } else {
-                    println!("Failed to open ALSA audio device, trying something else");
-                    failed_devices.lock().unwrap().insert(device_id);
+                    crate::error!("ALSA: could not open input device {}", name);
+                    audio_inputs
+                        .lock()
+                        .unwrap()
+                        .retain(|v| v.device_id != device_id);
+                    failed_inputs.lock().unwrap().insert(device_id);
                     change_signal.set();
                 }
             });
         }
     }
 
+    /// Gives the requested devices another chance when the app asks for a
+    /// different set than last time.
+    ///
+    /// The retry loop this guards against is an app re-requesting the *same*
+    /// devices on every device change. A changed request is an explicit choice -
+    /// a user picking a device, or a widget toggling its microphone back on -
+    /// and silently ignoring it because the device failed once would leave that
+    /// device dead for the rest of the process.
+    fn rearm_on_explicit_request(&mut self, devices: &[AudioDeviceId], is_input: bool) {
+        let (last, failed) = if is_input {
+            (&mut self.last_input_request, &self.failed_inputs)
+        } else {
+            (&mut self.last_output_request, &self.failed_outputs)
+        };
+        if last.as_slice() == devices {
+            return;
+        }
+        *last = devices.to_vec();
+        let mut failed = failed.lock().unwrap();
+        for device_id in devices {
+            failed.remove(device_id);
+        }
+    }
+
     pub fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
+        self.rearm_on_explicit_request(devices, false);
         let new = {
+            let failed_outputs = self.failed_outputs.lock().unwrap().clone();
             let mut audio_outputs = self.audio_outputs.lock().unwrap();
             // lets shut down the ones we dont use
             audio_outputs.iter_mut().for_each(|v| {
@@ -277,6 +364,12 @@ impl AlsaAudioAccess {
             // create the new ones
             let mut new = Vec::new();
             for (index, device_id) in devices.iter().enumerate() {
+                // a device that already refused to open is reported back with
+                // has_failed; opening it again on every device change would
+                // spawn a thread per frame and never stop
+                if failed_outputs.contains(device_id) {
+                    continue;
+                }
                 if audio_outputs
                     .iter()
                     .find(|v| v.device_id == *device_id)
@@ -296,15 +389,25 @@ impl AlsaAudioAccess {
         for (index, device_id, name) in new {
             let audio_output_cb = self.audio_output_cb[index].clone();
             let audio_outputs = self.audio_outputs.clone();
-            let failed_devices = self.failed_devices.clone();
+            let failed_outputs = self.failed_outputs.clone();
             let change_signal = self.change_signal.clone();
+            // published before the open, not after it: opening takes ~200ms, and
+            // the check above that decides to spawn reads this same list. two
+            // device changes inside that window - the normal startup, where the
+            // card watcher signals immediately after the first enumeration -
+            // would otherwise spawn a second thread for the same exclusive pcm,
+            // whose EBUSY would mark a device that is playing fine as failed.
+            // it also means a terminate arriving mid-open is not lost.
+            self.audio_outputs.lock().unwrap().push(AlsaAudioDeviceRef {
+                device_id,
+                is_terminated: false,
+            });
             std::thread::spawn(move || {
                 // this thing fails here. so how would we then drop down to a secondary
                 // we could simply switch default
-                if let Ok((mut device, device_ref)) =
+                if let Ok((mut device, _device_ref)) =
                     AlsaAudioDevice::new(&name, device_id, SND_PCM_STREAM_PLAYBACK)
                 {
-                    audio_outputs.lock().unwrap().push(device_ref);
                     // lets allocate an output buffer
                     let mut audio_buffer = device.allocate_matching_buffer();
                     loop {
@@ -329,7 +432,14 @@ impl AlsaAudioAccess {
                         }
                         match device.write_output_buffer(&audio_buffer) {
                             Err(e) => {
-                                println!("Write output buffer error {}", e.0);
+                                // the stream died under us. mark it like a failed
+                                // open and tell the app, so it moves to another
+                                // device instead of silently losing audio - and
+                                // so we do not respawn this thread on every
+                                // device change from here on
+                                crate::error!("ALSA: output device {} stopped: {}", name, e.0);
+                                failed_outputs.lock().unwrap().insert(device_id);
+                                change_signal.set();
                                 break;
                             }
                             Ok(_) => (),
@@ -340,8 +450,12 @@ impl AlsaAudioAccess {
                         .unwrap()
                         .retain(|v| v.device_id != device_id);
                 } else {
-                    println!("Failed to open ALSA audio device, trying something else");
-                    failed_devices.lock().unwrap().insert(device_id);
+                    crate::error!("ALSA: could not open output device {}", name);
+                    audio_outputs
+                        .lock()
+                        .unwrap()
+                        .retain(|v| v.device_id != device_id);
+                    failed_outputs.lock().unwrap().insert(device_id);
                     change_signal.set();
                 }
             });
