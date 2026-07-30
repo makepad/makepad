@@ -100,6 +100,10 @@ pub struct MapOverlayState {
     pub markers: Vec<MapMarker>,
     pub route: Option<MapRouteOverlay>,
     pub puck: Option<MapPuck>,
+    /// shiny.md T5b: additive halo passes under the route stroke (no HDR,
+    /// no bloom — premultiplied rgb with alpha 0 is pure additive over
+    /// whatever is underneath). Stamped from the theme per frame.
+    pub route_glow: bool,
     /// Scratch screen-space buffer reused across frames.
     scratch_screen: Vec<Vec2d>,
 }
@@ -169,7 +173,7 @@ pub fn draw_map_overlay(
 
     let route = state.route.take();
     if let Some(route) = &route {
-        draw_route(dv, camera, route, &mut state.scratch_screen);
+        draw_route(dv, camera, route, state.route_glow, &mut state.scratch_screen);
     }
     state.route = route;
 
@@ -188,6 +192,7 @@ fn draw_route(
     dv: &mut DrawVector,
     camera: &OverlayCamera,
     route: &MapRouteOverlay,
+    glow: bool,
     screen: &mut Vec<Vec2d>,
 ) {
     if route.points_norm.len() < 2 {
@@ -209,10 +214,25 @@ fn draw_route(
             || a.y > max_y && b.y > max_y)
     };
 
-    // Two stroke passes (casing then fill), each split at the traveled
-    // boundary so the behind-us part fades out.
+    // Halo passes (widest first) then casing then fill, each split at the
+    // traveled boundary so the behind-us part fades out. Halo colors are
+    // premultiplied-additive (rgb energy, alpha 0): roads underneath
+    // BRIGHTEN instead of being covered — the no-HDR glow trick.
+    let mut passes: Vec<(f32, Vec4f)> = Vec::with_capacity(4);
+    if glow {
+        passes.push((
+            26.0,
+            Vec4f { x: ROUTE_FILL.x * 0.07, y: ROUTE_FILL.y * 0.07, z: ROUTE_FILL.z * 0.07, w: 0.0 },
+        ));
+        passes.push((
+            14.0,
+            Vec4f { x: ROUTE_FILL.x * 0.16, y: ROUTE_FILL.y * 0.16, z: ROUTE_FILL.z * 0.16, w: 0.0 },
+        ));
+    }
+    passes.push((9.0, ROUTE_CASING));
+    passes.push((5.5, ROUTE_FILL));
     let split = route.traveled_index.min(screen.len());
-    for (width, color) in [(9.0f32, ROUTE_CASING), (5.5f32, ROUTE_FILL)] {
+    for (width, color) in passes {
         for (range, alpha) in [
             (0..split.saturating_add(1).min(screen.len()), ROUTE_DIM_ALPHA),
             (split..screen.len(), 1.0),
@@ -220,7 +240,13 @@ fn draw_route(
             if range.len() < 2 {
                 continue;
             }
-            dv.set_color(color.x, color.y, color.z, color.w * alpha);
+            // Additive halos (w = 0) carry their energy in rgb, so the
+            // traveled-portion dim must scale rgb, not the no-op alpha.
+            if color.w == 0.0 {
+                dv.set_color(color.x * alpha, color.y * alpha, color.z * alpha, 0.0);
+            } else {
+                dv.set_color(color.x, color.y, color.z, color.w * alpha);
+            }
             let mut pen_down = false;
             let mut last_drawn = dvec2(0.0, 0.0);
             let start = range.start;
