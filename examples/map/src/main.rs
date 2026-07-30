@@ -110,16 +110,12 @@ script_mod! {
                             detail_mbtiles_path: "local/maps/europe-osm-detail.mbtiles"
                             bridge_dz_mbtiles_path: "local/maps/ams-bridge-dz.mbtiles"
                             buildings_3d: true
-                            // shiny.md features under review (screenshot
-                            // tuning); library defaults stay off.
+                            // shiny.md: baked AO/shadows/water/foliage ride
+                            // the widget theme defaults; the showcase app
+                            // also turns on the specular sheen.
                             style_light +: {
-                                shiny: MapShinyStyle{
-                                    bake_ao: true
-                                    bake_shadows: true
-                                    terrain_shadows: true
-                                    water_fx: true
+                                shiny +: {
                                     building_sheen: true
-                                    foliage_fx: true
                                 }
                             }
                         }

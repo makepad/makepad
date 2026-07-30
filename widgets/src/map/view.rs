@@ -588,6 +588,17 @@ script_mod! {
             status_text: #x444444
             label: #x000000
 
+            // shiny.md defaults (screenshot-reviewed): baked AO + shadow
+            // geometry are zero GPU cost; water/foliage are a few ALU on
+            // minority pixels. Sheen/glow stay opt-in per app.
+            shiny: MapShinyStyle{
+                bake_ao: true
+                bake_shadows: true
+                terrain_shadows: true
+                water_fx: true
+                foliage_fx: true
+            }
+
             MapFillRule{group: "building" color: #xd9d0c9}
             MapFillRule{group: "building_outline" color: #xb5aa9b}
             MapFillRule{group: "street_area" color: #xdddde8}
@@ -641,6 +652,17 @@ script_mod! {
             status_text: #xb2c7d8
             label: #xe5eaf1
             label_halo: #x161b22
+
+            shiny: MapShinyStyle{
+                bake_ao: true
+                bake_shadows: true
+                terrain_shadows: true
+                water_fx: true
+                foliage_fx: true
+                // Dark volumes + glossy highlights read as the miniature
+                // look; the sheen carries the dark theme.
+                building_sheen: true
+            }
 
             MapFillRule{group: "building" color: #x383d46}
             MapFillRule{group: "building_outline" color: #x262a31}
