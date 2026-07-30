@@ -3753,21 +3753,62 @@ fn build_tile_buffers_from_features(
                         .map(|p| [p.0 as f64, p.1 as f64])
                         .collect();
                     push_positive(&mut scratch);
-                    let mut roof: Vec<[f64; 2]> = ring
-                        .iter()
-                        .map(|p| [(p.0 + sx * d) as f64, (p.1 + sy * d) as f64])
+                    // Silhouette chain sweep, not a per-edge quad soup:
+                    // only contiguous runs of edges facing along the
+                    // shadow direction sweep, one clean polygon per run.
+                    // Per-edge quads left hairline slivers welded to the
+                    // union wherever an edge ran near-parallel to the
+                    // shadow (the "needle pins" from review).
+                    let casts: Vec<bool> = (0..n)
+                        .map(|i| {
+                            let a = ring[i];
+                            let b = ring[(i + 1) % n];
+                            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                            let len = (dx * dx + dy * dy).sqrt();
+                            if len < 1e-4 {
+                                return false;
+                            }
+                            // Outward normal of a positively-wound ring.
+                            (dy / len) * sx + (-dx / len) * sy > 0.06
+                        })
                         .collect();
-                    push_positive(&mut roof);
-                    for i in 0..n {
-                        let a = ring[i];
-                        let b = ring[(i + 1) % n];
-                        let mut quad = vec![
-                            [a.0 as f64, a.1 as f64],
-                            [b.0 as f64, b.1 as f64],
-                            [(b.0 + sx * d) as f64, (b.1 + sy * d) as f64],
-                            [(a.0 + sx * d) as f64, (a.1 + sy * d) as f64],
-                        ];
-                        push_positive(&mut quad);
+                    let anchor = (0..n).find(|&i| !casts[i]);
+                    let mut sweep = |run: &[usize]| {
+                        if run.is_empty() {
+                            return;
+                        }
+                        let mut poly: Vec<[f64; 2]> = Vec::with_capacity(run.len() * 2 + 2);
+                        let first = ring[run[0]];
+                        poly.push([first.0 as f64, first.1 as f64]);
+                        for &edge in run {
+                            let b = ring[(edge + 1) % n];
+                            poly.push([b.0 as f64, b.1 as f64]);
+                        }
+                        for &edge in run.iter().rev() {
+                            let b = ring[(edge + 1) % n];
+                            poly.push([(b.0 + sx * d) as f64, (b.1 + sy * d) as f64]);
+                        }
+                        poly.push([(first.0 + sx * d) as f64, (first.1 + sy * d) as f64]);
+                        push_positive(&mut poly);
+                    };
+                    match anchor {
+                        None => {
+                            // Every edge casts (degenerate tiny ring):
+                            // sweep the whole outline in one go.
+                            sweep(&(0..n).collect::<Vec<_>>());
+                        }
+                        Some(s0) => {
+                            let mut run: Vec<usize> = Vec::new();
+                            for k in 1..=n {
+                                let edge = (s0 + k) % n;
+                                if casts[edge] {
+                                    run.push(edge);
+                                } else if !run.is_empty() {
+                                    sweep(&std::mem::take(&mut run));
+                                }
+                            }
+                            sweep(&run);
+                        }
                     }
                 }
             }
