@@ -297,6 +297,8 @@ extern "C" {
 
     pub fn snd_device_name_get_hint(hint: *const c_void, id: *const u8) -> *mut c_char;
 
+    pub fn snd_device_name_free_hint(hints: *mut *mut c_void) -> c_int;
+
     pub fn snd_pcm_open(
         pcm: *mut *mut snd_pcm_t,
         name: *const u8,

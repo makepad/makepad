@@ -107,16 +107,18 @@ impl AlsaAudioAccess {
             let mut device_descs = Vec::new();
             let failed_inputs = alsa.failed_inputs.lock().unwrap().clone();
             let failed_outputs = alsa.failed_outputs.lock().unwrap().clone();
-            let mut card_num = -1;
             unsafe {
-                loop {
-                    alsa_error!(snd_card_next(&mut card_num))?;
-                    if card_num < 0 {
-                        break;
-                    }
-
-                    let mut hints: *mut *mut c_void = 0 as *mut _;
-                    alsa_error!(snd_device_name_hint(card_num, "pcm\0".as_ptr(), &mut hints))?;
+                // -1 asks alsa for the whole system instead of one card. It is
+                // what every other alsa client does, and it is the only way the
+                // generic pcms show up at all - "default" above all, which
+                // follows whatever the machine is configured to use and mixes
+                // through the sound server. Asking per card only ever returned
+                // raw device nodes like plughw:CARD=PCH,DEV=0, which demand
+                // exclusive access and so fail whenever anything else is
+                // playing. The whole-system list already contains every card's
+                // own pcms, so nothing is lost by not walking the cards.
+                let mut hints: *mut *mut c_void = 0 as *mut _;
+                alsa_error!(snd_device_name_hint(-1, "pcm\0".as_ptr(), &mut hints))?;
 
                 let mut index = 0;
                 while *hints.offset(index) != std::ptr::null_mut() {
@@ -125,6 +127,13 @@ impl AlsaAudioAccess {
                     let name_str =
                         from_alsa_string(snd_device_name_get_hint(hint_ptr, "NAME\0".as_ptr()))
                             .unwrap_or("".into());
+                    // "null" accepts and discards everything, and it always
+                    // opens - offering it would let the automatic fallback
+                    // land on a device that looks like working audio and is
+                    // silent
+                    if name_str.is_empty() || name_str == "null" {
+                        continue;
+                    }
                     let desc_str =
                         from_alsa_string(snd_device_name_get_hint(hint_ptr, "DESC\0".as_ptr()))
                             .unwrap_or("".into())
@@ -161,7 +170,7 @@ impl AlsaAudioAccess {
                         });
                     }
                 }
-                }
+                snd_device_name_free_hint(hints);
             }
             Ok(device_descs)
         }
@@ -174,8 +183,17 @@ impl AlsaAudioAccess {
                 println!("ALSA ERROR {}", e.0)
             }
             Ok(mut descs) => {
-                // pick a single default device
+                // pick a single default device. "default" first: it is the pcm
+                // every other linux application plays through, it follows the
+                // machine's configured device, and it shares the card instead of
+                // seizing it. The raw nodes below it are the fallback for a
+                // system without any alsa configuration at all.
                 if let Some(descs) = descs
+                    .iter_mut()
+                    .find(|v| v.desc.device_type.is_output() && v.name == "default")
+                {
+                    descs.desc.is_default = true;
+                } else if let Some(descs) = descs
                     .iter_mut()
                     .find(|v| v.desc.device_type.is_output() && v.name.starts_with("plughw:"))
                 {
@@ -191,6 +209,11 @@ impl AlsaAudioAccess {
                     descs.desc.is_default = true;
                 }
                 if let Some(descs) = descs
+                    .iter_mut()
+                    .find(|v| v.desc.device_type.is_input() && v.name == "default")
+                {
+                    descs.desc.is_default = true;
+                } else if let Some(descs) = descs
                     .iter_mut()
                     .find(|v| v.desc.device_type.is_input() && v.name.starts_with("plughw:"))
                 {
