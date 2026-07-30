@@ -633,27 +633,73 @@ script_mod! {
                 }
                 let w = clamp(self.shiny_gates2.w, 0.25, 4.0)
                 let uv = vec2(self.v_param1, self.v_param2) * w
-                // Same lattice period as the legacy rings, so at the
-                // blend zoom the shrubs sit where the circles sat and at
-                // matching size — closer in they grow map-physically.
-                let period = 12.0
-                let row = floor(uv.y / period)
-                let sx = uv.x + fract(row * 0.5) * period
-                let cell_id = vec2(floor(sx / period), row)
-                let jitter = vec2(
+                // FOREST, not polkadot: three staggered crown lattices so
+                // canopies overlap and cover most of the ground; the
+                // nearest crown wins the pixel, its dome shades toward the
+                // sun, and only the crevices no crown reaches drop to the
+                // dark understory.
+                let period = 10.0
+                var best_d = 9.0
+                var best_lit = 0.0
+                var best_rnd = 0.0
+                // Layer 1
+                var luv = uv
+                var row = floor(luv.y / period)
+                var sx = luv.x + fract(row * 0.5) * period
+                var cell_id = vec2(floor(sx / period), row)
+                var jit = vec2(
                     self.mat_hash(cell_id) - 0.5,
                     self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
-                ) * 3.5
-                let cell = (fract(vec2(sx, uv.y) / period) - vec2(0.5, 0.5)) * period - jitter
-                let r = 3.1 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 1.3
-                let d = length(cell)
-                let body = 1.0 - smoothstep(r - 0.8, r + 0.4, d)
-                // Sun-side highlight / shade-side dark inside the blob.
-                let lit = clamp(0.5 - dot(cell, vec2(0.16, 0.20)) / r, 0.0, 1.0)
-                // Ground between shrubs stays slightly dark.
-                var f = 0.90
-                if body > 0.01 {
-                    f = mix(0.90, 0.82 + 0.34 * lit, body)
+                ) * (period * 0.30)
+                var cell = (fract(vec2(sx, luv.y) / period) - vec2(0.5, 0.5)) * period - jit
+                var r = period * (0.42 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 0.16)
+                var d = length(cell) / r
+                if d < 1.0 {
+                    best_d = d
+                    best_lit = clamp(0.55 - dot(cell, vec2(0.13, 0.16)) / r, 0.0, 1.0)
+                    best_rnd = self.mat_hash(cell_id + vec2(2.4, 6.6))
+                }
+                // Layer 2 (offset half period)
+                luv = uv + vec2(period * 0.5, period * 0.31)
+                row = floor(luv.y / period)
+                sx = luv.x + fract(row * 0.5) * period
+                cell_id = vec2(floor(sx / period), row) + vec2(37.0, 17.0)
+                jit = vec2(
+                    self.mat_hash(cell_id) - 0.5,
+                    self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
+                ) * (period * 0.30)
+                cell = (fract(vec2(sx, luv.y) / period) - vec2(0.5, 0.5)) * period - jit
+                r = period * (0.42 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 0.16)
+                d = length(cell) / r
+                if d < best_d {
+                    best_d = d
+                    best_lit = clamp(0.55 - dot(cell, vec2(0.13, 0.16)) / r, 0.0, 1.0)
+                    best_rnd = self.mat_hash(cell_id + vec2(2.4, 6.6))
+                }
+                // Layer 3 (offset the other diagonal)
+                luv = uv + vec2(period * 0.19, period * 0.67)
+                row = floor(luv.y / period)
+                sx = luv.x + fract(row * 0.5) * period
+                cell_id = vec2(floor(sx / period), row) + vec2(11.0, 53.0)
+                jit = vec2(
+                    self.mat_hash(cell_id) - 0.5,
+                    self.mat_hash(cell_id + vec2(11.7, 3.1)) - 0.5
+                ) * (period * 0.30)
+                cell = (fract(vec2(sx, luv.y) / period) - vec2(0.5, 0.5)) * period - jit
+                r = period * (0.42 + self.mat_hash(cell_id + vec2(5.2, 8.8)) * 0.16)
+                d = length(cell) / r
+                if d < best_d {
+                    best_d = d
+                    best_lit = clamp(0.55 - dot(cell, vec2(0.13, 0.16)) / r, 0.0, 1.0)
+                    best_rnd = self.mat_hash(cell_id + vec2(2.4, 6.6))
+                }
+                var f = 0.74
+                if best_d < 1.0 {
+                    // Crown dome: lit toward the sun, dark toward the rim,
+                    // per-crown value variation so the canopy reads as
+                    // many individual trees packed together.
+                    let dome = 1.0 - best_d * best_d * 0.30
+                    f = (0.86 + 0.26 * best_lit + 0.10 * (best_rnd - 0.5)) * dome
                 }
                 f = mix(legacy_f, f, shrub_amount)
                 return vec4(f, f, f, 1.0)
