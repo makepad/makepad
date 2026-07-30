@@ -2506,6 +2506,7 @@ fn append_ground_shadow_disc(
     center: (f32, f32),
     radius_units: f32,
     strength: f32,
+    depth_micro: f32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
@@ -2530,7 +2531,7 @@ fn append_ground_shadow_disc(
             0.0,
             MAT_SHADOW,
             0.0,
-            SHADOW_DECAL_DEPTH,
+            depth_micro,
             radius_units * 2.0,
             *zbias,
         ]);
@@ -2545,6 +2546,35 @@ fn append_ground_shadow_disc(
         out_indices.extend_from_slice(&[base, base + 1 + seg, base + 1 + next]);
     }
     *zbias += VECTOR_ZBIAS_STEP;
+}
+
+/// Even-odd point-in-shapes over i_overlay output (outer rings + holes):
+/// used to drop contact-shadow discs for trees already standing inside a
+/// building's cast shadow (stacked decals double-darken and z-fight).
+fn point_in_shadow_shapes(p: (f32, f32), shapes: &[Vec<Vec<[f64; 2]>>]) -> bool {
+    let (px, py) = (p.0 as f64, p.1 as f64);
+    for shape in shapes {
+        let mut inside = false;
+        for ring in shape {
+            let n = ring.len();
+            if n < 3 {
+                continue;
+            }
+            let mut j = n - 1;
+            for i in 0..n {
+                let (xi, yi) = (ring[i][0], ring[i][1]);
+                let (xj, yj) = (ring[j][0], ring[j][1]);
+                if (yi > py) != (yj > py) && px < xi + (py - yi) / (yj - yi) * (xj - xi) {
+                    inside = !inside;
+                }
+                j = i;
+            }
+        }
+        if inside {
+            return true;
+        }
+    }
+    false
 }
 
 /// T2 roof-edge/parapet AO: a gradient quad strip hugging the roof outline,
@@ -3306,13 +3336,14 @@ fn build_tile_buffers_from_features(
     let mut fill_order = (0..fill_groups.len()).collect::<Vec<_>>();
     fill_order.sort_by_key(|&index| fill_groups[index].layer_rank);
 
+
     let building_outline = if render_zoom >= BUILDING_OUTLINE_MIN_ZOOM {
         theme.building_outline
     } else {
         None
     };
 
-    for group_index in fill_order {
+    for (order_pos, group_index) in fill_order.into_iter().enumerate() {
         let group = &fill_groups[group_index];
         // A same-bucket 2D/3D switch reuses the resident road core. Its
         // deckable street-area fills already live in the stable stroke
@@ -3372,6 +3403,14 @@ fn build_tile_buffers_from_features(
                 } else {
                     None
                 };
+            // Same-rank micro ladder keyed on the group's PAINT-ORDER
+            // position: overlapping same-rank fills are adjacent in
+            // fill_order, so adjacent indices can never tie — the old
+            // feature_count % 16 collided every 16 features and shimmered
+            // (green vs gray z-fight in tilt mode).
+            let fill_micro = road_surface_micro
+                + group.layer_rank as f32 * DEPTH_MICRO_PER_RANK
+                + (order_pos % 19) as f32 * DEPTH_MICRO_PER_FEATURE;
             append_tessellated_geometry_decked(
                 &tess_verts,
                 &tess_indices,
@@ -3381,16 +3420,7 @@ fn build_tile_buffers_from_features(
                     color: hex_to_premul_rgba(group.color, group.alpha),
                     stroke_mult: 1e6,
                     shape_id: group.pattern,
-                    params: [
-                        0.0,
-                        0.0,
-                        0.0,
-                        group.material,
-                        group.deck_m,
-                        road_surface_micro
-                            + group.layer_rank as f32 * DEPTH_MICRO_PER_RANK
-                            + (feature_count % 16) as f32 * DEPTH_MICRO_PER_FEATURE,
-                    ],
+                    params: [0.0, 0.0, 0.0, group.material, group.deck_m, fill_micro],
                     zbias: *target_zbias,
                 },
                 fill_decks.as_deref(),
@@ -3451,6 +3481,10 @@ fn build_tile_buffers_from_features(
 
     profiler.lap("fills", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
 
+    // Cast-shadow union outlines, kept for the tree/signal contact discs:
+    // a tree already standing in a building's shadow must not stack its
+    // own disc on top (double-darkening + equal-depth z-fight).
+    let mut building_shadow_shapes: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
     // 2.5D building extrusion: per-edge flat-shaded walls (exterior rings
     // AND courtyard holes), then the roof with holes preserved, lifted by
     // height (the tilt shader does the lifting per frame, so tilt animates
@@ -3636,7 +3670,7 @@ fn build_tile_buffers_from_features(
                 // Chunked dissolve (union-mesh lesson: the solver
                 // degenerates on ring soups past a few thousand rings).
                 const SHADOW_DISSOLVE_CHUNK: usize = 3000;
-                let shapes = if paths.len() <= SHADOW_DISSOLVE_CHUNK {
+                let mut shapes = if paths.len() <= SHADOW_DISSOLVE_CHUNK {
                     paths.simplify_shape(IoFillRule::NonZero)
                 } else {
                     let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
@@ -3654,10 +3688,60 @@ fn build_tile_buffers_from_features(
                     }
                     acc
                 };
+                // Subtract every grounded building footprint: a shadow
+                // must never cover a building's own ground. Roofs sit at
+                // param5 0.05 + a LIFT-scaled depth term that vanishes
+                // overhead (tilt -> 0), so a decal left under a neighbor
+                // building would depth-win and blotch its roof.
+                let mut footprints: Vec<Vec<[f64; 2]>> = Vec::new();
+                for job in &building_jobs {
+                    if job.height_m <= 0.05 || job.base_m > 0.5 {
+                        continue;
+                    }
+                    for ring in &job.polygon {
+                        if polygon_signed_area(ring) <= 0.0 {
+                            continue;
+                        }
+                        let ring = simplify_wall_ring(ring, shadow_min_edge);
+                        if ring.len() < 3 {
+                            continue;
+                        }
+                        let mut fp: Vec<[f64; 2]> = ring
+                            .iter()
+                            .map(|p| [p.0 as f64, p.1 as f64])
+                            .collect();
+                        let mut area = 0.0f64;
+                        for i in 0..fp.len() {
+                            let a = fp[i];
+                            let b = fp[(i + 1) % fp.len()];
+                            area += a[0] * b[1] - b[0] * a[1];
+                        }
+                        if area < 0.0 {
+                            fp.reverse();
+                        }
+                        footprints.push(fp);
+                    }
+                }
+                if !footprints.is_empty() {
+                    let mut acc = shapes;
+                    for chunk in footprints.chunks(SHADOW_DISSOLVE_CHUNK) {
+                        let subject: Vec<Vec<[f64; 2]>> = acc
+                            .iter()
+                            .flat_map(|shape| shape.iter().cloned())
+                            .collect();
+                        acc = subject.overlay(
+                            &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
+                            OverlayRule::Difference,
+                            IoFillRule::NonZero,
+                        );
+                    }
+                    shapes = acc;
+                }
                 let fill_clip_bounds =
                     tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
                 // ~1.2 m analytic AA fringe softens the shadow edge.
                 let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
+                building_shadow_shapes = shapes.clone();
                 for shape in shapes {
                     let mut any_ring = false;
                     for ring in &shape {
@@ -3888,14 +3972,24 @@ fn build_tile_buffers_from_features(
         // ground" for a dozen vertices per tree.
         if theme.shiny.bake_shadows {
             let sun_2d = theme.shiny.sun.dir_2d();
-            for (x, y) in &tree_points_3d {
+            for (index, (x, y)) in tree_points_3d.iter().enumerate() {
+                let center = (
+                    *x - sun_2d.x * 2.2 * units_per_m,
+                    *y - sun_2d.y * 2.2 * units_per_m,
+                );
+                if point_in_shadow_shapes(center, &building_shadow_shapes) {
+                    continue;
+                }
+                // Full-strength center (the live shadow uniform is the
+                // brightness knob), canopy-sized, offset like a canopy
+                // hanging 7.5-11 m up would cast. The per-disc depth step
+                // keeps overlapping discs (tree rows) from z-fighting each
+                // other or the building shadow union underneath.
                 append_ground_shadow_disc(
-                    (
-                        *x - sun_2d.x * 1.2 * units_per_m,
-                        *y - sun_2d.y * 1.2 * units_per_m,
-                    ),
-                    2.4 * units_per_m,
-                    0.55,
+                    center,
+                    3.4 * units_per_m,
+                    1.0,
+                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
                     &mut icon_vertices,
                     &mut icon_indices,
                     &mut icon_zbias,
@@ -4082,6 +4176,28 @@ fn build_tile_buffers_from_features(
             (hex_to_premul_rgba(0xd7263d, 1.0), 5.2),
         ];
         let arm = 0.32 * units_per_m;
+        // T3: soft contact shadow under each stoplight pole.
+        if theme.shiny.bake_shadows {
+            let sun_2d = theme.shiny.sun.dir_2d();
+            for (index, (x, y)) in signal_points_3d.iter().enumerate() {
+                let center = (
+                    *x - sun_2d.x * 0.9 * units_per_m,
+                    *y - sun_2d.y * 0.9 * units_per_m,
+                );
+                if point_in_shadow_shapes(center, &building_shadow_shapes) {
+                    continue;
+                }
+                append_ground_shadow_disc(
+                    center,
+                    1.3 * units_per_m,
+                    0.9,
+                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+            }
+        }
         for (x, y) in &signal_points_3d {
             append_wall_quad(
                 (*x - arm, *y),
