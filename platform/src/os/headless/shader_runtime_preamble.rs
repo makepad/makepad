@@ -413,10 +413,22 @@ impl ops::MulAssign<f32> for Vec2f {
         self.y *= s;
     }
 }
+impl ops::MulAssign for Vec2f {
+    fn mul_assign(&mut self, r: Vec2f) {
+        self.x *= r.x;
+        self.y *= r.y;
+    }
+}
 impl ops::DivAssign<f32> for Vec2f {
     fn div_assign(&mut self, s: f32) {
         self.x /= s;
         self.y /= s;
+    }
+}
+impl ops::DivAssign for Vec2f {
+    fn div_assign(&mut self, r: Vec2f) {
+        self.x /= r.x;
+        self.y /= r.y;
     }
 }
 
@@ -441,11 +453,25 @@ impl ops::MulAssign<f32> for Vec3f {
         self.z *= s;
     }
 }
+impl ops::MulAssign for Vec3f {
+    fn mul_assign(&mut self, r: Vec3f) {
+        self.x *= r.x;
+        self.y *= r.y;
+        self.z *= r.z;
+    }
+}
 impl ops::DivAssign<f32> for Vec3f {
     fn div_assign(&mut self, s: f32) {
         self.x /= s;
         self.y /= s;
         self.z /= s;
+    }
+}
+impl ops::DivAssign for Vec3f {
+    fn div_assign(&mut self, r: Vec3f) {
+        self.x /= r.x;
+        self.y /= r.y;
+        self.z /= r.z;
     }
 }
 
@@ -473,12 +499,28 @@ impl ops::MulAssign<f32> for Vec4f {
         self.w *= s;
     }
 }
+impl ops::MulAssign for Vec4f {
+    fn mul_assign(&mut self, r: Vec4f) {
+        self.x *= r.x;
+        self.y *= r.y;
+        self.z *= r.z;
+        self.w *= r.w;
+    }
+}
 impl ops::DivAssign<f32> for Vec4f {
     fn div_assign(&mut self, s: f32) {
         self.x /= s;
         self.y /= s;
         self.z /= s;
         self.w /= s;
+    }
+}
+impl ops::DivAssign for Vec4f {
+    fn div_assign(&mut self, r: Vec4f) {
+        self.x /= r.x;
+        self.y /= r.y;
+        self.z /= r.z;
+        self.w /= r.w;
     }
 }
 
