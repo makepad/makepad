@@ -23,6 +23,10 @@ pub struct TerrainShader {
     /// normalized at use. Defaults to the legacy hillshade sun; set it from
     /// the app's `SceneSun` so the whole scene reads as one light source.
     pub sun: (f32, f32, f32),
+    /// Horizon-march cast shadows (shiny.md T3): mountains shadow their
+    /// valleys. Pure CPU on the elevation grid the shader already walks;
+    /// skipped automatically when the view's relief is too small to show.
+    pub cast_shadows: bool,
 }
 
 fn terrarium_decode(png: &png::DecodedPng) -> Option<Vec<f32>> {
@@ -58,6 +62,7 @@ impl TerrainShader {
             max_zoom,
             cache: HashMap::new(),
             sun: (-0.5, -0.62, 0.6),
+            cast_shadows: false,
         })
     }
 
@@ -149,6 +154,65 @@ impl TerrainShader {
         let len = (lx * lx + ly * ly + lz * lz).sqrt();
         let (lx, ly, lz) = (lx / len, ly / len, lz / len);
 
+        // T3 terrain cast shadows: march each pixel toward the sun through
+        // the elevation grid; terrain rising above the sun ray shadows it.
+        // Exponential stride keeps it ~13 samples/px; only run when the
+        // region has relief that could actually cast (skips the lowlands).
+        let mut shadow_dim: Option<Vec<f32>> = None;
+        if self.cast_shadows {
+            let (mut e_min, mut e_max) = (f32::MAX, f32::MIN);
+            for &e in &elev {
+                if !e.is_nan() {
+                    e_min = e_min.min(e);
+                    e_max = e_max.max(e);
+                }
+            }
+            let horiz = (lx * lx + ly * ly).sqrt();
+            if e_max - e_min > 150.0 && horiz > 1e-4 {
+                // Ray rise per meter of ground distance toward the sun.
+                let sun_slope = lz / horiz;
+                // March direction TOWARD the sun, in grid pixels.
+                let (dx, dy) = (lx / horiz, ly / horiz);
+                const STEPS: [f32; 17] = [
+                    1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 11.0, 15.0, 21.0, 29.0, 40.0, 56.0, 78.0,
+                    109.0, 152.0, 213.0, 298.0,
+                ];
+                let mut dim = vec![1.0f32; width * height];
+                for y in 0..height {
+                    for x in 0..width {
+                        let e0 = elev[(y + 1) * gw + (x + 1)];
+                        if e0.is_nan() {
+                            continue;
+                        }
+                        let mut occ = 0.0f32;
+                        for step in STEPS {
+                            let sx = x as f32 + dx * step;
+                            let sy = y as f32 + dy * step;
+                            if sx < 0.0 || sy < 0.0 || sx >= (width - 1) as f32
+                                || sy >= (height - 1) as f32
+                            {
+                                break;
+                            }
+                            let e_s = elev[(sy as usize + 1) * gw + (sx as usize + 1)];
+                            if e_s.is_nan() {
+                                continue;
+                            }
+                            let dist_m = step * m_per_px;
+                            let rise = e_s - e0 - sun_slope * dist_m;
+                            if rise > 0.0 {
+                                occ = occ.max(rise / dist_m);
+                            }
+                        }
+                        if occ > 0.0 {
+                            // ~3 degrees over the ray = full-depth shadow.
+                            dim[y * width + x] = 1.0 - 0.45 * (occ / 0.05).min(1.0);
+                        }
+                    }
+                }
+                shadow_dim = Some(dim);
+            }
+        }
+
         let mut out = vec![0u8; width * height * 4];
         let mut elev_out = vec![0f32; width * height];
         // Hillshade light factor (x255) per pixel, for draping landcover
@@ -178,7 +242,10 @@ impl TerrainShader {
                 let inv = 1.0 / (1.0 + gx * gx + gy * gy).sqrt();
                 let (nx, ny, nz) = (-gx * inv, -gy * inv, inv);
                 let ndl = (nx * lx + ny * ly + nz * lz).max(0.0);
-                let shade = 0.45 + 0.55 * ndl;
+                let cast = shadow_dim
+                    .as_ref()
+                    .map_or(1.0, |dim| dim[y * width + x]);
+                let shade = (0.45 + 0.55 * ndl) * cast;
                 shade_out[y * width + x] = (shade * 255.0).min(255.0) as u8;
                 // Hypsometric ramp: NL polders green-blue, lowland
                 // sand→brown, then Mittelgebirge→Alpine rock→snow.
@@ -265,6 +332,34 @@ mod tests {
         let (rgba, _, _) = shader.shade_region(cx - hw, cy - hh, cx + hw, cy + hh, 1024, 768);
         let visible = rgba.chunks_exact(4).filter(|px| px[3] > 0).count();
         println!("wide probe: {visible} of {} px visible", 1024 * 768);
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_alps_shadow_ab() {
+        let Ok(mut shader) =
+            TerrainShader::open(Path::new("../../local/overlays/nl-terrain.mbtiles"))
+        else {
+            println!("no archive");
+            return;
+        };
+        let (cx, cy) = norm_of(11.4, 47.27);
+        let h = 0.1 / 360.0;
+        for (name, cast) in [("off", false), ("on", true)] {
+            shader.cast_shadows = cast;
+            let start = std::time::Instant::now();
+            let (rgba, _, _) = shader.shade_region(cx - h, cy - h, cx + h, cy + h, 512, 512);
+            println!("alps shadows {name}: {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+            let rgb: Vec<u8> = rgba
+                .chunks_exact(4)
+                .flat_map(|px| [px[0], px[1], px[2]])
+                .collect();
+            let png = crate::png::encode(512, 512, crate::png::PngFormat::Rgb8, &rgb);
+            let out = format!(
+                "/private/tmp/claude-501/-Users-admin-makepad-makepad/dc97c21e-85e9-41f6-a8d1-03d180e6bf12/scratchpad/alps_shadow_{name}.png"
+            );
+            std::fs::write(out, png).unwrap();
+        }
     }
 
     #[test]

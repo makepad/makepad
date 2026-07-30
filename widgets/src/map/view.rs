@@ -5225,6 +5225,18 @@ impl MapViewRef {
         self.borrow().map(|inner| inner.map_zoom())
     }
 
+    /// The active theme's compiled shiny.md config (sun + toggles).
+    pub fn shiny(&self) -> Option<ShinyConfig> {
+        self.borrow().map(|inner| *inner.shiny())
+    }
+
+    /// Runtime shiny.md config update; restyles with stale tiles drawable.
+    pub fn update_shiny(&self, cx: &mut Cx, update: impl Fn(&mut MapShinyStyle)) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.update_shiny(cx, update);
+        }
+    }
+
     pub fn set_center(&self, cx: &mut Cx, lon: f64, lat: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_center(cx, lon, lat);
