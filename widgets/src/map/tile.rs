@@ -60,6 +60,12 @@ const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
 /// streets they fall across, but below lifted bridge decks (param5 + 0.30
 /// bumps) so a deck still draws over the shadow pooling under it.
 const SHADOW_DECAL_DEPTH: f32 = 0.40;
+/// Extruded building surfaces (walls, roofs, canopy balls): above every
+/// ground DECAL including shadows. A wall pixel N px up its quad carries
+/// the depth of ground N px behind it, so any decal with a bigger param5
+/// than the wall would cut a band across the building base whenever the
+/// camera rotation puts that decal behind the building on screen.
+const BUILDING_SURFACE_DEPTH: f32 = 0.50;
 const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.0001;
 const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
 const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
@@ -2413,7 +2419,7 @@ fn append_ball(
     let mut push_vertex = |x: f32, y: f32, h: f32, shade: [f32; 4], nx: f32, ny: f32| {
         out_vertices.extend_from_slice(&[
             x, y, 0.5, 1.0, shade[0], shade[1], shade[2], shade[3], 1e6, 0.0, 0.0, 0.0,
-            nx, ny, material, h, 0.05, 24.0, *zbias,
+            nx, ny, material, h, BUILDING_SURFACE_DEPTH, 24.0, *zbias,
         ]);
     };
     // rings from south pole (phi -90) to north pole (phi +90)
@@ -2490,7 +2496,7 @@ fn append_wall_quad(
             normal.1,
             material,
             h,
-            0.05,
+            BUILDING_SURFACE_DEPTH,
             90.0,
             *zbias,
         ]);
@@ -2671,7 +2677,7 @@ fn append_roof_edge_ao(
             0.0,
             MAT_ROOF,
             height_m,
-            0.05 + DEPTH_MICRO_PER_RANK,
+            BUILDING_SURFACE_DEPTH + DEPTH_MICRO_PER_RANK,
             90.0,
             *zbias,
         ]);
@@ -3916,7 +3922,7 @@ fn build_tile_buffers_from_features(
                     color: roof_color,
                     stroke_mult: 1e6,
                     shape_id: 0.0,
-                    params: [0.0, 0.0, 0.0, MAT_ROOF, job.height_m, 0.05],
+                    params: [0.0, 0.0, 0.0, MAT_ROOF, job.height_m, BUILDING_SURFACE_DEPTH],
                     zbias: fill_zbias,
                 },
             );

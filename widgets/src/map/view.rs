@@ -166,6 +166,21 @@ script_mod! {
                 pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(1.9, 6.3)
                 nd = self.mat_noise_d(pp + vec2(0.0 - t * 0.31, 0.0 - t * 0.26))
                 slope = slope + nd.yz * 0.32 * cut2
+                // Close-zoom octaves: fade in as the physical uv factor
+                // shrinks, so the surface keeps gaining real facet detail
+                // instead of magnifying into soft blobs.
+                let cut3 = clamp(0.9 - k * 2.0, 0.0, 1.0)
+                if cut3 > 0.01 {
+                    pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(3.3, 5.1)
+                    nd = self.mat_noise_d(pp + vec2(t * 0.42, 0.0 - t * 0.35))
+                    slope = slope + nd.yz * 0.38 * cut3
+                }
+                let cut4 = clamp(0.6 - k * 3.0, 0.0, 1.0)
+                if cut4 > 0.01 {
+                    pp = vec2(pp.x * 1.6 + pp.y * 1.2, pp.y * 1.6 - pp.x * 1.2) + vec2(9.4, 1.7)
+                    nd = self.mat_noise_d(pp + vec2(0.0 - t * 0.5, t * 0.44))
+                    slope = slope + nd.yz * 0.42 * cut4
+                }
                 // Chop: steepen the crests so the glint breaks into the
                 // irregular sparkle real water has.
                 slope = slope * (1.0 + 1.4 * length(slope))
@@ -247,33 +262,50 @@ script_mod! {
                 let add = self.sun_color * rim * rim * 0.06 * color.w
                 return vec4(color.xyz * clump + add, color.w)
             }
-            // 5: green areas — wavy grass (T5): patch tones + fine
-            // anisotropic blade noise whose domain sways with a slow
-            // traveling wave, so meadows read as grass moving in wind.
-            // Map-physical anchoring like water.
+            // 5: green areas — grass (T5). Grass at map scale is FINE,
+            // SHARP speckle (blade clumps catching or losing the light),
+            // not an undulating surface: the texture itself stays put and
+            // wind reads as slow low-frequency gust bands traveling across
+            // the field, modulating how hard the speckle contrast shows.
+            // Octaves fade in with the physical zoom factor so close-ups
+            // keep gaining detail instead of magnifying blobs.
             if mat > 4.5 && mat < 5.5 {
                 if self.shiny_gates.z < 0.5 {
                     return color
                 }
-                let uv = vec2(self.v_param1, self.v_param2) * self.shiny_gates2.z
+                let k = self.shiny_gates2.z
+                let uv = vec2(self.v_param1, self.v_param2) * k
                 let t = self.draw_pass.time
+                // Broad meadow tone patches (static).
                 let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
-                // Blade detail only matters when zoomed in (small uv
-                // scale); fade it out so far views keep calm patch tones.
-                let detail = clamp(1.3 - self.shiny_gates2.z, 0.0, 1.0)
-                var f = 0.92 + 0.13 * patch
-                if detail > 0.01 {
-                    let sway = sin(uv.x * 0.11 + uv.y * 0.07 + t * 1.1)
-                        + 0.5 * sin(uv.y * 0.19 - t * 0.7)
-                    let blades = self.mat_noise(vec2(uv.x * 0.7, (uv.y + sway * 1.4) * 0.45))
-                    f = f + (blades - 0.5) * 0.10 * detail
+                var f = 0.93 + 0.11 * patch
+                // Blade-clump speckle, sharpened; per-octave zoom gates.
+                let gate1 = clamp(1.5 - k * 1.5, 0.0, 1.0)
+                let gate2 = clamp(1.1 - k * 2.2, 0.0, 1.0)
+                let gate3 = clamp(0.7 - k * 4.0, 0.0, 1.0)
+                if gate1 > 0.01 {
+                    var fine = (self.mat_noise(uv * 1.3) - 0.5) * gate1
+                    if gate2 > 0.01 {
+                        fine = fine + (self.mat_noise(uv * 3.1 + vec2(7.7, 3.9)) - 0.5)
+                            * 0.8 * gate2
+                    }
+                    if gate3 > 0.01 {
+                        fine = fine + (self.mat_noise(uv * 7.4 + vec2(2.3, 8.1)) - 0.5)
+                            * 0.7 * gate3
+                    }
+                    // Sharpen: blades are contrasty, not soft gradients.
+                    let sharp = clamp(fine * 2.4, -1.0, 1.0)
+                    // Wind: gust bands drifting over the field scale the
+                    // speckle contrast — the grass itself does not move.
+                    let gust = self.mat_noise(uv * 0.03 + vec2(t * 0.05, t * 0.028))
+                    f = f + sharp * 0.075 * (0.65 + 0.7 * gust)
                     // Sparse pale speckles: daisies in the lawn.
                     let cell = floor(uv * 0.35)
                     let h = self.mat_hash(cell)
                     if h > 0.986 {
                         let fpos = fract(uv * 0.35) - vec2(0.5, 0.5)
                         let speck = 1.0 - smoothstep(0.05, 0.16, length(fpos))
-                        f = f + speck * 0.5 * detail
+                        f = f + speck * 0.45 * gate1
                     }
                 }
                 return vec4(color.xyz * f, color.w)
@@ -1124,9 +1156,10 @@ impl DrawMapVector {
         );
         // Water/green noise anchors physically to the map: scale the
         // baked view-px UV by exp2(16 - view_zoom) so ripple size tracks
-        // meters, not screen pixels. Clamped so far-out zooms don't push
-        // the finest octave sub-pixel (shimmer).
-        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.12, 1.25);
+        // meters, not screen pixels. The lower bound keeps refining well
+        // past z20 (the shaders gate their finest octaves on this value);
+        // the upper bound keeps far-out zooms from going sub-pixel.
+        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.03, 1.25);
         self.draw_super.draw_vars.set_uniform(
             cx.cx,
             live_id!(shiny_gates2),
