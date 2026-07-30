@@ -115,6 +115,8 @@ script_mod! {
                             style_light +: {
                                 shiny: MapShinyStyle{
                                     bake_ao: true
+                                    bake_shadows: true
+                                    terrain_shadows: true
                                     water_fx: true
                                     building_sheen: true
                                     foliage_fx: true
@@ -460,7 +462,7 @@ pub struct App {
     #[rust]
     terrain_worker_started: bool,
     #[rust]
-    terrain_tx: Option<mpsc::Sender<(f64, f64, f64, f64)>>,
+    terrain_tx: Option<mpsc::Sender<((f64, f64, f64, f64), (f32, f32, f32), bool)>>,
     #[rust]
     terrain_rx: ToUIReceiver<TerrainUpdate>,
     #[rust]
@@ -826,7 +828,7 @@ impl App {
             return;
         }
         self.terrain_worker_started = true;
-        let (tx, rx) = mpsc::channel::<(f64, f64, f64, f64)>();
+        let (tx, rx) = mpsc::channel::<((f64, f64, f64, f64), (f32, f32, f32), bool)>();
         self.terrain_tx = Some(tx);
         let sender = self.terrain_rx.sender();
         std::thread::spawn(move || {
@@ -841,11 +843,16 @@ impl App {
                     "local/maps/europe-shortbread.mbtiles",
                 ))
                 .ok();
-            while let Ok(mut bbox) = rx.recv() {
+            while let Ok(mut request) = rx.recv() {
                 // Only the newest pending request matters.
                 while let Ok(newer) = rx.try_recv() {
-                    bbox = newer;
+                    request = newer;
                 }
+                let (bbox, sun, cast_shadows) = request;
+                // One SceneSun: the hillshade lights with the same sun as
+                // the building walls and (optionally) casts terrain shadows.
+                shader.sun = sun;
+                shader.cast_shadows = cast_shadows;
                 let (w, h) = (4096usize, 3072usize);
                 let (mut rgba, elev_full, shade) =
                     shader.shade_region(bbox.0, bbox.1, bbox.2, bbox.3, w, h);
@@ -926,8 +933,13 @@ impl App {
             return;
         }
         self.last_terrain_request = Some(key);
+        let shiny = self.map(cx).shiny().unwrap_or_default();
         if let Some(tx) = &self.terrain_tx {
-            let _ = tx.send(bbox);
+            let _ = tx.send((
+                bbox,
+                (shiny.sun.dir.x, shiny.sun.dir.y, shiny.sun.dir.z),
+                shiny.terrain_shadows,
+            ));
         }
     }
 
