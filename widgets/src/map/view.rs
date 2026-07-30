@@ -55,9 +55,20 @@ script_mod! {
         // between their sparse vertices — leave fills flat and let the
         // (more opaque) surface be the ground; strokes/icons keep riding.
         terrain_fill_lift: uniform(1.0)
+        // shiny.md: the one SceneSun + per-feature gates. All gates default
+        // 0 -> the material dispatch short-circuits and the frame is
+        // identical to the legacy path (uniform branches are coherent).
+        // x=water_fx, y=building_sheen(gloss), z=foliage_fx, w=route_glow.
+        shiny_gates: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // x=dynamic_sun (reserved), y=shadow_alpha, z/w unused.
+        shiny_gates2: uniform(vec4(0.0, 0.22, 0.0, 0.0))
+        sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
+        sun_color: uniform(vec3(1.0, 0.98, 0.94))
+        sun_sky: uniform(vec3(0.55, 0.62, 0.72))
 
         fragment: fn(){
-            let color = self.pixel() * self.tile_fade * self.fill_pattern()
+            var color = self.pixel() * self.tile_fade * self.fill_pattern()
+            color = self.material_fx(color)
             // Dashed tunnel gaps and the zero-coverage tails of analytic
             // vectors are transparent. Discard them before depth_clip so an
             // invisible carrier cannot occlude the road above it in 3D.
@@ -65,6 +76,120 @@ script_mod! {
                 discard()
             }
             self.fb0 = depth_clip(self.v_world_clip, color, self.depth_clip)
+        }
+
+        // Cheap value noise for water/foliage (no LUT texture: a handful
+        // of ALU on minority-material pixels only).
+        mat_hash: fn(p: vec2) -> float {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
+        }
+
+        mat_noise: fn(p: vec2) -> float {
+            let i = floor(p)
+            let f = fract(p)
+            let u = f * f * (vec2(3.0, 3.0) - 2.0 * f)
+            let a = self.mat_hash(i)
+            let b = self.mat_hash(i + vec2(1.0, 0.0))
+            let c = self.mat_hash(i + vec2(0.0, 1.0))
+            let d = self.mat_hash(i + vec2(1.0, 1.0))
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+        }
+
+        // shiny.md material dispatch on param3 of shape-0 geometry. Every
+        // branch sits behind a uniform gate; all-gates-zero returns the
+        // input color untouched (screenshot-diffs to zero).
+        material_fx: fn(color: vec4) -> vec4 {
+            if self.v_shape_id > 0.5 || self.v_shape_id < -0.5 {
+                return color
+            }
+            let mat = self.v_param3;
+            if mat < 0.5 {
+                return color
+            }
+            // 6: baked shadow decal — alpha rides the live shadow uniform
+            // so time-of-day fades don't need a rebake.
+            if mat > 5.5 && mat < 6.5 {
+                return color * self.shiny_gates2.y
+            }
+            // 3: water — animated micro-noise sheen + sun glint (T4).
+            if mat > 2.5 && mat < 3.5 {
+                if self.shiny_gates.x < 0.5 {
+                    return color
+                }
+                let uv = vec2(self.v_param1, self.v_param2)
+                let t = self.draw_pass.time
+                let n1 = self.mat_noise(uv * 0.11 + vec2(t * 9.0, t * 4.0))
+                let n2 = self.mat_noise(uv * 0.31 - vec2(t * 5.0, t * 7.5))
+                let n = n1 * 0.62 + n2 * 0.38
+                // Broad sheen: gentle brightness swell + a sky tint push.
+                let shade = 0.94 + 0.12 * n
+                // Tight sparkle where the combined noise crests.
+                let glint = pow(clamp((n - 0.68) / 0.32, 0.0, 1.0), 4.0)
+                let add = (self.sun_sky * 0.05 + self.sun_color * glint * 0.30) * color.w
+                return vec4(color.xyz * shade + add, color.w)
+            }
+            // 1/2: building wall/roof specular sheen (T4b). Normals are
+            // baked in map space; rotate into screen space so the fixed
+            // 2.5D view vector makes highlights sweep during heading
+            // rotation — reads as real reflection.
+            if mat > 0.5 && mat < 2.5 {
+                let gloss = self.shiny_gates.y;
+                if gloss < 0.01 {
+                    return color
+                }
+                let c = self.view_rot.x;
+                let s = self.view_rot.y;
+                var n = vec3(0.0, 0.0, 1.0);
+                if mat < 1.5 {
+                    let nx = self.v_param1 * c - self.v_param2 * s;
+                    let ny = self.v_param1 * s + self.v_param2 * c;
+                    // Small constant z-tilt: sun-side facades catch a streak.
+                    n = normalize(vec3(nx, ny, 0.30));
+                }
+                let sd = vec3(
+                    self.sun_dir.x * c - self.sun_dir.y * s,
+                    self.sun_dir.x * s + self.sun_dir.y * c,
+                    self.sun_dir.z
+                );
+                var h = normalize(sd + vec3(0.0, 0.62, 0.79));
+                if mat > 1.5 {
+                    // Roofs: nudge the half-vector by screen position — a
+                    // fake linear environment gradient instead of one flat
+                    // spec value per roof.
+                    h = normalize(h + vec3(self.v_world * 0.0004, 0.0));
+                }
+                var spec = pow(max(dot(n, h), 0.0), 24.0) * gloss;
+                if mat < 1.5 {
+                    // Bloom toward rooflines (v_param4 = meters up the wall).
+                    spec = spec * clamp(self.v_param4 * 0.05, 0.15, 1.0);
+                }
+                return vec4(color.xyz + self.sun_color * spec * color.w, color.w)
+            }
+            // 4: tree canopy — leaf-clump noise + sun-side rim (T5).
+            if mat > 3.5 && mat < 4.5 {
+                if self.shiny_gates.z < 0.5 {
+                    return color
+                }
+                let n = self.mat_noise(self.v_world * 0.45)
+                let clump = 0.88 + 0.24 * n
+                let rim = max(
+                    dot(normalize(vec3(self.v_param1, self.v_param2, 0.4)), self.sun_dir),
+                    0.0
+                )
+                let add = self.sun_color * rim * rim * 0.06 * color.w
+                return vec4(color.xyz * clump + add, color.w)
+            }
+            // 5: green areas — low-frequency two-tone patchiness (T5).
+            if mat > 4.5 && mat < 5.5 {
+                if self.shiny_gates.z < 0.5 {
+                    return color
+                }
+                let uv = vec2(self.v_param1, self.v_param2)
+                let n = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
+                let f = 0.93 + 0.12 * n
+                return vec4(color.xyz * f, color.w)
+            }
+            return color
         }
 
         vertex: fn() {
@@ -234,6 +359,19 @@ script_mod! {
                 self.v_param2 = pattern_uv.y;
                 self.v_param3 = 0.0;
                 self.v_param4 = 0.0;
+            } else if shape_id < 0.5
+                && (
+                    (self.geom.param3 > 2.5 && self.geom.param3 < 3.5)
+                    || (self.geom.param3 > 4.5 && self.geom.param3 < 5.5)
+                ) {
+                // Water/green-area materials: param1/2 are free on these
+                // fills — carry a map-anchored UV for the per-pixel noise
+                // (same anchoring trick as the pattern fills above).
+                let mat_uv = pos * self.map_scale;
+                self.v_param1 = mat_uv.x;
+                self.v_param2 = mat_uv.y;
+                self.v_param3 = self.geom.param3;
+                self.v_param4 = self.geom.param4;
             } else {
                 self.v_param1 = self.geom.param1;
                 self.v_param2 = self.geom.param2;
@@ -756,6 +894,10 @@ pub struct DrawMapVector {
     pub map_offset: Vec2f,
     #[rust(1.0)]
     pub tile_fade: f32,
+    /// shiny.md gates + SceneSun, stamped once per frame from the active
+    /// theme; draw_geometry feeds them to the shader uniforms.
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
 }
 
 impl DrawMapVector {
@@ -832,6 +974,43 @@ impl DrawMapVector {
         self.draw_super
             .draw_vars
             .set_uniform(cx.cx, live_id!(terrain_fill_lift), &[terrain_fill_lift]);
+        let shiny = &self.shiny;
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(shiny_gates),
+            &[
+                if shiny.water_fx { 1.0 } else { 0.0 },
+                if shiny.building_sheen { 0.55 } else { 0.0 },
+                if shiny.foliage_fx { 1.0 } else { 0.0 },
+                if shiny.route_glow { 1.0 } else { 0.0 },
+            ],
+        );
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(shiny_gates2),
+            &[
+                if shiny.dynamic_sun { 1.0 } else { 0.0 },
+                shiny.sun.shadow_alpha,
+                0.0,
+                0.0,
+            ],
+        );
+        let sun = &shiny.sun;
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(sun_dir),
+            &[sun.dir.x, sun.dir.y, sun.dir.z],
+        );
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(sun_color),
+            &[sun.color.x, sun.color.y, sun.color.z],
+        );
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(sun_sky),
+            &[sun.sky.x, sun.sky.y, sun.sky.z],
+        );
         self.draw_super.draw_vars.set_texture(1, terrain_tex);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
@@ -1428,6 +1607,8 @@ impl Widget for MapView {
         // Below city buckets, fills stay flat (their sparse vertices cannot
         // track the surface) and the hillshade becomes the visible ground.
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
+        // shiny.md gates + sun for the material dispatch, per active theme.
+        self.draw_map.shiny = self.active_style().shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
         // relief actually in view: the margin exists to beat interpolation
         // twist (which grows with relief), but a flat-city boost lets
@@ -4440,6 +4621,21 @@ impl MapView {
         }
         self.overlay_mbtiles_paths = paths.to_string();
         self.restyle_tiles_keep_stale(cx);
+    }
+
+    /// Runtime shiny.md config update (feature toggles, time-of-day
+    /// slider): mutates both themes' shiny style, recompiles, and restyles
+    /// while stale tiles stay drawable — bake-flag flips are glitch-free.
+    pub fn update_shiny(&mut self, cx: &mut Cx, update: impl Fn(&mut MapShinyStyle)) {
+        update(&mut self.style_light.shiny);
+        update(&mut self.style_dark.shiny);
+        self.rebuild_compiled_styles();
+        self.restyle_tiles_keep_stale(cx);
+    }
+
+    /// The active theme's compiled shiny config.
+    pub fn shiny(&self) -> &ShinyConfig {
+        &self.active_style().shiny
     }
 
     fn restyle_tiles_keep_stale(&mut self, cx: &mut Cx) {
