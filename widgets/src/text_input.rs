@@ -567,6 +567,11 @@ pub struct TextInput {
     laidout_text: Option<Rc<LaidoutText>>,
     #[rust]
     laidout_width: Option<f32>,
+    /// `draw_text.max_lines` as of the cached layout. Part of the cache key:
+    /// clamping a field to one row is a runtime change (collapse/expand), and
+    /// without this the cached multi-row layout survives it.
+    #[rust]
+    laidout_max_lines: usize,
     #[rust]
     text_area: Area,
     #[rust]
@@ -900,7 +905,10 @@ impl TextInput {
         } else {
             None
         };
-        if self.laidout_text.is_some() && self.laidout_width == max_width_in_lpxs {
+        if self.laidout_text.is_some()
+            && self.laidout_width == max_width_in_lpxs
+            && self.laidout_max_lines == self.draw_text.max_lines
+        {
             return;
         }
         let text = if self.is_password {
@@ -916,6 +924,7 @@ impl TextInput {
 
         let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
+        self.laidout_max_lines = self.draw_text.max_lines;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
