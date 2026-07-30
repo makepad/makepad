@@ -15,6 +15,8 @@ pub struct CxAppleMedia {
     pub(crate) core_audio_change: SignalToUI,
     pub(crate) core_midi_change: SignalToUI,
     pub(crate) av_capture_change: SignalToUI,
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(crate) location: crate::os::apple::apple_geo::CxAppleLocation,
 }
 
 impl Cx {
@@ -49,6 +51,8 @@ impl Cx {
                 .get_updated_descs();
             self.call_event_handler(&Event::VideoInputs(VideoInputsEvent { descs }));
         }
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        self.handle_location_signals();
     }
 }
 

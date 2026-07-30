@@ -1405,6 +1405,12 @@ impl Cx {
                 } => {
                     self.handle_permission_request(permission, request_id);
                 }
+                CxOsOp::StartLocationUpdates => {
+                    self.apple_start_location_updates();
+                }
+                CxOsOp::StopLocationUpdates => {
+                    self.apple_stop_location_updates();
+                }
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
@@ -1617,6 +1623,7 @@ impl Cx {
             Permission::Camera => self.check_camera_permission_status(),
             Permission::HeadsetCamera => crate::permission::PermissionStatus::DeniedPermanent,
             Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
+            Permission::Location => Self::apple_location_permission_status(),
         };
 
         self.call_event_handler(&crate::event::Event::PermissionResult(
@@ -1634,6 +1641,7 @@ impl Cx {
             Permission::Camera => self.check_camera_permission_status(),
             Permission::HeadsetCamera => crate::permission::PermissionStatus::DeniedPermanent,
             Permission::SceneAccess => crate::permission::PermissionStatus::DeniedPermanent,
+            Permission::Location => Self::apple_location_permission_status(),
         };
         match status {
             crate::permission::PermissionStatus::NotDetermined => match permission {
@@ -1643,6 +1651,7 @@ impl Cx {
                 Permission::Camera => self.macos_request_camera_permission(permission, request_id),
                 Permission::HeadsetCamera => {}
                 Permission::SceneAccess => {}
+                Permission::Location => self.apple_request_location_permission(request_id),
             },
             _ => {
                 self.call_event_handler(&crate::event::Event::PermissionResult(

@@ -21,6 +21,9 @@ import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.input.InputManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.MediaCodec;
@@ -2563,6 +2566,91 @@ public class MakepadActivity
             String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
             MakepadNative.onMidiDeviceOpened(name, device);
         }
+    }
+
+    // location (Cx::start_location_updates)
+    private LocationManager mLocationManager;
+    private LocationListener mLocationListener;
+
+    private void sendLocationUpdate(Location loc) {
+        MakepadNative.onLocationUpdate(
+            loc.getLongitude(), loc.getLatitude(), loc.getAccuracy(),
+            loc.hasAltitude(), loc.getAltitude(),
+            loc.hasSpeed(), loc.getSpeed(),
+            loc.hasBearing(), loc.getBearing(),
+            loc.getTime());
+    }
+
+    public void startLocationUpdates(final long minIntervalMs, final float minDistanceM) {
+        runOnUiThread(() -> {
+            if (mLocationListener != null) {
+                return; // already running
+            }
+            try {
+                mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                if (mLocationManager == null) {
+                    MakepadNative.onLocationError(2, "no location service");
+                    return;
+                }
+                LocationListener listener = new LocationListener() {
+                    @Override
+                    public void onLocationChanged(Location loc) {
+                        sendLocationUpdate(loc);
+                    }
+                    @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+                    @Override public void onProviderEnabled(String provider) {}
+                    @Override public void onProviderDisabled(String provider) {}
+                };
+                boolean any = false;
+                if (mLocationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    mLocationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER, minIntervalMs, minDistanceM,
+                        listener, Looper.getMainLooper());
+                    any = true;
+                }
+                if (mLocationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    mLocationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER, minIntervalMs, minDistanceM,
+                        listener, Looper.getMainLooper());
+                    any = true;
+                }
+                if (!any) {
+                    MakepadNative.onLocationError(2, "location providers disabled");
+                    return;
+                }
+                mLocationListener = listener;
+                // seed with the last known fix so the app has a position immediately
+                Location last = mLocationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                if (last == null) {
+                    last = mLocationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+                }
+                if (last != null) {
+                    sendLocationUpdate(last);
+                }
+            }
+            catch (SecurityException e) {
+                mLocationListener = null;
+                MakepadNative.onLocationError(1, "location permission missing");
+            }
+            catch (Exception e) {
+                mLocationListener = null;
+                MakepadNative.onLocationError(2, e.toString());
+            }
+        });
+    }
+
+    public void stopLocationUpdates() {
+        runOnUiThread(() -> {
+            try {
+                if (mLocationManager != null && mLocationListener != null) {
+                    mLocationManager.removeUpdates(mLocationListener);
+                }
+            }
+            catch (Exception e) {
+                Log.e("Makepad", "stopLocationUpdates: " + e.toString());
+            }
+            mLocationListener = null;
+        });
     }
 
     public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {

@@ -1068,14 +1068,63 @@ impl Cx {
                         }
                     };
 
-                    self.call_event_handler(&Event::PermissionResult(
-                        crate::permission::PermissionResult {
-                            permission: perm,
-                            request_id,
-                            status: permission_status,
-                        },
-                    ));
+                    // Deferred start: StartLocationUpdates fired this dialog.
+                    if perm == crate::permission::Permission::Location
+                        && self.os.location_updates_wanted
+                    {
+                        match permission_status {
+                            crate::permission::PermissionStatus::Granted => unsafe {
+                                android_jni::to_java_start_location_updates(
+                                    LOCATION_MIN_INTERVAL_MS,
+                                    LOCATION_MIN_DISTANCE_M,
+                                );
+                            },
+                            _ => {
+                                self.call_event_handler(&Event::LocationError(
+                                    crate::event::LocationErrorEvent::PermissionDenied,
+                                ));
+                            }
+                        }
+                    }
+                    if request_id != LOCATION_INTERNAL_PERMISSION_REQUEST_ID {
+                        self.call_event_handler(&Event::PermissionResult(
+                            crate::permission::PermissionResult {
+                                permission: perm,
+                                request_id,
+                                status: permission_status,
+                            },
+                        ));
+                    }
                 }
+            }
+            FromJavaMessage::LocationUpdate {
+                lon,
+                lat,
+                accuracy_m,
+                altitude_m,
+                speed_mps,
+                heading_deg,
+                time_ms,
+            } => {
+                self.call_event_handler(&Event::LocationUpdate(
+                    crate::event::LocationUpdateEvent {
+                        lon,
+                        lat,
+                        accuracy_m: accuracy_m as f64,
+                        altitude_m,
+                        speed_mps: speed_mps.map(|v| v as f64),
+                        heading_deg: heading_deg.map(|v| v as f64),
+                        time: time_ms as f64 / 1000.0,
+                    },
+                ));
+            }
+            FromJavaMessage::LocationError { code, message } => {
+                let error = if code == 1 {
+                    crate::event::LocationErrorEvent::PermissionDenied
+                } else {
+                    crate::event::LocationErrorEvent::Unavailable(message)
+                };
+                self.call_event_handler(&Event::LocationError(error));
             }
             FromJavaMessage::VideoPlaybackPrepared {
                 video_id,
@@ -2472,6 +2521,34 @@ impl Cx {
                 } => {
                     self.handle_permission_request(permission, request_id);
                 }
+                CxOsOp::StartLocationUpdates => {
+                    self.os.location_updates_wanted = true;
+                    match self
+                        .check_android_permission_status(crate::permission::Permission::Location)
+                    {
+                        crate::permission::PermissionStatus::Granted => unsafe {
+                            android_jni::to_java_start_location_updates(
+                                LOCATION_MIN_INTERVAL_MS,
+                                LOCATION_MIN_DISTANCE_M,
+                            );
+                        },
+                        // NotDetermined also covers "permanently denied" on
+                        // Android (indistinguishable at check time) — request
+                        // and let the result decide.
+                        _ => unsafe {
+                            android_jni::to_java_request_permission(
+                                to_android_permission(crate::permission::Permission::Location),
+                                LOCATION_INTERNAL_PERMISSION_REQUEST_ID,
+                            );
+                        },
+                    }
+                }
+                CxOsOp::StopLocationUpdates => {
+                    self.os.location_updates_wanted = false;
+                    unsafe {
+                        android_jni::to_java_stop_location_updates();
+                    }
+                }
                 CxOsOp::HttpRequest {
                     request_id,
                     request,
@@ -2989,8 +3066,16 @@ fn to_android_permission(permission: crate::permission::Permission) -> &'static 
         crate::permission::Permission::Camera => "android.permission.CAMERA",
         crate::permission::Permission::HeadsetCamera => "horizonos.permission.HEADSET_CAMERA",
         crate::permission::Permission::SceneAccess => "com.oculus.permission.USE_SCENE",
+        crate::permission::Permission::Location => "android.permission.ACCESS_FINE_LOCATION",
     }
 }
+
+/// Internal request id for the permission dialog fired by
+/// `CxOsOp::StartLocationUpdates` (distinct from app-issued ids, which
+/// count up from 1).
+const LOCATION_INTERNAL_PERMISSION_REQUEST_ID: i32 = i32::MAX;
+const LOCATION_MIN_INTERVAL_MS: i64 = 1000;
+const LOCATION_MIN_DISTANCE_M: f32 = 3.0;
 
 impl Cx {
     fn find_popup_to_dismiss_on_touch(
@@ -3130,6 +3215,7 @@ fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permi
         "android.permission.CAMERA" => Some(crate::permission::Permission::Camera),
         "horizonos.permission.HEADSET_CAMERA" => Some(crate::permission::Permission::HeadsetCamera),
         "com.oculus.permission.USE_SCENE" => Some(crate::permission::Permission::SceneAccess),
+        "android.permission.ACCESS_FINE_LOCATION" => Some(crate::permission::Permission::Location),
         _ => None,
     }
 }
@@ -3137,6 +3223,7 @@ fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permi
 impl Default for CxOs {
     fn default() -> Self {
         Self {
+            location_updates_wanted: false,
             start_time: Instant::now(),
             first_after_resize: true,
             needs_first_draw: true,
@@ -3209,6 +3296,9 @@ pub(crate) struct AndroidSoftwarePlayer {
 }
 
 pub struct CxOs {
+    /// The app called `start_location_updates`; used to start streaming after
+    /// the runtime permission dialog resolves (and to re-arm on resume).
+    pub location_updates_wanted: bool,
     pub first_after_resize: bool,
     /// Set to `true` when a `RenderLoop` callback arrives but the surface is not
     /// yet drawable. When the surface later becomes ready, this flag triggers a

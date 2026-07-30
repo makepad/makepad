@@ -240,6 +240,30 @@ extern "C" {
     pub static AVCaptureDeviceWasDisconnectedNotification: ObjcId;
 }
 
+#[link(name = "CoreLocation", kind = "framework")]
+extern "C" {
+    pub static kCLLocationAccuracyBest: f64;
+    pub static kCLLocationAccuracyNearestTenMeters: f64;
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CLLocationCoordinate2D {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+unsafe impl Encode for CLLocationCoordinate2D {
+    fn encode() -> Encoding {
+        let encoding = format!(
+            "{{CLLocationCoordinate2D={}{}}}",
+            f64::encode().as_str(),
+            f64::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
+    }
+}
+
 pub type CMFormatDescriptionRef = ObjcId;
 pub const kCMPixelFormat_422YpCbCr8: u32 = four_char_as_u32("2vuy");
 pub const kCMPixelFormat_422YpCbCr8_yuvs: u32 = four_char_as_u32("yuvs");
