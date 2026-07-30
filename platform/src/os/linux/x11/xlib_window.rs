@@ -3,7 +3,7 @@ use {
     crate::{area::Area, cursor::MouseCursor, event::*, makepad_math::{Rect, Vec2d}, window::WindowId},
     std::{
         cell::Cell,
-        ffi::{CStr, CString, OsStr},
+        ffi::{CStr, CString},
         mem,
         os::raw::{c_char, c_int, c_long, c_ulong, c_void},
         ptr,
@@ -68,6 +68,7 @@ impl XlibWindow {
     pub fn init(
         &mut self,
         title: &str,
+        app_id: &str,
         size: Vec2d,
         position: Option<Vec2d>,
         is_fullscreen: bool,
@@ -195,14 +196,11 @@ impl XlibWindow {
             // Set the WM_CLASS before mapping the window.
             // Based on <https://www.x.org/releases/X11R7.5/doc/man/man3/XSetWMProperties.3.html>
             {
-                // Use the binary name by default (the first arg).
-                let class = std::env::args_os()
-                    .next()
-                    .as_ref()
-                    .and_then(|arg0| std::path::Path::new(arg0).file_name())
-                    .and_then(OsStr::to_str)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| String::from("Makepad"));
+                let class = if app_id.is_empty() {
+                    crate::window::default_app_id()
+                } else {
+                    app_id.to_string()
+                };
                 let instance = std::env::var("RESOURCE_NAME")
                     .ok()
                     .unwrap_or_else(|| class.clone());
