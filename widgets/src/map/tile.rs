@@ -39,18 +39,23 @@ pub const EARCUT_MAX_RINGS: usize = 500;
 
 const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
 const MVT_INTERNAL_RING_INDEX_KEY: &str = "__mp_ring";
-/// Tilt-mode road ladder: all solid-road casings under all solid-road
-/// centers, with patterned strokes such as rails and dashes interleaved.
-/// Oneway
-/// arrows reuse their own surface slot with a tiny decal epsilon; they do
-/// not occupy a global layer above every road. Deck bump (0.30 per 2 m in
-/// triangulate) exceeds the casing/center split so an elevated deck
-/// occludes grounded centers and their arrows.
-pub const ROAD_UNION_CENTER_DEPTH: f32 = 0.20;
+/// Stable tilt-mode road depth bands. Unlike the old per-tile face ladder,
+/// these values depend only on road semantics, so padded copies and adjacent
+/// tiles render a shared surface at exactly the same depth.
+const ROAD_SURFACE_PLAZA_DEPTH: f32 = 0.06;
+const ROAD_SURFACE_CASING_DEPTH: f32 = 0.08;
+pub const ROAD_UNION_CENTER_DEPTH: f32 = 0.24;
+const ROAD_DEPTH_MAX_MICRO: f32 = 730.0 * DEPTH_MICRO_PER_RANK;
+const ROAD_SUNK_DEPTH_OFFSET: f32 = 0.40;
+const ROAD_TUNNEL_CASING_DEPTH: f32 = 0.0498;
+const ROAD_TUNNEL_CENTER_DEPTH: f32 = 0.0500;
+const ROAD_FASCIA_DEPTH_EPSILON: f32 = 0.00005;
+const ROAD_FRINGE_DEPTH_EPSILON: f32 = 0.00005;
+const ROAD_STROKE_PASS_DEPTH_OFFSET: f32 = 0.02;
 // The icon draw call is +0.04 above the casing call in MapView. Subtract it
 // from arrow param5, then restore only this tiny own-surface decal epsilon.
 const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
-const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.004;
+const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.0001;
 const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
 const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
 
@@ -89,6 +94,11 @@ pub struct TileEntry {
     pub bucket: u32,
     /// This bake carries 3D extrusions (buildings/trees/signals).
     pub baked_3d: bool,
+    /// Whether casing/stroke GPU geometry and the CPU road-arrow subset are
+    /// available for a same-bucket 2D/3D overlay-only rebake.
+    pub road_core_cached: bool,
+    pub road_icon_indices: Vec<u32>,
+    pub road_icon_vertices: Vec<f32>,
     /// Cross-fade state: the replaced generation's geometry stays drawable
     /// underneath while the new one fades in.
     pub fade: Option<TileFade>,
@@ -104,6 +114,10 @@ pub struct TileFade {
     /// heights with the fade. 3D->3D rebakes keep full height (alpha-only
     /// crossfade) so zoom regens never replay the animation.
     pub grow_heights: bool,
+    /// The incoming casing/stroke handles are the unchanged resident road
+    /// core. They stay fully opaque and at full height while only the
+    /// mode-dependent fill/icon overlay cross-fades.
+    pub reuse_road_core: bool,
     pub fill_geometry: Option<Geometry>,
     pub casing_geometry: Option<Geometry>,
     pub stroke_geometry: Option<Geometry>,
@@ -179,6 +193,14 @@ pub struct TileBuffers {
     pub stroke_vertices: Vec<f32>,
     pub icon_indices: Vec<u32>,
     pub icon_vertices: Vec<f32>,
+    /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
+    /// copy beside the resident GPU road meshes, then appends it to a
+    /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
+    pub road_icon_indices: Vec<u32>,
+    pub road_icon_vertices: Vec<f32>,
+    /// This bake intentionally omitted all tilt-invariant road geometry and
+    /// must reuse the resident tile's casing/stroke/road-icon core.
+    pub mode_overlay_only: bool,
     pub feature_count: usize,
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
@@ -195,8 +217,31 @@ impl TileBuffers {
             + self.stroke_indices.len()
             + self.stroke_vertices.len()
             + self.icon_indices.len()
-            + self.icon_vertices.len())
+            + self.icon_vertices.len()
+            + self.road_icon_indices.len()
+            + self.road_icon_vertices.len())
             * 4
+    }
+
+    /// Restore the cached road decals after a mode-only overlay bake. Road
+    /// arrows share the icon draw call so their surface-depth compensation
+    /// remains identical to a full bake.
+    pub fn append_cached_road_icons(
+        &mut self,
+        road_indices: &[u32],
+        road_vertices: &[f32],
+    ) {
+        if road_indices.is_empty() || road_vertices.is_empty() {
+            return;
+        }
+        let vertex_base = (self.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        self.icon_indices
+            .extend(road_indices.iter().map(|index| index + vertex_base));
+        self.icon_vertices.extend_from_slice(road_vertices);
+        self.road_icon_indices.clear();
+        self.road_icon_indices.extend_from_slice(road_indices);
+        self.road_icon_vertices.clear();
+        self.road_icon_vertices.extend_from_slice(road_vertices);
     }
 }
 
@@ -210,6 +255,9 @@ struct StrokeDrawJob {
     solid_road_surface: bool,
     /// Per-point deck heights (base_dz join), aligned with `points`.
     dz: Option<Vec<f32>>,
+    /// Solid-road paint and physical vertical identity. Patterned/non-road
+    /// strokes leave this empty and stay on the regular stroke path.
+    surface_key: Option<RoadSurfaceKey>,
     /// Road semantics retained for safe 3D split/merge reconciliation.
     join_meta: RoadJoinMeta,
 }
@@ -219,8 +267,8 @@ struct StrokeDrawJob {
 /// strokes already carry a stable param5.
 #[derive(Clone, Copy, Debug)]
 enum ArrowSurfaceDepth {
-    Union(StrokeStyleKey),
-    Stroke { param5: f32, sort_rank: i16 },
+    Union(RoadSurfaceKey),
+    Stroke { level: i8, depth_micro: f32 },
     Unknown,
 }
 
@@ -235,11 +283,12 @@ struct ArrowDrawJob {
     surface_depth: ArrowSurfaceDepth,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct StrokePassKey {
     color: u32,
     width_bits: u32,
     shape_id_bits: u32,
+    depth_micro_bits: u32,
 }
 
 impl From<StrokePassStyle> for StrokePassKey {
@@ -248,11 +297,12 @@ impl From<StrokePassStyle> for StrokePassKey {
             color: value.color,
             width_bits: value.width.to_bits(),
             shape_id_bits: value.shape_id.to_bits(),
+            depth_micro_bits: value.depth_micro.to_bits(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct StrokeStyleKey {
     sort_rank: i16,
     casing: Option<StrokePassKey>,
@@ -269,25 +319,154 @@ impl From<StrokeStyle> for StrokeStyleKey {
     }
 }
 
+/// Physical sheet identity for solid-road boolean geometry. Paint style
+/// alone is insufficient: a same-colored tunnel, surface street, and deck
+/// may cross in XY while occupying different 2.5D planes. Mixing them into
+/// one nearest-centerline DzField folds the resulting mesh between their
+/// signed elevations when the camera tilts.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+enum RoadVerticalClass {
+    Sunk,
+    Surface,
+    Elevated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+struct RoadSurfaceKey {
+    style: StrokeStyleKey,
+    vertical: RoadVerticalClass,
+    /// Normalized OSM stack level. Untagged signed profiles use -1/+1.
+    layer: i8,
+}
+
+impl RoadSurfaceKey {
+    fn from_way(
+        style: StrokeStyle,
+        tags: &HashMap<String, String>,
+        dz: Option<&[f32]>,
+    ) -> Self {
+        let bridge = tag_is_truthy(tags, "bridge");
+        let tunnel = tag_is_truthy(tags, "tunnel");
+        let raw_layer = tags
+            .get("osm_layer")
+            .and_then(|value| value.parse::<f32>().ok())
+            .map(|value| value.round() as i32);
+        // Mirror the importer/baker's normalization so renderer-side sheet
+        // identity cannot disagree with the profile solver.
+        let osm_layer = match raw_layer {
+            Some(layer) if bridge && layer < 1 => 1,
+            Some(layer) if tunnel && layer > -1 => -1,
+            Some(layer) => layer,
+            None if bridge => 1,
+            None if tunnel => -1,
+            None => 0,
+        }
+            .clamp(i8::MIN as i32, i8::MAX as i32) as i8;
+        let min_dz = dz
+            .into_iter()
+            .flatten()
+            .copied()
+            .fold(0.0f32, f32::min);
+        let max_dz = dz
+            .into_iter()
+            .flatten()
+            .copied()
+            .fold(0.0f32, f32::max);
+        let (vertical, layer) = if tunnel || osm_layer < 0 {
+            (RoadVerticalClass::Sunk, osm_layer.min(-1))
+        } else if bridge || osm_layer > 0 {
+            (RoadVerticalClass::Elevated, osm_layer.max(1))
+        } else if min_dz <= -LIFT_COVER_M {
+            (RoadVerticalClass::Sunk, -1)
+        } else if max_dz >= LIFT_COVER_M {
+            (RoadVerticalClass::Elevated, 1)
+        } else {
+            (RoadVerticalClass::Surface, 0)
+        };
+        Self {
+            style: StrokeStyleKey::from(style),
+            vertical,
+            layer,
+        }
+    }
+
+    /// Surface approaches may reconcile with their elevated continuation.
+    /// A tunnel must never inherit a nearby surface/deck profile, and two
+    /// explicitly different elevated stack levels are separate structures.
+    fn grade_compatible(self, other: Self) -> bool {
+        match (self.vertical, other.vertical) {
+            (RoadVerticalClass::Sunk, RoadVerticalClass::Sunk) => self.layer == other.layer,
+            (RoadVerticalClass::Sunk, _) | (_, RoadVerticalClass::Sunk) => false,
+            (RoadVerticalClass::Elevated, RoadVerticalClass::Elevated) => {
+                self.layer == other.layer
+            }
+            _ => true,
+        }
+    }
+
+    fn depth_level(self) -> i8 {
+        if self.vertical == RoadVerticalClass::Sunk {
+            -1
+        } else {
+            0
+        }
+    }
+}
+
+/// Effective within-pass depth for road paint. Phase bands preserve the
+/// global plaza -> all casings -> all centers painter order; the style's
+/// exact depth micro preserves ordering inside a band. Solid sunk sheets
+/// retain those separations in one parallel band below surface content.
+fn road_semantic_param5(level: i8, phase: u8, depth_micro: f32) -> f32 {
+    let depth_micro = depth_micro.clamp(0.0, ROAD_DEPTH_MAX_MICRO);
+    let surface = match phase {
+        0 => ROAD_SURFACE_PLAZA_DEPTH,
+        1 => ROAD_SURFACE_CASING_DEPTH + depth_micro,
+        _ => ROAD_UNION_CENTER_DEPTH + depth_micro,
+    };
+    if level < 0 {
+        surface - ROAD_SUNK_DEPTH_OFFSET
+    } else {
+        surface
+    }
+}
+
+fn road_surface_param5(key: RoadSurfaceKey, phase: u8) -> f32 {
+    let depth_micro = if phase == 1 {
+        key.style.casing.map_or(0.0, |pass| {
+            f32::from_bits(pass.depth_micro_bits)
+        })
+    } else {
+        f32::from_bits(key.style.center.depth_micro_bits)
+    };
+    road_semantic_param5(key.depth_level(), phase, depth_micro)
+}
+
 /// Whether a styled way is a physical solid road surface handled by the
 /// road-paint boolean mesh. This deliberately ignores color and rank: those
 /// select paint groups inside the shared pipeline, not a different renderer.
 /// Patterned/dashed passes remain vector overlays.
 fn is_solid_road_surface(
     tags: &HashMap<String, String>,
-    sunk_3d: bool,
     style: &StrokeStyle,
 ) -> bool {
+    let layer = tags.get("layer").map(String::as_str).unwrap_or("");
     tags.contains_key("highway")
+        // Road-area polygons already enter the union as their complete
+        // plaza contour. Treating their styled outline as a second physical
+        // ribbon adds a redundant offset loop around every polygon edge and
+        // can change the union silhouette. Keep that outline in the ordinary
+        // vector-stroke path instead.
+        && !is_road_polygon_layer(layer)
         && !tag_is_truthy(tags, "rail")
-        && (sunk_3d || !tag_is_truthy(tags, "tunnel"))
+        && !tag_is_truthy(tags, "tunnel")
         && style.center.shape_id == 0.0
         && style
             .casing
             .is_none_or(|casing| casing.shape_id == 0.0)
 }
 
-type RoadTierEnd = (StrokeStyleKey, usize, bool);
+type RoadTierEnd = (RoadSurfaceKey, usize, bool);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum RoadJoinFamily {
@@ -351,7 +530,7 @@ impl RoadJoinMeta {
 
 #[derive(Clone, Debug)]
 struct RoadTierJoinWay {
-    key: StrokeStyleKey,
+    key: RoadSurfaceKey,
     way_index: usize,
     points: Vec<(f32, f32)>,
     dz: Vec<f32>,
@@ -421,6 +600,7 @@ fn endpoint_to_through_grade_corrections(
 
             for target in ways {
                 if target.key == source.key
+                    || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
                     || target.dz.len() != target.points.len()
                 {
@@ -428,7 +608,7 @@ fn endpoint_to_through_grade_corrections(
                 }
                 // A link inherits from its mainline, never the reverse.
                 // Width handles styles whose painter ranks happen to tie.
-                if target.key.sort_rank <= source.key.sort_rank
+                if target.key.style.sort_rank <= source.key.style.sort_rank
                     && target.half_width <= source.half_width * 1.1
                 {
                     continue;
@@ -511,7 +691,7 @@ fn endpoint_to_through_grade_corrections(
                     let large_join_gap = (source.half_width * 0.25).max(0.35);
                     if (delta < -CORRECTION_EPSILON_M || delta > MAX_RAISE_M)
                         && (tangent_dot < LARGE_JOIN_TANGENT_DOT
-                            || target.key.sort_rank <= source.key.sort_rank
+                            || target.key.style.sort_rank <= source.key.style.sort_rank
                             || target.half_width <= source.half_width * 1.1
                             || distance_sq > large_join_gap * large_join_gap)
                     {
@@ -609,6 +789,7 @@ fn endpoint_to_through_flush_ends(
                         let max_width = target.half_width.max(continuation.half_width);
                         *continuation_index != target_index
                             && target.meta.same_known_family(continuation.meta)
+                            && target.key.grade_compatible(continuation.key)
                             && target.meta.is_link == continuation.meta.is_link
                             && min_width > 1e-5
                             && max_width / min_width <= 1.25
@@ -668,6 +849,7 @@ fn endpoint_to_through_flush_ends(
 
             'targets: for (target_index, target) in ways.iter().enumerate() {
                 if target.key == source.key
+                    || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
                     || target.dz.len() != target.points.len()
                 {
@@ -906,7 +1088,10 @@ fn endpoint_continuation_grade_corrections(
     for entries in nodes.values() {
         for (index, a) in entries.iter().enumerate() {
             for b in entries.iter().skip(index + 1) {
-                if a.end.0 == b.end.0 || a.meta.is_link != b.meta.is_link {
+                if a.end.0 == b.end.0
+                    || !a.end.0.grade_compatible(b.end.0)
+                    || a.meta.is_link != b.meta.is_link
+                {
                     continue;
                 }
                 let (node_dx, node_dy) = (a.point.0 - b.point.0, a.point.1 - b.point.1);
@@ -1053,6 +1238,15 @@ struct FillFeatureGroup {
     /// vertices lift by projecting onto these only.
     profiles: Vec<BridgeCorridor>,
     rings: Vec<FillRing>,
+}
+
+/// Shortbread's `bridges` polygons describe the physical bridge structure,
+/// not the cartographic road surface. In a flat map the road stroke already
+/// communicates the crossing; painting the structure as an opaque ground
+/// fill hides water and roads beneath it. Tilted mode keeps the polygon so
+/// the bridge still has a visible physical footprint below its deck.
+fn structural_bridge_area_visible(layer: &str, tilted_3d: bool) -> bool {
+    layer != "bridges" || tilted_3d
 }
 
 #[derive(DeJson)]
@@ -1229,6 +1423,7 @@ pub fn build_tile_buffers_from_body(
         theme,
         render_zoom,
         false,
+        true,
         Vec::new(),
         false,
         false,
@@ -1250,6 +1445,7 @@ pub fn build_tile_buffers_from_mvt(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    build_road_core: bool,
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
@@ -1279,20 +1475,26 @@ pub fn build_tile_buffers_from_mvt(
     let want_buildings = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
     let mut bridge_corridors = Vec::<BridgeCorridor>::new();
     // Bridge corridors want the detail archive from bucket 14 in 3D.
-    if render_zoom >= ICON_MIN_ZOOM.min(BUILDING_3D_MIN_ZOOM)
+    let want_detail_points = render_zoom >= ICON_MIN_ZOOM;
+    let want_detail_platforms = render_zoom >= 16;
+    // Road elevation is camera-independent. Outside solved bridge-dz
+    // coverage collect the heuristic corridors in flat mode too, making
+    // the resulting road core reusable when the camera tilts.
+    let collect_detail_corridors =
+        build_road_core && render_zoom >= 14 && !bridge_dz_covered;
+    if want_detail_points
+        || want_detail_platforms
         || want_buildings
-        || (buildings_3d && render_zoom >= 14)
+        || collect_detail_corridors
     {
         if let Some(detail_data) = detail_tile_data {
             if let Err(err) = merge_detail_features(
                 detail_data,
                 tile_key,
                 render_scale,
-                render_zoom >= ICON_MIN_ZOOM,
+                want_detail_points,
                 want_buildings,
-                // Inside baked bridge-dz coverage the solved corridors
-                // replace the tag heuristic entirely.
-                !bridge_dz_covered,
+                collect_detail_corridors,
                 &mut collector.points,
                 &mut collector.ways,
                 &mut bridge_corridors,
@@ -1332,6 +1534,7 @@ pub fn build_tile_buffers_from_mvt(
         theme,
         render_zoom,
         buildings_3d,
+        build_road_core,
         bridge_corridors,
         bridge_dz_covered,
         have_charger_overlay,
@@ -2320,6 +2523,7 @@ fn build_tile_buffers_from_features(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    build_road_core: bool,
     bridge_corridors: Vec<BridgeCorridor>,
     bridge_dz_covered: bool,
     have_charger_overlay: bool,
@@ -2342,7 +2546,14 @@ fn build_tile_buffers_from_features(
             // get their dz from the per-tier field instead.
             way.dz
                 .as_ref()
-                .filter(|dz| !dz.iter().any(|&d| d < -0.05))
+                // The solved overlay annotates grounded ways with all-zero
+                // profiles too. They cannot lift anything and turning each
+                // one into a corridor makes every patterned stroke compare
+                // against thousands of irrelevant segments.
+                .filter(|dz| {
+                    !dz.iter().any(|&d| d < -0.05)
+                        && dz.iter().any(|&d| d > 0.05)
+                })
                 .map(|dz| BridgeCorridor {
                     points: way.points.clone(),
                     decks: dz.clone(),
@@ -2652,6 +2863,8 @@ fn build_tile_buffers_from_features(
     let mut stroke_vertices = Vec::<f32>::new();
     let mut icon_indices = Vec::<u32>::new();
     let mut icon_vertices = Vec::<f32>::new();
+    let mut road_icon_indices = Vec::<u32>::new();
+    let mut road_icon_vertices = Vec::<f32>::new();
     let mut fill_zbias = 0.0_f32;
     let mut casing_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
@@ -2788,6 +3001,10 @@ fn build_tile_buffers_from_features(
                 labels.push(label);
             }
         }
+        let source_layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+        if !structural_bridge_area_visible(source_layer, buildings_3d) {
+            continue;
+        }
         let Some(color) = fill_color else {
             continue;
         };
@@ -2840,7 +3057,8 @@ fn build_tile_buffers_from_features(
         // fill pipeline: the junction plaza and its road class must be ONE
         // surface (2D reference: plazas paint over minor-road centers).
         let plaza_layer = way.tags.get("layer").map(|v| v.as_str()).unwrap_or("");
-        if matches!(plaza_layer, "street_polygons" | "streets_med" | "streets_low")
+        if build_road_core
+            && matches!(plaza_layer, "street_polygons" | "streets_med" | "streets_low")
             && !tag_is_truthy(&way.tags, "tunnel")
             && way.closed
         {
@@ -2893,6 +3111,12 @@ fn build_tile_buffers_from_features(
 
     for group_index in fill_order {
         let group = &fill_groups[group_index];
+        // A same-bucket 2D/3D switch reuses the resident road core. Its
+        // deckable street-area fills already live in the stable stroke
+        // geometry and must not be emitted a second time.
+        if !build_road_core && group.deckable {
+            continue;
+        }
         let polygons = classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS);
         for polygon in polygons {
             if polygon.is_empty() {
@@ -3475,6 +3699,19 @@ fn build_tile_buffers_from_features(
         if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
             labels.push(label);
         }
+        // Detail building footprints are a mode-specific fill overlay. A
+        // handful inherit highway-like OSM tags; letting those fall through
+        // stroke styling made the supposedly stable road core differ between
+        // flat and tilted bakes and could add spurious road slivers.
+        if way.tags.get("layer").map(String::as_str) == Some("detail_buildings") {
+            continue;
+        }
+        // Road labels are mode-independent but are cheap to extract. Keep
+        // them in the replacement label set, then reuse the resident GPU
+        // road core instead of rebuilding stroke jobs and Boolean surfaces.
+        if !build_road_core {
+            continue;
+        }
         // Oneway arrows read from mid zoom, not just street level —
         // direction matters while route-planning zoomed out. NOT tied to
         // stroke style presence: at close zooms wide roads render as
@@ -3490,24 +3727,14 @@ fn build_tile_buffers_from_features(
             && !tag_is_truthy(&way.tags, "rail"))
         .then(|| tag_is_truthy(&way.tags, "oneway_reverse"));
         let mut arrow_surface_depth = ArrowSurfaceDepth::Unknown;
-        // A tunnel with baked negative dz becomes a real SUNK road in 3D
-        // bakes: styled as its solid road class (no dash), joining the
-        // union as a sunk level part. Flat bakes keep the carto dashes.
-        let sunk_3d = buildings_3d
-            && tag_is_truthy(&way.tags, "tunnel")
-            && way
-                .dz
-                .as_ref()
-                .is_some_and(|dz| dz.iter().any(|&d| d < -0.05));
-        let stripped_tags;
-        let style_tags = if sunk_3d {
-            let mut tags = way.tags.clone();
-            tags.remove("tunnel");
-            stripped_tags = tags;
-            &stripped_tags
-        } else {
-            &way.tags
-        };
+        // A tunnel stays a cartographic dashed/ghosted stroke in both 2D
+        // and 3D. Promoting its solved negative profile to an exposed solid
+        // mesh made the portal a literal cutaway: independently clipped
+        // sunk/surface faces opened triangular holes when pitched. The
+        // fixed under-surface depth still gives the tunnel correct
+        // occlusion beneath streets and plazas without pretending that its
+        // underground deck is visible terrain.
+        let style_tags = &way.tags;
         if let Some(mut style) =
             stroke_style_for_tags(theme, style_tags, tile_key.z, render_zoom, zoom_mult, px_to_units)
         {
@@ -3524,7 +3751,7 @@ fn build_tile_buffers_from_features(
             // running parallel to a bridge (IJtunnel next to Zouthavenbrug)
             // passes the direction gate and would hoist above ground.
             // deck_m < 0 is the "never deck" sentinel for the stroke pass.
-            if tag_is_truthy(&way.tags, "tunnel") && !sunk_3d {
+            if tag_is_truthy(&way.tags, "tunnel") {
                 style.center.deck_m = -1.0;
                 if let Some(casing) = style.casing.as_mut() {
                     casing.deck_m = -1.0;
@@ -3543,20 +3770,24 @@ fn build_tile_buffers_from_features(
                     points: prepared_way.points.clone(),
                     solid_road_surface: false,
                     dz: None,
+                    surface_key: None,
                     join_meta: RoadJoinMeta::default(),
                 });
             }
             // Solid road geometry joins the per-tier union mesh: one
             // seamless surface per class, identical flat and tilted. Dashed
             // shapes (rails, tunnels' dash patterns) keep the stroke path.
-            let solid_road_surface = is_solid_road_surface(&way.tags, sunk_3d, &style);
+            let solid_road_surface = is_solid_road_surface(&way.tags, &style);
+            let surface_key = solid_road_surface.then(|| {
+                RoadSurfaceKey::from_way(style, &way.tags, way.dz.as_deref())
+            });
             if arrow_reverse.is_some() {
-                arrow_surface_depth = if solid_road_surface {
-                    ArrowSurfaceDepth::Union(StrokeStyleKey::from(style))
+                arrow_surface_depth = if let Some(surface_key) = surface_key {
+                    ArrowSurfaceDepth::Union(surface_key)
                 } else {
                     ArrowSurfaceDepth::Stroke {
-                        param5: stroke_pass_param5(&style.center),
-                        sort_rank: style.sort_rank,
+                        level: if style.center.deck_m < 0.0 { -1 } else { 0 },
+                        depth_micro: style.center.depth_micro,
                     }
                 };
             }
@@ -3570,6 +3801,7 @@ fn build_tile_buffers_from_features(
                 } else {
                     None
                 },
+                surface_key,
                 join_meta: RoadJoinMeta::from_tags(&way.tags),
             });
         }
@@ -3590,17 +3822,20 @@ fn build_tile_buffers_from_features(
     profiler.lap("buildings", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
 
     let mut union_tiers =
-        HashMap::<StrokeStyleKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
-    let mut union_way_meta = HashMap::<StrokeStyleKey, Vec<RoadJoinMeta>>::new();
+        HashMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
+    let mut union_way_meta = HashMap::<RoadSurfaceKey, Vec<RoadJoinMeta>>::new();
     let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in stroke_jobs {
-        let key = StrokeStyleKey::from(job.style);
         if job.solid_road_surface {
+            let key = job
+                .surface_key
+                .expect("solid-road job must carry physical surface identity");
             let entry = union_tiers.entry(key).or_insert((job.style, Vec::new()));
             entry.1.push((job.points, job.dz));
             union_way_meta.entry(key).or_default().push(job.join_meta);
             continue;
         }
+        let key = StrokeStyleKey::from(job.style);
         let entry = grouped_strokes.entry(key).or_insert((job.style, Vec::new()));
         entry.1.push(job.points);
     }
@@ -3614,6 +3849,7 @@ fn build_tile_buffers_from_features(
                 points,
                 solid_road_surface: false,
                 dz: None,
+                surface_key: None,
                 join_meta: RoadJoinMeta::default(),
             });
         }
@@ -3768,13 +4004,16 @@ fn build_tile_buffers_from_features(
     // order through the param5 ladder. Only centers ranked above the top
     // road tier (trams, rails) stay in the stroke buffer above everything.
     let union_clip = clip_bounds;
-    let mut tier_list: Vec<&(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)> =
-        union_tiers.values().collect();
-    tier_list.sort_by_key(|entry| {
+    let mut tier_list: Vec<(
+        RoadSurfaceKey,
+        &(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>),
+    )> = union_tiers.iter().map(|(key, entry)| (*key, entry)).collect();
+    tier_list.sort_by_key(|(key, entry)| {
         (
             entry.0.sort_rank,
             entry.0.center.color,
             entry.0.center.width.to_bits(),
+            *key,
         )
     });
     let mut groups: Vec<PaintGroup> = Vec::new();
@@ -3802,6 +4041,7 @@ fn build_tile_buffers_from_features(
                 color: hex_to_premul_rgba(color, f32::from_bits(alpha_bits)),
                 phase: 0,
                 rank: i16::MIN,
+                depth_micro: 0.0,
                 field: 0,
                 skirt_joints: Vec::new(),
                 half_width: 1.0,
@@ -3869,7 +4109,10 @@ fn build_tile_buffers_from_features(
     for entries in endpoint_tiers.values() {
         for (index, (end_a, dir_a, dz_a)) in entries.iter().enumerate() {
             for (end_b, dir_b, dz_b) in entries.iter().skip(index + 1) {
-                if end_a.0 == end_b.0 || (dz_a - dz_b).abs() >= 0.3 {
+                if end_a.0 == end_b.0
+                    || !end_a.0.grade_compatible(end_b.0)
+                    || (dz_a - dz_b).abs() >= 0.3
+                {
                     continue;
                 }
                 fascia_joint_ends.insert(*end_a);
@@ -3899,10 +4142,15 @@ fn build_tile_buffers_from_features(
     // Solid-road ways get the same corner-cut smoothing as other strokes so
     // curve shapes stay identical between the two pipelines; dz rides
     // along through the cuts.
-    let smoothed_tiers: Vec<(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)> = tier_list
+    let smoothed_tiers: Vec<(
+        RoadSurfaceKey,
+        StrokeStyle,
+        Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>,
+    )> = tier_list
         .iter()
-        .map(|entry| {
+        .map(|(key, entry)| {
             (
+                *key,
                 entry.0,
                 entry
                     .1
@@ -3930,7 +4178,7 @@ fn build_tile_buffers_from_features(
             .iter()
             .map(|(_, _, points, dz)| (points.as_slice(), dz.as_deref()))
             .collect();
-        for (_, ways) in &smoothed_tiers {
+        for (_, _, ways) in &smoothed_tiers {
             plaza_ways.extend(
                 ways.iter()
                     .map(|(points, dz)| (points.as_slice(), dz.as_deref())),
@@ -3938,7 +4186,7 @@ fn build_tile_buffers_from_features(
         }
         dz_fields.push(DzField::build(&plaza_ways, 6.0, union_clip));
     }
-    for (style, ways) in &smoothed_tiers {
+    for (_, style, ways) in &smoothed_tiers {
         let half_width = style
             .casing
             .map_or(style.center.width, |casing| casing.width.max(style.center.width))
@@ -3950,13 +4198,16 @@ fn build_tile_buffers_from_features(
         dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
     for pass in 0..2u8 {
-        for (tier_index, (style, ways)) in smoothed_tiers.iter().enumerate() {
-            let tier_key = StrokeStyleKey::from(*style);
-            let (color, width) = if pass == 0 {
+        for (tier_index, (tier_key, style, ways)) in smoothed_tiers.iter().enumerate() {
+            let (color, width, depth_micro) = if pass == 0 {
                 let Some(casing) = style.casing else { continue };
-                (casing.color, casing.width)
+                (casing.color, casing.width, casing.depth_micro)
             } else {
-                (style.center.color, style.center.width)
+                (
+                    style.center.color,
+                    style.center.width,
+                    style.center.depth_micro,
+                )
             };
             let ribbons: Vec<RoadRibbon> = ways
                 .iter()
@@ -3967,7 +4218,7 @@ fn build_tile_buffers_from_features(
                             let node = ((x * 4.0).round() as i32, (y * 4.0).round() as i32);
                             road_endpoint_is_clip_cut((x, y), union_clip)
                                 || tunnel_portals.contains(&node)
-                                || tier_joint_ends.contains(&(tier_key, way_index, is_start))
+                                || tier_joint_ends.contains(&(*tier_key, way_index, is_start))
                         })
                     };
                     RoadRibbon {
@@ -3997,7 +4248,7 @@ fn build_tile_buffers_from_features(
                     ]
                     .into_iter()
                     .filter_map(|(is_start, point, inner)| {
-                        let end = (tier_key, way_index, is_start);
+                        let end = (*tier_key, way_index, is_start);
                         let round_cap = !tier_joint_ends.contains(&end)
                             && fascia_joint_ends.contains(&end);
                         if !round_cap && !tier_joint_ends.contains(&end) {
@@ -4021,6 +4272,7 @@ fn build_tile_buffers_from_features(
                 color: hex_to_premul_rgba(color, 1.0),
                 phase: 1 + pass,
                 rank: style.sort_rank,
+                depth_micro,
                 field: (1 + tier_index) as u16,
                 skirt_joints,
                 half_width: (width * 0.5).max(0.05),
@@ -4151,7 +4403,17 @@ fn build_tile_buffers_from_features(
     let corridor_boxes: Vec<(f32, f32, f32, f32)> = corridor_set
         .iter()
         .map(|corridor| {
-            let reach = corridor.half_width + CORRIDOR_FEATHER + 2.0;
+            // Match the exact support of corridor_deck_overrides. Solved
+            // profiles are identically zero at SOLVED_REACH_ZERO; heuristic
+            // corridors are identically zero outside half_width + feather.
+            // The previous extra two units admitted many strokes that could
+            // never receive a non-zero deck and made them pay the full
+            // vertex x corridor-segment matcher anyway.
+            let reach = if corridor.solved {
+                SOLVED_REACH_ZERO
+            } else {
+                corridor.half_width + CORRIDOR_FEATHER
+            };
             let mut min_x = f32::MAX;
             let mut min_y = f32::MAX;
             let mut max_x = f32::MIN;
@@ -4165,9 +4427,9 @@ fn build_tile_buffers_from_features(
             (min_x - reach, min_y - reach, max_x + reach, max_y + reach)
         })
         .collect();
-    let corridors_near = |part: &[(f32, f32)]| -> bool {
+    let corridors_for_part = |part: &[(f32, f32)]| -> Vec<&BridgeCorridor> {
         if corridor_boxes.is_empty() {
-            return false;
+            return Vec::new();
         }
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
@@ -4179,44 +4441,29 @@ fn build_tile_buffers_from_features(
             max_x = max_x.max(x);
             max_y = max_y.max(y);
         }
-        corridor_boxes.iter().any(|&(bx0, by0, bx1, by1)| {
-            min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0
-        })
+        corridor_set
+            .iter()
+            .zip(&corridor_boxes)
+            .filter_map(|(corridor, &(bx0, by0, bx1, by1))| {
+                (min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0)
+                    .then_some(corridor)
+            })
+            .collect()
     };
 
-    // Depth slots, not per-event steps: every face gets its own slot (faces
-    // of one rank can overlap since the dissolve-only boolean), strokes
-    // share one slot per (phase, rank) — the pre-union regime. Fewer slots
-    // = coarser, safer depth separation between coplanar overlaps.
-    let mut event_slots = Vec::with_capacity(events.len());
-    let mut slot_count = 0usize;
-    let mut last_stroke_slot: Option<(u8, i16)> = None;
-    for ((_, phase, rank, _, _), event) in &events {
-        match event {
-            RoadPaintEvent::Face(_) => {
-                slot_count += 1;
-                last_stroke_slot = None;
-                event_slots.push(slot_count);
-            }
-            RoadPaintEvent::Stroke { .. } => {
-                if last_stroke_slot != Some((*phase, *rank)) {
-                    slot_count += 1;
-                    last_stroke_slot = Some((*phase, *rank));
-                }
-                event_slots.push(slot_count);
-            }
-        }
-    }
+    // Tilt depth is semantic rather than face-ordinal. Adjacent tiles contain
+    // different padded face soups, so an ordinal ladder assigned two copies
+    // of the same road different depths and exposed the overlap at pitch.
+    // Event sorting remains authoritative for flat painter order.
     let mut prof_subdiv_ms = 0.0f64;
     let mut prof_sample_ms = 0.0f64;
     let mut prof_face_verts_out = 0usize;
-    let ladder_step =
-        (4.0 * DEPTH_MICRO_PER_RANK).min(0.44 / slot_count.max(1) as f32);
-    for (event_index, (_, event)) in events.iter().enumerate() {
-        let ladder_param5 = 0.06 + event_slots[event_index] as f32 * ladder_step;
+    for ((_, phase, _, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(face_index) => {
                 let face = &faces[*face_index];
+                let face_param5 =
+                    road_semantic_param5(face.level, face.phase, face.depth_micro);
                 // 3D: faces re-acquire deck height from their tier's dz
                 // field — height never needs to survive the boolean. The
                 // mesh is refined near lifted geometry first, so ramps
@@ -4258,8 +4505,8 @@ fn build_tile_buffers_from_features(
                                 .collect();
                             prof_sample_ms += clock.elapsed().as_secs_f64() * 1000.0;
                             prof_face_verts_out += sub_verts.len();
-                            let lifted = deck.iter().any(|&d| d > 0.05);
-                            (&sub_verts, &sub_indices, lifted.then_some(deck))
+                            let displaced = deck.iter().any(|&d| d.abs() > 0.05);
+                            (&sub_verts, &sub_indices, displaced.then_some(deck))
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
@@ -4313,7 +4560,7 @@ fn build_tile_buffers_from_features(
                                         0.0,
                                         0.0,
                                         0.0,
-                                        (ladder_param5 - ladder_step * 0.25).max(0.06),
+                                        (face_param5 - ROAD_FASCIA_DEPTH_EPSILON).max(0.0),
                                     ],
                                     zbias: casing_zbias,
                                 },
@@ -4332,7 +4579,7 @@ fn build_tile_buffers_from_features(
                         color: face.color,
                         stroke_mult: 1e6,
                         shape_id: 0.0,
-                        params: [0.0, 0.0, 0.0, 0.0, 0.0, ladder_param5],
+                        params: [0.0, 0.0, 0.0, 0.0, 0.0, face_param5],
                         zbias: casing_zbias,
                     },
                     deck.as_deref(),
@@ -4382,16 +4629,15 @@ fn build_tile_buffers_from_features(
                             color: face.color,
                             stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
                             shape_id: 0.0,
-                            // Half a ladder step above the own face: in tilt
-                            // the up-screen skirt half otherwise loses the
-                            // depth tie to the content it must blend over.
+                            // A fixed sub-rank epsilon keeps the carrier on
+                            // its own face without making depth tile-local.
                             params: [
                                 0.0,
                                 0.0,
                                 0.0,
                                 0.0,
                                 0.0,
-                                ladder_param5 + ladder_step * 0.5,
+                                face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
                             ],
                             zbias: casing_zbias,
                         },
@@ -4407,14 +4653,28 @@ fn build_tile_buffers_from_features(
                 start_cap,
                 end_cap,
             } => {
-                // Tunnels keep their fixed under-everything depth slot.
-                let param5 = if pass.deck_m < 0.0 { 0.05 } else { ladder_param5 };
+                let nearby_corridors = if stroke_corridors_available {
+                    corridors_for_part(part)
+                } else {
+                    Vec::new()
+                };
+                let param5 = if pass.deck_m < 0.0 {
+                    // Patterned tunnels have no physical sunk mesh; keep
+                    // their visible cartographic casing and dashed center
+                    // in two stable slots just under surface plazas.
+                    if *phase == 1 {
+                        ROAD_TUNNEL_CASING_DEPTH
+                    } else {
+                        ROAD_TUNNEL_CENTER_DEPTH
+                    }
+                } else {
+                    road_semantic_param5(0, *phase, pass.depth_micro)
+                };
                 append_stroke_pass(
                     &mut path,
                     part,
                     false,
-                    (stroke_corridors_available && corridors_near(part))
-                        .then_some(corridor_set),
+                    (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
                     &mut tess,
                     &mut tess_verts,
                     &mut tess_indices,
@@ -4455,6 +4715,11 @@ fn build_tile_buffers_from_features(
             if part.len() < 2 {
                 continue;
             }
+            let nearby_corridors = if stroke_corridors_available {
+                corridors_for_part(part)
+            } else {
+                Vec::new()
+            };
             let start_cap = if point_on_bounds(part[0], clip_bounds, cap_eps) {
                 LineCap::Butt
             } else {
@@ -4469,8 +4734,7 @@ fn build_tile_buffers_from_features(
                 &mut path,
                 part,
                 false,
-                (stroke_corridors_available && corridors_near(part))
-                    .then_some(corridor_set),
+                (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
@@ -4483,7 +4747,8 @@ fn build_tile_buffers_from_features(
                 aa_units,
                 tolerance,
                 &mut stroke_zbias,
-                stroke_pass_param5(&style.center),
+                road_semantic_param5(0, 2, style.center.depth_micro)
+                    - ROAD_STROKE_PASS_DEPTH_OFFSET,
             );
             feature_count += 1;
         }
@@ -4543,52 +4808,30 @@ fn build_tile_buffers_from_features(
     }
 
     // Oneway arrows: zoom-constant glyphs spaced along the way, offsets
-    // pre-rotated into the travel direction (carto-style). Resolve each
-    // union tier to the exact center-face depth it was painted with. The
-    // icon pass itself contributes +0.04, so append_oneway_arrow subtracts
-    // that global pass lift and leaves only a tiny own-surface decal bias.
+    // pre-rotated into the travel direction (carto-style). Each physical
+    // surface key resolves to the same semantic center depth on every tile.
+    // The icon pass itself contributes +0.04, so append_oneway_arrow
+    // subtracts that global lift and leaves only an own-surface decal bias.
     let arrow_color = hex_to_premul_rgba(0x8a8a8a, 1.0);
     let arrow_interval = 170.0 / render_scale;
-    let arrow_union_fields: HashMap<StrokeStyleKey, u16> = smoothed_tiers
+    let arrow_union_fields: HashMap<RoadSurfaceKey, u16> = smoothed_tiers
         .iter()
         .enumerate()
-        .map(|(index, (style, _))| (StrokeStyleKey::from(*style), (index + 1) as u16))
+        .map(|(index, (key, _, _))| (*key, (index + 1) as u16))
         .collect();
-    let arrow_face_slots: Vec<(usize, usize)> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(event_index, (_, event))| match event {
-            RoadPaintEvent::Face(face_index) => {
-                Some((*face_index, event_slots[event_index]))
-            }
-            RoadPaintEvent::Stroke { .. } => None,
-        })
-        .collect();
-    let arrow_surface_depth_at =
-        |surface: ArrowSurfaceDepth, anchor: (f32, f32)| -> f32 {
-            match surface {
-                ArrowSurfaceDepth::Union(key) => {
-                    let Some(field) = arrow_union_fields.get(&key).copied() else {
-                        return ROAD_UNION_CENTER_DEPTH;
-                    };
-                    arrow_union_surface_param5(
-                        field,
-                        anchor,
-                        &faces,
-                        &arrow_face_slots,
-                        ladder_step,
-                    )
-                    .unwrap_or(ROAD_UNION_CENTER_DEPTH)
+    let arrow_surface_depth_at = |surface: ArrowSurfaceDepth| -> f32 {
+        match surface {
+            ArrowSurfaceDepth::Union(key) => road_surface_param5(key, 2),
+            ArrowSurfaceDepth::Stroke { level, depth_micro } => {
+                if level < 0 {
+                    ROAD_TUNNEL_CENTER_DEPTH
+                } else {
+                    road_semantic_param5(0, 2, depth_micro)
                 }
-                ArrowSurfaceDepth::Stroke { param5, sort_rank } => {
-                    // Centers interleaved below/within the road ladder live
-                    // in the casing pass. Only centers above the top union
-                    // tier move to the stroke pass (+0.02).
-                    param5 + if sort_rank > max_tier_rank { 0.02 } else { 0.0 }
-                }
-                ArrowSurfaceDepth::Unknown => ROAD_UNION_CENTER_DEPTH,
             }
-        };
+            ArrowSurfaceDepth::Unknown => ROAD_UNION_CENTER_DEPTH,
+        }
+    };
     for job in &arrow_jobs {
         let final_surface_field = match job.surface_depth {
             ArrowSurfaceDepth::Union(key) => arrow_union_fields
@@ -4628,10 +4871,23 @@ fn build_tile_buffers_from_features(
                     dir_x = -dir_x;
                     dir_y = -dir_y;
                 }
-                // The baked profile on THIS source way is authoritative,
-                // including signed tunnel depths. Outside baked coverage,
-                // direction-gated heuristic corridors remain the fallback.
-                let fallback_corridors: &[BridgeCorridor] = if bridge_dz_covered {
+                // Patterned tunnels are a cartographic ground-plane overlay:
+                // keep their arrows on that same plane instead of sinking
+                // or hoisting them with the physical corridor profile.
+                let patterned_tunnel = matches!(
+                    job.surface_depth,
+                    ArrowSurfaceDepth::Stroke { level, .. } if level < 0
+                );
+                let profile_dz = if patterned_tunnel {
+                    None
+                } else {
+                    job.dz.as_deref()
+                };
+                // The baked profile on THIS source way is authoritative for
+                // physical surfaces. Outside baked coverage, direction-gated
+                // heuristic corridors remain the fallback.
+                let fallback_corridors: &[BridgeCorridor] =
+                    if patterned_tunnel || bridge_dz_covered {
                     &[]
                 } else {
                     &bridge_corridors
@@ -4642,18 +4898,31 @@ fn build_tile_buffers_from_features(
                     dir_y,
                     render_scale,
                     &job.points,
-                    job.dz.as_deref(),
+                    profile_dz,
                     final_surface_field,
                     fallback_corridors,
-                    arrow_surface_depth_at(job.surface_depth, anchor),
+                    arrow_surface_depth_at(job.surface_depth),
                     arrow_color,
-                    &mut icon_vertices,
-                    &mut icon_indices,
+                    &mut road_icon_vertices,
+                    &mut road_icon_indices,
                     &mut icon_zbias,
                 );
                 distance += arrow_interval;
             }
         }
+    }
+
+    // Road decals intentionally remain in the ordinary icon pass. Keep a
+    // compact source copy so a mode-only bake can append the exact same
+    // vertices without rerunning any road work.
+    if build_road_core {
+        let vertex_base = (icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        icon_indices.extend(
+            road_icon_indices
+                .iter()
+                .map(|index| index + vertex_base),
+        );
+        icon_vertices.extend_from_slice(&road_icon_vertices);
     }
 
     compact_tile_labels(&mut labels);
@@ -4681,6 +4950,9 @@ fn build_tile_buffers_from_features(
         stroke_vertices,
         icon_indices,
         icon_vertices,
+        road_icon_indices,
+        road_icon_vertices,
+        mode_overlay_only: !build_road_core,
         feature_count,
         labels,
         render_zoom,
@@ -4729,59 +5001,6 @@ fn ring_centroid(ring: &[(f32, f32)]) -> (f32, f32) {
         sum.1 += point.1;
     }
     (sum.0 / ring.len() as f32, sum.1 / ring.len() as f32)
-}
-
-fn paint_face_contains_point(face: &PaintFace, point: (f32, f32)) -> bool {
-    for tri in face.indices.chunks_exact(3) {
-        let Some(a) = face.verts.get(tri[0] as usize) else {
-            continue;
-        };
-        let Some(b) = face.verts.get(tri[1] as usize) else {
-            continue;
-        };
-        let Some(c) = face.verts.get(tri[2] as usize) else {
-            continue;
-        };
-        let edge = |p: &VVertex, q: &VVertex| {
-            (q.x - p.x) * (point.1 - p.y) - (q.y - p.y) * (point.0 - p.x)
-        };
-        let ab = edge(a, b);
-        let bc = edge(b, c);
-        let ca = edge(c, a);
-        const EPSILON: f32 = 1e-4;
-        if (ab >= -EPSILON && bc >= -EPSILON && ca >= -EPSILON)
-            || (ab <= EPSILON && bc <= EPSILON && ca <= EPSILON)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Recover the exact center-face slot beneath an arrow anchor. A union tier
-/// can dissolve into several independently slotted faces, so using the
-/// tier's global maximum would recreate an always-on-top arrow layer.
-fn arrow_union_surface_param5(
-    field: u16,
-    anchor: (f32, f32),
-    faces: &[PaintFace],
-    face_slots: &[(usize, usize)],
-    ladder_step: f32,
-) -> Option<f32> {
-    let mut exact: Option<f32> = None;
-    for &(face_index, slot) in face_slots {
-        let Some(face) = faces.get(face_index) else {
-            continue;
-        };
-        if face.phase != 2 || face.field != field {
-            continue;
-        }
-        let depth = 0.06 + slot as f32 * ladder_step;
-        if paint_face_contains_point(face, anchor) {
-            exact = Some(exact.map_or(depth, |old| old.max(depth)));
-        }
-    }
-    exact
 }
 
 fn deck_profile_at_point_dir(
@@ -5083,6 +5302,7 @@ pub fn load_local_tile_batch(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    build_road_core: bool,
 ) -> Result<(Vec<LoadedLocalTile>, Vec<TileKey>), String> {
     if requested.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -5192,11 +5412,13 @@ pub fn load_local_tile_batch(
     let mut reader = MbtilesReader::open(mbtiles_path)
         .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
 
-    // Optional all-tag detail overlay (micro-POIs + 2.5D buildings); only
-    // consulted at the zooms that use it.
-    let want_detail = render_zoom >= ICON_MIN_ZOOM
-        || (buildings_3d && render_zoom >= 14);
-    let mut detail_reader = if want_detail {
+    // Optional all-tag detail overlay. At z14 it may supply fallback bridge
+    // corridors outside solved bridge-dz coverage; points, platforms and
+    // buildings join at their higher style gates. Per tile below we avoid
+    // reading the large blob when solved coverage makes every one of those
+    // outputs unnecessary.
+    let detail_may_be_needed = render_zoom >= 14;
+    let mut detail_reader = if detail_may_be_needed {
         detail_mbtiles_path
             .filter(|path| path.is_file())
             .and_then(|path| MbtilesReader::open(path).ok())
@@ -5239,12 +5461,22 @@ pub fn load_local_tile_batch(
                     unavailable.push(tile_key);
                     continue;
                 };
-                let detail_raw = detail_reader
-                    .as_mut()
-                    .and_then(|reader| reader.get_tile(zoom as i64, tile_key.x as i64, tms_row).ok())
+                let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
+                let detail_needed = render_zoom >= ICON_MIN_ZOOM
+                    || render_zoom >= 16
+                    || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
+                    || !bridge_dz_covered;
+                let detail_raw = detail_needed
+                    .then(|| {
+                        detail_reader.as_mut().and_then(|reader| {
+                            reader
+                                .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                                .ok()
+                        })
+                    })
+                    .flatten()
                     .flatten();
                 let overlay_tiles = fetch_overlays(tile_key);
-                let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
 
                 match build_tile_buffers_from_mvt(
                     tile_key,
@@ -5256,6 +5488,7 @@ pub fn load_local_tile_batch(
                     theme,
                     render_zoom,
                     buildings_3d,
+                    build_road_core,
                 ) {
                     Ok(buffers) => {
                         loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -5327,17 +5560,23 @@ pub fn load_local_tile_batch(
                 logged_xyz_row_scheme = true;
             }
 
-            let detail_raw = detail_reader
-                .as_mut()
-                .and_then(|reader| {
-                    let tms_row = tile_count - 1 - tile_key.y as i64;
-                    reader
-                        .get_tile(zoom as i64, tile_key.x as i64, tms_row)
-                        .ok()
+            let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
+            let detail_needed = render_zoom >= ICON_MIN_ZOOM
+                || render_zoom >= 16
+                || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
+                || !bridge_dz_covered;
+            let detail_raw = detail_needed
+                .then(|| {
+                    detail_reader.as_mut().and_then(|reader| {
+                        let tms_row = tile_count - 1 - tile_key.y as i64;
+                        reader
+                            .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                            .ok()
+                    })
                 })
+                .flatten()
                 .flatten();
             let overlay_tiles = fetch_overlays(tile_key);
-            let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
             match build_tile_buffers_from_mvt(
                 tile_key,
                 &tile.tile_data,
@@ -5348,6 +5587,7 @@ pub fn load_local_tile_batch(
                 theme,
                 render_zoom,
                 buildings_3d,
+                build_road_core,
             ) {
                 Ok(buffers) => {
                     loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -6115,6 +6355,41 @@ mod bridge_probe_tests {
     use super::*;
 
     #[test]
+    fn structural_bridge_area_is_3d_only() {
+        assert!(!structural_bridge_area_visible("bridges", false));
+        assert!(structural_bridge_area_visible("bridges", true));
+        assert!(structural_bridge_area_visible("pier_polygons", false));
+        assert!(structural_bridge_area_visible("dam_polygons", false));
+    }
+
+    #[test]
+    fn mode_overlay_appends_cached_road_icons_with_rebased_indices() {
+        let mut buffers = TileBuffers {
+            pin_hits: Vec::new(),
+            fill_indices: Vec::new(),
+            fill_vertices: Vec::new(),
+            casing_indices: Vec::new(),
+            casing_vertices: Vec::new(),
+            stroke_indices: Vec::new(),
+            stroke_vertices: Vec::new(),
+            icon_indices: vec![0],
+            icon_vertices: vec![1.0; VECTOR_FLOATS_PER_VERTEX],
+            road_icon_indices: Vec::new(),
+            road_icon_vertices: Vec::new(),
+            mode_overlay_only: true,
+            feature_count: 0,
+            labels: Vec::new(),
+            render_zoom: 17,
+        };
+        let road_vertices = vec![2.0; VECTOR_FLOATS_PER_VERTEX * 2];
+        buffers.append_cached_road_icons(&[0, 1], &road_vertices);
+        assert_eq!(buffers.icon_indices, vec![0, 1, 2]);
+        assert_eq!(buffers.icon_vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+        assert_eq!(buffers.road_icon_indices, vec![0, 1]);
+        assert_eq!(buffers.road_icon_vertices, road_vertices);
+    }
+
+    #[test]
     fn built_in_solid_road_colors_share_union_mesh_pipeline() {
         let theme = probe_compiled_theme();
         let zoom_mult = zoom_width_mult(18);
@@ -6142,7 +6417,7 @@ mod bridge_probe_tests {
             let mut style =
                 stroke_style_for_tags(&theme, &tags, 14, 18, zoom_mult, 1.0).unwrap();
             assert!(
-                is_solid_road_surface(&tags, false, &style),
+                is_solid_road_surface(&tags, &style),
                 "{highway} bypassed the solid-road union"
             );
 
@@ -6152,7 +6427,7 @@ mod bridge_probe_tests {
                 casing.color ^= 0x005a_a55a;
             }
             assert!(
-                is_solid_road_surface(&tags, false, &style),
+                is_solid_road_surface(&tags, &style),
                 "{highway} union eligibility depended on color"
             );
         }
@@ -6172,27 +6447,31 @@ mod bridge_probe_tests {
         let cycleway = tags_for("cycleway");
         let cycleway_style =
             stroke_style_for_tags(&theme, &cycleway, 14, 18, zoom_mult, 1.0).unwrap();
-        assert!(!is_solid_road_surface(
-            &cycleway,
-            false,
-            &cycleway_style
-        ));
+        assert!(!is_solid_road_surface(&cycleway, &cycleway_style));
 
         let mut rail = tags_for("tram");
         rail.insert("rail".to_string(), "true".to_string());
         let rail_style =
             stroke_style_for_tags(&theme, &rail, 14, 18, zoom_mult, 1.0).unwrap();
-        assert!(!is_solid_road_surface(&rail, false, &rail_style));
+        assert!(!is_solid_road_surface(&rail, &rail_style));
 
         let mut tunnel = tags_for("primary");
         tunnel.insert("tunnel".to_string(), "true".to_string());
         let tunnel_style =
             stroke_style_for_tags(&theme, &tunnel, 14, 18, zoom_mult, 1.0).unwrap();
-        assert!(!is_solid_road_surface(
-            &tunnel,
-            false,
-            &tunnel_style
-        ));
+        assert!(!is_solid_road_surface(&tunnel, &tunnel_style));
+        assert_eq!(tunnel_style.center.shape_id, 11.0);
+        assert!(
+            tunnel_style
+                .casing
+                .is_none_or(|casing| casing.shape_id == 11.0)
+        );
+    }
+
+    #[test]
+    fn patterned_tunnel_depths_preserve_casing_center_plaza_order() {
+        assert!(ROAD_TUNNEL_CASING_DEPTH < ROAD_TUNNEL_CENTER_DEPTH);
+        assert!(ROAD_TUNNEL_CENTER_DEPTH < ROAD_SURFACE_PLAZA_DEPTH);
     }
 
     #[test]
@@ -6208,50 +6487,22 @@ mod bridge_probe_tests {
     }
 
     #[test]
-    fn union_arrow_uses_containing_face_slot_not_tier_maximum() {
-        let face = |min_x: f32, max_x: f32| PaintFace {
-            color: [1.0; 4],
-            phase: 2,
-            rank: 500,
-            field: 7,
-            verts: vec![
-                VVertex {
-                    x: min_x,
-                    y: 0.0,
-                    ..Default::default()
-                },
-                VVertex {
-                    x: max_x,
-                    y: 0.0,
-                    ..Default::default()
-                },
-                VVertex {
-                    x: max_x,
-                    y: 10.0,
-                    ..Default::default()
-                },
-                VVertex {
-                    x: min_x,
-                    y: 10.0,
-                    ..Default::default()
-                },
-            ],
-            indices: vec![0, 1, 2, 0, 2, 3],
-            fringe_verts: Vec::new(),
-            fringe_indices: Vec::new(),
-            level: 0,
-            skirt_verts: Vec::new(),
-            skirt_indices: Vec::new(),
-        };
-        let faces = [face(0.0, 10.0), face(20.0, 30.0)];
-        let slots = [(0, 2), (1, 9)];
-        let exact = arrow_union_surface_param5(7, (5.0, 5.0), &faces, &slots, 0.01)
-            .expect("containing face");
-        assert!((exact - 0.08).abs() < 1e-6);
+    fn road_depth_is_semantic_and_stable_across_face_splits() {
+        let micro = 500.0 * DEPTH_MICRO_PER_RANK;
+        let casing = road_semantic_param5(0, 1, micro);
+        let center = road_semantic_param5(0, 2, micro);
+        let repeated_center = (0..32)
+            .map(|_| road_semantic_param5(0, 2, micro))
+            .collect::<Vec<_>>();
+
+        assert!(repeated_center.iter().all(|depth| *depth == center));
+        assert!(casing < center);
+        assert!((center - (ROAD_UNION_CENTER_DEPTH + micro)).abs() < 1e-6);
         assert!(
-            arrow_union_surface_param5(7, (15.0, 5.0), &faces, &slots, 0.01).is_none(),
-            "an anchor outside visible own faces must not inherit the tier-wide maximum"
+            road_semantic_param5(-1, 2, micro) < ROAD_SURFACE_PLAZA_DEPTH,
+            "a solid sunk sheet must remain below all surface paint"
         );
+        assert!(ROAD_FRINGE_DEPTH_EPSILON < DEPTH_MICRO_PER_RANK);
     }
 
     #[test]
@@ -6510,16 +6761,77 @@ mod bridge_probe_tests {
         assert_eq!(projected.first(), projected.last());
     }
 
-    fn join_test_key(rank: i16, width: f32, color: u32) -> StrokeStyleKey {
-        StrokeStyleKey {
-            sort_rank: rank,
-            casing: None,
-            center: StrokePassKey {
-                color,
-                width_bits: width.to_bits(),
-                shape_id_bits: 0,
+    fn join_test_vertical_key(
+        rank: i16,
+        width: f32,
+        color: u32,
+        vertical: RoadVerticalClass,
+        layer: i8,
+    ) -> RoadSurfaceKey {
+        RoadSurfaceKey {
+            style: StrokeStyleKey {
+                sort_rank: rank,
+                casing: None,
+                center: StrokePassKey {
+                    color,
+                    width_bits: width.to_bits(),
+                    shape_id_bits: 0,
+                    depth_micro_bits: (rank as f32 * DEPTH_MICRO_PER_RANK).to_bits(),
+                },
             },
+            vertical,
+            layer,
         }
+    }
+
+    fn join_test_key(rank: i16, width: f32, color: u32) -> RoadSurfaceKey {
+        join_test_vertical_key(rank, width, color, RoadVerticalClass::Surface, 0)
+    }
+
+    #[test]
+    fn physical_surface_key_separates_tunnel_surface_and_deck() {
+        let theme = probe_compiled_theme();
+        let surface_tags = HashMap::from([
+            ("layer".to_string(), "streets".to_string()),
+            ("highway".to_string(), "primary".to_string()),
+        ]);
+        let style = stroke_style_for_tags(
+            &theme,
+            &surface_tags,
+            14,
+            18,
+            zoom_width_mult(18),
+            1.0,
+        )
+        .unwrap();
+        let surface = RoadSurfaceKey::from_way(style, &surface_tags, Some(&[0.0, 0.0]));
+
+        let mut tunnel_tags = surface_tags.clone();
+        tunnel_tags.insert("tunnel".to_string(), "true".to_string());
+        // Positive contradictory layer is normalized exactly like the baker.
+        tunnel_tags.insert("osm_layer".to_string(), "2".to_string());
+        let tunnel = RoadSurfaceKey::from_way(style, &tunnel_tags, Some(&[-0.8, 0.0]));
+
+        let mut bridge_tags = surface_tags.clone();
+        bridge_tags.insert("bridge".to_string(), "true".to_string());
+        // Negative contradictory layer is normalized to the bridge band.
+        bridge_tags.insert("osm_layer".to_string(), "-1".to_string());
+        let bridge = RoadSurfaceKey::from_way(style, &bridge_tags, Some(&[0.0, 5.5]));
+
+        assert_eq!(surface.vertical, RoadVerticalClass::Surface);
+        assert_eq!((tunnel.vertical, tunnel.layer), (RoadVerticalClass::Sunk, -1));
+        assert_eq!(
+            (bridge.vertical, bridge.layer),
+            (RoadVerticalClass::Elevated, 1)
+        );
+        assert!(!surface.grade_compatible(tunnel));
+        assert!(surface.grade_compatible(bridge));
+
+        let upper_bridge = RoadSurfaceKey { layer: 2, ..bridge };
+        assert!(!bridge.grade_compatible(upper_bridge));
+
+        let sheets = std::collections::HashSet::from([surface, tunnel, bridge, upper_bridge]);
+        assert_eq!(sheets.len(), 4);
     }
 
     fn join_test_meta(
@@ -6838,7 +7150,7 @@ mod bridge_probe_tests {
     }
 
     fn a9_near_cap_join_fixture(
-    ) -> (RoadTierJoinWay, RoadTierJoinWay, RoadTierJoinWay, StrokeStyleKey) {
+    ) -> (RoadTierJoinWay, RoadTierJoinWay, RoadTierJoinWay, RoadSurfaceKey) {
         let link_key = join_test_key(690, 0.7875, 1);
         let main_key = join_test_key(700, 1.125, 2);
         let continuation_key = join_test_key(726, 1.125, 3);
@@ -6983,7 +7295,8 @@ mod bridge_probe_tests {
     #[test]
     fn exact_bridge_continuation_inherits_deck_height() {
         let approach_key = join_test_key(20, 4.0, 1);
-        let bridge_key = join_test_key(46, 4.0, 2);
+        let bridge_key =
+            join_test_vertical_key(46, 4.0, 2, RoadVerticalClass::Elevated, 1);
         let approach_meta = join_test_meta(RoadJoinFamily::Motorway, false, false);
         let bridge_meta = join_test_meta(RoadJoinFamily::Motorway, false, true);
         let ways = vec![
@@ -7116,11 +7429,31 @@ mod bridge_probe_tests {
                     &theme,
                     render_zoom,
                     true,
+                    true,
                 )
                 .unwrap();
+                let full_ms = clock.elapsed().as_secs_f64() * 1000.0;
+                let overlay_clock = std::time::Instant::now();
+                let overlay = build_tile_buffers_from_mvt(
+                    key,
+                    &raw,
+                    det.as_deref(),
+                    dzt.as_deref(),
+                    dzt.is_some(),
+                    &[],
+                    &theme,
+                    render_zoom,
+                    false,
+                    false,
+                )
+                .unwrap();
+                let overlay_ms = overlay_clock.elapsed().as_secs_f64() * 1000.0;
+                assert!(overlay.mode_overlay_only);
+                assert!(overlay.casing_vertices.is_empty());
+                assert!(overlay.stroke_vertices.is_empty());
+                assert!(overlay.road_icon_vertices.is_empty());
                 println!(
-                    "PROBE {name} z14/{tx}/{ty} rz{render_zoom}: {:.0}ms fill={}KB casing={}KB stroke={}KB icon={}KB",
-                    clock.elapsed().as_secs_f64() * 1000.0,
+                    "PROBE {name} z14/{tx}/{ty} rz{render_zoom}: full={full_ms:.0}ms mode-overlay={overlay_ms:.0}ms fill={}KB casing={}KB stroke={}KB icon={}KB",
                     (buffers.fill_vertices.len() + buffers.fill_indices.len()) * 4 / 1024,
                     (buffers.casing_vertices.len() + buffers.casing_indices.len()) * 4 / 1024,
                     (buffers.stroke_vertices.len() + buffers.stroke_indices.len()) * 4 / 1024,
@@ -7220,6 +7553,7 @@ mod bridge_probe_tests {
             &theme,
             18,
             true,
+            true,
         )
         .unwrap();
         let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
@@ -7290,6 +7624,7 @@ mod bridge_probe_tests {
             &[],
             &theme,
             18,
+            true,
             true,
         )
         .unwrap();
@@ -7417,6 +7752,7 @@ mod bridge_probe_tests {
             &keys,
             &theme,
             17,
+            true,
             true,
         )
         .unwrap();
@@ -7696,6 +8032,7 @@ mod bridge_probe_tests {
                 &theme,
                 z as u32,
                 false,
+                true,
             )
             .unwrap();
             let places: Vec<&TileLabel> = buffers
@@ -7741,6 +8078,7 @@ mod bridge_probe_tests {
             &theme,
             12,
             false,
+            true,
         )
         .unwrap();
         for tile in &loaded.0 {
@@ -7790,6 +8128,7 @@ mod bridge_probe_tests {
             &theme,
             12,
             false,
+            true,
         )
         .unwrap();
         println!(
@@ -7825,6 +8164,7 @@ mod bridge_probe_tests {
             &theme,
             17,
             false,
+            true,
         )
         .unwrap();
         let attraction: Vec<&TileLabel> = buffers
