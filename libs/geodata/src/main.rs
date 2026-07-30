@@ -11,6 +11,8 @@ USAGE:
   geodata build <layer|all>    build the layer's .mbtiles (fetches if missing)
   geodata status               show cache and output state
   geodata query <layer> <lon> <lat>   query the features sidecar (LLM surface)
+  geodata radar-sync [forecast|reflectivity|volume-herwijnen|volume-denhelder]
+  geodata radar-composite      sync both radar volumes, write 250 m PNG
 
 OPTIONS:
   --cache-dir <dir>   default: local/overlays/cache
@@ -151,10 +153,11 @@ fn main() {
             }
         }
         "radar-sync" => {
-            let dataset = if args.target == "reflectivity" {
-                makepad_geodata::radar::RadarDataset::ReflectivityComposite
-            } else {
-                makepad_geodata::radar::RadarDataset::Forecast
+            let dataset = match args.target.as_str() {
+                "reflectivity" => makepad_geodata::radar::RadarDataset::ReflectivityComposite,
+                "volume-herwijnen" => makepad_geodata::radar::RadarDataset::VolumeHerwijnen,
+                "volume-denhelder" => makepad_geodata::radar::RadarDataset::VolumeDenHelder,
+                _ => makepad_geodata::radar::RadarDataset::Forecast,
             };
             let config = makepad_geodata::radar::RadarConfig::for_dataset(
                 args.out_dir.join("radar"),
@@ -182,6 +185,48 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        "radar-composite" => {
+            // Sync both radar volumes, composite the newest common timestamp
+            // at 250 m and dump a PNG next to the cache for eyeballing.
+            use makepad_geodata::radar::{RadarConfig, RadarSync};
+            use makepad_geodata::radar_volume;
+            let (herwijnen, den_helder) = RadarConfig::volume_pair(args.out_dir.join("radar"));
+            let mut volumes = Vec::new();
+            for config in [herwijnen, den_helder] {
+                let state = match RadarSync::new(config).sync() {
+                    Ok(state) => state,
+                    Err(error) => {
+                        eprintln!("volume sync failed: {error}");
+                        std::process::exit(1);
+                    }
+                };
+                let Some(frame) = state.frames.last() else {
+                    eprintln!("no volume frames on disk");
+                    std::process::exit(1);
+                };
+                println!("using {}", frame.filename);
+                let data = std::fs::read(&frame.path).expect("read volume");
+                volumes.push(radar_volume::RadarVolume::decode(&data).expect("decode volume"));
+            }
+            let start = std::time::Instant::now();
+            let frame = radar_volume::composite_volumes(&volumes, 4);
+            println!(
+                "composited {}x{} in {:.2}s",
+                frame.cols,
+                frame.rows,
+                start.elapsed().as_secs_f64()
+            );
+            // Grayscale PNG of PV values (255 = outside coverage).
+            let png = makepad_geodata::png::encode(
+                frame.cols as u32,
+                frame.rows as u32,
+                makepad_geodata::png::PngFormat::Gray8,
+                &frame.values,
+            );
+            let out = args.out_dir.join("radar").join("composite_hires.png");
+            std::fs::write(&out, png).expect("write png");
+            println!("wrote {}", out.display());
         }
         "query" => {
             let (Some(lon), Some(lat)) = (

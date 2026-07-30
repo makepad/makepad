@@ -59,6 +59,8 @@ pub struct AppleClasses {
     pub web_socket_delegate: *const Class,
     pub url_session_delegate: *const Class,
     pub url_session_data_delegate: *const Class,
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub location_manager_delegate: *const Class,
     #[cfg(target_os = "macos")]
     pub sc_stream_output_delegate: *const Class,
     pub const_attributes_for_marked_text: ObjcId,
@@ -78,6 +80,9 @@ impl AppleClasses {
             url_session_data_delegate: define_url_session_data_delegate(),
             video_callback_delegate: define_av_video_callback_delegate(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            location_manager_delegate:
+                crate::os::apple::apple_geo::define_cl_location_manager_delegate(),
             #[cfg(target_os = "macos")]
             sc_stream_output_delegate: define_sc_stream_output_delegate(),
             const_attributes_for_marked_text: unsafe {
