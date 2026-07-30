@@ -43,6 +43,9 @@ pub const PA_OPERATION_RUNNING: pa_operation_state = 0;
 pub const PA_OPERATION_DONE: pa_operation_state = 1;
 pub const PA_OPERATION_CANCELLED: pa_operation_state = 2;
 
+pub const PA_CONTEXT_NOAUTOSPAWN: pa_context_flags = 0x0001;
+pub const PA_CONTEXT_NOFAIL: pa_context_flags = 0x0002;
+
 pub const PA_CONTEXT_UNCONNECTED: pa_context_state = 0;
 pub const PA_CONTEXT_CONNECTING: pa_context_state = 1;
 pub const PA_CONTEXT_AUTHORIZING: pa_context_state = 2;
@@ -412,6 +415,10 @@ extern "C" {
     );
     pub fn pa_context_get_state(c: *const pa_context) -> pa_context_state_t;
 
+    pub fn pa_context_errno(c: *const pa_context) -> c_int;
+
+    pub fn pa_strerror(error: c_int) -> *const c_char;
+
     pub fn pa_context_disconnect(c: *mut pa_context);
 
     pub fn pa_context_unref(c: *mut pa_context);
@@ -423,6 +430,7 @@ extern "C" {
     ) -> *mut pa_operation;
 
     pub fn pa_operation_get_state(o: *const pa_operation) -> pa_operation_state_t;
+    pub fn pa_operation_cancel(o: *mut pa_operation);
     pub fn pa_operation_unref(o: *mut pa_operation);
 
     pub fn pa_context_get_source_info_list(
@@ -449,6 +457,7 @@ extern "C" {
         userdata: *mut c_void,
     ) -> *mut pa_operation;
     pub fn pa_proplist_new() -> *mut pa_proplist;
+    pub fn pa_proplist_free(p: *mut pa_proplist);
     pub fn pa_context_new_with_proplist(
         mainloop: *mut pa_mainloop_api,
         name: *const u8,
