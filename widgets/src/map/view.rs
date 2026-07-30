@@ -31,8 +31,8 @@ script_mod! {
         // stale deeper-bucket tiles must not flash markers on zoom-out.
         icon_zoom: uniform(24.0)
         // 2D->3D transition: scales the per-meter height lift so buildings
-        // (and trees/signals) GROW out of the ground as their 3D bake fades
-        // in, and sink back when leaving 3D — instead of crossfading.
+        // (and trees/signals) grow out of the ground as their 3D bake fades
+        // in.
         height_grow: uniform(1.0)
         // Heading-up camera: cos/sin of the screen rotation and its pivot
         // (the view center). Identity when north-up.
@@ -57,7 +57,14 @@ script_mod! {
         terrain_fill_lift: uniform(1.0)
 
         fragment: fn(){
-            self.fb0 = depth_clip(self.v_world_clip, self.pixel() * self.tile_fade * self.fill_pattern(), self.depth_clip)
+            let color = self.pixel() * self.tile_fade * self.fill_pattern()
+            // Dashed tunnel gaps and the zero-coverage tails of analytic
+            // vectors are transparent. Discard them before depth_clip so an
+            // invisible carrier cannot occlude the road above it in 3D.
+            if color.w <= 0.004 {
+                discard()
+            }
+            self.fb0 = depth_clip(self.v_world_clip, color, self.depth_clip)
         }
 
         vertex: fn() {
@@ -589,6 +596,15 @@ const TILE_FADE_SECONDS: f64 = 0.25;
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
 
+/// Inclusive tile-index span covering the half-open world-space interval
+/// `[world_min, world_max)` plus one prefetch tile on either side.
+fn tile_span_with_prefetch(world_min: f64, world_max: f64) -> (i32, i32) {
+    (
+        (world_min / TILE_SIZE).floor() as i32 - 1,
+        (world_max / TILE_SIZE).ceil() as i32,
+    )
+}
+
 // --- Actions ---
 
 /// Widget actions emitted by MapView; the app layer builds search, routing
@@ -601,8 +617,8 @@ pub enum MapViewAction {
         lat: f64,
         zoom: f64,
     },
-    /// Camera tilt changed via the rotate/tilt gesture — lets the app
-    /// keep its 2D/3D mode state in sync with manual tilting.
+    /// Camera tilt changed via the rotate/tilt gesture — lets the app keep
+    /// its camera controls in sync with manual tilting.
     TiltChanged {
         tilt: f64,
     },
@@ -877,8 +893,8 @@ pub struct MapView {
     /// screen y about the view center and lifts 2.5D building geometry.
     #[live(0.0)]
     tilt: f64,
-    /// Bake extruded, shaded buildings from the detail archive (needs
-    /// `detail_mbtiles_path`).
+    /// Bake extruded, shaded buildings from the detail archive while the
+    /// camera is tilted (needs `detail_mbtiles_path`).
     #[live(false)]
     buildings_3d: bool,
     #[live(false)]
@@ -1005,8 +1021,8 @@ pub struct MapView {
     wind_timer: Timer,
     #[rust]
     wind_rng: u64,
-    /// The 2D/3D mode the current tile set was baked with — a flip
-    /// re-bakes tiles (extrusions only exist in the 3D bake).
+    /// The 2D/3D mode the current tile set was baked with. Mode transitions
+    /// are detected in `ensure_visible_tiles`, the single invalidation owner.
     #[rust]
     baked_3d_mode: bool,
     #[rust]
@@ -1259,7 +1275,7 @@ impl Widget for MapView {
                     self.rotation = (start_rotation - delta.x * 0.35).rem_euclid(360.0);
                     // Snap-to-2D dead zone: dragging the camera back to
                     // straight above lands on EXACTLY 0 so the renderer
-                    // re-enters the flat classic path (2D mode).
+                    // re-enters the flat building/tree style.
                     let raw_tilt = (start_tilt + delta.y * 0.25).clamp(0.0, TILT_MAX_DEG);
                     self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
                     cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: self.tilt });
@@ -1566,6 +1582,11 @@ impl Widget for MapView {
                         );
                     }
                 }
+                let reused_road_pass = matches!(pass, 1 | 2)
+                    && entry
+                        .fade
+                        .as_ref()
+                        .is_some_and(|fade| fade.reuse_road_core);
                 let Some(geometry) = geometry else {
                     continue;
                 };
@@ -1575,13 +1596,15 @@ impl Widget for MapView {
                     geometry_id,
                     map_scale,
                     screen_offset,
-                    fade_alpha,
+                    if reused_road_pass { 1.0 } else { fade_alpha },
                     stroke_width_correction(entry.bucket, view_zoom),
                     view_rot_uniform,
                     rot_pivot_uniform,
                     tilt_uniform,
                     view_zoom as f32,
-                    if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                    if reused_road_pass {
+                        1.0
+                    } else if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
                         fade_alpha
                     } else {
                         1.0
@@ -2043,8 +2066,96 @@ impl MapView {
         self.draw_bg.redraw(cx);
     }
 
-    fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, buffers: TileBuffers) {
-        let tile_bytes = buffers.byte_size();
+    fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
+        // An overlay-only result has no roads of its own. Never accept it if
+        // eviction, a zoom restyle, or another transition replaced the exact
+        // resident core it was built to reuse; leave the current entry
+        // untouched so the normal request path schedules a full bake.
+        if buffers.mode_overlay_only
+            && !self.tiles.get(&tile_key).is_some_and(|entry| {
+                entry.bucket == buffers.render_zoom
+                    && entry.road_core_cached
+                    && matches!(entry.state, TileLoadState::Ready { .. })
+            })
+        {
+            return;
+        }
+        let old_entry = self.tiles.remove(&tile_key);
+        let (
+            old_bucket,
+            old_baked_3d,
+            old_fill,
+            old_casing,
+            old_stroke,
+            old_icon,
+            old_feature_count,
+            old_bytes,
+            old_road_core_cached,
+            old_road_icon_indices,
+            old_road_icon_vertices,
+        ) = match old_entry {
+            Some(TileEntry {
+                state:
+                    TileLoadState::Ready {
+                        fill_geometry,
+                        casing_geometry,
+                        stroke_geometry,
+                        icon_geometry,
+                feature_count,
+                ..
+            },
+                bytes,
+                bucket,
+                baked_3d,
+                road_core_cached,
+                road_icon_indices,
+                road_icon_vertices,
+                ..
+            }) => (
+                bucket,
+                baked_3d,
+                fill_geometry,
+                casing_geometry,
+                stroke_geometry,
+                icon_geometry,
+                feature_count,
+                bytes,
+                road_core_cached,
+                road_icon_indices,
+                road_icon_vertices,
+            ),
+            _ => (
+                buffers.render_zoom,
+                false,
+                None,
+                None,
+                None,
+                None,
+                0,
+                0,
+                false,
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+
+        // A mode-only bake is valid only while the exact same render-bucket
+        // road core is still resident. Append its cached arrow subset to the
+        // replacement POI buffer and move (not duplicate) its GPU meshes.
+        let reuse_road_core = buffers.mode_overlay_only
+            && old_road_core_cached
+            && old_bucket == buffers.render_zoom;
+        if reuse_road_core {
+            buffers.append_cached_road_icons(
+                &old_road_icon_indices,
+                &old_road_icon_vertices,
+            );
+        }
+        let tile_bytes = if reuse_road_core {
+            buffers.byte_size().max(old_bytes)
+        } else {
+            buffers.byte_size()
+        };
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
@@ -2054,7 +2165,7 @@ impl MapView {
             None
         };
 
-        let casing_geometry =
+        let new_casing_geometry =
             if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
                 geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
@@ -2062,8 +2173,13 @@ impl MapView {
             } else {
                 None
             };
+        let (casing_geometry, fade_casing_geometry) = if reuse_road_core {
+            (old_casing, None)
+        } else {
+            (new_casing_geometry, old_casing)
+        };
 
-        let stroke_geometry =
+        let new_stroke_geometry =
             if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
                 geometry.update(cx, buffers.stroke_indices, buffers.stroke_vertices);
@@ -2071,6 +2187,11 @@ impl MapView {
             } else {
                 None
             };
+        let (stroke_geometry, fade_stroke_geometry) = if reuse_road_core {
+            (old_stroke, None)
+        } else {
+            (new_stroke_geometry, old_stroke)
+        };
 
         let icon_geometry = if !buffers.icon_indices.is_empty() && !buffers.icon_vertices.is_empty()
         {
@@ -2084,37 +2205,34 @@ impl MapView {
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
         let new_baked_3d = self.baked_3d_mode;
-        let fade = match self.tiles.remove(&tile_key) {
-            Some(TileEntry {
-                state:
-                    TileLoadState::Ready {
-                        fill_geometry: old_fill,
-                        casing_geometry: old_casing,
-                        stroke_geometry: old_stroke,
-                        icon_geometry: old_icon,
-                        ..
-                    },
-                bucket: old_bucket,
-                baked_3d: old_baked_3d,
-                ..
-            }) => Some(TileFade {
+        let fade = if old_fill.is_some()
+            || old_icon.is_some()
+            || fade_casing_geometry.is_some()
+            || fade_stroke_geometry.is_some()
+        {
+            Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: old_bucket,
                 grow_heights: new_baked_3d && !old_baked_3d,
+                reuse_road_core,
                 fill_geometry: old_fill,
-                casing_geometry: old_casing,
-                stroke_geometry: old_stroke,
+                // Stable road geometry stays current across a mode switch;
+                // drawing it again as outgoing fade would darken the roads.
+                casing_geometry: fade_casing_geometry,
+                stroke_geometry: fade_stroke_geometry,
                 icon_geometry: old_icon,
-            }),
-            _ => Some(TileFade {
+            })
+        } else {
+            Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: buffers.render_zoom,
                 grow_heights: new_baked_3d,
+                reuse_road_core: false,
                 fill_geometry: None,
                 casing_geometry: None,
                 stroke_geometry: None,
                 icon_geometry: None,
-            }),
+            })
         };
         cx.stop_timer(self.tile_fade_timer);
         self.tile_fade_timer = cx.start_timeout(0.016);
@@ -2127,7 +2245,11 @@ impl MapView {
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
-                    feature_count: buffers.feature_count,
+                    feature_count: if reuse_road_core {
+                        buffers.feature_count.max(old_feature_count)
+                    } else {
+                        buffers.feature_count
+                    },
                     labels: buffers.labels,
                     pin_hits: buffers.pin_hits,
                 },
@@ -2136,6 +2258,9 @@ impl MapView {
                 bytes: tile_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
+                road_core_cached: !buffers.mode_overlay_only || reuse_road_core,
+                road_icon_indices: buffers.road_icon_indices,
+                road_icon_vertices: buffers.road_icon_vertices,
                 fade,
             },
         );
@@ -2357,8 +2482,14 @@ impl MapView {
             }
             if let Some(entry) = self.tiles.get(key) {
                 match &entry.state {
-                    // Stale zoom-bucket geometry stays drawable but gets rebuilt
-                    TileLoadState::Ready { .. } if entry.bucket != bucket => {
+                    // Stale geometry stays drawable but gets rebuilt. A
+                    // same-bucket mode flip can retain the stable road core;
+                    // zoom/style rebuilds cannot.
+                    TileLoadState::Ready { .. }
+                        if entry.bucket != bucket
+                            || entry.baked_3d != self.baked_3d_mode
+                            || !entry.road_core_cached =>
+                    {
                         if zoom_settling {
                             continue;
                         }
@@ -2400,6 +2531,9 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        road_core_cached: false,
+                        road_icon_indices: Vec::new(),
+                        road_icon_vertices: Vec::new(),
                         fade: None,
                     },
                 );
@@ -2409,6 +2543,11 @@ impl MapView {
         let pool = self.tile_thread_pool.as_ref().unwrap();
         let style_epoch = self.style_epoch;
         for key in missing {
+            let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
+                matches!(entry.state, TileLoadState::Ready { .. })
+                    && entry.bucket == bucket
+                    && entry.road_core_cached
+            });
             let sender = self.tile_worker_rx.sender();
             let requested = vec![key];
             let mbtiles_path = active_path.clone();
@@ -2421,7 +2560,7 @@ impl MapView {
                 .map(|p| p.trim().to_string())
                 .collect();
             // Extruded buildings only bake while the camera is tilted; flat
-            // mode keeps the classic 2D building style with outlines.
+            // mode keeps the classic 2D building and tree style.
             let buildings_3d = self.buildings_3d && self.tilt > 0.0;
             let theme_style = self.active_style().clone();
             pool.execute_rev(key, move |_tag| {
@@ -2436,6 +2575,7 @@ impl MapView {
                     &theme_style,
                     bucket,
                     buildings_3d,
+                    build_road_core,
                 );
             match result {
                 Ok((loaded, failed)) => {
@@ -2475,6 +2615,9 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                road_core_cached: false,
+                road_icon_indices: Vec::new(),
+                road_icon_vertices: Vec::new(),
                 fade: None,
             },
         );
@@ -2545,13 +2688,12 @@ impl MapView {
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        // Tiles bake differently in 2D vs 3D (building extrusions replace
-        // the flat fills). Crossing tilt 0 must re-bake, or leaving 3D
-        // keeps the extruded set until a zoom forces a bucket rebuild.
+        // This is the sole owner of the 2D/3D tile transition. `set_tilt`
+        // only updates the camera and redraws, avoiding duplicate restyles.
         let mode_3d = self.buildings_3d && self.tilt > 0.0;
         if mode_3d != self.baked_3d_mode {
             self.baked_3d_mode = mode_3d;
-            self.restyle_tiles_keep_stale(cx);
+            self.restyle_mode_overlay_keep_stale(cx);
         }
         // Read the archive's declared zoom range BEFORE computing visible
         // tile keys — request_zoom_level clamps to it, and reading it after
@@ -2712,10 +2854,8 @@ impl MapView {
         let bottom_right = center_world + half_size;
         let tile_count = 1_i32 << zoom;
 
-        let min_tx = (top_left.x / TILE_SIZE).floor() as i32 - 1;
-        let max_tx = (bottom_right.x / TILE_SIZE).ceil() as i32 + 1;
-        let min_ty = (top_left.y / TILE_SIZE).floor() as i32 - 1;
-        let max_ty = (bottom_right.y / TILE_SIZE).ceil() as i32 + 1;
+        let (min_tx, max_tx) = tile_span_with_prefetch(top_left.x, bottom_right.x);
+        let (min_ty, max_ty) = tile_span_with_prefetch(top_left.y, bottom_right.y);
 
         let mut out = Vec::new();
         for ty in min_ty..=max_ty {
@@ -2874,6 +3014,9 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        road_core_cached: false,
+                        road_icon_indices: Vec::new(),
+                        road_icon_vertices: Vec::new(),
                         fade: None,
                     },
                 );
@@ -2931,6 +3074,9 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                road_core_cached: false,
+                road_icon_indices: Vec::new(),
+                road_icon_vertices: Vec::new(),
                 fade: None,
             },
         );
@@ -4272,19 +4418,14 @@ impl MapView {
     }
 
     /// Axonometric camera tilt (degrees, 0 = top-down, clamped to TILT_MAX_DEG).
-    /// Crossing between flat and tilted rebakes tiles: flat mode uses the
-    /// true 2D building style (base fills + outlines), tilted mode the
-    /// extruded detail buildings.
+    /// The following draw detects a flat/tilted mode transition and re-bakes
+    /// once; keeping that invalidation in one place avoids duplicate work.
     pub fn set_tilt(&mut self, cx: &mut Cx, tilt_deg: f64) {
         let tilt = tilt_deg.clamp(0.0, TILT_MAX_DEG);
         if (tilt - self.tilt).abs() < 1e-9 {
             return;
         }
-        let was_3d = self.tilt > 0.0;
         self.tilt = tilt;
-        if was_3d != (self.tilt > 0.0) {
-            self.restyle_tiles_keep_stale(cx);
-        }
         self.redraw(cx);
     }
 
@@ -4314,6 +4455,22 @@ impl MapView {
         for entry in self.tiles.values_mut() {
             entry.bucket = u32::MAX;
         }
+        self.local_requested_tiles.clear();
+        self.pending_ready_tiles.clear();
+        self.label_cache_valid = false;
+        self.redraw(cx);
+    }
+
+    /// Invalidate only the tilt-dependent tile overlay. Ready tiles retain
+    /// their bucket and stable road-core cache, while the epoch bump rejects
+    /// any in-flight bake from the previous camera mode.
+    fn restyle_mode_overlay_keep_stale(&mut self, cx: &mut Cx) {
+        self.style_epoch = self.style_epoch.wrapping_add(1);
+        if self.style_epoch == 0 {
+            self.style_epoch = 1;
+        }
+        self.tiles
+            .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
         self.label_cache_valid = false;
@@ -5022,5 +5179,23 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
         (LABEL_CLASS_ADMIN, false) => Vec4f::from_u32(0x6a5b8eff),
         (LABEL_CLASS_ADMIN, true) => Vec4f::from_u32(0xb3a5d6ff),
         _ => default_color,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tile_span_with_prefetch, TILE_SIZE};
+
+    #[test]
+    fn tile_span_keeps_exactly_one_prefetch_tile_for_partial_edge_tiles() {
+        let (min, max) =
+            tile_span_with_prefetch(TILE_SIZE * 0.25, TILE_SIZE * 1.75);
+        assert_eq!((min, max), (-1, 2));
+    }
+
+    #[test]
+    fn tile_span_keeps_one_prefetch_tile_at_exact_boundaries() {
+        let (min, max) = tile_span_with_prefetch(TILE_SIZE, TILE_SIZE * 2.0);
+        assert_eq!((min, max), (0, 2));
     }
 }
