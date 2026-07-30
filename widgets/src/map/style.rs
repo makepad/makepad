@@ -10,6 +10,7 @@ script_mod! {
     mod.widgets.MapRoadRule = #(MapRoadRule::script_api(vm))
     mod.widgets.MapWaterwayRule = #(MapWaterwayRule::script_api(vm))
     mod.widgets.MapRailRule = #(MapRailRule::script_api(vm))
+    mod.widgets.MapShinyStyle = #(MapShinyStyle::script_api(vm))
     mod.widgets.MapThemeStyle = #(MapThemeStyle::script_component(vm))
 }
 
@@ -112,6 +113,10 @@ pub struct CompiledMapTheme {
     waterway_rules: HashMap<String, StrokeTemplate>,
     waterway_default: Option<StrokeTemplate>,
     railway_rule: Option<StrokeTemplate>,
+    /// shiny.md lighting config: bake flags + the one SceneSun. Lives in
+    /// the compiled theme so flipping any bake flag rides the existing
+    /// style-epoch restyle (stale tiles stay drawable while rebaking).
+    pub shiny: ShinyConfig,
 }
 
 impl Default for CompiledMapTheme {
@@ -135,6 +140,97 @@ impl Default for CompiledMapTheme {
             waterway_rules: HashMap::new(),
             waterway_default: None,
             railway_rule: None,
+            shiny: ShinyConfig::default(),
+        }
+    }
+}
+
+/// DSL-facing shiny.md switches, one per theme (a dark preset can run
+/// building sheen + route glow while the day theme keeps them off).
+/// Compiles into the plain `ShinyConfig` POD carried by the compiled theme.
+#[derive(Script, ScriptHook, Clone)]
+pub struct MapShinyStyle {
+    #[source]
+    source: ScriptObjectRef,
+    #[live(false)]
+    pub bake_ao: bool,
+    #[live(false)]
+    pub bake_bounce: bool,
+    #[live(false)]
+    pub bake_shadows: bool,
+    #[live(false)]
+    pub terrain_shadows: bool,
+    #[live(false)]
+    pub dynamic_sun: bool,
+    #[live(false)]
+    pub water_fx: bool,
+    #[live(false)]
+    pub building_sheen: bool,
+    #[live(false)]
+    pub foliage_fx: bool,
+    #[live(false)]
+    pub route_glow: bool,
+    #[live(false)]
+    pub bloom: bool,
+    #[live(false)]
+    pub tilt_shift: bool,
+    /// Local solar time driving the sun position; negative keeps the
+    /// legacy fixed NW sun (today's exact look).
+    #[live(-1.0)]
+    pub sun_hours: f32,
+    #[live(52.0)]
+    pub sun_latitude: f32,
+    /// Overrides the sun's shadow alpha when >= 0.
+    #[live(-1.0)]
+    pub shadow_alpha: f32,
+}
+
+impl Default for MapShinyStyle {
+    fn default() -> Self {
+        Self {
+            source: Default::default(),
+            bake_ao: false,
+            bake_bounce: false,
+            bake_shadows: false,
+            terrain_shadows: false,
+            dynamic_sun: false,
+            water_fx: false,
+            building_sheen: false,
+            foliage_fx: false,
+            route_glow: false,
+            bloom: false,
+            tilt_shift: false,
+            sun_hours: -1.0,
+            sun_latitude: 52.0,
+            shadow_alpha: -1.0,
+        }
+    }
+}
+
+impl MapShinyStyle {
+    pub fn compile(&self) -> ShinyConfig {
+        let mut sun = if self.sun_hours >= 0.0 {
+            SceneSun::from_time_of_day(self.sun_hours, self.sun_latitude)
+        } else {
+            SceneSun::default()
+        };
+        if self.shadow_alpha >= 0.0 {
+            sun.shadow_alpha = self.shadow_alpha;
+        }
+        ShinyConfig {
+            bake_ao: self.bake_ao,
+            bake_bounce: self.bake_bounce,
+            bake_shadows: self.bake_shadows,
+            terrain_shadows: self.terrain_shadows,
+            dynamic_sun: self.dynamic_sun,
+            water_fx: self.water_fx,
+            building_sheen: self.building_sheen,
+            foliage_fx: self.foliage_fx,
+            route_glow: self.route_glow,
+            bloom: self.bloom,
+            tilt_shift: self.tilt_shift,
+            xr_shadow_map: false,
+            sun,
         }
     }
 }
@@ -233,6 +329,8 @@ pub struct MapThemeStyle {
     pub label: Vec4f,
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub label_halo: Vec4f,
+    #[live]
+    pub shiny: MapShinyStyle,
     #[rust]
     fill_rules: Vec<MapFillRule>,
     #[rust]
@@ -251,6 +349,7 @@ impl Default for MapThemeStyle {
             status_text: Vec4f::from_u32(0xdee9f4ff),
             label: Vec4f::from_u32(0x000000ff),
             label_halo: Vec4f::from_u32(0xffffffff),
+            shiny: MapShinyStyle::default(),
             fill_rules: Vec::new(),
             road_rules: Vec::new(),
             waterway_rules: Vec::new(),
@@ -319,6 +418,7 @@ impl MapThemeStyle {
             status_text: self.status_text,
             label: self.label,
             label_halo: self.label_halo,
+            shiny: self.shiny.compile(),
             ..CompiledMapTheme::default()
         };
 
@@ -636,6 +736,43 @@ pub fn fill_color_for_tags(
         return theme.leisure_default;
     }
     None
+}
+
+/// shiny.md material id (carried in param3 of shape-0 fills) for a fill's
+/// tags: water and green areas get per-pixel effects behind uniform gates;
+/// everything else stays 0 = the untouched legacy path.
+pub fn fill_material_for_tags(tags: &HashMap<String, String>) -> f32 {
+    let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+    if tag_is(tags, "natural", "water") || tag_is(tags, "waterway", "riverbank") || layer == "ocean"
+    {
+        return MAT_WATER;
+    }
+    if matches!(
+        tags.get("natural").map(|value| value.as_str()),
+        Some("scrub" | "heath" | "shrubbery")
+    ) {
+        return MAT_GREEN;
+    }
+    let is_green = matches!(
+        tags.get("leisure").map(|value| value.as_str()),
+        Some("park" | "nature_reserve" | "garden" | "golf_course" | "pitch" | "village_green")
+    ) || matches!(
+        tags.get("landuse").map(|value| value.as_str()),
+        Some(
+            "grass"
+                | "forest"
+                | "meadow"
+                | "farmland"
+                | "allotments"
+                | "village_green"
+                | "recreation_ground"
+                | "cemetery"
+        )
+    );
+    if is_green {
+        return MAT_GREEN;
+    }
+    MAT_NONE
 }
 
 /// Semantic paint order for the fill pass (carto-like): land/landcover as the

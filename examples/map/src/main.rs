@@ -110,6 +110,16 @@ script_mod! {
                             detail_mbtiles_path: "local/maps/europe-osm-detail.mbtiles"
                             bridge_dz_mbtiles_path: "local/maps/ams-bridge-dz.mbtiles"
                             buildings_3d: true
+                            // shiny.md features under review (screenshot
+                            // tuning); library defaults stay off.
+                            style_light +: {
+                                shiny: MapShinyStyle{
+                                    bake_ao: true
+                                    water_fx: true
+                                    building_sheen: true
+                                    foliage_fx: true
+                                }
+                            }
                         }
 
                         // --- Search panel (top-left) ---
