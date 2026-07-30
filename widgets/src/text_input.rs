@@ -702,6 +702,31 @@ impl TextInput {
         self.draw_bg.redraw(cx);
     }
 
+    /// Clamps how many rows the field lays out; 0 means unlimited.
+    ///
+    /// Rows made by hard newlines count too, so this genuinely folds a
+    /// multi-line draft to one line rather than only disabling soft wrap —
+    /// which is what makes it usable for a composer that collapses when it
+    /// loses focus. Pair with `draw_text.text_overflow = Ellipsis` to mark the
+    /// truncation.
+    ///
+    /// Exists so callers don't have to reach for a script apply to change one
+    /// number: applying script to a TextInput resets its `#[live]` fields, and
+    /// `text` is one of them — so doing this the scripted way silently emptied
+    /// the field.
+    pub fn set_max_lines(&mut self, cx: &mut Cx, max_lines: usize) {
+        if self.draw_text.max_lines == max_lines {
+            return;
+        }
+        self.draw_text.max_lines = max_lines;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.draw_text.max_lines
+    }
+
     pub fn is_password(&self) -> bool {
         self.is_password
     }
@@ -3012,6 +3037,17 @@ impl Widget for TextInput {
 }
 
 impl TextInputRef {
+    /// See [`TextInput::set_max_lines`].
+    pub fn set_max_lines(&self, cx: &mut Cx, max_lines: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_max_lines(cx, max_lines);
+        }
+    }
+
+    pub fn max_lines(&self) -> usize {
+        self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
     pub fn is_multiline(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.is_multiline()
