@@ -1277,10 +1277,9 @@ fn rail_stroke_style(
     style
 }
 
-/// The live light-theme rules mirrored without the script VM: headless
-/// profiling and A/B probes build real tiles from unit tests, where the
-/// DSL theme cannot be compiled. Keep in sync with the `style:` block in
-/// view.rs when road classes change materially.
+/// The live light-theme rules mirrored without the script VM so headless
+/// tile tests can use the production road classes. Keep in sync with the
+/// `style:` block in view.rs when those classes change materially.
 pub fn probe_compiled_theme() -> CompiledMapTheme {
     fn road(
         kind: &str,
