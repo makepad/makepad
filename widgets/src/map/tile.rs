@@ -1224,6 +1224,9 @@ struct FillFeatureGroup {
     layer_rank: u8,
     is_building: bool,
     pattern: f32,
+    /// shiny.md material id (param3): water/green fills get per-pixel
+    /// effects behind uniform gates; 0 = legacy path.
+    material: f32,
     /// Bake into the ICON buffer (pass 3, after road strokes): district
     /// tints must colorize the roads too, and fills draw before strokes.
     late: bool,
@@ -2367,20 +2370,18 @@ fn append_ball(
     color: [f32; 4],
     segs: u32,
     rings: u32,
+    sun: &SceneSun,
+    material: f32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
     let (segs, rings) = (segs.max(3), rings.max(2));
     // Phong-ish per-vertex lighting (Gouraud across the triangles): the
-    // same NW sun as the building walls plus a tight glossy highlight, so
-    // canopies and lights read as lit volumes instead of flat blobs.
-    // Map coords: x east, y SOUTH (screen down), z up.
-    let light = {
-        let (lx, ly, lz) = (-0.55f32, -0.835, 1.05);
-        let len = (lx * lx + ly * ly + lz * lz).sqrt();
-        (lx / len, ly / len, lz / len)
-    };
+    // one SceneSun shared with the building walls plus a tight glossy
+    // highlight, so canopies and lights read as lit volumes instead of
+    // flat blobs. Map coords: x east, y SOUTH (screen down), z up.
+    let light = (sun.dir.x, sun.dir.y, sun.dir.z);
     let view = {
         let (vx, vy, vz) = (0.0f32, 0.62, 0.79);
         let len = (vx * vx + vy * vy + vz * vz).sqrt();
@@ -2404,10 +2405,10 @@ fn append_ball(
         ]
     };
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let mut push_vertex = |x: f32, y: f32, h: f32, shade: [f32; 4]| {
+    let mut push_vertex = |x: f32, y: f32, h: f32, shade: [f32; 4], nx: f32, ny: f32| {
         out_vertices.extend_from_slice(&[
             x, y, 0.5, 1.0, shade[0], shade[1], shade[2], shade[3], 1e6, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, h, 0.05, 24.0, *zbias,
+            nx, ny, material, h, 0.05, 24.0, *zbias,
         ]);
     };
     // rings from south pole (phi -90) to north pole (phi +90)
@@ -2417,12 +2418,15 @@ fn append_ball(
         let h = center_h_m + radius_m * phi.sin();
         for seg in 0..segs {
             let a = seg as f32 / segs as f32 * std::f32::consts::TAU;
-            let shade = lit(phi.cos() * a.cos(), phi.cos() * a.sin(), phi.sin());
+            let (nx, ny, nz) = (phi.cos() * a.cos(), phi.cos() * a.sin(), phi.sin());
+            let shade = lit(nx, ny, nz);
             push_vertex(
                 center.0 + a.cos() * ring_r,
                 center.1 + a.sin() * ring_r,
                 h,
                 shade,
+                nx,
+                ny,
             );
         }
     }
@@ -2440,25 +2444,170 @@ fn append_ball(
 }
 
 /// One flat-shaded wall quad: two ground vertices and two roof vertices
-/// whose height rides in param4 for the tilt shader to lift.
+/// whose height rides in param4 for the tilt shader to lift. The outward
+/// normal + material id ride in param1..3 (T1 channels); `ao_bottom`
+/// darkens the two ground vertices (T2 vertical AO gradient, 1.0 = off).
+#[allow(clippy::too_many_arguments)]
 fn append_wall_quad(
     a: (f32, f32),
     b: (f32, f32),
     base_m: f32,
     height_m: f32,
     color: [f32; 4],
+    ao_bottom: f32,
+    normal: (f32, f32),
+    material: f32,
     out_vertices: &mut Vec<f32>,
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
     let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for (p, h) in [(a, base_m), (b, base_m), (b, height_m), (a, height_m)] {
+    for (p, h, ao) in [
+        (a, base_m, ao_bottom),
+        (b, base_m, ao_bottom),
+        (b, height_m, 1.0),
+        (a, height_m, 1.0),
+    ] {
         out_vertices.extend_from_slice(&[
-            p.0, p.1, 0.5, 1.0, color[0], color[1], color[2], color[3], 1e6, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, h, 0.05, 90.0, *zbias,
+            p.0,
+            p.1,
+            0.5,
+            1.0,
+            color[0] * ao,
+            color[1] * ao,
+            color[2] * ao,
+            color[3],
+            1e6,
+            0.0,
+            0.0,
+            0.0,
+            normal.0,
+            normal.1,
+            material,
+            h,
+            0.05,
+            90.0,
+            *zbias,
         ]);
     }
     out_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    *zbias += VECTOR_ZBIAS_STEP;
+}
+
+/// T2 roof-edge/parapet AO: a gradient quad strip hugging the roof outline,
+/// dark at the edge fading to the plain roof color ~1.5 m inward. Drawn on
+/// top of the roof fill (micro-depth one rank above), so the roof reads as
+/// a slab with a lip instead of a flat sticker.
+fn append_roof_edge_ao(
+    ring: &[(f32, f32)],
+    height_m: f32,
+    roof_color: [f32; 4],
+    inset_units: f32,
+    out_vertices: &mut Vec<f32>,
+    out_indices: &mut Vec<u32>,
+    zbias: &mut f32,
+) {
+    let n = ring.len();
+    if n < 3 || inset_units <= 0.0 {
+        return;
+    }
+    // Skip slivers the strip couldn't fit into without self-crossing.
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in ring {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    if (max_x - min_x).min(max_y - min_y) < inset_units * 3.0 {
+        return;
+    }
+    // Interior side: exterior rings wind positive (clockwise in y-down
+    // space), holes negative — the roof interior flips accordingly.
+    let interior_sign = if polygon_signed_area(ring) > 0.0 { 1.0 } else { -1.0 };
+    // Drop duplicate closing point if present.
+    let n = if ring[0] == ring[n - 1] { n - 1 } else { n };
+    if n < 3 {
+        return;
+    }
+    let edge_normal = |i: usize| -> Option<(f32, f32)> {
+        let a = ring[i % n];
+        let b = ring[(i + 1) % n];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-4 {
+            return None;
+        }
+        // Inward normal (toward the roof interior).
+        Some((-dy / len * interior_sign, dx / len * interior_sign))
+    };
+    // Per-vertex miter offset from the two adjacent edges.
+    let mut inner: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = (0..n)
+            .map(|k| (i + n - 1 - k) % n)
+            .find_map(edge_normal)
+            .unwrap_or((0.0, 0.0));
+        let next = (0..n).map(|k| (i + k) % n).find_map(edge_normal).unwrap_or(prev);
+        let (mx, my) = (prev.0 + next.0, prev.1 + next.1);
+        let len = (mx * mx + my * my).sqrt();
+        if len < 1e-4 {
+            inner.push(ring[i]);
+            continue;
+        }
+        // Miter scale = 1/cos(half-angle), clamped so spikes stay short.
+        let scale = (2.0 / len).min(2.5);
+        inner.push((
+            ring[i].0 + mx / len * inset_units * scale,
+            ring[i].1 + my / len * inset_units * scale,
+        ));
+    }
+    const PARAPET_SHADE: f32 = 0.86;
+    let outer_color = [
+        roof_color[0] * PARAPET_SHADE,
+        roof_color[1] * PARAPET_SHADE,
+        roof_color[2] * PARAPET_SHADE,
+        roof_color[3],
+    ];
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    let mut push_vertex = |p: (f32, f32), color: [f32; 4]| {
+        out_vertices.extend_from_slice(&[
+            p.0,
+            p.1,
+            0.5,
+            1.0,
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            1e6,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            MAT_ROOF,
+            height_m,
+            0.05 + DEPTH_MICRO_PER_RANK,
+            90.0,
+            *zbias,
+        ]);
+    };
+    for i in 0..n {
+        push_vertex(ring[i], outer_color);
+        push_vertex(inner[i], roof_color);
+    }
+    for i in 0..n as u32 {
+        let j = (i + 1) % n as u32;
+        out_indices.extend_from_slice(&[
+            base + i * 2,
+            base + j * 2,
+            base + j * 2 + 1,
+            base + i * 2,
+            base + j * 2 + 1,
+            base + i * 2 + 1,
+        ]);
+    }
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
@@ -3041,6 +3190,7 @@ fn build_tile_buffers_from_features(
                 is_building: way.tags.contains_key("building"),
                 alpha,
                 pattern,
+                material: fill_material_for_tags(&way.tags),
                 late: matches!(
                     way.tags.get("layer").map(|v| v.as_str()),
                     Some("gemeenten" | "wijken" | "buurten")
@@ -3182,7 +3332,7 @@ fn build_tile_buffers_from_features(
                         0.0,
                         0.0,
                         0.0,
-                        0.0,
+                        group.material,
                         group.deck_m,
                         road_surface_micro
                             + group.layer_rank as f32 * DEPTH_MICRO_PER_RANK
@@ -3341,9 +3491,28 @@ fn build_tile_buffers_from_features(
                 .partial_cmp(&b.min_y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        let building_units_per_m = {
+            let n = (1u32 << tile_key.z) as f64;
+            let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
+                .sinh()
+                .atan();
+            (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
+        };
         let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
-        // Light from the north-west; walls shade by their outward normal.
-        let (light_x, light_y) = (-0.55_f32, -0.835_f32);
+        // The one SceneSun: walls shade by their outward normal against its
+        // horizontal direction (defaults reproduce the legacy NW sun).
+        let sun_2d = theme.shiny.sun.dir_2d();
+        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
+        // T2 vertical AO: ground-contact vertices darken so buildings sit
+        // in the scene instead of floating. Sections starting above ground
+        // (bridge decks, tower setbacks) fade the effect out.
+        let wall_ao = |base_m: f32| -> f32 {
+            if theme.shiny.bake_ao {
+                0.75 + 0.25 * (base_m / 8.0).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
         // Wall LOD: per-edge quads dominate 3D tile size (30-56 MB observed
         // on dense tiles) while sub-pixel footprint detail cannot show in a
         // wall silhouette. Collapse wall edges under ~1.2 screen px and drop
@@ -3417,6 +3586,9 @@ fn build_tile_buffers_from_features(
                         job.base_m,
                         job.height_m,
                         wall_color,
+                        wall_ao(job.base_m),
+                        (nx, ny),
+                        MAT_WALL,
                         &mut fill_vertices,
                         &mut fill_indices,
                         &mut fill_zbias,
@@ -3450,11 +3622,25 @@ fn build_tile_buffers_from_features(
                     color: roof_color,
                     stroke_mult: 1e6,
                     shape_id: 0.0,
-                    params: [0.0, 0.0, 0.0, 0.0, job.height_m, 0.05],
+                    params: [0.0, 0.0, 0.0, MAT_ROOF, job.height_m, 0.05],
                     zbias: fill_zbias,
                 },
             );
             fill_zbias += VECTOR_ZBIAS_STEP;
+            // T2 roof-edge AO: parapet gradient strip along the outline.
+            if theme.shiny.bake_ao && job.height_m > 0.05 {
+                for ring in &job.polygon {
+                    append_roof_edge_ao(
+                        ring,
+                        job.height_m,
+                        roof_color,
+                        1.5 * building_units_per_m,
+                        &mut fill_vertices,
+                        &mut fill_indices,
+                        &mut fill_zbias,
+                    );
+                }
+            }
             feature_count += 1;
         }
     }
@@ -3486,6 +3672,7 @@ fn build_tile_buffers_from_features(
             (6, 3)
         };
 
+        let trunk_ao = if theme.shiny.bake_ao { 0.78 } else { 1.0 };
         for (x, y) in &tree_points_3d {
             append_wall_quad(
                 (*x - arm, *y),
@@ -3493,6 +3680,9 @@ fn build_tile_buffers_from_features(
                 0.0,
                 7.5,
                 trunk_color,
+                trunk_ao,
+                (0.0, 0.0),
+                MAT_NONE,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3503,6 +3693,9 @@ fn build_tile_buffers_from_features(
                 0.0,
                 7.5,
                 trunk_color,
+                trunk_ao,
+                (0.0, 0.0),
+                MAT_NONE,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3518,6 +3711,8 @@ fn build_tile_buffers_from_features(
                 canopy_color,
                 canopy_segs_u,
                 canopy_segs_v,
+                &theme.shiny.sun,
+                MAT_CANOPY,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3618,6 +3813,9 @@ fn build_tile_buffers_from_features(
                     0.0,
                     lift,
                     stalk_color,
+                    1.0,
+                    (0.0, 0.0),
+                    MAT_NONE,
                     &mut fill_vertices,
                     &mut fill_indices,
                     &mut fill_zbias,
@@ -3628,6 +3826,9 @@ fn build_tile_buffers_from_features(
                     0.0,
                     lift,
                     stalk_color,
+                    1.0,
+                    (0.0, 0.0),
+                    MAT_NONE,
                     &mut fill_vertices,
                     &mut fill_indices,
                     &mut fill_zbias,
@@ -3659,6 +3860,9 @@ fn build_tile_buffers_from_features(
                 0.0,
                 3.2,
                 pole_color,
+                1.0,
+                (0.0, 0.0),
+                MAT_NONE,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3669,6 +3873,9 @@ fn build_tile_buffers_from_features(
                 0.0,
                 3.2,
                 pole_color,
+                1.0,
+                (0.0, 0.0),
+                MAT_NONE,
                 &mut fill_vertices,
                 &mut fill_indices,
                 &mut fill_zbias,
@@ -3682,6 +3889,8 @@ fn build_tile_buffers_from_features(
                     color,
                     8,
                     4,
+                    &theme.shiny.sun,
+                    MAT_NONE,
                     &mut fill_vertices,
                     &mut fill_indices,
                     &mut fill_zbias,

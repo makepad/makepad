@@ -13,6 +13,7 @@ pub mod match_event;
 pub mod nav;
 pub mod overlay;
 pub mod scene_3d;
+pub mod scene_sun;
 pub mod shader;
 pub mod svg;
 pub mod text;
@@ -34,6 +35,10 @@ pub use crate::{
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
     scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
+    scene_sun::{
+        SceneSun, ShinyConfig, MAT_CANOPY, MAT_GREEN, MAT_NONE, MAT_ROOF, MAT_ROUTE_GLOW,
+        MAT_SHADOW, MAT_WALL, MAT_WATER,
+    },
     shader::{
         draw_cube::DrawCube, draw_glyph::DrawGlyph, draw_pbr::DrawPbr,
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,

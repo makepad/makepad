@@ -19,6 +19,10 @@ pub struct TerrainShader {
     max_zoom: u32,
     /// Decoded elevation tiles (z, x, y) → 256x256 meters grid.
     cache: HashMap<(u32, i64, i64), Option<Vec<f32>>>,
+    /// Sun direction (map space: x east, y south/screen-down, z up),
+    /// normalized at use. Defaults to the legacy hillshade sun; set it from
+    /// the app's `SceneSun` so the whole scene reads as one light source.
+    pub sun: (f32, f32, f32),
 }
 
 fn terrarium_decode(png: &png::DecodedPng) -> Option<Vec<f32>> {
@@ -53,6 +57,7 @@ impl TerrainShader {
             min_zoom,
             max_zoom,
             cache: HashMap::new(),
+            sun: (-0.5, -0.62, 0.6),
         })
     }
 
@@ -139,8 +144,8 @@ impl TerrainShader {
         // Meters per output pixel (for gradient scaling): bbox spans
         // span*40075km of mercator "equator meters"; fine for shading.
         let m_per_px = (span * 40_075_016.0 / width as f64) as f32;
-        // Same sun family as the building walls: from the NW, ~45° up.
-        let (lx, ly, lz) = (-0.5f32, -0.62, 0.6);
+        // Same sun family as the building walls (one SceneSun).
+        let (lx, ly, lz) = self.sun;
         let len = (lx * lx + ly * ly + lz * lz).sqrt();
         let (lx, ly, lz) = (lx / len, ly / len, lz / len);
 
