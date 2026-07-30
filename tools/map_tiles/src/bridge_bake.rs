@@ -477,7 +477,11 @@ fn class_params(tags: &[(String, String)]) -> Option<(f32, f32)> {
             "residential" | "unclassified" | "living_street" => (0.10, 5.0),
             "service" | "track" | "busway" => (0.12, 4.0),
             "pedestrian" => (0.12, 5.0),
-            "cycleway" | "footway" | "path" | "bridleway" | "steps" => (0.16, 2.8),
+            "cycleway" | "footway" | "path" | "bridleway" => (0.16, 2.8),
+            // Real stairs drop 50-100%+ per meter: a gallery-deck footbridge
+            // must shed its height within the staircase itself, not carry it
+            // 30 m into the street grid as a 16% "ramp".
+            "steps" => (0.6, 2.8),
             _ => (0.10, 5.0),
         };
         return Some((grade, half_width));
@@ -980,10 +984,28 @@ fn solve_bbox(
                                     continue;
                                 }
                                 if let Some((_t, u)) = segments_intersect(a0, a1, b0, b1) {
-                                    let z_under = graph.low
-                                        [other.nodes[other_seg] as usize]
-                                        * (1.0 - u)
-                                        + graph.low[other.nodes[other_seg + 1] as usize] * u;
+                                    // A surface way's solved height includes
+                                    // ramp lift it may have inherited FROM
+                                    // this very deck via a shared approach (a
+                                    // staircase landing beside the crossing):
+                                    // reading graph.low back would feed the
+                                    // clearance its own output and pump the
+                                    // deck up every constraint round. Surface
+                                    // ways sit on the flat solve ground —
+                                    // clear from 0. Only genuinely elevated
+                                    // under ways (deck over deck) stack on
+                                    // their solved height.
+                                    let under_elevated = !other.tunnel
+                                        && (other.bridge || other.layer >= 1);
+                                    let z_under = if under_elevated {
+                                        graph.low[other.nodes[other_seg] as usize]
+                                            * (1.0 - u)
+                                            + graph.low
+                                                [other.nodes[other_seg + 1] as usize]
+                                                * u
+                                    } else {
+                                        0.0
+                                    };
                                     let steps =
                                         (way.layer - other.layer.max(0)).clamp(1, 3) as f32;
                                     hits.push((
@@ -999,7 +1021,7 @@ fn solve_bbox(
                     cell_y += 1;
                 }
                 if std::env::var("BB_DEBUG").is_ok()
-                    && matches!(way.id, 104447474 | 7381773 | 515946648 | 7381715)
+                    && matches!(way.id, 104447474 | 7381773 | 515946648 | 7381715 | 1251943398)
                 {
                     eprintln!(
                         "DBG way {} seg {} hits {} low_a {:.1}",
@@ -6258,4 +6280,211 @@ mod probe_amstelveenseweg {
         }
     }
 
+}
+
+#[cfg(test)]
+mod probe_duivendrecht {
+    use super::*;
+
+    // White residential streets (Venus/Astronautenweg/Neptunus) float in 3D
+    // at @cam 4.93529 52.33063 — tile z14 8416/5387, window in 4096 units:
+    // Venus (1794,1263) Astronautenweg (1421,1476) Neptunus (1552,1720),
+    // metro viaduct reference (2820,1934).
+    const TILE: (u32, u32) = (8416, 5387);
+    const WIN: (f32, f32, f32, f32) = (0.0, 4096.0, 0.0, 4096.0);
+
+    fn in_win(points: &[(f32, f32)]) -> bool {
+        points.iter().any(|&(px, py)| {
+            (WIN.0..=WIN.1).contains(&px) && (WIN.2..=WIN.3).contains(&py)
+        })
+    }
+
+    #[test]
+    #[ignore] // needs local bake output
+    fn baked_floats() {
+        let mut baked = MbtilesReader::open(Path::new(
+            "../../examples/map/local/maps/ams-bridge-dz.mbtiles",
+        ))
+        .unwrap();
+        let (x, y) = (TILE.0 as i64, TILE.1 as i64);
+        let raw = baked.get_tile(14, x, (1 << 14) - 1 - y).unwrap().unwrap();
+        for layer in ["base_dz", "bridge_dz"] {
+            let ways = decode_line_ways(&raw, layer).unwrap();
+            println!("== layer {layer}: {} ways total", ways.len());
+            for way in &ways {
+                if !way.paths.iter().any(|p| in_win(p)) {
+                    continue;
+                }
+                let dz = tag(&way.tags, "dz").unwrap_or("");
+                let max = dz
+                    .split(',')
+                    .filter_map(|v| v.parse::<f32>().ok())
+                    .fold(0.0f32, f32::max)
+                    / 10.0;
+                if max <= 0.2 {
+                    continue;
+                }
+                let first = way.paths[0][0];
+                let last = *way.paths[0].last().unwrap();
+                println!(
+                    "  L={:?} F={:?} P={:?} id {} max {max:.1} m first ({:.0},{:.0}) last ({:.0},{:.0}) dz {}",
+                    tag(&way.tags, "L"), tag(&way.tags, "F"), tag(&way.tags, "P"),
+                    way.id, first.0, first.1, last.0, last.1,
+                    &dz[..dz.len().min(100)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // needs local archives
+    fn detail_context() {
+        let mut detail = MbtilesReader::open(Path::new(
+            "../../examples/map/local/maps/europe-osm-detail.mbtiles",
+        ))
+        .unwrap();
+        let raw = detail.get_tile(14, TILE.0 as i64, (1 << 14) - 1 - TILE.1 as i64).unwrap().unwrap();
+        for way in &decode_osm_line_ways(&raw).unwrap() {
+            if !way.paths.iter().any(|p| in_win(p)) {
+                continue;
+            }
+            let hw = tag(&way.tags, "highway").unwrap_or("");
+            let rw = tag(&way.tags, "railway").unwrap_or("");
+            let bridge = tag(&way.tags, "bridge").unwrap_or("");
+            if hw.is_empty() && rw.is_empty() {
+                continue;
+            }
+            let name = tag(&way.tags, "name").unwrap_or("");
+            let planets = ["Venus", "Mercurius", "Neptunus", "Astronautenweg", "Saturnus", "Marsstraat", "Ares"];
+            if bridge.is_empty() && rw.is_empty() && !planets.iter().any(|p| name.contains(p)) {
+                continue;
+            }
+            println!(
+                "id {} hw={hw} rw={rw} bridge={bridge:?} layer={:?} name={:?} pts {} first {:?}",
+                way.id,
+                tag(&way.tags, "osm_layer"),
+                tag(&way.tags, "name"),
+                way.paths.iter().map(|p| p.len()).sum::<usize>(),
+                way.paths[0][0],
+            );
+        }
+    }
+
+    #[test]
+    #[ignore] // needs local archives
+    fn crossing_context() {
+        let mut detail = MbtilesReader::open(Path::new(
+            "../../examples/map/local/maps/europe-osm-detail.mbtiles",
+        ))
+        .unwrap();
+        let raw = detail.get_tile(14, TILE.0 as i64, (1 << 14) - 1 - TILE.1 as i64).unwrap().unwrap();
+        for way in &decode_osm_line_ways(&raw).unwrap() {
+            let near = way.paths.iter().flatten().any(|&(px, py)| {
+                (2280.0..=2480.0).contains(&px) && (1300.0..=1480.0).contains(&py)
+            });
+            if !near {
+                continue;
+            }
+            let head: Vec<(f32, f32)> = way.paths[0].iter().copied().take(6).collect();
+            println!(
+                "id {} hw={:?} rw={:?} wtr={:?} bridge={:?} tunnel={:?} layer={:?} area={:?} name={:?} pts {} {:?}",
+                way.id,
+                tag(&way.tags, "highway"),
+                tag(&way.tags, "railway"),
+                tag(&way.tags, "waterway"),
+                tag(&way.tags, "bridge"),
+                tag(&way.tags, "tunnel"),
+                tag(&way.tags, "osm_layer"),
+                tag(&way.tags, "area"),
+                tag(&way.tags, "name"),
+                way.paths.iter().map(|p| p.len()).sum::<usize>(),
+                head,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore] // needs local archives
+    fn resolve_no_ahn() {
+        let mut detail = MbtilesReader::open(Path::new(
+            "../../examples/map/local/maps/europe-osm-detail.mbtiles",
+        ))
+        .unwrap();
+        let mut decoded: HashMap<(u32, u32), Vec<RawWay>> = HashMap::new();
+        for ty in TILE.1 - 1..=TILE.1 + 1 {
+            for tx in TILE.0 - 1..=TILE.0 + 1 {
+                if let Ok(Some(raw)) = detail.get_tile(14, tx as i64, (1 << 14) - 1 - ty as i64) {
+                    decoded.insert((tx, ty), decode_osm_line_ways(&raw).unwrap());
+                }
+            }
+        }
+        let mut ahn = Ahn::open(None);
+        let (per_tile, _stats, _field, _tunnel_field) =
+            solve_bbox(14, (TILE.0 - 1, TILE.1 - 1), (TILE.0, TILE.1, TILE.0, TILE.1), &decoded, &mut ahn);
+        let features = per_tile.get(&TILE).cloned().unwrap_or_default();
+        println!("no-AHN solved features in tile: {}", features.len());
+        for feature in &features {
+            if matches!(feature.id, 1251943398 | 1251943397 | 1251943396 | 7046723 | 7046658 | 1052062455) {
+                let dz = feature.tags.iter().find(|(k, _)| k == "dz").map(|(_, v)| v.as_str()).unwrap_or("");
+                println!("  NOAHN id {} dz {}", feature.id, &dz[..dz.len().min(100)]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // needs local archives
+    fn resolve_field() {
+        let mut detail = MbtilesReader::open(Path::new(
+            "../../examples/map/local/maps/europe-osm-detail.mbtiles",
+        ))
+        .unwrap();
+        let mut decoded: HashMap<(u32, u32), Vec<RawWay>> = HashMap::new();
+        for ty in TILE.1 - 1..=TILE.1 + 1 {
+            for tx in TILE.0 - 1..=TILE.0 + 1 {
+                if let Ok(Some(raw)) = detail.get_tile(14, tx as i64, (1 << 14) - 1 - ty as i64) {
+                    decoded.insert((tx, ty), decode_osm_line_ways(&raw).unwrap());
+                }
+            }
+        }
+        let mut ahn = Ahn::open(Some(Path::new("../../examples/map/local/ahn")));
+        let (_per_tile, stats, field, _tunnel_field) =
+            solve_bbox(14, (TILE.0 - 1, TILE.1 - 1), (TILE.0, TILE.1, TILE.0, TILE.1), &decoded, &mut ahn);
+        println!(
+            "solved: {} ways {} crossings {} measured {} baked",
+            stats.ways, stats.crossings, stats.measured, stats.baked
+        );
+        for (name, px, py) in [
+            ("epicenter", 2400.0f32, 1390.0f32),
+            ("node2383", 2383.0, 1373.0),
+            ("Venus", 2547.0, 1443.0),
+            ("Mercurius", 2707.0, 1379.0),
+            ("Neptunus", 2280.0, 1300.0),
+        ] {
+            let ungated = field.sample(px, py, None, 8.0, None);
+            println!("field near {name} ({px},{py}): {:?}", ungated);
+        }
+        let features = _per_tile.get(&TILE).cloned().unwrap_or_default();
+        println!("solved features in tile: {}", features.len());
+        for feature in &features {
+            let near = feature.paths.iter().flatten().any(|point| {
+                (point.x as f32 - 2400.0).abs() < 120.0 && (point.y as f32 - 1390.0).abs() < 120.0
+            });
+            if !near && feature.id != 1251943398 {
+                continue;
+            }
+            let dz = feature
+                .tags
+                .iter()
+                .find(|(k, _)| k == "dz")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let first = &feature.paths[0][0];
+            println!(
+                "  SOLVED id {} first ({},{}) hw {:?} dz {}",
+                feature.id, first.x, first.y,
+                feature.tags.iter().find(|(k, _)| k == "hw").map(|(_, v)| v.as_str()),
+                &dz[..dz.len().min(120)]
+            );
+        }
+    }
 }
