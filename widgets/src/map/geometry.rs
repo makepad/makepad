@@ -787,7 +787,7 @@ pub struct BridgeCorridor {
 /// so the only offsets are chaikin smoothing and clipping (≤ ~0.5 unit):
 /// full deck within ~3.5 m, gone by ~6 m — parallel neighbors never catch.
 const SOLVED_REACH_FULL: f32 = 0.6;
-const SOLVED_REACH_ZERO: f32 = 1.0;
+pub(crate) const SOLVED_REACH_ZERO: f32 = 1.0;
 
 /// Corridor edge feather in tile units (tiles are 256 units across, so this
 /// is ~9 m at z14): a hard half_width cutoff makes vertical walls between
@@ -875,7 +875,7 @@ pub fn corridor_deck_at_point(px: f32, py: f32, corridors: &[BridgeCorridor]) ->
 fn corridor_deck_overrides(
     verts: &[VVertex],
     anchors: &[[f32; 2]],
-    corridors: &[BridgeCorridor],
+    corridors: &[&BridgeCorridor],
 ) -> Option<Vec<f32>> {
     if corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
         return None;
@@ -958,6 +958,12 @@ pub fn road_ribbon_rings(
     half_width: f32,
     clip: GeoBounds,
 ) -> Vec<(Vec<(f32, f32)>, Vec<f32>)> {
+    use i_overlay::mesh::stroke::offset::StrokeOffset;
+    use i_overlay::mesh::style::{
+        LineCap as OverlayLineCap, LineJoin as OverlayLineJoin,
+        StrokeStyle as OverlayStrokeStyle,
+    };
+
     let half_width = half_width.max(0.05);
     let mut rings_out: Vec<(Vec<(f32, f32)>, Vec<f32>)> = Vec::new();
     let mut ring: Vec<(f32, f32)> = Vec::new();
@@ -982,35 +988,7 @@ pub fn road_ribbon_rings(
             if ring.len() < 3 {
                 continue;
             }
-            let clipped = clip_ring_to_rect(&ring, clip);
-            if clipped.len() < 3 {
-                continue;
-            }
-            if clipped.len() == ring.len() {
-                rings_out.push((clipped, ring_dz.clone()));
-            } else {
-                let mut out_dz = Vec::with_capacity(clipped.len());
-                for &(px, py) in &clipped {
-                    let mut best = f32::MAX;
-                    let mut best_dz = 0.0f32;
-                    for i in 0..ring.len() {
-                        let j = (i + 1) % ring.len();
-                        let (ax, ay) = ring[i];
-                        let (bx, by) = ring[j];
-                        let (ex, ey) = (bx - ax, by - ay);
-                        let el2 = (ex * ex + ey * ey).max(1e-6);
-                        let t = (((px - ax) * ex + (py - ay) * ey) / el2).clamp(0.0, 1.0);
-                        let (qx, qy) = (ax + ex * t - px, ay + ey * t - py);
-                        let d2 = qx * qx + qy * qy;
-                        if d2 < best {
-                            best = d2;
-                            best_dz = ring_dz[i] * (1.0 - t) + ring_dz[j] * t;
-                        }
-                    }
-                    out_dz.push(best_dz);
-                }
-                rings_out.push((clipped, out_dz));
-            }
+            push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
             continue;
         }
         let mut center: Vec<(f32, f32)> = Vec::with_capacity(ribbon.points.len() + 2);
@@ -1027,98 +1005,96 @@ pub fn road_ribbon_rings(
         if center.len() < 2 {
             continue;
         }
-        // Segment rectangles + vertex discs: the union absorbs the overlap
-        // into round joins and round dead-end caps (the cartographic look), with
-        // no miter mathematics to go wrong at sharp bends.
-        for seg in 0..center.len() - 1 {
-            let (ax, ay) = center[seg];
-            let (bx, by) = center[seg + 1];
-            let (ex, ey) = (bx - ax, by - ay);
-            let len = (ex * ex + ey * ey).sqrt();
-            if len < 1e-4 {
-                continue;
+
+        // Build one already-dissolved outline per road instead of feeding
+        // the downstream tier union a rectangle for every segment plus a
+        // disc/triangle soup for every join. At z14 overzoomed to z17 the
+        // two Chaikin rounds can create four centerline segments per source
+        // segment; resolving those internal overlaps here keeps the expensive
+        // cross-road overlay proportional to road outlines, not smoothing
+        // primitives. Fixed scale 64 exactly matches overlay_paint_groups'
+        // 1/64-unit input snap.
+        const ARC_STEP: f64 = std::f64::consts::PI / 6.0;
+        const STROKE_SCALE: f64 = 64.0;
+        let center_path: Vec<[f64; 2]> = center
+            .iter()
+            .map(|&(x, y)| [f64::from(x), f64::from(y)])
+            .collect();
+        let cap = |round: bool| {
+            if round {
+                OverlayLineCap::Round(ARC_STEP)
+            } else {
+                OverlayLineCap::Butt
             }
-            let (nx, ny) = (-ey / len * half_width, ex / len * half_width);
-            ring.clear();
-            ring_dz.clear();
-            ring.extend_from_slice(&[
-                (ax + nx, ay + ny),
-                (ax - nx, ay - ny),
-                (bx - nx, by - ny),
-                (bx + nx, by + ny),
-            ]);
-            ring_dz.extend_from_slice(&[
-                center_dz[seg],
-                center_dz[seg],
-                center_dz[seg + 1],
-                center_dz[seg + 1],
-            ]);
-            push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
-        }
-        for (index, &(px, py)) in center.iter().enumerate() {
-            // Interior joins get the cheapest cover that closes the wedge
-            // between consecutive rects: nothing when collinear, two bevel
-            // triangles for gentle bends, a full disc (round join) only at
-            // real corners. Ends get the disc (round cap) unless flagged
-            // butt (tunnel portals).
-            if index == 0 && !ribbon.start_disc {
-                continue;
-            }
-            if index + 1 == center.len() && !ribbon.end_disc {
-                continue;
-            }
-            if index > 0 && index + 1 < center.len() {
-                let (ax, ay) = center[index - 1];
-                let (bx, by) = center[index + 1];
-                let (ux, uy) = (px - ax, py - ay);
-                let (vx, vy) = (bx - px, by - py);
-                let ul = (ux * ux + uy * uy).sqrt().max(1e-6);
-                let vl = (vx * vx + vy * vy).sqrt().max(1e-6);
-                let cos_bend = (ux * vx + uy * vy) / (ul * vl);
-                if cos_bend > 0.999 {
+        };
+        let style = OverlayStrokeStyle::new(f64::from(half_width * 2.0))
+            .start_cap(cap(ribbon.start_disc))
+            .end_cap(cap(ribbon.end_disc))
+            .line_join(OverlayLineJoin::Round(ARC_STEP));
+        let shapes = center_path
+            .stroke_fixed_scale(style.clone(), false, STROKE_SCALE)
+            // Tile-local coordinates are tiny enough that fixed-scale i32
+            // conversion cannot normally fail. Keep a dynamic-scale fallback
+            // so malformed/outlier source geometry cannot silently drop a road.
+            .unwrap_or_else(|_| center_path.stroke(style, false));
+        for shape in shapes {
+            for outline in shape {
+                ring.clear();
+                ring.extend(
+                    outline
+                        .into_iter()
+                        .map(|point| (point[0] as f32, point[1] as f32)),
+                );
+                if ring.len() < 3 {
                     continue;
                 }
-                if cos_bend > 0.94 {
-                    // Left normals of the incoming and outgoing segments.
-                    let (n1x, n1y) = (-uy / ul * half_width, ux / ul * half_width);
-                    let (n2x, n2y) = (-vy / vl * half_width, vx / vl * half_width);
-                    for side in [1.0f32, -1.0] {
-                        let (mut ax1, mut ay1) = (n1x * side, n1y * side);
-                        let (mut ax2, mut ay2) = (n2x * side, n2y * side);
-                        // Positive-area orientation, matching the rects.
-                        if ax1 * ay2 - ay1 * ax2 < 0.0 {
-                            std::mem::swap(&mut ax1, &mut ax2);
-                            std::mem::swap(&mut ay1, &mut ay2);
-                        }
-                        ring.clear();
-                        ring_dz.clear();
-                        ring.extend_from_slice(&[
-                            (px, py),
-                            (px + ax1, py + ay1),
-                            (px + ax2, py + ay2),
-                        ]);
-                        ring_dz.extend_from_slice(&[center_dz[index]; 3]);
-                        push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
-                    }
+                let clipped = clip_ring_to_rect(&ring, clip);
+                if clipped.len() < 3 {
                     continue;
                 }
+                let out_dz = if ribbon.dz.is_some() {
+                    clipped
+                        .iter()
+                        .map(|&point| polyline_dz_at(point, &center, &center_dz))
+                        .collect()
+                } else {
+                    vec![0.0; clipped.len()]
+                };
+                rings_out.push((clipped, out_dz));
             }
-            ring.clear();
-            ring_dz.clear();
-            const DISC_SEGMENTS: usize = 12;
-            for step in 0..DISC_SEGMENTS {
-                let angle =
-                    step as f32 / DISC_SEGMENTS as f32 * std::f32::consts::TAU;
-                ring.push((
-                    px + angle.cos() * half_width,
-                    py + angle.sin() * half_width,
-                ));
-                ring_dz.push(center_dz[index]);
-            }
-            push_clipped_ring(&ring, &ring_dz, clip, &mut rings_out);
         }
     }
     rings_out
+}
+
+/// Interpolate the source road's deck channel at an outline point. Stroke
+/// offsetting intentionally discards centerline vertex identity, so nearest
+/// centerline segment restores the same ownership rule used by `DzField`.
+/// Round caps naturally clamp to their endpoint height.
+fn polyline_dz_at(
+    point: (f32, f32),
+    center: &[(f32, f32)],
+    center_dz: &[f32],
+) -> f32 {
+    if center.len() < 2 || center.len() != center_dz.len() {
+        return 0.0;
+    }
+    let mut best_d2 = f32::MAX;
+    let mut best_dz = 0.0f32;
+    for index in 0..center.len() - 1 {
+        let (ax, ay) = center[index];
+        let (bx, by) = center[index + 1];
+        let (ex, ey) = (bx - ax, by - ay);
+        let el2 = (ex * ex + ey * ey).max(1e-6);
+        let t = (((point.0 - ax) * ex + (point.1 - ay) * ey) / el2).clamp(0.0, 1.0);
+        let (dx, dy) = (ax + ex * t - point.0, ay + ey * t - point.1);
+        let d2 = dx * dx + dy * dy;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best_dz = center_dz[index] * (1.0 - t) + center_dz[index + 1] * t;
+        }
+    }
+    best_dz
 }
 
 /// Clip a ring and carry dz through (nearest original segment when the
@@ -1171,7 +1147,7 @@ pub fn append_stroke_pass(
     path: &mut VectorPath,
     points: &[(f32, f32)],
     closed: bool,
-    corridors: Option<&[BridgeCorridor]>,
+    corridors: Option<&[&BridgeCorridor]>,
     tess: &mut Tessellator,
     tess_verts: &mut Vec<VVertex>,
     tess_indices: &mut Vec<u32>,
@@ -1238,10 +1214,10 @@ pub fn append_stroke_pass(
             aa,
             tolerance,
         );
-        let deck_override = if pass.deck_m > 0.0 {
-            None
-        } else {
+        let deck_override = if pass.deck_m == 0.0 {
             corridors.and_then(|c| corridor_deck_overrides(tess_verts, &anchors, c))
+        } else {
+            None
         };
         append_expanded_stroke_geometry(
             tess_verts,
@@ -1542,6 +1518,9 @@ pub struct PaintGroup {
     /// the output face so patterned strokes can interleave at their true rank.
     pub phase: u8,
     pub rank: i16,
+    /// Stable semantic depth within `phase`; unlike a face ordinal this is
+    /// identical for padded copies of the same road on adjacent tiles.
+    pub depth_micro: f32,
     /// Index into the caller's per-tier elevation-field table.
     pub field: u16,
     /// Flush tier-transition joints (way ends butt-joined to a same-class
@@ -1571,6 +1550,7 @@ pub struct PaintFace {
     pub color: [f32; 4],
     pub phase: u8,
     pub rank: i16,
+    pub depth_micro: f32,
     pub field: u16,
     pub verts: Vec<VVertex>,
     pub indices: Vec<u32>,
@@ -2257,6 +2237,7 @@ pub fn overlay_paint_groups(
                 color: group.color,
                 phase: group.phase,
                 rank: group.rank,
+                depth_micro: group.depth_micro,
                 field: group.field,
                 verts: tess_verts.clone(),
                 indices: tess_indices.clone(),
@@ -2565,6 +2546,101 @@ fn subdivide_face_mesh_impl(
 mod overlay_tests {
     use super::*;
 
+    fn ring_bounds(rings: &[(Vec<(f32, f32)>, Vec<f32>)]) -> (f32, f32, f32, f32) {
+        let mut bounds = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (ring, _) in rings {
+            for &(x, y) in ring {
+                bounds.0 = bounds.0.min(x);
+                bounds.1 = bounds.1.min(y);
+                bounds.2 = bounds.2.max(x);
+                bounds.3 = bounds.3.max(y);
+            }
+        }
+        bounds
+    }
+
+    #[test]
+    fn ribbon_stroke_preserves_independent_butt_and_round_caps() {
+        let points = [(10.0, 20.0), (30.0, 20.0)];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: None,
+            closed_ring: false,
+            start_disc: false,
+            end_disc: true,
+        }];
+        let clip = GeoBounds {
+            min: GeoPoint { x: -100.0, y: -100.0 },
+            max: GeoPoint { x: 100.0, y: 100.0 },
+        };
+        let rings = road_ribbon_rings(&ribbon, 2.0, clip);
+        assert_eq!(rings.len(), 1, "a simple road should be one dissolved outline");
+        let (min_x, min_y, max_x, max_y) = ring_bounds(&rings);
+        assert!((min_x - 10.0).abs() <= 1.0 / 64.0);
+        assert!((max_x - 32.0).abs() <= 1.0 / 64.0);
+        assert!((min_y - 18.0).abs() <= 1.0 / 64.0);
+        assert!((max_y - 22.0).abs() <= 1.0 / 64.0);
+    }
+
+    #[test]
+    fn ribbon_stroke_clips_and_interpolates_deck_at_new_boundary_vertices() {
+        let points = [(-10.0, 2.0), (10.0, 2.0)];
+        let deck = [0.0, 20.0];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: Some(&deck),
+            closed_ring: false,
+            start_disc: false,
+            end_disc: false,
+        }];
+        let clip = GeoBounds {
+            min: GeoPoint { x: 0.0, y: 0.0 },
+            max: GeoPoint { x: 5.0, y: 4.0 },
+        };
+        let rings = road_ribbon_rings(&ribbon, 1.0, clip);
+        assert_eq!(rings.len(), 1);
+        let (ring, values) = &rings[0];
+        assert_eq!(ring.len(), values.len());
+        assert!(ring.iter().all(|&(x, y)| {
+            (-1e-6..=5.0 + 1e-6).contains(&x) && (-1e-6..=4.0 + 1e-6).contains(&y)
+        }));
+        for (&(x, _), &deck) in ring.iter().zip(values) {
+            let expected = 10.0 + x;
+            assert!(
+                (deck - expected).abs() < 1e-4,
+                "clipped outline deck {deck} did not follow centerline at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_ribbon_remains_a_verbatim_fill_ring() {
+        let points = [
+            (2.0, 3.0),
+            (8.0, 3.0),
+            (8.0, 9.0),
+            (2.0, 9.0),
+            (2.0, 3.0),
+        ];
+        let deck = [1.0, 2.0, 3.0, 4.0, 1.0];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: Some(&deck),
+            closed_ring: true,
+            start_disc: true,
+            end_disc: true,
+        }];
+        let rings = road_ribbon_rings(
+            &ribbon,
+            20.0,
+            GeoBounds {
+                min: GeoPoint { x: 0.0, y: 0.0 },
+                max: GeoPoint { x: 10.0, y: 10.0 },
+            },
+        );
+        assert_eq!(rings, vec![(points[..4].to_vec(), deck[..4].to_vec())]);
+    }
+
     #[test]
     fn fringe_carrier_runs_from_boundary_to_unfilled_side() {
         let outer_ccw = [
@@ -2871,6 +2947,7 @@ mod overlay_tests {
                 color,
                 phase: 0,
                 rank: 0,
+                depth_micro: 0.0,
                 field: 0,
                 skirt_joints: Vec::new(),
                 half_width: 1.0,
