@@ -530,14 +530,10 @@ fn write_render_cx_struct(output: &ShaderOutput, vm: &ScriptVm, out: &mut String
         }
     }
 
-    // Group 7: Vertex position (vertex shader only)
-    if output
-        .io
-        .iter()
-        .any(|io| matches!(io.kind, ShaderIoKind::VertexPosition))
-    {
-        writeln!(out, "    vtx_pos: Vec4f,").ok();
-    }
+    // Group 7: Vertex position (vertex shader only). Always present: the vertex entry
+    // template reads/writes rcx.vtx_pos unconditionally, and shaders whose custom vertex
+    // fn RETURNS the position (e.g. clip_and_transform_vertex) have no VertexPosition io.
+    writeln!(out, "    vtx_pos: Vec4f,").ok();
 
     // Group 8: Fragment output
     for io in &output.io {
