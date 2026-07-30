@@ -2001,6 +2001,7 @@ impl Widget for MapView {
                 tilt_cos: tilt_rad.cos(),
             };
             let mut overlay = std::mem::take(&mut self.overlay);
+            overlay.route_glow = self.active_style().shiny.route_glow;
             draw_map_overlay(cx, &mut self.draw_overlay, &camera, &mut overlay);
             self.overlay = overlay;
         }
