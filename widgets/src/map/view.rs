@@ -3120,7 +3120,12 @@ impl MapView {
         }
         // Dispatch each tile as its own worker job so builds run in parallel
         // across the pool; keep enough in flight to cover a viewport restyle.
-        let max_in_flight = 12usize.saturating_sub(self.local_requested_tiles.len());
+        // While a zoom gesture is live, dispatch only the innermost tiles:
+        // mid-zoom tiles can take seconds to build, and filling every slot
+        // with speculative edge tiles leaves no worker free for the center
+        // the user is actually zooming towards.
+        let slot_cap = if zoom_settling { 4usize } else { 12usize };
+        let max_in_flight = slot_cap.saturating_sub(self.local_requested_tiles.len());
         if missing.len() > max_in_flight {
             missing.truncate(max_in_flight);
         }
