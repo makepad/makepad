@@ -102,7 +102,10 @@ impl Default for WindowVoiceInput {
             default_input: None,
             pending_permission_request: None,
             capture_enabled,
-            echo_cancellation: false,
+            // Constant AEC while capturing: swapping the unit mid-stream to
+            // dodge ducking glitches the assistant's own audio start, and
+            // standard+Min ducking is gentle enough to live with.
+            echo_cancellation: true,
             callback_state,
             control_tx,
             text_rx,
