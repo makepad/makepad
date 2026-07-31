@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use makepad_ggml::{
     backend::metal::{
-        create_context_main_buffer, execute_compiled_graph, execute_compiled_graph_in_active_batch,
+        create_context_main_buffer, create_context_main_buffer_no_copy, create_context_ro_buffer,
+        execute_compiled_graph, execute_compiled_graph_in_active_batch,
         execute_compiled_graph_with_buffer_inputs, prepare_graph, try_matmul_nt_ggml_bytes,
         try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer, MetalCompiledGraph,
-        MetalDeviceFeatures, MetalGraphSession, MetalGraphTensorBufferCopy, MetalGraphTensorWrite,
-        MetalPreparedGraph, MetalRuntime,
+        MetalContextBuffers, MetalDeviceFeatures, MetalGraphSession, MetalGraphTensorBufferCopy,
+        MetalGraphTensorWrite, MetalPreparedGraph, MetalRuntime,
     },
     f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu, ggml_row_size_for_type, BufferUsage, Context,
-    GluOp, Graph, InitParams, Op, Prec, SortOrder, Tensor, TensorId, TensorLayout, TensorType,
+    GluOp, Graph, InitParams, Op, Prec, SortOrder, Tensor, TensorId, TensorType,
     TriType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
 };
 
@@ -176,30 +177,6 @@ fn encode_rope_positions(
     Ok(expanded)
 }
 
-fn causal_mask_f16_bytes(n_tokens: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(n_tokens * n_tokens * std::mem::size_of::<u16>());
-    let zero = f32_to_f16(0.0);
-    let neg_inf = f32_to_f16(f32::NEG_INFINITY);
-    for query in 0..n_tokens {
-        for key in 0..n_tokens {
-            let value = if key > query { neg_inf } else { zero };
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
-}
-
-fn causal_mask_f32_bytes(n_tokens: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(n_tokens * n_tokens * std::mem::size_of::<f32>());
-    for query in 0..n_tokens {
-        for key in 0..n_tokens {
-            let value = if key > query { f32::NEG_INFINITY } else { 0.0 };
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
-}
-
 fn causal_window_key_start(position: usize, causal_window: Option<usize>) -> usize {
     causal_window
         .map(|window| position.saturating_add(1).saturating_sub(window))
@@ -240,33 +217,6 @@ fn causal_mask_f32_bytes_with_window(n_tokens: usize, causal_window: Option<usiz
     bytes
 }
 
-fn position_causal_mask_f16_bytes(key_count: usize, positions: &[i32]) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(
-        positions
-            .len()
-            .checked_mul(key_count)
-            .and_then(|v| v.checked_mul(std::mem::size_of::<u16>()))
-            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
-    );
-    let zero = f32_to_f16(0.0);
-    let neg_inf = f32_to_f16(f32::NEG_INFINITY);
-    for &position in positions {
-        let position = usize::try_from(position)
-            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
-        if position >= key_count {
-            return Err(LlamaError::format(format!(
-                "attention position {} exceeds key_count {}",
-                position, key_count
-            )));
-        }
-        for key in 0..key_count {
-            let value = if key > position { neg_inf } else { zero };
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    Ok(bytes)
-}
-
 fn position_causal_mask_f16_bytes_with_window(
     key_count: usize,
     positions: &[i32],
@@ -296,35 +246,6 @@ fn position_causal_mask_f16_bytes_with_window(
                 neg_inf
             } else {
                 zero
-            };
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    Ok(bytes)
-}
-
-fn position_causal_mask_f32_bytes(key_count: usize, positions: &[i32]) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(
-        positions
-            .len()
-            .checked_mul(key_count)
-            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
-    );
-    for &position in positions {
-        let position = usize::try_from(position)
-            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
-        if position >= key_count {
-            return Err(LlamaError::format(format!(
-                "attention position {} exceeds key_count {}",
-                position, key_count
-            )));
-        }
-        for key in 0..key_count {
-            let value = if key > position {
-                f32::NEG_INFINITY
-            } else {
-                0.0
             };
             bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -1554,7 +1475,7 @@ fn build_attention_mha_output(
             0,
         )
         .map_err(LlamaError::format)?;
-    let mut q = ctx.permute(q, [0, 2, 1, 3]).map_err(LlamaError::format)?;
+    let q = ctx.permute(q, [0, 2, 1, 3]).map_err(LlamaError::format)?;
     let mut k = ctx.permute(k, [0, 2, 1, 3]).map_err(LlamaError::format)?;
     let mut v = ctx.permute(v, [0, 2, 1, 3]).map_err(LlamaError::format)?;
 
@@ -3077,60 +2998,14 @@ fn execute_prepared_attention_decode_metal_no_readback_inner(
         )));
     }
 
-    if should_reconfigure_attention_views(spec.block.q_head_dim, positions.len()) {
-        let needs_reconfigure = attention_cache_view_needs_reconfigure(
-            ctx,
-            decode.k_cache_view,
-            i64::from(spec.block.k_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )? || attention_cache_view_needs_reconfigure(
-            ctx,
-            decode.v_cache_view,
-            i64::from(spec.block.v_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )? || decode
-            .input_mask
-            .map(|input_mask| {
-                attention_mask_view_needs_reconfigure(
-                    ctx,
-                    input_mask,
-                    cache_tokens,
-                    positions.len(),
-                )
-            })
-            .transpose()?
-            .unwrap_or(false);
-        if needs_reconfigure {
-            if cache_tokens != decode.graph_key_count && decode.graph_key_count != max_context {
-                return Err(LlamaError::format(format!(
-                    "attention decode graph key_count {} does not match cache_tokens {}",
-                    decode.graph_key_count, cache_tokens
-                )));
-            }
-            configure_attention_cache_view(
-                ctx,
-                decode.k_cache_view,
-                i64::from(spec.block.k_head_dim),
-                cache_tokens,
-                i64::from(spec.block.kv_head_count),
-                i64::from(spec.cache.max_sequences),
-            )?;
-            configure_attention_cache_view(
-                ctx,
-                decode.v_cache_view,
-                i64::from(spec.block.v_head_dim),
-                cache_tokens,
-                i64::from(spec.block.kv_head_count),
-                i64::from(spec.cache.max_sequences),
-            )?;
-            if let Some(input_mask) = decode.input_mask {
-                configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
-            }
-        }
+    // The graph's key width only needs to COVER the cache: masks are written
+    // at full graph width, so keys beyond cache_tokens are -inf'd exactly.
+    // (Views are never reconfigured — see attention_mask_write_key_count.)
+    if decode.graph_key_count < cache_tokens {
+        return Err(LlamaError::format(format!(
+            "attention decode graph key_count {} is smaller than cache_tokens {}",
+            decode.graph_key_count, cache_tokens
+        )));
     }
 
     let rope_positions = spec
@@ -3175,13 +3050,7 @@ fn execute_prepared_attention_decode_metal_no_readback_inner(
     let mask_bytes = decode
         .input_mask
         .map(|input_mask| {
-            let key_count = attention_mask_write_key_count(
-                ctx,
-                input_mask,
-                spec.block.q_head_dim,
-                cache_tokens,
-                positions.len(),
-            )?;
+            let key_count = attention_mask_write_key_count(ctx, input_mask)?;
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
                 input_mask,
@@ -3467,60 +3336,14 @@ pub fn execute_prepared_attention_decode_metal(
         }
     };
 
-    if should_reconfigure_attention_views(spec.block.q_head_dim, positions.len()) {
-        let needs_reconfigure = attention_cache_view_needs_reconfigure(
-            ctx,
-            decode.k_cache_view,
-            i64::from(spec.block.k_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )? || attention_cache_view_needs_reconfigure(
-            ctx,
-            decode.v_cache_view,
-            i64::from(spec.block.v_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )? || decode
-            .input_mask
-            .map(|input_mask| {
-                attention_mask_view_needs_reconfigure(
-                    ctx,
-                    input_mask,
-                    cache_tokens,
-                    positions.len(),
-                )
-            })
-            .transpose()?
-            .unwrap_or(false);
-        if needs_reconfigure {
-            if cache_tokens != decode.graph_key_count && decode.graph_key_count != max_context {
-                return Err(LlamaError::format(format!(
-                    "attention decode graph key_count {} does not match cache_tokens {}",
-                    decode.graph_key_count, cache_tokens
-                )));
-            }
-            configure_attention_cache_view(
-                ctx,
-                decode.k_cache_view,
-                i64::from(spec.block.k_head_dim),
-                cache_tokens,
-                i64::from(spec.block.kv_head_count),
-                i64::from(spec.cache.max_sequences),
-            )?;
-            configure_attention_cache_view(
-                ctx,
-                decode.v_cache_view,
-                i64::from(spec.block.v_head_dim),
-                cache_tokens,
-                i64::from(spec.block.kv_head_count),
-                i64::from(spec.cache.max_sequences),
-            )?;
-            if let Some(input_mask) = decode.input_mask {
-                configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
-            }
-        }
+    // The graph's key width only needs to COVER the cache: masks are written
+    // at full graph width, so keys beyond cache_tokens are -inf'd exactly.
+    // (Views are never reconfigured — see attention_mask_write_key_count.)
+    if decode.graph_key_count < cache_tokens {
+        return Err(LlamaError::format(format!(
+            "attention decode graph key_count {} is smaller than cache_tokens {}",
+            decode.graph_key_count, cache_tokens
+        )));
     }
 
     let rope_positions = spec
@@ -3550,13 +3373,7 @@ pub fn execute_prepared_attention_decode_metal(
     let mask_bytes = decode
         .input_mask
         .map(|input_mask| {
-            let key_count = attention_mask_write_key_count(
-                ctx,
-                input_mask,
-                spec.block.q_head_dim,
-                cache_tokens,
-                positions.len(),
-            )?;
+            let key_count = attention_mask_write_key_count(ctx, input_mask)?;
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
                 input_mask,
@@ -3776,7 +3593,7 @@ fn build_delta_net_chunking(
             ],
         )
         .map_err(LlamaError::format)?;
-    v = ctx
+    let _v_chunked = ctx
         .reshape(
             v,
             &[
@@ -4238,7 +4055,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
         &format!("{prefix}.input_norm"),
     )?;
 
-    let (mut qkv_mixed, mut z, mut beta, mut alpha) = if let Some(merged_input_proj_name) =
+    let (qkv_mixed, z, mut beta, mut alpha) = if let Some(merged_input_proj_name) =
         &block.merged_input_proj_name
     {
         if block.qkv_proj_scale_name.is_some()
@@ -7036,7 +6853,7 @@ pub fn prepare_hybrid_decode_graph_with_attention_key_count(
     Ok((decode, prepared))
 }
 
-pub fn create_metal_context_buffer(ctx: &Context) -> Result<MetalBuffer> {
+pub fn create_metal_context_buffer(ctx: &Context) -> Result<MetalContextBuffers> {
     let runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
     create_metal_context_buffer_with_runtime(&runtime, ctx)
 }
@@ -7044,8 +6861,28 @@ pub fn create_metal_context_buffer(ctx: &Context) -> Result<MetalBuffer> {
 pub fn create_metal_context_buffer_with_runtime(
     runtime: &MetalRuntime,
     ctx: &Context,
-) -> Result<MetalBuffer> {
-    create_context_main_buffer(runtime, ctx, BufferStorageMode::Private).map_err(LlamaError::format)
+) -> Result<MetalContextBuffers> {
+    // Two-region (mapped weight) contexts get a read-only no-copy buffer
+    // over the mapping plus a no-copy dirty buffer over the arena.
+    let ro_buffer = create_context_ro_buffer(runtime, ctx).map_err(LlamaError::format)?;
+    let ro_split = if ro_buffer.is_some() { ctx.ro_split() } else { 0 };
+    // Zero-copy shared weights on unified memory (one resident copy
+    // instead of CPU arena + private GPU duplicate).
+    // MAKEPAD_GGML_COPY_WEIGHTS=1 restores the old copying path (A/B;
+    // single-arena contexts only — mapped weights are never copied).
+    let main_buffer = if ro_buffer.is_none() && std::env::var_os("MAKEPAD_GGML_COPY_WEIGHTS").is_some()
+    {
+        create_context_main_buffer(runtime, ctx, BufferStorageMode::Private)
+            .map_err(LlamaError::format)?
+    } else {
+        create_context_main_buffer_no_copy(runtime, ctx, BufferStorageMode::Private)
+            .map_err(LlamaError::format)?
+    };
+    Ok(MetalContextBuffers {
+        ro_buffer,
+        ro_split,
+        main_buffer,
+    })
 }
 
 struct ImportedHybridGraphContext {
@@ -7126,6 +6963,11 @@ fn import_hybrid_graph_context(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     copy_main_buffer: bool,
 ) -> Result<ImportedHybridGraphContext> {
+    if copy_main_buffer && weights.ctx.ro_split() != 0 {
+        return Err(LlamaError::format(
+            "mapped weight contexts require a shared main buffer (the copying path is unsupported)",
+        ));
+    }
     let mut ctx = Context::new(InitParams {
         mem_size: weights.ctx.mem_size(),
         mem_buffer: Some(if copy_main_buffer {
@@ -7200,7 +7042,7 @@ fn compile_hybrid_decode_metal_impl(
     spec: &HybridDecodeSpec,
     shared_runtime: Option<&MetalRuntime>,
     shared_cache: Option<&HybridSharedCacheTensorIds>,
-    shared_main_buffer: Option<&MetalBuffer>,
+    shared_buffers: Option<&MetalContextBuffers>,
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: Option<usize>,
@@ -7214,7 +7056,7 @@ fn compile_hybrid_decode_metal_impl(
         mut ctx,
         tensor_ids,
         shared_cache,
-    } = import_hybrid_graph_context(weights, shared_cache, shared_main_buffer.is_none())?;
+    } = import_hybrid_graph_context(weights, shared_cache, shared_buffers.is_none())?;
     let (decode, prepared) = if let Some(attention_key_count) = attention_key_count {
         prepare_hybrid_decode_graph_with_attention_key_count(
             &mut ctx,
@@ -7246,11 +7088,11 @@ fn compile_hybrid_decode_metal_impl(
             runtime.features(),
         )?
     };
-    let session = if let Some(main_buffer) = shared_main_buffer {
-        MetalGraphSession::from_runtime_with_main_buffer(
+    let session = if let Some(buffers) = shared_buffers {
+        MetalGraphSession::from_runtime_with_context_buffers(
             runtime,
             &prepared,
-            main_buffer,
+            buffers,
             BufferStorageMode::Private,
         )
     } else {
@@ -7293,7 +7135,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_impl(
@@ -7301,7 +7143,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
         spec,
         None,
         Some(shared_cache),
-        Some(shared_main_buffer),
+        Some(shared_buffers),
         n_tokens,
         n_tokens,
         None,
@@ -7312,7 +7154,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7321,7 +7163,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
         spec,
         None,
         Some(shared_cache),
-        Some(shared_main_buffer),
+        Some(shared_buffers),
         n_tokens,
         n_outputs,
         None,
@@ -7333,7 +7175,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_impl(
@@ -7341,7 +7183,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
         spec,
         Some(shared_runtime),
         Some(shared_cache),
-        Some(shared_main_buffer),
+        Some(shared_buffers),
         n_tokens,
         n_tokens,
         None,
@@ -7353,7 +7195,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7362,7 +7204,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
         spec,
         Some(shared_runtime),
         Some(shared_cache),
-        Some(shared_main_buffer),
+        Some(shared_buffers),
         n_tokens,
         n_outputs,
         None,
@@ -7374,7 +7216,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
     attention_key_count: usize,
@@ -7384,7 +7226,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
         spec,
         Some(shared_runtime),
         Some(shared_cache),
-        Some(shared_main_buffer),
+        Some(shared_buffers),
         n_tokens,
         n_outputs,
         Some(attention_key_count),
@@ -7412,14 +7254,14 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_state(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_with_shared_state(
         weights,
         spec,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         n_tokens,
     )
 }
@@ -7428,7 +7270,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_state_and_outputs(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7436,7 +7278,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_state_and_outputs(
         weights,
         spec,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         n_tokens,
         n_outputs,
     )
@@ -7447,7 +7289,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_runtime_and_state(
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_with_shared_runtime_and_state(
@@ -7455,7 +7297,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_runtime_and_state(
         spec,
         shared_runtime,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         n_tokens,
     )
 }
@@ -7465,7 +7307,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_runtime_and_state_and_
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
@@ -7474,7 +7316,7 @@ pub fn compile_hybrid_prompt_processing_metal_with_shared_runtime_and_state_and_
         spec,
         shared_runtime,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         n_tokens,
         n_outputs,
     )
@@ -7491,13 +7333,13 @@ pub fn compile_hybrid_token_generation_metal_with_shared_state(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_with_shared_state(
         weights,
         spec,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         1,
     )
 }
@@ -7507,14 +7349,14 @@ pub fn compile_hybrid_token_generation_metal_with_shared_runtime_and_state(
     spec: &HybridDecodeSpec,
     shared_runtime: &MetalRuntime,
     shared_cache: &HybridSharedCacheTensorIds,
-    shared_main_buffer: &MetalBuffer,
+    shared_buffers: &MetalContextBuffers,
 ) -> Result<CompiledHybridDecodeMetal> {
     compile_hybrid_decode_metal_with_shared_runtime_and_state(
         weights,
         spec,
         shared_runtime,
         shared_cache,
-        shared_main_buffer,
+        shared_buffers,
         1,
     )
 }
@@ -7690,63 +7532,15 @@ pub fn execute_prepared_hybrid_decode_metal(
         }
     };
 
+    // The graph's key width only needs to COVER the cache: masks are written
+    // at full graph width, so keys beyond cache_tokens are -inf'd exactly.
+    // (Views are never reconfigured — see attention_mask_write_key_count.)
     for cache_view in &decode.attention_cache_views {
-        if should_reconfigure_attention_views(cache_view.k_head_dim as u32, positions.len()) {
-            let needs_reconfigure = attention_cache_view_needs_reconfigure(
-                ctx,
-                cache_view.k_cache_view,
-                cache_view.k_head_dim,
-                cache_tokens,
-                cache_view.kv_head_count,
-                cache_view.max_sequences,
-            )? || attention_cache_view_needs_reconfigure(
-                ctx,
-                cache_view.v_cache_view,
-                cache_view.v_head_dim,
-                cache_tokens,
-                cache_view.kv_head_count,
-                cache_view.max_sequences,
-            )? || cache_view
-                .input_mask
-                .map(|input_mask| {
-                    attention_mask_view_needs_reconfigure(
-                        ctx,
-                        input_mask,
-                        cache_tokens,
-                        positions.len(),
-                    )
-                })
-                .transpose()?
-                .unwrap_or(false);
-            if needs_reconfigure {
-                if cache_tokens != cache_view.graph_key_count
-                    && cache_view.graph_key_count != cache_view.max_context
-                {
-                    return Err(LlamaError::format(format!(
-                        "hybrid decode graph key_count {} does not match cache_tokens {} for attention layer {}",
-                        cache_view.graph_key_count, cache_tokens, cache_view.layer_index
-                    )));
-                }
-                configure_attention_cache_view(
-                    ctx,
-                    cache_view.k_cache_view,
-                    cache_view.k_head_dim,
-                    cache_tokens,
-                    cache_view.kv_head_count,
-                    cache_view.max_sequences,
-                )?;
-                configure_attention_cache_view(
-                    ctx,
-                    cache_view.v_cache_view,
-                    cache_view.v_head_dim,
-                    cache_tokens,
-                    cache_view.kv_head_count,
-                    cache_view.max_sequences,
-                )?;
-                if let Some(input_mask) = cache_view.input_mask {
-                    configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
-                }
-            }
+        if cache_view.graph_key_count < cache_tokens {
+            return Err(LlamaError::format(format!(
+                "hybrid decode graph key_count {} is smaller than cache_tokens {} for attention layer {}",
+                cache_view.graph_key_count, cache_tokens, cache_view.layer_index
+            )));
         }
     }
 
@@ -7807,13 +7601,7 @@ pub fn execute_prepared_hybrid_decode_metal(
     let mut attention_mask_bytes = Vec::new();
     for cache_view in &decode.attention_cache_views {
         if let Some(input_mask) = cache_view.input_mask {
-            let key_count = attention_mask_write_key_count(
-                ctx,
-                input_mask,
-                cache_view.k_head_dim as u32,
-                cache_tokens,
-                positions.len(),
-            )?;
+            let key_count = attention_mask_write_key_count(ctx, input_mask)?;
             let bytes = position_attention_mask_bytes_for_tensor(
                 ctx,
                 input_mask,
@@ -8294,116 +8082,22 @@ fn build_rms_norm_mul(
     Ok(scaled)
 }
 
-fn configure_attention_cache_view(
-    ctx: &mut Context,
-    tensor_id: TensorId,
-    ne0: i64,
-    ne1: usize,
-    ne2: i64,
-    ne3: i64,
-) -> Result<()> {
-    let tensor = ctx
-        .tensor(tensor_id)
-        .ok_or_else(|| LlamaError::format(format!("invalid tensor id {}", tensor_id)))?;
-    let strides = tensor.nb;
-    let layout = TensorLayout::from_parts(
-        4,
-        &[
-            ne0,
-            ne2,
-            i64::try_from(ne1).map_err(|_| {
-                LlamaError::format(format!("cache length {} does not fit in i64", ne1))
-            })?,
-            ne3,
-        ],
-        &strides,
-    )
-    .map_err(LlamaError::format)?;
-    ctx.set_tensor_layout(tensor_id, layout)
-        .map_err(LlamaError::format)
-}
 
-fn configure_attention_mask_view(
-    ctx: &mut Context,
-    tensor_id: TensorId,
-    key_count: usize,
-    query_count: usize,
-) -> Result<()> {
-    let tensor = ctx
-        .tensor(tensor_id)
-        .ok_or_else(|| LlamaError::format(format!("invalid tensor id {}", tensor_id)))?;
-    let layout = TensorLayout::for_ggml(
-        tensor.desc.ty,
-        &[
-            i64::try_from(key_count).map_err(|_| {
-                LlamaError::format(format!("mask key count {} does not fit in i64", key_count))
-            })?,
-            i64::try_from(query_count).map_err(|_| {
-                LlamaError::format(format!(
-                    "mask query count {} does not fit in i64",
-                    query_count
-                ))
-            })?,
-            tensor.ne[2],
-            tensor.ne[3],
-        ],
-    )
-    .map_err(LlamaError::format)?;
-    ctx.set_tensor_layout(tensor_id, layout)
-        .map_err(LlamaError::format)
-}
 
-fn should_reconfigure_attention_views(head_dim: u32, n_tokens: usize) -> bool {
-    should_use_flash_attention(head_dim, n_tokens)
-}
 
-fn attention_mask_write_key_count(
-    ctx: &Context,
-    tensor_id: TensorId,
-    head_dim: u32,
-    cache_tokens: usize,
-    n_tokens: usize,
-) -> Result<usize> {
-    if should_reconfigure_attention_views(head_dim, n_tokens) {
-        return Ok(cache_tokens);
-    }
+/// Masks are ALWAYS written at the graph's full key width: the causal fill
+/// puts -inf on every key beyond a query's position, which exactly covers
+/// the unwritten cache tail when graph_key_count > cache_tokens. Never
+/// shrink the mask or reconfigure the cache views instead — the flash op
+/// reads PERMUTE nodes whose dims were baked at graph build, so a view
+/// reconfigure never reaches the kernel and the width mismatch corrupts
+/// attention (kernel iterates graph_key_count keys against a narrower mask).
+fn attention_mask_write_key_count(ctx: &Context, tensor_id: TensorId) -> Result<usize> {
     let tensor = require_tensor(ctx, tensor_id)?;
     ne_usize(tensor, 0)
 }
 
-fn attention_cache_view_needs_reconfigure(
-    ctx: &Context,
-    tensor_id: TensorId,
-    ne0: i64,
-    ne1: usize,
-    ne2: i64,
-    ne3: i64,
-) -> Result<bool> {
-    let tensor = require_tensor(ctx, tensor_id)?;
-    let expected_ne1 = i64::try_from(ne1)
-        .map_err(|_| LlamaError::format(format!("cache length {} does not fit in i64", ne1)))?;
-    Ok(tensor.ne != [ne0, ne2, expected_ne1, ne3])
-}
 
-fn attention_mask_view_needs_reconfigure(
-    ctx: &Context,
-    tensor_id: TensorId,
-    key_count: usize,
-    query_count: usize,
-) -> Result<bool> {
-    let tensor = require_tensor(ctx, tensor_id)?;
-    Ok(tensor.ne[0]
-        != i64::try_from(key_count).map_err(|_| {
-            LlamaError::format(format!("mask key count {} does not fit in i64", key_count))
-        })?
-        || tensor.ne[1]
-            != i64::try_from(query_count).map_err(|_| {
-                LlamaError::format(format!(
-                    "mask query count {} does not fit in i64",
-                    query_count
-                ))
-            })?)
-}
 
 fn row_size(ty: TensorType, ne: i64) -> Result<usize> {
     ggml_row_size_for_type(ty, ne).map_err(LlamaError::format)

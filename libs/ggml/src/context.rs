@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::core::{ggml_pad, InitParams, ScaleMode, TriType, GGML_MEM_ALIGN, GGML_MROPE_SECTIONS};
+use crate::mmap::MappedRegion;
 use crate::op::{GluOp, Op, Prec, UnaryOp};
 use crate::tensor::{
     ggml_type_size_for_type, BufferUsage, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
@@ -10,6 +12,11 @@ use crate::tensor::{
 pub struct Context {
     mem_size: usize,
     mem_buffer: Vec<u8>,
+    /// Optional read-only region backing logical offsets [0, ro_split()).
+    /// When present, `mem_buffer` backs [ro_split(), mem_size) instead of
+    /// the whole space, and new tensors allocate past ro_split(). Shared
+    /// via Arc so cloning a context never remaps the file.
+    ro_region: Option<Arc<MappedRegion>>,
     no_alloc: bool,
     next_data_offset: usize,
     max_tensor_size: usize,
@@ -30,6 +37,7 @@ impl Context {
         Self {
             mem_size,
             mem_buffer,
+            ro_region: None,
             no_alloc: params.no_alloc,
             next_data_offset: 0,
             max_tensor_size: 0,
@@ -38,11 +46,42 @@ impl Context {
         }
     }
 
+    /// Two-region context: logical offsets [0, region.len()) resolve into
+    /// the read-only mapping (weights at their file offsets, placed with
+    /// `new_named_tensor_at_offset`), [region.len(), region.len() +
+    /// dirty_size) into an owned zeroed arena. The allocator starts at
+    /// region.len(), so caches/activations/inputs land in the dirty arena
+    /// automatically.
+    pub fn new_with_ro_region(ro_region: Arc<MappedRegion>, dirty_size: usize) -> Self {
+        let ro_len = ro_region.len();
+        Self {
+            mem_size: ro_len + dirty_size,
+            mem_buffer: vec![0; dirty_size],
+            ro_region: Some(ro_region),
+            no_alloc: false,
+            next_data_offset: ro_len,
+            max_tensor_size: 0,
+            tensors: Vec::new(),
+            name_to_tensor: HashMap::new(),
+        }
+    }
+
     pub fn reset(&mut self) {
-        self.next_data_offset = 0;
+        self.next_data_offset = self.ro_split();
         self.max_tensor_size = 0;
         self.tensors.clear();
         self.name_to_tensor.clear();
+    }
+
+    /// Length of the read-only region (0 for single-arena contexts).
+    /// Logical offsets below this are weight bytes and must never be
+    /// written.
+    pub fn ro_split(&self) -> usize {
+        self.ro_region.as_ref().map(|region| region.len()).unwrap_or(0)
+    }
+
+    pub fn ro_region(&self) -> Option<&Arc<MappedRegion>> {
+        self.ro_region.as_ref()
     }
 
     pub fn used_mem(&self) -> usize {
@@ -57,6 +96,10 @@ impl Context {
         self.no_alloc = no_alloc;
     }
 
+    /// The owned arena. For single-arena contexts this is the whole
+    /// logical space; for two-region contexts it is only the dirty region
+    /// starting at logical offset ro_split() (use `data_at` for
+    /// offset-based access).
     pub fn mem_buffer(&self) -> &[u8] {
         &self.mem_buffer
     }
@@ -141,6 +184,43 @@ impl Context {
         let layout = TensorLayout::for_ggml(ty, ne)?;
         let desc = TensorDesc::new(ty, layout, usage).with_name(name);
         self.push_tensor(Tensor::from_desc(self.tensors.len(), desc), true)
+    }
+
+    /// Like `new_named_tensor`, but places the tensor at an EXPLICIT
+    /// logical offset inside the read-only region (its file offset in the
+    /// mapped gguf) instead of bumping the allocator.
+    pub fn new_named_tensor_at_offset(
+        &mut self,
+        name: impl Into<String>,
+        ty: TensorType,
+        n_dims: usize,
+        ne: &[i64],
+        usage: BufferUsage,
+        offset: usize,
+    ) -> Result<TensorId, String> {
+        if n_dims == 0 || n_dims > 4 {
+            return Err(format!("invalid tensor rank {}", n_dims));
+        }
+        if ne.len() != n_dims {
+            return Err(format!("rank {} but got {} extents", n_dims, ne.len()));
+        }
+
+        let layout = TensorLayout::for_ggml(ty, ne)?;
+        let desc = TensorDesc::new(ty, layout, usage).with_name(name);
+        let mut tensor = Tensor::from_desc(self.tensors.len(), desc);
+        let end = offset
+            .checked_add(tensor.nbytes())
+            .ok_or_else(|| "tensor byte range overflow".to_string())?;
+        if end > self.ro_split() {
+            return Err(format!(
+                "explicit tensor range [{}..{}) exceeds read-only region {}",
+                offset,
+                end,
+                self.ro_split()
+            ));
+        }
+        tensor.data_offset = Some(offset);
+        self.push_tensor(tensor, false)
     }
 
     pub fn new_tensor_1d(
@@ -272,6 +352,51 @@ impl Context {
         Ok(())
     }
 
+    /// Bytes at a logical offset, served from whichever region holds it
+    /// (read-only mapping below ro_split, owned arena above).
+    pub fn data_at(&self, offset: usize, len: usize) -> Result<&[u8], String> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| format!("data range [{}..+{}) overflows", offset, len))?;
+        let ro_split = self.ro_split();
+        if offset < ro_split {
+            if end > ro_split {
+                return Err(format!(
+                    "data range [{}..{}) straddles the read-only region split {}",
+                    offset, end, ro_split
+                ));
+            }
+            let region = self.ro_region.as_ref().expect("ro_split > 0 implies region");
+            return region.as_slice().get(offset..end).ok_or_else(|| {
+                format!(
+                    "data range [{}..{}) is out of read-only region bounds",
+                    offset, end
+                )
+            });
+        }
+        self.mem_buffer
+            .get(offset - ro_split..end - ro_split)
+            .ok_or_else(|| format!("data range [{}..{}) is out of bounds", offset, end))
+    }
+
+    /// Mutable bytes at a logical offset. Errors for any offset inside the
+    /// read-only region: nothing may write weights.
+    pub fn data_at_mut(&mut self, offset: usize, len: usize) -> Result<&mut [u8], String> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| format!("data range [{}..+{}) overflows", offset, len))?;
+        let ro_split = self.ro_split();
+        if offset < ro_split {
+            return Err(format!(
+                "data range [{}..{}) is inside the read-only weight region (split {})",
+                offset, end, ro_split
+            ));
+        }
+        self.mem_buffer
+            .get_mut(offset - ro_split..end - ro_split)
+            .ok_or_else(|| format!("data range [{}..{}) is out of bounds", offset, end))
+    }
+
     pub fn tensor_data(&self, id: TensorId) -> Result<&[u8], String> {
         let tensor = self
             .tensor(id)
@@ -279,15 +404,9 @@ impl Context {
         let offset = tensor
             .data_offset
             .ok_or_else(|| format!("tensor {} has no allocated data offset", id))?;
-        let end = offset
-            .checked_add(tensor.nbytes())
-            .ok_or_else(|| format!("tensor {} byte range overflow", id))?;
-        self.mem_buffer.get(offset..end).ok_or_else(|| {
-            format!(
-                "tensor {} byte range [{}..{}) is out of bounds",
-                id, offset, end
-            )
-        })
+        let nbytes = tensor.nbytes();
+        self.data_at(offset, nbytes)
+            .map_err(|err| format!("tensor {}: {}", id, err))
     }
 
     pub fn tensor_data_mut(&mut self, id: TensorId) -> Result<&mut [u8], String> {
@@ -297,15 +416,9 @@ impl Context {
         let offset = tensor
             .data_offset
             .ok_or_else(|| format!("tensor {} has no allocated data offset", id))?;
-        let end = offset
-            .checked_add(tensor.nbytes())
-            .ok_or_else(|| format!("tensor {} byte range overflow", id))?;
-        self.mem_buffer.get_mut(offset..end).ok_or_else(|| {
-            format!(
-                "tensor {} byte range [{}..{}) is out of bounds",
-                id, offset, end
-            )
-        })
+        let nbytes = tensor.nbytes();
+        self.data_at_mut(offset, nbytes)
+            .map_err(|err| format!("tensor {}: {}", id, err))
     }
 
     pub fn write_tensor_data(&mut self, id: TensorId, bytes: &[u8]) -> Result<(), String> {

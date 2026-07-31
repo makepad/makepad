@@ -1758,6 +1758,8 @@ fn base_dz_profile_projected_points(
 
 /// Decode a bridge-bake overlay tile into per-point-deck corridors. Tags:
 /// dz = comma-joined decimeters per vertex, hw = corridor half-width meters.
+/// Runtime consumer not wired yet; exercised by the probe_bridge_dz_load test.
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_bridge_dz_corridors(
     dz_tile_data: &[u8],
     tile_key: TileKey,

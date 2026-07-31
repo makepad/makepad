@@ -989,6 +989,22 @@ pub struct MetalCompiledGraph {
     pub tail_buffer_size: usize,
     pub main_buffer: super::MetalBuffer,
     pub tail_buffer: Option<super::MetalBuffer>,
+    /// Read-only weight buffer serving logical offsets [0, ro_split);
+    /// offsets at or above ro_split resolve into main_buffer at
+    /// offset - ro_split. ro_split == 0 (no ro_buffer) keeps today's
+    /// single-buffer behavior.
+    pub ro_buffer: Option<super::MetalBuffer>,
+    pub ro_split: usize,
+}
+
+/// Buffers backing one logical context address space: an optional
+/// read-only weight buffer covering [0, ro_split) plus the main (dirty)
+/// buffer covering the rest.
+#[derive(Clone, Debug)]
+pub struct MetalContextBuffers {
+    pub ro_buffer: Option<super::MetalBuffer>,
+    pub ro_split: usize,
+    pub main_buffer: super::MetalBuffer,
 }
 
 pub struct MetalGraphSession {
@@ -1048,17 +1064,101 @@ pub fn create_context_main_buffer(
     runtime.create_buffer_with_bytes(&main_bytes, storage)
 }
 
+fn os_page_size() -> usize {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn getpagesize() -> i32;
+        }
+        let page = unsafe { getpagesize() };
+        if page > 0 {
+            return page as usize;
+        }
+    }
+    16384
+}
+
+/// Zero-copy variant: on unified memory the context arena itself becomes
+/// the shared GPU buffer (the copy path leaves every model resident twice
+/// — CPU arena + GPU buffer). Falls back to the copying path when the
+/// arena isn't page-aligned/page-sized (the GPU buffer is a byte-for-byte
+/// image of the arena either way, so offsets are identical).
+pub fn create_context_main_buffer_no_copy(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    fallback_storage: BufferStorageMode,
+) -> Result<super::MetalBuffer, String> {
+    let arena = ctx.mem_buffer();
+    let page = os_page_size();
+    let aligned = !arena.is_empty()
+        && (arena.as_ptr() as usize) % page == 0
+        && arena.len() % page == 0
+        && ctx.used_mem().saturating_sub(ctx.ro_split()) <= arena.len();
+    if aligned {
+        // Safety: the arena is page-aligned/page-sized (checked) and is
+        // owned by the session that also owns the returned buffer.
+        match unsafe { runtime.create_buffer_no_copy(arena) } {
+            Ok(buffer) => return Ok(buffer),
+            Err(err) => {
+                eprintln!("metal: no-copy weight buffer failed ({err}); falling back to copy");
+            }
+        }
+    }
+    create_context_main_buffer(runtime, ctx, fallback_storage)
+}
+
+/// Read-only weight buffer for a two-region context: wraps the mapped
+/// region zero-copy (file-backed pages stay clean). Ok(None) for
+/// single-arena contexts. No copy fallback — the mapping is page-aligned
+/// and page-multiple by construction, so a failure here is a real error.
+pub fn create_context_ro_buffer(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+) -> Result<Option<super::MetalBuffer>, String> {
+    let Some(region) = ctx.ro_region() else {
+        return Ok(None);
+    };
+    let bytes = region.as_slice();
+    let page = os_page_size();
+    if bytes.is_empty() || (bytes.as_ptr() as usize) % page != 0 || bytes.len() % page != 0 {
+        return Err(format!(
+            "mapped weight region is not page-aligned/page-multiple (len {})",
+            bytes.len()
+        ));
+    }
+    // Safety: the region is page-aligned/page-multiple (checked) and is
+    // kept alive by the context (Arc) that also outlives the buffer's
+    // owner in every call path.
+    unsafe { runtime.create_buffer_no_copy(bytes) }
+        .map(Some)
+        .map_err(|err| format!("metal: no-copy mapped weight buffer failed: {err}"))
+}
+
 fn compile_prepared_graph_from_buffers(
     runtime: &MetalRuntime,
     prepared: &MetalPreparedGraph,
     main_buffer: super::MetalBuffer,
     tail_buffer: Option<super::MetalBuffer>,
+    ro_buffer: Option<super::MetalBuffer>,
+    ro_split: usize,
 ) -> Result<MetalCompiledGraph, String> {
-    if main_buffer.size_bytes() < prepared.main_buffer_size {
+    let ro_split = if ro_buffer.is_some() { ro_split } else { 0 };
+    if let Some(ro_buffer) = &ro_buffer {
+        if ro_buffer.size_bytes() < ro_split {
+            return Err(format!(
+                "read-only Metal weight buffer is too small: got {}, need at least {}",
+                ro_buffer.size_bytes(),
+                ro_split
+            ));
+        }
+    }
+    let logical_size = ro_split
+        .checked_add(main_buffer.size_bytes())
+        .ok_or_else(|| "Metal buffer logical size overflow".to_string())?;
+    if logical_size < prepared.main_buffer_size {
         return Err(format!(
             "shared Metal main buffer is too small: got {}, need at least {}",
-            main_buffer.size_bytes(),
-            prepared.main_buffer_size
+            logical_size, prepared.main_buffer_size
         ));
     }
 
@@ -1100,6 +1200,8 @@ fn compile_prepared_graph_from_buffers(
         tail_buffer_size: prepared.tail_buffer_size,
         main_buffer,
         tail_buffer,
+        ro_buffer,
+        ro_split,
     })
 }
 
@@ -1118,7 +1220,7 @@ pub fn compile_prepared_graph(
         None
     };
 
-    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer, tail_buffer)
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer, tail_buffer, None, 0)
 }
 
 pub fn compile_prepared_graph_with_main_buffer(
@@ -1132,7 +1234,28 @@ pub fn compile_prepared_graph_with_main_buffer(
     } else {
         None
     };
-    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer.clone(), tail_buffer)
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer.clone(), tail_buffer, None, 0)
+}
+
+pub fn compile_prepared_graph_with_context_buffers(
+    runtime: &MetalRuntime,
+    prepared: &MetalPreparedGraph,
+    buffers: &MetalContextBuffers,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    let tail_buffer = if prepared.tail_buffer_size > 0 {
+        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
+    } else {
+        None
+    };
+    compile_prepared_graph_from_buffers(
+        runtime,
+        prepared,
+        buffers.main_buffer.clone(),
+        tail_buffer,
+        buffers.ro_buffer.clone(),
+        buffers.ro_split,
+    )
 }
 
 pub fn compile_graph_session(
@@ -1165,6 +1288,17 @@ impl MetalGraphSession {
     ) -> Result<Self, String> {
         let compiled =
             compile_prepared_graph_with_main_buffer(&runtime, prepared, main_buffer, tail_storage)?;
+        Ok(Self { runtime, compiled })
+    }
+
+    pub fn from_runtime_with_context_buffers(
+        runtime: MetalRuntime,
+        prepared: &MetalPreparedGraph,
+        buffers: &MetalContextBuffers,
+        tail_storage: BufferStorageMode,
+    ) -> Result<Self, String> {
+        let compiled =
+            compile_prepared_graph_with_context_buffers(&runtime, prepared, buffers, tail_storage)?;
         Ok(Self { runtime, compiled })
     }
 
@@ -1217,13 +1351,10 @@ pub fn execute_compiled_graph_with_buffer_inputs(
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
         let binding = binding(compiled, tensor_id)?;
+        let (buffer, offset_bytes) = resolve_buffer_offset(compiled, binding.offset_bytes);
         execution.outputs.insert(
             tensor_id,
-            runtime.read_buffer_range(
-                &compiled.main_buffer,
-                binding.offset_bytes,
-                binding.size_bytes,
-            )?,
+            runtime.read_buffer_range(buffer, offset_bytes, binding.size_bytes)?,
         );
     }
     Ok(execution)
@@ -1249,18 +1380,20 @@ pub fn execute_compiled_graph_in_active_batch(
                 tensor.nbytes()
             ));
         }
-        runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
+        let offset_bytes = resolve_main_write_offset(compiled, binding.offset_bytes)?;
+        runtime.write_buffer(&compiled.main_buffer, offset_bytes, input.bytes)?;
     }
     for input in buffer_inputs {
         let binding = binding(compiled, input.tensor_id)?;
         let tensor = ctx
             .tensor(input.tensor_id)
             .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+        let offset_bytes = resolve_main_write_offset(compiled, binding.offset_bytes)?;
         runtime.copy_buffer_range(
             input.source_buffer,
             input.source_offset_bytes,
             &compiled.main_buffer,
-            binding.offset_bytes,
+            offset_bytes,
             tensor.nbytes(),
         )?;
     }
@@ -1408,12 +1541,25 @@ impl GraphBindingPlanner {
 }
 
 fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, String> {
+    if ctx.ro_split() != 0 {
+        return Err(
+            "the copying main-buffer path does not support two-region (mapped weight) contexts"
+                .to_string(),
+        );
+    }
     let src = ctx.mem_buffer();
     let used = ctx.used_mem();
     if used > len {
         return Err(format!(
             "context memory image ({}) exceeds prepared main buffer size ({})",
             used, len
+        ));
+    }
+    if used > src.len() {
+        return Err(format!(
+            "context memory image ({}) exceeds arena length ({})",
+            used,
+            src.len()
         ));
     }
     let mut bytes = vec![0u8; len.max(1)];
@@ -3861,14 +4007,7 @@ fn dispatch_argsort_like(
                     &main_stage.pipeline,
                     bytes_of(&args),
                     &[
-                        MetalBufferBindingRef {
-                            index: 1,
-                            buffer: &compiled.main_buffer,
-                            offset_bytes: binding(compiled, src0_id)?
-                                .offset_bytes
-                                .checked_add(src_row_offset)
-                                .ok_or_else(|| "argsort src binding offset overflow".to_string())?,
-                        },
+                        buffer_ref_with_offset(compiled, 1, src0_id, src_row_offset)?,
                         MetalBufferBindingRef {
                             index: 2,
                             buffer: dst_binding.buffer,
@@ -3932,16 +4071,7 @@ fn dispatch_argsort_like(
                         &merge_stage.pipeline,
                         bytes_of(&args_merge),
                         &[
-                            MetalBufferBindingRef {
-                                index: 1,
-                                buffer: &compiled.main_buffer,
-                                offset_bytes: binding(compiled, src0_id)?
-                                    .offset_bytes
-                                    .checked_add(src_row_offset)
-                                    .ok_or_else(|| {
-                                        "argsort src binding offset overflow".to_string()
-                                    })?,
-                            },
+                            buffer_ref_with_offset(compiled, 1, src0_id, src_row_offset)?,
                             MetalBufferBindingRef {
                                 index: 2,
                                 buffer: dst_binding.buffer,
@@ -4305,6 +4435,17 @@ fn dispatch_flash_attn_ext(
     let k_shape = shape4(k)?;
     let v_shape = shape4(v)?;
     let dst_shape = shape4(tensor)?;
+    if std::env::var_os("MAKEPAD_FLASH_LOG").is_some() {
+        eprintln!(
+            "flash: q={:?} k={:?}(nb {:?}) v={:?} mask={:?} mask_nb={:?}",
+            q_shape,
+            k_shape,
+            k.nb,
+            v_shape,
+            mask.map(|m| m.ne),
+            mask.map(|m| m.nb),
+        );
+    }
 
     let has_mask = mask.is_some();
     let _has_sinks = sinks.is_some();
@@ -4981,16 +5122,49 @@ fn binding(
         .ok_or_else(|| format!("compiled graph has no binding for tensor {}", tensor_id))
 }
 
+/// THE resolution rule for logical context offsets: below ro_split the
+/// bytes live in the read-only weight buffer at the same offset, above it
+/// in the main (dirty) buffer at offset - ro_split. With no ro buffer
+/// (ro_split == 0) this is the identity on the main buffer.
+fn resolve_buffer_offset(
+    compiled: &MetalCompiledGraph,
+    offset_bytes: usize,
+) -> (&super::MetalBuffer, usize) {
+    if offset_bytes < compiled.ro_split {
+        if let Some(ro_buffer) = &compiled.ro_buffer {
+            return (ro_buffer, offset_bytes);
+        }
+    }
+    (&compiled.main_buffer, offset_bytes - compiled.ro_split)
+}
+
+/// Resolution for WRITES: the target must land in the main (dirty)
+/// buffer — nothing may write the read-only weight region. Returns the
+/// main-buffer-relative offset.
+fn resolve_main_write_offset(
+    compiled: &MetalCompiledGraph,
+    offset_bytes: usize,
+) -> Result<usize, String> {
+    if offset_bytes < compiled.ro_split {
+        return Err(format!(
+            "write targets the read-only weight region (offset {} < split {})",
+            offset_bytes, compiled.ro_split
+        ));
+    }
+    Ok(offset_bytes - compiled.ro_split)
+}
+
 fn buffer_ref<'a>(
     compiled: &'a MetalCompiledGraph,
     index: u64,
     tensor_id: TensorId,
 ) -> MetalBufferBindingRef<'a> {
     let binding = compiled.bindings.get(&tensor_id).unwrap();
+    let (buffer, offset_bytes) = resolve_buffer_offset(compiled, binding.offset_bytes);
     MetalBufferBindingRef {
         index,
-        buffer: &compiled.main_buffer,
-        offset_bytes: binding.offset_bytes,
+        buffer,
+        offset_bytes,
     }
 }
 
@@ -5001,13 +5175,15 @@ fn buffer_ref_with_offset<'a>(
     extra_offset: usize,
 ) -> Result<MetalBufferBindingRef<'a>, String> {
     let binding = binding(compiled, tensor_id)?;
+    let logical_offset = binding
+        .offset_bytes
+        .checked_add(extra_offset)
+        .ok_or_else(|| format!("buffer binding offset overflow for tensor {}", tensor_id))?;
+    let (buffer, offset_bytes) = resolve_buffer_offset(compiled, logical_offset);
     Ok(MetalBufferBindingRef {
         index,
-        buffer: &compiled.main_buffer,
-        offset_bytes: binding
-            .offset_bytes
-            .checked_add(extra_offset)
-            .ok_or_else(|| format!("buffer binding offset overflow for tensor {}", tensor_id))?,
+        buffer,
+        offset_bytes,
     })
 }
 

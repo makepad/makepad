@@ -32,6 +32,9 @@ pub enum VoiceWaveAction {
     RecordVoice(bool),
     InjectText(String),
     InjectEnter,
+    /// Speech energy appeared/disappeared on the open mic (RMS gate).
+    /// Emitted on change; apps use the rising edge for TTS barge-in.
+    VoiceActivity(bool),
 }
 
 script_mod! {
@@ -180,6 +183,8 @@ pub struct VoiceWave {
     voice_input: WindowVoiceInput,
     #[rust]
     voice_initialized: bool,
+    #[rust]
+    last_voice_active: bool,
     /// Also accept Escape as a push-to-talk key (opt-in per app — Escape
     /// doubles as cancel/dismiss elsewhere, so hosts choose).
     #[live(false)]
@@ -430,6 +435,7 @@ impl VoiceWave {
             return;
         }
         self.voice_initialized = true;
+        log!("voice: init voice_wave uid={:?}", self.widget_uid());
         self.voice_input.ensure_audio_callback(cx, 0);
     }
 
@@ -467,6 +473,13 @@ impl VoiceWave {
         }
         // Refresh visual state
         let state = self.voice_input.visual_state();
+        if state.voice_active != self.last_voice_active {
+            self.last_voice_active = state.voice_active;
+            cx.widget_action(
+                self.widget_uid(),
+                VoiceWaveAction::VoiceActivity(state.voice_active),
+            );
+        }
         self.set_voice_active(cx, state.voice_active);
         self.set_submit_flash(cx, state.submit_flash);
         if self.animating
@@ -485,8 +498,18 @@ impl VoiceWave {
         self.sync_mic_state(cx);
     }
 
-    fn handle_voice_event(&mut self, cx: &mut Cx, event: &Event) {
+    /// Load the speech models now (worker spawn + whisper preload) without
+    /// starting capture — eager AI boot without a hot mic.
+    fn prewarm(&mut self, cx: &mut Cx) {
         self.ensure_voice_initialized(cx);
+    }
+
+    // NOTE: no ensure_voice_initialized here — initialization registers the
+    // GLOBAL audio-input callback slot (last registrant wins, platform-side),
+    // so a passive VoiceWave (e.g. the Window caption one) that inits on
+    // event traffic steals the mic audio from the active instance and every
+    // sample is silently discarded. Only set_enabled/prewarm may initialize.
+    fn handle_voice_event(&mut self, cx: &mut Cx, event: &Event) {
         let uid = self.widget_uid();
 
         if let Event::AudioDevices(devices) = event {
@@ -638,6 +661,12 @@ impl VoiceWaveRef {
             }
         }
         result
+    }
+
+    pub fn prewarm(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.prewarm(cx);
+        }
     }
 
     pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
