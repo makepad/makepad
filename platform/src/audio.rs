@@ -70,13 +70,16 @@ impl AudioDevicesEvent {
     /// breach. Which microphone to use when the default one is unavailable is
     /// the app's decision to make, from `descs`.
     pub fn default_input(&self) -> Vec<AudioDeviceId> {
+        // Real microphones only: the loopback device captures SYSTEM AUDIO
+        // (via screen-recording privileges on macOS) and must never be
+        // selected implicitly — apps opt into it by explicit device id.
         for d in &self.descs {
-            if d.is_default && d.device_type.is_input() && !d.has_failed {
+            if d.is_default && matches!(d.device_type, AudioDeviceType::Input) && !d.has_failed {
                 return vec![d.device_id];
             }
         }
         for d in &self.descs {
-            if d.is_default && d.device_type.is_input() {
+            if d.is_default && matches!(d.device_type, AudioDeviceType::Input) {
                 return vec![d.device_id];
             }
         }
