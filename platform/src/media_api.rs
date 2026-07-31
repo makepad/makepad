@@ -1,5 +1,5 @@
 use crate::{
-    audio::{AudioBuffer, AudioDeviceId, AudioInfo, AudioInputFn, AudioOutputFn},
+    audio::{AudioBuffer, AudioDeviceId, AudioInfo, AudioInputFn, AudioInputOptions, AudioOutputFn},
     midi::*,
     video::*,
 };
@@ -13,6 +13,15 @@ pub trait CxMediaApi {
     fn use_midi_outputs(&mut self, ports: &[MidiPortId]);
 
     fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]);
+    /// `use_audio_inputs` with per-capture options (e.g. echo cancellation).
+    /// Platforms without an implementation ignore the options.
+    fn use_audio_inputs_with_options(
+        &mut self,
+        devices: &[AudioDeviceId],
+        _options: AudioInputOptions,
+    ) {
+        self.use_audio_inputs(devices);
+    }
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]);
 
     fn audio_output<F>(&mut self, index: usize, f: F)

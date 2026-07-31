@@ -312,6 +312,14 @@ impl AudioUnitAccess {
     }
 
     pub fn use_audio_inputs(&mut self, devices: &[AudioDeviceId]) {
+        self.use_audio_inputs_with_options(devices, AudioInputOptions::default());
+    }
+
+    pub fn use_audio_inputs_with_options(
+        &mut self,
+        devices: &[AudioDeviceId],
+        options: AudioInputOptions,
+    ) {
         #[cfg(target_os = "ios")]
         self.ensure_ios_session(true);
 
@@ -389,7 +397,12 @@ impl AudioUnitAccess {
         };
         for (index, device_id) in new {
             // lets create an audio input
-            let unit_info = &AudioUnitAccess::query_audio_units(AudioUnitQuery::Input)[0];
+            let query = if options.echo_cancellation {
+                AudioUnitQuery::VoiceInput
+            } else {
+                AudioUnitQuery::Input
+            };
+            let unit_info = &AudioUnitAccess::query_audio_units(query)[0];
             let audio_inputs = self.audio_inputs.clone();
             let audio_input_cb = self.audio_input_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
@@ -804,6 +817,13 @@ impl AudioUnitAccess {
                 AudioUnitType::IO,
                 AudioUnitSubType::VoiceProcessingIO,
             ),
+            // Voice-processing capture (echo cancellation): same unit iOS
+            // already uses for plain input; on macOS it swaps HAL for VPIO,
+            // which cancels device playback out of the mic system-wide.
+            AudioUnitQuery::VoiceInput => AudioComponentDescription::new_all_manufacturers(
+                AudioUnitType::IO,
+                AudioUnitSubType::VoiceProcessingIO,
+            ),
             AudioUnitQuery::Effect => AudioComponentDescription::new_all_manufacturers(
                 AudioUnitType::Effect,
                 AudioUnitSubType::Undefined,
@@ -1132,6 +1152,8 @@ impl AudioUnitAccess {
 pub enum AudioUnitQuery {
     Output,
     Input,
+    /// Input through the OS voice-processing unit (echo cancellation).
+    VoiceInput,
     MusicDevice,
     Effect,
 }

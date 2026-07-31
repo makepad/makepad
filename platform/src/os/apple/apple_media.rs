@@ -245,6 +245,19 @@ impl CxMediaApi for Cx {
             .use_audio_inputs(devices);
     }
 
+    fn use_audio_inputs_with_options(
+        &mut self,
+        devices: &[AudioDeviceId],
+        options: AudioInputOptions,
+    ) {
+        self.os
+            .media
+            .audio_unit()
+            .lock()
+            .unwrap()
+            .use_audio_inputs_with_options(devices, options);
+    }
+
     fn use_audio_outputs(&mut self, devices: &[AudioDeviceId]) {
         self.os
             .media
