@@ -734,6 +734,21 @@ impl TextInput {
         self.draw_text.max_lines
     }
 
+    /// Overrides the height this field asks its parent for.
+    ///
+    /// For a composer that folds to one line when it loses focus. Pinning the
+    /// HEIGHT is the safe way to do that — unlike clamping `max_lines`, it
+    /// leaves the laid-out text alone, and the laid-out text is what maps a
+    /// click to a caret position. Fold by re-layout and the press that
+    /// re-focuses the field resolves against the folded layout while the
+    /// expanded one is on screen, putting the caret and any drag-selection on
+    /// the wrong text. Overflow is clipped, so pick a whole number of lines or
+    /// the last one is sliced through the middle of its glyphs.
+    pub fn set_height(&mut self, cx: &mut Cx, height: Size) {
+        self.walk.height = height;
+        self.draw_bg.redraw(cx);
+    }
+
     /// Scrolls back to the very start of the text.
     ///
     /// For a field that folds down to a fixed height when it loses focus: the
@@ -3070,6 +3085,13 @@ impl TextInputRef {
 
     pub fn max_lines(&self) -> usize {
         self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::set_height`].
+    pub fn set_height(&self, cx: &mut Cx, height: Size) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_height(cx, height);
+        }
     }
 
     /// See [`TextInput::scroll_to_top`].
