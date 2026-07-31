@@ -7253,6 +7253,10 @@ impl MidiSynthesizer {
         let this = &windows_core::Interface::cast::<IMidiOutPort>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SendBuffer)(windows_core::Interface::as_raw(this), mididata.param().abi()).ok() }
     }
+    pub fn SetVolume(&self, value: f64) -> windows_core::Result<()> {
+        let this = self;
+        unsafe { (windows_core::Interface::vtable(this).SetVolume)(windows_core::Interface::as_raw(this), value).ok() }
+    }
     fn IMidiSynthesizerStatics<R, F: FnOnce(&IMidiSynthesizerStatics) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
         static SHARED: windows_core::imp::FactoryCache<MidiSynthesizer, IMidiSynthesizerStatics> = windows_core::imp::FactoryCache::new();
         SHARED.call(callback)
@@ -36747,6 +36751,12 @@ impl windows_core::RuntimeName for IMFMediaBuffer {}
 windows_core::imp::define_interface!(IMFMediaEngine, IMFMediaEngine_Vtbl, 0x98a1b0bb_03eb_4935_ae7c_93c1fa0e1c93);
 windows_core::imp::interface_hierarchy!(IMFMediaEngine, windows_core::IUnknown);
 impl IMFMediaEngine {
+    pub unsafe fn GetError(&self) -> windows_core::Result<IMFMediaError> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetError)(windows_core::Interface::as_raw(self), &mut result__).and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
     pub unsafe fn SetSource(&self, purl: &windows_core::BSTR) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetSource)(windows_core::Interface::as_raw(self), core::mem::transmute_copy(purl)).ok() }
     }
@@ -36762,6 +36772,9 @@ impl IMFMediaEngine {
     pub unsafe fn IsPaused(&self) -> windows_core::BOOL {
         unsafe { (windows_core::Interface::vtable(self).IsPaused)(windows_core::Interface::as_raw(self)) }
     }
+    pub unsafe fn SetPlaybackRate(&self, rate: f64) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetPlaybackRate)(windows_core::Interface::as_raw(self), rate).ok() }
+    }
     pub unsafe fn SetLoop(&self, r#loop: bool) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetLoop)(windows_core::Interface::as_raw(self), r#loop.into()).ok() }
     }
@@ -36773,6 +36786,9 @@ impl IMFMediaEngine {
     }
     pub unsafe fn SetMuted(&self, muted: bool) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetMuted)(windows_core::Interface::as_raw(self), muted.into()).ok() }
+    }
+    pub unsafe fn SetVolume(&self, volume: f64) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetVolume)(windows_core::Interface::as_raw(self), volume).ok() }
     }
     pub unsafe fn GetNativeVideoSize(&self, cx: Option<*mut u32>, cy: Option<*mut u32>) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).GetNativeVideoSize)(windows_core::Interface::as_raw(self), cx.unwrap_or(core::mem::zeroed()) as _, cy.unwrap_or(core::mem::zeroed()) as _).ok() }
@@ -38003,6 +38019,11 @@ impl IMFMediaEngineSrcElementsEx_Vtbl {
 impl windows_core::RuntimeName for IMFMediaEngineSrcElementsEx {}
 windows_core::imp::define_interface!(IMFMediaError, IMFMediaError_Vtbl, 0xfc0e10d2_ab2a_4501_a951_06bb1075184c);
 windows_core::imp::interface_hierarchy!(IMFMediaError, windows_core::IUnknown);
+impl IMFMediaError {
+    pub unsafe fn GetErrorCode(&self) -> u16 {
+        unsafe { (windows_core::Interface::vtable(self).GetErrorCode)(windows_core::Interface::as_raw(self)) }
+    }
+    }
 #[repr(C)]
 #[doc(hidden)]
 pub struct IMFMediaError_Vtbl {
@@ -38235,6 +38256,9 @@ impl windows_core::RuntimeName for IMFMediaEventGenerator {}
 windows_core::imp::define_interface!(IMFMediaKeySession, IMFMediaKeySession_Vtbl, 0x24fa67d5_d1d0_4dc5_995c_c0efdc191fb5);
 windows_core::imp::interface_hierarchy!(IMFMediaKeySession, windows_core::IUnknown);
 impl IMFMediaKeySession {
+    pub unsafe fn GetError(&self, code: *mut u16, systemcode: *mut u32) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).GetError)(windows_core::Interface::as_raw(self), code as _, systemcode as _).ok() }
+    }
     pub unsafe fn Close(&self) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).Close)(windows_core::Interface::as_raw(self)).ok() }
     }
@@ -46883,24 +46907,24 @@ impl IRecordInfo_Vtbl {
 impl windows_core::RuntimeName for IRecordInfo {}
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PARAMDESC {
-    pub pparamdescex: *mut PARAMDESCEX,
-    pub wParamFlags: PARAMFLAGS,
+pub struct PARAMDESCEX {
+    pub cBytes: u32,
+    pub varDefaultValue: super::Variant::VARIANT,
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PARAMFLAGS(pub u16);
 #[repr(C)]
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-pub struct PARAMDESCEX {
-    pub cBytes: u32,
-    pub varDefaultValue: super::Variant::VARIANT,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PARAMDESC {
+    pub pparamdescex: *mut PARAMDESCEX,
+    pub wParamFlags: PARAMFLAGS,
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Default for PARAMDESC {
-    fn default() -> Self {
-        unsafe { core::mem::zeroed() }
+impl Clone for PARAMDESCEX {
+    fn clone(&self) -> Self {
+        unsafe { core::mem::transmute_copy(self) }
     }
 }
 impl PARAMFLAGS {
@@ -46909,21 +46933,21 @@ impl PARAMFLAGS {
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
-impl Clone for PARAMDESCEX {
-    fn clone(&self) -> Self {
-        unsafe { core::mem::transmute_copy(self) }
-    }
-}
-impl core::ops::BitOr for PARAMFLAGS {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+impl Default for PARAMDESC {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
     }
 }
 #[cfg(all(feature = "Win32_System_Com", feature = "Win32_System_Variant"))]
 impl Default for PARAMDESCEX {
     fn default() -> Self {
         unsafe { core::mem::zeroed() }
+    }
+}
+impl core::ops::BitOr for PARAMFLAGS {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 impl core::ops::BitAnd for PARAMFLAGS {
