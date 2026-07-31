@@ -790,15 +790,6 @@ pub struct App {
     /// Last nav banner instruction spoken, so each maneuver is announced once.
     #[rust]
     last_spoken_banner: String,
-    /// Polls TTS playback to arm echo cancellation only while speaking.
-    #[rust]
-    speech_watch: Timer,
-    /// Time the assistant was last audibly speaking (for the AEC tail).
-    #[rust]
-    last_speaking_time: f64,
-    /// Current half-duplex state: true while VPIO (ducking) capture is armed.
-    #[rust]
-    aec_armed: bool,
 }
 
 fn read_secret(name: &str) -> Option<String> {
@@ -835,10 +826,6 @@ impl App {
         let speech = Speech::new();
         speech.install_audio_output(cx);
         self.speech = Some(speech);
-        // Half-duplex echo control: VPIO capture (which ducks all other
-        // audio) is armed only while our own voice plays + a short tail;
-        // idle listening runs plain capture so music stays untouched.
-        self.speech_watch = cx.start_interval(0.25);
         self.init_agent(cx);
         self.update_ai_status(cx);
     }
@@ -1862,22 +1849,6 @@ impl AppMain for App {
                 // TTS playback device; mic input selection lives inside the
                 // VoiceWave's own handler.
                 cx.use_audio_outputs(&devices.default_output());
-            }
-            _ if self.speech_watch.is_event(event).is_some() => {
-                let speaking = self.speech.as_ref().is_some_and(|s| s.is_speaking());
-                let now = cx.seconds_since_app_start();
-                if speaking {
-                    self.last_speaking_time = now;
-                }
-                // Keep AEC through a short tail so the speech reverb doesn't
-                // land in the transcript right as we switch units.
-                let want_aec = speaking || now - self.last_speaking_time < 0.8;
-                if want_aec != self.aec_armed {
-                    self.aec_armed = want_aec;
-                    self.ui
-                        .voice_wave(cx, ids!(mic_wave))
-                        .set_echo_cancellation(cx, want_aec);
-                }
             }
             Event::LocationUpdate(fix) => {
                 self.drive_log.log_fix(fix);
