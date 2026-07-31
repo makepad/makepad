@@ -339,8 +339,8 @@ struct VisionGraph {
     input_positions: TensorId,
     input_block_index: TensorId,
     output: TensorId,
-    grid_w: usize,
-    grid_h: usize,
+    _grid_w: usize,
+    _grid_h: usize,
 }
 
 pub struct VisionTower {
@@ -674,8 +674,8 @@ impl VisionTower {
             input_positions,
             input_block_index,
             output: cur,
-            grid_w,
-            grid_h,
+            _grid_w: grid_w,
+            _grid_h: grid_h,
         })
     }
 }

@@ -126,6 +126,7 @@ impl Cx {
                 Some(incoming) => incoming,
                 None => break,
             };
+            crate::memory_watchdog::note_stdin_host_message();
 
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {

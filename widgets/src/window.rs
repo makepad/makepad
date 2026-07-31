@@ -777,6 +777,12 @@ impl SsaaStack {
 
 impl Window {
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
+        // Hosted inside studio: the studio chrome owns the window, never
+        // show our own caption bar (a DSL hot-reload re-runs this sync).
+        if cx.in_makepad_studio() {
+            self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+            return;
+        }
         match cx.os_type() {
             OsType::Windows => {
                 self.view(cx, ids!(caption_bar))

@@ -1,0 +1,164 @@
+//! Read-only memory-mapped file region for weight data.
+//!
+//! Weights served from a file-backed `PROT_READ` mapping stay CLEAN pages
+//! (evictable, re-faultable from disk) instead of jetsam-dirty malloc
+//! memory — the llama.cpp iOS pattern. This is the ONLY platform-gated
+//! module: everything else treats the region as an opaque `&[u8]`, and on
+//! non-unix targets `map_file` simply fails so callers fall back to the
+//! owned-arena path.
+
+use std::path::Path;
+
+#[cfg(unix)]
+mod imp {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    const O_RDONLY: c_int = 0;
+    const SEEK_END: c_int = 2;
+    const PROT_READ: c_int = 1;
+    const MAP_SHARED: c_int = 1;
+
+    extern "C" {
+        fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
+        fn munmap(addr: *mut c_void, len: usize) -> c_int;
+        fn getpagesize() -> c_int;
+    }
+
+    /// Read-only mapping of a whole file. The mapped length is the file
+    /// size rounded UP to a page multiple (the tail stays within the
+    /// file's zero-filled last partial page), so the base pointer and
+    /// length both satisfy page granularity — required by the Metal
+    /// no-copy buffer path.
+    pub struct MappedRegion {
+        ptr: *mut c_void,
+        len: usize,
+    }
+
+    // Safety: the mapping is PROT_READ and never written or remapped;
+    // sharing immutable bytes across threads is safe.
+    unsafe impl Send for MappedRegion {}
+    unsafe impl Sync for MappedRegion {}
+
+    impl MappedRegion {
+        pub fn map_file(path: &Path) -> Result<Self, String> {
+            let page = unsafe { getpagesize() };
+            if page <= 0 {
+                return Err("mmap: getpagesize failed".to_string());
+            }
+            let page = page as usize;
+
+            let c_path = CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| format!("mmap: path {:?} contains a NUL byte", path))?;
+            let fd = unsafe { open(c_path.as_ptr(), O_RDONLY) };
+            if fd < 0 {
+                return Err(format!("mmap: failed to open {:?}", path));
+            }
+
+            let file_size = unsafe { lseek(fd, 0, SEEK_END) };
+            if file_size <= 0 {
+                unsafe { close(fd) };
+                return Err(format!("mmap: failed to size {:?}", path));
+            }
+            let Some(len) = usize::try_from(file_size)
+                .ok()
+                .and_then(|size| size.checked_next_multiple_of(page))
+            else {
+                unsafe { close(fd) };
+                return Err(format!("mmap: file size {} overflows usize", file_size));
+            };
+
+            let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0) };
+            // The fd is no longer needed once the mapping exists.
+            unsafe { close(fd) };
+            if ptr.is_null() || ptr as isize == -1 {
+                return Err(format!("mmap: mapping {:?} ({} bytes) failed", path, len));
+            }
+            Ok(Self { ptr, len })
+        }
+
+        pub fn len(&self) -> usize {
+            self.len
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.len == 0
+        }
+
+        pub fn as_slice(&self) -> &[u8] {
+            // Safety: ptr/len describe a live PROT_READ mapping owned by self.
+            unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+        }
+    }
+
+    impl Drop for MappedRegion {
+        fn drop(&mut self) {
+            unsafe {
+                munmap(self.ptr, self.len);
+            }
+        }
+    }
+
+    impl std::fmt::Debug for MappedRegion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MappedRegion")
+                .field("ptr", &self.ptr)
+                .field("len", &self.len)
+                .finish()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod imp {
+    use std::path::Path;
+
+    /// Stub: mapping is unavailable, so `map_file` always fails and
+    /// callers take the owned-arena path.
+    #[derive(Debug)]
+    pub struct MappedRegion {
+        _private: (),
+    }
+
+    impl MappedRegion {
+        pub fn map_file(path: &Path) -> Result<Self, String> {
+            Err(format!(
+                "mmap is unavailable on this platform (cannot map {:?})",
+                path
+            ))
+        }
+
+        pub fn len(&self) -> usize {
+            0
+        }
+
+        pub fn is_empty(&self) -> bool {
+            true
+        }
+
+        pub fn as_slice(&self) -> &[u8] {
+            &[]
+        }
+    }
+}
+
+pub use imp::MappedRegion;
+
+impl MappedRegion {
+    /// Convenience wrapper taking anything path-like.
+    pub fn map(path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::map_file(path.as_ref())
+    }
+}
