@@ -1057,6 +1057,10 @@ impl AudioUnitAccess {
                             OSError::from_nserror(err)?;
                         }
 
+                        // Allocate after configuration
+                        let mut err: ObjcId = nil;
+                        let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
+                        OSError::from_nserror(err)?;
                         // VPIO defaults to voice-chat mode, which DUCKS all
                         // other app audio (music drops to a whisper). Request
                         // advanced ducking at the minimum level — AEC keeps
@@ -1099,7 +1103,9 @@ impl AudioUnitAccess {
                                     (&config as *const DuckingConfig).cast(),
                                     std::mem::size_of::<DuckingConfig>() as u32,
                                 );
-                                if status != 0 {
+                                if status == 0 {
+                                    crate::log!("voice input: other-audio ducking set to minimum");
+                                } else {
                                     crate::log!(
                                         "voice input: ducking config not applied (OSStatus {status})"
                                     );
@@ -1107,10 +1113,6 @@ impl AudioUnitAccess {
                             }
                         }
 
-                        // Allocate after configuration
-                        let mut err: ObjcId = nil;
-                        let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                        OSError::from_nserror(err)?;
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                         OSError::from_nserror(err)?;
 
@@ -1685,6 +1687,16 @@ impl AudioUnit {
 
     pub fn release_audio_unit(&mut self) {
         unsafe {
+            // Full teardown, not just refcounts: a VoiceProcessingIO unit
+            // keeps the system-wide voice-chat session (and its ducking of
+            // other apps' audio) alive until its render resources are
+            // deallocated — and the retained render_block otherwise pins
+            // the unit for the life of the process.
+            let () = msg_send![self.au_audio_unit, stopHardware];
+            let () = msg_send![self.au_audio_unit, deallocateRenderResources];
+            if let Some(render_block) = self.render_block.take() {
+                let () = msg_send![render_block, release];
+            }
             let () = msg_send![self.av_audio_unit, release];
             self.av_audio_unit = nil;
             let () = msg_send![self.au_audio_unit, release];
