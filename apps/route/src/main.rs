@@ -117,7 +117,7 @@ script_mod! {
                             min_zoom: 3.0
                             mbtiles_path: "local/maps/europe-shortbread.mbtiles"
                             detail_mbtiles_path: "local/maps/europe-osm-detail.mbtiles"
-                            bridge_dz_mbtiles_path: "local/maps/ams-bridge-dz.mbtiles"
+                            bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
                             buildings_3d: true
                         }
 
