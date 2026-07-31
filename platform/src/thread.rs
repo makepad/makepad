@@ -97,6 +97,29 @@ where
             tasks.push((tag, Box::new(task)));
         }
     }
+
+    /// Drop queued (not yet started) tasks whose tag fails the predicate,
+    /// returning the dropped tags. Running tasks are unaffected — this is
+    /// obsolete-work cancellation: when the request context changes (zoom,
+    /// mode) the backlog for the dead context must not keep occupying the
+    /// pool ahead of current work.
+    pub fn retain_queued<F>(&self, mut keep: F) -> Vec<T>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut dropped = Vec::new();
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|v| {
+                if keep(&v.0) {
+                    true
+                } else {
+                    dropped.push(v.0.clone());
+                    false
+                }
+            });
+        }
+        dropped
+    }
 }
 
 pub struct MessageThreadPool<T: Clone + Send + 'static> {
