@@ -1,4 +1,5 @@
 mod bridge_bake;
+mod merge;
 mod nav_build;
 mod native;
 mod pbf_audit;
@@ -103,6 +104,24 @@ fn run() -> Result<(), String> {
     }
     if args.first().is_some_and(|arg| arg == "bridge-bake") {
         return bridge_bake::bake(bridge_bake::parse_bake_options(&args)?);
+    }
+    // mbtiles-merge <in1> <in2> [...] <output> [--zoom 14] — later inputs win
+    if args.first().is_some_and(|arg| arg == "mbtiles-merge") {
+        let mut zoom = 14u8;
+        let mut paths = Vec::new();
+        let mut iter = args[1..].iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--zoom" {
+                zoom = iter
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--zoom needs a number")?;
+            } else {
+                paths.push(arg.clone());
+            }
+        }
+        let output = paths.pop().ok_or("mbtiles-merge needs inputs and an output")?;
+        return merge::merge(&paths, &output, zoom);
     }
     if args.first().is_some_and(|arg| arg == "nav-build") {
         return nav_build::nav_build(nav_build::parse_nav_build_options(&args)?);
