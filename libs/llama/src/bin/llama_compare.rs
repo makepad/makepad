@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use makepad_ggml::{
     backend::metal::{
-        prepare_graph, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer, MetalGraphSession,
-        MetalGraphTensorWrite, MetalRuntime,
+        prepare_graph, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer,
+        MetalContextBuffers, MetalGraphSession, MetalGraphTensorWrite, MetalRuntime,
     },
     bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu, ggml_row_size_for_type,
     BufferUsage, Context, Graph, InitParams, Prec, Tensor, TensorId, TensorLayout, TensorType,
@@ -97,7 +97,7 @@ struct SharedHybridDebugEnv {
     weights: LoadedGgufWeights,
     spec: HybridDecodeSpec,
     shared_runtime: MetalRuntime,
-    shared_main_buffer: MetalBuffer,
+    shared_main_buffer: MetalContextBuffers,
     shared_cache: HybridSharedCacheTensorIds,
 }
 
@@ -2626,7 +2626,7 @@ fn capture_shared_hybrid_cache_snapshot(
             layer_index,
             read_attention_cache_prefix_values_f32(
                 &env.shared_runtime,
-                &env.shared_main_buffer,
+                &env.shared_main_buffer.main_buffer,
                 &env.weights.ctx,
                 ids.k_cache,
                 cache_tokens,
@@ -2636,7 +2636,7 @@ fn capture_shared_hybrid_cache_snapshot(
             layer_index,
             read_attention_cache_prefix_values_f32(
                 &env.shared_runtime,
-                &env.shared_main_buffer,
+                &env.shared_main_buffer.main_buffer,
                 &env.weights.ctx,
                 ids.v_cache,
                 cache_tokens,
@@ -2649,7 +2649,7 @@ fn capture_shared_hybrid_cache_snapshot(
             layer_index,
             read_full_tensor_values_f32(
                 &env.shared_runtime,
-                &env.shared_main_buffer,
+                &env.shared_main_buffer.main_buffer,
                 &env.weights.ctx,
                 ids.r_cache,
             )?,
@@ -2658,7 +2658,7 @@ fn capture_shared_hybrid_cache_snapshot(
             layer_index,
             read_full_tensor_values_f32(
                 &env.shared_runtime,
-                &env.shared_main_buffer,
+                &env.shared_main_buffer.main_buffer,
                 &env.weights.ctx,
                 ids.s_cache,
             )?,
@@ -2731,7 +2731,7 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
     for (&layer_index, full_ids) in &full_env.shared_cache.attention {
         let full_k = read_attention_cache_prefix_values_f32(
             &full_env.shared_runtime,
-            &full_env.shared_main_buffer,
+            &full_env.shared_main_buffer.main_buffer,
             &full_env.weights.ctx,
             full_ids.k_cache,
             total_tokens,
@@ -2748,7 +2748,7 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
 
         let full_v = read_attention_cache_prefix_values_f32(
             &full_env.shared_runtime,
-            &full_env.shared_main_buffer,
+            &full_env.shared_main_buffer.main_buffer,
             &full_env.weights.ctx,
             full_ids.v_cache,
             total_tokens,
@@ -2767,7 +2767,7 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
     for (&layer_index, full_ids) in &full_env.shared_cache.recurrent {
         let full_r = read_full_tensor_values_f32(
             &full_env.shared_runtime,
-            &full_env.shared_main_buffer,
+            &full_env.shared_main_buffer.main_buffer,
             &full_env.weights.ctx,
             full_ids.r_cache,
         )?;
@@ -2783,7 +2783,7 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
 
         let full_s = read_full_tensor_values_f32(
             &full_env.shared_runtime,
-            &full_env.shared_main_buffer,
+            &full_env.shared_main_buffer.main_buffer,
             &full_env.weights.ctx,
             full_ids.s_cache,
         )?;
@@ -3070,7 +3070,7 @@ fn build_hybrid_preview_session(
     checkpoint_specs: &[HybridPreviewCheckpointSpec],
 ) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
     let plan = model.execution_plan()?;
-    let mut weights = plan
+    let weights = plan
         .full_weights
         .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
     let spec = model.hybrid_decode_spec(

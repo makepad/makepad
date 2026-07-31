@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use makepad_ggml::{ggml_pad, BufferUsage, Context, InitParams, TensorId, GGML_MEM_ALIGN};
+use makepad_ggml::{
+    ggml_pad, BufferUsage, Context, InitParams, MappedRegion, TensorId, GGML_MEM_ALIGN,
+};
 
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufFile, GgufTensorInfo};
@@ -48,12 +51,17 @@ impl GgufWeightLayout {
     }
 
     pub fn allocate_context_with_extra(&self, extra_bytes: usize) -> Result<LoadedGgufWeights> {
+        // Page-multiple arena: lets the Metal backend wrap it zero-copy
+        // (newBufferWithBytesNoCopy needs page-aligned base + page-multiple
+        // length; large mallocs are page-aligned on macOS). 16384 covers
+        // both 4K and 16K page targets.
         let mem_size = ggml_pad(
             self.total_bytes
                 .checked_add(extra_bytes)
                 .ok_or_else(|| LlamaError::format("overflow computing gguf context size"))?,
             GGML_MEM_ALIGN,
-        );
+        )
+        .next_multiple_of(16384);
         let mut ctx = Context::new(InitParams {
             mem_size,
             mem_buffer: None,
@@ -85,6 +93,86 @@ impl GgufWeightLayout {
         }
         Ok(loaded)
     }
+
+    /// Mapped path: weights served straight from a read-only mmap of the
+    /// gguf file (clean file-backed pages, lazy page-in) at their file
+    /// offsets; caches/activations get a separate owned dirty region of
+    /// `extra_bytes`. Returns None when mapping is unavailable so callers
+    /// fall back EXACTLY to the owned-arena path.
+    pub fn map_and_load(&self, gguf: &GgufFile, extra_bytes: usize) -> Option<LoadedGgufWeights> {
+        let region = match MappedRegion::map_file(&gguf.path) {
+            Ok(region) => Arc::new(region),
+            Err(err) => {
+                eprintln!("llama: {} — using the owned-arena weight path", err);
+                return None;
+            }
+        };
+
+        // Same padding rule as allocate_context_with_extra: page-multiple
+        // dirty arena so the Metal no-copy buffer wraps it directly.
+        let dirty_size = ggml_pad(extra_bytes, GGML_MEM_ALIGN).next_multiple_of(16384);
+        let mut ctx = Context::new_with_ro_region(region, dirty_size);
+        let mut tensor_ids = BTreeMap::new();
+        for tensor in &self.tensors {
+            match map_tensor_at_file_offset(&mut ctx, gguf, tensor) {
+                Ok(id) => {
+                    tensor_ids.insert(tensor.name.clone(), id);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "llama: cannot map tensor '{}' ({}) — using the owned-arena weight path",
+                        tensor.name, err
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(LoadedGgufWeights { ctx, tensor_ids })
+    }
+}
+
+fn map_tensor_at_file_offset(
+    ctx: &mut Context,
+    gguf: &GgufFile,
+    tensor: &GgufTensorInfo,
+) -> Result<TensorId> {
+    let start = usize::try_from(tensor.absolute_offset(gguf.data_offset)?)
+        .map_err(|_| LlamaError::format("tensor offset does not fit in usize"))?;
+    let size_bytes = usize::try_from(tensor.size_bytes)
+        .map_err(|_| LlamaError::format("tensor size does not fit in usize"))?;
+    let end = start
+        .checked_add(size_bytes)
+        .ok_or_else(|| LlamaError::format("tensor byte range overflow"))?;
+    let file_size = usize::try_from(gguf.file_size)
+        .map_err(|_| LlamaError::format("file size does not fit in usize"))?;
+    if end > file_size {
+        return Err(LlamaError::format(format!(
+            "tensor range [{}..{}) exceeds file size {}",
+            start, end, file_size
+        )));
+    }
+    let dims = tensor_extents_i64(tensor)?;
+    let id = ctx
+        .new_named_tensor_at_offset(
+            tensor.name.clone(),
+            tensor.tensor_type,
+            dims.len(),
+            &dims,
+            BufferUsage::Weights,
+            start,
+        )
+        .map_err(LlamaError::format)?;
+    let nbytes = ctx
+        .tensor(id)
+        .ok_or_else(|| LlamaError::format("mapped tensor id is invalid"))?
+        .nbytes();
+    if nbytes != size_bytes {
+        return Err(LlamaError::format(format!(
+            "computed tensor size {} does not match gguf size {}",
+            nbytes, size_bytes
+        )));
+    }
+    Ok(id)
 }
 
 fn allocate_tensor_ids(

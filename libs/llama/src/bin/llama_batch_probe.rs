@@ -7,7 +7,7 @@
 
 use makepad_ggml::TensorType;
 use makepad_llama::{
-    compile_delta_net_recurrent_decode_metal, execute_delta_net_recurrent_decode_graph_metal_cached,
+    compile_delta_net_recurrent_decode_metal,
     qwen35_delta_net_recurrent_decode_spec, qwen35_recurrent_block_layout, LlamaModel,
     LlamaSession, LlamaSessionConfig, LlamaVocab, LogitsProbeInput,
 };

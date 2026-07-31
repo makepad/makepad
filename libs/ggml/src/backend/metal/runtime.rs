@@ -129,6 +129,10 @@ mod imp {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
+        pub unsafe fn create_buffer_no_copy(&self, _bytes: &[u8]) -> MetalResult<MetalBuffer> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
         pub fn create_buffer(
             &self,
             _size_bytes: usize,
@@ -827,6 +831,24 @@ mod imp {
             })
         }
 
+        /// Zero-copy shared buffer over caller-owned memory (unified
+        /// memory: one copy serves CPU and GPU — model weights would
+        /// otherwise be resident twice).
+        ///
+        /// Safety contract (checked by the caller): `bytes` is
+        /// page-aligned, page-multiple in length, and outlives the
+        /// returned buffer and any GPU work using it.
+        pub unsafe fn create_buffer_no_copy(&self, bytes: &[u8]) -> MetalResult<MetalBuffer> {
+            let ctx = self.ctx.borrow();
+            let obj =
+                ctx.new_buffer_with_bytes_no_copy(bytes.as_ptr() as *const c_void, bytes.len())?;
+            Ok(MetalBuffer {
+                obj,
+                size_bytes: bytes.len(),
+                storage: BufferStorageMode::Shared,
+            })
+        }
+
         pub fn get_or_compile_pipeline(
             &self,
             desc: &MetalPipelineDescriptor,
@@ -1191,6 +1213,28 @@ mod imp {
             };
             unsafe { StrongId::from_owned(obj) }
                 .ok_or_else(|| format!("newBufferWithLength failed for {} bytes", byte_len))
+        }
+
+        /// Wrap existing page-aligned memory as a shared buffer WITHOUT
+        /// copying (unified memory). Caller guarantees: page-aligned base,
+        /// page-multiple length, memory outlives the buffer (deallocator
+        /// is nil — Metal never frees it).
+        fn new_buffer_with_bytes_no_copy(
+            &self,
+            ptr: *const c_void,
+            byte_len: usize,
+        ) -> MetalResult<StrongId> {
+            let obj: ObjcId = unsafe {
+                msg_send![
+                    self.device.as_id(),
+                    newBufferWithBytesNoCopy: ptr as *mut c_void
+                    length: byte_len as u64
+                    options: MTL_RESOURCE_STORAGE_MODE_SHARED
+                    deallocator: nil
+                ]
+            };
+            unsafe { StrongId::from_owned(obj) }
+                .ok_or_else(|| format!("newBufferWithBytesNoCopy failed for {} bytes", byte_len))
         }
 
         fn new_buffer_with_length_private(&self, byte_len: usize) -> MetalResult<StrongId> {

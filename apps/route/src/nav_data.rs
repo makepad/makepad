@@ -28,7 +28,10 @@ pub struct NavData {
     pub searchdb: Option<SearchDb>,
     /// In-RAM Europe settlements, used only when the searchdb is absent.
     pub places: Option<SearchIndex>,
+    /// Europe major-roads long-haul graph (971MB) — loaded on the first
+    /// route that leaves NH coverage, not at startup.
     pub major_graph: Option<RouteGraph>,
+    major_graph_attempted: bool,
     pub chargers: Option<LayerDb>,
 }
 
@@ -72,9 +75,6 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>) {
                 .ok()
                 .and_then(|d| SearchIndex::deserialize(&d).ok())
         };
-        let major_graph = std::fs::read(EUROPE_MAJOR_GRAPH_PATH)
-            .ok()
-            .and_then(|d| RouteGraph::deserialize(&d).ok());
         let chargers = LayerDb::open(Path::new(CHARGERS_MBTILES_PATH)).ok();
 
         let stats = format!(
@@ -83,7 +83,7 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>) {
             nh_search.doc_count(),
             nh_graph.edges.len(),
             if searchdb.is_some() { ", europe searchdb" } else { "" },
-            if major_graph.is_some() { ", major graph" } else { "" },
+            ", major graph on demand",
             if chargers.is_some() { ", chargers" } else { "" },
         );
         let _ = sender.send(NavLoad::Ready {
@@ -92,7 +92,8 @@ pub fn start_nav_load(sender: ToUISender<NavLoad>) {
                 nh_graph,
                 searchdb,
                 places,
-                major_graph,
+                major_graph: None,
+                major_graph_attempted: false,
                 chargers,
             }),
             stats,
@@ -137,10 +138,24 @@ impl NavData {
     /// Detail graph first; whole-pair fallback to the Europe major-roads
     /// graph when an endpoint is outside NH coverage (no cross-graph
     /// stitching — same policy as examples/map).
-    pub fn route_pair(&self, from: LonLat, to: LonLat, mode: TravelMode) -> Option<Route> {
-        self.nh_graph
-            .route(from, to, mode)
-            .or_else(|| self.major_graph.as_ref()?.route(from, to, mode))
+    pub fn route_pair(&mut self, from: LonLat, to: LonLat, mode: TravelMode) -> Option<Route> {
+        if let Some(route) = self.nh_graph.route(from, to, mode) {
+            return Some(route);
+        }
+        if self.major_graph.is_none() && !self.major_graph_attempted {
+            self.major_graph_attempted = true;
+            let t0 = std::time::Instant::now();
+            self.major_graph = std::fs::read(EUROPE_MAJOR_GRAPH_PATH)
+                .ok()
+                .and_then(|d| RouteGraph::deserialize(&d).ok());
+            if self.major_graph.is_some() {
+                makepad_widgets::log!(
+                    "nav: europe-major graph loaded on demand in {:.1}s",
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+        }
+        self.major_graph.as_ref()?.route(from, to, mode)
     }
 }
 
