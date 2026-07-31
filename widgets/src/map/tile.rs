@@ -9038,6 +9038,89 @@ mod bridge_probe_tests {
         );
     }
 
+    /// Headless tile-build profiler: the app's exact hot path (decode +
+    /// parse + style + tessellation) over real archive tiles, no window.
+    /// TILE_PROFILE_KEYS="z,x,y;z,x,y;..." overrides the default slow set;
+    /// TILE_PROFILE_REPS=N (default 3). Run:
+    ///   cargo test -p makepad-widgets --features maps --release \
+    ///     profile_tile_build -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn profile_tile_build() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        // Defaults: the worst offenders from the in-app slow-tile log plus
+        // one mid and one deep zoom for contrast.
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS").unwrap_or_else(|_| {
+            "9,265,170;9,265,171;9,264,171;9,266,170;11,1057,678;13,4207,2692;14,8414,5387".into()
+        });
+        let reps: usize = std::env::var("TILE_PROFILE_REPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        // The real compiled day theme: a default CompiledMapTheme styles
+        // nothing and skips the entire tessellation path being profiled.
+        let theme = crate::map::style::probe_compiled_theme();
+        println!(
+            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>8} {:>9}",
+            "tile", "bytes", "decode", "build", "best", "feats", "verts"
+        );
+        let mut total_best = 0.0f64;
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let tile_count = 1_i64 << z;
+            let Some(blob) = reader.get_tile(z, x, tile_count - 1 - y).ok().flatten() else {
+                println!("{:<16} missing", format!("z{z} {x}/{y}"));
+                continue;
+            };
+            let t0 = std::time::Instant::now();
+            let raw = reader.decode_tile(&blob).unwrap();
+            let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let mut best = f64::MAX;
+            let mut last = None;
+            for _ in 0..reps {
+                let t1 = std::time::Instant::now();
+                let detail = (z >= 14).then_some(raw.as_slice());
+                let buffers = build_tile_buffers_from_mvt(
+                    key,
+                    &raw,
+                    detail,
+                    None,
+                    false,
+                    &[],
+                    &theme,
+                    z as u32,
+                    z >= 14,
+                    true,
+                )
+                .unwrap();
+                best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                last = Some(buffers);
+            }
+            let buffers = last.unwrap();
+            total_best += best;
+            println!(
+                "{:<16} {:>9} {:>8.1}m {:>8.1}m {:>8.1}m {:>8} {:>9}",
+                format!("z{z} {x}/{y}"),
+                blob.len(),
+                decode_ms,
+                best,
+                best,
+                buffers.feature_count,
+                buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            );
+        }
+        println!("total best-of-{reps}: {total_best:.1}ms");
+    }
+
     #[test]
     #[ignore]
     fn weesperplein_tear_probe() {
