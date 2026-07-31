@@ -739,6 +739,9 @@ pub struct TextFlow {
     pub inline_code_padding: Inset,
     #[live]
     pub inline_code_margin: Inset,
+    /// Font-size scale for fixed/code runs relative to the surrounding text.
+    #[live(0.85)]
+    pub fixed_font_size_scale: f64,
     #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
     pub heading_margin: Inset,
     #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
