@@ -1,5 +1,5 @@
 use crate::makepad_draw::{
-    audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent},
+    audio::{AudioBuffer, AudioDeviceId, AudioDevicesEvent, AudioInputOptions},
     permission::{Permission, PermissionResult, PermissionStatus},
     thread::SignalToUI,
     Cx, CxMediaApi, Event, NextFrame,
@@ -246,7 +246,14 @@ impl WindowVoiceInput {
         let _ = self.control_tx.send(VoiceControlMessage::Preload);
         if let Some(device_id) = self.default_input {
             self.capture_enabled.store(true, Ordering::Relaxed);
-            cx.use_audio_inputs(&[device_id]);
+            // Speech capture wants the OS voice-processing path: echo
+            // cancellation keeps the app's own TTS out of the transcript.
+            cx.use_audio_inputs_with_options(
+                &[device_id],
+                AudioInputOptions {
+                    echo_cancellation: true,
+                },
+            );
         } else {
             self.capture_enabled.store(false, Ordering::Relaxed);
             cx.use_audio_inputs(&[]);
