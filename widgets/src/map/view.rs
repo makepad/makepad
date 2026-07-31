@@ -2920,14 +2920,14 @@ impl MapView {
                         if tile.buffers.feature_count == 0 {
                             empty_feature_tiles.push(tile.tile_key);
                         }
-                        // A result styled for a bucket that is no longer
-                        // current is already-stale work: uploading it would
-                        // only compete with the current bucket's builds and
-                        // trigger a pointless restyle-fade. Drop it cheaply;
-                        // keep-stale geometry covers the gap.
-                        if tile.buffers.render_zoom != current_bucket {
-                            continue;
-                        }
+                        // NOTE: do NOT drop results whose bucket moved on:
+                        // buffers.render_zoom (request-zoom space, clamped to
+                        // the archive max) and render_bucket() disagree at
+                        // overzoom, so a != check here discarded EVERY tile
+                        // at building zooms — permanent livelock (build 24).
+                        // A stale-bucket result is still drawable; the
+                        // bucket-restyle path rebuilds it in due course.
+                        let _ = current_bucket;
                         self.pending_ready_tiles
                             .retain(|(key, _)| *key != tile.tile_key);
                         self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
