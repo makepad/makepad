@@ -6321,6 +6321,7 @@ pub fn load_local_tile_batch(
                     unavailable.push(tile_key);
                     continue;
                 };
+                let t_build = std::time::Instant::now();
                 let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
                 let detail_needed = render_zoom >= ICON_MIN_ZOOM
                     || render_zoom >= 16
@@ -6340,7 +6341,7 @@ pub fn load_local_tile_batch(
                         .flatten()
                         .flatten()
                 };
-                let detail_slice = if combined_archive && detail_needed {
+                let detail_slice = if combined_archive && detail_needed && tile_key.z >= 14 {
                     Some(raw.as_slice())
                 } else {
                     detail_raw.as_deref()
@@ -6360,6 +6361,20 @@ pub fn load_local_tile_batch(
                     build_road_core,
                 ) {
                     Ok(buffers) => {
+                        // Slow-tile forensics: anything over 150ms is worth a
+                        // line — which tile, how many bytes, what it holds.
+                        let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
+                        if build_ms > 150.0 {
+                            log!(
+                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build, {} raw bytes, detail {}",
+                                tile_key.z,
+                                tile_key.x,
+                                tile_key.y,
+                                build_ms,
+                                raw.len(),
+                                detail_slice.map_or(0, |d| d.len()),
+                            );
+                        }
                         loaded.push(LoadedLocalTile { tile_key, buffers });
                     }
                     Err(err) => {
@@ -6456,7 +6471,7 @@ pub fn load_local_tile_batch(
             let tile_data = reader
                 .decode_tile(&tile.tile_data)
                 .unwrap_or_else(|_| tile.tile_data.clone());
-            let detail_slice = if combined_archive && detail_needed {
+            let detail_slice = if combined_archive && detail_needed && tile_key.z >= 14 {
                 Some(tile_data.as_slice())
             } else {
                 detail_raw.as_deref()
