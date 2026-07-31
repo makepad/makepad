@@ -734,6 +734,26 @@ impl TextInput {
         self.draw_text.max_lines
     }
 
+    /// Takes key focus AND turns the caret on.
+    ///
+    /// Use this instead of the bare `Widget::set_key_focus` whenever the app
+    /// hands focus to a field itself. The caret is drawn as
+    /// `(1.0 - blink) * focus`, and both come from the `focus`/`blink`
+    /// animators, which only move when the widget is dealt a `Hit::KeyFocus`.
+    /// Setting key focus on a field that ALREADY holds it is a no-op at the
+    /// platform level — no hit is dispatched — so a field that was focused,
+    /// then hidden (hiding doesn't clear `Cx`'s key focus) and shown again
+    /// comes back typable but with no caret and no selection highlight, its
+    /// animators still parked where the last focus-lost left them.
+    pub fn take_key_focus(&mut self, cx: &mut Cx) {
+        cx.set_key_focus(self.draw_bg.area());
+        // Unconditional, not gated on the focus actually changing: the whole
+        // point is to repair the visuals when it did NOT.
+        self.animator_play(cx, ids!(focus.on));
+        self.reset_blink_timer(cx);
+        self.draw_bg.redraw(cx);
+    }
+
     /// Overrides the height this field asks its parent for.
     ///
     /// For a composer that folds to one line when it loses focus. Pinning the
@@ -3085,6 +3105,13 @@ impl TextInputRef {
 
     pub fn max_lines(&self) -> usize {
         self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::take_key_focus`].
+    pub fn take_key_focus(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.take_key_focus(cx);
+        }
     }
 
     /// See [`TextInput::set_height`].
