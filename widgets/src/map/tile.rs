@@ -221,6 +221,10 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
+    /// Compact per-stage build timing ("stage:ms stage:ms ..."), filled for
+    /// builds over ~100ms — carried into the SLOW-tile log so a slow build
+    /// is replayable headlessly without re-hitting it in-app.
+    pub stage_summary: String,
 }
 
 impl TileBuffers {
@@ -1452,6 +1456,7 @@ pub fn build_tile_buffers_from_body(
         false,
         false,
         Vec::new(),
+        None,
     ))
 }
 
@@ -1486,6 +1491,21 @@ pub fn build_tile_buffers_from_mvt(
         Vec::new()
     } else {
         parse_baked_fills(&pbf_data).unwrap_or_default()
+    };
+    // Baked painter-cascade faces (v2-faces-1, field 101): buckets 14-16
+    // only — outside that range styling diverges from any baked bucket and
+    // the runtime cascade is authoritative. MAKEPAD_NO_BAKED_FACES=1 is the
+    // kill switch / A/B lever.
+    static NO_BAKED_FACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let no_baked_faces =
+        *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
+    let baked_faces = if !no_baked_faces
+        && (14..=16).contains(&render_zoom)
+        && !faces_bake_sink_armed()
+    {
+        parse_baked_faces(&pbf_data, render_zoom)
+    } else {
+        None
     };
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -1578,6 +1598,7 @@ pub fn build_tile_buffers_from_mvt(
         bridge_dz_covered,
         have_charger_overlay,
         baked_fills,
+        baked_faces,
     ))
 }
 
@@ -2887,6 +2908,9 @@ struct TileProfiler {
     on: bool,
     last: std::time::Instant,
     start: std::time::Instant,
+    /// Always recorded (cheap): fuels the SLOW-tile replay log even when
+    /// stage printing is off.
+    laps: Vec<(&'static str, f64)>,
 }
 
 impl TileProfiler {
@@ -2899,18 +2923,32 @@ impl TileProfiler {
                 || std::path::Path::new("/tmp/mp_tile_profile").exists(),
             last: now,
             start: now,
+            laps: Vec::new(),
         }
     }
-    fn lap(&mut self, name: &str, extra: &str) {
-        if !self.on {
-            return;
-        }
+    fn lap(&mut self, name: &'static str, extra: &str) {
         let now = std::time::Instant::now();
-        eprintln!(
-            "MPPROF {name} {:.1}ms {extra}",
-            (now - self.last).as_secs_f64() * 1000.0
-        );
+        let ms = (now - self.last).as_secs_f64() * 1000.0;
+        self.laps.push((name, ms));
+        if self.on {
+            eprintln!("MPPROF {name} {ms:.1}ms {extra}");
+        }
         self.last = now;
+    }
+
+    /// Compact "stage:ms" summary for builds worth logging.
+    fn summary(&self) -> String {
+        let mut out = String::new();
+        for (name, ms) in &self.laps {
+            if *ms < 0.5 {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("{name}:{ms:.0}"));
+        }
+        out
     }
     fn total(&self, tile_key: TileKey, extra: &str) {
         if !self.on {
@@ -2939,6 +2977,7 @@ fn build_tile_buffers_from_features(
     bridge_dz_covered: bool,
     have_charger_overlay: bool,
     baked_fills: Vec<BakedFillFeature>,
+    baked_faces: Option<BakedFacesBucket>,
 ) -> TileBuffers {
     let mut profiler = TileProfiler::new();
     // How much this tile gets magnified on screen at the styled view zoom.
@@ -4884,7 +4923,13 @@ fn build_tile_buffers_from_features(
     // continuation must not turn every branch at that node into a butt end.
     let mut endpoint_tiers: HashMap<(i32, i32), Vec<(RoadTierEnd, (f32, f32), f32)>> =
         HashMap::new();
-    for (key, (_, ways)) in union_tiers.iter() {
+    // Iterate the SORTED tier list, not the HashMap: per-node candidate
+    // order feeds flush-joint pairing and the groups' skirt-joint lists,
+    // and raw map order made builds nondeterministic run-to-run (which the
+    // per-bucket face bake verification caught).
+    for &(key, entry) in tier_list.iter() {
+        let ways = &entry.1;
+        let key = &key;
         for (way_index, (points, dz)) in ways.iter().enumerate() {
             if points.len() < 2 {
                 continue;
@@ -5214,10 +5259,82 @@ fn build_tile_buffers_from_features(
             &format!("groups={} rings={} ring_verts={}", groups.len(), ring_count, ring_verts),
         );
     }
+    // Bake mode (offline tool): capture the cascade output + signature and
+    // stop — nothing after the faces is needed for the bake.
+    if faces_bake_sink_armed() {
+        let regions = if groups.is_empty() {
+            Vec::new()
+        } else {
+            compute_visible_regions(&groups)
+        };
+        let bucket = BakedFacesBucket {
+            bucket: render_zoom,
+            signature: paint_groups_signature(&groups),
+            regions,
+        };
+        FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
+        return TileBuffers {
+            pin_hits: Vec::new(),
+            fill_indices: Vec::new(),
+            fill_vertices: Vec::new(),
+            casing_indices: Vec::new(),
+            casing_vertices: Vec::new(),
+            stroke_indices: Vec::new(),
+            stroke_vertices: Vec::new(),
+            icon_indices: Vec::new(),
+            icon_vertices: Vec::new(),
+            road_icon_indices: Vec::new(),
+            road_icon_vertices: Vec::new(),
+            mode_overlay_only: false,
+            feature_count: 0,
+            labels: Vec::new(),
+            render_zoom,
+            stage_summary: String::new(),
+        };
+    }
     let faces = if groups.is_empty() {
         Vec::new()
     } else {
-        overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units)
+        // Baked cascade fast path: regions from the archive, tessellation +
+        // styling at runtime. Guarded by the group-structure signature (and
+        // the stream's coordinate checksum at parse time); any mismatch
+        // falls back to the runtime cascade.
+        let baked = baked_faces.as_ref().filter(|bake| {
+            let signature = paint_groups_signature(&groups);
+            let ok = bake.bucket == render_zoom
+                && bake.signature == signature
+                && bake
+                    .regions
+                    .iter()
+                    .all(|region| region.group_index < groups.len());
+            if !ok && profiler.on {
+                eprintln!(
+                    "MPPROF cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
+                    bake.bucket,
+                    render_zoom,
+                    bake.signature,
+                    signature,
+                    bake.regions.len(),
+                    groups.len(),
+                );
+            }
+            ok
+        });
+        match baked {
+            Some(bake) => {
+                if profiler.on {
+                    eprintln!("MPPROF cascade-baked regions={}", bake.regions.len());
+                }
+                build_paint_faces(
+                    &groups,
+                    &bake.regions,
+                    &mut tess,
+                    tolerance,
+                    analytic_fringe_units,
+                )
+            }
+            None => overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units),
+        }
     };
     if profiler.on {
         let face_verts: usize = faces.iter().map(|face| face.verts.len()).sum();
@@ -5908,6 +6025,11 @@ fn build_tile_buffers_from_features(
         ),
     );
 
+    let stage_summary = if profiler.start.elapsed().as_secs_f64() * 1e3 > 100.0 {
+        profiler.summary()
+    } else {
+        String::new()
+    };
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -5924,6 +6046,7 @@ fn build_tile_buffers_from_features(
         feature_count,
         labels,
         render_zoom,
+        stage_summary,
     }
 }
 
@@ -6477,14 +6600,48 @@ pub fn load_local_tile_batch(
                         // line — which tile, how many bytes, what it holds.
                         let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
                         if build_ms > 150.0 {
+                            // Everything needed to replay this exact build
+                            // headlessly, plus the ready-to-paste command.
+                            let detail_env = if combined_archive {
+                                String::new()
+                            } else {
+                                detail_mbtiles_path
+                                    .map(|p| {
+                                        format!(
+                                            " TILE_PROFILE_DETAIL_ARCHIVE={}",
+                                            p.display()
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            let dz_env = bridge_dz_mbtiles_path
+                                .map(|p| format!(" TILE_PROFILE_BRIDGE_DZ={}", p.display()))
+                                .unwrap_or_default();
+                            let overlays_env = if overlay_paths.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" TILE_PROFILE_OVERLAYS=\"{}\"", overlay_paths.join(";"))
+                            };
                             log!(
-                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build, {} raw bytes, detail {}",
+                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TILE_STAGES=1 TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
                                 tile_key.z,
                                 tile_key.x,
                                 tile_key.y,
                                 build_ms,
+                                render_zoom,
+                                if buildings_3d { "3D" } else { "flat" },
                                 raw.len(),
                                 detail_slice.map_or(0, |d| d.len()),
+                                buffers.stage_summary,
+                                mbtiles_path.display(),
+                                detail_env,
+                                dz_env,
+                                overlays_env,
+                                tile_key.z,
+                                tile_key.x,
+                                tile_key.y,
+                                render_zoom,
+                                if buildings_3d { "1" } else { "0" },
                             );
                         }
                         loaded.push(LoadedLocalTile { tile_key, buffers });
@@ -6887,6 +7044,280 @@ impl MvtValue {
             }
         }
     }
+}
+
+// --- Baked painter-cascade faces (payload v2-faces-1) ----------------------
+// The road painter-order union cascade (compute_visible_regions) is fully
+// deterministic per (tile bytes, bridge-dz bytes, style structure, render
+// bucket). Field 101 stores its output rings per bucket 14/15/16 so the
+// renderer can skip the boolean cascade — the dominant cost of heavy urban
+// tiles. Group STYLING (colors/ranks/fields) stays runtime: baked regions
+// join the runtime-built PaintGroups by index, guarded by a structural
+// signature plus a coordinate checksum. Any mismatch falls back to the
+// runtime cascade, so the stream is strictly an accelerator.
+
+thread_local! {
+    /// Bake-tool sink: when armed (Some), build_tile_buffers_from_features
+    /// stops at the painter cascade and hands its regions back through
+    /// here. Thread-local so the offline baker needs no public signature
+    /// churn on the tile-build entry points; never armed in the app.
+    static FACES_BAKE_SINK: std::cell::RefCell<Option<Option<BakedFacesBucket>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn faces_bake_sink_armed() -> bool {
+    FACES_BAKE_SINK.with(|sink| sink.borrow().is_some())
+}
+
+/// Offline bake entry: run the real tile build up to the painter cascade
+/// for one bucket and return its captured regions + signature.
+pub fn bake_tile_paint_faces(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    theme: &CompiledMapTheme,
+    bucket: u32,
+) -> Option<BakedFacesBucket> {
+    FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(None));
+    let result = build_tile_buffers_from_mvt(
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        &[],
+        theme,
+        bucket,
+        false,
+        true,
+    );
+    let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
+    match (result, captured) {
+        (Ok(_), Some(bucket)) => bucket,
+        _ => None,
+    }
+}
+
+const BAKED_FACES_FIELD: u32 = 101;
+const BAKED_FACES_VERSION: u8 = 1;
+/// Cascade coordinates are snapped to 1/64 unit (geometry.rs SNAP), so a
+/// x64 fixed-point roundtrip is EXACT.
+const BAKED_FACES_COORD_SCALE: f64 = 64.0;
+
+fn fnv1a64_step(hash: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *hash ^= b as u64;
+        *hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+/// Structural signature of the cascade INPUT: group order, phases, ranks,
+/// fields, ring counts/sizes and per-ring dz classification. Identical
+/// between bake and runtime iff the styling structure and tier input match.
+pub fn paint_groups_signature(groups: &[PaintGroup]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    fnv1a64_step(&mut hash, &(groups.len() as u32).to_le_bytes());
+    for group in groups {
+        fnv1a64_step(&mut hash, &[group.phase]);
+        fnv1a64_step(&mut hash, &group.rank.to_le_bytes());
+        fnv1a64_step(&mut hash, &group.field.to_le_bytes());
+        fnv1a64_step(&mut hash, &group.half_width.to_bits().to_le_bytes());
+        fnv1a64_step(&mut hash, &(group.rings.len() as u32).to_le_bytes());
+        for (ring, min_dz, max_dz) in &group.rings {
+            fnv1a64_step(&mut hash, &(ring.len() as u32).to_le_bytes());
+            let lifted = (*max_dz >= LIFT_COVER_M) as u8;
+            let sunk = (*min_dz <= -LIFT_COVER_M) as u8;
+            fnv1a64_step(&mut hash, &[lifted | (sunk << 1)]);
+        }
+    }
+    hash
+}
+
+fn write_faces_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn faces_zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn write_shapes(
+    shapes: &[Vec<Vec<[f64; 2]>>],
+    out: &mut Vec<u8>,
+    checksum: &mut u64,
+) {
+    write_faces_varint(shapes.len() as u64, out);
+    for shape in shapes {
+        write_faces_varint(shape.len() as u64, out);
+        for ring in shape {
+            write_faces_varint(ring.len() as u64, out);
+            let mut px = 0i64;
+            let mut py = 0i64;
+            for p in ring {
+                let x = (p[0] * BAKED_FACES_COORD_SCALE).round() as i64;
+                let y = (p[1] * BAKED_FACES_COORD_SCALE).round() as i64;
+                write_faces_varint(faces_zigzag(x - px), out);
+                write_faces_varint(faces_zigzag(y - py), out);
+                fnv1a64_step(checksum, &x.to_le_bytes());
+                fnv1a64_step(checksum, &y.to_le_bytes());
+                px = x;
+                py = y;
+            }
+        }
+    }
+}
+
+/// One bucket's baked cascade: the group-structure signature it was built
+/// against plus each group's visible regions.
+pub struct BakedFacesBucket {
+    pub bucket: u32,
+    pub signature: u64,
+    pub regions: Vec<VisibleRegions>,
+}
+
+/// Encode buckets into the complete field-101 bytes to append to a tile.
+pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
+    let mut blob = Vec::new();
+    blob.push(BAKED_FACES_VERSION);
+    write_faces_varint(buckets.len() as u64, &mut blob);
+    for bucket in buckets {
+        write_faces_varint(bucket.bucket as u64, &mut blob);
+        blob.extend_from_slice(&bucket.signature.to_le_bytes());
+        let mut body = Vec::new();
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        write_faces_varint(bucket.regions.len() as u64, &mut body);
+        for region in &bucket.regions {
+            write_faces_varint(region.group_index as u64, &mut body);
+            write_shapes(&region.main, &mut body, &mut checksum);
+            write_shapes(&region.sunk, &mut body, &mut checksum);
+            write_shapes(&region.lifted_outlines, &mut body, &mut checksum);
+        }
+        blob.extend_from_slice(&checksum.to_le_bytes());
+        write_faces_varint(body.len() as u64, &mut blob);
+        blob.extend_from_slice(&body);
+    }
+    let mut field = Vec::with_capacity(blob.len() + 8);
+    write_faces_varint(u64::from(BAKED_FACES_FIELD) << 3 | 2, &mut field);
+    write_faces_varint(blob.len() as u64, &mut field);
+    field.extend_from_slice(&blob);
+    field
+}
+
+fn read_shapes(
+    blob: &[u8],
+    pos: &mut usize,
+    checksum: &mut u64,
+) -> Option<Vec<Vec<Vec<[f64; 2]>>>> {
+    let shape_count = read_pb_varint(blob, pos).ok()? as usize;
+    if shape_count > 1_000_000 {
+        return None;
+    }
+    let mut shapes = Vec::with_capacity(shape_count);
+    for _ in 0..shape_count {
+        let ring_count = read_pb_varint(blob, pos).ok()? as usize;
+        if ring_count > 1_000_000 {
+            return None;
+        }
+        let mut rings = Vec::with_capacity(ring_count);
+        for _ in 0..ring_count {
+            let pt_count = read_pb_varint(blob, pos).ok()? as usize;
+            if pt_count > 4_000_000 {
+                return None;
+            }
+            let mut ring = Vec::with_capacity(pt_count);
+            let mut px = 0i64;
+            let mut py = 0i64;
+            for _ in 0..pt_count {
+                px += zigzag_decode(read_pb_varint(blob, pos).ok()?);
+                py += zigzag_decode(read_pb_varint(blob, pos).ok()?);
+                fnv1a64_step(checksum, &px.to_le_bytes());
+                fnv1a64_step(checksum, &py.to_le_bytes());
+                ring.push([
+                    px as f64 / BAKED_FACES_COORD_SCALE,
+                    py as f64 / BAKED_FACES_COORD_SCALE,
+                ]);
+            }
+            rings.push(ring);
+        }
+        shapes.push(rings);
+    }
+    Some(shapes)
+}
+
+/// Scan a decoded tile for field 101 and decode ONE bucket's regions.
+/// None = absent/malformed/checksum-mismatch: caller runs the cascade.
+pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFacesBucket> {
+    let mut pos = 0usize;
+    let mut blob: Option<&[u8]> = None;
+    while pos < tile_data.len() {
+        let key = read_pb_varint(tile_data, &mut pos).ok()?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        if field == BAKED_FACES_FIELD && wire == 2 {
+            blob = Some(read_pb_len_slice(tile_data, &mut pos).ok()?);
+            break;
+        }
+        skip_pb_field(tile_data, &mut pos, wire).ok()?;
+    }
+    let blob = blob?;
+    if blob.first() != Some(&BAKED_FACES_VERSION) {
+        return None;
+    }
+    let mut pos = 1usize;
+    let bucket_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+    for _ in 0..bucket_count.min(16) {
+        let bucket = read_pb_varint(blob, &mut pos).ok()? as u32;
+        if pos + 16 > blob.len() {
+            return None;
+        }
+        let signature = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        let stored_checksum = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        let body_len = read_pb_varint(blob, &mut pos).ok()? as usize;
+        if pos + body_len > blob.len() {
+            return None;
+        }
+        if bucket != want_bucket {
+            pos += body_len;
+            continue;
+        }
+        let body = &blob[pos..pos + body_len];
+        let mut bpos = 0usize;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        let region_count = read_pb_varint(body, &mut bpos).ok()? as usize;
+        if region_count > 100_000 {
+            return None;
+        }
+        let mut regions = Vec::with_capacity(region_count);
+        for _ in 0..region_count {
+            let group_index = read_pb_varint(body, &mut bpos).ok()? as usize;
+            let main = read_shapes(body, &mut bpos, &mut checksum)?;
+            let sunk = read_shapes(body, &mut bpos, &mut checksum)?;
+            let lifted_outlines = read_shapes(body, &mut bpos, &mut checksum)?;
+            regions.push(VisibleRegions {
+                group_index,
+                main,
+                sunk,
+                lifted_outlines,
+            });
+        }
+        if checksum != stored_checksum {
+            return None;
+        }
+        return Some(BakedFacesBucket {
+            bucket,
+            signature,
+            regions,
+        });
+    }
+    None
 }
 
 // --- Baked fill triangulations (payload v2-fills-1) -----------------------
@@ -7902,6 +8333,48 @@ mod bridge_probe_tests {
             parse_mvt_tile(&pbf, key, &mut collector).unwrap();
             let mut per_layer: std::collections::BTreeMap<String, (usize, usize)> =
                 Default::default();
+            let mut point_layers: std::collections::BTreeMap<String, usize> = Default::default();
+            for (_pos, tags) in &collector.points {
+                let layer = tags.get("layer").cloned().unwrap_or_default();
+                *point_layers.entry(layer).or_default() += 1;
+            }
+            for (layer, count) in &point_layers {
+                println!("  POINTS {:<24} {:>6}", layer, count);
+            }
+            // The real micro-POI path: merge_detail_features with the
+            // detail whitelist (trees/benches/bins enter here, not via
+            // plain parsing).
+            {
+                let mut points = Vec::new();
+                let mut ways = Vec::new();
+                let mut corridors = Vec::new();
+                merge_detail_features(
+                    &raw,
+                    key,
+                    4.0,
+                    true,
+                    true,
+                    false,
+                    &mut points,
+                    &mut ways,
+                    &mut corridors,
+                )
+                .unwrap();
+                let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+                for (_pos, tags) in &points {
+                    let kind = tags
+                        .get("natural")
+                        .or_else(|| tags.get("amenity"))
+                        .or_else(|| tags.get("highway"))
+                        .cloned()
+                        .unwrap_or_else(|| "other".into());
+                    *kinds.entry(kind).or_default() += 1;
+                }
+                println!("  DETAIL-MERGE points={} ways={}", points.len(), ways.len());
+                for (kind, count) in kinds.iter().take(8) {
+                    println!("    micro {:<16} {:>6}", kind, count);
+                }
+            }
             let mut street_kind: std::collections::BTreeMap<String, usize> = Default::default();
             for way in &collector.ways {
                 let layer = way.tags.get("layer").cloned().unwrap_or_default();
@@ -7928,6 +8401,162 @@ mod bridge_probe_tests {
         }
     }
 
+    /// Baked painter-cascade roundtrip: bake one tile's faces per bucket,
+    /// append the field-101 stream to the payload, rebuild through the
+    /// normal path, and require BIT-IDENTICAL buffers vs the runtime
+    /// cascade (same code builds the faces either way; the stream's 1/64
+    /// fixed-point roundtrip is exact).
+    #[test]
+    #[ignore]
+    fn baked_faces_roundtrip() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive");
+            return;
+        }
+        let keys = std::env::var("TILE_PROFILE_KEYS")
+            .unwrap_or_else(|_| "14,8414,5386;14,8415,5387".into());
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut dz_reader = std::env::var("TILE_PROFILE_BRIDGE_DZ")
+            .ok()
+            .map(|p| makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&p)).unwrap());
+        let theme = crate::map::style::probe_compiled_theme();
+        for spec in keys.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let raw = reader
+                .get_tile_decoded(z, x, (1 << z) - 1 - y)
+                .unwrap()
+                .unwrap();
+            let dz_raw = dz_reader
+                .as_mut()
+                .and_then(|r| r.get_tile_decoded(z, x, (1 << z) - 1 - y).ok().flatten());
+            let dz_covered = dz_reader.is_some();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            for bucket in [14u32, 15, 16] {
+                let Some(baked) =
+                    bake_tile_paint_faces(key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &theme, bucket)
+                else {
+                    println!("z{z} {x}/{y} b{bucket}: no bake");
+                    continue;
+                };
+                let baked2 =
+                    bake_tile_paint_faces(key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &theme, bucket)
+                        .unwrap();
+                println!(
+                    "bake determinism: sig {} regions {} vs sig {} regions {} | encode equal {}",
+                    baked.signature,
+                    baked.regions.len(),
+                    baked2.signature,
+                    baked2.regions.len(),
+                    encode_baked_faces_field(std::slice::from_ref(&baked))
+                        == encode_baked_faces_field(std::slice::from_ref(&baked2)),
+                );
+                let region_count = baked.regions.len();
+                let field = encode_baked_faces_field(&[baked]);
+                let mut with_field = pbf.clone();
+                with_field.extend_from_slice(&field);
+                // Decode sanity through the parse path.
+                let parsed = parse_baked_faces(&with_field, bucket).expect("parse baked");
+                assert_eq!(parsed.regions.len(), region_count);
+                let runtime = build_tile_buffers_from_mvt(
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                )
+                .unwrap();
+                let runtime2 = build_tile_buffers_from_mvt(
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                )
+                .unwrap();
+                let baked_build = build_tile_buffers_from_mvt(
+                    key,
+                    &with_field,
+                    Some(&with_field),
+                    dz_raw.as_deref(),
+                    dz_covered,
+                    &[],
+                    &theme,
+                    bucket,
+                    false,
+                    true,
+                )
+                .unwrap();
+                // Emission ORDER is not deterministic run-to-run in
+                // production (HashMap-fed passes downstream of the faces;
+                // order-derived floats zbias/micro-depth ride along), so
+                // equivalence is order-independent: identical vertex
+                // MULTISETS with the two order-derived fields masked, and
+                // runtime-vs-runtime must show the same equivalence as
+                // baked-vs-runtime (proving the bake adds no divergence
+                // beyond the pre-existing jitter).
+                let vert_multiset = |verts: &[f32]| -> Vec<Vec<u32>> {
+                    let mut rows: Vec<Vec<u32>> = verts
+                        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+                        .map(|chunk| {
+                            chunk
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| *i != 16 && *i != 18)
+                                .map(|(_, v)| v.to_bits())
+                                .collect()
+                        })
+                        .collect();
+                    rows.sort_unstable();
+                    rows
+                };
+                for (name, a, b, c) in [
+                    (
+                        "casing",
+                        &runtime.casing_vertices,
+                        &runtime2.casing_vertices,
+                        &baked_build.casing_vertices,
+                    ),
+                    (
+                        "stroke",
+                        &runtime.stroke_vertices,
+                        &runtime2.stroke_vertices,
+                        &baked_build.stroke_vertices,
+                    ),
+                    (
+                        "fill",
+                        &runtime.fill_vertices,
+                        &runtime2.fill_vertices,
+                        &baked_build.fill_vertices,
+                    ),
+                ] {
+                    let ma = vert_multiset(a);
+                    assert_eq!(
+                        ma,
+                        vert_multiset(b),
+                        "{name} runtime-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}"
+                    );
+                    let mc = vert_multiset(c);
+                    if ma != mc {
+                        let only_a: Vec<_> = ma.iter().filter(|r| !mc.contains(r)).take(3).collect();
+                        let only_c: Vec<_> = mc.iter().filter(|r| !ma.contains(r)).take(3).collect();
+                        println!("{name}: rows {} vs {}", ma.len(), mc.len());
+                        for r in &only_a {
+                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
+                            println!("  only-runtime: {:?}", &f[..8.min(f.len())]);
+                        }
+                        for r in &only_c {
+                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
+                            println!("  only-baked:   {:?}", &f[..8.min(f.len())]);
+                        }
+                        panic!("{name} baked-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}");
+                    }
+                }
+                println!(
+                    "z{z} {x}/{y} b{bucket}: OK bit-identical, {} regions, field {} bytes",
+                    region_count,
+                    field.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn structural_bridge_area_is_3d_only() {
         assert!(!structural_bridge_area_visible("bridges", false));
@@ -7948,6 +8577,7 @@ mod bridge_probe_tests {
             stroke_vertices: Vec::new(),
             icon_indices: vec![0],
             icon_vertices: vec![1.0; VECTOR_FLOATS_PER_VERTEX],
+            stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: true,
@@ -9779,6 +10409,64 @@ mod bridge_probe_tests {
                 .ok()
                 .map(|v| v == "1")
                 .unwrap_or(z >= 14);
+            // TILE_PROFILE_BRIDGE_DZ / TILE_PROFILE_OVERLAYS: reproduce the
+            // in-app worker path exactly (the SLOW-log replay contract) by
+            // delegating to load_local_tile_batch, which owns dz-coverage
+            // bounds and overlay quadrant/filter handling.
+            let bridge_dz_env = std::env::var("TILE_PROFILE_BRIDGE_DZ").ok();
+            let overlays_env: Vec<String> = std::env::var("TILE_PROFILE_OVERLAYS")
+                .map(|v| {
+                    v.split(';')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if bridge_dz_env.is_some() || !overlays_env.is_empty() {
+                let mut best = f64::MAX;
+                let mut last = None;
+                for _ in 0..reps {
+                    let t1 = std::time::Instant::now();
+                    // Combined archives are their own detail source (the
+                    // app passes the same path for both).
+                    let detail_env = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE").ok();
+                    let (loaded, _failed) = load_local_tile_batch(
+                        path,
+                        Some(
+                            detail_env
+                                .as_deref()
+                                .map(std::path::Path::new)
+                                .unwrap_or(path),
+                        ),
+                        bridge_dz_env.as_deref().map(std::path::Path::new),
+                        &overlays_env,
+                        &[TileKey { z: z as u32, x: x as i32, y: y as i32 }],
+                        &theme,
+                        render_zoom,
+                        force_3d,
+                        true,
+                    )
+                    .unwrap();
+                    best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                    last = loaded.into_iter().next().map(|t| t.buffers);
+                }
+                let Some(buffers) = last else {
+                    println!("{:<16} missing (batch)", format!("z{z} {x}/{y}"));
+                    continue;
+                };
+                total_best += best;
+                println!(
+                    "{:<16} {:>9} {:>8.1}m {:>8.1}m {:>8.1}m {:>8} {:>9}  (full batch path)",
+                    format!("z{z} {x}/{y}"),
+                    blob.len(),
+                    decode_ms,
+                    best,
+                    best,
+                    buffers.feature_count,
+                    buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                );
+                continue;
+            }
             let detail_raw: Option<Vec<u8>> = detail_reader.as_mut().and_then(|dr| {
                 let blob = dr.get_tile(z, x, tile_count - 1 - y).ok().flatten()?;
                 dr.decode_tile(&blob).ok()
@@ -9819,6 +10507,11 @@ mod bridge_probe_tests {
                 best,
                 buffers.feature_count,
                 buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+            );
+            println!(
+                "                  icons {} labels {}",
+                buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                buffers.labels.len()
             );
         }
         println!("total best-of-{reps}: {total_best:.1}ms");
