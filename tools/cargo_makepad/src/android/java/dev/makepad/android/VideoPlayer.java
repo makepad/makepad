@@ -16,6 +16,8 @@ import android.media.MediaPlayer;
 import java.io.FileInputStream;
 import java.io.File;
 
+import android.net.Uri;
+
 import dev.makepad.android.MakepadNative;
 
 public class VideoPlayer {
@@ -56,12 +58,19 @@ public class VideoPlayer {
                 mMediaPlayer.setDataSource(dataSource);
             } else if (mSource instanceof String) {
                 String dataString = (String) mSource;
+                Activity activity = mActivityReference.get();
                 if (dataString.startsWith("http://") || dataString.startsWith("https://")) {
                     // Source is a network URL
                     Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=network");
                     mMediaPlayer.setDataSource(dataString);
+                } else if (dataString.startsWith("content://") || dataString.startsWith("file://")) {
+                    if (activity == null) {
+                        throw new IllegalStateException("Activity unavailable for URI playback");
+                    }
+                    Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=uri " + dataString);
+                    mMediaPlayer.setDataSource(activity, Uri.parse(dataString));
                 } else {
-                    // Source is a url pointing to the local filesystem
+                    // Source is a path on the local filesystem
                     Log.i("MakepadVideoPlayer", "videoId=" + mVideoId + " source=file path=" + dataString);
                     mMediaPlayer.setDataSource(new FileInputStream(new File(dataString)).getFD());
                 }

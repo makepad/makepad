@@ -33,6 +33,15 @@ script_mod! {
             yuv_enabled: uniform(0.0)
             yuv_biplanar: uniform(0.0)
             yuv_rotation_steps: uniform(0.0)
+            // Android OES zero-copy: SurfaceTexture.getTransformMatrix() as 4 column
+            // vec4s (column-major). Required by the Android contract before sampling
+            // samplerExternalOES — handles Y-flip, crop, and buffer alignment. Left as
+            // identity on non-Android / non-OES paths (no-op). Prefer keeping these over
+            // a hard-coded v=1-v; only drop if UV is baked in an OES->2D blit instead.
+            oes_st_c0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+            oes_st_c1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+            oes_st_c2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+            oes_st_c3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
 
             opacity: instance(1.0)
             image_scale: instance(vec2(1.0, 1.0))
@@ -40,6 +49,13 @@ script_mod! {
 
             source_size: uniform(vec2(1.0, 1.0))
             target_size: uniform(vec2(-1.0, -1.0))
+
+            // Apply SurfaceTexture ST matrix, then sample OES (see oes_st_c* comment).
+            sample_oes: fn(coord: vec2) -> vec4 {
+                let uv = vec4(coord.x, coord.y, 0.0, 1.0)
+                let t = self.oes_st_c0 * uv.x + self.oes_st_c1 * uv.y + self.oes_st_c2 * uv.z + self.oes_st_c3 * uv.w
+                return self.video_texture.sample_video(t.xy)
+            }
 
             sample_yuv: fn(coord: vec2) -> vec4 {
                 let coord_90 = vec2(1.0 - coord.y, coord.x)
@@ -100,7 +116,7 @@ script_mod! {
                     } else if self.yuv_enabled > 0.5 {
                         return self.sample_yuv(self.pos)
                     } else {
-                        return self.video_texture.sample_video(self.pos)
+                        return self.sample_oes(self.pos)
                     }
                 }
 
@@ -135,7 +151,7 @@ script_mod! {
                 } else if self.yuv_enabled > 0.5 {
                     return self.sample_yuv(adjusted_pos)
                 } else {
-                    return self.video_texture.sample_video(adjusted_pos)
+                    return self.sample_oes(adjusted_pos)
                 }
             }
 
@@ -892,6 +908,20 @@ impl Widget for Video {
                         id!(yuv_rotation_steps),
                         &[event.yuv.rotation_steps],
                     );
+                    // Android-only: pull ST matrix from texture OS state (set on
+                    // updateTexImage drain). Not part of VideoTextureUpdatedEvent.
+                    #[cfg(target_os = "android")]
+                    if let Some(texture) = self.video_texture.as_ref() {
+                        let m = cx.textures[texture.texture_id()].os.oes_st_matrix;
+                        self.draw_bg
+                            .set_uniform(cx, id!(oes_st_c0), &[m[0], m[1], m[2], m[3]]);
+                        self.draw_bg
+                            .set_uniform(cx, id!(oes_st_c1), &[m[4], m[5], m[6], m[7]]);
+                        self.draw_bg
+                            .set_uniform(cx, id!(oes_st_c2), &[m[8], m[9], m[10], m[11]]);
+                        self.draw_bg
+                            .set_uniform(cx, id!(oes_st_c3), &[m[12], m[13], m[14], m[15]]);
+                    }
 
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {

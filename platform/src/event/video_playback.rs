@@ -96,6 +96,12 @@ impl VideoSource {
             false
         }
     }
+
+    /// `content://` URIs from the system picker must use the native player (MediaPlayer /
+    /// document-provider FD); the software/FFmpeg path cannot open them as filesystem paths.
+    pub fn is_android_content_uri(&self) -> bool {
+        matches!(self, Self::Filesystem(path) if path.starts_with("content://"))
+    }
 }
 
 #[derive(Clone, Debug)]

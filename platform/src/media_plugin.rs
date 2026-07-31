@@ -201,6 +201,17 @@ pub trait MediaPlaybackSession {
     fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>>;
     fn poll_frame(&mut self) -> bool;
     fn take_yuv_frame(&mut self) -> Option<YuvPlaneData>;
+    /// Optional Windows zero-copy present: NV12 `ID3D11Texture2D` from hard decode.
+    /// When `Some`, the platform poll path adopts Y/UV plane SRVs and skips CPU upload.
+    #[cfg(target_os = "windows")]
+    fn take_d3d11_nv12_frame(&mut self) -> Option<crate::gpu_texture::D3d11Nv12Frame> {
+        None
+    }
+    /// Optional Android zero-copy present: OES texture id for `sample_video`.
+    #[cfg(target_os = "android")]
+    fn take_oes_frame(&mut self) -> Option<crate::gpu_texture::OesFrame> {
+        None
+    }
     fn check_eos(&mut self) -> bool;
     fn play(&mut self);
     fn pause(&mut self);

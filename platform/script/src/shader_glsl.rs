@@ -45,7 +45,9 @@ vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
-        self.glsl_write_texture_uniforms(out);
+        // Vertex never samples video; omit TextureVideo so Adreno does not see
+        // `samplerExternalOES` + `camera_projection[int(VIEW_ID)]` (driver ICE).
+        self.glsl_write_texture_uniforms(out, /*include_video_external*/ false);
         self.glsl_write_vertex_globals(vm, out);
         self.glsl_write_vertex_input_attrs(&geometry_fields, &instance_fields, out);
         self.glsl_write_varying_interface(varying_slots, true, out);
@@ -68,7 +70,7 @@ vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
         );
 
         self.glsl_write_uniform_blocks(vm, out);
-        self.glsl_write_texture_uniforms(out);
+        self.glsl_write_texture_uniforms(out, /*include_video_external*/ true);
         self.glsl_write_fragment_globals(vm, out);
         self.glsl_write_varying_interface(varying_slots, false, out);
         self.glsl_write_fragment_outputs(vm, out);
@@ -169,9 +171,12 @@ vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
         true
     }
 
-    fn glsl_write_texture_uniforms(&self, out: &mut String) {
+    fn glsl_write_texture_uniforms(&self, out: &mut String, include_video_external: bool) {
         for io in &self.io {
             if let ShaderIoKind::Texture(tex_type) = io.kind {
+                if !include_video_external && matches!(tex_type, TextureType::TextureVideo) {
+                    continue;
+                }
                 let tex_name = self.backend.map_io_name(io.name);
                 writeln!(
                     out,

@@ -2007,6 +2007,125 @@ pub unsafe fn to_java_cleanup_video_decoder_ref(
     (**env).DeleteGlobalRef.unwrap()(env, video_decoder_ref);
 }
 
+/// Create an [`OesDecodeSurface`] for MediaCodec zero-copy present.
+///
+/// Returns a JNI **global** ref to the bridge object, or `None` on failure.
+/// Caller must eventually call [`to_java_release_oes_decode_surface`].
+pub unsafe fn to_java_create_oes_decode_surface(
+    env: *mut jni_sys::JNIEnv,
+    oes_tex_id: u32,
+) -> Option<jni_sys::jobject> {
+    if oes_tex_id == 0 {
+        return None;
+    }
+    let bridge = crate::new_object!(
+        env,
+        "dev/makepad/android/OesDecodeSurface",
+        "(I)V",
+        oes_tex_id as jni_sys::jint
+    );
+    if bridge.is_null() {
+        return None;
+    }
+    let ready = ndk_utils::call_bool_method!(env, bridge, "isReady", "()Z");
+    if ready == 0 {
+        (**env).DeleteLocalRef.unwrap()(env, bridge);
+        return None;
+    }
+    let global = (**env).NewGlobalRef.unwrap()(env, bridge);
+    (**env).DeleteLocalRef.unwrap()(env, bridge);
+    if global.is_null() {
+        None
+    } else {
+        Some(global)
+    }
+}
+
+/// Borrow the `android.view.Surface` from an OES decode bridge (new local ref).
+/// Caller should `NewGlobalRef` if it must outlive the current JNI scope, or
+/// pass the local ref to the hard-decode path only while the bridge stays alive.
+pub unsafe fn to_java_oes_decode_surface_get_surface(
+    env: *mut jni_sys::JNIEnv,
+    bridge: jni_sys::jobject,
+) -> Option<jni_sys::jobject> {
+    let surface = ndk_utils::call_object_method!(
+        env,
+        bridge,
+        "getSurface",
+        "()Landroid/view/Surface;"
+    );
+    if surface.is_null() {
+        None
+    } else {
+        Some(surface)
+    }
+}
+
+/// Drain all pending SurfaceTexture frames onto the OES texture (GL thread).
+/// Returns `(frames_drained, column_major_4x4_transform)`.
+pub unsafe fn to_java_oes_decode_surface_drain(
+    env: *mut jni_sys::JNIEnv,
+    bridge: jni_sys::jobject,
+) -> (u32, [f32; 16]) {
+    let drained =
+        ndk_utils::call_int_method!(env, bridge, "drainTexImage", "()I").max(0) as u32;
+    let mut matrix = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    if drained > 0 {
+        let arr = ndk_utils::call_object_method!(env, bridge, "getTransformMatrix", "()[F");
+        if !arr.is_null() {
+            let arr = arr as jni_sys::jfloatArray;
+            let len = (**env).GetArrayLength.unwrap()(env, arr);
+            if len >= 16 {
+                let mut is_copy: jni_sys::jboolean = 0;
+                let elems =
+                    (**env).GetFloatArrayElements.unwrap()(env, arr, &mut is_copy);
+                if !elems.is_null() {
+                    for i in 0..16 {
+                        matrix[i] = *elems.add(i);
+                    }
+                    (**env).ReleaseFloatArrayElements.unwrap()(
+                        env,
+                        arr,
+                        elems,
+                        jni_sys::JNI_ABORT,
+                    );
+                }
+            }
+            (**env).DeleteLocalRef.unwrap()(env, arr as jni_sys::jobject);
+        }
+    }
+    (drained, matrix)
+}
+
+pub unsafe fn to_java_oes_decode_surface_set_default_buffer_size(
+    env: *mut jni_sys::JNIEnv,
+    bridge: jni_sys::jobject,
+    width: i32,
+    height: i32,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    ndk_utils::call_void_method!(
+        env,
+        bridge,
+        "setDefaultBufferSize",
+        "(II)V",
+        width as jni_sys::jint,
+        height as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_release_oes_decode_surface(
+    env: *mut jni_sys::JNIEnv,
+    bridge: jni_sys::jobject,
+) {
+    ndk_utils::call_void_method!(env, bridge, "release", "()V");
+    (**env).DeleteGlobalRef.unwrap()(env, bridge);
+}
+
 pub unsafe fn to_java_check_permission(permission: &str) -> i32 {
     let env = attach_jni_env();
     let permission_str = CString::new(permission).unwrap();
