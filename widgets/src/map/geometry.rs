@@ -1770,12 +1770,31 @@ fn append_ring_fringe(
 /// faces whose flat rendering is pixel-identical to painting the groups in
 /// order — and whose depth order is therefore irrelevant, which is the
 /// whole point for tilt/3D.
+/// One group's visible boolean output: (group index, main-level shapes,
+/// sunk shapes, lifted outline shapes for skirt walls). Shapes are the
+/// f64 snapped rings straight from the cascade — the deterministic,
+/// bakeable part of the painter-order unifier.
+pub struct VisibleRegions {
+    pub group_index: usize,
+    pub main: Vec<Vec<Vec<[f64; 2]>>>,
+    pub sunk: Vec<Vec<Vec<[f64; 2]>>>,
+    pub lifted_outlines: Vec<Vec<Vec<[f64; 2]>>>,
+}
+
 pub fn overlay_paint_groups(
     groups: &[PaintGroup],
     tess: &mut Tessellator,
     tolerance: f32,
     aa: f32,
 ) -> Vec<PaintFace> {
+    let regions = compute_visible_regions(groups);
+    build_paint_faces(groups, &regions, tess, tolerance, aa)
+}
+
+/// The boolean half of the painter-order unifier: per-group dissolves plus
+/// the top-down cover cascade. Deterministic for a given (tile, bucket)
+/// input — this is what the per-bucket face bake captures offline.
+pub fn compute_visible_regions(groups: &[PaintGroup]) -> Vec<VisibleRegions> {
     use i_overlay::core::fill_rule::FillRule as IoFillRule;
     use i_overlay::core::overlay_rule::OverlayRule;
     use i_overlay::float::simplify::SimplifyShape;
@@ -1786,10 +1805,8 @@ pub fn overlay_paint_groups(
     // where the "boolean" lap actually goes.
     let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
         || std::env::var_os("MP_TILE_PROFILE").is_some();
-    let mut prof_dissolve = 0.0f64;
-    let mut prof_cascade = 0.0f64;
-    let mut prof_facetess = 0.0f64;
-    let prof_t0 = std::time::Instant::now();
+    let prof_dissolve: f64;
+    let prof_cascade: f64;
 
     // Boolean input hygiene — the runaway fix. The extraction stage of the
     // boolean solver can spin forever chasing a contour cycle fed by
@@ -2170,25 +2187,106 @@ pub fn overlay_paint_groups(
     }
 
     prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
+    if prof_on {
+        eprintln!(
+            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms groups={}",
+            groups.len()
+        );
+    }
+    // Snap OUTPUT rings to the same 1/64 grid as the boolean inputs: the
+    // solver's intersection vertices land off-grid, and the per-bucket face
+    // bake stores coordinates as x64 fixed point. Snapping here (for BOTH
+    // the runtime and the bake path) makes that encoding exact, so baked
+    // and runtime tiles are bit-identical. Half-grid shifts are below the
+    // input snap the cascade already applies.
+    let snap_shapes = |shapes: &mut Vec<Vec<Vec<[f64; 2]>>>| {
+        for shape in shapes.iter_mut() {
+            for ring in shape.iter_mut() {
+                for p in ring.iter_mut() {
+                    // `+ 0.0` normalizes -0.0 (the varint fixed-point
+                    // roundtrip cannot represent the zero sign).
+                    p[0] = (p[0] * SNAP).round() / SNAP + 0.0;
+                    p[1] = (p[1] * SNAP).round() / SNAP + 0.0;
+                }
+                // Canonical start: rotate to the lexicographic minimum
+                // point (winding preserved). The boolean solver's output
+                // order is nondeterministic run-to-run; canonical form
+                // makes builds reproducible and the face bake verifiable.
+                if let Some(min_at) = ring
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                {
+                    ring.rotate_left(min_at);
+                }
+            }
+            // Outer ring stays first; holes sort by start point.
+            if shape.len() > 2 {
+                shape[1..].sort_by(|a, b| {
+                    a.first()
+                        .partial_cmp(&b.first())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+        shapes.sort_by(|a, b| {
+            let ka = a.first().and_then(|r| r.first());
+            let kb = b.first().and_then(|r| r.first());
+            ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    };
+    groups
+        .iter()
+        .zip(visibles)
+        .zip(outlines.into_iter())
+        .enumerate()
+        .map(|(group_index, ((_group, (main, sunk)), outline))| {
+            let mut regions = VisibleRegions {
+                group_index,
+                main,
+                sunk,
+                lifted_outlines: outline.lifted_shapes,
+            };
+            snap_shapes(&mut regions.main);
+            snap_shapes(&mut regions.sunk);
+            snap_shapes(&mut regions.lifted_outlines);
+            regions
+        })
+        .collect()
+}
+
+/// The tessellation half of the painter-order unifier: visible regions
+/// (runtime cascade OR decoded from the per-bucket bake) become styled
+/// PaintFaces with AA fringe and skirt walls. Group styling (color, rank,
+/// depth) is applied HERE, at runtime — the regions carry only geometry.
+pub fn build_paint_faces(
+    groups: &[PaintGroup],
+    regions: &[VisibleRegions],
+    tess: &mut Tessellator,
+    tolerance: f32,
+    aa: f32,
+) -> Vec<PaintFace> {
+    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
+        || std::env::var_os("MP_TILE_PROFILE").is_some();
     let prof_t_facetess = std::time::Instant::now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
     let mut tess_indices: Vec<u32> = Vec::new();
-    for ((group, (visible_main, visible_sunk)), outline) in
-        groups.iter().zip(visibles).zip(outlines.iter())
-    {
-        for (part_index, visible) in [visible_main, visible_sunk].into_iter().enumerate() {
+    for region in regions {
+        let group = &groups[region.group_index];
+        for (part_index, visible) in [&region.main, &region.sunk].into_iter().enumerate() {
             let level: i8 = if part_index == 1 { -1 } else { 0 };
             // Walls hang from the deck's TRUE outer boundary (the lifted
             // outline), attached to the unified main face.
-            let lifted = part_index == 0 && !outline.lifted_shapes.is_empty();
+            let lifted = part_index == 0 && !region.lifted_outlines.is_empty();
             if visible.is_empty() {
                 continue;
             }
             // Each shape = outer ring + holes; contours are crossing-free,
             // so even-odd (no explicit winding) fills holes correctly.
-            for shape in &visible {
+            for shape in visible.iter() {
                 for ring in shape {
                     if ring.len() < 3 {
                         continue;
@@ -2218,7 +2316,7 @@ pub fn overlay_paint_groups(
             let mut fringe_indices: Vec<u32> = Vec::new();
             let mut skirt_verts: Vec<VVertex> = Vec::new();
             let mut skirt_indices: Vec<u32> = Vec::new();
-            for shape in &visible {
+            for shape in visible.iter() {
                 for ring in shape {
                     if aa > 0.0 {
                         append_ring_fringe(
@@ -2232,7 +2330,7 @@ pub fn overlay_paint_groups(
                 }
             }
             if lifted {
-                for shape in &outline.lifted_shapes {
+                for shape in &region.lifted_outlines {
                     for ring in shape {
                         append_ring_skirt(
                             ring,
@@ -2268,12 +2366,11 @@ pub fn overlay_paint_groups(
             });
         }
     }
-    prof_facetess = prof_t_facetess.elapsed().as_secs_f64() * 1e3;
     if prof_on {
         eprintln!(
-            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms facetess {prof_facetess:.1}ms total {:.1}ms groups={}",
-            prof_t0.elapsed().as_secs_f64() * 1e3,
-            groups.len()
+            "MPPROF facetess {:.1}ms faces={}",
+            prof_t_facetess.elapsed().as_secs_f64() * 1e3,
+            faces.len()
         );
     }
     faces

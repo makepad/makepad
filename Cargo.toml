@@ -73,6 +73,7 @@ workspace.members = [
     "tools/tui_test",
     "tools/profiler",
     "tools/map_tiles",
+    "tools/map_bake",
     "libs/mb3d",
     "libs/openexr",
     "libs/git",
