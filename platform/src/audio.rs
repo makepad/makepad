@@ -8,6 +8,17 @@ pub type AudioInputFn = Box<dyn FnMut(AudioInfo, &AudioBuffer) + Send + 'static>
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct AudioDeviceId(pub LiveId);
 
+/// Options for `use_audio_inputs_with_options`. Best-effort per platform:
+/// a platform without the capability captures plain audio instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioInputOptions {
+    /// Route capture through the OS voice-processing path (echo
+    /// cancellation / feedback suppression), so device playback — e.g. the
+    /// app's own TTS — is removed from the mic signal. Apple: the input
+    /// unit becomes VoiceProcessingIO (system-wide AEC; typically mono).
+    pub echo_cancellation: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AudioInfo {
     pub device_id: AudioDeviceId,
