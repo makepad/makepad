@@ -989,10 +989,15 @@ impl AudioUnitAccess {
                         let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                         OSError::from_nserror(err)?;
                     }
-                    AudioUnitQuery::Input => {
+                    AudioUnitQuery::Input | AudioUnitQuery::VoiceInput => {
                         // On iOS/tvOS, mic is commonly mono. Prefer 1 channel there.
                         #[cfg(any(target_os = "ios", target_os = "tvos"))]
                         {
+                            stream_desc.mChannelsPerFrame = 1;
+                        }
+                        // The voice-processing unit outputs its processed
+                        // (echo-cancelled) signal as mono on every platform.
+                        if matches!(unit_query, AudioUnitQuery::VoiceInput) {
                             stream_desc.mChannelsPerFrame = 1;
                         }
                         // Recreate AVAudioFormat with possibly adjusted channel count
@@ -1545,7 +1550,7 @@ impl AudioUnit {
         audio_callback: F,
     ) {
         match self.unit_query {
-            AudioUnitQuery::Input => (),
+            AudioUnitQuery::Input | AudioUnitQuery::VoiceInput => (),
             x => panic!("cannot call set_input_handler on this device {:?}", x),
         }
         if let Some(render_block) = self.render_block {
