@@ -361,10 +361,13 @@ fn worker_main(
         let mut tool_calls: Vec<(String, String)> = Vec::new();
         loop {
             if cancel.load(Ordering::Relaxed) {
-                // Close the dangling assistant turn so the KV stays valid.
+                // Close the dangling assistant turn so the KV stays valid,
+                // and drop any tool calls the cancelled turn produced — an
+                // interrupted command must not keep acting.
                 if let Some(im_end) = im_end {
                     let _ = session.append_token(im_end);
                 }
+                tool_calls.clear();
                 break;
             }
             if generated >= MAX_NEW_TOKENS
