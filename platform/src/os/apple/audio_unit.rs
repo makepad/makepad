@@ -102,6 +102,8 @@ pub struct AudioUnitAccess {
     /// echo-cancellation requests degrade to plain capture instead of
     /// repeatedly failing (the DEVICE is fine — the unit type is not).
     voice_input_unusable: Arc<AtomicBool>,
+    /// Options the running inputs were created with; a change rebuilds them.
+    last_input_options: AudioInputOptions,
     #[cfg(target_os = "macos")]
     audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
     #[cfg(target_os = "ios")]
@@ -132,6 +134,7 @@ impl Default for AudioUnitAccess {
             audio_outputs: Default::default(),
             failed_devices: Default::default(),
             voice_input_unusable: Default::default(),
+            last_input_options: Default::default(),
             #[cfg(target_os = "macos")]
             audio_tap: None,
             #[cfg(target_os = "ios")]
@@ -178,6 +181,7 @@ impl AudioUnitAccess {
         Arc::new(Mutex::new(Self {
             failed_devices: Default::default(),
             voice_input_unusable: Default::default(),
+            last_input_options: Default::default(),
             change_signal,
             device_descs: Default::default(),
             audio_input_cb: Default::default(),
@@ -329,6 +333,22 @@ impl AudioUnitAccess {
     ) {
         #[cfg(target_os = "ios")]
         self.ensure_ios_session(true);
+
+        // Capture options changed (e.g. echo cancellation toggled while the
+        // assistant speaks): tear down running inputs so they rebuild with
+        // the new unit type. Keyed globally — captures share one options set.
+        if self.last_input_options != options && !devices.is_empty() {
+            let mut audio_inputs = self.audio_inputs.lock().unwrap();
+            for input in audio_inputs.iter_mut() {
+                if let Some(audio_unit) = &mut input.audio_unit {
+                    audio_unit.stop_hardware();
+                    audio_unit.clear_input_handler();
+                    audio_unit.release_audio_unit();
+                }
+            }
+            audio_inputs.clear();
+        }
+        self.last_input_options = options;
 
         // Handle loopback device separately on macOS
         #[cfg(target_os = "macos")]
