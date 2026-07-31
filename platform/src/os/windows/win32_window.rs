@@ -51,7 +51,7 @@ use {
                         Ime::{
                             ImmAssociateContext, ImmGetCompositionStringW, ImmGetContext,
                             ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
-                            GCS_COMPSTR, GCS_RESULTSTR, HIMC,
+                            GCS_COMPSTR, GCS_RESULTSTR, HIMC, IME_COMPOSITION_STRING,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -353,10 +353,13 @@ impl Win32Window {
     /// preedit, or `GCS_RESULTSTR` for the committed text) from the input
     /// context as a Rust `String`. Returns `Some("")` for an empty string and
     /// `None` only on error.
-    unsafe fn imm_get_composition_string(himc: HIMC, index: u32) -> Option<String> {
+    unsafe fn imm_get_composition_string(
+        himc: HIMC,
+        index: IME_COMPOSITION_STRING,
+    ) -> Option<String> {
         // A null buffer makes ImmGetCompositionStringW return the required byte
         // length (the W variant returns UTF-16 code units, i.e. 2 bytes each).
-        let byte_len = ImmGetCompositionStringW(himc, index, std::ptr::null_mut(), 0);
+        let byte_len = ImmGetCompositionStringW(himc, index, None, 0);
         if byte_len < 0 {
             return None;
         }
@@ -367,7 +370,7 @@ impl Win32Window {
         let written = ImmGetCompositionStringW(
             himc,
             index,
-            buf.as_mut_ptr() as *mut c_void,
+            Some(buf.as_mut_ptr() as *mut c_void),
             byte_len as u32,
         );
         if written <= 0 {
@@ -745,7 +748,7 @@ impl Win32Window {
                     // preview and then clears the composition. We commit here (and
                     // consume the message below) so DefWindowProc does NOT also
                     // synthesize WM_CHAR for the same result and double-insert.
-                    if flags & GCS_RESULTSTR != 0 {
+                    if flags & GCS_RESULTSTR.0 != 0 {
                         if let Some(result) =
                             Self::imm_get_composition_string(himc, GCS_RESULTSTR)
                         {
@@ -761,7 +764,7 @@ impl Win32Window {
                     }
                     // GCS_COMPSTR: the in-progress preedit. Show it inline with
                     // `replace_last = true`; an empty string clears the preview.
-                    if flags & GCS_COMPSTR != 0 {
+                    if flags & GCS_COMPSTR.0 != 0 {
                         let comp = Self::imm_get_composition_string(himc, GCS_COMPSTR)
                             .unwrap_or_default();
                         window.do_callback(Win32Event::TextInput(TextInputEvent {

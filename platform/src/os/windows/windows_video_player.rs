@@ -30,6 +30,12 @@ pub struct WindowsUnifiedVideoPlayer {
     tex_u_id: TextureId,
     tex_v_id: TextureId,
     yuv_matrix: f32,
+    yuv_biplanar: bool,
+    #[cfg(target_os = "windows")]
+    gpu_frame_keep_alive: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+    /// Ping-pong ArraySize=1 NV12 targets for D3D11VA Texture2DArray present.
+    #[cfg(target_os = "windows")]
+    nv12_present: crate::gpu_texture::D3d11Nv12PresentCache,
     d3d11_device: ID3D11Device,
     source: VideoSource,
     autoplay: bool,
@@ -91,6 +97,9 @@ impl WindowsUnifiedVideoPlayer {
             tex_u_id,
             tex_v_id,
             yuv_matrix: 0.0,
+            yuv_biplanar: false,
+            gpu_frame_keep_alive: None,
+            nv12_present: crate::gpu_texture::D3d11Nv12PresentCache::default(),
             d3d11_device: d3d11_device.clone(),
             source,
             autoplay,
@@ -132,13 +141,56 @@ impl WindowsUnifiedVideoPlayer {
 
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
         match &mut self.mode {
-            WindowsPlayerMode::Native(player) => player.poll_frame(textures),
+            WindowsPlayerMode::Native(player) => {
+                self.yuv_biplanar = false;
+                player.poll_frame(textures)
+            }
             WindowsPlayerMode::Software(player) => {
                 if !player.poll_frame() {
                     return false;
                 }
-                if let Some(planes) = player.take_yuv_frame() {
+                if let Some(gpu) = player.take_d3d11_nv12_frame() {
+                    self.yuv_matrix = gpu.matrix.as_f32();
+                    self.yuv_biplanar = true;
+                    match crate::gpu_texture::adopt_d3d11_nv12_biplanar(
+                        &self.d3d11_device,
+                        textures,
+                        self.tex_y_id,
+                        self.tex_u_id,
+                        &gpu,
+                        &mut self.nv12_present,
+                    ) {
+                        Ok(()) => {
+                            // Blit already copied pixels into present textures — release the
+                            // D3D11VA surface immediately. Holding AVFrames (queue + keep_alive)
+                            // exhausts the decoder pool → "Failed to add bitstream buffer".
+                            self.gpu_frame_keep_alive = None;
+                            drop(gpu);
+                            static LOGGED: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                crate::log!("VIDEO: D3D11 NV12 adopt ok (surface released after blit)");
+                            }
+                            true
+                        }
+                        Err(err) => {
+                            crate::error!("VIDEO: adopt D3D11 NV12 failed: {err}");
+                            self.gpu_frame_keep_alive = None;
+                            // Fall back to CPU YUV if the plugin also queued one.
+                            if let Some(planes) = player.take_yuv_frame() {
+                                self.yuv_matrix = planes.matrix.as_f32();
+                                self.yuv_biplanar = false;
+                                self.upload_yuv_to_d3d11(textures, &planes);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                } else if let Some(planes) = player.take_yuv_frame() {
                     self.yuv_matrix = planes.matrix.as_f32();
+                    self.yuv_biplanar = false;
+                    self.gpu_frame_keep_alive = None;
                     self.upload_yuv_to_d3d11(textures, &planes);
                     true
                 } else {
@@ -250,6 +302,10 @@ impl WindowsUnifiedVideoPlayer {
         self.yuv_matrix
     }
 
+    pub fn yuv_biplanar(&self) -> bool {
+        self.yuv_biplanar
+    }
+
     pub fn check_eos(&mut self) -> bool {
         match &mut self.mode {
             WindowsPlayerMode::Native(player) => player.check_eos(),
@@ -260,6 +316,15 @@ impl WindowsUnifiedVideoPlayer {
     pub fn is_playing(&self) -> bool {
         match &self.mode {
             WindowsPlayerMode::Native(player) => player.is_playing(),
+            WindowsPlayerMode::Software(player) => player.is_playing(),
+        }
+    }
+
+    /// Keep Poll while Media Foundation is still buffering, or while playing.
+    pub fn keep_polling(&self) -> bool {
+        match &self.mode {
+            WindowsPlayerMode::Native(player) => player.keep_polling(),
+            // Software path prepares off-thread; only need Poll while decoding.
             WindowsPlayerMode::Software(player) => player.is_playing(),
         }
     }

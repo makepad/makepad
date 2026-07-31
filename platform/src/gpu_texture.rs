@@ -39,23 +39,25 @@ use crate::{
     Cx,
 };
 
-/// Serializes FFmpeg D3D11VA ops with Makepad present copies on the shared device.
-/// Must be recursive — FFmpeg may nest lock calls on the same thread.
-static FF_D3D11_MUTEX: Mutex<()> = Mutex::new(());
+/// Serializes hard-decode / media GPU work with Makepad present copies on the
+/// shared D3D11 device. Recursive so the same thread may nest lock calls
+/// (common when a decoder callback re-enters present).
+static MEDIA_D3D11_MUTEX: Mutex<()> = Mutex::new(());
 
 thread_local! {
-    static FF_D3D11_DEPTH: Cell<u32> = const { Cell::new(0) };
-    static FF_D3D11_GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    static MEDIA_D3D11_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static MEDIA_D3D11_LOCK_GUARD: RefCell<Option<MutexGuard<'static, ()>>> =
+        const { RefCell::new(None) };
 }
 
 /// Acquire the shared media D3D11 lock (recursive on the same thread).
 pub fn media_d3d11_lock() {
-    FF_D3D11_DEPTH.with(|depth| {
+    MEDIA_D3D11_LOCK_DEPTH.with(|depth| {
         if depth.get() == 0 {
-            let guard = FF_D3D11_MUTEX.lock().unwrap();
-            // Mutex is 'static; hold guard across FFmpeg lock/unlock pairing.
+            let guard = MEDIA_D3D11_MUTEX.lock().unwrap();
+            // Mutex is 'static; hold the guard across paired lock/unlock calls.
             let guard: MutexGuard<'static, ()> = unsafe { std::mem::transmute(guard) };
-            FF_D3D11_GUARD.with(|slot| {
+            MEDIA_D3D11_LOCK_GUARD.with(|slot| {
                 *slot.borrow_mut() = Some(guard);
             });
         }
@@ -65,11 +67,11 @@ pub fn media_d3d11_lock() {
 
 /// Release the shared media D3D11 lock.
 pub fn media_d3d11_unlock() {
-    FF_D3D11_DEPTH.with(|depth| {
+    MEDIA_D3D11_LOCK_DEPTH.with(|depth| {
         let next = depth.get().saturating_sub(1);
         depth.set(next);
         if next == 0 {
-            FF_D3D11_GUARD.with(|slot| {
+            MEDIA_D3D11_LOCK_GUARD.with(|slot| {
                 drop(slot.borrow_mut().take());
             });
         }
@@ -84,13 +86,14 @@ pub fn with_media_d3d11_lock<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// `AVD3D11VADeviceContext.lock` callback — must point at a recursive lock.
-pub unsafe extern "C" fn media_d3d11_ffmpeg_lock(_lock_ctx: *mut std::ffi::c_void) {
+/// C ABI wrapper around [`media_d3d11_lock`] for native decoder device-context
+/// lock callbacks (function-pointer slots).
+pub unsafe extern "C" fn media_d3d11_c_lock(_lock_ctx: *mut std::ffi::c_void) {
     media_d3d11_lock();
 }
 
-/// `AVD3D11VADeviceContext.unlock` callback.
-pub unsafe extern "C" fn media_d3d11_ffmpeg_unlock(_lock_ctx: *mut std::ffi::c_void) {
+/// C ABI wrapper around [`media_d3d11_unlock`].
+pub unsafe extern "C" fn media_d3d11_c_unlock(_lock_ctx: *mut std::ffi::c_void) {
     media_d3d11_unlock();
 }
 
@@ -119,7 +122,7 @@ pub struct D3d11Nv12Frame {
     pub keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
-/// Ping-pong NV12 present targets for D3D11VA.
+/// Ping-pong NV12 present targets for hardware-decoded frames.
 ///
 /// Y and UV use **separate** NV12 textures (each with its own plane SRV). Binding
 /// R8 + R8G8 views of the *same* NV12 resource in one draw TDRs some GPUs
@@ -169,8 +172,8 @@ mod windows_api {
     impl Cx {
         /// Makepad's shared D3D11 device (same device used for UI rendering).
         ///
-        /// Hard-decode (D3D11VA) and GPU present must use this device for
-        /// zero-copy adopt into Makepad textures.
+        /// Hard-decode and GPU present must use this device for zero-copy adopt
+        /// into Makepad textures.
         pub fn d3d11_device(&self) -> Option<ID3D11Device> {
             self.os.d3d11_device.clone()
         }
@@ -424,7 +427,8 @@ mod windows_api {
             .ok_or_else(|| "NV12 present: missing slot".to_string())
     }
 
-    /// Copy one D3D11VA array slice into two ArraySize=1 NV12 textures (Y + UV targets).
+    /// Copy one NV12 texture-array slice into two ArraySize=1 NV12 textures
+    /// (separate Y + UV present targets).
     fn copy_nv12_slice_to_present(
         device: &ID3D11Device,
         src: &ID3D11Texture2D,
@@ -491,7 +495,7 @@ mod windows_api {
             back: 1,
         };
         let src_sub = array_slice;
-        // Same lock FFmpeg uses on the shared device — Copy during decode TDRs / stalls VA.
+        // Hold the shared media lock so present copies do not race decoder GPU work.
         with_media_d3d11_lock(|| unsafe {
             context.CopySubresourceRegion(
                 &y_res,
@@ -575,7 +579,7 @@ mod android_api {
     /// created immediately after [`publish_media_oes_surface`].
     static MEDIA_OES_LATEST_TEX: Mutex<Option<u32>> = Mutex::new(None);
 
-    /// Publish a Java `Surface` global-ref pointer for MediaCodec OES zero-copy.
+    /// Publish a Java `Surface` global-ref pointer for OES zero-copy present.
     ///
     /// Ownership of the JNI global ref stays with the caller (OES bridge);
     /// the decoder only borrows the Surface for its lifetime.

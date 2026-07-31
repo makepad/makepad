@@ -33,6 +33,7 @@ use crate::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+                    D3D_SRV_DIMENSION_TEXTURECUBE,
                 },
                 Direct3D11::{
                     D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
@@ -56,9 +57,9 @@ use crate::{
                     D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
                     D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SDK_VERSION,
                     D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-                    D3D11_SRV_DIMENSION_TEXTURECUBE, D3D11_STENCIL_OP_REPLACE,
-                    D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV, D3D11_TEXCUBE_SRV,
-                    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
+                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
                     Common::{
@@ -594,13 +595,17 @@ impl Cx {
             }
         }
 
-        self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
+        // Serialize with FFmpeg D3D11VA when sharing Makepad's device (ZC video).
+        let mut presented = false;
+        crate::gpu_texture::with_media_d3d11_lock(|| {
+            self.setup_pass_render_targets(pass_id, &d3d11_window.render_target_view, d3d11_cx);
 
-        let mut zbias = 0.0;
-        let zbias_step = self.passes[pass_id].zbias_step;
+            let mut zbias = 0.0;
+            let zbias_step = self.passes[pass_id].zbias_step;
 
-        self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
-        let presented = d3d11_window.present(vsync, latency_wait_timed_out);
+            self.render_view(pass_id, draw_list_id, &mut zbias, zbias_step, d3d11_cx);
+            presented = d3d11_window.present(vsync, latency_wait_timed_out);
+        });
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
@@ -1608,7 +1613,14 @@ impl CxTexture {
                     let src = unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
                     let resource: ID3D11Resource = self.os.texture.as_ref().unwrap().cast().unwrap();
                     unsafe {
-                        d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, src, row_pitch, 0);
+                        d3d11_cx.context.UpdateSubresource(
+                            &resource,
+                            0,
+                            Some(&dst_box as *const _),
+                            src,
+                            row_pitch,
+                            0,
+                        );
                     }
                     self.os.vec_uploaded_height = (by + bh).max(self.os.vec_uploaded_height);
                 }
@@ -1655,7 +1667,14 @@ impl CxTexture {
                 left: 0, top: 0, front: 0, right: width as u32, bottom: height as u32, back: 1,
             };
             unsafe {
-                d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, data_ptr as *const _, row_pitch, 0);
+                d3d11_cx.context.UpdateSubresource(
+                    &resource,
+                    0,
+                    Some(&dst_box as *const _),
+                    data_ptr as *const _,
+                    row_pitch,
+                    0,
+                );
             }
             let mut shader_resource_view = None;
             unsafe {
@@ -1714,7 +1733,7 @@ impl CxTexture {
                 if is_cube {
                     let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
                         Format: format,
-                        ViewDimension: D3D11_SRV_DIMENSION_TEXTURECUBE,
+                        ViewDimension: D3D_SRV_DIMENSION_TEXTURECUBE,
                         Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
                             TextureCube: D3D11_TEXCUBE_SRV {
                                 MostDetailedMip: 0,
