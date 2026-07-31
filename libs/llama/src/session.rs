@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use makepad_ggml::backend::metal::{MetalBuffer, MetalRuntime};
+use makepad_ggml::backend::metal::{MetalContextBuffers, MetalRuntime};
 use makepad_ggml::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
@@ -26,6 +26,9 @@ const DEFAULT_EXTRA_ACTIVATION_BYTES: usize = 512 << 20;
 const DEFAULT_PREFILL_BATCH_SIZE: usize = 32;
 const GRAPH_RESERVE_RETRY_BYTES: usize = 64 << 20;
 const MAX_GRAPH_RESERVE_RETRIES: usize = 4;
+/// Attention-graph key widths round up to this bucket, bounding the number
+/// of compiled graphs per batch shape at max_context / bucket.
+const GRAPH_KEY_BUCKET: usize = 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LlamaSessionConfig {
@@ -105,7 +108,7 @@ impl SessionGraphParams {
 struct SessionGraphSet {
     shared_runtime: MetalRuntime,
     shared_cache: HybridSharedCacheTensorIds,
-    shared_main_buffer: MetalBuffer,
+    shared_buffers: MetalContextBuffers,
     compiled_by_params: BTreeMap<SessionGraphParams, CompiledHybridDecodeMetal>,
 }
 
@@ -227,6 +230,66 @@ impl LlamaSession {
             offset += batch_size;
         }
         Ok(())
+    }
+
+    /// Debug: per-cache-tensor stats over the written region (KV rows
+    /// 0..cache_tokens, full recurrent state): (abs-sum, max-abs, nan count).
+    /// Used to diff the state handed to decode across prefill batchings.
+    pub fn debug_cache_fingerprints(&self) -> Vec<(String, f64, f32, usize)> {
+        fn stats(bytes: &[u8], ty: TensorType) -> (f64, f32, usize) {
+            let mut sum = 0.0f64;
+            let mut max = 0.0f32;
+            let mut nans = 0usize;
+            match ty {
+                TensorType::F32 => {
+                    for chunk in bytes.chunks_exact(4) {
+                        let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                        if v.is_nan() {
+                            nans += 1;
+                        } else {
+                            sum += v.abs() as f64;
+                            max = max.max(v.abs());
+                        }
+                    }
+                }
+                _ => {
+                    for chunk in bytes.chunks_exact(2) {
+                        let v = makepad_ggml::quant::f16_to_f32(u16::from_le_bytes(
+                            chunk.try_into().unwrap(),
+                        ));
+                        if v.is_nan() {
+                            nans += 1;
+                        } else {
+                            sum += v.abs() as f64;
+                            max = max.max(v.abs());
+                        }
+                    }
+                }
+            }
+            (sum, max, nans)
+        }
+        let cache_tokens = self.token_ids.len();
+        let ctx = &self.weights.ctx;
+        let mut out = Vec::new();
+        for (layer, ids) in &self.graphs.shared_cache.attention {
+            for (tag, id) in [("k", ids.k_cache), ("v", ids.v_cache)] {
+                let Some(tensor) = ctx.tensor(id) else { continue };
+                let Some(offset) = tensor.data_offset else { continue };
+                let len = tensor.nb[1].saturating_mul(cache_tokens);
+                let Ok(bytes) = ctx.data_at(offset, len) else { continue };
+                let (sum, max, nans) = stats(bytes, tensor.desc.ty);
+                out.push((format!("attn{}.{}", layer, tag), sum, max, nans));
+            }
+        }
+        for (layer, ids) in &self.graphs.shared_cache.recurrent {
+            for (tag, id) in [("r", ids.r_cache), ("s", ids.s_cache)] {
+                let Some(tensor) = ctx.tensor(id) else { continue };
+                let Ok(bytes) = ctx.tensor_data(id) else { continue };
+                let (sum, max, nans) = stats(bytes, tensor.desc.ty);
+                out.push((format!("recur{}.{}", layer, tag), sum, max, nans));
+            }
+        }
+        out
     }
 
     pub fn next_greedy_token(&mut self) -> Result<Option<i32>> {
@@ -402,7 +465,25 @@ impl LlamaSession {
         } else {
             None
         };
-        let graph_params = SessionGraphParams::greedy(batch_size, cache_tokens);
+        // Key compiled graphs by a BUCKETED key count, not the exact cache
+        // length: per-length keys meant a NEW Metal graph compiled and
+        // cached for EVERY generated token (unbounded growth — the 30GB
+        // footprint on long voice sessions). The graph key width only needs
+        // to COVER the cache — masks are written at full graph width so the
+        // unwritten tail is -inf'd exactly (keying by max_context wasted
+        // key_count-cache_tokens of attention work per token; keying wider
+        // than the mask CANNOT be fixed by view reconfigure — the flash op
+        // reads permute nodes with build-time dims, which silently corrupted
+        // attention). MAKEPAD_LLAMA_PER_LEN_GRAPHS=1 restores per-length
+        // keying (A/B escape hatch).
+        let attention_key_count = if std::env::var_os("MAKEPAD_LLAMA_PER_LEN_GRAPHS").is_some() {
+            cache_tokens
+        } else {
+            cache_tokens
+                .next_multiple_of(GRAPH_KEY_BUCKET)
+                .min(self.max_context())
+        };
+        let graph_params = SessionGraphParams::greedy(batch_size, attention_key_count);
         self.ensure_compiled_graph(graph_params)?;
         let run = {
             let compiled = self
@@ -547,7 +628,7 @@ impl LlamaSession {
                 spec,
                 &self.graphs.shared_runtime,
                 &self.graphs.shared_cache,
-                &self.graphs.shared_main_buffer,
+                &self.graphs.shared_buffers,
                 params.n_tokens,
                 params.n_outputs,
                 params.attention_key_count,
@@ -602,11 +683,26 @@ fn build_runtime_state(
     context_extra_bytes: usize,
     prompt_batch_capacity: usize,
 ) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
+    // Weights come from a read-only mmap of the gguf (clean file-backed
+    // pages, lazy page-in) unless mapping is unavailable or disabled;
+    // the fallback is EXACTLY the previous owned-arena path.
+    // MAKEPAD_LLAMA_NO_MMAP=1 forces the owned-arena path (A/B).
+    let use_mmap = std::env::var_os("MAKEPAD_LLAMA_NO_MMAP").is_none();
     let mut extra_bytes = context_extra_bytes;
     for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
-        let mut weights = plan
-            .full_weights
-            .allocate_and_load_with_extra(&model.gguf, extra_bytes)?;
+        // Retries re-run this: remapping the same file is cheap, and only
+        // a real mapping failure may take the owned-arena fallback.
+        let mapped_weights = if use_mmap {
+            plan.full_weights.map_and_load(&model.gguf, extra_bytes)
+        } else {
+            None
+        };
+        let mut weights = match mapped_weights {
+            Some(weights) => weights,
+            None => plan
+                .full_weights
+                .allocate_and_load_with_extra(&model.gguf, extra_bytes)?,
+        };
         let shared_runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
         let shared_cache =
             allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
@@ -645,7 +741,7 @@ fn build_runtime_state(
                 required_main_buffer_size
             )));
         }
-        let shared_main_buffer =
+        let shared_buffers =
             create_metal_context_buffer_with_runtime(&shared_runtime, &weights.ctx)?;
         let mut compiled_by_params = BTreeMap::new();
         let build_result = (|| {
@@ -655,7 +751,7 @@ fn build_runtime_state(
                     spec,
                     &shared_runtime,
                     &shared_cache,
-                    &shared_main_buffer,
+                    &shared_buffers,
                     1,
                     1,
                     session_attention_key_count(spec)?,
@@ -673,7 +769,7 @@ fn build_runtime_state(
                     SessionGraphSet {
                         shared_runtime,
                         shared_cache,
-                        shared_main_buffer,
+                        shared_buffers,
                         compiled_by_params,
                     },
                 ));

@@ -14,6 +14,7 @@ struct Args {
     model_path: PathBuf,
     prompt: String,
     max_new_tokens: usize,
+    max_context: Option<usize>,
     prefill_batch_size: usize,
     upstream_completion_bin: PathBuf,
     no_bos: bool,
@@ -46,10 +47,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("prompt.token_ids: {:?}", prompt_token_ids);
     }
 
-    let max_context = prompt_token_ids
-        .len()
-        .checked_add(args.max_new_tokens)
-        .ok_or("overflow computing total generation context")?;
+    let max_context = match args.max_context {
+        Some(value) => value,
+        None => prompt_token_ids
+            .len()
+            .checked_add(args.max_new_tokens)
+            .ok_or("overflow computing total generation context")?,
+    };
     let mut session = LlamaSession::from_model(
         &model,
         LlamaSessionConfig {
@@ -68,6 +72,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let prefill_start = Instant::now();
     session.append_tokens(&prompt_token_ids)?;
     let prefill_elapsed = prefill_start.elapsed();
+    if std::env::var_os("MAKEPAD_LLAMA_DUMP_STATE").is_some() {
+        for (name, sum, max, nans) in session.debug_cache_fingerprints() {
+            eprintln!("state.{}: sum={:.3} max={:.3} nans={}", name, sum, max, nans);
+        }
+    }
 
     let generation_start = Instant::now();
     let generation = session.continue_greedy(args.max_new_tokens)?;
@@ -128,6 +137,7 @@ fn parse_args(
     let mut prompt = None;
     let mut prompt_parts = Vec::new();
     let mut max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
+    let mut max_context = None;
     let mut prefill_batch_size = 1usize;
     let mut upstream_completion_bin = PathBuf::from(DEFAULT_UPSTREAM_COMPLETION_BIN);
     let mut no_bos = false;
@@ -149,6 +159,10 @@ fn parse_args(
             "--prefill-batch-size" => {
                 let value = args.next().ok_or("--prefill-batch-size requires a value")?;
                 prefill_batch_size = value.to_string_lossy().parse()?;
+            }
+            "--max-context" => {
+                let value = args.next().ok_or("--max-context requires a value")?;
+                max_context = Some(value.to_string_lossy().parse()?);
             }
             "--prompt" => {
                 let value = args.next().ok_or("--prompt requires a value")?;
@@ -203,6 +217,7 @@ fn parse_args(
         model_path,
         prompt,
         max_new_tokens,
+        max_context,
         prefill_batch_size,
         upstream_completion_bin,
         no_bos,

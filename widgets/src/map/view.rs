@@ -2634,17 +2634,7 @@ impl MapView {
         }
     }
 
-    fn set_dark_theme(&mut self, cx: &mut Cx, dark_theme: bool) {
-        if self.dark_theme == dark_theme {
-            return;
-        }
-        self.theme_select = if dark_theme { 1 } else { 0 };
-        self.dark_theme = dark_theme;
-        self.apply_theme_change();
-        self.applied_dark_theme = Some(self.dark_theme);
-        self.update_status_text();
-        self.redraw(cx);
-    }
+
 
     fn apply_theme_change(&mut self) {
         self.style_epoch = self.style_epoch.wrapping_add(1);

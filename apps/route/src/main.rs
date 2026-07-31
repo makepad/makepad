@@ -21,8 +21,10 @@ mod layers;
 mod local_agent;
 mod nav;
 mod nav_data;
+mod speech;
 mod tools;
 mod trip;
+mod voice;
 
 use broker::{MarkerLegend, ToolCtx};
 use ddg::{DdgEvent, DdgState};
@@ -30,7 +32,9 @@ use history::DriveLog;
 use layers::{LayerState, TerrainUpdate, WindUpdate};
 use nav::{ActiveNav, NavAction, NavTick};
 use nav_data::{NavData, NavLoad, RadarData};
+use speech::Speech;
 use trip::TripModel;
+use voice::{GateResult, VoiceGate};
 
 app_main!(App);
 
@@ -448,6 +452,27 @@ script_mod! {
                                     img_2 := Image{ width: 86, height: 64 }
                                     img_3 := Image{ width: 86, height: 64 }
                                 }
+                                input_row := View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 6
+                                    align: Align{x: 0.0 y: 0.5}
+                                mic_button := AppButton{
+                                    padding: Inset{left: 12, right: 12, top: 8, bottom: 8}
+                                    text: "🎤"
+                                }
+                                speaker_button := AppButton{
+                                    padding: Inset{left: 12, right: 12, top: 8, bottom: 8}
+                                    text: "🔊"
+                                }
+                                // Kept visible (events must flow) but
+                                // zero-sized: the mic button is the only
+                                // recording indicator.
+                                mic_wave := VoiceWave{
+                                    width: 0
+                                    height: 0
+                                }
                                 prompt_input := TextInput{
                                     width: Fill
                                     empty_text: "Plan a trip…"
@@ -464,6 +489,7 @@ script_mod! {
                                         color_empty_focus: #x6b7784
                                     }
                                 }
+                                } // input_row
                                 status_label := PanelText{
                                     margin: Inset{top: 6, left: 2}
                                     text: "starting…"
@@ -740,10 +766,30 @@ pub struct App {
     nav_frame: NextFrame,
     #[rust]
     ddg: DdgState,
+    /// Continuous voice loop active (mic button).
+    #[rust]
+    mic_on: bool,
+    #[rust]
+    whisper_warmed: bool,
+    #[rust]
+    ai_llm_ready: bool,
+    #[rust]
+    ai_gate_ready: bool,
+    #[rust]
+    voice_gate: Option<VoiceGate>,
+    /// SEND instructions that arrived while the agent was busy.
+    #[rust]
+    voice_queue: Vec<String>,
     #[rust]
     wind_rx: ToUIReceiver<WindUpdate>,
     #[rust]
     terrain_rx: ToUIReceiver<TerrainUpdate>,
+    /// Kokoro voice output (🔊 button). None until first startup.
+    #[rust]
+    speech: Option<Speech>,
+    /// Last nav banner instruction spoken, so each maneuver is announced once.
+    #[rust]
+    last_spoken_banner: String,
 }
 
 fn read_secret(name: &str) -> Option<String> {
@@ -777,15 +823,11 @@ impl App {
         nav_data::start_nav_load(self.nav_rx.sender());
         nav_data::start_radar_worker(self.radar_rx.sender());
         cx.start_location_updates();
+        let speech = Speech::new();
+        speech.install_audio_output(cx);
+        self.speech = Some(speech);
         self.init_agent(cx);
-        self.set_status(
-            cx,
-            if self.local_timing.is_some() {
-                "loading nav data + local model…"
-            } else {
-                "loading nav data… (cloud dispatcher)"
-            },
-        );
+        self.update_ai_status(cx);
     }
 
     fn make_claude(api_key: String) -> Box<dyn Agent> {
@@ -848,6 +890,25 @@ impl App {
                 self.cloud_agent = Some(cloud);
             }
         }
+    }
+
+    /// Aggregate boot status: the whole AI pipeline loads at startup
+    /// (9B dispatcher, 4B voice gate, whisper via the voice worker).
+    fn update_ai_status(&mut self, cx: &mut Cx) {
+        if self.local_timing.is_none() {
+            self.set_status(cx, "AI loading — cloud dispatcher · voice gate…");
+            return;
+        }
+        let text = if self.ai_llm_ready && self.ai_gate_ready {
+            "AI ready — dispatcher 9B ✓ · voice gate 4B ✓ · whisper warm".to_string()
+        } else {
+            format!(
+                "AI loading — dispatcher 9B {} · voice gate 4B {} · whisper…",
+                if self.ai_llm_ready { "✓" } else { "…" },
+                if self.ai_gate_ready { "✓" } else { "…" },
+            )
+        };
+        self.set_status(cx, &text);
     }
 
     fn set_status(&mut self, cx: &mut Cx, text: &str) {
@@ -952,6 +1013,10 @@ impl App {
             self.push_line(cx, "⚠ no agent available");
             return;
         }
+        // A new turn obsoletes whatever the voice was still saying.
+        if let Some(speech) = &mut self.speech {
+            speech.stop();
+        }
         if self.busy {
             self.set_status(cx, "still thinking — wait for the current answer");
             return;
@@ -977,13 +1042,27 @@ impl App {
 
     fn on_agent_event(&mut self, cx: &mut Cx, event: AgentEvent) {
         match event {
-            AgentEvent::SessionReady { .. } => {}
+            AgentEvent::SessionReady { .. } => {
+                self.ai_llm_ready = true;
+                // Eager but SERIALIZED: the gate's 4B loads after the 9B is
+                // resident so startup peaks don't stack (iPad jetsam kills
+                // on peak footprint, not steady state).
+                if self.voice_gate.is_none() {
+                    self.voice_gate = Some(VoiceGate::new());
+                }
+                // Chain whisper after the LLMs (eager but serialized).
+                self.ui.voice_wave(cx, ids!(mic_wave)).prewarm(cx);
+                self.update_ai_status(cx);
+            }
             AgentEvent::SessionError { error, .. } => {
                 self.busy = false;
                 self.push_line(cx, &format!("⚠ session error: {error}"));
             }
             AgentEvent::TextDelta { text, .. } => {
                 self.chat.pending.push_str(&text);
+                if let Some(speech) = &mut self.speech {
+                    speech.feed(&text);
+                }
                 self.render_transcript(cx);
             }
             AgentEvent::ToolRequest {
@@ -997,6 +1076,9 @@ impl App {
             }
             AgentEvent::TurnComplete { .. } => {
                 self.commit_pending(cx);
+                if let Some(speech) = &mut self.speech {
+                    speech.flush();
+                }
                 self.busy = false;
                 let timing = self
                     .local_timing
@@ -1110,6 +1192,13 @@ impl App {
             self.ui
                 .label(cx, ids!(banner_dist))
                 .set_text(cx, &tick.banner_dist);
+            // Announce each maneuver once, when it becomes the current banner.
+            if tick.banner != self.last_spoken_banner {
+                self.last_spoken_banner = tick.banner.clone();
+                if let Some(speech) = &self.speech {
+                    speech.say(&tick.banner);
+                }
+            }
         }
 
         if tick.arrived {
@@ -1120,6 +1209,9 @@ impl App {
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
             self.push_line(cx, &format!("🏁 arrived at {dest}"));
+            if let Some(speech) = &self.speech {
+                speech.say(&format!("You have arrived at {dest}."));
+            }
             self.active_nav = None;
             let map = self.ui.map_view(cx, ids!(map));
             map.set_rotation(cx, 0.0);
@@ -1144,7 +1236,7 @@ impl App {
 
     /// Off-route with real GPS: recompute the current leg from here.
     fn reroute_nav(&mut self, cx: &mut Cx) {
-        let (Some(nav_data), Some(nav)) = (self.nav.as_ref(), self.active_nav.as_mut()) else {
+        let (Some(nav_data), Some(nav)) = (self.nav.as_mut(), self.active_nav.as_mut()) else {
             return;
         };
         if nav.simulate {
@@ -1224,6 +1316,97 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Mic toggle: starts/stops the continuous voice loop (VAD → STT →
+    /// attention gate → dispatcher). Pipeline wiring lands with voice.rs.
+    fn toggle_mic(&mut self, cx: &mut Cx) {
+        self.mic_on = !self.mic_on;
+        let mut button = self.ui.button(cx, ids!(mic_button));
+        if self.mic_on {
+            button.set_text(cx, "🔴");
+            script_apply_eval!(cx, button, {
+                draw_text +: {
+                    color: #(vec4(0.86, 0.20, 0.20, 1.0))
+                }
+            });
+            self.push_line(
+                cx,
+                if self.whisper_warmed {
+                    "🎤 listening — say 'computer, …' or address me directly"
+                } else {
+                    "🎤 arming — loading whisper (first time takes a few seconds), then say 'computer, …'"
+                },
+            );
+            self.whisper_warmed = true;
+        } else {
+            button.set_text(cx, "🎤");
+            self.push_line(cx, "🎤 mic off");
+        }
+        self.sync_voice_state(cx);
+    }
+
+    /// Start/stop the VoiceWave capture and lazily spawn the gate worker.
+    fn sync_voice_state(&mut self, cx: &mut Cx) {
+        if self.mic_on && self.voice_gate.is_none() {
+            self.voice_gate = Some(VoiceGate::new());
+        }
+        let wave = self.ui.voice_wave(cx, ids!(mic_wave));
+        wave.set_enabled(cx, self.mic_on);
+        log!(
+            "voice: mic toggle requested={} widget_enabled={}",
+            self.mic_on,
+            wave.is_enabled()
+        );
+    }
+
+    /// Last N user/assistant lines for the gate's in-context judgement.
+    fn recent_dialog(&self) -> Vec<String> {
+        self.chat
+            .entries
+            .iter()
+            .filter_map(|e| match e.kind {
+                EntryKind::User => Some(format!("user: {}", e.text)),
+                EntryKind::Assistant if e.trip.is_none() => {
+                    Some(format!("assistant: {}", e.text))
+                }
+                _ => None,
+            })
+            .rev()
+            .take(voice::RECENT_DIALOG_LINES)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    fn on_gate_result(&mut self, cx: &mut Cx, result: GateResult) {
+        match result {
+            GateResult::Ready { secs } => {
+                self.push_entry(
+                    cx,
+                    EntryKind::Info,
+                    &format!("voice gate ready (4B loaded + warmed in {secs:.1}s)"),
+                );
+                self.ai_gate_ready = true;
+                self.update_ai_status(cx);
+                return;
+            }
+            GateResult::Send { raw, instruction } => {
+                let _ = &raw;
+                self.push_entry(cx, EntryKind::Info, "→ directed");
+                if self.busy {
+                    self.push_entry(cx, EntryKind::Info, "(queued until current turn ends)");
+                    self.voice_queue.push(instruction);
+                } else {
+                    self.send_user_prompt(cx, &instruction);
+                }
+            }
+            GateResult::Skip { raw, reason } => {
+                let _ = &raw;
+                self.push_entry(cx, EntryKind::Info, &format!("— skipped ({})", reason.trim()));
+            }
         }
     }
 
@@ -1503,6 +1686,68 @@ impl MatchEvent for App {
                 self.send_user_prompt(cx, &text);
             }
         }
+        if self.ui.button(cx, ids!(mic_button)).clicked(actions) {
+            self.toggle_mic(cx);
+        }
+        if self.ui.button(cx, ids!(speaker_button)).clicked(actions) {
+            if let Some(speech) = &mut self.speech {
+                let muted = !speech.is_muted();
+                speech.set_muted(muted);
+                self.ui
+                    .button(cx, ids!(speaker_button))
+                    .set_text(cx, if muted { "🔇" } else { "🔊" });
+                self.push_line(cx, if muted { "🔇 voice off" } else { "🔊 voice on" });
+            }
+        }
+        // Endpointed transcripts from the mic → attention gate.
+        let mic_uid = self.ui.widget(cx, ids!(mic_wave)).widget_uid();
+        for action in actions {
+            let Some(action) = action.as_widget_action() else {
+                continue;
+            };
+            if action.widget_uid != mic_uid {
+                continue;
+            }
+            match action.cast::<VoiceWaveAction>() {
+                VoiceWaveAction::VoiceActivity(active) => {
+                    // Barge-in: the user talking mutes the assistant NOW —
+                    // they are not waiting for it to finish. (Assistant echo
+                    // can also trigger this; acceptable — the gate still
+                    // decides what the words meant.)
+                    if active {
+                        if let Some(speech) = &mut self.speech {
+                            if speech.is_speaking() {
+                                speech.stop();
+                            }
+                        }
+                    }
+                }
+                VoiceWaveAction::InjectText(text) => {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        // Raw transcript, immediately visible; the gate's
+                        // verdict follows as its own line. Assistant echo is
+                        // NOT filtered here — the gate skips non-directed
+                        // lines, and blocking the mic while speaking made
+                        // interruptions impossible.
+                        self.push_entry(cx, EntryKind::Info, &format!("🎤 “{text}”"));
+                        if let Some(gate) = &self.voice_gate {
+                            gate.submit(text, self.recent_dialog());
+                        } else {
+                            self.push_entry(cx, EntryKind::Info, "(gate still loading)");
+                        }
+                    }
+                }
+                VoiceWaveAction::RecordVoice(on) => {
+                    if on != self.mic_on {
+                        // widget-side toggle (click on the wave / F1)
+                        self.mic_on = on;
+                        self.sync_voice_state(cx);
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.ui.button(cx, ids!(layers_button)).clicked(actions) {
             self.layers_panel_open = !self.layers_panel_open;
             self.ui
@@ -1587,6 +1832,9 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        // Whisper stays on the F16 default (ggml-large-v3-turbo.bin): the
+        // voice Metal library has no quantized matmul kernels, so q5_0/q8_0
+        // models fail every GPU op. Port the kernels before re-quantizing.
         crate::makepad_widgets::script_mod(vm);
         self::script_mod(vm)
     }
@@ -1596,6 +1844,11 @@ impl AppMain for App {
         match event {
             Event::Shutdown => {
                 self.drive_log.close();
+            }
+            Event::AudioDevices(devices) => {
+                // TTS playback device; mic input selection lives inside the
+                // VoiceWave's own handler.
+                cx.use_audio_outputs(&devices.default_output());
             }
             Event::LocationUpdate(fix) => {
                 self.drive_log.log_fix(fix);
@@ -1658,11 +1911,21 @@ impl AppMain for App {
         if self.nav_frame.is_event(event).is_some() {
             self.tick_nav_sim(cx);
         }
+        if let Some(gate) = &mut self.voice_gate {
+            let results = gate.poll();
+            for result in results {
+                self.on_gate_result(cx, result);
+            }
+        }
+        if !self.busy && !self.voice_queue.is_empty() {
+            let next = self.voice_queue.remove(0);
+            self.send_user_prompt(cx, &next);
+        }
         while let Ok(load) = self.nav_rx.try_recv() {
             match load {
                 NavLoad::Ready { data, stats } => {
                     self.nav = Some(*data);
-                    self.set_status(cx, &stats);
+                    self.push_entry(cx, EntryKind::Info, &stats);
                 }
                 NavLoad::Failed { error } => {
                     self.set_status(cx, &format!("nav data failed: {error}"));

@@ -57,6 +57,10 @@ pub enum VoiceInjectEvent {
 pub struct WindowVoiceInput {
     desired_enabled: bool,
     callback_installed: bool,
+    /// Worker spawn is LAZY (first ensure_audio_callback): every VoiceWave
+    /// in the tree (incl. the Window caption one) constructs this struct,
+    /// and eager spawns meant duplicate whisper workers/models.
+    worker_inputs: Option<(Receiver<Vec<f32>>, Receiver<VoiceControlMessage>, mpsc::Sender<String>, SyncSender<VoiceWaveEvent>)>,
     callback_index: Option<usize>,
     default_input: Option<AudioDeviceId>,
     pending_permission_request: Option<i32>,
@@ -88,14 +92,11 @@ impl Default for WindowVoiceInput {
             text_signal.clone(),
         )));
         let capture_enabled = Arc::new(AtomicBool::new(false));
-        spawn_voice_worker(audio_rx, control_rx, text_tx, wave_tx, text_signal.clone());
-        // Keep the backend warm once per app lifetime: worker/model/threadpools stay alive
-        // and are not restarted on mic toggles.
-        let _ = control_tx.send(VoiceControlMessage::Preload);
 
         Self {
             desired_enabled: false,
             callback_installed: false,
+            worker_inputs: Some((audio_rx, control_rx, text_tx, wave_tx)),
             callback_index: None,
             default_input: None,
             pending_permission_request: None,
@@ -136,6 +137,12 @@ impl WindowVoiceInput {
     pub fn ensure_audio_callback(&mut self, cx: &mut Cx, callback_index: usize) {
         if self.callback_installed {
             return;
+        }
+        if let Some((audio_rx, control_rx, text_tx, wave_tx)) = self.worker_inputs.take() {
+            spawn_voice_worker(audio_rx, control_rx, text_tx, wave_tx, self.text_signal.clone());
+            // Keep the backend warm once per instance lifetime: worker/model/
+            // threadpools stay alive and are not restarted on mic toggles.
+            let _ = self.control_tx.send(VoiceControlMessage::Preload);
         }
         let callback_state = self.callback_state.clone();
         let capture_enabled = self.capture_enabled.clone();
@@ -592,6 +599,16 @@ fn spawn_voice_worker(
         let mut transcriber = VoiceTranscriber::from_makepad_env();
         let params = VoiceTranscribeParams::for_live_dictation();
         crate::log!("voice: backend {:?}", transcriber.kind());
+        // Eager weight load: otherwise the whisper model loads on the FIRST
+        // utterance, stalling the first transcription by seconds.
+        let t0 = std::time::Instant::now();
+        match transcriber.preload(&params) {
+            Ok(()) => crate::log!(
+                "voice: model preloaded in {:.1}s",
+                t0.elapsed().as_secs_f64()
+            ),
+            Err(err) => crate::log!("voice: model preload failed: {err:?}"),
+        }
 
         // Learned gate when the Silero weights are present, RMS energy gate
         // otherwise. The VAD stream carries its own 512-sample chunking, so it
