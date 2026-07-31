@@ -1782,6 +1782,15 @@ pub fn overlay_paint_groups(
     use i_overlay::float::single::SingleFloatOverlay;
     type Shapes = Vec<Vec<Vec<[f64; 2]>>>;
 
+    // Env-gated sub-stage timing (MAKEPAD_TILE_STAGES / MP_TILE_PROFILE):
+    // where the "boolean" lap actually goes.
+    let prof_on = std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
+        || std::env::var_os("MP_TILE_PROFILE").is_some();
+    let mut prof_dissolve = 0.0f64;
+    let mut prof_cascade = 0.0f64;
+    let mut prof_facetess = 0.0f64;
+    let prof_t0 = std::time::Instant::now();
+
     // Boolean input hygiene — the runaway fix. The extraction stage of the
     // boolean solver can spin forever chasing a contour cycle fed by
     // near-coincident / near-degenerate ring geometry (sliver bevel wedges,
@@ -1955,6 +1964,7 @@ pub fn overlay_paint_groups(
             .collect();
         (shapes, flat)
     };
+    let prof_t_dissolve = std::time::Instant::now();
     let outlines: Vec<GroupOutline> = groups
         .iter()
         .map(|group| {
@@ -2023,6 +2033,8 @@ pub fn overlay_paint_groups(
         })
         .collect();
 
+    prof_dissolve = prof_t_dissolve.elapsed().as_secs_f64() * 1e3;
+    let prof_t_cascade = std::time::Instant::now();
     // Incremental cascade per level, all operands dissolved outlines.
     // LIFTED content never enters an accumulated cover: two decks at
     // different heights (a viaduct over a bridge) must not cut each other
@@ -2157,6 +2169,8 @@ pub fn overlay_paint_groups(
         }
     }
 
+    prof_cascade = prof_t_cascade.elapsed().as_secs_f64() * 1e3;
+    let prof_t_facetess = std::time::Instant::now();
     let mut faces = Vec::new();
     let mut path = VectorPath::new();
     let mut tess_verts: Vec<VVertex> = Vec::new();
@@ -2253,6 +2267,14 @@ pub fn overlay_paint_groups(
                 skirt_indices,
             });
         }
+    }
+    prof_facetess = prof_t_facetess.elapsed().as_secs_f64() * 1e3;
+    if prof_on {
+        eprintln!(
+            "MPPROF boolean-split dissolve {prof_dissolve:.1}ms cascade {prof_cascade:.1}ms facetess {prof_facetess:.1}ms total {:.1}ms groups={}",
+            prof_t0.elapsed().as_secs_f64() * 1e3,
+            groups.len()
+        );
     }
     faces
 }
