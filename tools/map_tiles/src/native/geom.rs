@@ -335,7 +335,7 @@ pub fn prepare_polygons(
     Ok(())
 }
 
-fn to_local(point: GlobalPoint, tile_x: u32, tile_y: u32) -> Result<TilePoint, String> {
+pub(crate) fn to_local(point: GlobalPoint, tile_x: u32, tile_y: u32) -> Result<TilePoint, String> {
     let x = point.x - i64::from(tile_x) * MVT_EXTENT;
     let y = point.y - i64::from(tile_y) * MVT_EXTENT;
     Ok(TilePoint {
@@ -356,14 +356,14 @@ fn to_local_ring(
 }
 
 #[derive(Clone, Copy)]
-struct TileRange {
-    x_min: u32,
-    y_min: u32,
-    x_max: u32,
-    y_max: u32,
+pub(crate) struct TileRange {
+    pub(crate) x_min: u32,
+    pub(crate) y_min: u32,
+    pub(crate) x_max: u32,
+    pub(crate) y_max: u32,
 }
 
-fn tile_range(
+pub(crate) fn tile_range(
     zoom: u8,
     min_x: i64,
     min_y: i64,
@@ -387,14 +387,14 @@ fn tile_range(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Rect {
-    min_x: f64,
-    min_y: f64,
-    max_x: f64,
-    max_y: f64,
+pub(crate) struct Rect {
+    pub(crate) min_x: f64,
+    pub(crate) min_y: f64,
+    pub(crate) max_x: f64,
+    pub(crate) max_y: f64,
 }
 
-fn tile_rect(tile_x: u32, tile_y: u32, buffer: i64) -> Rect {
+pub(crate) fn tile_rect(tile_x: u32, tile_y: u32, buffer: i64) -> Rect {
     let x = i64::from(tile_x) * MVT_EXTENT;
     let y = i64::from(tile_y) * MVT_EXTENT;
     Rect {
@@ -405,7 +405,7 @@ fn tile_rect(tile_x: u32, tile_y: u32, buffer: i64) -> Rect {
     }
 }
 
-fn bounds(points: &[GlobalPoint]) -> Option<(i64, i64, i64, i64)> {
+pub(crate) fn bounds(points: &[GlobalPoint]) -> Option<(i64, i64, i64, i64)> {
     let first = *points.first()?;
     let mut result = (first.x, first.y, first.x, first.y);
     for point in &points[1..] {
@@ -417,7 +417,7 @@ fn bounds(points: &[GlobalPoint]) -> Option<(i64, i64, i64, i64)> {
     Some(result)
 }
 
-fn clip_line(points: &[GlobalPoint], rect: Rect) -> Vec<Vec<GlobalPoint>> {
+pub(crate) fn clip_line(points: &[GlobalPoint], rect: Rect) -> Vec<Vec<GlobalPoint>> {
     let mut output = Vec::new();
     let mut current = Vec::new();
     for segment in points.windows(2) {
@@ -488,7 +488,7 @@ fn clip_segment(
     Some((point(t0), point(t1)))
 }
 
-fn clip_ring(points: &[GlobalPoint], rect: Rect) -> Vec<GlobalPoint> {
+pub(crate) fn clip_ring(points: &[GlobalPoint], rect: Rect) -> Vec<GlobalPoint> {
     let mut output = points.to_vec();
     if output.first() == output.last() {
         output.pop();
@@ -544,14 +544,14 @@ fn edge_intersection(start: GlobalPoint, end: GlobalPoint, rect: Rect, edge: usi
     }
 }
 
-fn remove_consecutive_duplicates<T: PartialEq>(points: &mut Vec<T>) {
+pub(crate) fn remove_consecutive_duplicates<T: PartialEq>(points: &mut Vec<T>) {
     points.dedup();
     if points.len() > 1 && points.first() == points.last() {
         points.pop();
     }
 }
 
-fn signed_area(points: &[GlobalPoint]) -> i128 {
+pub(crate) fn signed_area(points: &[GlobalPoint]) -> i128 {
     if points.len() < 3 {
         return 0;
     }
