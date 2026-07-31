@@ -719,7 +719,14 @@ impl TextInput {
             return;
         }
         self.draw_text.max_lines = max_lines;
-        self.laidout_text = None;
+        // Deliberately does NOT clear `laidout_text`. `max_lines` is part of
+        // the layout cache key, so the next draw re-lays out anyway — whereas
+        // dropping the layout HERE leaves the field with none for the rest of
+        // the event batch, and every cursor operation in that window fails
+        // ("can't move cursor because layout was invalidated by an earlier
+        // event") and silently returns. Since this is called from focus and
+        // blur handling, that window is exactly when the user is clicking into
+        // the field, so the click would place no caret at all.
         self.draw_bg.redraw(cx);
     }
 
