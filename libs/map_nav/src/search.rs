@@ -779,6 +779,36 @@ impl SearchIndex {
         out
     }
 
+    /// Token-table indices within a small edit distance of `token` —
+    /// speech-to-text anglicizes names ("Harlem" for Haarlem), so near-miss
+    /// tokens become retrieval candidates and the tiered scorer arbitrates.
+    /// First letter must match; the sorted table bounds the scan.
+    fn fuzzy_token_indices(&self, token: &str) -> Vec<usize> {
+        let max_ed = if token.len() >= 9 { 2 } else { 1 };
+        let Some(first) = token.chars().next() else {
+            return Vec::new();
+        };
+        let head = &token[..first.len_utf8()];
+        let start = self.token_strings.partition_point(|t| t.as_str() < head);
+        let mut out = Vec::new();
+        for idx in start..self.token_strings.len() {
+            let cand = &self.token_strings[idx];
+            if !cand.starts_with(head) {
+                break;
+            }
+            if cand.len().abs_diff(token.len()) <= max_ed
+                && cand.as_str() != token
+                && edit_distance_at_most(token.as_bytes(), cand.as_bytes(), max_ed)
+            {
+                out.push(idx);
+                if out.len() >= 24 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Ranked search. `near` enables the proximity boost ("pizza" means
     /// "pizza near me"). The last token is treated as a prefix
     /// (autocomplete-style).
@@ -802,6 +832,46 @@ impl SearchIndex {
             }
         }
         let text_candidates = text_candidates.unwrap_or_default();
+
+        // Transcription correction: if the literal match surfaced no
+        // settlement at all (e.g. "harlem" only hits a parking spot), redo
+        // the intersection with near-miss tokens unioned in per query
+        // token. The tiered scorer then prefers the town of Haarlem over
+        // an exactly-named minor POI on its own.
+        let is_settlement = |doc_id: u32| {
+            matches!(
+                Category::from_u16(self.docs[doc_id as usize].category),
+                Category::City
+                    | Category::Town
+                    | Category::Village
+                    | Category::Suburb
+                    | Category::Hamlet
+                    | Category::Neighbourhood
+            )
+        };
+        let mut fuzzy_candidates: Vec<u32> = Vec::new();
+        if !text_candidates.iter().any(|&id| is_settlement(id)) {
+            let mut acc: Option<Vec<u32>> = None;
+            for (i, token) in tokens.iter().enumerate() {
+                let mut ids = self.candidate_docs(token, i == last, CANDIDATE_CAP);
+                if token.len() >= 4 {
+                    for idx in self.fuzzy_token_indices(token) {
+                        ids.extend_from_slice(self.postings_for(idx));
+                    }
+                    ids.sort_unstable();
+                    ids.dedup();
+                }
+                acc = Some(match acc {
+                    None => ids,
+                    Some(prev) => intersect_sorted(&prev, &ids),
+                });
+                if acc.as_ref().unwrap().is_empty() {
+                    break;
+                }
+            }
+            fuzzy_candidates = acc.unwrap_or_default();
+            fuzzy_candidates.retain(|&id| text_candidates.binary_search(&id).is_err());
+        }
 
         // Category expansion: tokens hitting the synonym table pull in the
         // top-ranked docs of those categories (proximity re-ranks them).
@@ -856,8 +926,13 @@ impl SearchIndex {
         for &doc_id in &text_candidates {
             push_result(doc_id, false, &mut results);
         }
+        for &doc_id in &fuzzy_candidates {
+            push_result(doc_id, false, &mut results);
+        }
         for &doc_id in &category_candidates {
-            if text_candidates.binary_search(&doc_id).is_err() {
+            if text_candidates.binary_search(&doc_id).is_err()
+                && fuzzy_candidates.binary_search(&doc_id).is_err()
+            {
                 push_result(doc_id, true, &mut results);
             }
         }
@@ -1021,6 +1096,37 @@ pub fn score_search_hit(
     score
 }
 
+/// Levenshtein distance <= k (k is 1 or 2), banded and early-exiting.
+fn edit_distance_at_most(a: &[u8], b: &[u8], k: usize) -> bool {
+    if a.len().abs_diff(b.len()) > k {
+        return false;
+    }
+    // Band of width 2k+1 around the diagonal.
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        let lo = i.saturating_sub(k).max(1);
+        let hi = (i + k).min(b.len());
+        if lo > 1 {
+            curr[lo - 1] = usize::MAX / 2;
+        }
+        let mut row_min = usize::MAX;
+        for j in lo..=hi {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+            row_min = row_min.min(curr[j]);
+        }
+        if row_min > k {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()] <= k
+}
+
 fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
     let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     let mut out = Vec::with_capacity(small.len());
@@ -1054,6 +1160,33 @@ mod tests {
         assert_eq!(normalize_tokens("Café de Prins"), vec!["cafe", "de", "prins"]);
         assert_eq!(normalize_tokens("'s-Gravenhage"), vec!["s", "gravenhage"]);
         assert_eq!(normalize_tokens("  A10/E22  "), vec!["a10", "e22"]);
+    }
+
+    #[test]
+    fn transcription_error_prefers_settlement() {
+        // Whisper anglicizes "Haarlem" to "Harlem"; an exactly-named minor
+        // POI must not beat the fuzzy-matched town.
+        let mut b = SearchIndexBuilder::new();
+        b.add("Haarlem", "", LonLat::new(4.6462, 52.3874), Category::Town, 230);
+        b.add(
+            "Harlem",
+            "parking",
+            LonLat::new(4.9000, 52.3700),
+            Category::Parking,
+            20,
+        );
+        let index = b.build();
+        let results = index.query("harlem", Some(LonLat::new(4.9041, 52.3676)), 10);
+        assert_eq!(results[0].name, "Haarlem");
+        assert!(results.iter().any(|r| r.name == "Harlem"));
+    }
+
+    #[test]
+    fn edit_distance_bounds() {
+        assert!(edit_distance_at_most(b"harlem", b"haarlem", 1));
+        assert!(!edit_distance_at_most(b"harlem", b"haarlemmermeer", 2));
+        assert!(edit_distance_at_most(b"utrecht", b"utrecht", 1));
+        assert!(!edit_distance_at_most(b"harlem", b"arnhem", 1));
     }
 
     #[test]
