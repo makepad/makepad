@@ -3106,6 +3106,18 @@ impl MapView {
         if missing.is_empty() {
             return;
         }
+        // Load center-out: visible_tiles is generated row-major, and with
+        // only max_in_flight slots per frame the top-left corner otherwise
+        // fills before what the user is actually looking at.
+        {
+            let zoom = self.request_zoom_level();
+            let center = self.center_norm * tile_world_size(zoom) / TILE_SIZE as f64;
+            missing.sort_by_key(|key| {
+                let dx = (key.x as f64 + 0.5) - center.x;
+                let dy = (key.y as f64 + 0.5) - center.y;
+                ((dx * dx + dy * dy) * 4096.0) as i64
+            });
+        }
         // Dispatch each tile as its own worker job so builds run in parallel
         // across the pool; keep enough in flight to cover a viewport restyle.
         let max_in_flight = 12usize.saturating_sub(self.local_requested_tiles.len());
