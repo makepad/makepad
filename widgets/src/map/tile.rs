@@ -6206,7 +6206,7 @@ pub fn load_local_tile_batch(
         }
         let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
         let raw = reader
-            .get_tile(tile_key.z as i64, tile_key.x as i64, tms_row)
+            .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
             .ok()
             .flatten();
         (raw, true)
@@ -6245,7 +6245,7 @@ pub fn load_local_tile_batch(
             let fetch_x = (tile_key.x as u32 >> shift) as i64;
             let fetch_y = (tile_key.y as u32 >> shift) as i64;
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
-            if let Ok(Some(raw)) = reader.get_tile(fetch_z as i64, fetch_x, tms_row) {
+            if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
                     raw,
                     shift,
@@ -6274,7 +6274,11 @@ pub fn load_local_tile_batch(
     // reading the large blob when solved coverage makes every one of those
     // outputs unnecessary.
     let detail_may_be_needed = render_zoom >= 14;
-    let mut detail_reader = if detail_may_be_needed {
+    // Single-archive mode: base and detail layers live in the SAME file
+    // (the pbf-base combined build). Re-reading it through a second reader
+    // brotli-decoded every z14 blob twice — reuse the base bytes instead.
+    let combined_archive = detail_mbtiles_path == Some(mbtiles_path);
+    let mut detail_reader = if detail_may_be_needed && !combined_archive {
         detail_mbtiles_path
             .filter(|path| path.is_file())
             .and_then(|path| MbtilesReader::open(path).ok())
@@ -6302,7 +6306,7 @@ pub fn load_local_tile_batch(
             for tile_key in keys {
                 let tms_row = tile_count - 1 - tile_key.y as i64;
                 let raw = reader
-                    .get_tile(zoom as i64, tile_key.x as i64, tms_row)
+                    .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
                     .map_err(|err| {
                         format!(
                             "read tile z{} x{} y{} from {}: {}",
@@ -6322,22 +6326,31 @@ pub fn load_local_tile_batch(
                     || render_zoom >= 16
                     || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
                     || !bridge_dz_covered;
-                let detail_raw = detail_needed
-                    .then(|| {
-                        detail_reader.as_mut().and_then(|reader| {
-                            reader
-                                .get_tile(zoom as i64, tile_key.x as i64, tms_row)
-                                .ok()
+                let detail_raw = if combined_archive {
+                    None // base bytes double as detail below
+                } else {
+                    detail_needed
+                        .then(|| {
+                            detail_reader.as_mut().and_then(|reader| {
+                                reader
+                                    .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
+                                    .ok()
+                            })
                         })
-                    })
-                    .flatten()
-                    .flatten();
+                        .flatten()
+                        .flatten()
+                };
+                let detail_slice = if combined_archive && detail_needed {
+                    Some(raw.as_slice())
+                } else {
+                    detail_raw.as_deref()
+                };
                 let overlay_tiles = fetch_overlays(tile_key);
 
                 match build_tile_buffers_from_mvt(
                     tile_key,
                     &raw,
-                    detail_raw.as_deref(),
+                    detail_slice,
                     bridge_dz_raw.as_deref(),
                     bridge_dz_covered,
                     &overlay_tiles,
@@ -6421,22 +6434,37 @@ pub fn load_local_tile_batch(
                 || render_zoom >= 16
                 || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
                 || !bridge_dz_covered;
-            let detail_raw = detail_needed
-                .then(|| {
-                    detail_reader.as_mut().and_then(|reader| {
-                        let tms_row = tile_count - 1 - tile_key.y as i64;
-                        reader
-                            .get_tile(zoom as i64, tile_key.x as i64, tms_row)
-                            .ok()
+            let detail_raw = if combined_archive {
+                None // base bytes double as detail below
+            } else {
+                detail_needed
+                    .then(|| {
+                        detail_reader.as_mut().and_then(|reader| {
+                            let tms_row = tile_count - 1 - tile_key.y as i64;
+                            reader
+                                .get_tile_decoded(zoom as i64, tile_key.x as i64, tms_row)
+                                .ok()
+                        })
                     })
-                })
-                .flatten()
-                .flatten();
+                    .flatten()
+                    .flatten()
+            };
             let overlay_tiles = fetch_overlays(tile_key);
+            // Codec-aware decode; a failure falls back to the raw payload,
+            // which the magic-byte sniff downstream still handles for the
+            // legacy gzip/zlib/raw archives this scan path serves.
+            let tile_data = reader
+                .decode_tile(&tile.tile_data)
+                .unwrap_or_else(|_| tile.tile_data.clone());
+            let detail_slice = if combined_archive && detail_needed {
+                Some(tile_data.as_slice())
+            } else {
+                detail_raw.as_deref()
+            };
             match build_tile_buffers_from_mvt(
                 tile_key,
-                &tile.tile_data,
-                detail_raw.as_deref(),
+                &tile_data,
+                detail_slice,
                 bridge_dz_raw.as_deref(),
                 bridge_dz_covered,
                 &overlay_tiles,
@@ -8254,7 +8282,7 @@ mod bridge_probe_tests {
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let theme = crate::map::style::probe_compiled_theme();
         let spots = [
             ("raampoort", 4.8785f64, 52.3798f64),
@@ -8327,7 +8355,7 @@ mod bridge_probe_tests {
         use super::*;
         let (lon, lat) = (4.9445f64, 52.3382f64);
         let maps = Path::new("../examples/map/local/maps");
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let z = 14u32;
         let n = (1u64 << z) as f64;
         let nx = (lon + 180.0) / 360.0 * n;
@@ -8392,7 +8420,7 @@ mod bridge_probe_tests {
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
-        let mut dz = MbtilesReader::open(&maps.join("ams-bridge-dz.mbtiles")).unwrap();
+        let mut dz = MbtilesReader::open(&maps.join("nl-bridge-dz.mbtiles")).unwrap();
         let theme = crate::map::style::probe_compiled_theme();
         let (z, tx, ty) = (14u32, 8414i64, 5386i64);
         let tms = (1i64 << z) - 1 - ty;
@@ -8572,7 +8600,7 @@ mod bridge_probe_tests {
     #[ignore] // needs local bake output
     fn probe_bridge_dz_load() {
         use super::*;
-        let path = std::path::Path::new("../local/maps/ams-bridge-dz.mbtiles");
+        let path = std::path::Path::new("../local/maps/nl-bridge-dz.mbtiles");
         assert!(path.is_file(), "no bake output at {}", path.display());
         let mut reader = MbtilesReader::open(path).unwrap();
         let meta = reader.get_metadata().unwrap_or_default();
@@ -9001,7 +9029,7 @@ mod bridge_probe_tests {
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
         let dz_name = std::env::var("TEAR_DZ")
-            .unwrap_or_else(|_| "../local/maps/ams-bridge-dz.mbtiles".to_string());
+            .unwrap_or_else(|_| "../local/maps/nl-bridge-dz.mbtiles".to_string());
         let dz = std::path::Path::new(&dz_name);
         if !base.exists() || !detail.exists() || !dz.exists() {
             println!("no archives");
