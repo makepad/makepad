@@ -734,6 +734,23 @@ impl TextInput {
         self.draw_text.max_lines
     }
 
+    /// Scrolls back to the very start of the text.
+    ///
+    /// For a field that folds down to a fixed height when it loses focus: the
+    /// scroll offset survives the blur, so a draft last edited near its end
+    /// would fold showing whichever line the caret had scrolled to rather than
+    /// its first. Deliberately leaves `laidout_text` alone — scrolling doesn't
+    /// change the layout, and dropping it here would break every cursor
+    /// operation for the rest of the event batch (see `set_max_lines`).
+    pub fn scroll_to_top(&mut self, cx: &mut Cx) {
+        if self.scroll_x == 0.0 && self.scroll_y == 0.0 {
+            return;
+        }
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
+        self.draw_bg.redraw(cx);
+    }
+
     pub fn is_password(&self) -> bool {
         self.is_password
     }
@@ -3053,6 +3070,13 @@ impl TextInputRef {
 
     pub fn max_lines(&self) -> usize {
         self.borrow().map(|inner| inner.max_lines()).unwrap_or(0)
+    }
+
+    /// See [`TextInput::scroll_to_top`].
+    pub fn scroll_to_top(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.scroll_to_top(cx);
+        }
     }
 
     pub fn is_multiline(&self) -> bool {
