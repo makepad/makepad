@@ -1125,10 +1125,27 @@ impl AudioUnitAccess {
                             let raw_unit: *mut std::ffi::c_void =
                                 msg_send![av_audio_unit, audioUnit];
                             if !raw_unit.is_null() {
+                                // Standard (non-advanced) ducking at Min is
+                                // the gentlest combination — advanced mode
+                                // dips other audio hard on voice activity.
+                                // MAKEPAD_VPIO_DUCKING=min|mid|max|default
+                                // and MAKEPAD_VPIO_ADVANCED=1 override for
+                                // experimentation.
+                                let level = match std::env::var("MAKEPAD_VPIO_DUCKING")
+                                    .unwrap_or_default()
+                                    .as_str()
+                                {
+                                    "mid" => 20,
+                                    "max" => 30,
+                                    "default" => 0,
+                                    _ => DUCKING_LEVEL_MIN,
+                                };
+                                let advanced =
+                                    std::env::var("MAKEPAD_VPIO_ADVANCED").is_ok_and(|v| v == "1");
                                 let config = DuckingConfig {
-                                    enable_advanced_ducking: 1,
+                                    enable_advanced_ducking: advanced as u8,
                                     _pad: [0; 3],
-                                    ducking_level: DUCKING_LEVEL_MIN,
+                                    ducking_level: level,
                                 };
                                 let status = AudioUnitSetProperty(
                                     raw_unit,
@@ -1139,7 +1156,9 @@ impl AudioUnitAccess {
                                     std::mem::size_of::<DuckingConfig>() as u32,
                                 );
                                 if status == 0 {
-                                    crate::log!("voice input: other-audio ducking set to minimum");
+                                    crate::log!(
+                                        "voice input: other-audio ducking level {level} advanced {advanced}"
+                                    );
                                 } else {
                                     crate::log!(
                                         "voice input: ducking config not applied (OSStatus {status})"
