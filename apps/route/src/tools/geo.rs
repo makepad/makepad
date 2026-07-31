@@ -21,6 +21,15 @@ pub fn defs() -> Vec<ToolDefinition> {
 
 pub fn search(ctx: &mut ToolCtx, args: &JsonValue) -> Result<String, String> {
     let query = arg_str(args, "query").ok_or("missing query")?.to_string();
+    // A degenerate/repetitious query (greedy-decoding loops produce them)
+    // makes the fuzzy index scan crawl. Refuse with guidance instead.
+    if query.len() > 64 || query.split_whitespace().count() > 8 {
+        return Err(format!(
+            "query too long ({} chars) — search for ONE short place name or category, \
+             e.g. 'Oudegracht 399 Utrecht' or 'hotel museumkwartier'",
+            query.len()
+        ));
+    }
     let limit = arg_usize(args, "limit").unwrap_or(8).clamp(1, 20);
     let (center_lon, center_lat) = ctx.map_center();
     let near = LonLat {
