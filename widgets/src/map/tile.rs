@@ -3,8 +3,8 @@ use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, append_tessellated_geometry_decked, tessellate_path_fill,
-    LineCap, LineJoin, Tessellator, VVertex,
+    append_tessellated_geometry, append_tessellated_geometry_decked, compute_clip_radii,
+    tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
 };
@@ -1245,6 +1245,10 @@ struct FillFeatureGroup {
     /// close zoom lift with the stroke decks instead of lying flat under
     /// the crossing.
     deck_m: f32,
+    /// Index into the tile's decoded baked-fill list when this feature's
+    /// triangulation was pre-baked (payload v2-fills-1). Flat mode then
+    /// skips runtime ring classification + tessellation for the body.
+    baked: Option<usize>,
     /// Road-surface polygon: eligible for per-vertex corridor decks when a
     /// baked bridge-dz overlay covers the tile.
     deckable: bool,
@@ -1427,6 +1431,7 @@ pub fn build_tile_buffers_from_body(
             tags: way.tags,
             closed: way.closed,
             dz: None,
+            fidx: None,
         });
     }
 
@@ -1441,6 +1446,7 @@ pub fn build_tile_buffers_from_body(
         Vec::new(),
         false,
         false,
+        Vec::new(),
     ))
 }
 
@@ -1463,6 +1469,19 @@ pub fn build_tile_buffers_from_mvt(
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
+    // Baked fill triangulations (payload v2-fills-1, field 100): flat mode
+    // substitutes them for the runtime tessellation of the big polygon
+    // features. 3D/terrain ignores the stream — drape and extrusion re-grid
+    // from the rings. MAKEPAD_NO_BAKED_FILLS=1 is the kill switch (also the
+    // A/B lever for benchmarks).
+    static NO_BAKED_FILLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let no_baked =
+        *NO_BAKED_FILLS.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FILLS").is_ok());
+    let baked_fills: Vec<BakedFillFeature> = if buildings_3d || no_baked {
+        Vec::new()
+    } else {
+        parse_baked_fills(&pbf_data).unwrap_or_default()
+    };
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
@@ -1552,6 +1571,7 @@ pub fn build_tile_buffers_from_mvt(
         bridge_corridors,
         bridge_dz_covered,
         have_charger_overlay,
+        baked_fills,
     ))
 }
 
@@ -1590,6 +1610,7 @@ impl MvtSink for BridgeDzCollector {
             tags,
             closed: close,
             dz: None,
+            fidx: None,
         });
     }
 
@@ -2845,6 +2866,10 @@ pub struct TileWay {
     /// Baked per-vertex deck height (m), aligned with `points` — from the
     /// base_dz overlay join. The way lifts off its own profile.
     pub dz: Option<Vec<f32>>,
+    /// Source-layer feature index in MVT decode order: the join key into
+    /// the baked fill stream (protobuf field 100, payload v2-fills-1).
+    /// None for ways that did not come from a plain base-tile decode.
+    pub fidx: Option<u32>,
 }
 
 /// Stage clock for MP_TILE_PROFILE=1: per-stage wall time to stderr, so the
@@ -2891,6 +2916,7 @@ impl TileProfiler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
     tile_ways: Vec<TileWay>,
@@ -2902,6 +2928,7 @@ fn build_tile_buffers_from_features(
     bridge_corridors: Vec<BridgeCorridor>,
     bridge_dz_covered: bool,
     have_charger_overlay: bool,
+    baked_fills: Vec<BakedFillFeature>,
 ) -> TileBuffers {
     let mut profiler = TileProfiler::new();
     // How much this tile gets magnified on screen at the styled view zoom.
@@ -3227,6 +3254,12 @@ fn build_tile_buffers_from_features(
 
     let mut path = VectorPath::new();
     let mut tess = Tessellator::default();
+    // Map polygon rings have trustworthy winding everywhere fills are
+    // emitted from here: MVT rings are orientation-normalized by
+    // classify_polygon_rings, boolean overlay/shadow outputs are
+    // winding-consistent by construction. This lets fill() derive the AA
+    // fill-side sign from ring orientation instead of O(V^2) probing.
+    tess.set_trust_fill_winding(true);
     let mut tess_verts = Vec::<VVertex>::new();
     let mut tess_indices = Vec::<u32>::new();
 
@@ -3293,6 +3326,12 @@ fn build_tile_buffers_from_features(
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut plaza_rings: Vec<(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)> = Vec::new();
     let mut fill_group_lookup = HashMap::<(String, u32, u32), usize>::new();
+    // Baked fill join: (baker Layer discriminant, per-layer feature index).
+    let baked_fill_lookup: HashMap<(u8, u32), usize> = baked_fills
+        .iter()
+        .enumerate()
+        .map(|(index, bake)| ((bake.layer_id, bake.feature_index), index))
+        .collect();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
         if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
@@ -3410,12 +3449,17 @@ fn build_tile_buffers_from_features(
             } else {
                 0.0
             };
+            let baked = way.fidx.and_then(|fidx| {
+                let layer_id = baked_layer_discriminant(mvt_layer)?;
+                baked_fill_lookup.get(&(layer_id, fidx)).copied()
+            });
             fill_groups.push(FillFeatureGroup {
                 color,
                 layer_rank: fill_layer_rank(&way.tags),
                 is_building: way.tags.contains_key("building"),
                 alpha,
                 pattern,
+                baked,
                 material: fill_material_for_tags(&way.tags),
                 late: matches!(
                     way.tags.get("layer").map(|v| v.as_str()),
@@ -3494,8 +3538,65 @@ fn build_tile_buffers_from_features(
         if !build_road_core && group.deckable {
             continue;
         }
-        let polygons = classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS);
+        // Baked fast path: the feature's body triangulation was pre-baked
+        // into the tile (v2-fills-1). Emit the clipped strip triangles
+        // directly and add ONLY the AA fringe from the (clipped) runtime
+        // rings — the fringe strips are self-contained, so edge AA is the
+        // exact geometry the runtime fill would have produced, while the
+        // body skips ring classification + sweep tessellation entirely.
+        // Empty rings mean the whole feature was diverted (plaza tier) or
+        // clipped away — never double-paint from the bake then.
+        let baked_body = group
+            .baked
+            .and_then(|index| baked_fills.get(index))
+            .filter(|_| !group.rings.is_empty());
+        let mut baked_ready = false;
+        if let Some(baked) = baked_body {
+            let clip = tile_clip_rect((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+            let baked_area =
+                emit_baked_fill_body(baked, clip, &mut tess_verts, &mut tess_indices);
+            // Sanity guard: the clipped baked partition must cover the
+            // feature's net (clipped) ring area. A bake that disagrees —
+            // e.g. an inverted-winding source feature whose exterior the
+            // baker mistook for a hole — would erase whole surfaces, so it
+            // falls back to runtime tessellation instead.
+            let net_ring_area: f64 = group.rings.iter().map(|r| r.signed_area).sum();
+            let net_ring_area = net_ring_area.abs();
+            if net_ring_area > 1e-6 && (baked_area - net_ring_area).abs() <= net_ring_area * 0.05
+            {
+                if aa_units > 0.0 {
+                    for ring in &group.rings {
+                        emit_path(&mut path, &ring.points, true);
+                    }
+                    tess.flatten(&path, tolerance);
+                    tess.fill_fringe_into(
+                        aa_units,
+                        LineJoin::Miter,
+                        4.0,
+                        false,
+                        &mut tess_verts,
+                        &mut tess_indices,
+                    );
+                    path.clear();
+                }
+                compute_clip_radii(&mut tess_verts, &tess_indices);
+                baked_ready = true;
+            } else {
+                tess_verts.clear();
+                tess_indices.clear();
+            }
+        }
+        let polygons = if baked_ready {
+            // One synthetic piece drives the shared emission tail below.
+            vec![Vec::new()]
+        } else {
+            classify_polygon_rings(&group.rings, EARCUT_MAX_RINGS)
+        };
         for polygon in polygons {
+            if baked_ready {
+                // tess_verts / tess_indices already hold the baked body +
+                // fringe for this single piece.
+            } else {
             if polygon.is_empty() {
                 continue;
             }
@@ -3513,6 +3614,7 @@ fn build_tile_buffers_from_features(
                 false,
                 tolerance,
             );
+            }
             // Road-surface polygons join the STROKE pass: in tilt mode
             // passes 1-3 carry the relief depth boost, and a junction
             // plaza left in the unboosted fill domain gets sliced by every
@@ -6594,7 +6696,7 @@ impl MvtSink for MvtLocalCollector {
         let profile = if self.base_dz.is_empty() {
             None
         } else {
-            match (tags.get("layer"), feature_index, path_index) {
+            match (tags.get("layer"), feature_index.as_deref(), path_index) {
                 (Some(layer), Some(fidx), Some(pidx)) => {
                     match (fidx.parse::<u32>(), pidx.parse::<u32>()) {
                         (Ok(fidx), Ok(pidx)) => self
@@ -6665,6 +6767,7 @@ impl MvtSink for MvtLocalCollector {
             tags,
             closed: close,
             dz,
+            fidx: feature_index.as_deref().and_then(|v| v.parse::<u32>().ok()),
         });
     }
 
@@ -6741,6 +6844,253 @@ impl MvtValue {
             }
         }
     }
+}
+
+// --- Baked fill triangulations (payload v2-fills-1) -----------------------
+// The pyramid baker (tools/map_tiles/src/native/bake.rs) appends top-level
+// protobuf field 100 to qualifying tiles: pre-earcut triangle strips for the
+// big polygon features (water_polygons / land / street_polygons, >=96 ring
+// vertices). Flat mode substitutes these for the runtime fill tessellation;
+// 3D/terrain ignores them (drape re-grids from the rings).
+
+/// One decoded baked-fill feature.
+pub struct BakedFillFeature {
+    /// tools/map_tiles Layer discriminant of the source polygon layer.
+    pub layer_id: u8,
+    /// Feature index within that MVT layer, decode order (joins __mp_fidx).
+    pub feature_index: u32,
+    /// Tile-local units (TILE_SIZE space), full MVT precision, UNCLIPPED:
+    /// geometry carries the emitter's 64-MVT-unit tile buffer, so consumers
+    /// must clip triangles to their own tile bounds.
+    pub verts: Vec<(f32, f32)>,
+    /// Decoded triangle list (positive y-down winding).
+    pub tris: Vec<[u32; 3]>,
+}
+
+/// Maps a renderer-side MVT layer NAME to the baker's Layer discriminant.
+/// Mirrors tools/map_tiles/src/native/mvt.rs `Layer`; only the layers the
+/// baker emits (bake.rs `baked_fills_field`) are listed.
+fn baked_layer_discriminant(layer_name: &str) -> Option<u8> {
+    match layer_name {
+        "water_polygons" => Some(9),
+        "land" => Some(11),
+        "street_polygons" => Some(13),
+        _ => None,
+    }
+}
+
+fn zigzag_decode(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+/// Decode the strip stream exactly like the baker's `strip_to_triangles`:
+/// sliding window of 3, even/odd winding alternation by absolute window
+/// index, degenerate windows (repeated index) restart the strip.
+fn baked_strip_to_triangles(strip: &[u32]) -> Vec<[u32; 3]> {
+    let mut out = Vec::with_capacity(strip.len().saturating_sub(2));
+    let mut odd = false;
+    for window in strip.windows(3) {
+        let [a, b, c] = [window[0], window[1], window[2]];
+        if a != b && b != c && a != c {
+            out.push(if odd { [b, a, c] } else { [a, b, c] });
+        }
+        odd = !odd;
+    }
+    out
+}
+
+/// Scan a decoded (uncompressed) tile for field 100 and decode the baked
+/// fill stream. Returns None when absent or malformed (renderer falls back
+/// to runtime tessellation — the stream is strictly an accelerator).
+pub fn parse_baked_fills(tile_data: &[u8]) -> Option<Vec<BakedFillFeature>> {
+    let mut pos = 0usize;
+    let mut blob: Option<&[u8]> = None;
+    while pos < tile_data.len() {
+        let key = read_pb_varint(tile_data, &mut pos).ok()?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        if field == 100 && wire == 2 {
+            blob = Some(read_pb_len_slice(tile_data, &mut pos).ok()?);
+            break;
+        }
+        skip_pb_field(tile_data, &mut pos, wire).ok()?;
+    }
+    let blob = blob?;
+    if blob.first() != Some(&1u8) {
+        return None;
+    }
+    // The baker writes MVT extent 4096 for every layer (mvt.rs MVT_EXTENT);
+    // baked coordinates are in the same local tile space.
+    const BAKED_MVT_EXTENT: f32 = 4096.0;
+    let scale = TILE_SIZE as f32 / BAKED_MVT_EXTENT;
+    let mut pos = 1usize;
+    let count = read_pb_varint(blob, &mut pos).ok()? as usize;
+    // Cap against garbage: a tile never has millions of baked features.
+    if count > 100_000 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let layer_id = read_pb_varint(blob, &mut pos).ok()?;
+        let feature_index = read_pb_varint(blob, &mut pos).ok()?;
+        let vertex_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+        let index_count = read_pb_varint(blob, &mut pos).ok()? as usize;
+        if vertex_count > 4_000_000 || index_count > 12_000_000 {
+            return None;
+        }
+        let mut verts = vec![(0.0f32, 0.0f32); vertex_count];
+        let mut previous = 0i64;
+        for vert in verts.iter_mut() {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            vert.0 = previous as f32 * scale;
+        }
+        previous = 0;
+        for vert in verts.iter_mut() {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            vert.1 = previous as f32 * scale;
+        }
+        let mut strip = Vec::with_capacity(index_count);
+        previous = 0;
+        for _ in 0..index_count {
+            previous += zigzag_decode(read_pb_varint(blob, &mut pos).ok()?);
+            if previous < 0 || previous as usize >= vertex_count {
+                return None;
+            }
+            strip.push(previous as u32);
+        }
+        let tris = baked_strip_to_triangles(&strip);
+        out.push(BakedFillFeature {
+            layer_id: layer_id as u8,
+            feature_index: feature_index as u32,
+            verts,
+            tris,
+        });
+    }
+    Some(out)
+}
+
+/// Clip a convex polygon against one half-plane (Sutherland–Hodgman step).
+/// `inside`/`intersect` in f64 for edge-crossing robustness.
+fn clip_poly_axis(
+    input: &[(f64, f64)],
+    output: &mut Vec<(f64, f64)>,
+    axis_x: bool,
+    bound: f64,
+    keep_less: bool,
+) {
+    output.clear();
+    let inside = |p: (f64, f64)| {
+        let v = if axis_x { p.0 } else { p.1 };
+        if keep_less {
+            v <= bound
+        } else {
+            v >= bound
+        }
+    };
+    let n = input.len();
+    for i in 0..n {
+        let cur = input[i];
+        let prev = input[(i + n - 1) % n];
+        let cur_in = inside(cur);
+        let prev_in = inside(prev);
+        if cur_in != prev_in {
+            // Edge crosses the boundary: emit intersection.
+            let (num, den) = if axis_x {
+                (bound - prev.0, cur.0 - prev.0)
+            } else {
+                (bound - prev.1, cur.1 - prev.1)
+            };
+            let t = if den.abs() > 1e-12 { num / den } else { 0.0 };
+            output.push((prev.0 + (cur.0 - prev.0) * t, prev.1 + (cur.1 - prev.1) * t));
+        }
+        if cur_in {
+            output.push(cur);
+        }
+    }
+}
+
+/// Emit a baked fill body into `verts`/`indices` (clears both): shared
+/// vertices for fully-inside triangles, per-triangle Sutherland–Hodgman
+/// clipping + fan retriangulation at the tile clip rect. Vertex semantics
+/// match `Tessellator::fill`'s EvenOdd body: position on the ring,
+/// u=0.5 / v=1.0 (opaque interior). Returns the emitted (clipped)
+/// triangle area — callers sanity-check it against the feature's net ring
+/// area and fall back to runtime tessellation on disagreement.
+fn emit_baked_fill_body(
+    baked: &BakedFillFeature,
+    clip: (f32, f32, f32, f32),
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+) -> f64 {
+    verts.clear();
+    indices.clear();
+    let (min_x, min_y, max_x, max_y) = clip;
+    for &(x, y) in &baked.verts {
+        verts.push(VVertex {
+            x,
+            y,
+            u: 0.5,
+            v: 1.0,
+            stroke_dist: 0.0,
+            clip_radius: 0.0,
+        });
+    }
+    let inside = |x: f32, y: f32| x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+    let tri_area = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| -> f64 {
+        0.5 * ((b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1)).abs()
+    };
+    let mut area = 0.0f64;
+    let mut poly_a: Vec<(f64, f64)> = Vec::with_capacity(8);
+    let mut poly_b: Vec<(f64, f64)> = Vec::with_capacity(8);
+    for tri in &baked.tris {
+        let a = &baked.verts[tri[0] as usize];
+        let b = &baked.verts[tri[1] as usize];
+        let c = &baked.verts[tri[2] as usize];
+        if inside(a.0, a.1) && inside(b.0, b.1) && inside(c.0, c.1) {
+            indices.extend_from_slice(&[tri[0], tri[1], tri[2]]);
+            area += tri_area(
+                (a.0 as f64, a.1 as f64),
+                (b.0 as f64, b.1 as f64),
+                (c.0 as f64, c.1 as f64),
+            );
+            continue;
+        }
+        // Clip against the four rect edges; the result is convex, so a
+        // fan preserves the (positive) winding.
+        poly_a.clear();
+        poly_a.extend([
+            (a.0 as f64, a.1 as f64),
+            (b.0 as f64, b.1 as f64),
+            (c.0 as f64, c.1 as f64),
+        ]);
+        clip_poly_axis(&poly_a, &mut poly_b, true, min_x as f64, false);
+        clip_poly_axis(&poly_b, &mut poly_a, true, max_x as f64, true);
+        clip_poly_axis(&poly_a, &mut poly_b, false, min_y as f64, false);
+        clip_poly_axis(&poly_b, &mut poly_a, false, max_y as f64, true);
+        if poly_a.len() < 3 {
+            continue;
+        }
+        let start = verts.len() as u32;
+        for &(x, y) in poly_a.iter() {
+            verts.push(VVertex {
+                x: x as f32,
+                y: y as f32,
+                u: 0.5,
+                v: 1.0,
+                stroke_dist: 0.0,
+                clip_radius: 0.0,
+            });
+        }
+        for k in 1..poly_a.len() as u32 - 1 {
+            indices.extend_from_slice(&[start, start + k, start + k + 1]);
+            area += tri_area(
+                poly_a[0],
+                poly_a[k as usize],
+                poly_a[k as usize + 1],
+            );
+        }
+    }
+    area
 }
 
 pub fn parse_mvt_tile(
@@ -7252,6 +7602,232 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
 #[cfg(test)]
 mod bridge_probe_tests {
     use super::*;
+
+    /// Baked-fill audit (payload v2-fills-1): per baked feature, compare the
+    /// clipped baked body triangle area against the runtime tessellation of
+    /// the SAME feature's (clipped, min-dist-deduped) rings. NaN scan on the
+    /// baked vertices included. Env:
+    ///   BAKED_AUDIT_ARCHIVE (default ../local/maps/nl-base-br.mbtiles)
+    ///   BAKED_AUDIT_KEYS "z,x,y;..." (default a z10-13 spread)
+    /// Run:
+    ///   cargo test -p makepad-widgets --features maps --release \
+    ///     baked_fill_audit -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn baked_fill_audit() {
+        let archive = std::env::var("BAKED_AUDIT_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        let keys_spec = std::env::var("BAKED_AUDIT_KEYS").unwrap_or_else(|_| {
+            "10,528,340;11,1057,678;12,2103,1346;13,4207,2692;13,4211,2691".into()
+        });
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut total_features = 0usize;
+        let mut total_diverged = 0usize;
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let Some(blob) = reader.get_tile(z, x, (1 << z) - 1 - y).ok().flatten() else {
+                println!("z{z} {x}/{y}: missing");
+                continue;
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let Some(baked) = parse_baked_fills(&pbf) else {
+                println!("z{z} {x}/{y}: no baked stream");
+                continue;
+            };
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            // Collect ways exactly like the flat build (render_zoom = z).
+            let mut collector = MvtLocalCollector::new(1.0);
+            parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+            // Group rings per (layer discriminant, fidx).
+            let mut rings_of: HashMap<(u8, u32), Vec<FillRing>> = HashMap::new();
+            let clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
+            for (order, way) in collector.ways.iter().enumerate() {
+                let Some(fidx) = way.fidx else { continue };
+                let layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+                let Some(layer_id) = baked_layer_discriminant(layer) else {
+                    continue;
+                };
+                let Some(mut ring_points) = normalize_polygon_ring(&way.points) else {
+                    continue;
+                };
+                if !ring_inside_bounds(&ring_points, clip_bounds) {
+                    ring_points = clip_ring_to_rect(&ring_points, clip_bounds);
+                    if ring_points.len() < 3 {
+                        continue;
+                    }
+                }
+                let signed_area = polygon_signed_area(&ring_points);
+                if signed_area.abs() <= POLYGON_AREA_EPSILON {
+                    continue;
+                }
+                let ring_order = way
+                    .tags
+                    .get(MVT_INTERNAL_RING_INDEX_KEY)
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(order);
+                rings_of.entry((layer_id, fidx)).or_default().push(FillRing {
+                    order: ring_order,
+                    points: ring_points,
+                    signed_area,
+                });
+            }
+            if std::env::var("BAKED_AUDIT_DEBUG").is_ok() {
+                let mut runtime_list: Vec<((u8, u32), usize, f64)> = rings_of
+                    .iter()
+                    .map(|(&k, rings)| {
+                        (
+                            k,
+                            rings.iter().map(|r| r.points.len()).sum::<usize>(),
+                            rings.iter().map(|r| r.signed_area).sum::<f64>(),
+                        )
+                    })
+                    .collect();
+                runtime_list.sort_by_key(|entry| entry.0);
+                for (k, nv, area) in runtime_list.iter().take(30) {
+                    println!("  runtime layer {} fidx {}: {} ring verts, net area {:.2}", k.0, k.1, nv, area);
+                }
+                for bake in baked.iter().take(30) {
+                    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                    for &(x, y) in &bake.verts {
+                        minx = minx.min(x); miny = miny.min(y); maxx = maxx.max(x); maxy = maxy.max(y);
+                    }
+                    println!(
+                        "  baked layer {} fidx {}: {} verts {} tris bbox ({:.1},{:.1})-({:.1},{:.1})",
+                        bake.layer_id, bake.feature_index, bake.verts.len(), bake.tris.len(), minx, miny, maxx, maxy
+                    );
+                }
+            }
+            // Sum of per-triangle |area|: both tessellations partition their
+            // region (no overlaps), so this equals covered area regardless
+            // of triangle winding (the sweep emits mixed orientations).
+            let tri_area = |verts: &[VVertex], indices: &[u32]| -> f64 {
+                let mut area = 0.0f64;
+                for tri in indices.chunks_exact(3) {
+                    let a = &verts[tri[0] as usize];
+                    let b = &verts[tri[1] as usize];
+                    let c = &verts[tri[2] as usize];
+                    area += 0.5
+                        * ((b.x as f64 - a.x as f64) * (c.y as f64 - a.y as f64)
+                            - (c.x as f64 - a.x as f64) * (b.y as f64 - a.y as f64))
+                            .abs();
+                }
+                area
+            };
+            let mut tess = Tessellator::default();
+            tess.set_trust_fill_winding(true);
+            let mut path = VectorPath::new();
+            let mut verts = Vec::<VVertex>::new();
+            let mut indices = Vec::<u32>::new();
+            let mut diverged = 0usize;
+            let mut nan_verts = 0usize;
+            let mut max_rel = 0.0f64;
+            let mut guard_rejected = 0usize;
+            let mut max_rel_accepted = 0.0f64;
+            for bake in &baked {
+                total_features += 1;
+                // Baked body, clipped like the fill pass at render_zoom = z.
+                let clip = tile_clip_rect(FILL_CLIP_OVERLAP);
+                emit_baked_fill_body(bake, clip, &mut verts, &mut indices);
+                nan_verts += verts
+                    .iter()
+                    .filter(|v| !v.x.is_finite() || !v.y.is_finite())
+                    .count();
+                let baked_area = tri_area(&verts, &indices);
+                // Runtime tessellation of the same feature's rings
+                // (aa = 0: body only, no fringe — the fringe is shared
+                // construction in both paths).
+                let mut runtime_area = 0.0f64;
+                if let Some(rings) = rings_of.get(&(bake.layer_id, bake.feature_index)) {
+                    for polygon in classify_polygon_rings(rings, EARCUT_MAX_RINGS) {
+                        if polygon.is_empty() {
+                            continue;
+                        }
+                        for ring in &polygon {
+                            emit_path(&mut path, ring, true);
+                        }
+                        tessellate_path_fill(
+                            &mut path,
+                            &mut tess,
+                            &mut verts,
+                            &mut indices,
+                            LineJoin::Miter,
+                            4.0,
+                            0.0,
+                            false,
+                            DEFAULT_FLATTEN_TOLERANCE,
+                        );
+                        runtime_area += tri_area(&verts, &indices);
+                    }
+                }
+                let denom = runtime_area.max(1e-6);
+                let rel = (baked_area - runtime_area).abs() / denom;
+                max_rel = max_rel.max(rel);
+                // Mirror the shipping fast path's sanity guard: baked
+                // partition area vs the feature's net clipped ring area.
+                let net_ring_area: f64 = rings_of
+                    .get(&(bake.layer_id, bake.feature_index))
+                    .map(|rings| rings.iter().map(|r| r.signed_area).sum::<f64>().abs())
+                    .unwrap_or(0.0);
+                let guard_accepts = net_ring_area > 1e-6
+                    && (baked_area - net_ring_area).abs() <= net_ring_area * 0.05;
+                if guard_accepts {
+                    max_rel_accepted = max_rel_accepted.max(rel);
+                } else {
+                    guard_rejected += 1;
+                }
+                if rel > 1e-3 {
+                    diverged += 1;
+                    if diverged <= 5 {
+                        let rings = rings_of
+                            .get(&(bake.layer_id, bake.feature_index))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let net: f64 = rings.iter().map(|r| r.signed_area).sum();
+                        println!(
+                            "  DIVERGED layer {} fidx {}: baked {:.3} runtime {:.3} rel {:.2e} ({} verts {} tris, {} rings net {:.3})",
+                            bake.layer_id,
+                            bake.feature_index,
+                            baked_area,
+                            runtime_area,
+                            rel,
+                            bake.verts.len(),
+                            bake.tris.len(),
+                            rings.len(),
+                            net,
+                        );
+                        if rel > 3e-2 {
+                            for (ri, ring) in rings.iter().enumerate().take(12) {
+                                println!(
+                                    "    ring {ri}: {} pts area {:.3}",
+                                    ring.points.len(),
+                                    ring.signed_area
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            total_diverged += diverged;
+            println!(
+                "z{z} {x}/{y}: {} baked features, {} diverged (>1e-3 rel), max rel {:.2e}, {} NaN verts | guard rejects {}, max rel among accepted {:.2e}",
+                baked.len(),
+                diverged,
+                max_rel,
+                nan_verts,
+                guard_rejected,
+                max_rel_accepted,
+            );
+            assert_eq!(nan_verts, 0, "NaN in baked vertices");
+        }
+        println!("audit total: {total_features} baked features, {total_diverged} diverged");
+    }
 
     #[test]
     fn structural_bridge_area_is_3d_only() {
