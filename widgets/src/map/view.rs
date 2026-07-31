@@ -1506,6 +1506,10 @@ pub struct MapView {
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
     #[rust]
     tile_thread_pool: Option<TagThreadPool<TileKey>>,
+    /// Last (request zoom, bucket, 3D mode, epoch) the worker queue was
+    /// pruned for — obsolete queued jobs are dropped when this changes.
+    #[rust]
+    last_pool_prune: Option<(u32, u32, bool, u64)>,
     #[rust]
     local_requested_tiles: HashMap<TileKey, u64>,
     #[rust]
@@ -2857,6 +2861,7 @@ impl MapView {
                 },
                 last_used: self.frame_counter,
                 attempts: 0,
+                retry_after: 0,
                 bytes: tile_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
@@ -2908,11 +2913,20 @@ impl MapView {
 
                     let mut loaded_keys = HashSet::with_capacity(loaded.len());
                     let mut empty_feature_tiles = Vec::<TileKey>::new();
+                    let current_bucket = self.render_bucket();
                     for tile in loaded {
                         loaded_keys.insert(tile.tile_key);
                         self.local_missing_tiles.remove(&tile.tile_key);
                         if tile.buffers.feature_count == 0 {
                             empty_feature_tiles.push(tile.tile_key);
+                        }
+                        // A result styled for a bucket that is no longer
+                        // current is already-stale work: uploading it would
+                        // only compete with the current bucket's builds and
+                        // trigger a pointless restyle-fade. Drop it cheaply;
+                        // keep-stale geometry covers the gap.
+                        if tile.buffers.render_zoom != current_bucket {
+                            continue;
                         }
                         self.pending_ready_tiles
                             .retain(|(key, _)| *key != tile.tile_key);
@@ -2935,7 +2949,18 @@ impl MapView {
                             continue;
                         }
                         self.local_missing_tiles.insert(key, self.frame_counter);
-                        self.tiles.remove(&key);
+                        // KEEP-STALE: a key that reads as absent during a
+                        // rebuild (racing archive writer, transient read
+                        // error) must not take its stale drawable geometry
+                        // off screen; the blacklist above already stops
+                        // re-requests until the recheck window elapses.
+                        if !self
+                            .tiles
+                            .get(&key)
+                            .is_some_and(|entry| matches!(entry.state, TileLoadState::Ready { .. }))
+                        {
+                            self.tiles.remove(&key);
+                        }
                     }
                     redraw = true;
                 }
@@ -2991,7 +3016,23 @@ impl MapView {
         {
             self.last_tile_upload_frame = self.frame_counter;
             let upload_start = std::time::Instant::now();
-            let count = self.pending_ready_tiles.len().min(2);
+            // Budget by BYTES, not just count: two 3D/overzoom tiles can
+            // carry 60+ MB of buffers each and stall the frame for hundreds
+            // of ms; always ship at least one so progress never stops.
+            const UPLOAD_BYTE_BUDGET: usize = 24_000_000;
+            let mut count = 0usize;
+            let mut budget = 0usize;
+            for (_, buffers) in self.pending_ready_tiles.iter() {
+                if count >= 2 {
+                    break;
+                }
+                let size = buffers.byte_size();
+                if count > 0 && budget + size > UPLOAD_BYTE_BUDGET {
+                    break;
+                }
+                budget += size;
+                count += 1;
+            }
             let batch = self
                 .pending_ready_tiles
                 .drain(..count)
@@ -3044,6 +3085,34 @@ impl MapView {
         }
 
         let bucket = self.render_bucket();
+        // OBSOLETE-WORK CANCELLATION: when the request context changes
+        // (zoom gesture reversed, bucket advanced, 2D/3D flip, restyle),
+        // queued builds for the dead context would hold every pool slot
+        // ahead of current work — running jobs finish, but nothing stale
+        // may START. Drop queued jobs for keys outside the current visible
+        // set and free their in-flight slots.
+        let request_zoom = self.request_zoom_level();
+        let prune_sig = (request_zoom, bucket, self.baked_3d_mode, self.style_epoch);
+        if self.last_pool_prune != Some(prune_sig) {
+            self.last_pool_prune = Some(prune_sig);
+            if let Some(pool) = self.tile_thread_pool.as_ref() {
+                let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
+                let dropped =
+                    pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
+                for key in dropped {
+                    self.local_requested_tiles.remove(&key);
+                    // A queued-then-dropped placeholder must not linger as
+                    // Loading forever; keep-stale Ready entries stay.
+                    if self
+                        .tiles
+                        .get(&key)
+                        .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+                    {
+                        self.tiles.remove(&key);
+                    }
+                }
+            }
+        }
         // Watchdog: a worker job that dies (or a lost message) would leak its
         // key here forever and choke the 12-slot in-flight cap; time out and
         // retry, clearing any stuck Loading placeholder so it can re-request.
@@ -3095,6 +3164,11 @@ impl MapView {
                         if zoom_settling {
                             continue;
                         }
+                        // Failed-rebuild backoff for still-drawable entries
+                        // (mark_tile_failed keeps them Ready).
+                        if now < entry.retry_after {
+                            continue;
+                        }
                     }
                     // Failed tiles retry once their backoff elapses.
                     TileLoadState::Failed { retry_after } if now >= *retry_after => {}
@@ -3112,11 +3186,30 @@ impl MapView {
         {
             let zoom = self.request_zoom_level();
             let center = self.center_norm * tile_world_size(zoom) / TILE_SIZE as f64;
-            missing.sort_by_key(|key| {
-                let dx = (key.x as f64 + 0.5) - center.x;
-                let dy = (key.y as f64 + 0.5) - center.y;
-                ((dx * dx + dy * dy) * 4096.0) as i64
-            });
+            if self.tilt > 0.0 {
+                // Screen-space priority under tilt: the flat grid distance
+                // ranks the near field (screen-bottom, LARGEST on screen)
+                // no better than the compressed far field, so it loaded
+                // last. Project tile centers through the camera rotation +
+                // tilt foreshortening and give toward-camera tiles a
+                // tilt-scaled head start. Untilted behavior is unchanged.
+                let (rot_cos, rot_sin) = self.screen_rotation();
+                let tilt_cos = self.tilt.to_radians().cos().clamp(0.2, 1.0);
+                missing.sort_by_key(|key| {
+                    let dx = (key.x as f64 + 0.5) - center.x;
+                    let dy = (key.y as f64 + 0.5) - center.y;
+                    let sx = dx * rot_cos - dy * rot_sin;
+                    let sy = (dx * rot_sin + dy * rot_cos) * tilt_cos;
+                    let near_bias = sy.max(0.0) * (1.0 - tilt_cos) * 3.0;
+                    (((sx * sx + sy * sy).sqrt() - near_bias) * 4096.0) as i64
+                });
+            } else {
+                missing.sort_by_key(|key| {
+                    let dx = (key.x as f64 + 0.5) - center.x;
+                    let dy = (key.y as f64 + 0.5) - center.y;
+                    ((dx * dx + dy * dy) * 4096.0) as i64
+                });
+            }
         }
         // Dispatch each tile as its own worker job so builds run in parallel
         // across the pool; keep enough in flight to cover a viewport restyle.
@@ -3124,7 +3217,25 @@ impl MapView {
         // mid-zoom tiles can take seconds to build, and filling every slot
         // with speculative edge tiles leaves no worker free for the center
         // the user is actually zooming towards.
-        let slot_cap = if zoom_settling { 4usize } else { 12usize };
+        // A mode/bucket restyle of currently-visible tiles is NOT gesture
+        // speculation — everything on screen needs its rebuild, so the
+        // 4-slot gesture throttle would only serialize the burst. Detect it
+        // by the missing set being dominated by still-drawable stale
+        // entries (keep-stale rebuilds).
+        let stale_rebuilds = missing
+            .iter()
+            .filter(|key| {
+                self.tiles
+                    .get(key)
+                    .is_some_and(|entry| matches!(entry.state, TileLoadState::Ready { .. }))
+            })
+            .count();
+        let restyle_burst = stale_rebuilds * 2 >= missing.len();
+        let slot_cap = if zoom_settling && !restyle_burst {
+            4usize
+        } else {
+            12usize
+        };
         let max_in_flight = slot_cap.saturating_sub(self.local_requested_tiles.len());
         if missing.len() > max_in_flight {
             missing.truncate(max_in_flight);
@@ -3147,6 +3258,7 @@ impl MapView {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
                         attempts: prev_attempts,
+                        retry_after: 0,
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
@@ -3225,12 +3337,33 @@ impl MapView {
         let retry_delay = retry_delay_frames(attempts);
         let retry_after = self.frame_counter.saturating_add(retry_delay);
         let bucket = self.render_bucket();
+        // KEEP-STALE: a failed REBUILD of a tile that still has drawable
+        // geometry must not replace it with a gray Failed placeholder (the
+        // 2D/3D flip gray-out: any transient batch error — e.g. an archive
+        // being rewritten — nuked every stale mesh on screen). Keep the
+        // entry drawable and only arm the rebuild backoff.
+        if let Some(entry) = self.tiles.get_mut(&tile_key) {
+            if matches!(entry.state, TileLoadState::Ready { .. }) {
+                entry.attempts = attempts;
+                entry.retry_after = retry_after;
+                log!(
+                    "MapView: tile z{} x{} y{} rebuild failed (attempt {}), keeping stale geometry: {}",
+                    tile_key.z,
+                    tile_key.x,
+                    tile_key.y,
+                    attempts,
+                    reason
+                );
+                return;
+            }
+        }
         self.tiles.insert(
             tile_key,
             TileEntry {
                 state: TileLoadState::Failed { retry_after },
                 last_used: self.frame_counter,
                 attempts,
+                retry_after,
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
@@ -3630,6 +3763,7 @@ impl MapView {
                         state: TileLoadState::LoadingLocal,
                         last_used: self.frame_counter,
                         attempts: 0,
+                        retry_after: 0,
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
@@ -3690,6 +3824,7 @@ impl MapView {
                 state: TileLoadState::LoadingNetwork,
                 last_used: self.frame_counter,
                 attempts,
+                retry_after: 0,
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,

@@ -95,6 +95,11 @@ pub struct TileEntry {
     pub state: TileLoadState,
     pub last_used: u64,
     pub attempts: u8,
+    /// Earliest frame a REBUILD of a still-drawable stale entry may be
+    /// re-requested (backoff after a failed rebuild). A failed rebuild must
+    /// never replace live stale geometry with a gray placeholder; the
+    /// backoff lives here instead of in TileLoadState::Failed.
+    pub retry_after: u64,
     /// Geometry buffer footprint (CPU-side floats at bake time; the GPU
     /// copy is the same order of magnitude). Drives byte-budget eviction —
     /// 3D building tiles reach 60-90 MB each, so a tile-count cap alone
@@ -1486,6 +1491,7 @@ pub fn build_tile_buffers_from_mvt(
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
     let mut collector = MvtLocalCollector::new(render_scale);
+    collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
     // Baked base_dz overlay: dense solved height profiles keyed to this
     // tile's exact base features. The profile geometry replaces sparse base
     // edges during collection after an endpoint identity check.
@@ -1901,6 +1907,9 @@ fn merge_detail_features(
 ) -> Result<(), String> {
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
+    // Combined archives carry base AND detail layers in one tile; this
+    // pass only consumes the raw osm_* layers, so skip the rest undecoded.
+    collector.layer_filter = LayerParseFilter::DetailLayersOnly;
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
     for way in &collector.ways {
@@ -2886,6 +2895,7 @@ impl TileProfiler {
         // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
             on: std::env::var_os("MP_TILE_PROFILE").is_some()
+                || std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
                 || std::path::Path::new("/tmp/mp_tile_profile").exists(),
             last: now,
             start: now,
@@ -6626,6 +6636,13 @@ pub fn load_local_tile_batch(
 /// Receives decoded MVT features (tile-local integer geometry + tags).
 pub trait MvtSink {
     fn alloc_feature_id(&mut self) -> u64;
+    /// Layer-level lazy skip: consulted by `parse_mvt_layer` BEFORE decoding
+    /// a layer's features. MVT layers are length-prefixed, so returning
+    /// false skips the whole layer's geometry/tag decode. Default: consume
+    /// everything.
+    fn wants_layer(&self, _layer_name: &str) -> bool {
+        true
+    }
     fn add_path(
         &mut self,
         tile_key: TileKey,
@@ -6646,7 +6663,23 @@ pub trait MvtSink {
 /// Collects MVT features directly in tile-local f32 coordinates with
 /// scale-aware vertex thinning — the typed replacement for the old
 /// MVT -> Overpass-JSON -> parse round trip.
+/// Which MVT layers a collector pass consumes (layer-level lazy skip).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayerParseFilter {
+    /// Everything (legacy behavior; standalone probes).
+    All,
+    /// Base-tile pass of a combined base+detail archive: the six raw
+    /// `osm_*` detail layers are owned by the detail pass (bridge
+    /// corridors, micro-POIs, detail buildings/platforms) — wholesale
+    /// base ingestion double-styles them (roads exist in `streets` AND
+    /// `osm_lines`) and was measured tripling road-union input.
+    BaseNoDetailLayers,
+    /// Detail pass: ONLY the raw `osm_*` layers.
+    DetailLayersOnly,
+}
+
 struct MvtLocalCollector {
+    layer_filter: LayerParseFilter,
     min_dist_sq: f32,
     next_feature_id: u64,
     ways: Vec<TileWay>,
@@ -6660,6 +6693,7 @@ impl MvtLocalCollector {
     fn new(render_scale: f32) -> Self {
         let min_dist = 0.35 / render_scale.max(0.001);
         Self {
+            layer_filter: LayerParseFilter::All,
             min_dist_sq: min_dist * min_dist,
             next_feature_id: 1,
             ways: Vec::new(),
@@ -6674,6 +6708,15 @@ impl MvtSink for MvtLocalCollector {
         let id = self.next_feature_id;
         self.next_feature_id = self.next_feature_id.wrapping_add(1).max(1);
         id
+    }
+
+    fn wants_layer(&self, layer_name: &str) -> bool {
+        let is_detail = layer_name.starts_with("osm_");
+        match self.layer_filter {
+            LayerParseFilter::All => true,
+            LayerParseFilter::BaseNoDetailLayers => !is_detail,
+            LayerParseFilter::DetailLayersOnly => is_detail,
+        }
     }
 
     fn add_path(
@@ -7150,6 +7193,11 @@ fn parse_mvt_layer(
     }
 
     let extent = extent.max(1);
+    // Layer-level lazy skip: drop the whole layer before any feature decode
+    // when the sink does not consume it in this pass.
+    if !builder.wants_layer(&layer_name) {
+        return Ok(());
+    }
     for (feature_index, feature_data) in features.into_iter().enumerate() {
         parse_mvt_feature(
             feature_index as u32,
@@ -7827,6 +7875,57 @@ mod bridge_probe_tests {
             assert_eq!(nan_verts, 0, "NaN in baked vertices");
         }
         println!("audit total: {total_features} baked features, {total_diverged} diverged");
+    }
+
+    /// Per-layer way census for one tile of TILE_PROFILE_ARCHIVE — used to
+    /// attribute build-time regressions to emission changes. Prints layer,
+    /// way count, total verts, and per-key street-class breakdown.
+    #[test]
+    #[ignore]
+    fn layer_census() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS").unwrap_or_else(|_| "14,8414,5386".into());
+        let mut reader =
+            makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&archive)).unwrap();
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let Some(blob) = reader.get_tile(z, x, (1 << z) - 1 - y).ok().flatten() else {
+                println!("missing");
+                continue;
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let mut collector = MvtLocalCollector::new(1.0);
+            parse_mvt_tile(&pbf, key, &mut collector).unwrap();
+            let mut per_layer: std::collections::BTreeMap<String, (usize, usize)> =
+                Default::default();
+            let mut street_kind: std::collections::BTreeMap<String, usize> = Default::default();
+            for way in &collector.ways {
+                let layer = way.tags.get("layer").cloned().unwrap_or_default();
+                let e = per_layer.entry(layer.clone()).or_default();
+                e.0 += 1;
+                e.1 += way.points.len();
+                if layer.starts_with("street") {
+                    let kind = way
+                        .tags
+                        .get("kind")
+                        .or_else(|| way.tags.get("highway"))
+                        .cloned()
+                        .unwrap_or_default();
+                    *street_kind.entry(kind).or_default() += 1;
+                }
+            }
+            println!("z{z} {x}/{y} ({} bytes blob): {} ways", blob.len(), collector.ways.len());
+            for (layer, (n, verts)) in &per_layer {
+                println!("  {layer:<24} {n:>6} ways {verts:>8} verts");
+            }
+            for (kind, n) in &street_kind {
+                println!("    street kind {kind:<20} {n:>6}");
+            }
+        }
     }
 
     #[test]
@@ -9640,6 +9739,13 @@ mod bridge_probe_tests {
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
         let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        // TILE_PROFILE_DETAIL_ARCHIVE: two-reader mode replicating the old
+        // base+detail archive pair (europe-shortbread + europe-osm-detail);
+        // without it, deep-zoom detail comes from the combined archive's own
+        // tile bytes (the nl-base-br pattern).
+        let mut detail_reader = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE")
+            .ok()
+            .map(|p| makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&p)).unwrap());
         // The real compiled day theme: a default CompiledMapTheme styles
         // nothing and skips the entire tessellation path being profiled.
         let theme = crate::map::style::probe_compiled_theme();
@@ -9662,9 +9768,30 @@ mod bridge_probe_tests {
             let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
             let mut best = f64::MAX;
             let mut last = None;
+            // Simulate overzoom/3D: TILE_PROFILE_RENDER_ZOOM overrides the
+            // render zoom (e.g. 16 for z14 tiles at building-3D zooms) and
+            // TILE_PROFILE_3D=0/1 forces the buildings mode.
+            let render_zoom: u32 = std::env::var("TILE_PROFILE_RENDER_ZOOM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(z as u32);
+            let force_3d = std::env::var("TILE_PROFILE_3D")
+                .ok()
+                .map(|v| v == "1")
+                .unwrap_or(z >= 14);
+            let detail_raw: Option<Vec<u8>> = detail_reader.as_mut().and_then(|dr| {
+                let blob = dr.get_tile(z, x, tile_count - 1 - y).ok().flatten()?;
+                dr.decode_tile(&blob).ok()
+            });
             for _ in 0..reps {
                 let t1 = std::time::Instant::now();
-                let detail = (z >= 14).then_some(raw.as_slice());
+                let detail = if detail_reader.is_some() {
+                    // Old two-archive pattern: detail strictly from its own
+                    // archive (may be absent for a tile).
+                    detail_raw.as_deref().filter(|_| z >= 14)
+                } else {
+                    (z >= 14).then_some(raw.as_slice())
+                };
                 let buffers = build_tile_buffers_from_mvt(
                     key,
                     &raw,
@@ -9673,8 +9800,8 @@ mod bridge_probe_tests {
                     false,
                     &[],
                     &theme,
-                    z as u32,
-                    z >= 14,
+                    render_zoom,
+                    force_3d,
                     true,
                 )
                 .unwrap();
