@@ -47,7 +47,9 @@ impl AudioTapAccess {
         AudioDeviceDesc {
             device_id: AudioDeviceId(LOOPBACK_DEVICE_ID),
             device_type: AudioDeviceType::Loopback,
-            is_default: true,
+            // NEVER a default: system-audio capture needs screen-recording
+            // privileges and must only ever be an explicit app choice.
+            is_default: false,
             has_failed: false,
             channel_count: 2,
             name: "System Audio (Loopback)".to_string(),
