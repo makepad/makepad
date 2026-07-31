@@ -5,6 +5,7 @@ use {
         os::apple::apple_sys::*, os::apple::apple_util::*, thread::*,
     },
     std::collections::HashSet,
+    std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Mutex},
 };
 
@@ -97,6 +98,10 @@ pub struct AudioUnitAccess {
     pub audio_inputs: Arc<Mutex<Vec<RunningAudioUnit>>>,
     pub audio_outputs: Arc<Mutex<Vec<RunningAudioUnit>>>,
     failed_devices: Arc<Mutex<HashSet<AudioDeviceId>>>,
+    /// Set when a VoiceProcessingIO input unit fails to initialize: later
+    /// echo-cancellation requests degrade to plain capture instead of
+    /// repeatedly failing (the DEVICE is fine — the unit type is not).
+    voice_input_unusable: Arc<AtomicBool>,
     #[cfg(target_os = "macos")]
     audio_tap: Option<Arc<Mutex<AudioTapAccess>>>,
     #[cfg(target_os = "ios")]
@@ -126,6 +131,7 @@ impl Default for AudioUnitAccess {
             audio_inputs: Default::default(),
             audio_outputs: Default::default(),
             failed_devices: Default::default(),
+            voice_input_unusable: Default::default(),
             #[cfg(target_os = "macos")]
             audio_tap: None,
             #[cfg(target_os = "ios")]
@@ -171,6 +177,7 @@ impl AudioUnitAccess {
 
         Arc::new(Mutex::new(Self {
             failed_devices: Default::default(),
+            voice_input_unusable: Default::default(),
             change_signal,
             device_descs: Default::default(),
             audio_input_cb: Default::default(),
@@ -397,7 +404,9 @@ impl AudioUnitAccess {
         };
         for (index, device_id) in new {
             // lets create an audio input
-            let query = if options.echo_cancellation {
+            let use_voice = options.echo_cancellation
+                && !self.voice_input_unusable.load(Ordering::Relaxed);
+            let query = if use_voice {
                 AudioUnitQuery::VoiceInput
             } else {
                 AudioUnitQuery::Input
@@ -406,6 +415,7 @@ impl AudioUnitAccess {
             let audio_inputs = self.audio_inputs.clone();
             let audio_input_cb = self.audio_input_cb[index].clone();
             let failed_devices = self.failed_devices.clone();
+            let voice_input_unusable = self.voice_input_unusable.clone();
             let change_signal = self.change_signal.clone();
             self.new_audio_io(
                 self.change_signal.clone(),
@@ -436,10 +446,24 @@ impl AudioUnitAccess {
                             running.audio_unit = Some(audio_unit);
                         }
                         Err(err) => {
-                            failed_devices.lock().unwrap().insert(device_id);
-                            change_signal.set();
-                            audio_inputs.retain(|v| v.device_id != device_id);
-                            crate::error!("spawn_audio_output Error {:?}", err)
+                            if use_voice {
+                                // The voice-processing unit failed, not the
+                                // device: degrade to plain capture. The
+                                // change signal re-runs device selection,
+                                // which recreates this input without VPIO.
+                                voice_input_unusable.store(true, Ordering::Relaxed);
+                                audio_inputs.retain(|v| v.device_id != device_id);
+                                change_signal.set();
+                                crate::error!(
+                                    "voice-processing input failed ({:?}); falling back to plain capture",
+                                    err
+                                );
+                            } else {
+                                failed_devices.lock().unwrap().insert(device_id);
+                                change_signal.set();
+                                audio_inputs.retain(|v| v.device_id != device_id);
+                                crate::error!("spawn_audio_input Error {:?}", err)
+                            }
                         }
                     }
                 },
@@ -1023,11 +1047,64 @@ impl AudioUnitAccess {
                         let () = msg_send![au_audio_unit, setOutputEnabled: false];
                         let () = msg_send![au_audio_unit, setInputEnabled: true];
 
+                        // The voice-processing unit manages its own device
+                        // aggregation and fails initialization when pinned to
+                        // a HAL device — it follows the system default input.
                         #[cfg(target_os = "macos")]
-                        {
+                        if !matches!(unit_query, AudioUnitQuery::VoiceInput) {
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, setDeviceID: core_device_id error: &mut err];
                             OSError::from_nserror(err)?;
+                        }
+
+                        // VPIO defaults to voice-chat mode, which DUCKS all
+                        // other app audio (music drops to a whisper). Request
+                        // advanced ducking at the minimum level — AEC keeps
+                        // working, other audio stays near full volume.
+                        // macOS 14+/iOS 17+; older systems return an error we
+                        // ignore (they keep the default ducking).
+                        if matches!(unit_query, AudioUnitQuery::VoiceInput) {
+                            #[repr(C)]
+                            struct DuckingConfig {
+                                enable_advanced_ducking: u8,
+                                _pad: [u8; 3],
+                                ducking_level: u32,
+                            }
+                            const OTHER_AUDIO_DUCKING_CONFIGURATION: u32 = 2108;
+                            const DUCKING_LEVEL_MIN: u32 = 10;
+                            const SCOPE_GLOBAL: u32 = 0;
+                            extern "C" {
+                                fn AudioUnitSetProperty(
+                                    unit: *mut std::ffi::c_void,
+                                    property_id: u32,
+                                    scope: u32,
+                                    element: u32,
+                                    data: *const std::ffi::c_void,
+                                    data_size: u32,
+                                ) -> i32;
+                            }
+                            let raw_unit: *mut std::ffi::c_void =
+                                msg_send![av_audio_unit, audioUnit];
+                            if !raw_unit.is_null() {
+                                let config = DuckingConfig {
+                                    enable_advanced_ducking: 1,
+                                    _pad: [0; 3],
+                                    ducking_level: DUCKING_LEVEL_MIN,
+                                };
+                                let status = AudioUnitSetProperty(
+                                    raw_unit,
+                                    OTHER_AUDIO_DUCKING_CONFIGURATION,
+                                    SCOPE_GLOBAL,
+                                    0,
+                                    (&config as *const DuckingConfig).cast(),
+                                    std::mem::size_of::<DuckingConfig>() as u32,
+                                );
+                                if status != 0 {
+                                    crate::log!(
+                                        "voice input: ducking config not applied (OSStatus {status})"
+                                    );
+                                }
+                            }
                         }
 
                         // Allocate after configuration
