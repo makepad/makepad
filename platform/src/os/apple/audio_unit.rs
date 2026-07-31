@@ -906,10 +906,13 @@ impl AudioUnitAccess {
                 let _ = core_device_id; // silence unused on iOS/tvOS
                 OSError::from_nserror(error)?;
                 let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
-                let () = msg_send![av_audio_unit, retain];
 
                 // Configure stream format before allocating resources
                 let mut render_block = None;
+                #[cfg(any(target_os = "ios", target_os = "tvos"))]
+                let mut input_channels: usize = 1;
+                #[cfg(not(any(target_os = "ios", target_os = "tvos")))]
+                let mut input_channels: usize = 2;
 
                 // Default stream desc; on iOS we'll pull the AVAudioSession sample rate
                 #[allow(unused_mut)] // mut needed on iOS/tvOS but not macOS
@@ -1019,29 +1022,34 @@ impl AudioUnitAccess {
                         {
                             stream_desc.mChannelsPerFrame = 1;
                         }
-                        // The voice-processing unit outputs its processed
-                        // (echo-cancelled) signal as mono on every platform.
-                        if matches!(unit_query, AudioUnitQuery::VoiceInput) {
-                            stream_desc.mChannelsPerFrame = 1;
-                        }
-                        // Recreate AVAudioFormat with possibly adjusted channel count
-                        let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
-                        let () =
-                            msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
+                        // The macOS voice-processing unit REJECTS any custom
+                        // bus format (allocate fails -10875): leave its
+                        // native format untouched and read it back after
+                        // allocation instead.
+                        #[cfg(target_os = "macos")]
+                        let skip_format = matches!(unit_query, AudioUnitQuery::VoiceInput);
+                        #[cfg(not(target_os = "macos"))]
+                        let skip_format = false;
+                        if !skip_format {
+                            // Recreate AVAudioFormat with possibly adjusted channel count
+                            let av_audio_format: ObjcId = msg_send![class!(AVAudioFormat), alloc];
+                            let () =
+                                msg_send![av_audio_format, initWithStreamDescription: &stream_desc];
 
-                        let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
-                        let count: usize = msg_send![busses, count];
-                        if count > 0 {
-                            // RemoteIO/VoiceProcessingIO uses bus 1 for input on iOS/tvOS
-                            #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
-                            let bus_index = 1;
-                            if count > bus_index {
-                                let bus: ObjcId =
-                                    msg_send![busses, objectAtIndexedSubscript: bus_index];
-                                let mut err: ObjcId = nil;
-                                let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
-                                OSError::from_nserror(err)?;
-                                let () = msg_send![bus, setEnabled: true];
+                            let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
+                            let count: usize = msg_send![busses, count];
+                            if count > 0 {
+                                // RemoteIO/VoiceProcessingIO uses bus 1 for input on iOS/tvOS
+                                #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "macos"))]
+                                let bus_index = 1;
+                                if count > bus_index {
+                                    let bus: ObjcId =
+                                        msg_send![busses, objectAtIndexedSubscript: bus_index];
+                                    let mut err: ObjcId = nil;
+                                    let () = msg_send![bus, setFormat: av_audio_format error: &mut err];
+                                    OSError::from_nserror(err)?;
+                                    let () = msg_send![bus, setEnabled: true];
+                                }
                             }
                         }
                         let () = msg_send![au_audio_unit, setOutputEnabled: false];
@@ -1061,6 +1069,33 @@ impl AudioUnitAccess {
                         let mut err: ObjcId = nil;
                         let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
                         OSError::from_nserror(err)?;
+                        // VPIO kept its native bus format — read back the
+                        // ACTUAL sample rate + channel count so the input
+                        // callback and downstream resamplers see the truth.
+                        if matches!(unit_query, AudioUnitQuery::VoiceInput) {
+                            let busses: ObjcId = msg_send![au_audio_unit, outputBusses];
+                            let count: usize = msg_send![busses, count];
+                            if count > 1 {
+                                let bus: ObjcId = msg_send![busses, objectAtIndexedSubscript: 1usize];
+                                let format: ObjcId = msg_send![bus, format];
+                                if format != nil {
+                                    let sample_rate: f64 = msg_send![format, sampleRate];
+                                    let channel_count: u32 = msg_send![format, channelCount];
+                                    if sample_rate > 0.0 {
+                                        stream_desc.mSampleRate = sample_rate;
+                                    }
+                                    if channel_count > 0 {
+                                        input_channels = channel_count as usize;
+                                    }
+                                    crate::log!(
+                                        "voice input: native format {}Hz {}ch",
+                                        stream_desc.mSampleRate,
+                                        input_channels
+                                    );
+                                }
+                            }
+                        }
+
                         // VPIO defaults to voice-chat mode, which DUCKS all
                         // other app audio (music drops to a whisper). Request
                         // advanced ducking at the minimum level — AEC keeps
@@ -1124,6 +1159,13 @@ impl AudioUnitAccess {
                 }
                 #[cfg(target_os = "macos")]
                 AudioUnitAccess::observe_audio_unit_termination(_change_signal, core_device_id);
+                // Retain the AU handle only on SUCCESS (balanced by
+                // release_audio_unit) — retaining earlier leaked it on any
+                // error return. NOT av again: that historic double retain
+                // made every IO unit immortal, so failed/stopped
+                // VoiceProcessingIO units kept system-wide ducking engaged
+                // until process exit.
+                let () = msg_send![au_audio_unit, retain];
                 Ok(AudioUnit {
                     view_controller: Arc::new(Mutex::new(None)),
                     param_tree_observer: None,
@@ -1132,6 +1174,7 @@ impl AudioUnitAccess {
                     av_audio_unit,
                     au_audio_unit,
                     sample_rate: stream_desc.mSampleRate,
+                    input_channels,
                 })
             }
             let change_signal = change_signal.clone();
@@ -1144,7 +1187,16 @@ impl AudioUnitAccess {
                     unit_query,
                 )
             } {
-                Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
+                Err(err) => {
+                    // Release the instantiated unit on failure or it leaks
+                    // FOREVER — a failed-but-alive VoiceProcessingIO unit
+                    // keeps the system-wide voice-chat ducking engaged until
+                    // the process dies.
+                    if av_audio_unit != nil {
+                        let () = unsafe { msg_send![av_audio_unit, release] };
+                    }
+                    unit_callback(Err(AudioError::System(format!("{:?}", err))))
+                }
                 Ok(device) => unit_callback(Ok(device)),
             }
         });
@@ -1211,6 +1263,7 @@ impl AudioUnitAccess {
                     av_audio_unit,
                     au_audio_unit,
                     sample_rate: 48000.0, // Default for plugins, not device-dependent
+                    input_channels: 2,
                 })
             }
 
@@ -1261,6 +1314,8 @@ pub struct AudioUnit {
     view_controller: Arc<Mutex<Option<ObjcId>>>,
     unit_query: AudioUnitQuery,
     sample_rate: f64,
+    /// Channel count the input render block delivers (VPIO native is mono).
+    input_channels: usize,
 }
 unsafe impl Send for AudioUnitClone {}
 unsafe impl Sync for AudioUnitClone {}
@@ -1634,16 +1689,14 @@ impl AudioUnit {
         }
         if let Some(render_block) = self.render_block {
             unsafe {
+                let input_channels = self.input_channels.max(1);
                 let input_handler =
                     objc_block!(move |_flags: *mut u32,
                                       time_stamp: *const AudioTimeStamp,
                                       frame_count: u32,
                                       _input_bus_number: u64| {
-                        // iOS/tvOS input is mono when using VoiceProcessingIO
-                        #[cfg(any(target_os = "ios", target_os = "tvos"))]
-                        let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 1);
-                        #[cfg(not(any(target_os = "ios", target_os = "tvos")))]
-                        let mut buffer = AudioBuffer::new_with_size(frame_count as usize, 2);
+                        let mut buffer =
+                            AudioBuffer::new_with_size(frame_count as usize, input_channels);
                         let mut flags = 0u32;
                         let mut buffer_list = buffer.to_audio_buffer_list();
 
