@@ -1,7 +1,12 @@
+pub(crate) mod bake;
+pub(crate) mod base;
 mod geom;
 pub(crate) mod mvt;
+pub(crate) mod schema;
 mod spool;
 mod store;
+
+pub use base::{convert_base, default_base_options, BaseOptions, ProgressBaseline};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -494,12 +499,12 @@ fn validate_detail_options(options: &DetailOptions) -> Result<(), String> {
 }
 
 #[derive(Clone, Debug)]
-struct PbfHeaderInfo {
-    sorted_type_then_id: bool,
-    bounds: Option<[f64; 4]>,
+pub(crate) struct PbfHeaderInfo {
+    pub(crate) sorted_type_then_id: bool,
+    pub(crate) bounds: Option<[f64; 4]>,
 }
 
-fn read_pbf_header(path: &Path) -> Result<PbfHeaderInfo, String> {
+pub(crate) fn read_pbf_header(path: &Path) -> Result<PbfHeaderInfo, String> {
     let mut reader =
         BlobReader::from_path(path).map_err(|err| format!("open {}: {err}", path.display()))?;
     let blob = reader

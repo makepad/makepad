@@ -18,9 +18,23 @@ pub fn merge(inputs: &[String], output: &str, zoom: u8) -> Result<(), String> {
     let mut tiles: HashMap<(u32, u32), Vec<u8>> = HashMap::new();
     let mut metadata = HashMap::new();
     let mut bounds = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut merged_codec: Option<String> = None;
     for input in inputs {
         let mut reader = MbtilesReader::open(Path::new(input))
             .map_err(|e| format!("open {input}: {e}"))?;
+        // Tiles are copied verbatim, so every input must use the same codec
+        // (the shared metadata copied below then stays correct).
+        let codec = reader.tile_codec().metadata_value().to_string();
+        if let Some(previous) = &merged_codec {
+            if *previous != codec {
+                return Err(format!(
+                    "{input} uses tile compression '{codec}' but earlier inputs use '{previous}'; \
+                     re-encode before merging"
+                ));
+            }
+        } else {
+            merged_codec = Some(codec);
+        }
         let meta = reader.get_metadata().unwrap_or_default();
         if let Some(b) = meta.get("bounds") {
             let parts: Vec<f64> = b.split(',').filter_map(|v| v.parse().ok()).collect();

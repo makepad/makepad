@@ -123,7 +123,7 @@ pub fn drape_landcover(
     for ty in ty0..=ty1 {
         for tx in tx0..=tx1 {
             let tms_row = n_tiles - 1 - ty;
-            let Ok(Some(raw)) = reader.get_tile(z as i64, tx, tms_row) else {
+            let Ok(Some(raw)) = reader.get_tile_decoded(z as i64, tx, tms_row) else {
                 continue;
             };
             let Ok(data) = decode_vector_tile_payload(&raw) else {
