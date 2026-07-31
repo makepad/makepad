@@ -1292,6 +1292,11 @@ pub struct DrawText {
     #[live]
     pub temp_y_shift: f32,
 
+    /// Centering height (in unscaled lpxs) for RowAlign::Center; TextFlow sets
+    /// this to the line style's height so mixed-font runs stay baseline-aligned.
+    #[rust]
+    pub align_row_height: Option<f32>,
+
     /// Per-row horizontal alignment applied by the text layouter when the
     /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
     /// `0.5` = center, `1.0` = right. `y` is currently unused by the
@@ -2404,12 +2409,15 @@ impl DrawText {
 
                 // Emit a per-row FinishedWalk covering this row's glyphs +
                 // callback rect-areas.
-                cx.emit_turtle_walk(
+                cx.emit_turtle_walk_with_align_height(
                     Rect {
                         pos: dvec2(row_origin.x as f64, row_top_y),
                         size: dvec2((row.width_in_lpxs * self.font_scale) as f64, row_h),
                     },
                     row_als,
+                    Metrics::default(),
+                    self.align_row_height
+                        .map(|h| (h * self.font_scale) as f64),
                 );
             }
 
@@ -2487,7 +2495,9 @@ impl DrawText {
                 }
             }
 
-            cx.emit_turtle_walk(
+            // Only pass the centering height for single-row runs; a multi-row
+            // walk here spans the whole block, which centering already skips.
+            cx.emit_turtle_walk_with_align_height(
                 Rect {
                     pos: new_turtle_pos,
                     size: dvec2(
@@ -2496,6 +2506,10 @@ impl DrawText {
                     ),
                 },
                 align_list_start,
+                Metrics::default(),
+                self.align_row_height
+                    .filter(|_| text.rows.len() == 1)
+                    .map(|h| (h * self.font_scale) as f64),
             );
         }
 

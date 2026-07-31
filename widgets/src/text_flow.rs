@@ -9,6 +9,8 @@ use crate::{
 };
 use std::rc::Rc;
 
+const LPXS_PER_PT: f32 = 96.0 / 72.0;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -667,12 +669,12 @@ pub struct TextFlow {
     #[rust]
     pub inline_code: StackCounter,
 
-    /// Ascender in ems per style slot (normal/bold/italic/bold_italic/fixed),
-    /// probed lazily via a tiny layout call. Used to baseline-align mixed
-    /// runs: a 0.85x inline-code run must sit ON the line's baseline, not
-    /// hang from its top.
+    /// (Ascender, descender) in ems per style slot (normal/bold/italic/
+    /// bold_italic/fixed), probed lazily via a tiny layout call. Used to
+    /// baseline-align mixed runs: a 0.85x inline-code run must sit ON the
+    /// line's baseline, not hang from its top.
     #[rust]
-    style_ascender_em: [Option<f32>; 5],
+    style_metrics_em: [Option<(f32, f32)>; 5],
     #[rust]
     pub item_counter: u64,
     #[rust]
@@ -1190,11 +1192,11 @@ impl TextFlow {
             .push(self.font_sizes.last().unwrap_or(&self.font_size) * (scale as f32));
     }
 
-    /// Ascender (in ems) of one of the five run styles, probed once via a
-    /// tiny layout call and cached. Slots: 0 normal, 1 bold, 2 italic,
-    /// 3 bold-italic, 4 fixed.
-    fn ascender_em(&mut self, cx: &mut Cx2d, slot: usize) -> f32 {
-        if let Some(v) = self.style_ascender_em[slot] {
+    /// (Ascender, descender) in ems (descender positive) of one of the five
+    /// run styles, probed once via a tiny layout call and cached. Slots:
+    /// 0 normal, 1 bold, 2 italic, 3 bold-italic, 4 fixed.
+    fn style_metrics_em(&mut self, cx: &mut Cx2d, slot: usize) -> (f32, f32) {
+        if let Some(v) = self.style_metrics_em[slot] {
             return v;
         }
         let style = match slot {
@@ -1205,20 +1207,22 @@ impl TextFlow {
             _ => self.text_style_normal.clone(),
         };
         const PROBE_PT: f32 = 100.0;
-        const LPXS_PER_PT: f32 = 96.0 / 72.0;
         let saved = self.draw_text.text_style.clone();
         self.draw_text.text_style = style;
         self.draw_text.text_style.font_size = PROBE_PT;
-        let asc_lpxs = self
+        let (asc_lpxs, desc_lpxs) = self
             .draw_text
             .layout(cx, 0.0, 0.0, None, false, Align::default(), "Ag")
             .rows
             .first()
-            .map(|row| row.ascender_in_lpxs)
-            .unwrap_or(PROBE_PT * LPXS_PER_PT * 0.9);
+            .map(|row| (row.ascender_in_lpxs, -row.descender_in_lpxs))
+            .unwrap_or((PROBE_PT * LPXS_PER_PT * 0.9, PROBE_PT * LPXS_PER_PT * 0.3));
         self.draw_text.text_style = saved;
-        let em = asc_lpxs / (PROBE_PT * LPXS_PER_PT);
-        self.style_ascender_em[slot] = Some(em);
+        let em = (
+            asc_lpxs / (PROBE_PT * LPXS_PER_PT),
+            desc_lpxs / (PROBE_PT * LPXS_PER_PT),
+        );
+        self.style_metrics_em[slot] = Some(em);
         em
     }
 
@@ -1891,27 +1895,40 @@ impl TextFlow {
                 (self.text_style_normal.clone(), 0)
             };
 
+            let run_size = *self.font_sizes.last().unwrap_or(&self.font_size);
+            let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
+            // A code or sub/superscript run pushed its own scaled size; the
+            // entry below it (or the base size) is the surrounding line's.
+            let line_size = if style_slot == 4 || y_shift_scale != 0.0 {
+                if self.font_sizes.len() >= 2 {
+                    self.font_sizes[self.font_sizes.len() - 2]
+                } else {
+                    self.font_size
+                }
+            } else {
+                run_size
+            };
+
             // Baseline-align mixed runs: a fixed/code run scaled to 0.85x of
             // the surrounding text must sit ON the line's baseline — without
             // this shift it hangs from the row top and inline code floats
             // above the prose. Shift = (line ascender − run ascender), in
             // multiples of the run's own font size (temp_y_shift units).
             // Probe BEFORE the run style is applied (the probe clobbers it).
-            let run_size = *self.font_sizes.last().unwrap_or(&self.font_size);
             let baseline_shift = if style_slot == 4 && run_size > 0.0 {
-                // The code run's size was pushed relative to the surrounding
-                // text; the entry below it (or the base size) is the line.
-                let line_size = if self.font_sizes.len() >= 2 {
-                    self.font_sizes[self.font_sizes.len() - 2]
-                } else {
-                    self.font_size
-                };
-                let line_asc = self.ascender_em(cx, 0);
-                let run_asc = self.ascender_em(cx, 4);
+                let (line_asc, _) = self.style_metrics_em(cx, 0);
+                let (run_asc, _) = self.style_metrics_em(cx, 4);
                 (line_asc * line_size - run_asc * run_size) / run_size
             } else {
                 0.0
             };
+
+            // RowAlign::Center centers each walk by its own height, which
+            // would undo baseline_shift for shorter runs; hand every run the
+            // line's height instead so they all get the same centering shift.
+            let (line_asc, line_desc) = self.style_metrics_em(cx, 0);
+            self.draw_text.align_row_height =
+                Some((line_asc + line_desc) * line_size * LPXS_PER_PT);
 
             // Apply the text style to the single draw_text instance
             let top_drop = text_style.top_drop;
@@ -1920,7 +1937,6 @@ impl TextFlow {
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             self.draw_text.text_style.font_size = *font_size as _;
             self.draw_text.color = *font_color;
-            let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
             self.draw_text.temp_y_shift = top_drop + y_shift_scale + baseline_shift;
             self.draw_text.layout_align = Align {
                 x: self.cell_text_align_x,
