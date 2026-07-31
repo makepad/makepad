@@ -26,7 +26,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
-const MAX_CONTEXT: u32 = 8192;
+// 32k: the session is append-only (tool prefix + every turn accumulates) and
+// the hybrid model's KV is cheap — only 12 of 48 layers are attention
+// (~48KB/token → ~1.6GB at 32k); DeltaNet state is context-independent.
+const MAX_CONTEXT: u32 = 32768;
 const MAX_NEW_TOKENS: usize = 768;
 /// Stop generating a turn when fewer tokens than this remain.
 const MIN_REMAINING_CONTEXT: usize = 256;

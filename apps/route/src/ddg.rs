@@ -14,7 +14,8 @@ pub const MAX_CARDS: usize = 4;
 
 pub struct DdgImage {
     pub title: String,
-    pub thumbnail_url: String,
+    /// Kept for future card taps (open source page) — not read yet.
+    pub _thumbnail_url: String,
     pub thumb_request: Option<LiveId>,
     pub loaded: bool,
 }
@@ -189,7 +190,7 @@ impl DdgState {
                     let thumb_request = Some(get(cx, &thumbnail_url, None));
                     search.images.push(DdgImage {
                         title,
-                        thumbnail_url,
+                        _thumbnail_url: thumbnail_url,
                         thumb_request,
                         loaded: false,
                     });

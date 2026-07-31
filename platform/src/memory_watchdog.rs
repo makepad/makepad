@@ -11,9 +11,29 @@
 //! Limits default to 24 GB soft / 48 GB hard, overridable with
 //! `MAKEPAD_MEM_LIMIT_GB` (hard; soft = half) or explicit arguments.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Unix seconds of the last message received from the studio host in
+/// `--stdin-loop` mode (0 = never / not in that mode).
+static STDIN_LAST_HOST_MSG_UNIX: AtomicU64 = AtomicU64::new(0);
+/// A stdin-loop app that hears nothing from studio for this long is an
+/// abandoned build (ClearBuild leaves the websocket half-open — the
+/// historic zombie-instance leak) and exits itself.
+const STDIN_HOST_SILENCE_LIMIT_S: u64 = 300;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Called by the stdin event loop on every received host message.
+pub fn note_stdin_host_message() {
+    STDIN_LAST_HOST_MSG_UNIX.store(now_unix(), Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryLimits {
@@ -86,6 +106,17 @@ fn watchdog_main(limits: MemoryLimits) {
         if orphaned_stdin_app() {
             crate::error!(
                 "memory watchdog: stdin-loop host is gone (orphaned) — exiting to avoid a zombie app instance"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::process::exit(0);
+        }
+        // Host-silence guard: parent may outlive us (studio spawns apps
+        // directly), so also exit when the studio websocket goes quiet.
+        let last_msg = STDIN_LAST_HOST_MSG_UNIX.load(Ordering::Relaxed);
+        if last_msg != 0 && now_unix().saturating_sub(last_msg) > STDIN_HOST_SILENCE_LIMIT_S {
+            crate::error!(
+                "memory watchdog: no studio host traffic for {}s — exiting abandoned stdin-loop instance",
+                STDIN_HOST_SILENCE_LIMIT_S
             );
             std::thread::sleep(std::time::Duration::from_millis(200));
             std::process::exit(0);

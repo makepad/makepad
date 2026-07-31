@@ -2,6 +2,7 @@ pub mod backend;
 pub mod context;
 pub mod core;
 pub mod graph;
+pub mod mmap;
 pub mod op;
 pub mod plan;
 pub mod quant;
@@ -23,6 +24,7 @@ pub use core::{
     GGML_ROPE_TYPE_VISION, GGML_SCALE_FLAG_ALIGN_CORNERS, GGML_SCALE_FLAG_ANTIALIAS,
 };
 pub use graph::{Graph, GraphEvalOrder, NodeId};
+pub use mmap::MappedRegion;
 pub use op::{
     ggml_glu_op_name, ggml_op_name, ggml_op_symbol, ggml_unary_op_name, Ftype, GluOp, Op, Prec,
     UnaryOp,
