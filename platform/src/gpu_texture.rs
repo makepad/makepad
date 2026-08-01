@@ -23,6 +23,7 @@
 //! |----------|----------------|
 //! | Windows  | [`Cx::d3d11_device`], [`Texture::adopt_d3d11_bgra`], [`Texture::adopt_d3d11_plane`] |
 //! | Android  | [`Cx::with_gl`], [`Texture::adopt_oes_texture`], [`Texture::adopt_gl_texture_2d`] |
+//! | Linux    | [`Cx::with_gl`], [`Texture::adopt_gl_texture_2d`], [`Texture::adopt_gl_video_external`], [`Texture::adopt_gl_r8_plane`], [`Texture::adopt_gl_rg8_plane`] |
 //! | macOS/iOS | [`Cx::metal_device`], [`Texture::adopt_metal_r8_plane`], [`Texture::adopt_metal_rg8_plane`], [`adopt_metal_nv12_biplanar`] |
 //!
 //! Other platforms can be added later; unsupported targets compile these
@@ -914,6 +915,236 @@ pub use android_api::{
     clear_all_media_oes_surfaces, clear_media_oes_surface, media_oes_surface,
     media_oes_surface_for_tex, media_oes_tex_id, publish_media_oes_surface,
 };
+
+/// Linux desktop (X11 / Wayland) GL texture adopt hooks for app-owned video /
+/// camera / effect surfaces. Same ownership rules as the module docs: borrowed
+/// by default (`gl_texture_owned = false`).
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+mod linux_api {
+    use super::*;
+    use crate::os::gl_sys::LibGl;
+
+    impl Cx {
+        /// Run `f` with Makepad's current GL function table.
+        ///
+        /// Call from the UI / render thread where Makepad's EGL context is
+        /// current (e.g. while handling draw / video poll). Returns `None` if
+        /// GL is not available yet.
+        pub fn with_gl<R>(&mut self, f: impl FnOnce(&LibGl) -> R) -> Option<R> {
+            let opengl_cx = self.os.opengl_cx.as_ref()?;
+            opengl_cx.make_current();
+            Some(f(&opengl_cx.libgl))
+        }
+    }
+
+    impl Texture {
+        /// Adopt an externally owned `GL_TEXTURE_2D` id for ordinary
+        /// `texture_2d` / `sample` shaders (RGBA/BGRA color).
+        ///
+        /// Makepad will **not** delete `tex_id`.
+        pub fn adopt_gl_texture_2d(
+            &self,
+            cx: &mut Cx,
+            tex_id: u32,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            if tex_id == 0 {
+                return Err("adopt_gl_texture_2d: tex_id must be non-zero".into());
+            }
+            if width == 0 || height == 0 {
+                return Err("adopt_gl_texture_2d: width/height must be non-zero".into());
+            }
+
+            let old_owned = {
+                let cxtex = &mut cx.textures[self.texture_id()];
+                if cxtex.os.gl_texture_owned {
+                    cxtex.os.gl_texture.take().filter(|&old| old != tex_id)
+                } else {
+                    None
+                }
+            };
+            if let Some(old) = old_owned {
+                let _ = cx.with_gl(|gl| unsafe {
+                    (gl.glDeleteTextures)(1, &old);
+                });
+            }
+
+            let cxtex = &mut cx.textures[self.texture_id()];
+            cxtex.format = TextureFormat::RenderBGRAu8 {
+                size: crate::texture::TextureSize::Fixed { width, height },
+                initial: false,
+            };
+            cxtex.os.gl_texture = Some(tex_id);
+            cxtex.os.gl_texture_owned = false;
+            cxtex.alloc = Some(TextureAlloc {
+                width,
+                height,
+                pixel: TexturePixel::BGRAu8,
+                category: TextureCategory::Render,
+            });
+            Ok(())
+        }
+
+        /// Adopt an externally owned `GL_TEXTURE_2D` as
+        /// [`TextureFormat::VideoExternal`] for `sample_video` shaders
+        /// (e.g. GStreamer GLMemory / app hard-decode RGBA).
+        ///
+        /// Makepad will **not** delete `tex_id`. Keep the producer buffer alive
+        /// until the next successful adopt (plus one frame of present latency).
+        ///
+        /// `width` / `height` are logical sizes for callers; internal alloc uses
+        /// the `VideoExternal` sentinel (0×0) so draw-time `setup_video_texture`
+        /// does not fight a mismatched size.
+        pub fn adopt_gl_video_external(
+            &self,
+            cx: &mut Cx,
+            tex_id: u32,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            if tex_id == 0 {
+                return Err("adopt_gl_video_external: tex_id must be non-zero".into());
+            }
+            if width == 0 || height == 0 {
+                return Err("adopt_gl_video_external: width/height must be non-zero".into());
+            }
+
+            let old_owned = {
+                let cxtex = &mut cx.textures[self.texture_id()];
+                if cxtex.os.gl_texture_owned {
+                    cxtex.os.gl_texture.take().filter(|&old| old != tex_id)
+                } else {
+                    None
+                }
+            };
+            if let Some(old) = old_owned {
+                let _ = cx.with_gl(|gl| unsafe {
+                    (gl.glDeleteTextures)(1, &old);
+                });
+            }
+
+            let _ = (width, height);
+            let cxtex = &mut cx.textures[self.texture_id()];
+            cxtex.format = TextureFormat::VideoExternal;
+            cxtex.os.gl_texture = Some(tex_id);
+            cxtex.os.gl_texture_owned = false;
+            cxtex.alloc = Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            });
+            Ok(())
+        }
+
+        /// Adopt an externally owned single-channel `GL_TEXTURE_2D` (R8) as a
+        /// YUV plane slot ([`TextureFormat::VideoYuvPlane`]).
+        ///
+        /// Use for planar Y, U, or V. Makepad will **not** delete `tex_id`.
+        pub fn adopt_gl_r8_plane(
+            &self,
+            cx: &mut Cx,
+            tex_id: u32,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            adopt_gl_plane(self, cx, tex_id, width, height, TexturePixel::Ru8, "adopt_gl_r8_plane")
+        }
+
+        /// Adopt an externally owned RG8 `GL_TEXTURE_2D` as a biplanar UV plane
+        /// for NV12-style present ([`TextureFormat::VideoYuvPlane`]).
+        ///
+        /// Makepad will **not** delete `tex_id`.
+        pub fn adopt_gl_rg8_plane(
+            &self,
+            cx: &mut Cx,
+            tex_id: u32,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            adopt_gl_plane(
+                self,
+                cx,
+                tex_id,
+                width,
+                height,
+                TexturePixel::RGu8,
+                "adopt_gl_rg8_plane",
+            )
+        }
+    }
+
+    fn adopt_gl_plane(
+        texture: &Texture,
+        cx: &mut Cx,
+        tex_id: u32,
+        width: usize,
+        height: usize,
+        pixel: TexturePixel,
+        api_name: &str,
+    ) -> Result<(), String> {
+        if tex_id == 0 {
+            return Err(format!("{api_name}: tex_id must be non-zero"));
+        }
+        if width == 0 || height == 0 {
+            return Err(format!("{api_name}: width/height must be non-zero"));
+        }
+
+        let old_owned = {
+            let cxtex = &mut cx.textures[texture.texture_id()];
+            if cxtex.os.gl_texture_owned {
+                cxtex.os.gl_texture.take().filter(|&old| old != tex_id)
+            } else {
+                None
+            }
+        };
+        if let Some(old) = old_owned {
+            let _ = cx.with_gl(|gl| unsafe {
+                (gl.glDeleteTextures)(1, &old);
+            });
+        }
+
+        adopt_gl_plane_raw(
+            &mut cx.textures,
+            texture.texture_id(),
+            tex_id,
+            width,
+            height,
+            pixel,
+        )
+    }
+
+    /// Pool-level adopt used by [`Texture::adopt_gl_r8_plane`] /
+    /// [`Texture::adopt_gl_rg8_plane`] (and internal video present paths).
+    pub(crate) fn adopt_gl_plane_raw(
+        textures: &mut CxTexturePool,
+        texture_id: TextureId,
+        tex_id: u32,
+        width: usize,
+        height: usize,
+        pixel: TexturePixel,
+    ) -> Result<(), String> {
+        if tex_id == 0 {
+            return Err("adopt_gl_plane: tex_id must be non-zero".into());
+        }
+        if width == 0 || height == 0 {
+            return Err("adopt_gl_plane: width/height must be non-zero".into());
+        }
+
+        let cxtex = &mut textures[texture_id];
+        cxtex.format = TextureFormat::VideoYuvPlane;
+        cxtex.os.gl_texture = Some(tex_id);
+        cxtex.os.gl_texture_owned = false;
+        cxtex.alloc = Some(TextureAlloc {
+            width,
+            height,
+            pixel,
+            category: TextureCategory::Video,
+        });
+        Ok(())
+    }
+}
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple_api {

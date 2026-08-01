@@ -4,12 +4,24 @@
 use {
     super::gl_sys::LibGl,
     super::gl_video_upload::upload_yuv_to_gl,
-    super::linux_video_playback::{GStreamerVideoPlayer, YuvTextureIds},
+    super::gstreamer_sys::LibGStreamer,
+    super::linux_video_playback::{
+        poll_pending_gstreamer_teardowns, GStreamerVideoPlayer, GstRuntimeEvent, YuvTextureIds,
+    },
+    super::opengl_cx::OpenglCx,
     super::v4l2_camera_player::V4l2CameraPlayer,
     crate::{
+        event::{
+            video_playback::{
+                VideoBufferedRangesEvent, VideoDecodingErrorEvent, VideoPlaybackCompletedEvent,
+                VideoPlaybackPreparedEvent, VideoSeekableRangesEvent, VideoSource,
+                VideoTextureUpdatedEvent, VideoTracksChangedEvent,
+            },
+            Event,
+        },
         makepad_live_id::LiveId,
         media_plugin::PlaybackPrepared,
-        texture::{CxTexturePool, Texture},
+        texture::{CxTexturePool, Texture, TextureFormat, TextureId},
         video_decode::software_video::PlaybackSessionHandle,
     },
 };
@@ -35,6 +47,152 @@ impl YuvTextureSet {
             tex_v,
         }
     }
+}
+
+/// Which decoder backend to use for a non-camera Linux video source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxDecodeBackend {
+    GStreamer,
+    Software,
+}
+
+/// Choose GStreamer vs software, refusing software for HLS/DASH manifests.
+pub fn choose_linux_decode_backend(
+    source: &VideoSource,
+    gstreamer_available: bool,
+    force_software: bool,
+) -> Result<LinuxDecodeBackend, String> {
+    if force_software {
+        if source.is_adaptive_manifest() {
+            return Err(
+                "MAKEPAD_FORCE_SOFTWARE_VIDEO cannot decode HLS/DASH manifests; unset it or use a progressive URL"
+                    .into(),
+            );
+        }
+        return Ok(LinuxDecodeBackend::Software);
+    }
+    if source.is_session() {
+        return Ok(LinuxDecodeBackend::Software);
+    }
+    if gstreamer_available {
+        return Ok(LinuxDecodeBackend::GStreamer);
+    }
+    if source.is_adaptive_manifest() {
+        return Err(
+            "GStreamer is required for HLS/DASH playback on Linux. Install packages from tools/linux_deps.sh (gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav)."
+                .into(),
+        );
+    }
+    Ok(LinuxDecodeBackend::Software)
+}
+
+/// Outcome of preparing a non-camera Linux video source.
+pub enum LinuxPrepareResult {
+    Ready {
+        player: LinuxVideoPlayer,
+        yuv: Option<YuvTextureSet>,
+    },
+    Failed(String),
+}
+
+/// Shared X11/Wayland prepare path for file/network/session video sources.
+pub fn prepare_desktop_linux_video(
+    gstreamer: &mut Option<LibGStreamer>,
+    textures: &mut CxTexturePool,
+    video_id: LiveId,
+    source: VideoSource,
+    texture_id: TextureId,
+    autoplay: bool,
+    should_loop: bool,
+    opengl_cx: Option<&super::opengl_cx::OpenglCx>,
+) -> LinuxPrepareResult {
+    let force_software = std::env::var_os("MAKEPAD_FORCE_SOFTWARE_VIDEO").is_some();
+    if force_software {
+        crate::log!("VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder");
+    } else if source.is_session() {
+        crate::log!("VIDEO: session source uses software video decoder");
+    }
+
+    if gstreamer.is_none() {
+        match LibGStreamer::try_load() {
+            Some(gst) => {
+                gst.init();
+                *gstreamer = Some(gst);
+            }
+            None => crate::log!("VIDEO: GStreamer not available"),
+        }
+    }
+
+    let gst_available = gstreamer.is_some();
+    let backend = match choose_linux_decode_backend(&source, gst_available, force_software) {
+        Ok(b) => b,
+        Err(error) => return LinuxPrepareResult::Failed(error),
+    };
+
+    let mut use_software = backend == LinuxDecodeBackend::Software;
+    if !use_software {
+        if let Some(gst) = gstreamer.as_ref() {
+            let yuv = YuvTextureSet::new(
+                textures.alloc(TextureFormat::VideoYuvPlane),
+                textures.alloc(TextureFormat::VideoYuvPlane),
+                textures.alloc(TextureFormat::VideoYuvPlane),
+            );
+            let player = GStreamerVideoPlayer::new(
+                gst,
+                video_id,
+                texture_id,
+                Some(yuv.ids),
+                source.clone(),
+                autoplay,
+                should_loop,
+                opengl_cx,
+            );
+            if player.is_active() {
+                return LinuxPrepareResult::Ready {
+                    player: LinuxVideoPlayer::GStreamer {
+                        player,
+                        yuv: Some(yuv.clone()),
+                    },
+                    yuv: Some(yuv),
+                };
+            }
+            if source.is_adaptive_manifest() {
+                return LinuxPrepareResult::Failed(
+                    "GStreamer failed to open HLS/DASH stream. Install packages from tools/linux_deps.sh (gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav)."
+                        .into(),
+                );
+            }
+            crate::log!(
+                "VIDEO: GStreamer pipeline failed, falling back to software video decoder"
+            );
+            use_software = true;
+        }
+    }
+
+    if use_software {
+        let yuv = YuvTextureSet::new(
+            textures.alloc(TextureFormat::VideoYuvPlane),
+            textures.alloc(TextureFormat::VideoYuvPlane),
+            textures.alloc(TextureFormat::VideoYuvPlane),
+        );
+        let player = PlaybackSessionHandle::new(
+            video_id,
+            texture_id,
+            source,
+            autoplay,
+            should_loop,
+        );
+        return LinuxPrepareResult::Ready {
+            player: LinuxVideoPlayer::Software {
+                player,
+                yuv: yuv.clone(),
+                yuv_matrix: 0.0,
+            },
+            yuv: Some(yuv),
+        };
+    }
+
+    LinuxPrepareResult::Failed("No video backend available".into())
 }
 
 pub enum LinuxVideoPlayer {
@@ -67,9 +225,16 @@ impl LinuxVideoPlayer {
         }
     }
 
-    pub fn poll_frame(&mut self, gl: &LibGl, textures: &mut CxTexturePool) -> bool {
+    pub fn poll_frame(
+        &mut self,
+        gl: &LibGl,
+        textures: &mut CxTexturePool,
+        opengl_cx: Option<&super::opengl_cx::OpenglCx>,
+    ) -> bool {
         match self {
-            LinuxVideoPlayer::GStreamer { player: p, .. } => p.poll_frame(gl, textures),
+            LinuxVideoPlayer::GStreamer { player: p, .. } => {
+                p.poll_frame(gl, textures, opengl_cx)
+            }
             LinuxVideoPlayer::Software {
                 player: p,
                 yuv,
@@ -97,11 +262,40 @@ impl LinuxVideoPlayer {
         }
     }
 
+    pub fn select_video_track(&mut self, index: usize) -> bool {
+        match self {
+            LinuxVideoPlayer::GStreamer { player: p, .. } => p.select_video_track(index),
+            _ => false,
+        }
+    }
+
+    pub fn select_audio_track(&mut self, index: usize) -> bool {
+        match self {
+            LinuxVideoPlayer::GStreamer { player: p, .. } => p.select_audio_track(index),
+            _ => false,
+        }
+    }
+
     pub fn check_eos(&mut self) -> bool {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.check_eos(),
             LinuxVideoPlayer::Software { player: p, .. } => p.check_eos(),
             LinuxVideoPlayer::Camera(_) => false, // camera never ends
+        }
+    }
+
+    pub fn poll_runtime(&mut self) -> Vec<GstRuntimeEvent> {
+        match self {
+            LinuxVideoPlayer::GStreamer { player: p, .. } => p.poll_runtime(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn take_buffered_ranges_if_changed(&mut self) -> Option<Vec<(f64, f64)>> {
+        match self {
+            LinuxVideoPlayer::GStreamer { player: p, .. } => p.take_buffered_ranges_if_changed(),
+            LinuxVideoPlayer::Software { .. } => None,
+            LinuxVideoPlayer::Camera(_) => None,
         }
     }
 
@@ -137,18 +331,18 @@ impl LinuxVideoPlayer {
         }
     }
 
-    pub fn mute(&self) {
+    pub fn mute(&mut self) {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.mute(),
-            LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Software { player: p, .. } => p.mute(),
             LinuxVideoPlayer::Camera(_) => {}
         }
     }
 
-    pub fn unmute(&self) {
+    pub fn unmute(&mut self) {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.unmute(),
-            LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Software { player: p, .. } => p.unmute(),
             LinuxVideoPlayer::Camera(_) => {}
         }
     }
@@ -161,7 +355,7 @@ impl LinuxVideoPlayer {
         }
     }
 
-    pub fn set_volume(&self, volume: f64) {
+    pub fn set_volume(&mut self, volume: f64) {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.set_volume(volume),
             LinuxVideoPlayer::Software { player: p, .. } => p.set_volume(volume),
@@ -172,7 +366,7 @@ impl LinuxVideoPlayer {
     pub fn set_playback_rate(&self, rate: f64) {
         match self {
             LinuxVideoPlayer::GStreamer { player: p, .. } => p.set_playback_rate(rate),
-            LinuxVideoPlayer::Software { .. } => {}
+            LinuxVideoPlayer::Software { player: p, .. } => p.set_playback_rate(rate),
             LinuxVideoPlayer::Camera(_) => {}
         }
     }
@@ -240,4 +434,128 @@ impl LinuxVideoPlayer {
             LinuxVideoPlayer::Camera(_) => 1.0, // BT.601
         }
     }
+
+    pub fn yuv_metadata(&self) -> crate::event::video_playback::VideoYuvMetadata {
+        match self {
+            LinuxVideoPlayer::GStreamer { player: p, .. } => p.yuv_metadata(),
+            LinuxVideoPlayer::Software { yuv_matrix, .. } => {
+                crate::event::video_playback::VideoYuvMetadata {
+                    enabled: true,
+                    matrix: *yuv_matrix,
+                    biplanar: false,
+                    full_range: false,
+                    rotation_steps: 0.0,
+                }
+            }
+            LinuxVideoPlayer::Camera(_) => crate::event::video_playback::VideoYuvMetadata {
+                enabled: true,
+                matrix: 1.0,
+                biplanar: false,
+                full_range: false,
+                rotation_steps: 0.0,
+            },
+        }
+    }
+}
+
+/// Shared X11/Wayland timer-tick poll for one desktop Linux video player.
+pub fn collect_linux_video_player_events(
+    player: &mut LinuxVideoPlayer,
+    gl: &LibGl,
+    textures: &mut CxTexturePool,
+    opengl_cx: Option<&OpenglCx>,
+) -> Vec<Event> {
+    poll_pending_gstreamer_teardowns();
+    let mut video_events = Vec::new();
+    match player.check_prepared() {
+        Some(Ok(PlaybackPrepared {
+            width,
+            height,
+            duration_ms: duration,
+            is_seekable,
+            video_tracks,
+            audio_tracks,
+        })) => {
+            video_events.push(Event::VideoPlaybackPrepared(
+                VideoPlaybackPreparedEvent {
+                    video_id: player.video_id(),
+                    video_width: width,
+                    video_height: height,
+                    duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                },
+            ));
+            let seekable = player.seekable_ranges();
+            if !seekable.is_empty() {
+                video_events.push(Event::VideoSeekableRanges(VideoSeekableRangesEvent {
+                    video_id: player.video_id(),
+                    ranges: seekable,
+                }));
+            }
+            let buffered = player.buffered_ranges();
+            if !buffered.is_empty() {
+                video_events.push(Event::VideoBufferedRanges(VideoBufferedRangesEvent {
+                    video_id: player.video_id(),
+                    ranges: buffered,
+                }));
+            }
+        }
+        Some(Err(err)) => {
+            video_events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                video_id: player.video_id(),
+                error: err,
+            }));
+        }
+        None => {}
+    }
+    for ev in player.poll_runtime() {
+        match ev {
+            GstRuntimeEvent::Error(error) => {
+                video_events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                    video_id: player.video_id(),
+                    error,
+                }));
+            }
+            GstRuntimeEvent::Eos => {
+                video_events.push(Event::VideoPlaybackCompleted(
+                    VideoPlaybackCompletedEvent {
+                        video_id: player.video_id(),
+                    },
+                ));
+            }
+            GstRuntimeEvent::TracksChanged {
+                video_tracks,
+                audio_tracks,
+            } => {
+                video_events.push(Event::VideoTracksChanged(VideoTracksChangedEvent {
+                    video_id: player.video_id(),
+                    video_tracks,
+                    audio_tracks,
+                }));
+            }
+        }
+    }
+    if let Some(ranges) = player.take_buffered_ranges_if_changed() {
+        video_events.push(Event::VideoBufferedRanges(VideoBufferedRangesEvent {
+            video_id: player.video_id(),
+            ranges,
+        }));
+    }
+    if player.poll_frame(gl, textures, opengl_cx) {
+        video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+            video_id: player.video_id(),
+            current_position_ms: player.current_position_ms(),
+            yuv: player.yuv_metadata(),
+        }));
+    }
+    if player.check_eos() {
+        video_events.push(Event::VideoPlaybackCompleted(
+            VideoPlaybackCompletedEvent {
+                video_id: player.video_id(),
+            },
+        ));
+    }
+    video_events
 }

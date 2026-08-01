@@ -61,10 +61,31 @@ pub(crate) fn upload_i420_slices_to_gl(
     height: u32,
 ) {
     let cw = width.div_ceil(2);
+    upload_i420_planes_to_gl(
+        gl, textures, tex_y_id, tex_u_id, tex_v_id, y, u, v, width, height, width, cw, cw,
+    );
+}
+
+pub(crate) fn upload_i420_planes_to_gl(
+    gl: &LibGl,
+    textures: &mut CxTexturePool,
+    tex_y_id: TextureId,
+    tex_u_id: TextureId,
+    tex_v_id: TextureId,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    width: u32,
+    height: u32,
+    y_stride: u32,
+    u_stride: u32,
+    v_stride: u32,
+) {
+    let cw = width.div_ceil(2);
     let ch = height.div_ceil(2);
-    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height, width);
-    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch, cw);
-    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch, cw);
+    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height, y_stride);
+    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch, u_stride);
+    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch, v_stride);
 }
 
 pub(crate) fn upload_r8_plane_to_gl(

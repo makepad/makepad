@@ -380,6 +380,8 @@ pub enum CxOsOp {
     SeekVideoPlayback(LiveId, u64),
     SetVideoVolume(LiveId, f64),
     SetVideoPlaybackRate(LiveId, f64),
+    SelectVideoTrack(LiveId, usize),
+    SelectAudioTrack(LiveId, usize),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -476,6 +478,8 @@ impl std::fmt::Debug for CxOsOp {
             Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
             Self::SetVideoVolume(..) => write!(f, "SetVideoVolume"),
             Self::SetVideoPlaybackRate(..) => write!(f, "SetVideoPlaybackRate"),
+            Self::SelectVideoTrack(..) => write!(f, "SelectVideoTrack"),
+            Self::SelectAudioTrack(..) => write!(f, "SelectAudioTrack"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -1685,6 +1689,16 @@ impl Cx {
     pub fn set_video_playback_rate(&mut self, video_id: LiveId, rate: f64) {
         self.platform_ops
             .push(CxOsOp::SetVideoPlaybackRate(video_id, rate));
+    }
+
+    pub fn select_video_track(&mut self, video_id: LiveId, index: usize) {
+        self.platform_ops
+            .push(CxOsOp::SelectVideoTrack(video_id, index));
+    }
+
+    pub fn select_audio_track(&mut self, video_id: LiveId, index: usize) {
+        self.platform_ops
+            .push(CxOsOp::SelectAudioTrack(video_id, index));
     }
 
     pub fn prepare_audio_playback(

@@ -487,6 +487,12 @@ pub struct Video {
     #[rust]
     total_duration: u128,
 
+    /// Labels from the last prepare / tracks-changed event (Linux GStreamer playbin3).
+    #[rust]
+    video_tracks: Vec<String>,
+    #[rust]
+    audio_tracks: Vec<String>,
+
     // Playback position tracking
     #[rust]
     current_position_ms: u128,
@@ -656,6 +662,38 @@ impl VideoRef {
     pub fn set_playback_rate(&self, cx: &mut Cx, rate: f64) {
         if let Some(inner) = self.borrow() {
             cx.set_video_playback_rate(inner.id, rate);
+        }
+    }
+
+    /// Select a video track by index from [`VideoRef::video_tracks`] / prepared labels.
+    pub fn select_video_track(&self, cx: &mut Cx, index: usize) {
+        if let Some(inner) = self.borrow() {
+            cx.select_video_track(inner.id, index);
+        }
+    }
+
+    /// Select an audio track by index from [`VideoRef::audio_tracks`] / prepared labels.
+    pub fn select_audio_track(&self, cx: &mut Cx, index: usize) {
+        if let Some(inner) = self.borrow() {
+            cx.select_audio_track(inner.id, index);
+        }
+    }
+
+    /// Video track labels from prepare / mid-stream collection updates.
+    pub fn video_tracks(&self) -> Vec<String> {
+        if let Some(inner) = self.borrow() {
+            inner.video_tracks.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Audio track labels from prepare / mid-stream collection updates.
+    pub fn audio_tracks(&self) -> Vec<String> {
+        if let Some(inner) = self.borrow() {
+            inner.audio_tracks.clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -839,6 +877,8 @@ pub enum VideoAction {
     PlaybackBegan,
     TextureUpdated,
     PlaybackCompleted,
+    /// Stream collection labels changed after prepare (e.g. HLS variants).
+    TracksChanged,
     PlayerReset,
     // The video view was secondary clicked (right-clicked) or long-pressed.
     SecondaryClicked {
@@ -891,6 +931,13 @@ impl Widget for Video {
                 if event.video_id == self.id {
                     self.handle_playback_prepared(cx, event);
                     cx.widget_action(uid, VideoAction::PlaybackPrepared);
+                }
+            }
+            Event::VideoTracksChanged(event) => {
+                if event.video_id == self.id {
+                    self.video_tracks = event.video_tracks.clone();
+                    self.audio_tracks = event.audio_tracks.clone();
+                    cx.widget_action(uid, VideoAction::TracksChanged);
                 }
             }
             Event::VideoTextureUpdated(event) => {
@@ -957,6 +1004,8 @@ impl Widget for Video {
             Event::VideoPlaybackResourcesReleased(event) => {
                 if event.video_id == self.id {
                     self.playback_state = PlaybackState::Unprepared;
+                    self.video_tracks.clear();
+                    self.audio_tracks.clear();
                     if self.native_preview_attached {
                         cx.detach_camera_native_preview(self.id);
                         self.native_preview_attached = false;
@@ -1218,6 +1267,8 @@ impl Video {
         self.video_width = event.video_width as usize;
         self.video_height = event.video_height as usize;
         self.total_duration = event.duration;
+        self.video_tracks = event.video_tracks.clone();
+        self.audio_tracks = event.audio_tracks.clone();
 
         self.draw_bg.set_uniform(
             cx,
@@ -1933,10 +1984,12 @@ impl Video {
                 }
             }
             PlaybackState::Completed => {
+                // platform_ops is LIFO (`pop`). Push resume *before* seek so the
+                // drained order is seek → resume (not resume-from-EOS then seek).
+                cx.resume_video_playback(self.id);
                 cx.seek_video_playback(self.id, 0);
                 self.current_position_ms = 0;
                 self.seek_cooldown = 5;
-                cx.resume_video_playback(self.id);
                 self.playback_state = PlaybackState::Playing;
             }
             _ => {}

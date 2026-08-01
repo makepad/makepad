@@ -98,13 +98,25 @@ impl VideoSource {
     /// fall back to software for these.
     pub fn is_network_stream(&self) -> bool {
         if let Self::Network(url) = self {
-            // Strip any query string before matching the extension.
-            let path = url.split(['?', '#']).next().unwrap_or(url);
-            let lower = path.to_ascii_lowercase();
-            lower.ends_with(".m3u8") || lower.ends_with(".mpd")
+            Self::path_is_adaptive_manifest(url)
         } else {
             false
         }
+    }
+
+    /// True for HLS/DASH manifests whether they are remote URLs or local files.
+    pub fn is_adaptive_manifest(&self) -> bool {
+        match self {
+            Self::Network(url) | Self::Filesystem(url) => Self::path_is_adaptive_manifest(url),
+            _ => false,
+        }
+    }
+
+    fn path_is_adaptive_manifest(url: &str) -> bool {
+        // Strip any query string / fragment before matching the extension.
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        let lower = path.to_ascii_lowercase();
+        lower.ends_with(".m3u8") || lower.ends_with(".mpd")
     }
 
     /// `content://` URIs from the system picker must use the native player (MediaPlayer /
@@ -158,4 +170,13 @@ pub struct VideoSeekableRangesEvent {
 pub struct VideoBufferedRangesEvent {
     pub video_id: LiveId,
     pub ranges: Vec<(f64, f64)>,
+}
+
+/// Emitted when playbin3 stream collection labels change after prepare
+/// (e.g. HLS variant / alternate audio discovered mid-stream).
+#[derive(Clone, Debug)]
+pub struct VideoTracksChangedEvent {
+    pub video_id: LiveId,
+    pub video_tracks: Vec<String>,
+    pub audio_tracks: Vec<String>,
 }
