@@ -39,6 +39,13 @@ fn main() {
     let mut limit = usize::MAX;
     let mut threshold_ms = 60.0f64;
     let mut buckets: Vec<u32> = DEFAULT_BUCKETS.to_vec();
+    // Tile zooms to bake. z14 tiles use the --buckets list; mid-zoom tiles
+    // bake their native bucket only (the runtime cascade at z11-13 city
+    // tiles measured 117-340ms — worse than z14). When rerunning over an
+    // archive that ALREADY carries streams (e.g. adding mid-zooms to a
+    // finished z14 bake), the zoom sets must not overlap: a baked tile
+    // appends field 101, and a reader takes the FIRST field it finds.
+    let mut zooms: Vec<u32> = vec![14];
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -65,10 +72,19 @@ fn main() {
                     .collect();
                 i += 2;
             }
+            "--zooms" => {
+                zooms = args[i + 1]
+                    .split(',')
+                    .map(|z| z.trim().parse().expect("zoom"))
+                    .collect();
+                i += 2;
+            }
             other => panic!("unknown arg {other}"),
         }
     }
-    eprintln!("map-bake: buckets {buckets:?}, threshold {threshold_ms}ms, brotli q{quality}");
+    eprintln!(
+        "map-bake: zooms {zooms:?}, buckets {buckets:?} (z14) / native (below), threshold {threshold_ms}ms, brotli q{quality}"
+    );
 
     let mut reader = MbtilesReader::open(input).expect("open input");
     let metadata = reader.get_metadata().expect("metadata");
@@ -169,6 +185,7 @@ fn main() {
     let (tx, rx) = std::sync::mpsc::channel::<(usize, Baked, usize)>();
     std::thread::scope(|scope| {
         let buckets = &buckets;
+        let zooms = &zooms;
         for _ in 0..threads {
             let queue = &queue;
             let codec = codec.clone();
@@ -179,7 +196,7 @@ fn main() {
                 let Some((seq, (zoom, col, row, blob, dz_raw, dz_covered))) = item else {
                     break;
                 };
-                if zoom != 14 || seq >= limit {
+                if !zooms.contains(&(zoom as u32)) || seq >= limit {
                     let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
                     continue;
                 }
@@ -187,9 +204,12 @@ fn main() {
                 let pbf = decode_vector_tile_payload(&raw).expect("payload");
                 let y = (1u32 << zoom) - 1 - row;
                 let key = TileKey { z: zoom as u32, x: col as i32, y: y as i32 };
+                let native_bucket = [zoom as u32];
+                let tile_buckets: &[u32] =
+                    if zoom == 14 { buckets } else { &native_bucket };
                 let mut baked_buckets = Vec::new();
                 let t_bake = std::time::Instant::now();
-                for &bucket in buckets.iter() {
+                for &bucket in tile_buckets.iter() {
                     if let Some(baked) = bake_tile_paint_faces(
                         key,
                         &pbf,
