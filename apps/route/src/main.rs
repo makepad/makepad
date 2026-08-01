@@ -115,8 +115,8 @@ script_mod! {
                             center_lat: 52.3702
                             zoom: 13.0
                             min_zoom: 3.0
-                            mbtiles_path: "local/maps/europe-base-br-faces-mz.mbtiles"
-                            detail_mbtiles_path: "local/maps/europe-base-br-faces-mz.mbtiles"
+                            mbtiles_path: "local/maps/europe-base-br-v2.mbtiles"
+                            detail_mbtiles_path: "local/maps/europe-base-br-v2.mbtiles"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
                             buildings_3d: true
                         }
