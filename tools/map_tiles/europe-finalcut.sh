@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 IN=local/maps/europe-base-br.mbtiles
-OUT=local/maps/europe-base-br-v3.mbtiles
+OUT=local/maps/europe-base-br-v4.mbtiles
 MKMAP=local/maps/europe-base-br.mkmap
 LOG=local/maps/europe-finalcut.log
 BIN=./target/release/makepad-map-tiles
@@ -14,8 +14,8 @@ BAKE=./target/release/makepad-map-bake
 
 phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 
-# v3: buckets carry baked building shadows. Buckets 14,15,16: rz15 is NOT a transient band — users cruise at z15 and
-# an unbaked bucket there ran the full 460ms cascade per tile in-app.
+# v4 morph cut: TWO keyframe buckets (14,16) — faces/strokes GPU-morph to
+# the live zoom, so bucket 15 and everything above 16 need no streams.
 phase "v3 faces+shadow bake (zooms 10-14, buckets 14-17 at z14 / native below, threshold 100ms)"
 "$BAKE" "$IN" "$OUT" \
     --bridge-dz local/maps/nl-bridge-dz.mbtiles \
