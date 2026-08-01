@@ -1,6 +1,7 @@
+use super::codec::{compress_tile, compression_metadata_rows};
 use super::{
     payload_overflow_threshold_max, payload_overflow_threshold_min, payload_overflows, Error,
-    PageType, Result, SQLITE_MAGIC,
+    PageType, Result, TileCompression, SQLITE_MAGIC,
 };
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -36,6 +37,8 @@ pub struct MbtilesWriter {
     tile_count: u64,
     tile_bytes: u64,
     extra_tables: Vec<ExtraTable>,
+    tile_compression: TileCompression,
+    compression_dict: Option<Vec<u8>>,
 }
 
 struct ExtraTable {
@@ -65,7 +68,40 @@ impl MbtilesWriter {
             tile_count: 0,
             tile_bytes: 0,
             extra_tables: Vec::new(),
+            tile_compression: TileCompression::Gzip,
+            compression_dict: None,
         })
+    }
+
+    /// Opt in to a per-archive tile codec (default: gzip, no metadata row).
+    ///
+    /// Records the `compression` (and, with a dictionary, `compression_dict`)
+    /// metadata rows so readers decode correctly, and selects the codec used
+    /// by [`MbtilesWriter::write_tile_encoded`]. Payloads passed to
+    /// [`MbtilesWriter::write_tile_xyz`] are still stored verbatim, which
+    /// lets parallel pipelines compress on worker threads via
+    /// [`crate::compress_tile`] and hand finished bytes to the writer.
+    pub fn set_tile_compression(
+        &mut self,
+        compression: TileCompression,
+        dict: Option<Vec<u8>>,
+    ) {
+        let dict = dict.filter(|d| !d.is_empty());
+        for (key, value) in compression_metadata_rows(&compression, dict.as_deref()) {
+            self.set_metadata(key, value);
+        }
+        self.tile_compression = compression;
+        self.compression_dict = dict;
+    }
+
+    /// Compress a raw tile payload with the archive codec, then store it.
+    pub fn write_tile_encoded(&mut self, zoom: u8, x: u32, y: u32, raw: &[u8]) -> Result<()> {
+        let compressed = compress_tile(
+            &self.tile_compression,
+            self.compression_dict.as_deref(),
+            raw,
+        )?;
+        self.write_tile_xyz(zoom, x, y, &compressed)
     }
 
     /// Declare an additional table. Rows are supplied via
@@ -120,7 +156,10 @@ impl MbtilesWriter {
         self.metadata.insert(name.into(), value.into());
     }
 
-    /// Add a gzip-compressed MVT/PBF tile addressed using XYZ coordinates.
+    /// Add a pre-compressed MVT/PBF tile addressed using XYZ coordinates.
+    /// The payload bytes are stored verbatim; they must already match the
+    /// archive codec (gzip by default, see
+    /// [`MbtilesWriter::set_tile_compression`]).
     ///
     /// MBTiles stores rows in TMS orientation, so this method flips `y` before
     /// serializing the row. Input must be in deterministic block-major order.
@@ -858,6 +897,71 @@ mod tests {
             vec![(0, 1), (9, 2)]
         );
 
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn brotli_archive_round_trips_with_and_without_dict() {
+        let raw_tile: Vec<u8> = b"streets water_polygons buildings place_labels "
+            .iter()
+            .copied()
+            .cycle()
+            .take(20_000)
+            .collect();
+        for dict in [None, Some(b"streets water_polygons buildings".to_vec())] {
+            let path = temp_path("makepad-mbtiles-brotli");
+            let mut writer = MbtilesWriter::create(&path).unwrap();
+            writer.set_metadata("name", "brotli test");
+            writer.set_tile_compression(TileCompression::Brotli { quality: 9 }, dict.clone());
+            writer.write_tile_encoded(5, 3, 4, &raw_tile).unwrap();
+            // Worker-thread style: pre-compress and store verbatim.
+            let pre = crate::compress_tile(
+                &TileCompression::Brotli { quality: 9 },
+                dict.as_deref(),
+                &raw_tile,
+            )
+            .unwrap();
+            writer.write_tile_xyz(5, 4, 4, &pre).unwrap();
+            writer.finish().unwrap();
+
+            let mut reader = MbtilesReader::open(&path).unwrap();
+            let metadata = reader.get_metadata().unwrap();
+            let expected = if dict.is_some() { "br:dict-v1" } else { "br" };
+            assert_eq!(
+                metadata.get("compression").map(String::as_str),
+                Some(expected)
+            );
+            assert!(reader.tile_codec().is_brotli());
+            assert_eq!(reader.tile_codec().dict(), dict.as_deref());
+            let tms_row = (1_i64 << 5) - 1 - 4;
+            for x in [3_i64, 4] {
+                let stored = reader.get_tile(5, x, tms_row).unwrap().unwrap();
+                assert_ne!(stored, raw_tile);
+                assert_eq!(reader.decode_tile(&stored).unwrap(), raw_tile);
+                assert_eq!(
+                    reader.get_tile_decoded(5, x, tms_row).unwrap().unwrap(),
+                    raw_tile
+                );
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn gzip_archives_stay_readable_without_compression_metadata() {
+        let path = temp_path("makepad-mbtiles-gzip-default");
+        let raw_tile = b"legacy gzip archive tile payload".repeat(64);
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.write_tile_encoded(3, 1, 2, &raw_tile).unwrap();
+        writer.finish().unwrap();
+
+        let mut reader = MbtilesReader::open(&path).unwrap();
+        // Gzip is the default; no compression row is required for it.
+        assert!(!reader.tile_codec().is_brotli());
+        let tms_row = (1_i64 << 3) - 1 - 2;
+        let stored = reader.get_tile(3, 1, tms_row).unwrap().unwrap();
+        assert_eq!(&stored[..2], &[0x1f, 0x8b]);
+        assert_eq!(reader.decode_tile(&stored).unwrap(), raw_tile);
         std::fs::remove_file(path).unwrap();
     }
 

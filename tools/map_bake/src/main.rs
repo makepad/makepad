@@ -18,7 +18,13 @@ use makepad_widgets::map::tile::{
 };
 use std::path::Path;
 
-const BUCKETS: [u32; 3] = [14, 15, 16];
+/// Default buckets. Europe policy (data-cost analysis): bake 14 and 16
+/// only — native zoom and deep overzoom, where cost concentrates. There is
+/// NO cross-bucket reuse: the signature guard requires the exact bucket's
+/// styling structure, so rz15 (a transient gesture band) intentionally
+/// falls back to the runtime cascade. rz17+ was always runtime (outside
+/// the 14..=16 consumption window, reusing nothing).
+const DEFAULT_BUCKETS: [u32; 3] = [14, 15, 16];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -31,6 +37,8 @@ fn main() {
     let mut bridge_dz_path: Option<String> = None;
     let mut quality = 10u32;
     let mut limit = usize::MAX;
+    let mut threshold_ms = 60.0f64;
+    let mut buckets: Vec<u32> = DEFAULT_BUCKETS.to_vec();
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -46,9 +54,21 @@ fn main() {
                 limit = args[i + 1].parse().expect("limit");
                 i += 2;
             }
+            "--threshold-ms" => {
+                threshold_ms = args[i + 1].parse().expect("threshold");
+                i += 2;
+            }
+            "--buckets" => {
+                buckets = args[i + 1]
+                    .split(',')
+                    .map(|b| b.trim().parse().expect("bucket"))
+                    .collect();
+                i += 2;
+            }
             other => panic!("unknown arg {other}"),
         }
     }
+    eprintln!("map-bake: buckets {buckets:?}, threshold {threshold_ms}ms, brotli q{quality}");
 
     let mut reader = MbtilesReader::open(input).expect("open input");
     let metadata = reader.get_metadata().expect("metadata");
@@ -148,6 +168,7 @@ fn main() {
     );
     let (tx, rx) = std::sync::mpsc::channel::<(usize, Baked, usize)>();
     std::thread::scope(|scope| {
+        let buckets = &buckets;
         for _ in 0..threads {
             let queue = &queue;
             let codec = codec.clone();
@@ -166,9 +187,9 @@ fn main() {
                 let pbf = decode_vector_tile_payload(&raw).expect("payload");
                 let y = (1u32 << zoom) - 1 - row;
                 let key = TileKey { z: zoom as u32, x: col as i32, y: y as i32 };
-                let mut buckets = Vec::new();
+                let mut baked_buckets = Vec::new();
                 let t_bake = std::time::Instant::now();
-                for bucket in BUCKETS {
+                for &bucket in buckets.iter() {
                     if let Some(baked) = bake_tile_paint_faces(
                         key,
                         &pbf,
@@ -179,7 +200,7 @@ fn main() {
                         bucket,
                     ) {
                         if !baked.regions.is_empty() {
-                            buckets.push(baked);
+                            baked_buckets.push(baked);
                         }
                     }
                 }
@@ -187,13 +208,13 @@ fn main() {
                 // stream exists to rescue heavy urban builds, and baking
                 // every rural tile costs archive size for builds that were
                 // already fast. Threshold on the measured cascade replay.
-                if t_bake.elapsed().as_secs_f64() * 1e3 < 60.0 {
-                    buckets.clear();
+                if t_bake.elapsed().as_secs_f64() * 1e3 < threshold_ms {
+                    baked_buckets.clear();
                 }
-                if buckets.is_empty() {
+                if baked_buckets.is_empty() {
                     let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
                 } else {
-                    let field = encode_baked_faces_field(&buckets);
+                    let field = encode_baked_faces_field(&baked_buckets);
                     let field_len = field.len();
                     let mut appended = pbf;
                     appended.extend_from_slice(&field);
