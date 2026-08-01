@@ -16,10 +16,10 @@ phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 
 # v3: buckets carry baked building shadows. Buckets 14,15,16: rz15 is NOT a transient band — users cruise at z15 and
 # an unbaked bucket there ran the full 460ms cascade per tile in-app.
-phase "v2 faces bake (zooms 10-14, buckets 14+15+16 at z14 / native below, threshold 100ms)"
+phase "v3 faces+shadow bake (zooms 10-14, buckets 14-17 at z14 / native below, threshold 100ms)"
 "$BAKE" "$IN" "$OUT" \
     --bridge-dz local/maps/nl-bridge-dz.mbtiles \
-    --zooms 10,11,12,13,14 --buckets 14,15,16 --threshold-ms 100 2>&1 | tee -a "$LOG"
+    --zooms 10,11,12,13,14 --buckets 14,15,16,17 --threshold-ms 100 2>&1 | tee -a "$LOG"
 
 phase "decode-sanity"
 "$BIN" verify-mbtiles "$OUT" --stride 200 2>&1 | tee -a "$LOG"
