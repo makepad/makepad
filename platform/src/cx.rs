@@ -507,7 +507,6 @@ impl Cx {
 
             script_data: CxScriptData {
                 std: script_std,
-                crate_manifests: script_vm.code.crate_manifests.clone(),
                 live_reload: crate::live_reload::CxLiveReloadState {
                     script_mod_overrides: script_vm.code.script_mod_overrides.clone(),
                     ..Default::default()
