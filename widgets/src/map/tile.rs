@@ -577,6 +577,54 @@ struct RoadTierGradeCorrection {
 /// for a typed link joining a non-link road of the same family. That typed
 /// relationship is also the only one allowed to lower an endpoint: the
 /// wider through road is authoritative in either direction.
+/// Way-bbox cell grid for the endpoint join passes: an endpoint query
+/// returns every way whose bbox expanded by its own half-width plus the
+/// caller's worst-case source reach can contain the point. Candidate lists
+/// stay in ascending way order (insertion order), so first-match iteration
+/// semantics survive the prefilter exactly.
+struct WayBboxGrid {
+    cell: f32,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl WayBboxGrid {
+    fn build(
+        way_bounds: &[(f32, f32, f32, f32, f32)],
+        ways: &[RoadTierJoinWay],
+        extra_reach: f32,
+    ) -> WayBboxGrid {
+        let cell = 16.0f32;
+        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for (way_index, (&(bx0, by0, bx1, by1, _), way)) in
+            way_bounds.iter().zip(ways).enumerate()
+        {
+            if bx0 > bx1 {
+                continue;
+            }
+            let reach = way.half_width + extra_reach + 0.01;
+            let clamp_cell = |v: f32| ((v / cell).floor() as i32).clamp(-64, 64);
+            let x0 = clamp_cell(bx0 - reach);
+            let x1 = clamp_cell(bx1 + reach);
+            let y0 = clamp_cell(by0 - reach);
+            let y1 = clamp_cell(by1 + reach);
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    cells.entry((cx, cy)).or_default().push(way_index as u32);
+                }
+            }
+        }
+        WayBboxGrid { cell, cells }
+    }
+
+    fn candidates(&self, point: (f32, f32)) -> &[u32] {
+        let key = (
+            ((point.0 / self.cell).floor() as i32).clamp(-64, 64),
+            ((point.1 / self.cell).floor() as i32).clamp(-64, 64),
+        );
+        self.cells.get(&key).map_or(&[], |cell| cell.as_slice())
+    }
+}
+
 fn endpoint_to_through_grade_corrections(
     ways: &[RoadTierJoinWay],
 ) -> Vec<RoadTierGradeCorrection> {
@@ -615,6 +663,8 @@ fn endpoint_to_through_grade_corrections(
             (min_x, min_y, max_x, max_y, total_len)
         })
         .collect();
+    let max_source_hw = ways.iter().map(|way| way.half_width).fold(0.0f32, f32::max);
+    let bbox_grid = WayBboxGrid::build(&way_bounds, ways, max_source_hw);
     let mut corrections = Vec::new();
     for source in ways {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -647,7 +697,9 @@ fn endpoint_to_through_grade_corrections(
             let source_dz = source.dz[end_index];
             let mut best: Option<(f32, f32)> = None;
 
-            for (target_index, target) in ways.iter().enumerate() {
+            for &target_index in bbox_grid.candidates(point) {
+                let target_index = target_index as usize;
+                let target = &ways[target_index];
                 let (bx0, by0, bx1, by1, total_len) = way_bounds[target_index];
                 let reach = source.half_width + target.half_width;
                 if point.0 < bx0 - reach
@@ -920,6 +972,9 @@ fn endpoint_to_through_flush_ends(
             (min_x, min_y, max_x, max_y, total_len)
         })
         .collect();
+    let max_source_hw = ways.iter().map(|way| way.half_width).fold(0.0f32, f32::max);
+    let bbox_grid =
+        WayBboxGrid::build(&way_bounds, ways, max_source_hw + MIN_CENTERLINE_GAP);
     let mut flush = std::collections::HashSet::new();
     for (source_index, source) in ways.iter().enumerate() {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -950,7 +1005,9 @@ fn endpoint_to_through_flush_ends(
             }
             let outward = (out_x / out_len, out_y / out_len);
 
-            'targets: for (target_index, target) in ways.iter().enumerate() {
+            'targets: for &target_index in bbox_grid.candidates(point) {
+                let target_index = target_index as usize;
+                let target = &ways[target_index];
                 let (bx0, by0, bx1, by1, precomputed_len) = way_bounds[target_index];
                 let reach = source.half_width + target.half_width + MIN_CENTERLINE_GAP;
                 if point.0 < bx0 - reach
