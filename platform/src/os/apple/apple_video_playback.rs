@@ -378,14 +378,14 @@ impl AppleVideoPlayer {
         width: usize,
         height: usize,
     ) -> bool {
-        const kCVPixelBufferLock_ReadOnly: CVPixelBufferLockFlags = 1;
-        if CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly) != 0 {
+        const LOCK_READ_ONLY: CVPixelBufferLockFlags = 1;
+        if CVPixelBufferLockBaseAddress(pixel_buffer, LOCK_READ_ONLY) != 0 {
             return false;
         }
         let base = CVPixelBufferGetBaseAddress(pixel_buffer);
         let bpr = CVPixelBufferGetBytesPerRow(pixel_buffer);
         if base.is_null() || bpr == 0 {
-            let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+            let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
             return false;
         }
 
@@ -407,8 +407,7 @@ impl AppleVideoPlayer {
                 msg_send![self.metal_device, newTextureWithDescriptor: descriptor];
             let _: () = msg_send![descriptor, release];
             if mtl_texture.is_null() {
-                let _ =
-                    CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+                let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
                 return false;
             }
             cxtexture.os.texture = Some(RcObjcId::from_owned(NonNull::new(mtl_texture).unwrap()));
@@ -437,7 +436,7 @@ impl AppleVideoPlayer {
             withBytes: base as *const c_void
             bytesPerRow: bpr as u64
         ];
-        let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+        let _ = CVPixelBufferUnlockBaseAddress(pixel_buffer, LOCK_READ_ONLY);
         true
     }
 
