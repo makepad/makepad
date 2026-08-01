@@ -43,3 +43,18 @@ z13 166 → 13ms. All optimizations byte-parity-proven against the runtime casca
       future rebake — every re-cut shifts all shard offsets)
 - [ ] On-device measure once the phone client exists; next perf tier if needed:
       emit-stage ribbon bake (worst tiles ~100ms of emit remain)
+
+## PIVOT 2026-08-01 ~23:00 (user-directed)
+Europe v3b bake CANCELED. New sequence:
+1. **Morphable-faces prototype, Amsterdam only** (task #30 has full design).
+   Key simplification found: outward normals computable POST-HOC from baked
+   ring winding at runtime — no format change for directions; earcut adds
+   no interior verts (all face verts are ring verts, normals well-defined);
+   dz-subdiv midpoints inherit averaged offsets. Keyframes 14+16 morph to 18.
+   Signature: stop hashing per-bucket widths for morphable groups.
+2. Chase render glitches (junction morph, translucent groups pinned at 0,
+   fringe ride-along) via studio screenshots at morphed vs native buckets.
+3. ONE final Europe cut + re-shard + upload. Target: MapLibre-class per-tile
+   CPU (worst AMS <60ms), streams ~2 keyframes (< v3 size).
+App still runs fine on the v3 128-shard set meanwhile (buckets 14-16 baked,
+17 clamp in code but unbaked -> runtime at 17: acceptable during prototype).
