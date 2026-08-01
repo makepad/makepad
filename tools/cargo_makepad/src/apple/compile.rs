@@ -1057,7 +1057,8 @@ pub fn copy_resources(
             let crate_name = crate_name.replace('-', "_");
             let dst_dir = app_dir.join(format!("makepad/{crate_name}/{asset_subdir}"));
             mkdir(&dst_dir)?;
-            cp_all(source_dir, &dst_dir, false)?;
+            // resources/android is Android-only; ios/ still ships in Apple bundles
+            cp_all_skip_top(source_dir, &dst_dir, &["android"], false)?;
             Ok(())
         };
     let add_font_assets_dir =

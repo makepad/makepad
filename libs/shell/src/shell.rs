@@ -296,6 +296,38 @@ pub fn cp_all(source_dir: &Path, dest_dir: &Path, exec: bool) -> Result<(), Stri
     Ok(())
 }
 
+/// Like `cp_all`, but skips top-level entries whose name is in `skip`.
+pub fn cp_all_skip_top(
+    source_dir: &Path,
+    dest_dir: &Path,
+    skip: &[&str],
+    exec: bool,
+) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Err(format!("{:?} is not a directory", source_dir));
+    }
+
+    mkdir(dest_dir)?;
+
+    for entry in fs::read_dir(source_dir)
+        .map_err(|_e| format!("Unable to read source directory {:?}", source_dir))?
+    {
+        let entry = entry.map_err(|_e| format!("Unable to process directory entry"))?;
+        if skip.iter().any(|name| entry.file_name() == *name) {
+            continue;
+        }
+        let source_path = entry.path();
+        let dest_path = dest_dir.join(entry.file_name());
+        if source_path.is_file() {
+            cp(&source_path, &dest_path, exec)?;
+        } else if source_path.is_dir() {
+            cp_all_recursive(&source_path, &dest_path, exec)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn cp_all_recursive(source_dir: &Path, dest_dir: &Path, exec: bool) -> Result<(), String> {
     if !source_dir.is_dir() {
         return Err(format!("{:?} is not a directory", source_dir));
