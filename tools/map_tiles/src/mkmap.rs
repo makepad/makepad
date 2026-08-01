@@ -31,7 +31,8 @@ use std::time::Instant;
 
 pub const SHARD_HARD_CAP: u64 = 510_000_000;
 const MAGIC: &[u8; 8] = b"MKMAPIX1";
-const VERSION: u32 = 1;
+// v2: metadata section is varint KV (was JSON).
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 112;
 const ROOT_RECORD_LEN: usize = 36;
 
@@ -427,14 +428,22 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
         &mut root,
     )?;
 
-    // Index file.
+    // Index file. Metadata is varint KV pairs (count, then per pair
+    // length-prefixed key and value bytes) — same primitive the leaf
+    // directories use; no JSON anywhere in the container.
     let metadata_map: std::collections::BTreeMap<&str, &str> = metadata
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let metadata_json = serde_json::to_vec(&metadata_map)
-        .map_err(|err| format!("serialize metadata: {err}"))?;
-    let metadata_br = brotli_pack(&metadata_json)?;
+    let mut metadata_raw = Vec::new();
+    write_varint(metadata_map.len() as u64, &mut metadata_raw);
+    for (key, value) in &metadata_map {
+        write_varint(key.len() as u64, &mut metadata_raw);
+        metadata_raw.extend_from_slice(key.as_bytes());
+        write_varint(value.len() as u64, &mut metadata_raw);
+        metadata_raw.extend_from_slice(value.as_bytes());
+    }
+    let metadata_br = brotli_pack(&metadata_raw)?;
     let mut root_raw = Vec::with_capacity(root.len() * ROOT_RECORD_LEN);
     for record in &root {
         root_raw.extend_from_slice(&record.start_tile_id.to_le_bytes());
