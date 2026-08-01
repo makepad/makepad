@@ -19,11 +19,13 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 mod codec;
+mod mkmap;
 mod writer;
 pub use codec::{
     compress_tile, compression_metadata_rows, TileCodec, TileCompression,
     COMPRESSION_DICT_METADATA_KEY, COMPRESSION_METADATA_KEY,
 };
+pub use mkmap::{mkmap_tile_id, MkmapReader, TileArchiveReader};
 pub use writer::{MbtilesWriter, MbtilesWriterStats, WriterValue};
 
 // ---------------------------------------------------------------------------
