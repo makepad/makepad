@@ -2006,6 +2006,7 @@ fn append_ring_fringe(
 /// sunk shapes, lifted outline shapes for skirt walls). Shapes are the
 /// f64 snapped rings straight from the cascade — the deterministic,
 /// bakeable part of the painter-order unifier.
+#[derive(Clone)]
 pub struct VisibleRegions {
     pub group_index: usize,
     pub main: Vec<Vec<Vec<[f64; 2]>>>,
@@ -2615,12 +2616,37 @@ pub fn build_paint_faces(
 /// problem), while the whole cross-section of the deck itself, edge to
 /// edge, lifts uniformly. The baker's junction consensus makes way dz agree
 /// at shared nodes, so nearest-wins stays continuous across junctions.
+/// Multiply-rotate hasher for small integer cell keys: these maps are
+/// lookup-only (never iterated), and SipHash dominated `DzField::sample`
+/// profiles at ~114k samples per 3D tile.
+#[derive(Default)]
+pub struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_i32(&mut self, value: i32) {
+        self.0 = (self.0 ^ value as u32 as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(13);
+    }
+}
+
+pub type CellMap<V> = std::collections::HashMap<(i32, i32), V, std::hash::BuildHasherDefault<CellHasher>>;
+pub type CellSet = std::collections::HashSet<(i32, i32), std::hash::BuildHasherDefault<CellHasher>>;
+
 pub struct DzField {
     cell: f32,
     radius: f32,
-    grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    grid: CellMap<Vec<u32>>,
     /// Cells within reach of a lifted segment — the "needs subdivision" set.
-    active: std::collections::HashSet<(i32, i32)>,
+    active: CellSet,
     segs: Vec<[f32; 7]>,
 }
 
