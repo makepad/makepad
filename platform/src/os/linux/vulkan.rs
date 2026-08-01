@@ -4902,6 +4902,7 @@ impl CxVulkan {
                 enabled: true,
                 matrix: 0.0,
                 biplanar,
+                full_range: false,
                 rotation_steps: 0.0,
             });
         }
@@ -5153,6 +5154,7 @@ impl CxVulkan {
             enabled: true,
             matrix: 0.0,
             biplanar: plane_layout.biplanar,
+            full_range: false,
             rotation_steps: 0.0,
         })
     }

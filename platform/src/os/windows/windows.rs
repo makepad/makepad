@@ -251,6 +251,7 @@ impl Cx {
                                         enabled: player.is_software_mode(),
                                         matrix: player.yuv_matrix(),
                                         biplanar: player.yuv_biplanar(),
+                                        full_range: false,
                                         rotation_steps: 0.0,
                                     },
                                 },

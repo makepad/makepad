@@ -26,9 +26,26 @@ pub(crate) fn upload_yuv_to_gl(
         &planes.y,
         planes.width,
         planes.height,
+        planes.y_bytes_per_row(),
     );
-    upload_r8_plane_to_gl(gl, textures, tex_u_id, &planes.u, cw, ch);
-    upload_r8_plane_to_gl(gl, textures, tex_v_id, &planes.v, cw, ch);
+    upload_r8_plane_to_gl(
+        gl,
+        textures,
+        tex_u_id,
+        &planes.u,
+        cw,
+        ch,
+        planes.u_bytes_per_row(),
+    );
+    upload_r8_plane_to_gl(
+        gl,
+        textures,
+        tex_v_id,
+        &planes.v,
+        cw,
+        ch,
+        planes.v_bytes_per_row(),
+    );
 }
 
 pub(crate) fn upload_i420_slices_to_gl(
@@ -45,9 +62,9 @@ pub(crate) fn upload_i420_slices_to_gl(
 ) {
     let cw = width.div_ceil(2);
     let ch = height.div_ceil(2);
-    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height);
-    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch);
-    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch);
+    upload_r8_plane_to_gl(gl, textures, tex_y_id, y, width, height, width);
+    upload_r8_plane_to_gl(gl, textures, tex_u_id, u, cw, ch, cw);
+    upload_r8_plane_to_gl(gl, textures, tex_v_id, v, cw, ch, cw);
 }
 
 pub(crate) fn upload_r8_plane_to_gl(
@@ -57,10 +74,12 @@ pub(crate) fn upload_r8_plane_to_gl(
     data: &[u8],
     width: u32,
     height: u32,
+    bytes_per_row: u32,
 ) {
     let w = width as usize;
     let h = height as usize;
-    if data.len() < w * h {
+    let bpr = bytes_per_row.max(width) as usize;
+    if w == 0 || h == 0 || data.len() < bpr * (h.saturating_sub(1)) + w {
         return;
     }
 
@@ -104,7 +123,7 @@ pub(crate) fn upload_r8_plane_to_gl(
         let gl_texture = cxtexture.os.gl_texture.unwrap();
         (gl.glBindTexture)(gl_sys::TEXTURE_2D, gl_texture);
         (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 1);
-        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, bpr as i32);
         (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
         (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
 
@@ -134,6 +153,8 @@ pub(crate) fn upload_r8_plane_to_gl(
             );
         }
 
+        // Restore default unpack state so other uploads stay packed.
+        (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
         (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
 
         cxtexture.alloc = Some(TextureAlloc {

@@ -73,6 +73,13 @@ impl PlaybackSessionHandle {
         self.inner.as_mut().and_then(|p| p.take_oes_frame())
     }
 
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
+        self.inner
+            .as_mut()
+            .and_then(|p| p.take_metal_nv12_frame())
+    }
+
     pub fn check_eos(&mut self) -> bool {
         self.inner.as_mut().map(|p| p.check_eos()).unwrap_or(false)
     }

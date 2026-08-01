@@ -349,6 +349,13 @@ pub const kCMTimeInvalid: CMTime = CMTime {
     epoch: 0,
 };
 
+pub const kCMTimePositiveInfinity: CMTime = CMTime {
+    value: 0,
+    timescale: 0,
+    flags: kCMTimeFlags_Valid | kCMTimeFlags_PositiveInfinity,
+    epoch: 0,
+};
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct CMSampleTimingInfo {

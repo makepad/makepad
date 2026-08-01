@@ -364,6 +364,7 @@ impl Cx {
 
         // store device object ID for double buffering
         cx.borrow_mut().os.metal_device = Some(metal_cx.borrow().device);
+        cx.borrow_mut().publish_metal_device_for_media();
 
         //let cx = Rc::new(RefCell::new(self));
         cx.borrow_mut().set_physical_keyboard_state(true);
@@ -863,9 +864,10 @@ impl Cx {
                                     video_id: player.video_id,
                                     current_position_ms: player.current_position_ms(),
                                     yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.is_software_mode(),
+                                        enabled: player.yuv_shader_enabled(),
                                         matrix: player.yuv_matrix(),
                                         biplanar: player.yuv_biplanar() > 0.5,
+                                        full_range: player.yuv_full_range(),
                                         rotation_steps: 0.0,
                                     },
                                 },

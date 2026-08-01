@@ -47,6 +47,7 @@ impl D3d11YuvCpuCache {
         data: &[u8],
         width: u32,
         height: u32,
+        bytes_per_row: u32,
     ) {
         Self::upload_plane(
             &mut self.y,
@@ -57,6 +58,7 @@ impl D3d11YuvCpuCache {
             data,
             width,
             height,
+            bytes_per_row,
         );
     }
 
@@ -69,6 +71,7 @@ impl D3d11YuvCpuCache {
         data: &[u8],
         width: u32,
         height: u32,
+        bytes_per_row: u32,
     ) {
         Self::upload_plane(
             &mut self.u,
@@ -79,6 +82,7 @@ impl D3d11YuvCpuCache {
             data,
             width,
             height,
+            bytes_per_row,
         );
     }
 
@@ -91,6 +95,7 @@ impl D3d11YuvCpuCache {
         data: &[u8],
         width: u32,
         height: u32,
+        bytes_per_row: u32,
     ) {
         Self::upload_plane(
             &mut self.v,
@@ -101,6 +106,7 @@ impl D3d11YuvCpuCache {
             data,
             width,
             height,
+            bytes_per_row,
         );
     }
 
@@ -113,10 +119,12 @@ impl D3d11YuvCpuCache {
         data: &[u8],
         width: u32,
         height: u32,
+        bytes_per_row: u32,
     ) {
         let w = width as usize;
         let h = height as usize;
-        if width == 0 || height == 0 || data.len() < w * h {
+        let bpr = bytes_per_row.max(width) as usize;
+        if width == 0 || height == 0 || data.len() < bpr * (h.saturating_sub(1)) + w {
             return;
         }
 
@@ -192,7 +200,7 @@ impl D3d11YuvCpuCache {
                 0,
                 Some(&dst_box as *const _),
                 data.as_ptr() as *const _,
-                width,
+                bpr as u32,
                 0,
             );
         });
@@ -417,6 +425,7 @@ impl WindowsUnifiedVideoPlayer {
             &planes.y,
             planes.width,
             planes.height,
+            planes.y_bytes_per_row(),
         );
         self.yuv_cpu_cache.upload_u(
             &self.d3d11_device,
@@ -426,6 +435,7 @@ impl WindowsUnifiedVideoPlayer {
             &planes.u,
             cw,
             ch,
+            planes.u_bytes_per_row(),
         );
         self.yuv_cpu_cache.upload_v(
             &self.d3d11_device,
@@ -435,6 +445,7 @@ impl WindowsUnifiedVideoPlayer {
             &planes.v,
             cw,
             ch,
+            planes.v_bytes_per_row(),
         );
     }
 

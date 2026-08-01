@@ -467,6 +467,7 @@ impl Cx {
                                 enabled: false,
                                 matrix: 0.0,
                                 biplanar: false,
+                                full_range: false,
                                 rotation_steps: 0.0,
                             },
                         },

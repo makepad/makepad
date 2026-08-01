@@ -27,6 +27,8 @@ pub struct VideoYuvMetadata {
     pub matrix: f32,
     /// When true, UV is in a single RG8 texture (NV12 biplanar).
     pub biplanar: bool,
+    /// When true, Y/UV are full range (JPEG/PC); when false, limited/video range.
+    pub full_range: bool,
     /// YUV texture rotation in quarter turns clockwise (0, 1, 2, 3).
     pub rotation_steps: f32,
 }
@@ -46,6 +48,14 @@ impl VideoYuvMetadata {
 
     pub fn shader_biplanar(self) -> f32 {
         if self.biplanar {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    pub fn shader_full_range(self) -> f32 {
+        if self.full_range {
             1.0
         } else {
             0.0

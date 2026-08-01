@@ -32,6 +32,8 @@ script_mod! {
             yuv_type: uniform(0.0)
             yuv_enabled: uniform(0.0)
             yuv_biplanar: uniform(0.0)
+            // 0 = limited/video range (TV), 1 = full range (JPEG/PC)
+            yuv_full_range: uniform(0.0)
             yuv_rotation_steps: uniform(0.0)
             // Android OES zero-copy: SurfaceTexture.getTransformMatrix() as 4 column
             // vec4s (column-major). Required by the Android contract before sampling
@@ -75,10 +77,18 @@ script_mod! {
                 let u_val = uv_sample.x
                 let v_val = mix(self.tex_v.sample(sample_coord).x, uv_sample.y, step(0.5, self.yuv_biplanar))
 
-                // Limited range: Y [16..235] -> [0..1], UV [16..240] -> [-0.5..0.5]
-                let y = (y_val * 255.0 - 16.0) / 219.0
-                let u = (u_val * 255.0 - 128.0) / 224.0
-                let v = (v_val * 255.0 - 128.0) / 224.0
+                // Limited/video range: Y [16..235] -> [0..1], UV [16..240] -> [-0.5..0.5]
+                let y_lim = (y_val * 255.0 - 16.0) / 219.0
+                let u_lim = (u_val * 255.0 - 128.0) / 224.0
+                let v_lim = (v_val * 255.0 - 128.0) / 224.0
+                // Full/JPEG range: Y [0..255] -> [0..1], UV [0..255] -> [-0.5..0.5]
+                let y_full = y_val
+                let u_full = u_val - 0.5
+                let v_full = v_val - 0.5
+                let use_full = step(0.5, self.yuv_full_range)
+                let y = mix(y_lim, y_full, use_full)
+                let u = mix(u_lim, u_full, use_full)
+                let v = mix(v_lim, v_full, use_full)
 
                 // BT.709 (yuv_type == 0.0)
                 let r709 = y + 1.5748 * v
@@ -903,6 +913,8 @@ impl Widget for Video {
                         .set_uniform(cx, id!(yuv_type), &[event.yuv.matrix]);
                     self.draw_bg
                         .set_uniform(cx, id!(yuv_biplanar), &[event.yuv.shader_biplanar()]);
+                    self.draw_bg
+                        .set_uniform(cx, id!(yuv_full_range), &[event.yuv.shader_full_range()]);
                     self.draw_bg.set_uniform(
                         cx,
                         id!(yuv_rotation_steps),

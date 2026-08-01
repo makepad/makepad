@@ -403,6 +403,7 @@ impl X11Cx {
                                             enabled: player.is_yuv_mode(),
                                             matrix: player.yuv_matrix(),
                                             biplanar: false,
+                                            full_range: false,
                                             rotation_steps: 0.0,
                                         },
                                     },

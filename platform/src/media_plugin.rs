@@ -212,6 +212,11 @@ pub trait MediaPlaybackSession {
     fn take_oes_frame(&mut self) -> Option<crate::gpu_texture::OesFrame> {
         None
     }
+    /// Optional Apple zero-copy present: biplanar NV12 `CVPixelBuffer` from VideoToolbox.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
+        None
+    }
     fn check_eos(&mut self) -> bool;
     fn play(&mut self);
     fn pause(&mut self);

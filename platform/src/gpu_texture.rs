@@ -13,8 +13,9 @@
 //! - The caller must keep the underlying resource alive while any draw call
 //!   may still sample the `Texture` (typically until the next successful adopt
 //!   of a newer frame, plus one frame of latency).
-//! - Resources must come from **Makepad's** D3D11 device / GL context
-//!   (`Cx::d3d11_device` / `Cx::with_gl`). Cross-device sharing is out of scope.
+//! - Resources must come from **Makepad's** D3D11 device / GL / Metal context
+//!   (`Cx::d3d11_device` / `Cx::with_gl` / `Cx::metal_device`). Cross-device
+//!   sharing is out of scope.
 //!
 //! # Platforms
 //!
@@ -22,6 +23,7 @@
 //! |----------|----------------|
 //! | Windows  | [`Cx::d3d11_device`], [`Texture::adopt_d3d11_bgra`], [`Texture::adopt_d3d11_plane`] |
 //! | Android  | [`Cx::with_gl`], [`Texture::adopt_oes_texture`], [`Texture::adopt_gl_texture_2d`] |
+//! | macOS/iOS | [`Cx::metal_device`], [`Texture::adopt_metal_r8_plane`], [`Texture::adopt_metal_rg8_plane`], [`adopt_metal_nv12_biplanar`] |
 //!
 //! Other platforms can be added later; unsupported targets compile these
 //! helpers out via `cfg`.
@@ -144,6 +146,154 @@ pub struct OesFrame {
     pub width: u32,
     pub height: u32,
     pub keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+/// Zero-copy NV12 / biplanar frame from VideoToolbox (or any CVPixelBuffer
+/// producer) for Metal present. `keep_alive` must outlive GPU sampling of the
+/// adopted Metal textures (usually until the next frame replaces it).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub struct MetalNv12Frame {
+    pub pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
+    pub width: u32,
+    pub height: u32,
+    pub matrix: crate::video_decode::yuv::YuvColorMatrix,
+    /// `true` for `420f` (JPEG/full); `false` for `420v` (video/limited).
+    pub full_range: bool,
+    /// Owns the `CVPixelBuffer` (and/or source `AVFrame`). `pixel_buffer` is an
+    /// alias into this keep-alive — do not `CVPixelBufferRelease` it separately.
+    pub keep_alive: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+// CVPixelBuffer / IOSurface handoff across decode → UI threads (same process).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe impl Send for MetalNv12Frame {}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe impl Sync for MetalNv12Frame {}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+struct CvPixelBufferKeepAlive(crate::os::apple::apple_sys::CVPixelBufferRef);
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe impl Send for CvPixelBufferKeepAlive {}
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe impl Sync for CvPixelBufferKeepAlive {}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl Drop for CvPixelBufferKeepAlive {
+    fn drop(&mut self) {
+        use crate::os::apple::apple_sys::CVPixelBufferRelease;
+        unsafe {
+            if !self.0.is_null() {
+                CVPixelBufferRelease(self.0);
+                self.0 = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl MetalNv12Frame {
+    /// Take ownership of a biplanar NV12 `CVPixelBuffer` for Metal adopt.
+    ///
+    /// On success, `pixel_buffer` is released when the last `keep_alive` clone
+    /// drops. On `None`, the caller still owns `pixel_buffer` and must release it.
+    pub fn from_owned_cv_pixel_buffer(
+        pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
+        width: u32,
+        height: u32,
+        matrix: crate::video_decode::yuv::YuvColorMatrix,
+    ) -> Option<Self> {
+        if pixel_buffer.is_null() || width == 0 || height == 0 {
+            return None;
+        }
+        if !apple_api::cv_pixel_buffer_is_biplanar_nv12(pixel_buffer) {
+            return None;
+        }
+        let full_range = apple_api::cv_pixel_buffer_is_full_range(pixel_buffer);
+        Some(Self {
+            pixel_buffer,
+            width,
+            height,
+            matrix,
+            full_range,
+            keep_alive: std::sync::Arc::new(CvPixelBufferKeepAlive(pixel_buffer)),
+        })
+    }
+}
+
+/// Retains `CVMetalTextureCache` + last wrap refs so Metal textures stay valid
+/// while the UI samples them.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub struct MetalNv12PresentCache {
+    metal_device: crate::os::apple::apple_sys::ObjcId,
+    texture_cache: crate::os::apple::apple_sys::CVMetalTextureCacheRef,
+    cv_y_texture: crate::os::apple::apple_sys::CVMetalTextureRef,
+    cv_uv_texture: crate::os::apple::apple_sys::CVMetalTextureRef,
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl MetalNv12PresentCache {
+    pub fn new(metal_device: crate::os::apple::apple_sys::ObjcId) -> Self {
+        use crate::os::apple::apple_sys::*;
+        let texture_cache = unsafe {
+            let mut cache: CVMetalTextureCacheRef = std::ptr::null_mut();
+            let status = CVMetalTextureCacheCreate(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                metal_device,
+                std::ptr::null_mut(),
+                &mut cache,
+            );
+            if status != 0 {
+                crate::error!("CVMetalTextureCacheCreate failed: {status}");
+                std::ptr::null_mut()
+            } else {
+                cache
+            }
+        };
+        Self {
+            metal_device,
+            texture_cache,
+            cv_y_texture: std::ptr::null_mut(),
+            cv_uv_texture: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        !self.texture_cache.is_null()
+    }
+
+    /// Drop retained `CVMetalTexture` wraps (call before releasing `keep_alive`
+    /// or when switching to a CPU upload path).
+    ///
+    /// Prefer [`detach_metal_nv12_present`] when the texture pool still holds the
+    /// adopted MTLTextures — releasing wraps alone can leave IOSurface-backed
+    /// textures in the pool that CPU `replaceRegion` must not reuse.
+    pub fn release_textures(&mut self) {
+        unsafe {
+            if !self.cv_y_texture.is_null() {
+                crate::os::apple::apple_sys::CFRelease(self.cv_y_texture);
+                self.cv_y_texture = std::ptr::null_mut();
+            }
+            if !self.cv_uv_texture.is_null() {
+                crate::os::apple::apple_sys::CFRelease(self.cv_uv_texture);
+                self.cv_uv_texture = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl Drop for MetalNv12PresentCache {
+    fn drop(&mut self) {
+        self.release_textures();
+        unsafe {
+            if !self.texture_cache.is_null() {
+                crate::os::apple::apple_sys::CFRelease(self.texture_cache);
+                self.texture_cache = std::ptr::null_mut();
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -763,4 +913,418 @@ mod android_api {
 pub use android_api::{
     clear_all_media_oes_surfaces, clear_media_oes_surface, media_oes_surface,
     media_oes_surface_for_tex, media_oes_tex_id, publish_media_oes_surface,
+};
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod apple_api {
+    use super::*;
+    use crate::os::apple::apple_sys::*;
+    use std::{ptr::NonNull, sync::Mutex};
+
+    static MEDIA_METAL_DEVICE: Mutex<Option<usize>> = Mutex::new(None);
+
+    impl Cx {
+        /// Makepad's shared Metal device (same device used for UI rendering).
+        pub fn metal_device(&self) -> Option<ObjcId> {
+            #[cfg(target_os = "macos")]
+            {
+                self.os.metal_device
+            }
+            #[cfg(target_os = "ios")]
+            {
+                crate::os::apple::ios::ios_app::try_metal_device()
+            }
+        }
+
+        /// Publish the UI Metal device for media plugins / hard-decode threads
+        /// that cannot hold `&Cx` (same device as [`Cx::metal_device`]).
+        ///
+        /// Retains the device so the published pointer stays valid for the app
+        /// lifetime even if callers only held an unretained reference.
+        pub fn publish_metal_device_for_media(&self) {
+            let Some(device) = self.metal_device() else {
+                return;
+            };
+            if device.is_null() {
+                return;
+            }
+            let mut slot = MEDIA_METAL_DEVICE.lock().unwrap();
+            if *slot == Some(device as usize) {
+                return;
+            }
+            unsafe {
+                let _: ObjcId = msg_send![device, retain];
+                if let Some(old) = *slot {
+                    let old_id = old as ObjcId;
+                    if !old_id.is_null() {
+                        let _: () = msg_send![old_id, release];
+                    }
+                }
+            }
+            *slot = Some(device as usize);
+        }
+    }
+
+    /// Metal device previously published via [`Cx::publish_metal_device_for_media`].
+    pub fn media_metal_device() -> Option<ObjcId> {
+        MEDIA_METAL_DEVICE
+            .lock()
+            .unwrap()
+            .map(|p| p as ObjcId)
+            .filter(|p| !p.is_null())
+    }
+
+    impl Texture {
+        /// Adopt an externally owned `MTLTexture` as a YUV / R8 plane
+        /// ([`TextureFormat::VideoYuvPlane`]).
+        ///
+        /// Makepad will **Release** the previous texture (if any) and **retain**
+        /// `texture`. For biplanar UV planes use [`Texture::adopt_metal_rg8_plane`].
+        pub fn adopt_metal_r8_plane(
+            &self,
+            cx: &mut Cx,
+            texture: ObjcId,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            adopt_metal_texture_raw(
+                &mut cx.textures,
+                self.texture_id(),
+                texture,
+                width,
+                height,
+                TexturePixel::Ru8,
+            )
+        }
+
+        /// Adopt an externally owned `MTLTexture` as an RG8 chroma plane
+        /// (NV12 UV).
+        pub fn adopt_metal_rg8_plane(
+            &self,
+            cx: &mut Cx,
+            texture: ObjcId,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            adopt_metal_texture_raw(
+                &mut cx.textures,
+                self.texture_id(),
+                texture,
+                width,
+                height,
+                TexturePixel::RGu8,
+            )
+        }
+
+        /// Adopt an externally owned BGRA `MTLTexture` as
+        /// [`TextureFormat::VideoExternal`].
+        pub fn adopt_metal_bgra(
+            &self,
+            cx: &mut Cx,
+            texture: ObjcId,
+            width: usize,
+            height: usize,
+        ) -> Result<(), String> {
+            if texture.is_null() {
+                return Err("adopt_metal_bgra: null MTLTexture".into());
+            }
+            if width == 0 || height == 0 {
+                return Err("adopt_metal_bgra: width/height must be non-zero".into());
+            }
+            unsafe {
+                let _: ObjcId = msg_send![texture, retain];
+            }
+            let cxtex = &mut cx.textures[self.texture_id()];
+            if let Some(old) = cxtex.os.texture.take() {
+                drop(old);
+            }
+            cxtex.os.texture = Some(RcObjcId::from_owned(
+                NonNull::new(texture)
+                    .ok_or_else(|| "adopt_metal_bgra: null after retain".to_string())?,
+            ));
+            cxtex.format = TextureFormat::VideoExternal;
+            let _ = (width, height);
+            cxtex.alloc = Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            });
+            Ok(())
+        }
+    }
+
+    pub(crate) fn adopt_metal_texture_raw(
+        textures: &mut CxTexturePool,
+        texture_id: TextureId,
+        texture: ObjcId,
+        width: usize,
+        height: usize,
+        pixel: TexturePixel,
+    ) -> Result<(), String> {
+        if texture.is_null() {
+            return Err("adopt_metal_texture: null MTLTexture".into());
+        }
+        if width == 0 || height == 0 {
+            return Err("adopt_metal_texture: width/height must be non-zero".into());
+        }
+        unsafe {
+            let _: ObjcId = msg_send![texture, retain];
+        }
+        let cxtex = &mut textures[texture_id];
+        if let Some(old) = cxtex.os.texture.take() {
+            drop(old);
+        }
+        cxtex.os.texture = Some(RcObjcId::from_owned(
+            NonNull::new(texture).ok_or_else(|| "adopt_metal_texture: null after retain".to_string())?,
+        ));
+        // Keep VideoYuvPlane format for YUV plane slots; otherwise mirror pixel.
+        cxtex.format = match pixel {
+            TexturePixel::VideoYuvPlane => TextureFormat::VideoYuvPlane,
+            TexturePixel::VideoExternal => TextureFormat::VideoExternal,
+            TexturePixel::Ru8 | TexturePixel::RGu8 => TextureFormat::VideoYuvPlane,
+            _ => cxtex.format.clone(),
+        };
+        cxtex.alloc = Some(TextureAlloc {
+            width,
+            height,
+            pixel,
+            category: TextureCategory::Video,
+        });
+        Ok(())
+    }
+
+    fn ensure_dummy_v_texture(
+        metal_device: ObjcId,
+        textures: &mut CxTexturePool,
+        tex_v: TextureId,
+    ) -> Result<(), String> {
+        let cxtex = &mut textures[tex_v];
+        if cxtex.os.texture.is_some() {
+            return Ok(());
+        }
+        unsafe {
+            let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
+            let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
+            let _: () = msg_send![descriptor, setWidth: 1u64];
+            let _: () = msg_send![descriptor, setHeight: 1u64];
+            let _: () = msg_send![descriptor, setDepth: 1u64];
+            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::R8Unorm];
+            let _: () = msg_send![descriptor, setStorageMode: MTLStorageMode::Shared];
+            let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
+            let tex: ObjcId = msg_send![metal_device, newTextureWithDescriptor: descriptor];
+            let _: () = msg_send![descriptor, release];
+            if tex.is_null() {
+                return Err("adopt_metal_nv12: dummy V texture alloc failed".into());
+            }
+            cxtex.os.texture = Some(RcObjcId::from_owned(NonNull::new(tex).unwrap()));
+            cxtex.format = TextureFormat::VideoYuvPlane;
+            cxtex.alloc = Some(TextureAlloc {
+                width: 1,
+                height: 1,
+                pixel: TexturePixel::Ru8,
+                category: TextureCategory::Video,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `pixel_buffer` is a biplanar 8-bit NV12-style buffer we can wrap.
+    pub fn cv_pixel_buffer_is_biplanar_nv12(pixel_buffer: CVPixelBufferRef) -> bool {
+        if pixel_buffer.is_null() {
+            return false;
+        }
+        unsafe {
+            if !CVPixelBufferIsPlanar(pixel_buffer) || CVPixelBufferGetPlaneCount(pixel_buffer) < 2
+            {
+                return false;
+            }
+            let fmt = CVPixelBufferGetPixelFormatType(pixel_buffer);
+            fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        }
+    }
+
+    /// `true` when the buffer is full-range (`420f`); `false` for video-range (`420v`)
+    /// or unknown formats.
+    pub fn cv_pixel_buffer_is_full_range(pixel_buffer: CVPixelBufferRef) -> bool {
+        if pixel_buffer.is_null() {
+            return false;
+        }
+        unsafe {
+            CVPixelBufferGetPixelFormatType(pixel_buffer)
+                == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        }
+    }
+
+    /// Wrap a biplanar NV12 `CVPixelBuffer` into Y (`R8`) + UV (`RG8`) Metal
+    /// textures via `CVMetalTextureCache` and adopt them into `tex_y` / `tex_u`.
+    ///
+    /// `tex_v` gets a 1×1 dummy R8 texture (shaders still bind three planes;
+    /// biplanar mode ignores V). Caller must keep `frame.keep_alive` alive until
+    /// the next successful adopt.
+    ///
+    /// Lifetime note (Apple): keep the `CVMetalTextureRef` alive for as long as
+    /// the derived `MTLTexture` may be sampled. We retain the MTLTexture into the
+    /// texture pool **and** store the CVMetalTextureRefs in `cache` until the
+    /// next adopt / `release_textures`.
+    ///
+    /// On failure the previous pool textures + cache wraps are left intact
+    /// (partial adopts are rolled back).
+    pub fn adopt_metal_nv12_biplanar(
+        textures: &mut CxTexturePool,
+        tex_y: TextureId,
+        tex_u: TextureId,
+        tex_v: TextureId,
+        frame: &MetalNv12Frame,
+        cache: &mut MetalNv12PresentCache,
+    ) -> Result<(), String> {
+        if cache.texture_cache.is_null() {
+            return Err("adopt_metal_nv12: CVMetalTextureCache not ready".into());
+        }
+        if frame.pixel_buffer.is_null() {
+            return Err("adopt_metal_nv12: null CVPixelBuffer".into());
+        }
+        if !cv_pixel_buffer_is_biplanar_nv12(frame.pixel_buffer) {
+            return Err("adopt_metal_nv12: CVPixelBuffer is not biplanar 420".into());
+        }
+
+        // Prefer the buffer's plane sizes (handles coded vs display padding).
+        let (w, h, cw, ch) = unsafe {
+            let w = CVPixelBufferGetWidthOfPlane(frame.pixel_buffer, 0);
+            let h = CVPixelBufferGetHeightOfPlane(frame.pixel_buffer, 0);
+            let cw = CVPixelBufferGetWidthOfPlane(frame.pixel_buffer, 1);
+            let ch = CVPixelBufferGetHeightOfPlane(frame.pixel_buffer, 1);
+            (w, h, cw, ch)
+        };
+        if w == 0 || h == 0 || cw == 0 || ch == 0 {
+            return Err("adopt_metal_nv12: empty CVPixelBuffer plane".into());
+        }
+
+        unsafe {
+            let mut cv_y: CVMetalTextureRef = std::ptr::null_mut();
+            let ret_y = CVMetalTextureCacheCreateTextureFromImage(
+                std::ptr::null_mut(),
+                cache.texture_cache,
+                frame.pixel_buffer,
+                std::ptr::null_mut(),
+                MTLPixelFormat::R8Unorm as u64,
+                w,
+                h,
+                0,
+                &mut cv_y,
+            );
+            if ret_y != 0 || cv_y.is_null() {
+                return Err(format!(
+                    "adopt_metal_nv12: Y CVMetalTextureCacheCreateTextureFromImage failed: {ret_y}"
+                ));
+            }
+
+            let mut cv_uv: CVMetalTextureRef = std::ptr::null_mut();
+            let ret_uv = CVMetalTextureCacheCreateTextureFromImage(
+                std::ptr::null_mut(),
+                cache.texture_cache,
+                frame.pixel_buffer,
+                std::ptr::null_mut(),
+                MTLPixelFormat::RG8Unorm as u64,
+                cw,
+                ch,
+                1,
+                &mut cv_uv,
+            );
+            if ret_uv != 0 || cv_uv.is_null() {
+                CFRelease(cv_y);
+                return Err(format!(
+                    "adopt_metal_nv12: UV CVMetalTextureCacheCreateTextureFromImage failed: {ret_uv}"
+                ));
+            }
+
+            let mtl_y: ObjcId = CVMetalTextureGetTexture(cv_y);
+            let mtl_uv: ObjcId = CVMetalTextureGetTexture(cv_uv);
+            if mtl_y.is_null() || mtl_uv.is_null() {
+                CFRelease(cv_y);
+                CFRelease(cv_uv);
+                return Err("adopt_metal_nv12: CVMetalTextureGetTexture returned null".into());
+            }
+
+            // Snapshot previous pool slots so a partial adopt can roll back
+            // without tearing down the last good zero-copy frame.
+            let prev_y_tex = textures[tex_y].os.texture.clone();
+            let prev_y_alloc = textures[tex_y].alloc.clone();
+            let prev_y_fmt = textures[tex_y].format.clone();
+            let prev_u_tex = textures[tex_u].os.texture.clone();
+            let prev_u_alloc = textures[tex_u].alloc.clone();
+            let prev_u_fmt = textures[tex_u].format.clone();
+
+            let restore_prev = |textures: &mut CxTexturePool| {
+                textures[tex_y].os.texture = prev_y_tex.clone();
+                textures[tex_y].alloc = prev_y_alloc.clone();
+                textures[tex_y].format = prev_y_fmt.clone();
+                textures[tex_u].os.texture = prev_u_tex.clone();
+                textures[tex_u].alloc = prev_u_alloc.clone();
+                textures[tex_u].format = prev_u_fmt.clone();
+            };
+
+            // Adopt new MTLTextures first (drops previous RcObjcId from the pool
+            // slots — clones above keep them alive for rollback), then release
+            // the previous CVMetalTextureRefs — never the reverse.
+            if let Err(err) =
+                adopt_metal_texture_raw(textures, tex_y, mtl_y, w, h, TexturePixel::Ru8)
+            {
+                CFRelease(cv_y);
+                CFRelease(cv_uv);
+                return Err(err);
+            }
+            if let Err(err) =
+                adopt_metal_texture_raw(textures, tex_u, mtl_uv, cw, ch, TexturePixel::RGu8)
+            {
+                restore_prev(textures);
+                CFRelease(cv_y);
+                CFRelease(cv_uv);
+                return Err(err);
+            }
+            if let Err(err) = ensure_dummy_v_texture(cache.metal_device, textures, tex_v) {
+                restore_prev(textures);
+                CFRelease(cv_y);
+                CFRelease(cv_uv);
+                return Err(err);
+            }
+
+            let old_y = cache.cv_y_texture;
+            let old_uv = cache.cv_uv_texture;
+            cache.cv_y_texture = cv_y;
+            cache.cv_uv_texture = cv_uv;
+            if !old_y.is_null() {
+                CFRelease(old_y);
+            }
+            if !old_uv.is_null() {
+                CFRelease(old_uv);
+            }
+        }
+        Ok(())
+    }
+
+    /// Detach biplanar NV12 present from the texture pool before dropping
+    /// `CVMetalTexture` wraps / `CVPixelBuffer` keep-alive.
+    ///
+    /// Clears Y/U pool textures first so a subsequent CPU `replaceRegion`
+    /// cannot reuse an IOSurface-backed MTLTexture after the buffer is released.
+    pub fn detach_metal_nv12_present(
+        textures: &mut CxTexturePool,
+        tex_y: TextureId,
+        tex_u: TextureId,
+        cache: &mut MetalNv12PresentCache,
+    ) {
+        textures[tex_y].os.texture = None;
+        textures[tex_u].os.texture = None;
+        textures[tex_y].alloc = None;
+        textures[tex_u].alloc = None;
+        cache.release_textures();
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub use apple_api::{
+    adopt_metal_nv12_biplanar, cv_pixel_buffer_is_biplanar_nv12, cv_pixel_buffer_is_full_range,
+    detach_metal_nv12_present, media_metal_device,
 };

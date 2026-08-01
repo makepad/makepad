@@ -1606,6 +1606,7 @@ impl Cx {
                     enabled: false,
                     matrix: 0.0,
                     biplanar: false,
+                    full_range: false,
                     rotation_steps: 0.0,
                 },
             });
@@ -1753,6 +1754,7 @@ impl Cx {
                         enabled: true,
                         matrix: 1.0,
                         biplanar: false,
+                        full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
                     },
                 }));
@@ -1845,6 +1847,7 @@ impl Cx {
                                 enabled: false,
                                 matrix: 0.0,
                                 biplanar: false,
+                                full_range: false,
                                 rotation_steps: 0.0,
                             },
                         }));
@@ -1874,6 +1877,7 @@ impl Cx {
                             enabled: true,
                             matrix: asp.yuv_matrix,
                             biplanar: false,
+                            full_range: false,
                             rotation_steps: 0.0,
                         },
                     }));
