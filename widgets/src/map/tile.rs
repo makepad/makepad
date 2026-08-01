@@ -351,9 +351,23 @@ enum RoadVerticalClass {
     Elevated,
 }
 
+/// Sentinel for "no casing pass" in `RoadSurfaceKey::casing_width_bits`
+/// (real width bit patterns never collide with it).
+const NO_CASING_BITS: u32 = u32::MAX;
+
+/// Theme-stable identity of one road-surface union tier. NO resolved
+/// colors: grouping, paint-order tiebreaks and the faces-bake signature
+/// key on the styling rule's class id plus the geometric fields, so one
+/// bake serves the light/dark/circuit themes (which by contract only
+/// recolor). Field order is the derived Ord = the tier paint order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct RoadSurfaceKey {
-    style: StrokeStyleKey,
+    sort_rank: i16,
+    class_id: u32,
+    center_width_bits: u32,
+    center_depth_micro_bits: u32,
+    casing_width_bits: u32,
+    casing_depth_micro_bits: u32,
     vertical: RoadVerticalClass,
     /// Normalized OSM stack level. Untagged signed profiles use -1/+1.
     layer: i8,
@@ -404,7 +418,16 @@ impl RoadSurfaceKey {
             (RoadVerticalClass::Surface, 0)
         };
         Self {
-            style: StrokeStyleKey::from(style),
+            sort_rank: style.sort_rank,
+            class_id: style.class_id,
+            center_width_bits: style.center.width.to_bits(),
+            center_depth_micro_bits: style.center.depth_micro.to_bits(),
+            casing_width_bits: style
+                .casing
+                .map_or(NO_CASING_BITS, |pass| pass.width.to_bits()),
+            casing_depth_micro_bits: style
+                .casing
+                .map_or(NO_CASING_BITS, |pass| pass.depth_micro.to_bits()),
             vertical,
             layer,
         }
@@ -453,11 +476,13 @@ fn road_semantic_param5(level: i8, phase: u8, depth_micro: f32) -> f32 {
 
 fn road_surface_param5(key: RoadSurfaceKey, phase: u8) -> f32 {
     let depth_micro = if phase == 1 {
-        key.style.casing.map_or(0.0, |pass| {
-            f32::from_bits(pass.depth_micro_bits)
-        })
+        if key.casing_depth_micro_bits == NO_CASING_BITS {
+            0.0
+        } else {
+            f32::from_bits(key.casing_depth_micro_bits)
+        }
     } else {
-        f32::from_bits(key.style.center.depth_micro_bits)
+        f32::from_bits(key.center_depth_micro_bits)
     };
     road_semantic_param5(key.depth_level(), phase, depth_micro)
 }
@@ -718,7 +743,7 @@ fn endpoint_to_through_grade_corrections(
                 }
                 // A link inherits from its mainline, never the reverse.
                 // Width handles styles whose painter ranks happen to tie.
-                if target.key.style.sort_rank <= source.key.style.sort_rank
+                if target.key.sort_rank <= source.key.sort_rank
                     && target.half_width <= source.half_width * 1.1
                 {
                     continue;
@@ -792,7 +817,7 @@ fn endpoint_to_through_grade_corrections(
                     let large_join_gap = (source.half_width * 0.25).max(0.35);
                     if (delta < -CORRECTION_EPSILON_M || delta > MAX_RAISE_M)
                         && (tangent_dot < LARGE_JOIN_TANGENT_DOT
-                            || target.key.style.sort_rank <= source.key.style.sort_rank
+                            || target.key.sort_rank <= source.key.sort_rank
                             || target.half_width <= source.half_width * 1.1
                             || distance_sq > large_join_gap * large_join_gap)
                     {
@@ -5118,26 +5143,32 @@ fn build_tile_buffers_from_features_profiled(
         RoadSurfaceKey,
         &(StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>),
     )> = union_tiers.iter().map(|(key, entry)| (*key, entry)).collect();
-    tier_list.sort_by_key(|(key, entry)| {
-        (
-            entry.0.sort_rank,
-            entry.0.center.color,
-            entry.0.center.width.to_bits(),
-            *key,
-        )
-    });
+    // Theme-stable paint order: the key's derived Ord leads with sort_rank
+    // and never reads resolved colors, so tier order (and with it the baked
+    // regions' group indices) is identical across recolor-only themes.
+    tier_list.sort_by_key(|(key, _)| *key);
     let mut groups: Vec<PaintGroup> = Vec::new();
     {
-        let mut plaza_keys: Vec<(u32, u32)> = plaza_rings
+        // Road-polygon fills all resolve to ONE theme constant
+        // (street_area_fill), so alpha is the only structural discriminant
+        // — grouping by it alone is identical to the old (color, alpha)
+        // grouping within any single theme AND theme-stable across
+        // recolors. The paint color comes from the group's first member.
+        let mut plaza_keys: Vec<u32> = plaza_rings
             .iter()
-            .map(|(color, alpha, _, _)| (*color, alpha.to_bits()))
+            .map(|(_, alpha, _, _)| alpha.to_bits())
             .collect();
         plaza_keys.sort_unstable();
         plaza_keys.dedup();
-        for (color, alpha_bits) in plaza_keys {
+        for alpha_bits in plaza_keys {
+            let color = plaza_rings
+                .iter()
+                .find(|(_, a, _, _)| a.to_bits() == alpha_bits)
+                .map(|(c, _, _, _)| *c)
+                .unwrap_or(0);
             let ribbons: Vec<RoadRibbon> = plaza_rings
                 .iter()
-                .filter(|(c, a, _, _)| *c == color && a.to_bits() == alpha_bits)
+                .filter(|(_, a, _, _)| a.to_bits() == alpha_bits)
                 .map(|(_, _, points, dz)| RoadRibbon {
                     points,
                     dz: dz.as_deref(),
@@ -7557,17 +7588,18 @@ pub(crate) fn paint_input_signature(
         }
         None => h.write(&u32::MAX.to_le_bytes()),
     };
+    // NO resolved colors anywhere in this hash: the key carries the
+    // theme-stable class/rank/width identity, so recolor-only themes
+    // (light/dark/circuit) produce the same signature and share one bake.
     h.write(&(plaza_rings.len() as u32).to_le_bytes());
-    for (color, alpha, points, dz) in plaza_rings {
-        h.write(&color.to_le_bytes());
+    for (_, alpha, points, dz) in plaza_rings {
         h.write(&alpha.to_bits().to_le_bytes());
         eat_points(&mut h, points);
         eat_dz(&mut h, dz);
     }
     h.write(&(smoothed_tiers.len() as u32).to_le_bytes());
-    for (key, style, ways) in smoothed_tiers {
+    for (key, _, ways) in smoothed_tiers {
         key.hash(&mut h);
-        StrokeStyleKey::from(*style).hash(&mut h);
         h.write(&(ways.len() as u32).to_le_bytes());
         for (points, dz) in ways {
             eat_points(&mut h, points);
@@ -9468,16 +9500,14 @@ mod bridge_probe_tests {
         layer: i8,
     ) -> RoadSurfaceKey {
         RoadSurfaceKey {
-            style: StrokeStyleKey {
-                sort_rank: rank,
-                casing: None,
-                center: StrokePassKey {
-                    color,
-                    width_bits: width.to_bits(),
-                    shape_id_bits: 0,
-                    depth_micro_bits: (rank as f32 * DEPTH_MICRO_PER_RANK).to_bits(),
-                },
-            },
+            sort_rank: rank,
+            // Tests previously discriminated tiers by color; the key is
+            // color-free now, so the color argument doubles as class id.
+            class_id: color,
+            center_width_bits: width.to_bits(),
+            center_depth_micro_bits: (rank as f32 * DEPTH_MICRO_PER_RANK).to_bits(),
+            casing_width_bits: NO_CASING_BITS,
+            casing_depth_micro_bits: NO_CASING_BITS,
             vertical,
             layer,
         }
@@ -10841,6 +10871,66 @@ mod bridge_probe_tests {
     /// Headless tile-build profiler: the app's exact hot path (decode +
     /// parse + style + tessellation) over real archive tiles, no window.
     /// TILE_PROFILE_KEYS="z,x,y;z,x,y;..." overrides the default slow set;
+    /// The theme-independence contract: baking a tile under the light
+    /// theme and under a full recolor (the dark/circuit stand-in) must
+    /// produce identical signatures and regions — proving one bake serves
+    /// every recolor-only theme. Uses TILE_PROFILE_ARCHIVE/KEYS.
+    #[test]
+    #[ignore]
+    fn baked_faces_theme_independent() {
+        let archive = std::env::var("TILE_PROFILE_ARCHIVE")
+            .unwrap_or_else(|_| "../local/maps/nl-base-br3.mbtiles".to_string());
+        let path = std::path::Path::new(&archive);
+        if !path.exists() {
+            println!("no archive at {archive}");
+            return;
+        }
+        let keys_spec = std::env::var("TILE_PROFILE_KEYS")
+            .unwrap_or_else(|_| "14,8414,5384;13,4207,2690;12,2103,1346".into());
+        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let light = crate::map::style::probe_compiled_theme();
+        let recolored = crate::map::style::probe_compiled_theme_recolored();
+        for spec in keys_spec.split(';') {
+            let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
+            let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let tile_count = 1_i64 << z;
+            let Some(blob) = reader.get_tile(z, x, tile_count - 1 - y).ok().flatten() else {
+                panic!("tile z{z} {x}/{y} missing from {archive}");
+            };
+            let raw = reader.decode_tile(&blob).unwrap();
+            let pbf = decode_vector_tile_payload(&raw).unwrap();
+            let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
+            let bucket = if z >= 14 { 16 } else { z as u32 };
+            let a = bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &light, bucket)
+                .unwrap_or_else(|| panic!("light bake produced nothing for z{z} {x}/{y}"));
+            let b = bake_tile_paint_faces(key, &pbf, Some(&pbf), None, false, &recolored, bucket)
+                .unwrap_or_else(|| panic!("recolored bake produced nothing for z{z} {x}/{y}"));
+            assert_eq!(
+                a.signature, b.signature,
+                "signature diverged across recolor on z{z} {x}/{y}"
+            );
+            assert_eq!(
+                a.regions.len(),
+                b.regions.len(),
+                "region count diverged on z{z} {x}/{y}"
+            );
+            for (ra, rb) in a.regions.iter().zip(&b.regions) {
+                assert_eq!(ra.group_index, rb.group_index, "group order diverged");
+                assert_eq!(
+                    ra.main.len(),
+                    rb.main.len(),
+                    "main region shapes diverged on z{z} {x}/{y}"
+                );
+                assert_eq!(ra.sunk.len(), rb.sunk.len(), "sunk shapes diverged");
+            }
+            println!(
+                "z{z} {x}/{y} bucket {bucket}: sig {:016x} identical across recolor, {} regions",
+                a.signature,
+                a.regions.len()
+            );
+        }
+    }
+
     /// TILE_PROFILE_REPS=N (default 3). Run:
     ///   cargo test -p makepad-widgets --features maps --release \
     ///     profile_tile_build -- --ignored --nocapture
