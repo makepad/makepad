@@ -4025,6 +4025,9 @@ fn build_tile_buffers_from_features_profiled(
     // a tree already standing in a building's shadow must not stack its
     // own disc on top (double-darkening + equal-depth z-fight).
     let mut building_shadow_shapes: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+    // Shadow input signature captured when the runtime pipeline runs, so
+    // the faces-bake sink stores it with the shapes.
+    let mut captured_shadow_sig = 0u64;
     // Grounded building footprints (positive winding), kept so deck
     // shadows can subtract them exactly like the building shadows did.
     let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -4192,6 +4195,65 @@ fn build_tile_buffers_from_features_profiled(
             // footprint micro-detail, and sub-meter edges spawn needle
             // slivers out of the boolean at high overzoom.
             let shadow_min_edge = (1.2 / render_scale).max(0.35);
+            // Signature over everything the sweep+dissolve consumes: job
+            // rings and heights, sun, scale, simplification floor. On a
+            // baked match the entire boolean pipeline below is skipped and
+            // the baked shapes/footprints substitute — the 0.2-2.6s tail
+            // the in-app slow-tile log kept catching on building-dense
+            // tiles.
+            let shadow_sig = {
+                use std::hash::Hasher;
+                let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
+                h.write(&sun_2d.x.to_bits().to_le_bytes());
+                h.write(&sun_2d.y.to_bits().to_le_bytes());
+                h.write(&len_per_m.to_bits().to_le_bytes());
+                h.write(&shadow_min_edge.to_bits().to_le_bytes());
+                h.write(&building_units_per_m.to_bits().to_le_bytes());
+                h.write(&render_scale.to_bits().to_le_bytes());
+                h.write(&(building_jobs.len() as u32).to_le_bytes());
+                for job in &building_jobs {
+                    h.write(&job.height_m.to_bits().to_le_bytes());
+                    h.write(&job.base_m.to_bits().to_le_bytes());
+                    h.write(&(job.polygon.len() as u32).to_le_bytes());
+                    for ring in &job.polygon {
+                        h.write(&(ring.len() as u32).to_le_bytes());
+                        for &(x, y) in ring {
+                            h.write(&x.to_bits().to_le_bytes());
+                            h.write(&y.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                h.0
+            };
+            let baked_shadow = (!faces_bake_sink_armed())
+                .then(|| baked_faces.as_ref())
+                .flatten()
+                .filter(|bake| {
+                    bake.bucket == render_zoom && bake.shadow_signature == shadow_sig
+                });
+            if let Some(bake) = baked_shadow {
+                building_shadow_footprints = bake.shadow_footprints.clone();
+                building_shadow_shapes = bake.shadow_shapes.clone();
+                profiler.lap("b-sh-baked", &format!("shapes={}", building_shadow_shapes.len()));
+                let fill_clip_bounds =
+                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
+                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
+                emit_shadow_shapes(
+                    bake.shadow_shapes.clone(),
+                    fill_clip_bounds,
+                    shadow_aa,
+                    tolerance,
+                    &mut path,
+                    &mut tess,
+                    &mut tess_verts,
+                    &mut tess_indices,
+                    &mut icon_vertices,
+                    &mut icon_indices,
+                    &mut icon_zbias,
+                );
+                feature_count += 1;
+            } else {
+            captured_shadow_sig = shadow_sig;
             let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
             let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
                 // NonZero dissolve: every contributing path must wind
@@ -4385,6 +4447,7 @@ fn build_tile_buffers_from_features_profiled(
                     &mut icon_zbias,
                 );
                 feature_count += 1;
+            }
             }
         }
         profiler.lap("b-shadow", "");
@@ -5596,6 +5659,9 @@ fn build_tile_buffers_from_features_profiled(
             bucket: render_zoom,
             signature: input_sig,
             regions,
+            shadow_signature: captured_shadow_sig,
+            shadow_shapes: building_shadow_shapes.clone(),
+            shadow_footprints: building_shadow_footprints.clone(),
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
         return TileBuffers {
@@ -7551,7 +7617,10 @@ pub fn bake_tile_paint_faces(
         &[],
         theme,
         bucket,
-        false,
+        // 3D build: the shadow pass (and the detail buildings feeding it)
+        // only runs there, and v3 buckets carry its dissolved output. Road
+        // tier inputs — the faces signature — are building-independent.
+        true,
         true,
     );
     let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
@@ -7567,7 +7636,9 @@ const BAKED_FACES_FIELD: u32 = 101;
 // streams carried the group-structure hash — semantically incompatible,
 // so they are rejected wholesale and fall back to the runtime cascade
 // until the archive is rebaked.
-const BAKED_FACES_VERSION: u8 = 2;
+// v3: bucket body gains shadow_signature + dissolved shadow shapes +
+// grounded footprints after the regions (same running checksum).
+const BAKED_FACES_VERSION: u8 = 3;
 /// Cascade coordinates are snapped to 1/64 unit (geometry.rs SNAP), so a
 /// x64 fixed-point roundtrip is EXACT.
 const BAKED_FACES_COORD_SCALE: f64 = 64.0;
@@ -7736,6 +7807,14 @@ pub struct BakedFacesBucket {
     pub bucket: u32,
     pub signature: u64,
     pub regions: Vec<VisibleRegions>,
+    /// Baked T3 building-shadow output (v3): the dissolved+opened shadow
+    /// shapes and the grounded footprints the deck-shadow pass subtracts.
+    /// Guarded by their own input signature — buildings and roads change
+    /// independently. Night themes leave shadows unsubmitted; the shapes
+    /// bake once under the standard sun.
+    pub shadow_signature: u64,
+    pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
+    pub shadow_footprints: Vec<Vec<[f64; 2]>>,
 }
 
 /// Encode buckets into the complete field-101 bytes to append to a tile.
@@ -7755,6 +7834,16 @@ pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
             write_shapes(&region.sunk, &mut body, &mut checksum);
             write_shapes(&region.lifted_outlines, &mut body, &mut checksum);
         }
+        // v3 shadow section, checksummed with the same running fnv.
+        body.extend_from_slice(&bucket.shadow_signature.to_le_bytes());
+        write_shapes(&bucket.shadow_shapes, &mut body, &mut checksum);
+        // Footprints are a flat ring list: wrap as single-ring shapes.
+        let footprint_shapes: Vec<Vec<Vec<[f64; 2]>>> = bucket
+            .shadow_footprints
+            .iter()
+            .map(|ring| vec![ring.clone()])
+            .collect();
+        write_shapes(&footprint_shapes, &mut body, &mut checksum);
         blob.extend_from_slice(&checksum.to_le_bytes());
         write_faces_varint(body.len() as u64, &mut blob);
         blob.extend_from_slice(&body);
@@ -7865,6 +7954,18 @@ pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFace
                 lifted_outlines,
             });
         }
+        // v3 shadow section.
+        if bpos + 8 > body.len() {
+            return None;
+        }
+        let shadow_signature = u64::from_le_bytes(body[bpos..bpos + 8].try_into().ok()?);
+        bpos += 8;
+        let shadow_shapes = read_shapes(body, &mut bpos, &mut checksum)?;
+        let footprint_shapes = read_shapes(body, &mut bpos, &mut checksum)?;
+        let shadow_footprints: Vec<Vec<[f64; 2]>> = footprint_shapes
+            .into_iter()
+            .filter_map(|mut shape| (!shape.is_empty()).then(|| shape.swap_remove(0)))
+            .collect();
         if checksum != stored_checksum {
             return None;
         }
@@ -7872,6 +7973,9 @@ pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFace
             bucket,
             signature,
             regions,
+            shadow_signature,
+            shadow_shapes,
+            shadow_footprints,
         });
     }
     None
