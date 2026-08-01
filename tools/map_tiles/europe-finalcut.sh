@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 IN=local/maps/europe-base-br.mbtiles
-OUT=local/maps/europe-base-br-v2.mbtiles
+OUT=local/maps/europe-base-br-v3.mbtiles
 MKMAP=local/maps/europe-base-br.mkmap
 LOG=local/maps/europe-finalcut.log
 BIN=./target/release/makepad-map-tiles
@@ -14,7 +14,7 @@ BAKE=./target/release/makepad-map-bake
 
 phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 
-# Buckets 14,15,16: rz15 is NOT a transient band — users cruise at z15 and
+# v3: buckets carry baked building shadows. Buckets 14,15,16: rz15 is NOT a transient band — users cruise at z15 and
 # an unbaked bucket there ran the full 460ms cascade per tile in-app.
 phase "v2 faces bake (zooms 10-14, buckets 14+15+16 at z14 / native below, threshold 100ms)"
 "$BAKE" "$IN" "$OUT" \
