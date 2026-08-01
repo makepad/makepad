@@ -586,6 +586,35 @@ fn endpoint_to_through_grade_corrections(
     const MAX_TYPED_CORRECTION_M: f32 = 40.0;
     const CORRECTION_EPSILON_M: f32 = 0.001;
 
+    // Per-way bbox + polyline length, computed once: every distance gate
+    // below is bounded by source.half_width + target.half_width, so an
+    // endpoint outside the target's expanded bbox can never contribute —
+    // the pair scan was O(ways^2 x points) on mid-zoom city tiles.
+    let way_bounds: Vec<(f32, f32, f32, f32, f32)> = ways
+        .iter()
+        .map(|way| {
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            for &(x, y) in &way.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            let total_len: f32 = way
+                .points
+                .windows(2)
+                .map(|pair| {
+                    let dx = pair[1].0 - pair[0].0;
+                    let dy = pair[1].1 - pair[0].1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum();
+            (min_x, min_y, max_x, max_y, total_len)
+        })
+        .collect();
     let mut corrections = Vec::new();
     for source in ways {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -618,7 +647,16 @@ fn endpoint_to_through_grade_corrections(
             let source_dz = source.dz[end_index];
             let mut best: Option<(f32, f32)> = None;
 
-            for target in ways {
+            for (target_index, target) in ways.iter().enumerate() {
+                let (bx0, by0, bx1, by1, total_len) = way_bounds[target_index];
+                let reach = source.half_width + target.half_width;
+                if point.0 < bx0 - reach
+                    || point.0 > bx1 + reach
+                    || point.1 < by0 - reach
+                    || point.1 > by1 + reach
+                {
+                    continue;
+                }
                 if target.key == source.key
                     || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
@@ -634,15 +672,6 @@ fn endpoint_to_through_grade_corrections(
                     continue;
                 }
 
-                let total_len: f32 = target
-                    .points
-                    .windows(2)
-                    .map(|pair| {
-                        let dx = pair[1].0 - pair[0].0;
-                        let dy = pair[1].1 - pair[0].1;
-                        (dx * dx + dy * dy).sqrt()
-                    })
-                    .sum();
                 if total_len <= 1e-4 {
                     continue;
                 }
@@ -791,9 +820,23 @@ fn endpoint_to_through_flush_ends(
         })
         .collect();
 
+    // Endpoint hash grid (1-unit cells): continuation proofs join endpoints
+    // within MAX_NODE_DISTANCE (0.2), so candidates always share the 3x3
+    // neighborhood — the previous all-ways rescan per endpoint was the
+    // larger quadratic half of this pass on mid-zoom city tiles.
+    let mut endpoint_cells: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (way_index, slots) in endpoints.iter().enumerate() {
+        for endpoint in slots.iter().flatten() {
+            let cell = (endpoint.point.0.floor() as i32, endpoint.point.1.floor() as i32);
+            let entry = endpoint_cells.entry(cell).or_default();
+            if entry.last() != Some(&way_index) {
+                entry.push(way_index);
+            }
+        }
+    }
     // Precompute the exact through proof once. Looking it up inside every
-    // source/target pair keeps this pass quadratic rather than rescanning all
-    // ways a third time for every candidate.
+    // source/target pair keeps this pass linear-ish rather than rescanning
+    // all ways a third time for every candidate.
     let continuations: Vec<[Vec<usize>; 2]> = ways
         .iter()
         .enumerate()
@@ -802,18 +845,31 @@ fn endpoint_to_through_flush_ends(
                 let Some(target_end) = endpoints[target_index][target_end_slot] else {
                     return Vec::new();
                 };
-                ways.iter()
-                    .enumerate()
-                    .filter(|(continuation_index, continuation)| {
+                let cell_x = target_end.point.0.floor() as i32;
+                let cell_y = target_end.point.1.floor() as i32;
+                let mut candidates: Vec<usize> = Vec::new();
+                for cy in (cell_y - 1)..=(cell_y + 1) {
+                    for cx in (cell_x - 1)..=(cell_x + 1) {
+                        if let Some(cell) = endpoint_cells.get(&(cx, cy)) {
+                            candidates.extend_from_slice(cell);
+                        }
+                    }
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+                candidates
+                    .into_iter()
+                    .filter(|&continuation_index| {
+                        let continuation = &ways[continuation_index];
                         let min_width = target.half_width.min(continuation.half_width);
                         let max_width = target.half_width.max(continuation.half_width);
-                        *continuation_index != target_index
+                        continuation_index != target_index
                             && target.meta.same_known_family(continuation.meta)
                             && target.key.grade_compatible(continuation.key)
                             && target.meta.is_link == continuation.meta.is_link
                             && min_width > 1e-5
                             && max_width / min_width <= 1.25
-                            && endpoints[*continuation_index]
+                            && endpoints[continuation_index]
                                 .iter()
                                 .flatten()
                                 .any(|continuation_end| {
@@ -831,12 +887,39 @@ fn endpoint_to_through_flush_ends(
                                             < MAX_DZ_GAP_M
                                 })
                     })
-                    .map(|(continuation_index, _)| continuation_index)
                     .collect()
             })
         })
         .collect();
 
+    // Same bbox prefilter as the grade pass: every proximity gate in the
+    // target loop is bounded by half-width sums (plus the 0.35 centerline
+    // floor), so distant targets can never classify an end as flush.
+    let way_bounds: Vec<(f32, f32, f32, f32, f32)> = ways
+        .iter()
+        .map(|way| {
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            for &(x, y) in &way.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            let total_len: f32 = way
+                .points
+                .windows(2)
+                .map(|pair| {
+                    let dx = pair[1].0 - pair[0].0;
+                    let dy = pair[1].1 - pair[0].1;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum();
+            (min_x, min_y, max_x, max_y, total_len)
+        })
+        .collect();
     let mut flush = std::collections::HashSet::new();
     for (source_index, source) in ways.iter().enumerate() {
         if source.points.len() < 2 || source.dz.len() != source.points.len() {
@@ -868,6 +951,15 @@ fn endpoint_to_through_flush_ends(
             let outward = (out_x / out_len, out_y / out_len);
 
             'targets: for (target_index, target) in ways.iter().enumerate() {
+                let (bx0, by0, bx1, by1, precomputed_len) = way_bounds[target_index];
+                let reach = source.half_width + target.half_width + MIN_CENTERLINE_GAP;
+                if point.0 < bx0 - reach
+                    || point.0 > bx1 + reach
+                    || point.1 < by0 - reach
+                    || point.1 > by1 + reach
+                {
+                    continue;
+                }
                 if target.key == source.key
                     || !source.key.grade_compatible(target.key)
                     || target.points.len() < 2
@@ -976,15 +1068,7 @@ fn endpoint_to_through_flush_ends(
                     }
                 }
 
-                let total_len: f32 = target
-                    .points
-                    .windows(2)
-                    .map(|pair| {
-                        let dx = pair[1].0 - pair[0].0;
-                        let dy = pair[1].1 - pair[0].1;
-                        (dx * dx + dy * dy).sqrt()
-                    })
-                    .sum();
+                let total_len = precomputed_len;
                 if total_len <= 1e-4 {
                     continue;
                 }
@@ -1494,15 +1578,17 @@ pub fn build_tile_buffers_from_mvt(
     } else {
         parse_baked_fills(&pbf_data).unwrap_or_default()
     };
-    // Baked painter-cascade faces (v2-faces-1, field 101): buckets 14-16
-    // only — outside that range styling diverges from any baked bucket and
-    // the runtime cascade is authoritative. MAKEPAD_NO_BAKED_FACES=1 is the
-    // kill switch / A/B lever.
+    // Baked painter-cascade faces (v2-faces-1, field 101): z14 tiles carry
+    // buckets 14/16, mid-zoom tiles their native bucket (the runtime
+    // cascade at z11-13 city tiles measured 117-340ms — worse than z14).
+    // A bucket missing from the stream or any signature mismatch falls
+    // back to the runtime cascade. MAKEPAD_NO_BAKED_FACES=1 is the kill
+    // switch / A/B lever.
     static NO_BAKED_FACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let no_baked_faces =
         *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
     let baked_faces = if !no_baked_faces
-        && (14..=16).contains(&render_zoom)
+        && (10..=16).contains(&render_zoom)
         && !faces_bake_sink_armed()
     {
         parse_baked_faces(&pbf_data, render_zoom)
@@ -4806,6 +4892,7 @@ fn build_tile_buffers_from_features_profiled(
         let parts = build_polyline_parts(&smooth, clip_bounds, false, ROAD_SMOOTH_FACTOR);
         merged_stroke_parts.push((job.style, parts));
     }
+    profiler.lap("sp-merge", "");
 
     // Painter interleave vs the road faces: patterned/non-surface strokes
     // whose rank is
@@ -4856,13 +4943,17 @@ fn build_tile_buffers_from_features_profiled(
                 })
         })
         .collect();
+    profiler.lap("sp-joinways", "");
     let mut endpoint_grade_corrections = endpoint_to_through_grade_corrections(&join_ways);
+    profiler.lap("sp-through", &format!("ways={}", join_ways.len()));
     let interior_fascia_ends: std::collections::HashSet<RoadTierEnd> =
         endpoint_grade_corrections
             .iter()
             .map(|correction| correction.end)
             .collect();
-    for correction in endpoint_continuation_grade_corrections(&join_ways) {
+    let continuation_corrections = endpoint_continuation_grade_corrections(&join_ways);
+    profiler.lap("sp-continuation", "");
+    for correction in continuation_corrections {
         if let Some(existing) = endpoint_grade_corrections
             .iter_mut()
             .find(|existing| existing.end == correction.end)
@@ -4910,6 +5001,7 @@ fn build_tile_buffers_from_features_profiled(
             );
         }
     }
+    profiler.lap("sp-apply", "");
     // Classify flush endpoint-to-interior joins only after all dz
     // corrections have landed; their safety gate requires the final two
     // deck profiles to agree at the contact point.
