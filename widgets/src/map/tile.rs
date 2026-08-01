@@ -3,7 +3,8 @@ use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
-    append_tessellated_geometry, append_tessellated_geometry_decked, compute_clip_radii,
+    append_expanded_stroke_geometry, append_tessellated_geometry,
+    append_tessellated_geometry_decked, compute_clip_radii,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
@@ -1638,6 +1639,14 @@ pub fn build_tile_buffers_from_body(
 /// Render buckets from which 2.5D buildings are baked.
 pub const BUILDING_3D_MIN_ZOOM: u32 = 15;
 
+/// Icon INCLUSION horizon: from the high keyframe bucket (16) tiles carry
+/// every icon through z18 with its real zoom floor encoded per icon; the
+/// shader's live `icon_zoom` uniform reveals them per frame. Inclusion
+/// stays bucket-gated below the keyframe so mid-zoom buffers stay lean.
+fn icon_inclusion_zoom(render_zoom: u32) -> f32 {
+    if render_zoom >= 16 { 18.0 } else { render_zoom as f32 }
+}
+
 pub fn build_tile_buffers_from_mvt(
     tile_key: TileKey,
     raw_tile_data: &[u8],
@@ -1714,7 +1723,7 @@ pub fn build_tile_buffers_from_mvt(
     let want_buildings = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
     let mut bridge_corridors = Vec::<BridgeCorridor>::new();
     // Bridge corridors want the detail archive from bucket 14 in 3D.
-    let want_detail_points = render_zoom >= ICON_MIN_ZOOM;
+    let want_detail_points = icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
     let want_detail_platforms = render_zoom >= 16;
     // Road elevation is camera-independent. Outside solved bridge-dz
     // coverage collect the heuristic corridors in flat mode too, making
@@ -2113,6 +2122,9 @@ fn merge_detail_features(
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
+    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
+    // buffers carry all street icons; the shader reveals by live zoom.
+    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     // Combined archives carry base AND detail layers in one tile; this
     // pass only consumes the raw osm_* layers, and of those only the
     // geometry classes the flags below reach:
@@ -2188,7 +2200,7 @@ fn merge_detail_features(
                 && (tags.contains_key("attraction") || tags.contains_key("zoo"));
             match micro_icon_for_tags(&tags) {
                 Some((icon, _)) => {
-                    if render_zoom < micro_icon_min_zoom(icon) {
+                    if icon_horizon < micro_icon_min_zoom(icon) {
                         continue;
                     }
                 }
@@ -2216,7 +2228,7 @@ fn merge_detail_features(
                 let underground =
                     way.tags.get("parking").map(|v| v.as_str()) == Some("underground");
                 if let Some((icon, _)) = micro_icon_for_tags(&way.tags).filter(|_| !underground) {
-                    if render_zoom >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
+                    if icon_horizon >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
                         let mut tags = way.tags.clone();
                         tags.insert("layer".to_string(), "micro_pois".to_string());
                         points.push((ring_centroid(&way.points), tags));
@@ -3301,7 +3313,7 @@ fn build_tile_buffers_from_features_profiled(
             "stops" => 13,
             _ => ICON_MIN_ZOOM,
         };
-        if render_zoom >= icon_zoom_floor {
+        if icon_inclusion_zoom(render_zoom) >= icon_zoom_floor as f32 {
             if let Some((icon_name, color_class)) = icon_for_tags(tags) {
                 if let Some(mesh) = icon_mesh(icon_name) {
                     // Doors and generic dots yield to real symbols in the
@@ -6104,27 +6116,61 @@ fn build_tile_buffers_from_features_profiled(
                         }
                     }
                 }
-                append_tessellated_geometry_decked(
-                    verts,
-                    indices,
-                    &mut casing_vertices,
-                    &mut casing_indices,
-                    VectorRenderParams {
-                        color: face.color,
-                        stroke_mult: 1e6,
-                        shape_id: 0.0,
-                        params: [
-                            0.0,
-                            face.emissive,
-                            0.0,
-                            if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
-                            0.0,
-                            face_param5,
-                        ],
-                        zbias: casing_zbias,
-                    },
-                    deck.as_deref(),
-                );
+                // Morphable body: flat, non-emissive faces whose offsets
+                // survived 1:1 (the dz-subdivided path regenerates verts,
+                // so it stays pinned this round) ride the expandable-stroke
+                // band — the live zoom re-widths them per frame and the
+                // expanded branch zeroes the fragment params it never used.
+                let body_morph = deck.is_none()
+                    && face.emissive <= 0.001
+                    && face.morph_offsets.len() == verts.len()
+                    && face.morph_offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0);
+                if body_morph {
+                    let anchors: Vec<[f32; 2]> = verts
+                        .iter()
+                        .zip(&face.morph_offsets)
+                        .map(|(v, o)| [v.x - o[0], v.y - o[1]])
+                        .collect();
+                    append_expanded_stroke_geometry(
+                        verts,
+                        &anchors,
+                        indices,
+                        &mut casing_vertices,
+                        &mut casing_indices,
+                        VectorRenderParams {
+                            color: face.color,
+                            stroke_mult: 1e6,
+                            shape_id: 0.0,
+                            params: [0.0, 0.0, 0.0, 0.0, 0.0, face_param5],
+                            zbias: casing_zbias,
+                        },
+                        EXPAND_CLASS_ROAD,
+                        0.0,
+                        None,
+                    );
+                } else {
+                    append_tessellated_geometry_decked(
+                        verts,
+                        indices,
+                        &mut casing_vertices,
+                        &mut casing_indices,
+                        VectorRenderParams {
+                            color: face.color,
+                            stroke_mult: 1e6,
+                            shape_id: 0.0,
+                            params: [
+                                0.0,
+                                face.emissive,
+                                0.0,
+                                if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
+                                0.0,
+                                face_param5,
+                            ],
+                            zbias: casing_zbias,
+                        },
+                        deck.as_deref(),
+                    );
+                }
                 casing_zbias += VECTOR_ZBIAS_STEP;
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
@@ -6161,29 +6207,72 @@ fn build_tile_buffers_from_features_profiled(
                     // Signed u runs 0 -> -1 from the exact road edge through
                     // a wide, outside-only carrier. DrawVector divides by
                     // its screen derivative to recover device-pixel distance.
-                    append_tessellated_geometry_decked(
-                        fr_verts,
-                        fr_indices,
-                        &mut casing_vertices,
-                        &mut casing_indices,
-                        VectorRenderParams {
-                            color: face.color,
-                            stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
-                            shape_id: 0.0,
-                            // A fixed sub-rank epsilon keeps the carrier on
-                            // its own face without making depth tile-local.
-                            params: [
-                                0.0,
-                                face.emissive,
-                                0.0,
-                                if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
-                                0.0,
-                                face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
-                            ],
-                            zbias: casing_zbias,
-                        },
-                        fr_deck.as_deref(),
-                    );
+                    // Morphable fringes ride the expandable band with their
+                    // boundary vertices' offsets so the AA edge tracks the
+                    // morphed face edge; carrier outer verts pin (u-ramp
+                    // stretches, coverage stays one pixel by fwidth).
+                    let fringe_morph = fr_deck.is_none()
+                        && face.emissive <= 0.001
+                        && face.morph_fringe_offsets.len() == fr_verts.len()
+                        && face
+                            .morph_fringe_offsets
+                            .iter()
+                            .any(|o| o[0] != 0.0 || o[1] != 0.0);
+                    if fringe_morph {
+                        let anchors: Vec<[f32; 2]> = fr_verts
+                            .iter()
+                            .zip(&face.morph_fringe_offsets)
+                            .map(|(v, o)| [v.x - o[0], v.y - o[1]])
+                            .collect();
+                        append_expanded_stroke_geometry(
+                            fr_verts,
+                            &anchors,
+                            fr_indices,
+                            &mut casing_vertices,
+                            &mut casing_indices,
+                            VectorRenderParams {
+                                color: face.color,
+                                stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
+                                shape_id: 0.0,
+                                params: [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
+                                ],
+                                zbias: casing_zbias,
+                            },
+                            EXPAND_CLASS_ROAD,
+                            0.0,
+                            None,
+                        );
+                    } else {
+                        append_tessellated_geometry_decked(
+                            fr_verts,
+                            fr_indices,
+                            &mut casing_vertices,
+                            &mut casing_indices,
+                            VectorRenderParams {
+                                color: face.color,
+                                stroke_mult: VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
+                                shape_id: 0.0,
+                                // A fixed sub-rank epsilon keeps the carrier on
+                                // its own face without making depth tile-local.
+                                params: [
+                                    0.0,
+                                    face.emissive,
+                                    0.0,
+                                    if face.emissive > 0.001 { MAT_ROUTE_GLOW } else { 0.0 },
+                                    0.0,
+                                    face_param5 + ROAD_FRINGE_DEPTH_EPSILON,
+                                ],
+                                zbias: casing_zbias,
+                            },
+                            fr_deck.as_deref(),
+                        );
+                    }
                     casing_zbias += VECTOR_ZBIAS_STEP;
                 }
                 feature_count += 1;

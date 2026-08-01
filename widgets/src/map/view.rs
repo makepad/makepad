@@ -4925,13 +4925,18 @@ impl MapView {
     /// View-zoom bucket the tile styling (widths, AA, outlines) is built for.
     /// Beyond the source max zoom the same z14 tiles are re-styled per bucket.
     fn render_bucket(&self) -> u32 {
-        // Styling buckets stop at 17 — the last baked bucket. Above it
-        // the bucket-17 geometry magnifies (the same look every zoom
-        // gesture already shows mid-flight; GPU-expandable strokes keep
-        // correct pixel widths), instead of re-running the full boolean
-        // pipeline at 16-32x overzoom. Chargers/signals icons (gate 16.5)
-        // survive; only the z18 entrance-door icons are forfeited.
-        (self.view_zoom().round() as u32).min(17)
+        // TWO keyframe buckets above the mid-zooms: 14 (view < 15.5) and
+        // 16 (view >= 15.5, through the max zoom). Faces/strokes morph to
+        // the live zoom on the GPU, icons carry their zoom floors and
+        // reveal by the live icon_zoom uniform, so the only restyle event
+        // left on the whole zoom axis is the single 14<->16 crossover —
+        // and both keyframes morph to identical widths at that zoom.
+        let raw = self.view_zoom().round() as u32;
+        match raw {
+            0..=14 => raw,
+            15 => 14,
+            _ => 16,
+        }
     }
 
     fn source_mode_label(&self) -> &'static str {

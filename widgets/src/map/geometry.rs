@@ -2533,7 +2533,13 @@ pub fn build_paint_faces(
             // 1:1; anything else (clip cuts, carrier outer edges) stays
             // pinned at zero. Translucent groups must not self-overlap
             // under widening — pinned wholesale.
-            let morphable = group.color[3] > 0.999 && group.half_width > 0.05;
+            // Road casings/centers only (phase > 0): plaza rings are
+            // verbatim polygon geometry (zoom-independent), and emissive
+            // groups need the fragment params band 100 zeroes out.
+            let morphable = group.phase > 0
+                && group.color[3] > 0.999
+                && group.emissive <= 0.001
+                && group.half_width > 0.05;
             let mut normal_map: CellMap<[f32; 2]> = CellMap::default();
             let normal_key =
                 |x: f32, y: f32| (x.to_bits() as i32, y.to_bits() as i32);
