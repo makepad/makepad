@@ -3492,3 +3492,80 @@ mod boolean_repro_tests {
         );
     }
 }
+
+/// Per-vertex outward unit normals for a closed outline ring (morphable
+/// faces): miter of the two adjacent edge normals, pointing OUT of the
+/// polygon per its winding. Length is the miter reciprocal (1/cos of the
+/// half-angle, clamped) so displacing by `n * dw` keeps parallel edges
+/// parallel through corners. Degenerate edges contribute nothing; a fully
+/// degenerate vertex gets a zero normal (it will not morph).
+pub fn ring_outward_normals(ring: &[[f64; 2]]) -> Vec<[f32; 2]> {
+    let n = ring.len();
+    if n < 3 {
+        return vec![[0.0, 0.0]; n];
+    }
+    // Signed area decides which perpendicular points outward.
+    let mut area = 0.0f64;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    let out_sign = if area >= 0.0 { 1.0f64 } else { -1.0 };
+    const MITER_LIMIT: f64 = 2.0;
+    (0..n)
+        .map(|i| {
+            let p = ring[(i + n - 1) % n];
+            let c = ring[i];
+            let q = ring[(i + 1) % n];
+            let edge_normal = |a: [f64; 2], b: [f64; 2]| -> Option<[f64; 2]> {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                (len > 1e-9).then(|| [out_sign * dy / len, -out_sign * dx / len])
+            };
+            let na = edge_normal(p, c);
+            let nb = edge_normal(c, q);
+            let m = match (na, nb) {
+                (Some(a), Some(b)) => {
+                    let (mx, my) = (a[0] + b[0], a[1] + b[1]);
+                    let ml = (mx * mx + my * my).sqrt();
+                    if ml < 1e-6 {
+                        // 180-degree spike: no stable outward direction.
+                        [0.0, 0.0]
+                    } else {
+                        // Miter scale = 1 / cos(half angle), capped.
+                        let cos_half = (ml * 0.5).min(1.0);
+                        let scale = (1.0 / cos_half.max(1.0 / MITER_LIMIT)).min(MITER_LIMIT);
+                        [mx / ml * scale, my / ml * scale]
+                    }
+                }
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => [0.0, 0.0],
+            };
+            [m[0] as f32, m[1] as f32]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod morph_tests {
+    use super::ring_outward_normals;
+
+    #[test]
+    fn square_normals_point_outward_both_windings() {
+        let ccw = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let cw: Vec<[f64; 2]> = ccw.iter().rev().copied().collect();
+        for ring in [ccw.to_vec(), cw] {
+            let normals = ring_outward_normals(&ring);
+            for (v, nm) in ring.iter().zip(&normals) {
+                // Displacing outward must move AWAY from the centroid (5,5).
+                let (cx, cy) = (v[0] - 5.0, v[1] - 5.0);
+                let dot = cx * nm[0] as f64 + cy * nm[1] as f64;
+                assert!(dot > 0.5, "normal points inward: v={v:?} n={nm:?}");
+                // Square corner miter = sqrt(2).
+                let len = (nm[0] * nm[0] + nm[1] * nm[1]).sqrt();
+                assert!((len - std::f32::consts::SQRT_2).abs() < 1e-3);
+            }
+        }
+    }
+}
