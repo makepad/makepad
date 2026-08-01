@@ -1478,7 +1478,9 @@ pub fn build_tile_buffers_from_mvt(
     build_road_core: bool,
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
+    let mut profiler = TileProfiler::new();
     let pbf_data = decode_vector_tile_payload(raw_tile_data)?;
+    profiler.lap("payload-decode", "");
     // Baked fill triangulations (payload v2-fills-1, field 100): flat mode
     // substitutes them for the runtime tessellation of the big polygon
     // features. 3D/terrain ignores the stream — drape and extrusion re-grid
@@ -1507,6 +1509,7 @@ pub fn build_tile_buffers_from_mvt(
     } else {
         None
     };
+    profiler.lap("baked-parse", "");
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
         .max(1e-3) as f32;
@@ -1527,7 +1530,9 @@ pub fn build_tile_buffers_from_mvt(
             ),
         }
     }
+    profiler.lap("dz-parse", "");
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    profiler.lap("mvt-parse", "");
     // Compose micro-POIs (trees, benches, bins…) and, in 2.5D mode, building
     // footprints with real heights from the all-tag detail archive over the
     // shortbread base — skip the extra decode below the zooms that use them.
@@ -1569,6 +1574,7 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
 
+    profiler.lap("detail-merge", "");
     for overlay in overlay_tiles {
         if let Err(err) = merge_overlay_features(
             overlay,
@@ -1586,7 +1592,9 @@ pub fn build_tile_buffers_from_mvt(
             );
         }
     }
-    Ok(build_tile_buffers_from_features(
+    profiler.lap("overlay-merge", "");
+    Ok(build_tile_buffers_from_features_profiled(
+        profiler,
         tile_key,
         collector.ways,
         collector.points,
@@ -1926,13 +1934,24 @@ fn merge_detail_features(
     ways: &mut Vec<TileWay>,
     corridors: &mut Vec<BridgeCorridor>,
 ) -> Result<(), String> {
+    let census_start = ways.len();
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
-    // Combined archives carry base AND detail layers in one tile; this
-    // pass only consumes the raw osm_* layers, so skip the rest undecoded.
-    collector.layer_filter = LayerParseFilter::DetailLayersOnly;
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
+    // Combined archives carry base AND detail layers in one tile; this
+    // pass only consumes the raw osm_* layers, and of those only the
+    // geometry classes the flags below reach:
+    // - points: micro-POI icons (want_points only)
+    // - lines: heuristic bridge corridors, barrier/pedestrian/attraction
+    //   rings (platform zooms)
+    // - polygons: buildings, platforms, and polygon-anchored POI icons
+    let want_platform_zoom = render_zoom >= 15.5;
+    collector.layer_filter = LayerParseFilter::DetailLayers {
+        points: want_points,
+        lines: collect_corridors || want_platform_zoom,
+        polygons: want_buildings || want_platform_zoom || want_points,
+    };
+    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     for way in &collector.ways {
         if !collect_corridors {
             break;
@@ -2195,6 +2214,17 @@ fn merge_detail_features(
                 .insert("layer".to_string(), "detail_buildings".to_string());
             ways.push(way);
         }
+    }
+    // MAKEPAD_DETAIL_KEY_CENSUS=1: distinct tag keys on forwarded detail
+    // ways — the ground truth for the parse whitelist above.
+    if std::env::var_os("MAKEPAD_DETAIL_KEY_CENSUS").is_some() {
+        let mut census = std::collections::BTreeMap::<String, usize>::new();
+        for way in ways.iter().skip(census_start) {
+            for key in way.tags.keys() {
+                *census.entry(key.clone()).or_default() += 1;
+            }
+        }
+        eprintln!("DETAIL-KEY-CENSUS z{}/{}/{}: {census:?}", tile_key.z, tile_key.x, tile_key.y);
     }
     Ok(())
 }
@@ -2979,7 +3009,42 @@ fn build_tile_buffers_from_features(
     baked_fills: Vec<BakedFillFeature>,
     baked_faces: Option<BakedFacesBucket>,
 ) -> TileBuffers {
-    let mut profiler = TileProfiler::new();
+    build_tile_buffers_from_features_profiled(
+        TileProfiler::new(),
+        tile_key,
+        tile_ways,
+        tagged_points,
+        theme,
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+        bridge_corridors,
+        bridge_dz_covered,
+        have_charger_overlay,
+        baked_fills,
+        baked_faces,
+    )
+}
+
+/// The shared feature builder with the caller's stage clock: the mbtiles
+/// path laps its parse/merge stages on the same profiler so the SLOW-tile
+/// log accounts for the WHOLE build, not just post-parse.
+#[allow(clippy::too_many_arguments)]
+fn build_tile_buffers_from_features_profiled(
+    mut profiler: TileProfiler,
+    tile_key: TileKey,
+    tile_ways: Vec<TileWay>,
+    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+    bridge_corridors: Vec<BridgeCorridor>,
+    bridge_dz_covered: bool,
+    have_charger_overlay: bool,
+    baked_fills: Vec<BakedFillFeature>,
+    baked_faces: Option<BakedFacesBucket>,
+) -> TileBuffers {
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -5299,6 +5364,25 @@ fn build_tile_buffers_from_features(
         // styling at runtime. Guarded by the group-structure signature (and
         // the stream's coordinate checksum at parse time); any mismatch
         // falls back to the runtime cascade.
+        // MAKEPAD_CASCADE_DUMP=1: per-group structural lines in signature
+        // order — diff two runs to find exactly which group diverges.
+        if std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some() {
+            for (gi, group) in groups.iter().enumerate() {
+                let ring_lens: Vec<usize> =
+                    group.rings.iter().map(|(ring, _, _)| ring.len()).collect();
+                let lift_bits: Vec<u8> = group
+                    .rings
+                    .iter()
+                    .map(|(_, min_dz, max_dz)| {
+                        (*max_dz >= LIFT_COVER_M) as u8 | (((*min_dz <= -LIFT_COVER_M) as u8) << 1)
+                    })
+                    .collect();
+                eprintln!(
+                    "CASCADE-GROUP {gi}: phase={} rank={} field={} hw={} rings={:?} lift={:?}",
+                    group.phase, group.rank, group.field, group.half_width, ring_lens, lift_bits
+                );
+            }
+        }
         let baked = baked_faces.as_ref().filter(|bake| {
             let signature = paint_groups_signature(&groups);
             let ok = bake.bucket == render_zoom
@@ -5500,9 +5584,9 @@ fn build_tile_buffers_from_features(
             (min_x - reach, min_y - reach, max_x + reach, max_y + reach)
         })
         .collect();
-    let corridors_for_part = |part: &[(f32, f32)]| -> Vec<&BridgeCorridor> {
+    let part_near_corridor = |part: &[(f32, f32)]| -> bool {
         if corridor_boxes.is_empty() {
-            return Vec::new();
+            return false;
         }
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
@@ -5514,14 +5598,17 @@ fn build_tile_buffers_from_features(
             max_x = max_x.max(x);
             max_y = max_y.max(y);
         }
-        corridor_set
+        corridor_boxes
             .iter()
-            .zip(&corridor_boxes)
-            .filter_map(|(corridor, &(bx0, by0, bx1, by1))| {
-                (min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0)
-                    .then_some(corridor)
-            })
-            .collect()
+            .any(|&(bx0, by0, bx1, by1)| min_x <= bx1 && max_x >= bx0 && min_y <= by1 && max_y >= by0)
+    };
+    // Segment grid for the matcher itself: the bbox gate above only decides
+    // WHETHER a part pays for deck matching, the grid keeps that matching
+    // from scanning every corridor segment per vertex.
+    let corridor_grid = CorridorGrid::build(corridor_set);
+    let corridor_query = CorridorGridQuery {
+        corridors: corridor_set,
+        grid: &corridor_grid,
     };
 
     // Tilt depth is semantic rather than face-ordinal. Adjacent tiles contain
@@ -5738,11 +5825,7 @@ fn build_tile_buffers_from_features(
                 start_cap,
                 end_cap,
             } => {
-                let nearby_corridors = if stroke_corridors_available {
-                    corridors_for_part(part)
-                } else {
-                    Vec::new()
-                };
+                let near_corridor = stroke_corridors_available && part_near_corridor(part);
                 let param5 = if pass.deck_m < 0.0 {
                     // Patterned tunnels have no physical sunk mesh; keep
                     // their visible cartographic casing and dashed center
@@ -5759,7 +5842,7 @@ fn build_tile_buffers_from_features(
                     &mut path,
                     part,
                     false,
-                    (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
+                    near_corridor.then_some(corridor_query),
                     &mut tess,
                     &mut tess_verts,
                     &mut tess_indices,
@@ -5779,14 +5862,21 @@ fn build_tile_buffers_from_features(
         }
     }
 
+    let sp = crate::map::geometry::stroke_prof_take();
     profiler.lap(
         "emit",
         &format!(
-            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={}",
+            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={} | strokes: calls={} verts={} densify={:.1}ms tess={:.1}ms deck={:.1}ms expand={:.1}ms",
             events.len(),
             prof_subdiv_ms,
             prof_sample_ms,
-            prof_face_verts_out
+            prof_face_verts_out,
+            sp.calls,
+            sp.verts,
+            sp.densify_ms,
+            sp.tess_ms,
+            sp.deck_ms,
+            sp.expand_ms
         ),
     );
 
@@ -5800,11 +5890,7 @@ fn build_tile_buffers_from_features(
             if part.len() < 2 {
                 continue;
             }
-            let nearby_corridors = if stroke_corridors_available {
-                corridors_for_part(part)
-            } else {
-                Vec::new()
-            };
+            let near_corridor = stroke_corridors_available && part_near_corridor(part);
             let start_cap = if point_on_bounds(part[0], clip_bounds, cap_eps) {
                 LineCap::Butt
             } else {
@@ -5819,7 +5905,7 @@ fn build_tile_buffers_from_features(
                 &mut path,
                 part,
                 false,
-                (!nearby_corridors.is_empty()).then_some(nearby_corridors.as_slice()),
+                near_corridor.then_some(corridor_query),
                 &mut tess,
                 &mut tess_verts,
                 &mut tess_indices,
@@ -6013,15 +6099,39 @@ fn build_tile_buffers_from_features(
     compact_tile_labels(&mut labels);
 
     profiler.lap("tail", "");
+    // MAKEPAD_TILE_HASH=1: fnv over every emitted buffer, printed on the
+    // TOTAL line — the bit-identity oracle for geometry-path refactors.
+    let buffer_hash = if std::env::var_os("MAKEPAD_TILE_HASH").is_some() {
+        let mut h = 0xcbf29ce484222325u64;
+        let mut eat = |bytes: &[u8]| {
+            for &b in bytes {
+                h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+        };
+        for floats in [&fill_vertices, &casing_vertices, &stroke_vertices, &icon_vertices] {
+            for f in floats.iter() {
+                eat(&f.to_bits().to_le_bytes());
+            }
+        }
+        for indices in [&fill_indices, &casing_indices, &stroke_indices, &icon_indices] {
+            for i in indices.iter() {
+                eat(&i.to_le_bytes());
+            }
+        }
+        format!(" hash={h:016x}")
+    } else {
+        String::new()
+    };
     profiler.total(
         tile_key,
         &format!(
-            "rz{} fill={}KB casing={}KB stroke={}KB icon={}KB",
+            "rz{} fill={}KB casing={}KB stroke={}KB icon={}KB{}",
             render_zoom,
             (fill_vertices.len() + fill_indices.len()) * 4 / 1024,
             (casing_vertices.len() + casing_indices.len()) * 4 / 1024,
             (stroke_vertices.len() + stroke_indices.len()) * 4 / 1024,
             (icon_vertices.len() + icon_indices.len()) * 4 / 1024,
+            buffer_hash,
         ),
     );
 
@@ -6800,6 +6910,15 @@ pub trait MvtSink {
     fn wants_layer(&self, _layer_name: &str) -> bool {
         true
     }
+    /// Tag-key whitelist for a layer, or None for all keys. Resolved once
+    /// per layer against the MVT key table, so the string compares are paid
+    /// per distinct key — the per-feature loop then skips unwanted pairs
+    /// before any String materializes. All-tag detail layers carry dozens
+    /// of keys per feature (multilingual names, addr:*) that no consumer
+    /// below the icon zooms ever reads.
+    fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
+        None
+    }
     fn add_path(
         &mut self,
         tile_key: TileKey,
@@ -6831,8 +6950,12 @@ enum LayerParseFilter {
     /// base ingestion double-styles them (roads exist in `streets` AND
     /// `osm_lines`) and was measured tripling road-union input.
     BaseNoDetailLayers,
-    /// Detail pass: ONLY the raw `osm_*` layers.
-    DetailLayersOnly,
+    /// Detail pass: ONLY the raw `osm_*` layers, and only the geometry
+    /// classes the current render bucket consumes. Point layers are the
+    /// bulk of a city-center detail blob (every tree/bench/POI with full
+    /// tags) and icons don't render below z17 — parsing them there was
+    /// most of a ~110ms/tile constant.
+    DetailLayers { points: bool, lines: bool, polygons: bool },
 }
 
 struct MvtLocalCollector {
@@ -6872,7 +6995,42 @@ impl MvtSink for MvtLocalCollector {
         match self.layer_filter {
             LayerParseFilter::All => true,
             LayerParseFilter::BaseNoDetailLayers => !is_detail,
-            LayerParseFilter::DetailLayersOnly => is_detail,
+            LayerParseFilter::DetailLayers { points, lines, polygons } => {
+                is_detail
+                    && match layer_name {
+                        "osm_points" | "osm_relation_points" => points,
+                        "osm_lines" | "osm_relation_lines" => lines,
+                        "osm_polygons" | "osm_relation_polygons" => polygons,
+                        _ => true,
+                    }
+            }
+        }
+    }
+
+    fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
+        // Every key the detail-merge way consumers (corridors, barriers,
+        // platforms, attraction/pedestrian/green rings, building extrusion)
+        // or downstream styling of their rewritten layers can read. Point
+        // features are the one consumer with an open-ended key set
+        // (micro_icon_for_tags), so the whitelist only arms when the point
+        // layers are off — below the icon zooms, exactly where the tag mass
+        // hurts.
+        const DETAIL_WAY_KEYS: &[&str] = &[
+            "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
+            "name", "attraction", "zoo", "tourism", "public_transport", "landuse",
+            "leisure", "natural", "building", "building:part", "height",
+            "building:levels", "min_height", "building:min_level", "location", "place",
+            "parking", "surface", "access", "service", "link", "rail", "waterway", "ref",
+        ];
+        static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *NO_WHITELIST
+            .get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some())
+        {
+            return None;
+        }
+        match self.layer_filter {
+            LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
+            _ => None,
         }
     }
 
@@ -7629,6 +7787,12 @@ fn parse_mvt_layer(
     if !builder.wants_layer(&layer_name) {
         return Ok(());
     }
+    // Key-level lazy skip: one bool per key-table entry.
+    let key_wanted: Option<Vec<bool>> = builder.tag_key_whitelist(&layer_name).map(|whitelist| {
+        keys.iter()
+            .map(|key| whitelist.contains(&key.as_str()))
+            .collect()
+    });
     for (feature_index, feature_data) in features.into_iter().enumerate() {
         parse_mvt_feature(
             feature_index as u32,
@@ -7636,6 +7800,7 @@ fn parse_mvt_layer(
             &layer_name,
             &keys,
             &values,
+            key_wanted.as_deref(),
             extent,
             tile_key,
             builder,
@@ -7644,12 +7809,14 @@ fn parse_mvt_layer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_mvt_feature(
     feature_index: u32,
     feature_data: &[u8],
     layer_name: &str,
     keys: &[String],
     values: &[MvtValue],
+    key_wanted: Option<&[bool]>,
     extent: u32,
     tile_key: TileKey,
     builder: &mut impl MvtSink,
@@ -7687,6 +7854,11 @@ fn parse_mvt_feature(
     for pair in tag_indexes.chunks_exact(2) {
         let key_index = pair[0] as usize;
         let value_index = pair[1] as usize;
+        if let Some(wanted) = key_wanted {
+            if !wanted.get(key_index).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let Some(key) = keys.get(key_index) else {
             continue;
         };
