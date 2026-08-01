@@ -1677,7 +1677,7 @@ pub fn build_tile_buffers_from_mvt(
     let no_baked_faces =
         *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
     let baked_faces = if !no_baked_faces
-        && (10..=16).contains(&render_zoom)
+        && (10..=18).contains(&render_zoom)
         && !faces_bake_sink_armed()
     {
         parse_baked_faces(&pbf_data, render_zoom)
