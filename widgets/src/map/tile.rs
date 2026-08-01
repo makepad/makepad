@@ -4025,14 +4025,53 @@ fn build_tile_buffers_from_features_profiled(
             })
             .collect();
         if !part_centroids.is_empty() {
+            // Cell grid over part centroids: point_in_ring can only hit a
+            // centroid inside the ring's bbox, so the cover test visits one
+            // bbox worth of cells instead of every part in the tile —
+            // dense part cities (Paris) ran groups x rings x parts x verts.
+            const CENTROID_CELL: f32 = 16.0;
+            let mut centroid_cells: HashMap<(i32, i32), Vec<(f32, f32)>> = HashMap::new();
+            for &c in &part_centroids {
+                centroid_cells
+                    .entry((
+                        (c.0 / CENTROID_CELL).floor() as i32,
+                        (c.1 / CENTROID_CELL).floor() as i32,
+                    ))
+                    .or_default()
+                    .push(c);
+            }
             for group in building_groups.iter_mut() {
                 if group.is_part {
                     continue;
                 }
                 let covers = group.rings.iter().any(|ring| {
-                    part_centroids
-                        .iter()
-                        .any(|c| point_in_ring(*c, &ring.points))
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    for &(x, y) in &ring.points {
+                        min_x = min_x.min(x);
+                        min_y = min_y.min(y);
+                        max_x = max_x.max(x);
+                        max_y = max_y.max(y);
+                    }
+                    let cx0 = (min_x / CENTROID_CELL).floor() as i32;
+                    let cy0 = (min_y / CENTROID_CELL).floor() as i32;
+                    let cx1 = (max_x / CENTROID_CELL).floor() as i32;
+                    let cy1 = (max_y / CENTROID_CELL).floor() as i32;
+                    (cy0..=cy1).any(|cy| {
+                        (cx0..=cx1).any(|cx| {
+                            centroid_cells.get(&(cx, cy)).is_some_and(|cell| {
+                                cell.iter().any(|&c| {
+                                    c.0 >= min_x
+                                        && c.0 <= max_x
+                                        && c.1 >= min_y
+                                        && c.1 <= max_y
+                                        && point_in_ring(c, &ring.points)
+                                })
+                            })
+                        })
+                    })
                 });
                 if covers {
                     group.height_m = 0.0;
@@ -5245,6 +5284,26 @@ fn build_tile_buffers_from_features_profiled(
             )
         })
         .collect();
+    profiler.lap("rf-smooth", "");
+    // Input signature over everything ring construction consumes. When it
+    // matches the baked bucket, the i_overlay tier ring construction (and
+    // its per-ring-vertex field classification) is skipped entirely — the
+    // baked regions carry the geometry, and every other group ingredient
+    // (styling, fields, skirt joints, shadows) derives from the ways.
+    // Bake capture and the dump diagnostic need real rings, so both force
+    // the full path.
+    let input_sig = paint_input_signature(
+        &smoothed_tiers,
+        &plaza_rings,
+        &tier_joint_ends,
+        &tunnel_portals,
+        union_clip,
+    );
+    let baked_input_hit = !faces_bake_sink_armed()
+        && std::env::var_os("MAKEPAD_CASCADE_DUMP").is_none()
+        && baked_faces
+            .as_ref()
+            .is_some_and(|bake| bake.bucket == render_zoom && bake.signature == input_sig);
     // Per-tier deck fields: index 0 is the plaza field, tier i lives at
     // 1 + i. Casing and center faces of one tier share one field, so both
     // displace identically in tilt — no more detached outlines on ramps.
@@ -5285,6 +5344,7 @@ fn build_tile_buffers_from_features_profiled(
             .collect();
         dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
+    profiler.lap("rf-fields", "");
     // T3 deck shadows: elevated road segments project along the sun by
     // their per-vertex height, so overpasses ground themselves the way
     // buildings do. Collected as slab quads per lifted segment (grounded
@@ -5339,7 +5399,11 @@ fn build_tile_buffers_from_features_profiled(
                     }
                 })
                 .collect();
-            let rings = road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip);
+            let rings = if baked_input_hit {
+                Vec::new()
+            } else {
+                road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip)
+            };
             if pass == 1 {
                 if let Some((sx, sy, len_per_m_units)) = deck_shadow_ctx {
                     let hw = (width * 0.5).max(0.05);
@@ -5483,7 +5547,7 @@ fn build_tile_buffers_from_features_profiled(
         };
         let bucket = BakedFacesBucket {
             bucket: render_zoom,
-            signature: paint_groups_signature(&groups),
+            signature: input_sig,
             regions,
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
@@ -5533,20 +5597,14 @@ fn build_tile_buffers_from_features_profiled(
             }
         }
         let baked = baked_faces.as_ref().filter(|bake| {
-            let signature = paint_groups_signature(&groups);
-            let ok = bake.bucket == render_zoom
-                && bake.signature == signature
-                && bake
-                    .regions
-                    .iter()
-                    .all(|region| region.group_index < groups.len());
+            let ok = bake.bucket == render_zoom && bake.signature == input_sig;
             if !ok && profiler.on {
                 eprintln!(
                     "MPPROF cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
                     bake.bucket,
                     render_zoom,
                     bake.signature,
-                    signature,
+                    input_sig,
                     bake.regions.len(),
                     groups.len(),
                 );
@@ -5558,13 +5616,34 @@ fn build_tile_buffers_from_features_profiled(
                 if profiler.on {
                     eprintln!("MPPROF cascade-baked regions={}", bake.regions.len());
                 }
-                build_paint_faces(
-                    &groups,
-                    &bake.regions,
-                    &mut tess,
-                    tolerance,
-                    analytic_fringe_units,
-                )
+                // Group count is pinned by the input signature; an index
+                // past it means a corrupt stream (already checksum-guarded
+                // at parse). Drop such regions instead of indexing OOB —
+                // the runtime cascade is NOT a fallback here, the rings
+                // were skipped on the signature's authority.
+                let in_range: Vec<VisibleRegions>;
+                let regions: &[VisibleRegions] = if bake
+                    .regions
+                    .iter()
+                    .all(|region| region.group_index < groups.len())
+                {
+                    &bake.regions
+                } else {
+                    log!(
+                        "MapView: baked faces region/group mismatch on z{} x{} y{} — dropping out-of-range regions",
+                        tile_key.z,
+                        tile_key.x,
+                        tile_key.y
+                    );
+                    in_range = bake
+                        .regions
+                        .iter()
+                        .filter(|region| region.group_index < groups.len())
+                        .cloned()
+                        .collect();
+                    &in_range
+                };
+                build_paint_faces(&groups, regions, &mut tess, tolerance, analytic_fringe_units)
             }
             None => overlay_paint_groups(&groups, &mut tess, tolerance, analytic_fringe_units),
         }
@@ -7408,7 +7487,12 @@ pub fn bake_tile_paint_faces(
 }
 
 const BAKED_FACES_FIELD: u32 = 101;
-const BAKED_FACES_VERSION: u8 = 1;
+// v2: `signature` is paint_input_signature (hash of the ring-construction
+// INPUT), letting the consumer skip tier ring building on a hit. v1
+// streams carried the group-structure hash — semantically incompatible,
+// so they are rejected wholesale and fall back to the runtime cascade
+// until the archive is rebaked.
+const BAKED_FACES_VERSION: u8 = 2;
 /// Cascade coordinates are snapped to 1/64 unit (geometry.rs SNAP), so a
 /// x64 fixed-point roundtrip is EXACT.
 const BAKED_FACES_COORD_SCALE: f64 = 64.0;
@@ -7418,6 +7502,96 @@ fn fnv1a64_step(hash: &mut u64, bytes: &[u8]) {
         *hash ^= b as u64;
         *hash = hash.wrapping_mul(0x100_0000_01b3);
     }
+}
+
+/// Deterministic FNV-1a as a std Hasher: the baker and the app must agree
+/// across processes, which rules out SipHash's per-process keys. Feeds the
+/// derived Hash impls of the tier/style key types.
+struct FnvStdHasher(u64);
+
+impl std::hash::Hasher for FnvStdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+/// Signature of the painter-cascade INPUT, taken BEFORE ring construction:
+/// tier order and style identity, every smoothed way's points and dz,
+/// plaza rings, and the end sets that decide ribbon caps. If this matches
+/// a baked bucket, the bake's regions are valid for the current input and
+/// the expensive i_overlay ring construction can be skipped wholesale —
+/// the regions carry all geometry, groups only contribute styling, fields
+/// and skirt joints, all of which derive from the ways directly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_input_signature(
+    smoothed_tiers: &[(
+        RoadSurfaceKey,
+        StrokeStyle,
+        Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>,
+    )],
+    plaza_rings: &[(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)],
+    tier_joint_ends: &std::collections::HashSet<RoadTierEnd>,
+    tunnel_portals: &std::collections::HashSet<(i32, i32)>,
+    union_clip: GeoBounds,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
+    let eat_points = |h: &mut FnvStdHasher, points: &[(f32, f32)]| {
+        h.write(&(points.len() as u32).to_le_bytes());
+        for &(x, y) in points {
+            h.write(&x.to_bits().to_le_bytes());
+            h.write(&y.to_bits().to_le_bytes());
+        }
+    };
+    let eat_dz = |h: &mut FnvStdHasher, dz: &Option<Vec<f32>>| match dz {
+        Some(values) => {
+            h.write(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                h.write(&value.to_bits().to_le_bytes());
+            }
+        }
+        None => h.write(&u32::MAX.to_le_bytes()),
+    };
+    h.write(&(plaza_rings.len() as u32).to_le_bytes());
+    for (color, alpha, points, dz) in plaza_rings {
+        h.write(&color.to_le_bytes());
+        h.write(&alpha.to_bits().to_le_bytes());
+        eat_points(&mut h, points);
+        eat_dz(&mut h, dz);
+    }
+    h.write(&(smoothed_tiers.len() as u32).to_le_bytes());
+    for (key, style, ways) in smoothed_tiers {
+        key.hash(&mut h);
+        StrokeStyleKey::from(*style).hash(&mut h);
+        h.write(&(ways.len() as u32).to_le_bytes());
+        for (points, dz) in ways {
+            eat_points(&mut h, points);
+            eat_dz(&mut h, dz);
+        }
+    }
+    // HashSet iteration is nondeterministic: sort before hashing.
+    let mut joint_ends: Vec<&RoadTierEnd> = tier_joint_ends.iter().collect();
+    joint_ends.sort_unstable();
+    h.write(&(joint_ends.len() as u32).to_le_bytes());
+    for end in joint_ends {
+        end.hash(&mut h);
+    }
+    let mut portals: Vec<&(i32, i32)> = tunnel_portals.iter().collect();
+    portals.sort_unstable();
+    h.write(&(portals.len() as u32).to_le_bytes());
+    for portal in portals {
+        portal.hash(&mut h);
+    }
+    h.write(&union_clip.min.x.to_bits().to_le_bytes());
+    h.write(&union_clip.min.y.to_bits().to_le_bytes());
+    h.write(&union_clip.max.x.to_bits().to_le_bytes());
+    h.write(&union_clip.max.y.to_bits().to_le_bytes());
+    h.0
 }
 
 /// Structural signature of the cascade INPUT: group order, phases, ranks,
