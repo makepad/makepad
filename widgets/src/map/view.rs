@@ -3550,7 +3550,22 @@ impl MapView {
         // non-visible tiles until the geometry footprint fits.
         const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
         let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
-        if total_bytes > TILE_CACHE_BYTE_BUDGET {
+        // Anti-thrash: street-zoom tiles now carry the full icon horizon
+        // (50-85 MB each), so a fixed budget can sit BELOW visible+ring —
+        // pure LRU then evicts the exact neighbor a pan re-enters seconds
+        // later and every circle around a city center rebuilds its ring.
+        // Scale the effective budget to hold twice the visible set, and
+        // evict by DISTANCE from the view center (farthest first, LRU as
+        // the tiebreak): the pan ring survives, the trail behind does not.
+        let visible_bytes: usize = self
+            .tiles
+            .iter()
+            .filter(|(key, _)| visible_set.contains(*key))
+            .map(|(_, entry)| entry.bytes)
+            .sum();
+        let byte_budget = TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2));
+        if total_bytes > byte_budget {
+            let center = self.center_norm;
             let mut evictable: Vec<(TileKey, u64, usize)> = self
                 .tiles
                 .iter()
@@ -3563,10 +3578,22 @@ impl MapView {
                 })
                 .map(|(key, entry)| (*key, entry.last_used, entry.bytes))
                 .collect();
-            evictable.sort_unstable_by_key(|&(_, last_used, _)| last_used);
+            let norm_dist = |key: &TileKey| -> f64 {
+                let n = (1u64 << key.z.min(30)) as f64;
+                let dx = (key.x as f64 + 0.5) / n - center.x;
+                let dy = (key.y as f64 + 0.5) / n - center.y;
+                dx * dx + dy * dy
+            };
+            // Farthest first; equal-distance ties fall back to oldest use.
+            evictable.sort_unstable_by(|a, b| {
+                norm_dist(&b.0)
+                    .partial_cmp(&norm_dist(&a.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
             let mut remaining = total_bytes;
             for (key, _, bytes) in evictable {
-                if remaining <= TILE_CACHE_BYTE_BUDGET {
+                if remaining <= byte_budget {
                     break;
                 }
                 self.tiles.remove(&key);
