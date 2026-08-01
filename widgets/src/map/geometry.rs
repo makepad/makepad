@@ -1805,6 +1805,14 @@ pub struct PaintFace {
     /// Closes the ramp-displacement crescents and reads as deck volume.
     pub skirt_verts: Vec<VVertex>,
     pub skirt_indices: Vec<u32>,
+    /// GPU-morph offsets parallel to `verts` (and `morph_fringe_offsets`
+    /// to `fringe_verts`): outward miter normal x the group's keyframe
+    /// half-width, or zero for pinned vertices (junction blends,
+    /// translucent groups, unmatched tessellator output). Emitted through
+    /// the expandable-stroke vertex layout so the live zoom re-widths the
+    /// face per frame — the "no buckets" morph.
+    pub morph_offsets: Vec<[f32; 2]>,
+    pub morph_fringe_offsets: Vec<[f32; 2]>,
 }
 
 /// Boolean outlines inherit straight edges from the padded tile clip. They
@@ -2519,10 +2527,30 @@ pub fn build_paint_faces(
             }
             // Each shape = outer ring + holes; contours are crossing-free,
             // so even-odd (no explicit winding) fills holes correctly.
+            // Morph map: exact f32 coordinate -> outward miter normal for
+            // every outline vertex. Tessellator/fringe output that came
+            // from a ring vertex keeps its exact bits, so lookups match
+            // 1:1; anything else (clip cuts, carrier outer edges) stays
+            // pinned at zero. Translucent groups must not self-overlap
+            // under widening — pinned wholesale.
+            let morphable = group.color[3] > 0.999 && group.half_width > 0.05;
+            let mut normal_map: CellMap<[f32; 2]> = CellMap::default();
+            let normal_key =
+                |x: f32, y: f32| (x.to_bits() as i32, y.to_bits() as i32);
             for shape in visible.iter() {
                 for ring in shape {
                     if ring.len() < 3 {
                         continue;
+                    }
+                    if morphable {
+                        for (point, normal) in
+                            ring.iter().zip(ring_outward_normals(ring))
+                        {
+                            normal_map.insert(
+                                normal_key(point[0] as f32, point[1] as f32),
+                                normal,
+                            );
+                        }
                     }
                     path.move_to(ring[0][0] as f32, ring[0][1] as f32);
                     for point in ring.iter().skip(1) {
@@ -2582,6 +2610,28 @@ pub fn build_paint_faces(
             // conservative per-vertex span from the actual index buffers.
             compute_clip_radii(&mut fringe_verts, &fringe_indices);
             compute_clip_radii(&mut skirt_verts, &skirt_indices);
+            // Offset = miter normal x keyframe half-width: at the keyframe
+            // zoom the shader's correction is exactly 1 and the face is
+            // bit-identical to today; at other zooms it re-widths per
+            // frame. Unmatched verts stay [0,0] (pinned).
+            let offsets_for = |verts: &[VVertex]| -> Vec<[f32; 2]> {
+                if !morphable {
+                    return vec![[0.0, 0.0]; verts.len()];
+                }
+                verts
+                    .iter()
+                    .map(|v| {
+                        normal_map
+                            .get(&normal_key(v.x, v.y))
+                            .map(|n| {
+                                [n[0] * group.half_width, n[1] * group.half_width]
+                            })
+                            .unwrap_or([0.0, 0.0])
+                    })
+                    .collect()
+            };
+            let morph_offsets = offsets_for(&tess_verts);
+            let morph_fringe_offsets = offsets_for(&fringe_verts);
             faces.push(PaintFace {
                 color: group.color,
                 emissive: group.emissive,
@@ -2596,6 +2646,8 @@ pub fn build_paint_faces(
                 level,
                 skirt_verts,
                 skirt_indices,
+                morph_offsets,
+                morph_fringe_offsets,
             });
         }
     }
