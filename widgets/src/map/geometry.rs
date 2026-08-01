@@ -870,69 +870,254 @@ pub fn corridor_deck_at_point(px: f32, py: f32, corridors: &[BridgeCorridor]) ->
     deck
 }
 
+/// Uniform grid over corridor segments, built once per tile build. Each
+/// segment lands in every cell its bbox expanded by that corridor's
+/// fade-zero reach overlaps, so a point query visits exactly the segments
+/// that could produce a non-zero deck — matcher results stay bit-identical
+/// to the full scan while dense own-profile tiles stop paying
+/// O(verts x segments).
+pub struct CorridorGrid {
+    min_x: f32,
+    min_y: f32,
+    inv_cell: f32,
+    nx: i32,
+    ny: i32,
+    /// (corridor index, first point index of the segment)
+    cells: Vec<Vec<(u32, u32)>>,
+}
+
+impl CorridorGrid {
+    const CELL: f32 = 16.0;
+
+    pub fn build(corridors: &[BridgeCorridor]) -> CorridorGrid {
+        let empty = CorridorGrid {
+            min_x: 0.0,
+            min_y: 0.0,
+            inv_cell: 1.0 / Self::CELL,
+            nx: 0,
+            ny: 0,
+            cells: Vec::new(),
+        };
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut max_reach = 0.0f32;
+        for c in corridors {
+            for &(x, y) in &c.points {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            max_reach = max_reach.max(corridor_reach(c));
+        }
+        if min_x > max_x {
+            return empty;
+        }
+        min_x -= max_reach;
+        min_y -= max_reach;
+        max_x += max_reach;
+        max_y += max_reach;
+        let nx = ((max_x - min_x) / Self::CELL).ceil().max(1.0) as i32;
+        let ny = ((max_y - min_y) / Self::CELL).ceil().max(1.0) as i32;
+        let mut grid = CorridorGrid {
+            min_x,
+            min_y,
+            inv_cell: 1.0 / Self::CELL,
+            nx,
+            ny,
+            cells: vec![Vec::new(); (nx * ny) as usize],
+        };
+        for (ci, c) in corridors.iter().enumerate() {
+            let reach = corridor_reach(c) + 0.001;
+            for si in 0..c.points.len().saturating_sub(1) {
+                let (ax, ay) = c.points[si];
+                let (bx, by) = c.points[si + 1];
+                let x0 = ((ax.min(bx) - reach - min_x) * grid.inv_cell) as i32;
+                let x1 = ((ax.max(bx) + reach - min_x) * grid.inv_cell) as i32;
+                let y0 = ((ay.min(by) - reach - min_y) * grid.inv_cell) as i32;
+                let y1 = ((ay.max(by) + reach - min_y) * grid.inv_cell) as i32;
+                for cy in y0.max(0)..=y1.min(ny - 1) {
+                    for cx in x0.max(0)..=x1.min(nx - 1) {
+                        grid.cells[(cy * nx + cx) as usize].push((ci as u32, si as u32));
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// Segments whose reach can cover (x, y). Points outside the padded
+    /// bounds are beyond every segment's reach by construction.
+    fn entries(&self, x: f32, y: f32) -> &[(u32, u32)] {
+        let cx = ((x - self.min_x) * self.inv_cell) as i32;
+        let cy = ((y - self.min_y) * self.inv_cell) as i32;
+        if cx < 0 || cy < 0 || cx >= self.nx || cy >= self.ny {
+            return &[];
+        }
+        &self.cells[(cy * self.nx + cx) as usize]
+    }
+}
+
+/// Distance beyond which a corridor's fade is exactly zero.
+fn corridor_reach(c: &BridgeCorridor) -> f32 {
+    if c.solved {
+        SOLVED_REACH_ZERO
+    } else {
+        c.half_width + CORRIDOR_FEATHER
+    }
+}
+
+/// Corridor set + its grid, borrowed together into the stroke emitter.
+#[derive(Clone, Copy)]
+pub struct CorridorGridQuery<'a> {
+    pub corridors: &'a [BridgeCorridor],
+    pub grid: &'a CorridorGrid,
+}
+
+/// One corridor segment against one anchored vertex: the shared core of
+/// the grid and brute matchers. Returns the faded deck contribution.
+#[inline]
+fn probe_corridor_segment(
+    c: &BridgeCorridor,
+    si: usize,
+    a: &[f32; 2],
+    dx: f32,
+    dy: f32,
+    dl: f32,
+) -> f32 {
+    let (ax, ay) = c.points[si];
+    let (bx, by) = c.points[si + 1];
+    let (ex, ey) = (bx - ax, by - ay);
+    let el = (ex * ex + ey * ey).sqrt().max(1e-6);
+    // Direction gate (~35 deg): ways passing UNDER the
+    // bridge cross the corridor and must stay grounded.
+    // Offset-degenerate vertices (caps) skip the gate.
+    if dl > 0.0 && ((dx * ex + dy * ey) / (dl * el)).abs() < 0.82 {
+        return 0.0;
+    }
+    let t = (((a[0] - ax) * ex + (a[1] - ay) * ey) / (el * el)).clamp(0.0, 1.0);
+    let (px, py) = (ax + ex * t - a[0], ay + ey * t - a[1]);
+    let dist = (px * px + py * py).sqrt();
+    let fade = if c.solved {
+        ((SOLVED_REACH_ZERO - dist) / (SOLVED_REACH_ZERO - SOLVED_REACH_FULL)).clamp(0.0, 1.0)
+    } else {
+        ((c.half_width + CORRIDOR_FEATHER - dist) / CORRIDOR_FEATHER).clamp(0.0, 1.0)
+    };
+    let deck_at = c.decks[si] * (1.0 - t) + c.decks[si + 1] * t;
+    deck_at * fade
+}
+
+/// Full-scan deck for one anchored vertex — the verify-mode reference.
+fn brute_deck(corridors: &[BridgeCorridor], v: &VVertex, a: &[f32; 2]) -> f32 {
+    let (ox, oy) = (v.x - a[0], v.y - a[1]);
+    let ol = (ox * ox + oy * oy).sqrt();
+    let (dx, dy, dl) = if ol > 0.02 {
+        (-oy, ox, ol)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    let mut deck = 0.0f32;
+    for c in corridors {
+        for si in 0..c.points.len().saturating_sub(1) {
+            let d = probe_corridor_segment(c, si, a, dx, dy, dl);
+            if d > deck {
+                deck = d;
+            }
+        }
+    }
+    deck
+}
+
 /// Per-anchor deck heights for a stroke run: the attribute path (deck on
 /// the style) wins; otherwise corridor matching by distance + direction.
 fn corridor_deck_overrides(
     verts: &[VVertex],
     anchors: &[[f32; 2]],
-    corridors: &[&BridgeCorridor],
+    q: CorridorGridQuery,
 ) -> Option<Vec<f32>> {
-    if corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
+    if q.corridors.is_empty() || anchors.len() < 2 || verts.len() != anchors.len() {
         return None;
     }
-    let mut any = false;
-    let out: Vec<f32> = verts
-        .iter()
-        .zip(anchors)
-        .map(|(v, a)| {
-            // Stroke direction per vertex: the width offset (vertex minus
-            // its centerline anchor) is perpendicular to the line. Neighbor
-            // anchors are useless — the stream is left/right pairs. The
-            // degenerate threshold must sit below the thinnest half-width
-            // in 256-unit tile space or thin strokes (rails) skip the gate
-            // and tent up wherever a corridor crosses them.
-            let (ox, oy) = (v.x - a[0], v.y - a[1]);
-            let ol = (ox * ox + oy * oy).sqrt();
-            let (dx, dy, dl) = if ol > 0.02 {
-                (-oy, ox, ol)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-            let mut deck = 0.0f32;
-            for c in corridors {
-                for (ci, w) in c.points.windows(2).enumerate() {
-                    let (ax, ay) = w[0];
-                    let (bx, by) = w[1];
-                    let (ex, ey) = (bx - ax, by - ay);
-                    let el = (ex * ex + ey * ey).sqrt().max(1e-6);
-                    // Direction gate (~35 deg): ways passing UNDER the
-                    // bridge cross the corridor and must stay grounded.
-                    // Offset-degenerate vertices (caps) skip the gate.
-                    if dl > 0.0 && ((dx * ex + dy * ey) / (dl * el)).abs() < 0.82 {
-                        continue;
-                    }
-                    let t = (((a[0] - ax) * ex + (a[1] - ay) * ey) / (el * el)).clamp(0.0, 1.0);
-                    let (px, py) = (ax + ex * t - a[0], ay + ey * t - a[1]);
-                    let dist = (px * px + py * py).sqrt();
-                    let fade = if c.solved {
-                        ((SOLVED_REACH_ZERO - dist) / (SOLVED_REACH_ZERO - SOLVED_REACH_FULL))
-                            .clamp(0.0, 1.0)
-                    } else {
-                        ((c.half_width + CORRIDOR_FEATHER - dist) / CORRIDOR_FEATHER)
-                            .clamp(0.0, 1.0)
-                    };
-                    let deck_at = c.decks[ci] * (1.0 - t) + c.decks[ci + 1] * t;
-                    let d = deck_at * fade;
+    // MAKEPAD_CORRIDOR_BRUTE=1: the pre-grid full scan, kept as the
+    // bit-identity oracle. MAKEPAD_CORRIDOR_VERIFY=1: run BOTH paths per
+    // vertex and panic on any bit difference.
+    static BRUTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let brute = *BRUTE.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_BRUTE").is_some());
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let verify = *VERIFY.get_or_init(|| std::env::var_os("MAKEPAD_CORRIDOR_VERIFY").is_some());
+    let mut deck_max = 0.0f32;
+    let mut out: Vec<f32> = Vec::with_capacity(verts.len());
+    let mut prev: Option<(usize, f32)> = None;
+    for (vi, (v, a)) in verts.iter().zip(anchors).enumerate() {
+        // Stroke direction per vertex: the width offset (vertex minus
+        // its centerline anchor) is perpendicular to the line. Neighbor
+        // anchors are useless — the stream is left/right pairs. The
+        // degenerate threshold must sit below the thinnest half-width
+        // in 256-unit tile space or thin strokes (rails) skip the gate
+        // and tent up wherever a corridor crosses them.
+        let (ox, oy) = (v.x - a[0], v.y - a[1]);
+        // The mirrored partner of the previous vertex (same anchor,
+        // negated offset) matches identically: the direction gate is
+        // side-blind. Ribbon streams alternate left/right, so this halves
+        // the matcher's work without touching its output.
+        if let Some((pi, pd)) = prev {
+            let (px_o, py_o) = (verts[pi].x - anchors[pi][0], verts[pi].y - anchors[pi][1]);
+            if !brute
+                && *a == anchors[pi]
+                && ((ox == px_o && oy == py_o) || (ox == -px_o && oy == -py_o))
+            {
+                if verify {
+                    let bd = brute_deck(q.corridors, v, a);
+                    assert!(
+                        pd.to_bits() == bd.to_bits(),
+                        "corridor pair-reuse mismatch: reused {pd} vs brute {bd}"
+                    );
+                }
+                out.push(pd);
+                continue;
+            }
+        }
+        let ol = (ox * ox + oy * oy).sqrt();
+        let (dx, dy, dl) = if ol > 0.02 {
+            (-oy, ox, ol)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        let mut deck = 0.0f32;
+        if brute {
+            for c in q.corridors {
+                for si in 0..c.points.len().saturating_sub(1) {
+                    let d = probe_corridor_segment(c, si, a, dx, dy, dl);
                     if d > deck {
                         deck = d;
-                        any = true;
                     }
                 }
             }
-            deck
-        })
-        .collect();
-    any.then_some(out)
+        } else {
+            for &(ci, si) in q.grid.entries(a[0], a[1]) {
+                let d =
+                    probe_corridor_segment(&q.corridors[ci as usize], si as usize, a, dx, dy, dl);
+                if d > deck {
+                    deck = d;
+                }
+            }
+            if verify {
+                let bd = brute_deck(q.corridors, v, a);
+                assert!(
+                    deck.to_bits() == bd.to_bits(),
+                    "corridor grid mismatch at anchor {a:?}: grid {deck} vs brute {bd}"
+                );
+            }
+        }
+        if deck > deck_max {
+            deck_max = deck;
+        }
+        prev = Some((vi, deck));
+        out.push(deck);
+    }
+    (deck_max > 0.0).then_some(out)
 }
 
 /// One road polyline feeding a tier union: raw way points (collector
@@ -1143,11 +1328,42 @@ pub fn stroke_pass_param5(pass: &StrokePassStyle) -> f32 {
     (if pass.deck_m < 0.0 { 0.05 } else { 0.22 }) + pass.depth_micro
 }
 
+/// Always-on per-thread accumulator splitting `append_stroke_pass` cost:
+/// fuels the emit-stage profiler line the same way the subdiv/sample
+/// counters do. `take()` resets, so each tile build reads its own window.
+#[derive(Default, Clone, Copy)]
+pub struct StrokeProf {
+    pub densify_ms: f64,
+    pub tess_ms: f64,
+    pub deck_ms: f64,
+    pub expand_ms: f64,
+    pub calls: u32,
+    pub verts: u32,
+}
+
+thread_local! {
+    static STROKE_PROF: std::cell::Cell<StrokeProf> = const { std::cell::Cell::new(StrokeProf {
+        densify_ms: 0.0, tess_ms: 0.0, deck_ms: 0.0, expand_ms: 0.0, calls: 0, verts: 0,
+    }) };
+}
+
+pub fn stroke_prof_take() -> StrokeProf {
+    STROKE_PROF.with(|p| p.replace(StrokeProf::default()))
+}
+
+fn stroke_prof_add(f: impl FnOnce(&mut StrokeProf)) {
+    STROKE_PROF.with(|p| {
+        let mut v = p.get();
+        f(&mut v);
+        p.set(v);
+    });
+}
+
 pub fn append_stroke_pass(
     path: &mut VectorPath,
     points: &[(f32, f32)],
     closed: bool,
-    corridors: Option<&[&BridgeCorridor]>,
+    corridors: Option<CorridorGridQuery>,
     tess: &mut Tessellator,
     tess_verts: &mut Vec<VVertex>,
     tess_indices: &mut Vec<u32>,
@@ -1178,7 +1394,8 @@ pub fn append_stroke_pass(
     // deck_m < 0 is the "never deck" sentinel (tunnels): no attribute deck
     // and no corridor matching.
     let deck_possible = pass.deck_m > 0.0
-        || (pass.deck_m == 0.0 && corridors.is_some_and(|c| !c.is_empty()));
+        || (pass.deck_m == 0.0 && corridors.is_some_and(|q| !q.corridors.is_empty()));
+    let clock = std::time::Instant::now();
     let mut dense: Vec<(f32, f32)> = Vec::new();
     let points = if deck_possible && points.len() >= 2 {
         const MAX_SEG: f32 = 3.0;
@@ -1197,6 +1414,8 @@ pub fn append_stroke_pass(
     } else {
         points
     };
+    let t_densify = clock.elapsed().as_secs_f64() * 1000.0;
+    let clock = std::time::Instant::now();
     emit_path(path, points, closed);
     STROKE_ANCHORS.with(|anchors| {
         let mut anchors = anchors.borrow_mut();
@@ -1214,11 +1433,15 @@ pub fn append_stroke_pass(
             aa,
             tolerance,
         );
+        let t_tess = clock.elapsed().as_secs_f64() * 1000.0;
+        let clock = std::time::Instant::now();
         let deck_override = if pass.deck_m == 0.0 {
-            corridors.and_then(|c| corridor_deck_overrides(tess_verts, &anchors, c))
+            corridors.and_then(|q| corridor_deck_overrides(tess_verts, &anchors, q))
         } else {
             None
         };
+        let t_deck = clock.elapsed().as_secs_f64() * 1000.0;
+        let clock = std::time::Instant::now();
         append_expanded_stroke_geometry(
             tess_verts,
             &anchors,
@@ -1236,6 +1459,15 @@ pub fn append_stroke_pass(
             pass.deck_m,
             deck_override.as_deref(),
         );
+        let vert_count = tess_verts.len() as u32;
+        stroke_prof_add(|p| {
+            p.densify_ms += t_densify;
+            p.tess_ms += t_tess;
+            p.deck_ms += t_deck;
+            p.expand_ms += clock.elapsed().as_secs_f64() * 1000.0;
+            p.calls += 1;
+            p.verts += vert_count;
+        });
     });
     *stroke_zbias += VECTOR_ZBIAS_STEP;
 }
