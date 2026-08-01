@@ -3552,28 +3552,15 @@ fn build_tile_buffers_from_features_profiled(
     let mut tess_verts = Vec::<VVertex>::new();
     let mut tess_indices = Vec::<u32>::new();
 
-    // One large reservation per output buffer instead of doubling growth:
-    // every big realloc is a vm call serialized on the task's vm-map lock,
-    // and 12 concurrent builders turned the buildings stage from 11ms into
-    // 340ms in-app (parallel single-thread PROCESSES showed no inflation —
-    // the lock is per-task). Sized from measured city-tile output (~4-5
-    // floats per source byte for fills/casings in 3D); Vec::reserve on
-    // these sizes is one allocation, and overshoot is returned at the
-    // shrink below.
-    let heavy_3d = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
-    let payload_estimate = tile_ways
-        .iter()
-        .map(|way| way.points.len() * 8 + 64)
-        .sum::<usize>();
-    let reserve_floats = if heavy_3d {
-        (payload_estimate * 6).clamp(1 << 16, 24 << 20)
-    } else {
-        (payload_estimate * 2).clamp(1 << 12, 8 << 20)
-    };
-    let mut fill_indices = Vec::<u32>::with_capacity(reserve_floats / 4);
-    let mut fill_vertices = Vec::<f32>::with_capacity(reserve_floats);
-    let mut casing_indices = Vec::<u32>::with_capacity(reserve_floats / 4);
-    let mut casing_vertices = Vec::<f32>::with_capacity(reserve_floats);
+    // NOTE: do NOT pre-reserve these to "final" sizes. A generous
+    // reservation (tried at up to 24M floats) made 12 concurrent builders
+    // first-touch ~240MB of fresh zero pages each and serialized the whole
+    // pool on the kernel fault path — the buildings stage went 340ms ->
+    // 3000ms in-app while staying at 11ms in the serial harness.
+    let mut fill_indices = Vec::<u32>::new();
+    let mut fill_vertices = Vec::<f32>::new();
+    let mut casing_indices = Vec::<u32>::new();
+    let mut casing_vertices = Vec::<f32>::new();
     let mut stroke_indices = Vec::<u32>::new();
     let mut stroke_vertices = Vec::<f32>::new();
     let mut icon_indices = Vec::<u32>::new();
@@ -4173,6 +4160,7 @@ fn build_tile_buffers_from_features_profiled(
                 .partial_cmp(&b.min_y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        profiler.lap("b-jobs", &format!("jobs={}", building_jobs.len()));
         let building_units_per_m = {
             let n = (1u32 << tile_key.z) as f64;
             let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
@@ -4243,11 +4231,12 @@ fn build_tile_buffers_from_features_profiled(
                     }
                     // The swept hull needs all three parts: footprint,
                     // TRANSLATED footprint, and the connecting edge quads.
-                    // Without the translated ring the far side is stitched
-                    // only from quads, and any facing gate then leaves
-                    // grid-aligned buildings with sheared wedge shadows;
-                    // with it, thin near-parallel quads are interior to
-                    // the hull and can never show as spikes.
+                    // (A single Minkowski-sweep path was tried and REVERTED:
+                    // epsilon-concave rings hand i_overlay self-crossing
+                    // near-degenerate polygons and the dissolve explodes to
+                    // 10-15s. The real fix for shadow cost is baking the
+                    // dissolved shadow shapes per bucket, not a cleverer
+                    // runtime construction.)
                     let mut scratch: Vec<[f64; 2]> = ring
                         .iter()
                         .map(|p| [p.0 as f64, p.1 as f64])
@@ -4266,9 +4255,6 @@ fn build_tile_buffers_from_features_profiled(
                         if len < 1e-4 {
                             continue;
                         }
-                        // Outward normal of a positively-wound ring: only
-                        // skip true degenerates — coverage comes from the
-                        // two rings, quads just connect them.
                         if (dy / len) * sx + (-dx / len) * sy <= 0.02 {
                             continue;
                         }
@@ -4282,6 +4268,7 @@ fn build_tile_buffers_from_features_profiled(
                     }
                 }
             }
+            profiler.lap("b-sh-sweep", &format!("paths={}", paths.len()));
             if !paths.is_empty() {
                 // Chunked dissolve (union-mesh lesson: the solver
                 // degenerates on ring soups past a few thousand rings).
@@ -4343,6 +4330,7 @@ fn build_tile_buffers_from_features_profiled(
                         footprints.push(fp);
                     }
                 }
+                profiler.lap("b-sh-dissolve", "");
                 if !footprints.is_empty() {
                     let mut acc = shapes;
                     for chunk in footprints.chunks(SHADOW_DISSOLVE_CHUNK) {
@@ -4359,6 +4347,7 @@ fn build_tile_buffers_from_features_profiled(
                     shapes = acc;
                 }
                 building_shadow_footprints = footprints;
+                profiler.lap("b-sh-diff", "");
                 let fill_clip_bounds =
                     tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
                 // ~1.2 m analytic AA fringe softens the shadow edge.
@@ -4381,6 +4370,7 @@ fn build_tile_buffers_from_features_profiled(
                     }
                 }
                 building_shadow_shapes = shapes.clone();
+                profiler.lap("b-sh-open", "");
                 emit_shadow_shapes(
                     shapes,
                     fill_clip_bounds,
@@ -4397,6 +4387,7 @@ fn build_tile_buffers_from_features_profiled(
                 feature_count += 1;
             }
         }
+        profiler.lap("b-shadow", "");
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -6452,17 +6443,6 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         String::new()
     };
-    // Return the up-front reservation's overshoot: these buffers stay
-    // resident until tile eviction and the byte budget must see real
-    // sizes. One vm op each — the growth path this run avoided was ~10.
-    let mut fill_indices = fill_indices;
-    let mut fill_vertices = fill_vertices;
-    let mut casing_indices = casing_indices;
-    let mut casing_vertices = casing_vertices;
-    fill_indices.shrink_to_fit();
-    fill_vertices.shrink_to_fit();
-    casing_indices.shrink_to_fit();
-    casing_vertices.shrink_to_fit();
     TileBuffers {
         pin_hits,
         fill_indices,

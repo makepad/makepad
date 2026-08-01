@@ -1574,6 +1574,11 @@ pub fn probe_compiled_theme() -> CompiledMapTheme {
         }
     }
     let mut style = MapThemeStyle::default();
+    // Match the live app themes: they run with baked building/deck shadows
+    // on. The probe shipped with this OFF for weeks, which made every
+    // headless profile skip the per-tile shadow silhouette dissolve — the
+    // buildings stage measured 11ms while the app paid 340ms+.
+    style.shiny.bake_shadows = true;
     style.fill_rules = vec![
         fill("building", "", 0xd9d0c9),
         fill("building_outline", "", 0xb5aa9b),
