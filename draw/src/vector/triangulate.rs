@@ -174,22 +174,8 @@ pub fn append_expanded_stroke_geometry(
     let ramp = (total_dist * 0.35).min(96.0).max(1e-3);
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    acc_verts.reserve(verts.len() * VECTOR_FLOATS_PER_VERTEX);
     for (vi, (v, anchor)) in verts.iter().zip(anchors).enumerate() {
-        acc_verts.push(anchor[0]);
-        acc_verts.push(anchor[1]);
-        acc_verts.push(v.u);
-        acc_verts.push(v.v);
-        acc_verts.push(params.color[0]);
-        acc_verts.push(params.color[1]);
-        acc_verts.push(params.color[2]);
-        acc_verts.push(params.color[3]);
-        acc_verts.push(params.stroke_mult);
-        acc_verts.push(v.stroke_dist);
-        acc_verts.push(params.shape_id + EXPAND_STROKE_SHAPE_OFFSET);
-        acc_verts.push(params.params[0]);
-        acc_verts.push(v.x - anchor[0]);
-        acc_verts.push(v.y - anchor[1]);
-        acc_verts.push(expand_class);
         let deck_v = if let Some(decks) = deck_override {
             decks.get(vi).copied().unwrap_or(0.0)
         } else if deck_m > 0.0 {
@@ -199,22 +185,38 @@ pub fn append_expanded_stroke_geometry(
         } else {
             params.params[4]
         };
-        acc_verts.push(deck_v);
         // A lifted deck is semantically ABOVE whatever it crosses: bump its
         // tilt micro-depth with the lift, or high-rank strokes underneath
         // (rail over secondary) still depth-win near the crossing.
-        acc_verts.push(if deck_m > 0.0 || deck_override.is_some() {
+        let param5 = if deck_m > 0.0 || deck_override.is_some() {
             params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
         } else {
             params.params[5]
-        });
-        acc_verts.push(v.clip_radius);
-        acc_verts.push(params.zbias);
+        };
+        acc_verts.extend_from_slice(&[
+            anchor[0],
+            anchor[1],
+            v.u,
+            v.v,
+            params.color[0],
+            params.color[1],
+            params.color[2],
+            params.color[3],
+            params.stroke_mult,
+            v.stroke_dist,
+            params.shape_id + EXPAND_STROKE_SHAPE_OFFSET,
+            params.params[0],
+            v.x - anchor[0],
+            v.y - anchor[1],
+            expand_class,
+            deck_v,
+            param5,
+            v.clip_radius,
+            params.zbias,
+        ]);
     }
 
-    for &idx in indices {
-        acc_indices.push(base + idx);
-    }
+    acc_indices.extend(indices.iter().map(|&idx| base + idx));
 }
 
 pub fn append_tessellated_geometry(
@@ -244,37 +246,39 @@ pub fn append_tessellated_geometry_decked(
     }
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    acc_verts.reserve(verts.len() * VECTOR_FLOATS_PER_VERTEX);
     for (vi, v) in verts.iter().enumerate() {
         let deck_v = match deck_override {
             Some(decks) => decks.get(vi).copied().unwrap_or(0.0),
             None => params.params[4],
         };
-        acc_verts.push(v.x);
-        acc_verts.push(v.y);
-        acc_verts.push(v.u);
-        acc_verts.push(v.v);
-        acc_verts.push(params.color[0]);
-        acc_verts.push(params.color[1]);
-        acc_verts.push(params.color[2]);
-        acc_verts.push(params.color[3]);
-        acc_verts.push(params.stroke_mult);
-        acc_verts.push(v.stroke_dist);
-        acc_verts.push(params.shape_id);
-        acc_verts.push(params.params[0]);
-        acc_verts.push(params.params[1]);
-        acc_verts.push(params.params[2]);
-        acc_verts.push(params.params[3]);
-        acc_verts.push(deck_v);
-        acc_verts.push(if deck_v > 0.0 {
+        let param5 = if deck_v > 0.0 {
             params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
         } else {
             params.params[5]
-        });
-        acc_verts.push(v.clip_radius);
-        acc_verts.push(params.zbias);
+        };
+        acc_verts.extend_from_slice(&[
+            v.x,
+            v.y,
+            v.u,
+            v.v,
+            params.color[0],
+            params.color[1],
+            params.color[2],
+            params.color[3],
+            params.stroke_mult,
+            v.stroke_dist,
+            params.shape_id,
+            params.params[0],
+            params.params[1],
+            params.params[2],
+            params.params[3],
+            deck_v,
+            param5,
+            v.clip_radius,
+            params.zbias,
+        ]);
     }
 
-    for &idx in indices {
-        acc_indices.push(base + idx);
-    }
+    acc_indices.extend(indices.iter().map(|&idx| base + idx));
 }
