@@ -2983,6 +2983,8 @@ impl Cx {
                     let _ = (video_id, source, autoplay, should_loop);
                     // TODO: implement via MediaPlayer when needed
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.xr_buffer_scale_requested = self
                         .os

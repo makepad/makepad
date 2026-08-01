@@ -1463,6 +1463,8 @@ impl Cx {
                         player.set_playback_rate(rate);
                     }
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
                     use crate::texture::TextureId;
                     let player = AppleUnifiedVideoPlayer::new(

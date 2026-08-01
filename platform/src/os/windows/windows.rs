@@ -891,6 +891,8 @@ impl Cx {
                         player.set_playback_rate(rate);
                     }
                 }
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 CxOsOp::AttachCameraNativePreview { .. }
                 | CxOsOp::UpdateCameraNativePreview { .. }
                 | CxOsOp::DetachCameraNativePreview { .. } => {

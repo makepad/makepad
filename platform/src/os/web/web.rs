@@ -882,6 +882,8 @@ impl Cx {
                 CxOsOp::SetVideoVolume(_, _) => {}
                 CxOsOp::SetVideoPlaybackRate(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
+                // Track selection is currently implemented on Linux GStreamer only.
+                CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
