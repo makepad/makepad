@@ -11,7 +11,7 @@ use crate::makepad_draw::vector::{
 use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
-use makepad_mbtile_reader::MbtilesReader;
+use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -354,6 +354,13 @@ enum RoadVerticalClass {
 /// Sentinel for "no casing pass" in `RoadSurfaceKey::casing_width_bits`
 /// (real width bit patterns never collide with it).
 const NO_CASING_BITS: u32 = u32::MAX;
+
+/// Cascade-input dump lever: env for headless runs, file flag for
+/// studio-launched apps (their env is the studio's).
+fn cascade_dump_armed() -> bool {
+    std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some()
+        || std::path::Path::new("/tmp/mp_cascade_dump").exists()
+}
 
 /// Theme-stable identity of one road-surface union tier. NO resolved
 /// colors: grouping, paint-order tiebreaks and the faces-bake signature
@@ -3545,10 +3552,28 @@ fn build_tile_buffers_from_features_profiled(
     let mut tess_verts = Vec::<VVertex>::new();
     let mut tess_indices = Vec::<u32>::new();
 
-    let mut fill_indices = Vec::<u32>::new();
-    let mut fill_vertices = Vec::<f32>::new();
-    let mut casing_indices = Vec::<u32>::new();
-    let mut casing_vertices = Vec::<f32>::new();
+    // One large reservation per output buffer instead of doubling growth:
+    // every big realloc is a vm call serialized on the task's vm-map lock,
+    // and 12 concurrent builders turned the buildings stage from 11ms into
+    // 340ms in-app (parallel single-thread PROCESSES showed no inflation —
+    // the lock is per-task). Sized from measured city-tile output (~4-5
+    // floats per source byte for fills/casings in 3D); Vec::reserve on
+    // these sizes is one allocation, and overshoot is returned at the
+    // shrink below.
+    let heavy_3d = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
+    let payload_estimate = tile_ways
+        .iter()
+        .map(|way| way.points.len() * 8 + 64)
+        .sum::<usize>();
+    let reserve_floats = if heavy_3d {
+        (payload_estimate * 6).clamp(1 << 16, 24 << 20)
+    } else {
+        (payload_estimate * 2).clamp(1 << 12, 8 << 20)
+    };
+    let mut fill_indices = Vec::<u32>::with_capacity(reserve_floats / 4);
+    let mut fill_vertices = Vec::<f32>::with_capacity(reserve_floats);
+    let mut casing_indices = Vec::<u32>::with_capacity(reserve_floats / 4);
+    let mut casing_vertices = Vec::<f32>::with_capacity(reserve_floats);
     let mut stroke_indices = Vec::<u32>::new();
     let mut stroke_vertices = Vec::<f32>::new();
     let mut icon_indices = Vec::<u32>::new();
@@ -5331,7 +5356,7 @@ fn build_tile_buffers_from_features_profiled(
         union_clip,
     );
     let baked_input_hit = !faces_bake_sink_armed()
-        && std::env::var_os("MAKEPAD_CASCADE_DUMP").is_none()
+        && !cascade_dump_armed()
         && baked_faces
             .as_ref()
             .is_some_and(|bake| bake.bucket == render_zoom && bake.signature == input_sig);
@@ -5608,9 +5633,37 @@ fn build_tile_buffers_from_features_profiled(
         // styling at runtime. Guarded by the group-structure signature (and
         // the stream's coordinate checksum at parse time); any mismatch
         // falls back to the runtime cascade.
-        // MAKEPAD_CASCADE_DUMP=1: per-group structural lines in signature
-        // order — diff two runs to find exactly which group diverges.
-        if std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some() {
+        // MAKEPAD_CASCADE_DUMP=1 (or `touch /tmp/mp_cascade_dump` for
+        // studio-launched apps): structural dump of the cascade input —
+        // diff two runs (e.g. light vs night) to find what diverges.
+        if cascade_dump_armed() {
+            for (key, _, ways) in &smoothed_tiers {
+                let pts: usize = ways.iter().map(|(points, _)| points.len()).sum();
+                let dzs: usize = ways
+                    .iter()
+                    .filter(|(_, dz)| dz.is_some())
+                    .count();
+                eprintln!(
+                    "CASCADE-TIER class={:08x} rank={} cw={:08x} caw={:08x} v={:?} l={} ways={} pts={} dz={}",
+                    key.class_id,
+                    key.sort_rank,
+                    key.center_width_bits,
+                    key.casing_width_bits,
+                    key.vertical,
+                    key.layer,
+                    ways.len(),
+                    pts,
+                    dzs
+                );
+            }
+            let plaza_pts: usize = plaza_rings.iter().map(|(_, _, p, _)| p.len()).sum();
+            eprintln!(
+                "CASCADE-PLAZA count={} pts={} joints={} portals={}",
+                plaza_rings.len(),
+                plaza_pts,
+                tier_joint_ends.len(),
+                tunnel_portals.len()
+            );
             for (gi, group) in groups.iter().enumerate() {
                 let ring_lens: Vec<usize> =
                     group.rings.iter().map(|(ring, _, _)| ring.len()).collect();
@@ -6399,6 +6452,17 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         String::new()
     };
+    // Return the up-front reservation's overshoot: these buffers stay
+    // resident until tile eviction and the byte budget must see real
+    // sizes. One vm op each — the growth path this run avoided was ~10.
+    let mut fill_indices = fill_indices;
+    let mut fill_vertices = fill_vertices;
+    let mut casing_indices = casing_indices;
+    let mut casing_vertices = casing_vertices;
+    fill_indices.shrink_to_fit();
+    fill_vertices.shrink_to_fit();
+    casing_indices.shrink_to_fit();
+    casing_vertices.shrink_to_fit();
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -6869,7 +6933,7 @@ pub fn load_local_tile_batch(
     let mut decode_failed = Vec::<TileKey>::new();
     let missing = requested;
 
-    let mut reader = MbtilesReader::open(mbtiles_path)
+    let mut reader = TileArchiveReader::open(mbtiles_path)
         .map_err(|err| format!("open {}: {}", mbtiles_path.display(), err))?;
 
     // Optional all-tag detail overlay. At z14 it may supply fallback bridge
@@ -6884,8 +6948,8 @@ pub fn load_local_tile_batch(
     let combined_archive = detail_mbtiles_path == Some(mbtiles_path);
     let mut detail_reader = if detail_may_be_needed && !combined_archive {
         detail_mbtiles_path
-            .filter(|path| path.is_file())
-            .and_then(|path| MbtilesReader::open(path).ok())
+            .filter(|path| path.is_file() || TileArchiveReader::is_mkmap_path(path))
+            .and_then(|path| TileArchiveReader::open(path).ok())
     } else {
         None
     };
@@ -8631,7 +8695,7 @@ mod bridge_probe_tests {
         let keys_spec = std::env::var("BAKED_AUDIT_KEYS").unwrap_or_else(|_| {
             "10,528,340;11,1057,678;12,2103,1346;13,4207,2692;13,4211,2691".into()
         });
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         let mut total_features = 0usize;
         let mut total_diverged = 0usize;
         for spec in keys_spec.split(';') {
@@ -8845,7 +8909,7 @@ mod bridge_probe_tests {
             .unwrap_or_else(|_| "../local/maps/nl-base-br.mbtiles".to_string());
         let keys_spec = std::env::var("TILE_PROFILE_KEYS").unwrap_or_else(|_| "14,8414,5386".into());
         let mut reader =
-            makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&archive)).unwrap();
+            makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&archive)).unwrap();
         for spec in keys_spec.split(';') {
             let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
             let (z, x, y) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
@@ -8945,10 +9009,10 @@ mod bridge_probe_tests {
         }
         let keys = std::env::var("TILE_PROFILE_KEYS")
             .unwrap_or_else(|_| "14,8414,5386;14,8415,5387".into());
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         let mut dz_reader = std::env::var("TILE_PROFILE_BRIDGE_DZ")
             .ok()
-            .map(|p| makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&p)).unwrap());
+            .map(|p| makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&p)).unwrap());
         let theme = crate::map::style::probe_compiled_theme();
         for spec in keys.split(';') {
             let mut it = spec.split(',').map(|v| v.trim().parse::<i64>().unwrap());
@@ -10887,7 +10951,7 @@ mod bridge_probe_tests {
         }
         let keys_spec = std::env::var("TILE_PROFILE_KEYS")
             .unwrap_or_else(|_| "14,8414,5384;13,4207,2690;12,2103,1346".into());
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         let light = crate::map::style::probe_compiled_theme();
         let recolored = crate::map::style::probe_compiled_theme_recolored();
         for spec in keys_spec.split(';') {
@@ -10953,14 +11017,14 @@ mod bridge_probe_tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         // TILE_PROFILE_DETAIL_ARCHIVE: two-reader mode replicating the old
         // base+detail archive pair (europe-shortbread + europe-osm-detail);
         // without it, deep-zoom detail comes from the combined archive's own
         // tile bytes (the nl-base-br pattern).
         let mut detail_reader = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE")
             .ok()
-            .map(|p| makepad_mbtile_reader::MbtilesReader::open(std::path::Path::new(&p)).unwrap());
+            .map(|p| makepad_mbtile_reader::TileArchiveReader::open(std::path::Path::new(&p)).unwrap());
         // The real compiled day theme: a default CompiledMapTheme styles
         // nothing and skips the entire tessellation path being profiled.
         let theme = crate::map::style::probe_compiled_theme();
@@ -11329,7 +11393,7 @@ mod bridge_probe_tests {
         if !path.exists() {
             return;
         }
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         for y in 5378..=5392 {
             let Some(raw) = reader.get_tile(14, 8415, 16383 - y).unwrap() else {
                 continue;
@@ -11408,7 +11472,7 @@ mod bridge_probe_tests {
         if !path.exists() {
             return;
         }
-        let mut reader = makepad_mbtile_reader::MbtilesReader::open(path).unwrap();
+        let mut reader = makepad_mbtile_reader::TileArchiveReader::open(path).unwrap();
         let raw = reader.get_tile(14, 8414, 16383 - 5386).unwrap().unwrap();
         let data = decode_vector_tile_payload(&raw).unwrap();
         let mut collector = MvtLocalCollector::new(1.0);

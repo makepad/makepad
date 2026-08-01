@@ -4884,7 +4884,8 @@ impl MapView {
     /// Opening is cheap (metadata B-tree only); absent/invalid metadata
     /// falls back to the compiled-in range.
     fn ensure_local_zoom_range(&mut self, active_path: &str, mbtiles_path: &Path) {
-        let file_exists = mbtiles_path.is_file();
+        let file_exists = mbtiles_path.is_file()
+            || makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(mbtiles_path);
         let same_path = self
             .local_source_zoom_range_path
             .as_deref()
@@ -4900,7 +4901,7 @@ impl MapView {
         if !file_exists {
             return;
         }
-        let range = MbtilesReader::open(mbtiles_path)
+        let range = makepad_mbtile_reader::TileArchiveReader::open(mbtiles_path)
             .ok()
             .and_then(|mut reader| reader.get_metadata().ok())
             .and_then(|metadata| {
