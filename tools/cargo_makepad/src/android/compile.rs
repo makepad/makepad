@@ -1744,6 +1744,22 @@ fn add_resources(
     Ok(())
 }
 
+// resources/ios is iOS-only; resources/android ships as runtime assets minus
+// the packaging inputs (manifest template, res/) already compiled into the package
+fn cp_android_runtime_assets(source_dir: &Path, dst_dir: &Path) -> Result<(), String> {
+    cp_all_skip_top(source_dir, dst_dir, &["android", "ios"], false)?;
+    let android_src = source_dir.join("android");
+    if android_src.is_dir() {
+        cp_all_skip_top(
+            &android_src,
+            &dst_dir.join("android"),
+            &["AndroidManifest.xml.template", "res"],
+            false,
+        )?;
+    }
+    Ok(())
+}
+
 fn add_assets_dir_to_apk(
     out_dir: &Path,
     assets_to_add: &mut Vec<String>,
@@ -1759,7 +1775,7 @@ fn add_assets_dir_to_apk(
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = out_dir.join(format!("assets/makepad/{crate_name}/{asset_subdir}"));
     mkdir(&dst_dir)?;
-    cp_all(source_dir, &dst_dir, false)?;
+    cp_android_runtime_assets(source_dir, &dst_dir)?;
     if config.small_fonts && asset_subdir == "resources" {
         for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
             let replacement = source_dir.join(replacement_name);
@@ -1956,7 +1972,7 @@ fn stage_makepad_assets_subdir(
     let crate_name = crate_name.replace('-', "_");
     let dst_dir = assets_root.join(format!("makepad/{crate_name}/{asset_subdir}"));
     mkdir(&dst_dir)?;
-    cp_all(source_dir, &dst_dir, false)?;
+    cp_android_runtime_assets(source_dir, &dst_dir)?;
     if config.small_fonts && asset_subdir == "resources" {
         for (target_name, replacement_name) in SMALL_FONT_REPLACEMENTS {
             let replacement = source_dir.join(replacement_name);
