@@ -1270,6 +1270,11 @@ pub struct FinishedWalk {
     outer_size: Vec2d,
 
     metrics: Metrics,
+
+    /// Height to center by under `RowAlign::Center` instead of `outer_size.y`.
+    /// Text runs pass their line's height here so mixed-font runs on a row all
+    /// get the same shift and keep their relative baselines.
+    align_height: Option<f64>,
 }
 
 /// The horizontal shift that centers a `Flow::Right` row's actually-drawn content
@@ -1929,6 +1934,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 deferred_before_count: 0,
                 outer_size: size + walk.margin.size(),
                 metrics: walk.metrics,
+                align_height: None,
             });
 
             let origin = outer_origin + walk.margin.left_top();
@@ -1979,6 +1985,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 deferred_before_count: defer_index,
                 outer_size,
                 metrics: walk.metrics,
+                align_height: None,
             });
 
             let origin = outer_origin + walk.margin.left_top();
@@ -2160,12 +2167,25 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         align_list_start: usize,
         metrics: Metrics,
     ) {
+        self.emit_turtle_walk_with_align_height(rect, align_list_start, metrics, None)
+    }
+
+    /// Like [`emit_turtle_walk_with_metrics`] but also sets the walk's
+    /// centering height for `RowAlign::Center` (see `FinishedWalk::align_height`).
+    pub fn emit_turtle_walk_with_align_height(
+        &mut self,
+        rect: Rect,
+        align_list_start: usize,
+        metrics: Metrics,
+        align_height: Option<f64>,
+    ) {
         let turtle = self.turtles.last().unwrap();
         self.finished_walks.push(FinishedWalk {
             align_list_start,
             deferred_before_count: turtle.deferred_fills.len(),
             outer_size: rect.size,
             metrics,
+            align_height,
         });
     }
 
@@ -2361,7 +2381,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         let finished_walks_end = self.finished_walks.len();
 
         for finished_walk_index in finished_walks_start..finished_walks_end {
-            let finished_walk_height = self.finished_walks[finished_walk_index].outer_size.y;
+            let finished_walk = &self.finished_walks[finished_walk_index];
+            let finished_walk_height = finished_walk
+                .align_height
+                .unwrap_or(finished_walk.outer_size.y);
             let shift = (current_row_height - finished_walk_height) * 0.5;
 
             if shift <= 0.0 {
