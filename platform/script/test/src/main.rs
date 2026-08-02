@@ -4683,6 +4683,78 @@ pub fn main() {
         println!("GC campaign tests passed");
     }
 
+    // ========================================
+    // Per-tick cumulative budget: last_limit_consumed accounting
+    // (game.md M0r — N callbacks share ONE tick pool host-side)
+    // ========================================
+    {
+        let mut std0 = 0usize;
+        let vm = &mut ScriptVm {
+            host: &mut 0,
+            std: &mut std0,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        let exports = vm.heap_mut().new_object();
+        let _exports_ref = vm.heap_mut().new_object_ref(exports);
+        vm.set_injected_global(id!(exports), exports.into());
+        vm.eval(script! {
+            exports.work = |n| {
+                let acc = 0.0
+                let i = 0.0
+                while i < n {
+                    acc = acc + i
+                    i = i + 1.0
+                }
+                acc
+            }
+        });
+        let errs = vm.take_errors();
+        assert!(errs.is_empty(), "budget eval errors: {:?}", errs);
+        let work = vm.heap_mut().value(exports, id!(work).into(), NoTrap);
+
+        fn call(vm: &mut ScriptVm, work: ScriptValue, n: f64, limit: usize) -> ScriptValue {
+            let args = vm.heap_mut().new_object();
+            vm.heap_mut().set_object_storage_vec2(args);
+            vm.heap_mut()
+                .vec_push_unchecked(args, NIL, ScriptValue::from_f64(n));
+            let r = vm.with_instruction_limit(limit, |vm| vm.call_with_args_object(work, args));
+            vm.release_transient(args.into());
+            r
+        }
+
+        // Warmup, then: a successful call charges a sane, repeatable amount.
+        let _ = call(vm, work, 100.0, 500_000);
+        let r = call(vm, work, 100.0, 500_000);
+        assert!(!r.is_err());
+        let used_100 = vm.last_limit_consumed();
+        assert!(
+            used_100 > 100 && used_100 < 500_000,
+            "used_100={used_100}"
+        );
+        let _ = call(vm, work, 100.0, 500_000);
+        assert_eq!(
+            vm.last_limit_consumed(),
+            used_100,
+            "same work must charge the same amount"
+        );
+
+        // A host pool decrements across calls (gamemaker's tick pattern).
+        let mut pool = 500_000usize;
+        let _ = call(vm, work, 100.0, pool);
+        pool -= vm.last_limit_consumed();
+        let _ = call(vm, work, 100.0, pool);
+        pool -= vm.last_limit_consumed();
+        assert_eq!(pool, 500_000 - 2 * used_100);
+
+        // Exceeding the limit errors AND charges the entire allowance.
+        let r = call(vm, work, 10_000_000.0, 2_000);
+        assert!(r.is_err(), "limit overrun must error");
+        assert_eq!(vm.last_limit_consumed(), 2_000);
+        let _ = vm.take_errors();
+
+        println!("tick budget accounting tests passed");
+    }
+
     println!("Test done");
 
     // ========================================

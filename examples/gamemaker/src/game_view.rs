@@ -219,6 +219,9 @@ impl CallbackTable {
 /// working world ("last good" semantics).
 struct WorldSnapshot {
     entities: Vec<Entity>,
+    /// Restored on rollback so post-rollback spawns can't collide with (or
+    /// sort under) surviving ids — the sorted-by-id invariant depends on it.
+    next_id: u64,
     parts: Vec<Part>,
     labels: Vec<LabelDef>,
     terrain: Option<Terrain>,
@@ -306,7 +309,7 @@ pub struct GameView {
     /// makepad-game-render owns the whole scene pass now.
     #[rust]
     renderer: GameRenderer,
-    #[rust]
+    #[rust(Rc::new(RefCell::new(GameWorld::new())))]
     world: Rc<RefCell<GameWorld>>,
     /// Slot table for script callbacks (see CallbackTable). Shared with the
     /// dispatch closure the same way `world` is.
@@ -338,17 +341,24 @@ pub struct GameView {
     time_accum: f64,
     #[rust]
     last_time: Option<f64>,
-    // Orbit camera (script sets target/distance; mouse orbits).
-    #[rust(0.6f32)]
-    orbit_yaw: f32,
-    #[rust(-0.35f32)]
-    orbit_pitch: f32,
+    // Orbit camera: the AUTHORITATIVE pose lives on GameWorld (orbit_yaw/
+    // orbit_pitch/chase_hold — M0r ownership consolidation); the widget owns
+    // only device-input accumulation below.
     #[rust]
     orbit_last_abs: Option<DVec2>,
-    /// Chase-rig mouse authority: seconds left before easing resumes after a
-    /// drag (refreshed while dragging, counts down after release).
+    /// Buffered game.log lines (see append_log/flush_log_to_disk).
     #[rust]
-    chase_hold: f32,
+    log_buf: String,
+    /// .agent dir mtime at the last RPC poll — unchanged mtime means no new
+    /// request files, so the poll is one stat instead of three exists().
+    #[rust]
+    agent_dir_mtime: Option<std::time::SystemTime>,
+    /// Cumulative script-instruction budget left this tick (on_tick + timers
+    /// + on_touch all draw from ONE pool of TICK_INSTRUCTION_LIMIT).
+    #[rust]
+    tick_budget_left: usize,
+    #[rust]
+    budget_exhausted_logged: bool,
     /// Mouse orbit delta accumulated between ticks, handed to the script as
     /// input.look_dx/look_dy (drag detection for chase cams).
     #[rust]
@@ -518,6 +528,7 @@ impl GameView {
         let snapshot = {
             let mut world = self.world.borrow_mut();
             let snapshot = WorldSnapshot {
+                next_id: world.next_id,
                 entities: std::mem::take(&mut world.entities),
                 parts: std::mem::take(&mut world.parts),
                 labels: std::mem::take(&mut world.labels),
@@ -612,6 +623,7 @@ impl GameView {
             {
                 let mut world = self.world.borrow_mut();
                 world.entities = snapshot.entities;
+                world.next_id = snapshot.next_id;
                 world.parts = snapshot.parts;
                 world.labels = snapshot.labels;
                 world.terrain = snapshot.terrain;
@@ -643,6 +655,9 @@ impl GameView {
             self.write_agent_file("last_error.txt", &format!("eval #{generation}\n{joined}\n"));
             self.last_eval_error = Some(joined);
         }
+        // Eval boundaries flush immediately — `ag logs`/`ag errors` right
+        // after an edit must see the report, not a 1s-stale file.
+        self.flush_log_to_disk();
         if self.last_eval_ok {
             cx.widget_action(self.uid, GameViewAction::EvalOk { generation });
         } else {
@@ -679,18 +694,30 @@ impl GameView {
 
     // ── logs / agent files ──────────────────────────────────────────────
 
-    fn append_log(&self, line: &str) {
+    /// Buffered: lines land in memory and hit disk via flush_log_to_disk —
+    /// once a second from the tick, immediately on eval/error boundaries.
+    /// (The old per-line open/append was file I/O on the 60Hz tick path.)
+    fn append_log(&mut self, line: &str) {
+        use std::fmt::Write;
+        let tick = self.world.borrow().tick;
+        let _ = writeln!(self.log_buf, "[t{tick}] {line}");
+    }
+
+    fn flush_log_to_disk(&mut self) {
+        if self.log_buf.is_empty() {
+            return;
+        }
         let Some(dir) = self.agent_dir() else { return };
         let _ = std::fs::create_dir_all(&dir);
-        let stamped = format!("[t{}] {}\n", self.world.borrow().tick, line);
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join("game.log"))
         {
-            let _ = file.write_all(stamped.as_bytes());
+            let _ = file.write_all(self.log_buf.as_bytes());
         }
+        self.log_buf.clear();
     }
 
     fn write_agent_file(&self, name: &str, contents: &str) {
@@ -730,6 +757,16 @@ impl GameView {
 
     fn poll_agent_requests(&mut self, cx: &mut Cx) {
         let Some(dir) = self.agent_dir() else { return };
+
+        // Cheap gate: request files land as direct children of .agent/, so an
+        // unchanged dir mtime means nothing new — one stat instead of three
+        // exists() every poll. (Our own writes bump it too; that just costs
+        // one full check on the next poll.)
+        let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if mtime.is_some() && mtime == self.agent_dir_mtime {
+            return;
+        }
+        self.agent_dir_mtime = mtime;
 
         // `ag perf`: answer with the NEXT completed profiler window (≤2s away)
         // so the numbers are a fresh whole window, not a stale one.
@@ -788,16 +825,13 @@ impl GameView {
             // (bugs.md BUG 3: set_cam_yaw appeared clobbered because every
             // probe ran inside a test).
             {
-                let world = self.world.borrow();
-                if world.cam_third != 0 {
-                    self.orbit_yaw = 0.0;
-                } else {
-                    self.orbit_yaw = 0.6;
-                }
-                self.orbit_pitch = -0.35;
+                let mut world = self.world.borrow_mut();
+                let yaw = if world.cam_third != 0 { 0.0 } else { 0.6 };
+                world.orbit_yaw = yaw;
+                world.orbit_pitch = -0.35;
                 // A drag just before test start must not leak mouse authority
                 // into the (mouse-inert) test — chase rigs stay deterministic.
-                self.chase_hold = 0.0;
+                world.chase_hold = 0.0;
             }
             self.test_run = Some(TestRun {
                 frame: 0,
@@ -1003,6 +1037,10 @@ impl GameView {
     fn run_tick(&mut self, cx: &mut Cx) {
         let tick_t0 = std::time::Instant::now();
         let in_test = self.tick_test_run(cx);
+        // ONE cumulative script budget per tick: on_tick, every timer and
+        // every touch event share it (each call used to get a fresh 500k).
+        self.tick_budget_left = TICK_INSTRUCTION_LIMIT;
+        self.budget_exhausted_logged = false;
         // Scripts steer relative to the camera ("run where the camera looks"),
         // so the EFFECTIVE yaw must be visible world state: the orbit yaw, or
         // 0 for the fixed side-on camera (where raw axes are already correct).
@@ -1015,23 +1053,24 @@ impl GameView {
         // events, so a script set_cam_yaw still wins its tick.
         let stick_look = if in_test { dvec2(0.0, 0.0) } else { self.pad_look };
         let stick_active = stick_look.x != 0.0 || stick_look.y != 0.0;
-        if stick_active {
-            let px = stick_look * (260.0 * TICK_DT as f64);
-            self.orbit_yaw -= px.x as f32 * 0.01;
-            self.orbit_pitch = (self.orbit_pitch + px.y as f32 * 0.01).clamp(-1.45, 1.45);
-            self.look_accum += px;
-        }
         {
             let mut world = self.world.borrow_mut();
+            if stick_active {
+                let px = stick_look * (260.0 * TICK_DT as f64);
+                world.orbit_yaw -= px.x as f32 * 0.01;
+                world.orbit_pitch =
+                    (world.orbit_pitch + px.y as f32 * 0.01).clamp(-1.45, 1.45);
+                self.look_accum += px;
+            }
             // Script camera writes (game.set_cam_yaw/pitch, camera({pitch}))
             // apply to the live rig here — the SAME state the mouse writes,
             // so script and kid share one camera and never fork.
             if let Some(pitch) = world.cam_pitch_request.take() {
-                self.orbit_pitch = pitch;
+                world.orbit_pitch = pitch;
             }
             let mut script_wrote_yaw = false;
             if let Some(yaw) = world.cam_yaw_request.take() {
-                self.orbit_yaw = yaw;
+                world.orbit_yaw = yaw;
                 script_wrote_yaw = true;
             }
             // Chase rig: ease the orbit yaw to sit behind the target.
@@ -1048,36 +1087,38 @@ impl GameView {
                 let dragging =
                     !in_test && (self.orbit_last_abs.is_some() || stick_active);
                 if dragging {
-                    self.chase_hold = world.cam_recenter;
-                } else if self.chase_hold > 0.0 {
-                    self.chase_hold -= TICK_DT;
+                    world.chase_hold = world.cam_recenter;
+                } else if world.chase_hold > 0.0 {
+                    world.chase_hold -= TICK_DT;
                 } else if !script_wrote_yaw {
-                    if let Some(e) = world.entity(world.cam_chase) {
-                        let desired = -e.yaw;
-                        let speed = (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt();
+                    // Copy out of the entity borrow before writing the rig —
+                    // same values, same float expression order as before.
+                    if let Some((desired, speed)) = world.entity(world.cam_chase).map(|e| {
+                        (-e.yaw, (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt())
+                    }) {
                         let rate = (1.0 / world.cam_lag.max(0.05))
                             * (1.0 + speed * world.cam_speed_tighten.max(0.0));
-                        let mut d = desired - self.orbit_yaw;
+                        let mut d = desired - world.orbit_yaw;
                         while d > std::f32::consts::PI {
                             d -= std::f32::consts::TAU;
                         }
                         while d < -std::f32::consts::PI {
                             d += std::f32::consts::TAU;
                         }
-                        self.orbit_yaw += d * (rate * TICK_DT).min(1.0);
+                        world.orbit_yaw += d * (rate * TICK_DT).min(1.0);
                     }
                 }
             }
             // Beams are immediate-mode: whatever on_tick re-issues below
             // survives to render; everything else vanishes right here.
             world.beams.clear();
-            world.cam_yaw = if world.cam_side { 0.0 } else { self.orbit_yaw };
+            world.cam_yaw = if world.cam_side { 0.0 } else { world.orbit_yaw };
             // Mirror the rest of the camera pose for script reads, and hand
             // over the drag deltas (zeroed under tapes for determinism).
             // Tests no longer pin per-frame: the test START pins the orbit
             // once and the mouse is inert, so script camera writes stick and
             // stay deterministic.
-            world.cam_pitch = self.orbit_pitch;
+            world.cam_pitch = world.orbit_pitch;
             world.cam_dragging =
                 !in_test && (self.orbit_last_abs.is_some() || stick_active);
             let look = std::mem::take(&mut self.look_accum);
@@ -1187,6 +1228,10 @@ impl GameView {
         }
         self.tick_peek_run(cx);
         self.flush_log();
+        // Disk flush at most once a second (or when a chatty game piles up).
+        if self.world.borrow().tick % 60 == 0 || self.log_buf.len() > 16384 {
+            self.flush_log_to_disk();
+        }
         self.perf.house_us += perf_us(t_house);
         self.perf.ticks += 1;
         self.perf.worst_tick_us = self.perf.worst_tick_us.max(perf_us(tick_t0));
@@ -1266,9 +1311,17 @@ impl GameView {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return;
         }
+        if self.tick_budget_left == 0 {
+            if !self.budget_exhausted_logged {
+                self.budget_exhausted_logged = true;
+                self.append_log("tick script budget exhausted — remaining callbacks skipped this tick");
+            }
+            return;
+        }
+        let budget = self.tick_budget_left;
         let world = self.world.clone();
         let vm_id = self.vm_id;
-        let errors = cx.with_script_vm_id(vm_id, |vm| {
+        let (errors, consumed) = cx.with_script_vm_id(vm_id, |vm| {
             let args_obj = vm.bx.heap.new_object();
             vm.bx.heap.set_object_storage_vec2(args_obj);
             vm.bx.heap.clear_object_deep(args_obj);
@@ -1288,18 +1341,21 @@ impl GameView {
                 vm.bx.heap.vec_push_unchecked(args_obj, NIL, value);
             }
             vm.bx.captured_errors = Some(Vec::new());
-            let _ = vm.with_instruction_limit(TICK_INSTRUCTION_LIMIT, |vm| {
+            let _ = vm.with_instruction_limit(budget, |vm| {
                 vm.call_with_args_object_with_me(func.as_object().into(), args_obj, NIL)
             });
+            let consumed = vm.last_limit_consumed();
             vm.release_transient(args_obj.into());
             if let Some(input) = input_val {
                 vm.release_transient(input);
             }
-            vm.take_errors()
+            (vm.take_errors(), consumed)
         });
+        self.tick_budget_left = self.tick_budget_left.saturating_sub(consumed);
         if !errors.is_empty() {
             let joined = errors.join("\n");
             self.append_log(&format!("script error:\n{joined}"));
+            self.flush_log_to_disk();
             self.write_agent_file("last_error.txt", &format!("runtime\n{joined}\n"));
             // Push to the app, which decides whether to wake the agent — a
             // runtime error the kid just hit is invisible to the AI otherwise.
@@ -1329,8 +1385,8 @@ impl GameView {
             rect,
             time,
             &CameraRig {
-                yaw: self.orbit_yaw,
-                pitch: self.orbit_pitch,
+                yaw: world.orbit_yaw,
+                pitch: world.orbit_pitch,
                 in_test: self.test_run.is_some(),
             },
         )
@@ -1659,7 +1715,7 @@ fn spawn_entity(
     world.mark_render_dirty();
     world.next_id += 1;
     let id = world.next_id;
-    world.entities.push(Entity {
+    world.push_entity(Entity {
         id,
         kind,
         shape,
@@ -1900,7 +1956,7 @@ fn spawn_terrain(
             world.next_id += 1;
             let id = world.next_id;
             // One translucent sensor slab: gameplay touch + the water look.
-            world.entities.push(Entity {
+            world.push_entity(Entity {
                 id,
                 kind: BodyKind::Static,
                 pos: vec3f(0.0, level - 0.05, 0.0),
@@ -1945,7 +2001,7 @@ fn spawn_terrain(
             let mut world = world.borrow_mut();
             world.next_id += 1;
             let id = world.next_id;
-            world.entities.push(Entity {
+            world.push_entity(Entity {
                 id,
                 kind: BodyKind::Static,
                 pos: vec3f(x, (base + top) * 0.5, z),
@@ -3429,9 +3485,12 @@ impl Widget for GameView {
             Event::MouseMove(me) => {
                 if let Some(last) = self.orbit_last_abs {
                     let delta = me.abs - last;
-                    self.orbit_yaw -= delta.x as f32 * 0.01;
-                    self.orbit_pitch =
-                        (self.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
+                    {
+                        let mut world = self.world.borrow_mut();
+                        world.orbit_yaw -= delta.x as f32 * 0.01;
+                        world.orbit_pitch =
+                            (world.orbit_pitch + delta.y as f32 * 0.01).clamp(-1.45, 1.45);
+                    }
                     // Scripts see this as input.look_dx/look_dy next tick.
                     self.look_accum += delta;
                     self.orbit_last_abs = Some(me.abs);
