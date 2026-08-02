@@ -2,6 +2,80 @@ use makepad_svg::path::{LineCap, LineJoin, VectorPath};
 use makepad_svg::tessellate::{compute_clip_radii, Tessellator, VVertex};
 
 pub const VECTOR_FLOATS_PER_VERTEX: usize = 19;
+/// Packed GPU layout: see `pack_vector_record` / VectorVertexPacked.
+pub const VECTOR_PACKED_FLOATS_PER_VERTEX: usize = 12;
+
+#[inline]
+fn f16_bits(value: f32) -> u32 {
+    // IEEE 754 binary16 encode (round-to-nearest-even, clamps to inf).
+    let bits = value.to_bits();
+    let sign = (bits >> 16) & 0x8000;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let frac = bits & 0x007f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if frac != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let frac = frac | 0x0080_0000;
+        let shift = (14 - e) as u32;
+        let half = frac >> shift;
+        let rem = frac & ((1 << shift) - 1);
+        let round = (rem > (1 << (shift - 1)))
+            || (rem == (1 << (shift - 1)) && (half & 1) != 0);
+        return sign | (half + round as u32);
+    }
+    let half = ((e as u32) << 10) | (frac >> 13);
+    let rem = frac & 0x1fff;
+    let round = (rem > 0x1000) || (rem == 0x1000 && (half & 1) != 0);
+    sign | (half + round as u32)
+}
+
+#[inline]
+fn pack_pair_f16(a: f32, b: f32) -> f32 {
+    f32::from_bits(f16_bits(a) | (f16_bits(b) << 16))
+}
+
+#[inline]
+fn pack_unorm8x4(r: f32, g: f32, b: f32, a: f32) -> f32 {
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    f32::from_bits(q(r) | (q(g) << 8) | (q(b) << 16) | (q(a) << 24))
+}
+
+/// One 19-float logical record -> the 12-slot packed layout.
+#[inline]
+pub fn pack_vector_record(record: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PER_VERTEX] {
+    [
+        record[0],
+        record[1],
+        pack_pair_f16(record[2], record[3]),
+        pack_unorm8x4(record[4], record[5], record[6], record[7]),
+        record[8],
+        pack_pair_f16(record[9], record[10]),
+        pack_pair_f16(record[11], record[14]),
+        pack_pair_f16(record[12], record[13]),
+        record[15],
+        record[16],
+        pack_pair_f16(record[17], 0.0),
+        record[18],
+    ]
+}
+
+/// Pack a whole 19-stride vertex buffer for GPU upload.
+pub fn pack_vector_vertices(vertices: &[f32]) -> Vec<f32> {
+    let count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut out = Vec::with_capacity(count * VECTOR_PACKED_FLOATS_PER_VERTEX);
+    for record in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
+        out.extend_from_slice(&pack_vector_record(record));
+    }
+    out
+}
 pub const VECTOR_ZBIAS_STEP: f32 = 0.000001;
 /// Selects DrawVector's signed-coordinate analytic fill fringe. Ordinary
 /// fills use `1e6`; a distinct sentinel lets the same vertex format carry a

@@ -51,6 +51,45 @@ pub struct VectorVertex {
     pub zbias: f32,
 }
 
+/// Packed VectorVertex: 12 f32 slots carrying the 19 logical fields —
+/// f16 pairs / unorm8x4 bitcast into single slots, unpacked in the vertex
+/// shader (unpack2f16/unpack4u8). Halves vertex fetch bandwidth; the
+/// precision-critical slots (positions, stroke_mult sentinels, param4
+/// icon-floor composite, param5 depth ladder, zbias 1e-6 steps) stay f32.
+#[derive(Clone, Script, ScriptHook)]
+pub struct VectorVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    /// unorm8 r|g|b|a
+    #[live]
+    pub color: f32,
+    #[live]
+    pub stroke_mult: f32,
+    /// f16(stroke_dist) | f16(shape_id)
+    #[live]
+    pub dist_shape: f32,
+    /// f16(param0) | f16(param3)
+    #[live]
+    pub p03: f32,
+    /// f16(param1) | f16(param2)
+    #[live]
+    pub p12: f32,
+    #[live]
+    pub param4: f32,
+    #[live]
+    pub param5: f32,
+    /// f16(clip_radius) | spare
+    #[live]
+    pub clipr: f32,
+    #[live]
+    pub zbias: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct PbrVertex {
     #[live]
@@ -119,6 +158,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertex);
     let vgen = shared(vm, id!(VectorGeom), GeometryGen::from_triangle_2d);
     set_script_value!(vm, geom.VectorGeom = vgen);
+    set_script_value_to_pod!(vm, geom.VectorVertexPacked);
+    let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
+    set_script_value!(vm, geom.VectorGeomPacked = vpgen);
     // PBR geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.PbrVertex);
     let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
@@ -165,6 +207,22 @@ impl GeometryGen {
     }
 
     /// Placeholder single-triangle geometry for vector drawing (overridden at draw time)
+    pub fn from_triangle_2d_packed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&crate::vector::pack_vector_record(&[
+                0.0, 0.0, 0.5, 1.0,
+                1.0, 1.0, 1.0, 1.0,
+                1e6, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0,
+                0.0,
+            ]));
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
     pub fn from_triangle_2d() -> GeometryGen {
         let mut g = Self::default();
         // 3 vertices with full VectorVertex stride (23 floats each)
