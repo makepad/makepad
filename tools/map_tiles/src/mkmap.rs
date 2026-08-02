@@ -37,6 +37,10 @@ const HEADER_LEN: usize = 112;
 const ROOT_RECORD_LEN: usize = 36;
 
 pub struct TransmuxOptions {
+    /// Additional source archives woven AFTER `source` (first-wins on
+    /// duplicate tile ids — order the world low-zoom slab first, then the
+    /// spiral cells).
+    pub extra_sources: Vec<PathBuf>,
     pub source: PathBuf,
     pub output: PathBuf,
     pub shard_cap: u64,
@@ -45,15 +49,32 @@ pub struct TransmuxOptions {
 
 pub fn parse_transmux_options(args: &[String]) -> Result<TransmuxOptions, String> {
     if args.len() < 3 {
-        return Err("transmux needs <source.mbtiles> <output.mkmap>".to_string());
+        return Err(
+            "transmux needs <source.mbtiles> [more.mbtiles ...] <output.mkmap>".to_string(),
+        );
+    }
+    // All-but-last positional args are sources; the last is the output.
+    let mut positional_end = args.len();
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if arg.starts_with("--") {
+            positional_end = i;
+            break;
+        }
+    }
+    if positional_end < 3 {
+        return Err("transmux needs at least one source and an output".to_string());
     }
     let mut options = TransmuxOptions {
         source: PathBuf::from(&args[1]),
-        output: PathBuf::from(&args[2]),
+        extra_sources: args[2..positional_end - 1]
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+        output: PathBuf::from(&args[positional_end - 1]),
         shard_cap: SHARD_HARD_CAP,
         sample_stride: 37,
     };
-    let mut index = 3;
+    let mut index = positional_end;
     while index < args.len() {
         match args[index].as_str() {
             "--shard-cap-bytes" => {
@@ -284,37 +305,54 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
             options.output.display()
         ));
     }
-    let mut reader = MbtilesReader::open(&options.source)
-        .map_err(|err| format!("open {}: {err}", options.source.display()))?;
-    let metadata = reader
+    let mut source_paths = vec![options.source.clone()];
+    source_paths.extend(options.extra_sources.iter().cloned());
+    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(source_paths.len());
+    for path in &source_paths {
+        readers.push(
+            MbtilesReader::open(path).map_err(|err| format!("open {}: {err}", path.display()))?,
+        );
+    }
+    let metadata = readers[0]
         .get_metadata()
         .map_err(|err| format!("read metadata: {err}"))?;
-    let dict = reader.tile_codec().dict().map(<[u8]>::to_vec);
+    let dict = readers[0].tile_codec().dict().map(<[u8]>::to_vec);
+    for (path, reader) in source_paths.iter().zip(&readers).skip(1) {
+        if reader.tile_codec().dict().map(<[u8]>::to_vec) != dict {
+            return Err(format!("{}: dictionary differs from first source", path.display()));
+        }
+    }
 
-    // Pass 1: enumerate all tiles, map to Hilbert ids.
-    println!("mkmap: pass 1/3 enumerating tiles");
-    let mut tiles: Vec<(u64, u8, u32, u32)> = Vec::new();
+    // Pass 1: enumerate all sources' tiles, map to Hilbert ids. Duplicate
+    // ids resolve FIRST-SOURCE-WINS (weave: world low-zoom slab first,
+    // then spiral cells — each cell's clipped world tiles lose).
+    println!("mkmap: pass 1/3 enumerating tiles ({} sources)", readers.len());
+    let mut tiles: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0_u8;
-    reader
-        .for_each_tile(|tile| {
-            let zoom = tile.zoom_level as u8;
-            let x = tile.tile_column as u32;
-            let axis = 1_u32 << zoom;
-            let y = axis - 1 - tile.tile_row as u32; // TMS -> XYZ
-            tiles.push((tile_id(zoom, x, y), zoom, x, y));
-            min_zoom = min_zoom.min(zoom);
-            max_zoom = max_zoom.max(zoom);
-        })
-        .map_err(|err| format!("scan {}: {err}", options.source.display()))?;
-    if tiles.is_empty() {
-        return Err("source archive contains no tiles".to_string());
+    for (src, reader) in readers.iter_mut().enumerate() {
+        reader
+            .for_each_tile(|tile| {
+                let zoom = tile.zoom_level as u8;
+                let x = tile.tile_column as u32;
+                let axis = 1_u32 << zoom;
+                let y = axis - 1 - tile.tile_row as u32; // TMS -> XYZ
+                tiles.push((tile_id(zoom, x, y), zoom, x, y, src as u32));
+                min_zoom = min_zoom.min(zoom);
+                max_zoom = max_zoom.max(zoom);
+            })
+            .map_err(|err| format!("scan {}: {err}", source_paths[src].display()))?;
     }
-    tiles.sort_unstable_by_key(|&(id, ..)| id);
-    for pair in tiles.windows(2) {
-        if pair[0].0 == pair[1].0 {
-            return Err(format!("duplicate tile id {} in source", pair[0].0));
-        }
+    if tiles.is_empty() {
+        return Err("source archives contain no tiles".to_string());
+    }
+    // Stable resolution: sort by (id, src) then keep the first of each id.
+    tiles.sort_unstable_by_key(|&(id, _, _, _, src)| (id, src));
+    let before = tiles.len();
+    tiles.dedup_by_key(|&mut (id, ..)| id);
+    let woven_out = before - tiles.len();
+    if woven_out > 0 {
+        println!("  {} duplicate tiles resolved first-source-wins", woven_out);
     }
     println!("  {} tiles, z{}..z{}", tiles.len(), min_zoom, max_zoom);
 
@@ -375,10 +413,10 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
         Ok(())
     };
 
-    for (index, &(id, zoom, x, y)) in tiles.iter().enumerate() {
+    for (index, &(id, zoom, x, y, src)) in tiles.iter().enumerate() {
         let axis = 1_i64 << zoom;
         let tms_row = axis - 1 - i64::from(y);
-        let blob = reader
+        let blob = readers[src as usize]
             .get_tile(i64::from(zoom), i64::from(x), tms_row)
             .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
             .ok_or_else(|| format!("tile z{zoom}/{x}/{y} vanished during transmux"))?;
