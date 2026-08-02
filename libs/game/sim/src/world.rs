@@ -1,0 +1,222 @@
+//! GameWorld — the complete simulation state. Moved verbatim from gamemaker's
+//! game_view.rs (M0 stage A extraction). The only semantic transformations:
+//! script callbacks are opaque [`CallbackSlot`]s (the host owns the
+//! slot→closure table), and reset_content no longer touches audio (the host
+//! stops the synth alongside its calls).
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+use makepad_live_id::*;
+use makepad_math::*;
+
+use crate::entity::*;
+use crate::terrain::*;
+use crate::CallbackSlot;
+
+/// Everything the script API reads/writes. Shared (Rc<RefCell>) between the
+/// widget and the native `game` handle registered into the isolate, so script
+/// calls mutate it synchronously — no async widget trampoline, deterministic
+/// ordering, and world-building during eval completes before eval returns.
+#[derive(Default)]
+pub struct GameWorld {
+    pub entities: Vec<Entity>,
+    pub next_id: u64,
+    pub gravity: f32,
+    pub on_tick: Option<CallbackSlot>,
+    pub on_touch: Option<CallbackSlot>,
+    pub timers: Vec<GameTimer>,
+    /// HUD text, keyed by slot name ("center"/"top"/"hint" + any the script
+    /// invents), each pinned to an anchor. Replace-on-set; empty text removes.
+    pub hud_slots: Vec<(String, HudSlot)>,
+    /// HUD gauges, keyed by name.
+    pub hud_bars: Vec<HudBar>,
+    pub crosshair: bool,
+    /// Camera requests from script.
+    pub cam_target: Vec3f,
+    pub cam_distance: f32,
+    pub cam_follow: u64,
+    pub cam_side: bool,
+    /// Third-person rig: pivot entity (0 = off), pivot height, boom length.
+    pub cam_third: u64,
+    pub cam_height: f32,
+    pub cam_boom: f32,
+    /// Chase rig (camera({chase: id})): renders exactly like third_person
+    /// (setting chase also sets cam_third) but additionally eases the orbit
+    /// yaw to sit BEHIND the target every tick. Authority: script write >
+    /// mouse this-tick > rig easing. 0 = off (mouse owns the orbit again).
+    pub cam_chase: u64,
+    /// Ease time-constant in seconds (smaller = tighter).
+    pub cam_lag: f32,
+    /// Seconds of mouse authority after a drag ends before the rig resumes.
+    pub cam_recenter: f32,
+    /// Scales the ease rate up with target speed: rate = (1/lag)·(1+speed·this).
+    pub cam_speed_tighten: f32,
+    /// One-shot angle sets from script, consumed by the widget next tick —
+    /// the writable half of the chase-cam API (the mouse owns the angles
+    /// otherwise, so writes go through the same authoritative widget state).
+    pub cam_pitch_request: Option<f32>,
+    pub cam_yaw_request: Option<f32>,
+    /// Widget state mirrored into the world each tick, so scripts can read
+    /// the full camera pose and hand control back gracefully after drags.
+    pub cam_pitch: f32,
+    pub cam_dragging: bool,
+    /// Mouse orbit delta accumulated since the last tick (0 while not
+    /// dragging, always 0 under tapes).
+    pub look_dx: f64,
+    pub look_dy: f64,
+    /// Vertical field of view (degrees). Racing games widen it with speed.
+    pub cam_fov: f32,
+    /// Decaying random camera offset amplitude (game.cam_shake).
+    pub cam_shake: f32,
+    /// game.save/game.load persistence. NOT cleared on eval — surviving
+    /// edits is the whole point (best laps). Loaded from save_path at
+    /// project switch; flushed by the widget at most once a second.
+    pub save_data: HashMap<String, SaveVal>,
+    pub save_path: Option<PathBuf>,
+    pub save_dirty: bool,
+    /// Immediate-mode cables, cleared at the top of every tick.
+    pub beams: Vec<Beam>,
+    /// Input state, written by the ActionMap / tape, read by script.
+    pub held: HashSet<LiveId>,
+    pub pressed: HashSet<LiveId>,
+    /// Gamepad state, merged with the keyboard at read time (never into
+    /// `held`, so a pad release can't cancel a held key). Stick is analog.
+    pub pad: PadState,
+    /// Decoration: visual-only child boxes and billboard nametags.
+    pub parts: Vec<Part>,
+    pub labels: Vec<LabelDef>,
+    /// Smooth heightfield ground (game.terrain smooth mode).
+    pub terrain: Option<Terrain>,
+    /// Sky/fog, enabled by game.sky().
+    pub sky: Option<SkyConfig>,
+    /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
+    /// camera-relative movement ("run where the camera looks").
+    pub cam_yaw: f32,
+    /// Seeded per eval, so wander AI is repeatable under input tapes — an
+    /// improvement over the Godot corpus, which called randomize().
+    pub rng: u64,
+    pub tick: u64,
+    pub time: f64,
+    pub log_pending: Vec<String>,
+    /// PERF: bumped whenever anything a STATIC entity contributes to the
+    /// screen changes (spawn/remove/restyle/sky). The renderer caches packed
+    /// instance slabs for static content keyed by this — bump it or your
+    /// static edit won't show.
+    pub render_rev: u64,
+}
+
+impl GameWorld {
+    /// Keyboard OR gamepad. The pad's stick maps onto the four directions at
+    /// half deflection so `held("left")` works the same on both.
+    pub fn action_held(&self, action: LiveId) -> bool {
+        if self.held.contains(&action) {
+            return true;
+        }
+        match action {
+            x if x == live_id!(jump) => self.pad.jump,
+            x if x == live_id!(shoot) => self.pad.shoot,
+            x if x == live_id!(grab) => self.pad.grab,
+            x if x == live_id!(reset) => self.pad.reset,
+            x if x == live_id!(left) => self.pad.axis_x < -0.5,
+            x if x == live_id!(right) => self.pad.axis_x > 0.5,
+            x if x == live_id!(up) => self.pad.axis_z < -0.5,
+            x if x == live_id!(down) => self.pad.axis_z > 0.5,
+            _ => false,
+        }
+    }
+
+    pub fn action_pressed(&self, action: LiveId) -> bool {
+        if self.pressed.contains(&action) {
+            return true;
+        }
+        match action {
+            x if x == live_id!(jump) => self.pad.jump_pressed,
+            x if x == live_id!(shoot) => self.pad.shoot_pressed,
+            x if x == live_id!(grab) => self.pad.grab_pressed,
+            x if x == live_id!(reset) => self.pad.reset_pressed,
+            _ => false,
+        }
+    }
+
+    /// Reset everything a re-eval rebuilds. The HOST is responsible for two
+    /// things alongside this call: stopping sustained audio (the synth is not
+    /// a sim concern) and releasing the callback slots this discards (the
+    /// slot table lives host-side; see game_view's CallbackTable).
+    pub fn reset_content(&mut self) {
+        self.entities.clear();
+        self.parts.clear();
+        self.labels.clear();
+        self.terrain = None;
+        self.sky = None;
+        self.next_id = 0;
+        self.gravity = 30.0;
+        self.on_tick = None;
+        self.on_touch = None;
+        self.timers.clear();
+        self.hud_slots.clear();
+        self.hud_bars.clear();
+        self.crosshair = false;
+        self.beams.clear();
+        self.cam_target = vec3f(0.0, 2.0, 0.0);
+        self.cam_distance = 18.0;
+        self.cam_follow = 0;
+        self.cam_side = false;
+        self.cam_third = 0;
+        self.cam_height = 1.6;
+        self.cam_boom = 10.0;
+        self.cam_chase = 0;
+        self.cam_lag = 0.3;
+        self.cam_recenter = 1.2;
+        self.cam_speed_tighten = 0.0;
+        self.cam_pitch_request = None;
+        self.cam_yaw_request = None;
+        self.cam_fov = 40.0;
+        self.cam_shake = 0.0;
+        self.rng = 0x9E37_79B9_7F4A_7C15;
+        // The doc contract: game.time() restarts at 0 on every reload. The
+        // tick counter stays monotonic (log stamps, timer scheduling).
+        // save_data deliberately survives — that's what game.save is FOR.
+        self.time = 0.0;
+        // A rebuilt world must never alias a previous world's slab revision.
+        self.mark_render_dirty();
+    }
+
+    /// Find a HUD slot by name (mut), or None.
+    pub fn hud_slot_mut(&mut self, name: &str) -> Option<&mut HudSlot> {
+        self.hud_slots
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| s)
+    }
+
+    pub fn rand(&mut self) -> f64 {
+        // xorshift64* — cheap, deterministic, plenty for wander timers.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    pub fn entity(&self, id: u64) -> Option<&Entity> {
+        self.entities.iter().find(|e| e.id == id)
+    }
+
+    pub fn entity_mut(&mut self, id: u64) -> Option<&mut Entity> {
+        self.entities.iter_mut().find(|e| e.id == id)
+    }
+
+    pub fn log(&mut self, line: String) {
+        self.log_pending.push(line);
+    }
+
+    /// See `render_rev`. Call after mutating anything static-visible.
+    pub fn mark_render_dirty(&mut self) {
+        self.render_rev = self.render_rev.wrapping_add(1);
+    }
+
+    /// Does a mutation of this entity id invalidate the static slab?
+    pub fn is_static_visual(&self, id: u64) -> bool {
+        self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
+    }
+}
