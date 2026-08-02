@@ -1,33 +1,22 @@
 // Makepad Arcade — networked AI game sandbox. Plan: repo-root game.md.
 pub use makepad_widgets;
 
+pub mod arcade_view;
+
 use makepad_widgets::*;
 
 app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.widgets.ArcadeView
 
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
                 window.inner_size: vec2(1000, 700)
                 body +: {
-                    View{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        spacing: 12
-                        align: Center
-
-                        Label{
-                            text: "Makepad Arcade"
-                            draw_text.text_style.font_size: 32
-                        }
-                        status := Label{
-                            text: "M0 — engine extraction in progress (game.md)"
-                        }
-                    }
+                    arcade_view := ArcadeView{}
                 }
             }
         }
@@ -40,19 +29,13 @@ pub struct App {
     ui: WidgetRef,
 }
 
-impl MatchEvent for App {
-    fn handle_startup(&mut self, cx: &mut Cx) {
-        let status = format!(
-            "M0 — sim core online: tick {}Hz, deterministic math kernel linked",
-            makepad_game_sim::TICK_HZ
-        );
-        self.ui.label(cx, ids!(status)).set_text(cx, &status);
-    }
-}
+impl MatchEvent for App {}
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        makepad_game_render::script_mod(vm);
+        crate::arcade_view::script_mod(vm);
         self::script_mod(vm)
     }
 

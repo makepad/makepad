@@ -4,6 +4,7 @@ workspace.members = [
     # === arcade (game.md) ===
     "apps/arcade",
     "libs/game/math",
+    "libs/game/render",
     "libs/game/sim",
     # === examples ===
     "examples/hotload_ui",
