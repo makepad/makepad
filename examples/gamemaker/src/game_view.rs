@@ -29,137 +29,22 @@ use makepad_widgets::*;
 // queries moved there verbatim. This file keeps the host: script isolate,
 // verb dispatch, rendering, input devices, agent RPC.
 use makepad_game_sim::{
-    camera_boom_limit, camera_shake_offset, collect_touches, step_world, world_raycast, Beam,
-    BodyKind, CallbackSlot, Entity, GameTimer, GameWorld, HudAnchor, HudBar, HudSlot, LabelDef,
-    PadState, Part, SaveVal, Shape, SkyConfig, Terrain, TERRAIN_ID, TICK_DT,
+    collect_touches, step_world, world_raycast, Beam, BodyKind, CallbackSlot, Entity, GameTimer,
+    GameWorld, HudAnchor, HudBar, HudSlot, LabelDef, PadState, Part, SaveVal, Shape, SkyConfig,
+    Terrain, TERRAIN_ID, TICK_DT,
+};
+use makepad_game_render::{
+    draw_billboard_labels, draw_hud_overlay, scene_state as render_scene_state, set_pass_camera,
+    CameraRig, DrawGameAlpha, DrawGameCube, DrawGameSky, DrawGameTerrain, DrawGameTexture,
+    GameDraws, GameRenderer,
 };
 
+// The five game draw shaders (DrawGameTexture/Cube/Alpha/Sky/Terrain) and the
+// whole scene/HUD render path moved to makepad-game-render (M0 stage B) —
+// main.rs registers makepad_game_render::script_mod before this module's.
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
-    use mod.geom
-
-    mod.draw.DrawGameTexture = mod.std.set_type_default() do #(DrawGameTexture::script_shader(vm)){
-        ..mod.draw.DrawQuad
-        scene_texture: texture_2d(float)
-
-        pixel: fn() {
-            let color = self.scene_texture.sample_as_bgra(self.pos)
-            return Pal.premul(color)
-        }
-    }
-
-    // The game cube: DrawCube + per-instance emission and distance fog.
-    mod.draw.DrawGameCube = mod.std.set_type_default() do #(DrawGameCube::script_shader(vm)){
-        ..mod.draw.DrawCube
-        v_fog: varying(float)
-
-        vertex: fn() {
-            let pos = self.get_size() * self.geom.geom_pos + self.get_pos()
-            let model_view = self.draw_list.view_transform * self.transform
-            let normal4 = model_view * vec4(
-                self.geom.geom_normal.x,
-                self.geom.geom_normal.y,
-                self.geom.geom_normal.z,
-                0.0
-            )
-            let normal = normalize(normal4.xyz)
-            self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
-            let view_pos = self.draw_pass.camera_view * self.world
-            let dp = max(dot(normal, normalize(self.light_dir)), 0.0)
-            self.lit_color = self.get_color(dp)
-            self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos
-        }
-
-        get_color: fn(dp: float) {
-            let ambient = self.color.xyz * 0.28
-            let lit = ambient + self.color.xyz * dp * 0.72
-            // Emission: glowing eyes, beacons, bolts (energy ramps at runtime).
-            let glowing = lit + self.color.xyz * self.glow * 0.6
-            return vec4(glowing, self.color.w)
-        }
-
-        pixel: fn() {
-            let fogged = mix(self.lit_color.xyz, self.fog_color, self.v_fog)
-            return vec4(fogged, self.lit_color.w)
-        }
-    }
-
-    // Same shading, alpha-blended: water, sensor ghosts, blob shadows.
-    mod.draw.DrawGameAlpha = mod.std.set_type_default() do #(DrawGameAlpha::script_shader(vm)){
-        ..mod.draw.DrawGameCube
-        alpha_blend: true
-        backface_culling: false
-    }
-
-    // Sky dome: a big cube around the camera, gradient by view direction
-    // (the Godot ProceduralSkyMaterial look).
-    mod.draw.DrawGameSky = mod.std.set_type_default() do #(DrawGameSky::script_shader(vm)){
-        ..mod.draw.DrawCube
-        backface_culling: false
-        v_dir: varying(vec3f)
-
-        vertex: fn() {
-            let pos = self.get_size() * self.geom.geom_pos + self.get_pos()
-            let model_view = self.draw_list.view_transform * self.transform
-            self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
-            self.v_dir = self.geom.geom_pos
-            let view_pos = self.draw_pass.camera_view * self.world
-            let clip = self.draw_pass.camera_projection * view_pos
-            // Pin the sky to the far plane (z ~= w) — the skybox trick Godot's
-            // background pass amounts to: the dome never clips against the far
-            // plane no matter its world size, and everything else wins depth.
-            self.vertex_pos = vec4(clip.x, clip.y, clip.w * 0.99995, clip.w)
-        }
-
-        pixel: fn() {
-            let y = normalize(self.v_dir).y
-            let up = clamp(y * 2.2, 0.0, 1.0)
-            let down = clamp((0.0 - y) * 2.2, 0.0, 1.0)
-            let sky = mix(self.sky_horizon, self.sky_top, up)
-            let ground = mix(self.sky_ground, self.sky_bottom, down)
-            let color = mix(ground, sky, step(0.0, y))
-            return vec4(color, 1.0)
-        }
-    }
-
-    // The smooth terrain mesh: per-vertex colored triangles, flat normals.
-    mod.draw.DrawGameTerrain = mod.std.set_type_default() do #(DrawGameTerrain::script_shader(vm)){
-        alpha_blend: false
-        backface_culling: true
-        vertex_pos: vertex_position(vec4f)
-        fb0: fragment_output(0, vec4f)
-        draw_call: uniform_buffer(draw.DrawCallUniforms)
-        draw_pass: uniform_buffer(draw.DrawPassUniforms)
-        draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
-        lit_color: varying(vec4f)
-        world: varying(vec4f)
-        v_fog: varying(float)
-
-        vertex: fn() {
-            let pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
-            let normal_in = vec3(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y)
-            let model_view = self.draw_list.view_transform * self.transform
-            let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
-            self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
-            let view_pos = self.draw_pass.camera_view * self.world
-            let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
-            let ambient = self.geom.color.xyz * 0.34
-            self.lit_color = vec4(ambient + self.geom.color.xyz * dp * 0.66, self.geom.color.w)
-            self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos
-        }
-
-        pixel: fn() {
-            return vec4(mix(self.lit_color.xyz, self.fog_color, self.v_fog), self.lit_color.w)
-        }
-
-        fragment: fn() {
-            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
-        }
-    }
 
     mod.widgets.GameViewBase = #(GameView::register_widget(vm))
     mod.widgets.GameView = set_type_default() do mod.widgets.GameViewBase{
@@ -186,70 +71,6 @@ script_mod! {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
     }
-}
-
-#[derive(Script, ScriptHook, Debug)]
-#[repr(C)]
-pub struct DrawGameTexture {
-    #[deref]
-    draw_super: DrawQuad,
-}
-
-/// DrawCube + per-instance emission (`glow`) and per-instance fog params.
-/// Instance-field rule: only #[live] instance fields after the deref chain.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawGameCube {
-    #[deref]
-    pub cube: DrawCube,
-    #[live(0.0)]
-    pub glow: f32,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub fog_color: Vec3f,
-    #[live(0.0)]
-    pub fog_density: f32,
-}
-
-/// Alpha-blended variant: water, sensor ghosts, blob shadows.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawGameAlpha {
-    #[deref]
-    pub cube: DrawGameCube,
-}
-
-/// Sky dome gradient (colors are instances so Rust sets them per frame).
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawGameSky {
-    #[deref]
-    pub cube: DrawCube,
-    #[live(vec3(0.32, 0.58, 0.9))]
-    pub sky_top: Vec3f,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub sky_horizon: Vec3f,
-    #[live(vec3(0.68, 0.75, 0.66))]
-    pub sky_ground: Vec3f,
-    #[live(vec3(0.3, 0.4, 0.3))]
-    pub sky_bottom: Vec3f,
-}
-
-/// The smooth terrain mesh (PbrVertex layout: per-vertex color).
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawGameTerrain {
-    #[deref]
-    pub draw_vars: DrawVars,
-    #[live]
-    pub transform: Mat4f,
-    #[live(1.0)]
-    pub depth_clip: f32,
-    #[live(vec3(0.35, 0.8, 0.45))]
-    pub light_dir: Vec3f,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub fog_color: Vec3f,
-    #[live(0.0)]
-    pub fog_density: f32,
 }
 
 const EVAL_INSTRUCTION_LIMIT: usize = 2_000_000;
@@ -481,19 +302,10 @@ pub struct GameView {
     // PerfGraph widget channel for the physics step (registered on first use).
     #[rust]
     perf_physics_ch: Option<PerfChannel>,
-    // PERF: unit shape geometries, built once (index = Shape::index()).
+    /// GPU-side caches (shape geometries, static slabs, terrain mesh) —
+    /// makepad-game-render owns the whole scene pass now.
     #[rust]
-    shape_geometries: [Option<Geometry>; 5],
-    // PERF: packed static instance data per shape (opaque / alpha passes),
-    // valid while slab_rev == world.render_rev.
-    #[rust]
-    static_slab: [Vec<f32>; 5],
-    #[rust]
-    static_slab_alpha: [Vec<f32>; 5],
-    #[rust]
-    slab_rev: Option<u64>,
-    #[rust]
-    slab_instance_count: u64,
+    renderer: GameRenderer,
     #[rust]
     world: Rc<RefCell<GameWorld>>,
     /// Slot table for script callbacks (see CallbackTable). Shared with the
@@ -568,11 +380,6 @@ pub struct GameView {
     /// so stick-up = look-up). Rotates the camera exactly like a drag.
     #[rust]
     pad_look: DVec2,
-    /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
-    #[rust]
-    terrain_geometry: Option<Geometry>,
-    #[rust]
-    terrain_revision: u64,
 }
 
 impl GameView {
@@ -1516,275 +1323,37 @@ impl GameView {
     // ── camera / render ─────────────────────────────────────────────────
 
     fn scene_state(&self, rect: Rect, time: f64) -> Option<SceneState3D> {
-        if rect.size.x <= 1.0 || rect.size.y <= 1.0 {
-            return None;
-        }
         let world = self.world.borrow();
-        // Tape runs pin the camera completely — captures must not depend on
-        // where the kid happened to leave the mouse.
-        let in_test = self.test_run.is_some();
-
-        // Third-person rig: pivot above the entity, drag orbits around it,
-        // boom slides in when geometry blocks the view (the Godot player cam).
-        if world.cam_third != 0 {
-            if let Some(e) = world.entity(world.cam_third) {
-                let pivot = e.pos + vec3f(0.0, world.cam_height, 0.0);
-                // No per-frame test pin: test start pins the orbit once and
-                // the mouse is inert during tests, so script camera writes
-                // render (and stay deterministic).
-                let (yaw, pitch) = (self.orbit_yaw, self.orbit_pitch.clamp(-1.2, 0.25));
-                let forward = vec3f(
-                    yaw.sin() * pitch.cos(),
-                    pitch.sin(),
-                    -yaw.cos() * pitch.cos(),
-                )
-                .normalize();
-                let boom = camera_boom_limit(&world, pivot, forward * -1.0, world.cam_boom);
-                let mut camera_pos = pivot - forward * boom;
-                camera_pos = camera_pos + camera_shake_offset(&world, in_test);
-                let view = Mat4f::look_at(camera_pos, pivot, vec3f(0.0, 1.0, 0.0));
-                let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-                // Near plane 1.0 (Godot's CAM_NEAR): a creature overlapping the
-                // lens clips open instead of filling the screen with one giant
-                // polygon. FOV is script-tunable (racing games widen with speed).
-                let projection =
-                    Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 1.0, 500.0);
-                return Some(SceneState3D {
-                    time,
-                    camera_pos,
-                    view,
-                    projection,
-                    viewport_rect: rect,
-                });
-            }
-        }
-
-        let mut target = world.cam_target;
-        if world.cam_follow != 0 {
-            if let Some(e) = world.entity(world.cam_follow) {
-                target = e.pos;
-            }
-        }
-        let distance = world.cam_distance.max(0.5);
-        let (yaw, pitch) = if world.cam_side {
-            // Side-on 2D style camera: look down -z.
-            (0.0f32, -0.08f32)
-        } else {
-            // Tests pinned at test START (orbit reset once, mouse inert).
-            (self.orbit_yaw, self.orbit_pitch.clamp(-1.45, 1.45))
-        };
-        let forward = vec3f(
-            yaw.sin() * pitch.cos(),
-            pitch.sin(),
-            -yaw.cos() * pitch.cos(),
-        )
-        .normalize();
-        // Camera sits behind the target looking along `forward` at it.
-        let mut camera_pos = target - forward * distance;
-        camera_pos = camera_pos + camera_shake_offset(&world, in_test);
-        let view = Mat4f::look_at(camera_pos, target, vec3f(0.0, 1.0, 0.0));
-        let aspect = (rect.size.x / rect.size.y).max(0.001) as f32;
-        let projection =
-            Mat4f::perspective(world.cam_fov.clamp(20.0, 120.0), aspect, 1.0, 500.0);
-        Some(SceneState3D {
+        render_scene_state(
+            &world,
+            rect,
             time,
-            camera_pos,
-            view,
-            projection,
-            viewport_rect: rect,
-        })
-    }
-
-    fn set_pass_camera(&self, cx: &mut Cx, scene: &SceneState3D) {
-        let camera_inv = scene.view.invert();
-        let pass_uniforms = &mut cx.passes[self.pass.draw_pass_id()].pass_uniforms;
-        pass_uniforms.camera_projection = scene.projection;
-        pass_uniforms.camera_projection_r = scene.projection;
-        pass_uniforms.camera_view = scene.view;
-        pass_uniforms.camera_view_r = scene.view;
-        pass_uniforms.depth_projection = scene.projection;
-        pass_uniforms.depth_projection_r = scene.projection;
-        pass_uniforms.depth_view = scene.view;
-        pass_uniforms.depth_view_r = scene.view;
-        pass_uniforms.camera_inv = camera_inv;
-        pass_uniforms.camera_inv_r = camera_inv;
-    }
-
-    /// Rebuild the terrain GPU mesh when the world's terrain revision moved.
-    /// Godot-style: two triangles per cell, verts duplicated per triangle so
-    /// normals are flat, per-tri color = average of its corners.
-    fn ensure_terrain_geometry(&mut self, cx: &mut Cx, terrain: &Terrain) -> GeometryId {
-        if self.terrain_geometry.is_some() && self.terrain_revision == terrain.revision {
-            return self.terrain_geometry.as_ref().unwrap().geometry_id();
-        }
-        let n = terrain.cells;
-        let mut vertices: Vec<f32> = Vec::with_capacity((n - 1) * (n - 1) * 2 * 3 * 16);
-        let mut indices: Vec<u32> = Vec::with_capacity((n - 1) * (n - 1) * 6);
-        let world_pos = |gx: usize, gz: usize| -> Vec3f {
-            vec3f(
-                terrain.origin + gx as f32 * terrain.cell_size,
-                terrain.heights[gz * n + gx],
-                terrain.origin + gz as f32 * terrain.cell_size,
-            )
-        };
-        let push_tri = |vertices: &mut Vec<f32>, indices: &mut Vec<u32>, a: Vec3f, b: Vec3f, c: Vec3f, color: Vec4f| {
-            let normal = Vec3f::cross(b - a, c - a).normalize();
-            for p in [a, b, c] {
-                let base = vertices.len() as u32 / 16;
-                let _ = base;
-                // PbrVertex: pos_nx, ny_nz_uv, color, tangent — 16 floats.
-                vertices.extend_from_slice(&[
-                    p.x, p.y, p.z, normal.x, normal.y, normal.z, 0.0, 0.0, color.x, color.y,
-                    color.z, color.w, 1.0, 0.0, 0.0, 1.0,
-                ]);
-                indices.push(vertices.len() as u32 / 16 - 1);
-            }
-        };
-        for gz in 0..n - 1 {
-            for gx in 0..n - 1 {
-                let a = world_pos(gx, gz);
-                let b = world_pos(gx + 1, gz);
-                let c = world_pos(gx, gz + 1);
-                let d = world_pos(gx + 1, gz + 1);
-                let color_at = |gx: usize, gz: usize| terrain.colors[gz * n + gx];
-                let c0 = color_at(gx, gz);
-                let c1 = color_at(gx + 1, gz);
-                let c2 = color_at(gx, gz + 1);
-                let c3 = color_at(gx + 1, gz + 1);
-                let avg3 = |x: Vec4f, y: Vec4f, z: Vec4f| {
-                    vec4(
-                        (x.x + y.x + z.x) / 3.0,
-                        (x.y + y.y + z.y) / 3.0,
-                        (x.z + y.z + z.z) / 3.0,
-                        1.0,
-                    )
-                };
-                // Same diagonal split as Terrain::height_at, CCW seen from +y.
-                push_tri(&mut vertices, &mut indices, a, c, b, avg3(c0, c2, c1));
-                push_tri(&mut vertices, &mut indices, b, c, d, avg3(c1, c2, c3));
-            }
-        }
-        let geometry = Geometry::new(cx);
-        geometry.update(cx, indices, vertices);
-        let id = geometry.geometry_id();
-        self.terrain_geometry = Some(geometry);
-        self.terrain_revision = terrain.revision;
-        id
-    }
-
-    /// Unit geometry for a shape, built once and shared by every instance
-    /// (index = Shape::index()). All shapes span [-0.5, 0.5] so `cube_size`
-    /// scales them exactly like the built-in cube.
-    fn ensure_shape_geometry(&mut self, cx: &mut Cx, shape: Shape) -> GeometryId {
-        let slot = &mut self.shape_geometries[shape.index()];
-        if let Some(geometry) = slot {
-            return geometry.geometry_id();
-        }
-        let (vertices, indices) = shape_geometry_data(shape);
-        let geometry = Geometry::new(cx);
-        geometry.update(cx, indices, vertices);
-        let id = geometry.geometry_id();
-        *slot = Some(geometry);
-        id
-    }
-
-    /// PERF: pack one instance in the exact slice layout `DrawCube::draw`
-    /// emits (DrawVars::as_slice covers the trailing glow/fog instance
-    /// fields), so slab content and immediate draws are indistinguishable.
-    fn pack_cube_instance(
-        &mut self,
-        alpha: bool,
-        out_index: usize,
-        transform: Mat4f,
-        size: Vec3f,
-        color: Vec4f,
-        glow: f32,
-    ) {
-        if alpha {
-            self.draw_alpha.cube.cube.transform = transform;
-            self.draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-            self.draw_alpha.cube.cube.cube_size = size;
-            self.draw_alpha.cube.cube.color = color;
-            self.draw_alpha.cube.cube.depth_clip = 1.0;
-            self.draw_alpha.cube.glow = glow;
-            let slice = self.draw_alpha.cube.cube.draw_vars.as_slice();
-            self.static_slab_alpha[out_index].extend_from_slice(slice);
-            self.slab_instance_count += 1;
-        } else {
-            self.draw_cube.cube.transform = transform;
-            self.draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-            self.draw_cube.cube.cube_size = size;
-            self.draw_cube.cube.color = color;
-            self.draw_cube.cube.depth_clip = 1.0;
-            self.draw_cube.glow = glow;
-            let slice = self.draw_cube.cube.draw_vars.as_slice();
-            self.static_slab[out_index].extend_from_slice(slice);
-            self.slab_instance_count += 1;
-        }
-    }
-
-    /// PERF: rebuild the packed static instance slabs. Only runs when
-    /// `world.render_rev` moved — the world bumps it on every mutation that
-    /// changes what static content looks like (see mark_render_dirty).
-    fn rebuild_static_slabs(&mut self, world: &GameWorld) {
-        for slab in self.static_slab.iter_mut() {
-            slab.clear();
-        }
-        for slab in self.static_slab_alpha.iter_mut() {
-            slab.clear();
-        }
-        self.slab_instance_count = 0;
-        // Static entities (opaque and sensor/alpha).
-        for e in world.entities.iter().filter(|e| e.kind == BodyKind::Static) {
-            let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
-            transform.v[12] = e.pos.x;
-            transform.v[13] = e.pos.y;
-            transform.v[14] = e.pos.z;
-            let size = vec3(
-                e.half.x * 2.0 * e.scale.x,
-                e.half.y * 2.0 * e.scale.y,
-                e.half.z * 2.0 * e.scale.z,
-            );
-            let mut color = e.color;
-            if e.sensor && color.w >= 0.99 {
-                color.w = 0.35;
-            }
-            self.pack_cube_instance(e.sensor, e.shape.index(), transform, size, color, e.glow);
-        }
-        // Settled parts of static owners.
-        for p in world.parts.iter().filter(|p| !p.anim_active) {
-            // Entity ids are spawn-ordered, so the list stays sorted: binary
-            // search instead of a linear scan (this runs per part).
-            let Some(owner) = world
-                .entities
-                .binary_search_by_key(&p.owner, |e| e.id)
-                .ok()
-                .map(|i| &world.entities[i])
-                .filter(|e| e.kind == BodyKind::Static)
-            else {
-                continue;
-            };
-            let mut owner_frame = Mat4f::rotation(vec3f(0.0, owner.yaw, 0.0));
-            owner_frame.v[12] = owner.pos.x;
-            owner_frame.v[13] = owner.pos.y;
-            owner_frame.v[14] = owner.pos.z;
-            let mut local = Mat4f::rotation(p.rot);
-            local.v[12] = p.offset.x * owner.scale.x;
-            local.v[13] = p.offset.y * owner.scale.y;
-            local.v[14] = p.offset.z * owner.scale.z;
-            let transform = Mat4f::mul(&owner_frame, &local);
-            let size = vec3(
-                p.half.x * 2.0 * owner.scale.x,
-                p.half.y * 2.0 * owner.scale.y,
-                p.half.z * 2.0 * owner.scale.z,
-            );
-            self.pack_cube_instance(false, p.shape.index(), transform, size, p.color, p.glow);
-        }
+            &CameraRig {
+                yaw: self.orbit_yaw,
+                pitch: self.orbit_pitch,
+                in_test: self.test_run.is_some(),
+            },
+        )
     }
 
     fn draw_scene(&mut self, cx: &mut Cx3d, scene_state: SceneState3D) {
         let t0 = std::time::Instant::now();
-        self.draw_scene_inner(cx, scene_state);
+        let world = self.world.clone();
+        let world = world.borrow();
+        let mut draws = GameDraws {
+            cube: &mut self.draw_cube,
+            alpha: &mut self.draw_alpha,
+            sky: &mut self.draw_sky,
+            terrain: &mut self.draw_terrain,
+        };
+        let stats = self
+            .renderer
+            .draw_scene(cx, &mut self.draw_list, &mut draws, &world, scene_state);
+        drop(world);
+        self.perf.slab_us += stats.slab_us;
+        self.perf.slab_rebuilds += stats.slab_rebuilds;
+        self.perf.static_instances = stats.static_instances;
+        self.perf.dyn_instances = stats.dyn_instances;
         let us = perf_us(t0);
         self.perf.scene_us += us;
         self.perf.worst_scene_us = self.perf.worst_scene_us.max(us);
@@ -1842,523 +1411,6 @@ impl GameView {
         }
     }
 
-    fn draw_scene_inner(&mut self, cx: &mut Cx3d, scene_state: SceneState3D) {
-        let camera_pos = scene_state.camera_pos;
-        self.draw_list.begin_always(cx);
-        cx.begin_scene_3d(scene_state);
-        let previous_world = cx.set_scene_world_transform_3d(Mat4f::identity());
-
-        let world = self.world.clone();
-        let world = world.borrow();
-
-        // Fog only exists once the script asked for a sky.
-        let (fog_color, fog_density) = match &world.sky {
-            Some(sky) => (vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z), sky.fog),
-            None => (vec3(0.75, 0.87, 0.96), 0.0),
-        };
-
-        // 1. Sky dome around the camera (depth-tested at radius, drawn first).
-        if let Some(sky) = &world.sky {
-            let mut transform = Mat4f::identity();
-            transform.v[12] = camera_pos.x;
-            transform.v[13] = camera_pos.y;
-            transform.v[14] = camera_pos.z;
-            self.draw_sky.cube.transform = transform;
-            self.draw_sky.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-            self.draw_sky.cube.cube_size = vec3(800.0, 800.0, 800.0);
-            self.draw_sky.cube.color = vec4(1.0, 1.0, 1.0, 1.0);
-            self.draw_sky.cube.depth_clip = 1.0;
-            self.draw_sky.sky_top = vec3(sky.top.x, sky.top.y, sky.top.z);
-            self.draw_sky.sky_horizon = vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z);
-            self.draw_sky.sky_ground = vec3(sky.ground.x, sky.ground.y, sky.ground.z);
-            self.draw_sky.sky_bottom =
-                vec3(sky.ground_bottom.x, sky.ground_bottom.y, sky.ground_bottom.z);
-            self.draw_sky.cube.draw(cx);
-        }
-
-        // 2. The smooth terrain mesh.
-        if let Some(terrain) = world.terrain.clone() {
-            let geometry_id = self.ensure_terrain_geometry(cx.cx, &terrain);
-            self.draw_terrain.draw_vars.geometry_id = Some(geometry_id);
-            self.draw_terrain.transform = Mat4f::identity();
-            self.draw_terrain.depth_clip = 1.0;
-            self.draw_terrain.fog_color = fog_color;
-            self.draw_terrain.fog_density = fog_density;
-            if self.draw_terrain.draw_vars.can_instance() {
-                let new_area = cx.add_instance(&self.draw_terrain.draw_vars);
-                self.draw_terrain.draw_vars.area =
-                    cx.update_area_refs(self.draw_terrain.draw_vars.area, new_area);
-            }
-        }
-
-        // PERF: sections 3+4 batch per shape through many_instances. Statics
-        // come from packed slabs rebuilt only when world.render_rev moves
-        // (bump it — mark_render_dirty — or your static edit won't show);
-        // dynamics (movers, their parts, beams, blob shadows) re-pack every
-        // frame. One draw call per shape per pass; empty batches are skipped.
-        self.draw_cube.fog_color = fog_color;
-        self.draw_cube.fog_density = fog_density;
-        self.draw_alpha.cube.fog_color = fog_color;
-        self.draw_alpha.cube.fog_density = fog_density;
-
-        let vars_ready = self.draw_cube.cube.draw_vars.can_instance()
-            && self.draw_alpha.cube.cube.draw_vars.can_instance();
-        if vars_ready && self.slab_rev != Some(world.render_rev) {
-            let t0 = std::time::Instant::now();
-            self.rebuild_static_slabs(&world);
-            self.perf.slab_us += perf_us(t0);
-            self.perf.slab_rebuilds += 1;
-            self.slab_rev = Some(world.render_rev);
-        }
-        self.perf.static_instances = self.slab_instance_count;
-        self.perf.dyn_instances = 0;
-
-        // PERF: resolve dynamic parts and shape membership ONCE per frame —
-        // the per-shape loops below must not re-scan entities per part.
-        let mut dyn_parts: Vec<(usize, usize)> = Vec::new();
-        for (part_index, part) in world.parts.iter().enumerate() {
-            let Some(owner_index) = world
-                .entities
-                .binary_search_by_key(&part.owner, |e| e.id)
-                .ok()
-            else {
-                continue;
-            };
-            if world.entities[owner_index].kind != BodyKind::Static || part.anim_active {
-                dyn_parts.push((part_index, owner_index));
-            }
-        }
-        let mut dyn_entity_shapes = [false; 5];
-        let mut dyn_sensor_shapes = [false; 5];
-        for e in world.entities.iter().filter(|e| e.kind != BodyKind::Static) {
-            if e.sensor {
-                dyn_sensor_shapes[e.shape.index()] = true;
-            } else {
-                dyn_entity_shapes[e.shape.index()] = true;
-            }
-        }
-        let mut dyn_part_shapes = [false; 5];
-        for (part_index, _) in &dyn_parts {
-            dyn_part_shapes[world.parts[*part_index].shape.index()] = true;
-        }
-
-        // 3. Opaque pass, one batch per shape.
-        for shape in Shape::ALL {
-            let shape_index = shape.index();
-            let has_static = !self.static_slab[shape_index].is_empty();
-            let has_dynamic_entity = dyn_entity_shapes[shape_index];
-            let has_dynamic_part = dyn_part_shapes[shape_index];
-            let has_beams = shape == Shape::Box && !world.beams.is_empty();
-            if !has_static && !has_dynamic_entity && !has_dynamic_part && !has_beams {
-                continue;
-            }
-            let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
-            self.draw_cube.cube.draw_vars.geometry_id = Some(geometry_id);
-            self.draw_cube.cube.many_instances =
-                cx.begin_many_instances(&self.draw_cube.cube.draw_vars);
-            if has_static {
-                if let Some(mi) = &mut self.draw_cube.cube.many_instances {
-                    mi.instances
-                        .extend_from_slice(&self.static_slab[shape_index]);
-                }
-            }
-            // Dynamic entities: movers/kinematics/projectiles of this shape.
-            for e in world
-                .entities
-                .iter()
-                .filter(|e| !e.sensor && e.kind != BodyKind::Static && e.shape == shape)
-            {
-                let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
-                transform.v[12] = e.pos.x;
-                transform.v[13] = e.pos.y;
-                transform.v[14] = e.pos.z;
-                self.draw_cube.cube.transform = transform;
-                self.draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                self.draw_cube.cube.cube_size = vec3(
-                    e.half.x * 2.0 * e.scale.x,
-                    e.half.y * 2.0 * e.scale.y,
-                    e.half.z * 2.0 * e.scale.z,
-                );
-                self.draw_cube.cube.color = e.color;
-                self.draw_cube.cube.depth_clip = 1.0;
-                self.draw_cube.glow = e.glow;
-                self.draw_cube.cube.draw(cx);
-                self.perf.dyn_instances += 1;
-            }
-            // Parts that are NOT in the slab: dynamic owner, or mid-animation.
-            for (part_index, owner_index) in dyn_parts.iter().copied() {
-                let part = &world.parts[part_index];
-                if part.shape != shape {
-                    continue;
-                }
-                let owner = &world.entities[owner_index];
-                let mut owner_frame = Mat4f::rotation(vec3f(0.0, owner.yaw, 0.0));
-                owner_frame.v[12] = owner.pos.x;
-                owner_frame.v[13] = owner.pos.y;
-                owner_frame.v[14] = owner.pos.z;
-                let mut local = Mat4f::rotation(part.rot);
-                local.v[12] = part.offset.x * owner.scale.x;
-                local.v[13] = part.offset.y * owner.scale.y;
-                local.v[14] = part.offset.z * owner.scale.z;
-                self.draw_cube.cube.transform = Mat4f::mul(&owner_frame, &local);
-                self.draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                self.draw_cube.cube.cube_size = vec3(
-                    part.half.x * 2.0 * owner.scale.x,
-                    part.half.y * 2.0 * owner.scale.y,
-                    part.half.z * 2.0 * owner.scale.z,
-                );
-                self.draw_cube.cube.color = part.color;
-                self.draw_cube.cube.depth_clip = 1.0;
-                self.draw_cube.glow = part.glow;
-                self.draw_cube.cube.draw(cx);
-                self.perf.dyn_instances += 1;
-            }
-            // Immediate-mode beams (box batch): a box stretched between two
-            // points (grapple cables, lasers). Cable axis on local z.
-            if has_beams {
-                for beam in &world.beams {
-                    let d = beam.to - beam.from;
-                    let len = d.length();
-                    if len < 1.0e-4 {
-                        continue;
-                    }
-                    let f = d * (1.0 / len);
-                    let upv = if f.y.abs() > 0.99 {
-                        vec3f(1.0, 0.0, 0.0)
-                    } else {
-                        vec3f(0.0, 1.0, 0.0)
-                    };
-                    let r = Vec3f::cross(upv, f).normalize();
-                    let u = Vec3f::cross(f, r);
-                    let mid = beam.from + d * 0.5;
-                    let mut m = Mat4f::identity();
-                    m.v[0] = r.x;
-                    m.v[1] = r.y;
-                    m.v[2] = r.z;
-                    m.v[4] = u.x;
-                    m.v[5] = u.y;
-                    m.v[6] = u.z;
-                    m.v[8] = f.x;
-                    m.v[9] = f.y;
-                    m.v[10] = f.z;
-                    m.v[12] = mid.x;
-                    m.v[13] = mid.y;
-                    m.v[14] = mid.z;
-                    self.draw_cube.cube.transform = m;
-                    self.draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                    self.draw_cube.cube.cube_size = vec3(beam.size, beam.size, len);
-                    self.draw_cube.cube.color = beam.color;
-                    self.draw_cube.cube.depth_clip = 1.0;
-                    self.draw_cube.glow = beam.glow;
-                    self.draw_cube.cube.draw(cx);
-                    self.perf.dyn_instances += 1;
-                }
-            }
-            if let Some(mi) = self.draw_cube.cube.many_instances.take() {
-                cx.end_many_instances(mi);
-            }
-        }
-
-        // 4. Alpha pass, one batch per shape: static sensors from the slab,
-        // then blob shadows (box batch) and dynamic sensors — drawn after all
-        // opaque geometry so blending sees depth.
-        for shape in Shape::ALL {
-            let shape_index = shape.index();
-            let has_static = !self.static_slab_alpha[shape_index].is_empty();
-            let has_dynamic_sensor = dyn_sensor_shapes[shape_index];
-            let has_shadows = shape == Shape::Box
-                && world
-                    .entities
-                    .iter()
-                    .any(|e| e.kind == BodyKind::Mover && !e.sensor && e.attached_to == 0);
-            if !has_static && !has_dynamic_sensor && !has_shadows {
-                continue;
-            }
-            let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
-            self.draw_alpha.cube.cube.draw_vars.geometry_id = Some(geometry_id);
-            self.draw_alpha.cube.cube.many_instances =
-                cx.begin_many_instances(&self.draw_alpha.cube.cube.draw_vars);
-            if has_static {
-                if let Some(mi) = &mut self.draw_alpha.cube.cube.many_instances {
-                    mi.instances
-                        .extend_from_slice(&self.static_slab_alpha[shape_index]);
-                }
-            }
-            if has_shadows {
-                for e in world.entities.iter().filter(|e| {
-                    e.kind == BodyKind::Mover && !e.sensor && e.attached_to == 0
-                }) {
-                    // Ground under the mover: terrain, or the tallest static
-                    // box top.
-                    let mut ground: Option<f32> = world
-                        .terrain
-                        .as_ref()
-                        .and_then(|t| t.floor_under(e.pos, e.half));
-                    let feet = e.pos.y - e.half.y;
-                    for s in world.entities.iter() {
-                        if s.sensor
-                            || !matches!(s.kind, BodyKind::Static | BodyKind::Kinematic)
-                        {
-                            continue;
-                        }
-                        let top = s.pos.y + s.half.y;
-                        if top <= feet + 0.01
-                            && (e.pos.x - s.pos.x).abs() < s.half.x
-                            && (e.pos.z - s.pos.z).abs() < s.half.z
-                        {
-                            ground = Some(ground.map_or(top, |g: f32| g.max(top)));
-                        }
-                    }
-                    let Some(ground) = ground else { continue };
-                    let drop = feet - ground;
-                    if !(0.0..8.0).contains(&drop) {
-                        continue;
-                    }
-                    let fade = (1.0 - drop / 8.0) * 0.35;
-                    let mut transform = Mat4f::identity();
-                    transform.v[12] = e.pos.x;
-                    transform.v[13] = ground + 0.03;
-                    transform.v[14] = e.pos.z;
-                    self.draw_alpha.cube.cube.transform = transform;
-                    self.draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                    self.draw_alpha.cube.cube.cube_size = vec3(
-                        e.half.x * 2.2 * e.scale.x,
-                        0.02,
-                        e.half.z * 2.2 * e.scale.z,
-                    );
-                    self.draw_alpha.cube.cube.color = vec4(0.02, 0.02, 0.05, fade);
-                    self.draw_alpha.cube.cube.depth_clip = 1.0;
-                    self.draw_alpha.cube.glow = 0.0;
-                    self.draw_alpha.cube.cube.draw(cx);
-                    self.perf.dyn_instances += 1;
-                }
-            }
-            for e in world
-                .entities
-                .iter()
-                .filter(|e| e.sensor && e.kind != BodyKind::Static && e.shape == shape)
-            {
-                let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
-                transform.v[12] = e.pos.x;
-                transform.v[13] = e.pos.y;
-                transform.v[14] = e.pos.z;
-                self.draw_alpha.cube.cube.transform = transform;
-                self.draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                self.draw_alpha.cube.cube.cube_size = vec3(
-                    e.half.x * 2.0 * e.scale.x,
-                    e.half.y * 2.0 * e.scale.y,
-                    e.half.z * 2.0 * e.scale.z,
-                );
-                let mut color = e.color;
-                if color.w >= 0.99 {
-                    // Sensors are see-through by default; explicit alpha wins.
-                    color.w = 0.35;
-                }
-                self.draw_alpha.cube.cube.color = color;
-                self.draw_alpha.cube.cube.depth_clip = 1.0;
-                self.draw_alpha.cube.glow = e.glow;
-                self.draw_alpha.cube.cube.draw(cx);
-                self.perf.dyn_instances += 1;
-            }
-            if let Some(mi) = self.draw_alpha.cube.cube.many_instances.take() {
-                cx.end_many_instances(mi);
-            }
-        }
-
-        if let Some(previous_world) = previous_world {
-            let _ = cx.set_scene_world_transform_3d(previous_world);
-        }
-        cx.end_scene_3d();
-        self.draw_list.end(cx);
-    }
-}
-
-// ── unit shape geometries ───────────────────────────────────────────────
-//
-// CubeVertex POD layout (12 floats): pos3, id, normal3, pad, uv2, pad2 — what
-// the DrawCube shader family samples. All shapes span [-0.5, 0.5]. The opaque
-// pass backface-culls, so triangles are wound with cross(b-a, c-a) pointing
-// OUTWARD — the same convention the terrain mesh uses.
-
-fn pod_vertex(vertices: &mut Vec<f32>, p: Vec3f, n: Vec3f) {
-    vertices.extend_from_slice(&[
-        p.x, p.y, p.z, 0.0, n.x, n.y, n.z, 0.0, 0.0, 0.0, 0.0, 0.0,
-    ]);
-}
-
-/// Flat-shaded triangle, normal from winding.
-fn pod_tri(vertices: &mut Vec<f32>, indices: &mut Vec<u32>, a: Vec3f, b: Vec3f, c: Vec3f) {
-    let n = Vec3f::cross(b - a, c - a).normalize();
-    for p in [a, b, c] {
-        indices.push((vertices.len() / 12) as u32);
-        pod_vertex(vertices, p, n);
-    }
-}
-
-fn shape_geometry_data(shape: Shape) -> (Vec<f32>, Vec<u32>) {
-    let mut vertices: Vec<f32> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    match shape {
-        Shape::Box => {
-            // Hand-rolled unit cube, matching the outward-winding rule.
-            let corner = |x: i32, y: i32, z: i32| {
-                vec3f(x as f32 - 0.5, y as f32 - 0.5, z as f32 - 0.5)
-            };
-            // (axis-aligned quads: a, b, c, d counter-clockwise seen from outside)
-            let faces = [
-                // +x
-                [corner(1, 0, 0), corner(1, 0, 1), corner(1, 1, 1), corner(1, 1, 0)],
-                // -x
-                [corner(0, 0, 1), corner(0, 0, 0), corner(0, 1, 0), corner(0, 1, 1)],
-                // +y
-                [corner(0, 1, 0), corner(1, 1, 0), corner(1, 1, 1), corner(0, 1, 1)],
-                // -y
-                [corner(0, 0, 1), corner(1, 0, 1), corner(1, 0, 0), corner(0, 0, 0)],
-                // +z
-                [corner(1, 0, 1), corner(0, 0, 1), corner(0, 1, 1), corner(1, 1, 1)],
-                // -z
-                [corner(0, 0, 0), corner(1, 0, 0), corner(1, 1, 0), corner(0, 1, 0)],
-            ];
-            for [a, b, c, d] in faces {
-                pod_tri(&mut vertices, &mut indices, a, c, b);
-                pod_tri(&mut vertices, &mut indices, a, d, c);
-            }
-        }
-        Shape::Sphere => {
-            // UV sphere, smooth normals (position direction).
-            const RINGS: usize = 10;
-            const SEGS: usize = 16;
-            let point = |r: usize, s: usize| {
-                let theta = std::f32::consts::PI * r as f32 / RINGS as f32;
-                let phi = std::f32::consts::TAU * s as f32 / SEGS as f32;
-                vec3f(
-                    0.5 * theta.sin() * phi.cos(),
-                    0.5 * theta.cos(),
-                    0.5 * theta.sin() * phi.sin(),
-                )
-            };
-            let push_smooth = |vertices: &mut Vec<f32>, indices: &mut Vec<u32>, p: Vec3f| {
-                indices.push((vertices.len() / 12) as u32);
-                pod_vertex(vertices, p, p.normalize());
-            };
-            for r in 0..RINGS {
-                for s in 0..SEGS {
-                    let (a, b) = (point(r, s), point(r + 1, s));
-                    let (c, d) = (point(r + 1, s + 1), point(r, s + 1));
-                    // Wound so cross points outward (verified by the test
-                    // below); pole rows drop their degenerate half-quad.
-                    if r + 1 < RINGS {
-                        for p in [a, c, b] {
-                            push_smooth(&mut vertices, &mut indices, p);
-                        }
-                    }
-                    if r > 0 {
-                        for p in [a, d, c] {
-                            push_smooth(&mut vertices, &mut indices, p);
-                        }
-                    }
-                }
-            }
-        }
-        Shape::Cylinder => {
-            const SEGS: usize = 20;
-            let rim = |y: f32, s: usize| {
-                let phi = std::f32::consts::TAU * s as f32 / SEGS as f32;
-                vec3f(0.5 * phi.cos(), y, 0.5 * phi.sin())
-            };
-            for s in 0..SEGS {
-                let (a, b) = (rim(-0.5, s), rim(-0.5, s + 1));
-                let (c, d) = (rim(0.5, s + 1), rim(0.5, s));
-                // Side (smooth radial normals).
-                let side = |vertices: &mut Vec<f32>, indices: &mut Vec<u32>, p: Vec3f| {
-                    indices.push((vertices.len() / 12) as u32);
-                    pod_vertex(vertices, p, vec3f(p.x, 0.0, p.z).normalize());
-                };
-                for p in [a, c, b] {
-                    side(&mut vertices, &mut indices, p);
-                }
-                for p in [a, d, c] {
-                    side(&mut vertices, &mut indices, p);
-                }
-                // Caps (flat).
-                pod_tri(&mut vertices, &mut indices, vec3f(0.0, 0.5, 0.0), rim(0.5, s + 1), rim(0.5, s));
-                pod_tri(&mut vertices, &mut indices, vec3f(0.0, -0.5, 0.0), rim(-0.5, s), rim(-0.5, s + 1));
-            }
-        }
-        Shape::Cone => {
-            const SEGS: usize = 20;
-            let rim = |s: usize| {
-                let phi = std::f32::consts::TAU * s as f32 / SEGS as f32;
-                vec3f(0.5 * phi.cos(), -0.5, 0.5 * phi.sin())
-            };
-            let apex = vec3f(0.0, 0.5, 0.0);
-            for s in 0..SEGS {
-                // Side (flat per-face) + base cap.
-                pod_tri(&mut vertices, &mut indices, apex, rim(s + 1), rim(s));
-                pod_tri(&mut vertices, &mut indices, vec3f(0.0, -0.5, 0.0), rim(s), rim(s + 1));
-            }
-        }
-        Shape::Wedge => {
-            // A ramp: full box footprint, sloping from the top back edge
-            // (+z) down to the bottom front edge (-z). Front = -z like parts.
-            let p = |x: f32, y: f32, z: f32| vec3f(x, y, z);
-            let (l, r, bo, t, f, ba) = (-0.5, 0.5, -0.5, 0.5, -0.5, 0.5);
-            // Bottom.
-            pod_tri(&mut vertices, &mut indices, p(l, bo, f), p(r, bo, f), p(r, bo, ba));
-            pod_tri(&mut vertices, &mut indices, p(l, bo, f), p(r, bo, ba), p(l, bo, ba));
-            // Back (+z, full height).
-            pod_tri(&mut vertices, &mut indices, p(r, bo, ba), p(r, t, ba), p(l, t, ba));
-            pod_tri(&mut vertices, &mut indices, p(r, bo, ba), p(l, t, ba), p(l, bo, ba));
-            // Slope (front bottom edge to back top edge).
-            pod_tri(&mut vertices, &mut indices, p(l, bo, f), p(r, t, ba), p(r, bo, f));
-            pod_tri(&mut vertices, &mut indices, p(l, bo, f), p(l, t, ba), p(r, t, ba));
-            // Side triangles.
-            pod_tri(&mut vertices, &mut indices, p(l, bo, f), p(l, bo, ba), p(l, t, ba));
-            pod_tri(&mut vertices, &mut indices, p(r, bo, f), p(r, t, ba), p(r, bo, ba));
-        }
-    }
-    (vertices, indices)
-}
-
-#[cfg(test)]
-mod shape_tests {
-    use super::*;
-
-    /// Every triangle of every shape must wind so its face normal points away
-    /// from the shape's interior — the opaque pass backface-culls.
-    #[test]
-    fn shape_windings_face_outward() {
-        for shape in Shape::ALL {
-            let (vertices, indices) = shape_geometry_data(shape);
-            assert_eq!(indices.len() % 3, 0);
-            for tri in indices.chunks_exact(3) {
-                let v = |i: u32| {
-                    let base = i as usize * 12;
-                    vec3f(vertices[base], vertices[base + 1], vertices[base + 2])
-                };
-                let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
-                let n = Vec3f::cross(b - a, c - a);
-                let centroid = (a + b + c) * (1.0 / 3.0);
-                // A strictly-interior point: outward face normals of a convex
-                // solid satisfy n · (face_point - interior) > 0. The wedge is
-                // not origin-centred, so it gets its own interior point.
-                let interior = match shape {
-                    Shape::Wedge => vec3f(0.0, -0.25, 0.25),
-                    _ => vec3f(0.0, 0.0, 0.0),
-                };
-                if n.length() < 1.0e-6 {
-                    panic!("{:?} has a degenerate triangle", shape);
-                }
-                let d = n.dot(centroid - interior);
-                assert!(
-                    d > 1.0e-6,
-                    "{:?} triangle winds inward (n·(centroid-interior) = {})",
-                    shape,
-                    d
-                );
-            }
-        }
-    }
 }
 
 // ── the script API dispatcher ───────────────────────────────────────────
@@ -4434,7 +3486,7 @@ impl Widget for GameView {
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, None);
         if let Some(scene_state) = self.scene_state(rect, cx.time()) {
-            self.set_pass_camera(cx.cx, &scene_state);
+            set_pass_camera(cx.cx, &self.pass, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
             self.draw_scene(cx3d, scene_state);
         }
@@ -4446,132 +3498,21 @@ impl Widget for GameView {
         cx.set_pass_area(&self.pass, self.area);
 
         let t_overlay = std::time::Instant::now();
-        // HUD: named text slots pinned to anchors (slots sharing an anchor
-        // stack downward in insertion order), plus gauges. "center" is the big
-        // banner, "hint" the small top-left control help — their historical
-        // looks are the slot-name defaults. Color/size of 0 = defaults.
+        // HUD + gauges + crosshair (moved to makepad-game-render::hud).
         {
             let (slots, bars, crosshair) = {
                 let world = self.world.borrow();
                 (world.hud_slots.clone(), world.hud_bars.clone(), world.crosshair)
             };
-            let default_color = vec4(1.0, 1.0, 1.0, 0.93);
-            // Per-anchor stacking cursors (y offset from the anchor's origin).
-            let mut cursors: [f64; 7] = [0.0; 7];
-            let anchor_index = |a: HudAnchor| match a {
-                HudAnchor::TopLeft => 0usize,
-                HudAnchor::Top => 1,
-                HudAnchor::TopRight => 2,
-                HudAnchor::Center => 3,
-                HudAnchor::BottomLeft => 4,
-                HudAnchor::Bottom => 5,
-                HudAnchor::BottomRight => 6,
-            };
-            let margin = 12.0f64;
-            // (x anchor: -1 left, 0 center, 1 right; base y; stack direction)
-            let anchor_home = |a: HudAnchor, rect: Rect| -> (f64, f64, f64) {
-                match a {
-                    HudAnchor::TopLeft => (rect.pos.x + margin, rect.pos.y + 10.0, 1.0),
-                    HudAnchor::Top => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 84.0, 1.0),
-                    HudAnchor::TopRight => {
-                        (rect.pos.x + rect.size.x - margin, rect.pos.y + 10.0, 1.0)
-                    }
-                    HudAnchor::Center => (rect.pos.x + rect.size.x * 0.5, rect.pos.y + 42.0, 1.0),
-                    HudAnchor::BottomLeft => {
-                        (rect.pos.x + margin, rect.pos.y + rect.size.y - 26.0, -1.0)
-                    }
-                    HudAnchor::Bottom => (
-                        rect.pos.x + rect.size.x * 0.5,
-                        rect.pos.y + rect.size.y - 26.0,
-                        -1.0,
-                    ),
-                    HudAnchor::BottomRight => (
-                        rect.pos.x + rect.size.x - margin,
-                        rect.pos.y + rect.size.y - 26.0,
-                        -1.0,
-                    ),
-                }
-            };
-            for (name, slot) in &slots {
-                if slot.text.is_empty() {
-                    continue;
-                }
-                let default_size = match name.as_str() {
-                    "center" => 22.0,
-                    "top" => 15.0,
-                    "hint" => 9.0,
-                    _ => 12.0,
-                };
-                let size = if slot.size > 0.0 { slot.size } else { default_size };
-                self.draw_hud.text_style.font_size = size;
-                self.draw_hud.color = if slot.color.w > 0.0 {
-                    slot.color
-                } else {
-                    default_color
-                };
-                let (home_x, home_y, stack_dir) = anchor_home(slot.anchor, rect);
-                let layout = self
-                    .draw_hud
-                    .layout(cx, 0.0, 0.0, None, false, Align::default(), &slot.text);
-                let width = layout.size_in_lpxs.width as f64;
-                let x = match slot.anchor {
-                    HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - width * 0.5,
-                    HudAnchor::TopRight | HudAnchor::BottomRight => home_x - width,
-                    _ => home_x,
-                };
-                let ai = anchor_index(slot.anchor);
-                let y = home_y + cursors[ai] * stack_dir;
-                cursors[ai] += size as f64 * 1.55;
-                self.draw_hud.draw_abs(cx, dvec2(x, y), &slot.text);
-            }
-            // Gauges stack after the texts of their anchor.
-            for bar in &bars {
-                let (home_x, home_y, stack_dir) = anchor_home(bar.anchor, rect);
-                let ai = anchor_index(bar.anchor);
-                let y = home_y + cursors[ai] * stack_dir + 3.0;
-                cursors[ai] += 16.0;
-                let bar_w = 140.0f64;
-                let x = match bar.anchor {
-                    HudAnchor::Top | HudAnchor::Center | HudAnchor::Bottom => home_x - bar_w * 0.5,
-                    HudAnchor::TopRight | HudAnchor::BottomRight => home_x - bar_w,
-                    _ => home_x,
-                };
-                // Track, then fill.
-                self.draw_dot.color = vec4(0.05, 0.06, 0.1, 0.65);
-                self.draw_dot.draw_abs(
-                    cx,
-                    Rect {
-                        pos: dvec2(x, y),
-                        size: dvec2(bar_w, 10.0),
-                    },
-                );
-                self.draw_dot.color = bar.color;
-                self.draw_dot.draw_abs(
-                    cx,
-                    Rect {
-                        pos: dvec2(x + 1.0, y + 1.0),
-                        size: dvec2((bar_w - 2.0) * bar.fraction.clamp(0.0, 1.0) as f64, 8.0),
-                    },
-                );
-            }
-            // Restore defaults for anyone else using these draws.
-            self.draw_hud.text_style.font_size = 22.0;
-            self.draw_hud.color = default_color;
-            self.draw_dot.color = vec4(1.0, 1.0, 1.0, 0.9);
-
-            if crosshair {
-                let dot = 5.0;
-                self.draw_dot.draw_abs(
-                    cx,
-                    Rect {
-                        pos: dvec2(
-                            rect.pos.x + (rect.size.x - dot) * 0.5,
-                            rect.pos.y + (rect.size.y - dot) * 0.5,
-                        ),
-                        size: dvec2(dot, dot),
-                    },
-                );
-            }
+            draw_hud_overlay(
+                cx,
+                rect,
+                &mut self.draw_hud,
+                &mut self.draw_dot,
+                &slots,
+                &bars,
+                crosshair,
+            );
         }
 
         // Billboard nametags: project each labeled entity into the pane and
@@ -4601,48 +3542,7 @@ impl Widget for GameView {
         };
         if !labels.is_empty() {
             if let Some(scene) = self.scene_state(rect, cx.time()) {
-                for (anchor, text, color, size) in labels {
-                    let clip = scene.projection.transform_vec4(
-                        scene
-                            .view
-                            .transform_vec4(vec4(anchor.x, anchor.y, anchor.z, 1.0)),
-                    );
-                    if clip.w <= 0.1 {
-                        continue; // behind the camera
-                    }
-                    let ndc_x = clip.x / clip.w;
-                    let ndc_y = clip.y / clip.w;
-                    if ndc_x < -1.1 || ndc_x > 1.1 || ndc_y < -1.1 || ndc_y > 1.1 {
-                        continue;
-                    }
-                    let px = rect.pos.x + (ndc_x as f64 + 1.0) * 0.5 * rect.size.x;
-                    let py = rect.pos.y + (1.0 - ndc_y as f64) * 0.5 * rect.size.y;
-                    self.draw_label.text_style.font_size = if size > 0.0 { size } else { 11.0 };
-                    self.draw_label.color = if color.w > 0.0 {
-                        color
-                    } else {
-                        vec4(1.0, 1.0, 1.0, 0.87)
-                    };
-                    // Centre on the anchor (draw_abs is left-anchored).
-                    let width = self
-                        .draw_label
-                        .layout(cx, 0.0, 0.0, None, false, Align::default(), &text)
-                        .size_in_lpxs
-                        .width as f64;
-                    let at = dvec2(px - width * 0.5, py);
-                    // Poor-man's outline (Godot Label3D has outline_size 24):
-                    // four dark offset copies keep names readable against the
-                    // bright sky.
-                    let fill = self.draw_label.color;
-                    self.draw_label.color = vec4(0.06, 0.07, 0.1, fill.w * 0.9);
-                    for (ox, oy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
-                        self.draw_label.draw_abs(cx, at + dvec2(ox, oy), &text);
-                    }
-                    self.draw_label.color = fill;
-                    self.draw_label.draw_abs(cx, at, &text);
-                }
-                self.draw_label.text_style.font_size = 11.0;
-                self.draw_label.color = vec4(1.0, 1.0, 1.0, 0.87);
+                draw_billboard_labels(cx, rect, &scene, &mut self.draw_label, &labels);
             }
         }
         self.perf.overlay_us += perf_us(t_overlay);

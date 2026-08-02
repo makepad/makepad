@@ -1427,6 +1427,7 @@ impl AppMain for App {
         vm.bx.captured_errors = Some(Vec::new());
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_code_editor::script_mod(vm);
+        makepad_game_render::script_mod(vm);
         crate::game_view::script_mod(vm);
         let value = self::script_mod(vm);
         let errors = vm.take_errors();
