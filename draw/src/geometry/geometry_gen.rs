@@ -70,22 +70,21 @@ pub struct VectorVertexPacked {
     pub color: f32,
     #[live]
     pub stroke_mult: f32,
-    /// f16(stroke_dist) | f16(shape_id)
     #[live]
-    pub dist_shape: f32,
-    /// f16(param0) | f16(param3)
+    pub stroke_dist: f32,
+    /// f16(param0) | f16(shape_id)
     #[live]
-    pub p03: f32,
+    pub p0s: f32,
     /// f16(param1) | f16(param2)
     #[live]
     pub p12: f32,
+    /// f16(param3) | f16(clip_radius, clamped)
+    #[live]
+    pub p3c: f32,
     #[live]
     pub param4: f32,
     #[live]
     pub param5: f32,
-    /// f16(clip_radius) | spare
-    #[live]
-    pub clipr: f32,
     #[live]
     pub zbias: f32,
 }
