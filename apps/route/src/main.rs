@@ -118,8 +118,8 @@ script_mod! {
                             zoom: 15.6
                             tilt: 60.0
                             min_zoom: 3.0
-                            mbtiles_path: "local/maps/nl-kf-test.mbtiles"
-                            detail_mbtiles_path: "local/maps/nl-kf-test.mbtiles"
+                            mbtiles_path: "local/maps/world.mkmap"
+                            detail_mbtiles_path: "local/maps/world.mkmap"
                             bridge_dz_mbtiles_path: "local/maps/nl-bridge-dz.mbtiles"
                             buildings_3d: true
                         }
