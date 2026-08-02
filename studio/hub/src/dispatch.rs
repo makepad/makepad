@@ -3572,12 +3572,20 @@ impl HubCore {
             .vfs
             .resolve_mount(&mount)
             .map_err(|err| err.to_string())?;
-        let history = self
+        // Replay only the TAIL of the persisted history: a weekend of bake
+        // logs left a 208MB .term file and feeding it whole through the VT
+        // parser hung studio at boot for minutes. The parser resyncs after
+        // at most one mangled line at the cut point.
+        const TERM_HISTORY_REPLAY_CAP: usize = 2 * 1024 * 1024;
+        let mut history = self
             .vfs
             .resolve_path(path)
             .ok()
             .and_then(|disk_path| fs::read(disk_path).ok())
             .unwrap_or_default();
+        if history.len() > TERM_HISTORY_REPLAY_CAP {
+            history.drain(..history.len() - TERM_HISTORY_REPLAY_CAP);
+        }
         self.terminal_manager.open_terminal(
             path.to_string(),
             mount,
@@ -4787,6 +4795,10 @@ fn mount_from_virtual_path(path: &str) -> Option<&str> {
 }
 
 fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Result<(), String> {
+    // Rotation: past 4MB the file rewrites to its last 2MB. Keeps boot
+    // replay and disk bounded no matter how chatty a build gets.
+    const TERM_HISTORY_FILE_CAP: u64 = 4 * 1024 * 1024;
+    const TERM_HISTORY_KEEP: usize = 2 * 1024 * 1024;
     let disk_path = vfs
         .resolve_path(path)
         .map_err(|err| format!("failed to resolve terminal path {}: {}", path, err))?;
@@ -4800,6 +4812,12 @@ fn append_terminal_history_bytes(vfs: &VirtualFs, path: &str, data: &[u8]) -> Re
         })?;
     }
     use std::io::Write;
+    if fs::metadata(&disk_path).map_or(false, |meta| meta.len() > TERM_HISTORY_FILE_CAP) {
+        if let Ok(mut existing) = fs::read(&disk_path) {
+            existing.drain(..existing.len().saturating_sub(TERM_HISTORY_KEEP));
+            let _ = fs::write(&disk_path, &existing);
+        }
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
