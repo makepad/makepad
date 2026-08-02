@@ -84,6 +84,30 @@ fn main() {
         .collect();
     std::fs::create_dir_all(&config.out).ok();
 
+    // Eager bootstrap: the boxes' first-time bake-tool compile (~10-15
+    // min) runs DURING the spool wait, so cells dispatch the moment the
+    // marker drops. Idempotent — the per-worker bootstrap no-ops after.
+    let mut eager: Vec<String> = config.hosts.clone();
+    if let Some(hosts_file) = &config.hosts_file {
+        if let Ok(text) = std::fs::read_to_string(hosts_file) {
+            for line in text.lines().map(str::trim) {
+                if !line.is_empty() && !line.starts_with('#') {
+                    eager.push(line.to_string());
+                }
+            }
+        }
+    }
+    eager.dedup();
+    for host in eager {
+        thread::spawn(move || {
+            println!("mapfleet: {host} eager bootstrap build");
+            match remote_run(&host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
+                Ok(0) => println!("mapfleet: {host} bootstrap ready"),
+                other => eprintln!("mapfleet: {host} eager bootstrap failed: {other:?}"),
+            }
+        });
+    }
+
     // Wait for the spool if it has not finished yet.
     let marker = config.store.join("SPOOL_COMPLETE");
     while !marker.exists() {
