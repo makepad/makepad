@@ -749,6 +749,49 @@ impl ScriptHeap {
         objects + strings + arrays + pods + handles + regexes
     }
 
+    /// Conservative escape barrier. Called by every *checked* store funnel
+    /// (`set_value`, scope def/set, `vec_push`, `array_push`, splat merges,
+    /// `force_value_in_map`): any object VALUE stored into a script-reachable
+    /// container is tagged REFFED, so the eager-free paths
+    /// ([`Self::free_object_if_unreffed`], scope frees at call exit,
+    /// `ScriptVm::release_transient`) can never free an object the script may
+    /// have retained. REFFED does NOT block normal GC — an unreachable REFFED
+    /// object is still swept — it only disables *eager* frees. The
+    /// `*_unchecked` store variants skip the barrier on purpose: they are the
+    /// host fast path for building containers the host itself will release.
+    #[inline]
+    pub fn escape_value(&mut self, v: ScriptValue) {
+        if let Some(obj) = v.as_object() {
+            if self.objects.is_valid(obj) {
+                let tag = &mut self.objects[obj].tag;
+                if tag.is_alloced() {
+                    tag.set_reffed();
+                }
+            }
+        }
+    }
+
+    /// Diagnostic/test accessor for the escape barrier.
+    pub fn is_object_reffed(&self, obj: ScriptObject) -> bool {
+        self.objects.is_valid(obj) && self.objects[obj].tag.is_reffed()
+    }
+
+    /// Live (allocated, non-free) object slot count — the flat-heap metric
+    /// for host transient tests.
+    pub fn live_object_len(&self) -> usize {
+        self.objects.len() - self.objects_free.len()
+    }
+
+    /// Free a host-transient value now if it never escaped into script
+    /// structures (see [`Self::escape_value`]). Safe by construction: a value
+    /// the script retained is REFFED and this is a no-op (normal GC collects
+    /// it when it actually dies). Non-object values are ignored.
+    pub fn free_value_if_unreffed(&mut self, v: ScriptValue) {
+        if let Some(obj) = v.as_object() {
+            self.free_object_if_unreffed(obj);
+        }
+    }
+
     pub fn free_object_if_unreffed(&mut self, ptr: ScriptObject) {
         // Check if reference is still valid (may have been freed by GC)
         if !self.objects.is_valid(ptr) {
