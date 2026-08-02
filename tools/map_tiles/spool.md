@@ -64,3 +64,10 @@ no intermediate sqlite) composes with (1): per-region spool completion
 feeds per-region streaming slices, so planet-refresh wall-time
 approaches max(spool-of-densest-region, fleet-bake) instead of
 spool + bake.
+
+7. **Pass-granular resume.** The store is all-or-nothing today: an
+   interrupted spool cannot resume ("incomplete and cannot be resumed")
+   and restarts from zero. Each pass already produces a discrete
+   artifact (node store, way bits, relation output, bucket merge) —
+   write a per-pass completion stamp and resume from the last complete
+   pass. A ~3h un-resumable process WILL someday die at hour 2.9.
