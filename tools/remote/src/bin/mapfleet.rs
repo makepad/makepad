@@ -665,7 +665,14 @@ fn weave(shared: &Shared, config: &Config) {
                 let _ = std::fs::rename(&config.mkmap, &prev_dir);
             }
             match std::fs::rename(&next_dir, &config.mkmap) {
-                Ok(()) => println!("mapfleet: world LIVE with {} cells", baked.len()),
+                Ok(()) => {
+                    println!("mapfleet: world LIVE with {} cells", baked.len());
+                    // Drop the displaced set immediately: at world scale a
+                    // retained .prev is a full extra copy of the map, and
+                    // a reader that still has the old shards open keeps
+                    // them alive via its file handles anyway.
+                    let _ = std::fs::remove_dir_all(&prev_dir);
+                }
                 Err(err) => eprintln!("mapfleet: swap failed: {err}"),
             }
         }
