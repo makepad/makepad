@@ -206,18 +206,28 @@ impl SerBin for String {
 impl DeBin for String {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<String, DeBinErr> {
         let len: u64 = DeBin::de_bin(o, d)?;
-        if *o + (len as usize) > d.len() {
-            return Err(DeBinErr {
+        // Untrusted input: `len` is attacker-controlled, so the end offset is
+        // computed with checked arithmetic (it wraps in release otherwise) and
+        // invalid UTF-8 returns an error instead of panicking.
+        let end = usize::try_from(len)
+            .ok()
+            .and_then(|len| o.checked_add(len))
+            .filter(|end| *end <= d.len())
+            .ok_or_else(|| DeBinErr {
                 o: *o,
                 l: 1,
                 s: d.len(),
                 msg: "String".to_string(),
-            });
-        }
-        let r = std::str::from_utf8(&d[*o..(*o + (len as usize))])
-            .unwrap()
+            })?;
+        let r = std::str::from_utf8(&d[*o..end])
+            .map_err(|_| DeBinErr {
+                o: *o,
+                l: end - *o,
+                s: d.len(),
+                msg: "String is not valid utf8".to_string(),
+            })?
             .to_string();
-        *o += len as usize;
+        *o = end;
         Ok(r)
     }
 }
@@ -235,14 +245,42 @@ where
     }
 }
 
+/// Iteration ceiling for vectors whose elements serialize to nothing: their
+/// count is unbounded by the buffer, so only an absolute cap terminates a
+/// hostile length.
+const DE_BIN_MAX_ZERO_SIZED_LEN: u64 = 1 << 20;
+
 impl<T> DeBin for Vec<T>
 where
     T: DeBin,
 {
     fn de_bin(o: &mut usize, d: &[u8]) -> Result<Vec<T>, DeBinErr> {
         let len: u64 = DeBin::de_bin(o, d)?;
-        let mut out = Vec::new();
-        for _ in 0..len {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        // Untrusted input: `len` is attacker-controlled, so never size the
+        // allocation from it, and reject counts the buffer cannot back. Every
+        // element that consumes at least one byte puts the true ceiling at the
+        // remaining byte count; measure the first element to tell that case
+        // apart from zero-sized ones.
+        let mut out = Vec::with_capacity((len as usize).min(1024));
+        let start = *o;
+        out.push(DeBin::de_bin(o, d)?);
+        let max_len = if *o == start {
+            DE_BIN_MAX_ZERO_SIZED_LEN
+        } else {
+            (d.len() - start) as u64
+        };
+        if len > max_len {
+            return Err(DeBinErr {
+                o: start,
+                l: 1,
+                s: d.len(),
+                msg: "Vec length exceeds buffer".to_string(),
+            });
+        }
+        for _ in 1..len {
             out.push(DeBin::de_bin(o, d)?)
         }
         Ok(out)
@@ -643,4 +681,89 @@ pub fn utf8_char_width(b: u8) -> usize {
     ];
 
     UTF8_CHAR_WIDTH[b as usize] as usize
+}
+
+#[cfg(test)]
+mod hostile_input_tests {
+    use crate::*;
+
+    /// `d` is a length prefix of `len` with no payload behind it.
+    fn only_len(len: u64) -> Vec<u8> {
+        len.to_le_bytes().to_vec()
+    }
+
+    #[test]
+    fn string_rejects_invalid_utf8_instead_of_panicking() {
+        let mut d = only_len(2);
+        d.extend_from_slice(&[0xff, 0xfe]);
+        let mut o = 0;
+        assert!(String::de_bin(&mut o, &d).is_err());
+    }
+
+    #[test]
+    fn string_rejects_length_beyond_buffer_without_overflowing() {
+        for len in [4u64, u64::MAX, u64::MAX - 8, 1 << 40] {
+            let d = only_len(len);
+            let mut o = 0;
+            assert!(String::de_bin(&mut o, &d).is_err(), "len {len}");
+        }
+    }
+
+    #[test]
+    fn string_roundtrips_valid_utf8() {
+        let mut s = Vec::new();
+        "hällo".to_string().ser_bin(&mut s);
+        let mut o = 0;
+        assert_eq!(String::de_bin(&mut o, &s).unwrap(), "hällo");
+        assert_eq!(o, s.len());
+    }
+
+    #[test]
+    fn vec_rejects_length_beyond_buffer() {
+        // One decodable u8 followed by a claim of billions more.
+        let mut d = only_len(1 << 32);
+        d.push(7);
+        let mut o = 0;
+        assert!(Vec::<u8>::de_bin(&mut o, &d).is_err());
+    }
+
+    #[test]
+    fn vec_roundtrips_variable_size_elements() {
+        // A long first element must not shrink the bound for later ones.
+        let v: Vec<String> = std::iter::once("x".repeat(200))
+            .chain((0..500).map(|_| "a".to_string()))
+            .collect();
+        let mut s = Vec::new();
+        v.ser_bin(&mut s);
+        let mut o = 0;
+        assert_eq!(Vec::<String>::de_bin(&mut o, &s).unwrap(), v);
+    }
+
+    /// A unit type serializes to nothing, so its count is unbounded by the
+    /// buffer — the case the absolute ceiling exists for.
+    #[derive(Debug)]
+    struct Unit;
+
+    impl DeBin for Unit {
+        fn de_bin(_o: &mut usize, _d: &[u8]) -> Result<Unit, DeBinErr> {
+            Ok(Unit)
+        }
+    }
+
+    #[test]
+    fn vec_of_zero_sized_elements_is_capped() {
+        let d = only_len(u64::MAX);
+        let mut o = 0;
+        assert!(Vec::<Unit>::de_bin(&mut o, &d).is_err());
+    }
+
+    #[test]
+    fn truncated_payloads_never_panic() {
+        let mut full = Vec::new();
+        vec!["alpha".to_string(), "beta".to_string()].ser_bin(&mut full);
+        for cut in 0..full.len() {
+            let mut o = 0;
+            let _ = Vec::<String>::de_bin(&mut o, &full[..cut]);
+        }
+    }
 }
