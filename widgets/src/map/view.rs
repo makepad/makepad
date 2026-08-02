@@ -1,5 +1,4 @@
 use super::geometry::*;
-use crate::makepad_draw::vector::pack_vector_vertices;
 use super::icons::ICON_MIN_ZOOM;
 use super::label::*;
 use super::overlay::*;
@@ -2936,7 +2935,7 @@ impl MapView {
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_indices, pack_vector_vertices(&buffers.fill_vertices));
+            geometry.update(cx, buffers.fill_indices, buffers.fill_vertices);
             Some(geometry)
         } else {
             None
@@ -2945,7 +2944,7 @@ impl MapView {
         let new_casing_geometry =
             if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.casing_indices, pack_vector_vertices(&buffers.casing_vertices));
+                geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
                 Some(geometry)
             } else {
                 None
@@ -2959,7 +2958,7 @@ impl MapView {
         let new_stroke_geometry =
             if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.stroke_indices, pack_vector_vertices(&buffers.stroke_vertices));
+                geometry.update(cx, buffers.stroke_indices, buffers.stroke_vertices);
                 Some(geometry)
             } else {
                 None
@@ -2973,7 +2972,7 @@ impl MapView {
         let icon_geometry = if !buffers.icon_indices.is_empty() && !buffers.icon_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.icon_indices, pack_vector_vertices(&buffers.icon_vertices));
+            geometry.update(cx, buffers.icon_indices, buffers.icon_vertices);
             Some(geometry)
         } else {
             None
@@ -2982,7 +2981,7 @@ impl MapView {
             && !buffers.icon_high_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.icon_high_indices, pack_vector_vertices(&buffers.icon_high_vertices));
+            geometry.update(cx, buffers.icon_high_indices, buffers.icon_high_vertices);
             Some(geometry)
         } else {
             None
@@ -2991,7 +2990,7 @@ impl MapView {
             && !buffers.fringe_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fringe_indices, pack_vector_vertices(&buffers.fringe_vertices));
+            geometry.update(cx, buffers.fringe_indices, buffers.fringe_vertices);
             Some(geometry)
         } else {
             None
@@ -3000,7 +2999,7 @@ impl MapView {
             && !buffers.fill_3d_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_3d_indices, pack_vector_vertices(&buffers.fill_3d_vertices));
+            geometry.update(cx, buffers.fill_3d_indices, buffers.fill_3d_vertices);
             Some(geometry)
         } else {
             None
