@@ -93,6 +93,16 @@ pub struct GameWorld {
     /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
     /// camera-relative movement ("run where the camera looks").
     pub cam_yaw: f32,
+    /// AUTHORITATIVE orbit rig (M0r camera-ownership consolidation): the DSL
+    /// and the chase rig read/write these; the host feeds device deltas in.
+    /// Deliberately NOT touched by reset_content — the camera pose survives
+    /// re-evals exactly like it did when the widget owned it. Seeded by
+    /// [`GameWorld::new`]; a plain Default world starts at 0/0.
+    pub orbit_yaw: f32,
+    pub orbit_pitch: f32,
+    /// Chase-rig mouse authority: seconds left before easing resumes after a
+    /// drag (refreshed while dragging, counts down after release).
+    pub chase_hold: f32,
     /// Seeded per eval, so wander AI is repeatable under input tapes — an
     /// improvement over the Godot corpus, which called randomize().
     pub rng: u64,
@@ -107,6 +117,15 @@ pub struct GameWorld {
 }
 
 impl GameWorld {
+    /// A world with the canonical starting camera (the values the gamemaker
+    /// widget historically seeded: yaw 0.6, pitch -0.35).
+    pub fn new() -> Self {
+        let mut world = Self::default();
+        world.orbit_yaw = 0.6;
+        world.orbit_pitch = -0.35;
+        world
+    }
+
     /// Keyboard OR gamepad. The pad's stick maps onto the four directions at
     /// half deflection so `held("left")` works the same on both.
     pub fn action_held(&self, action: LiveId) -> bool {
@@ -198,12 +217,34 @@ impl GameWorld {
         (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
     }
 
+    /// Entity ids are handed out monotonically and entities are only ever
+    /// appended ([`push_entity`](Self::push_entity)) or `retain`ed, so the
+    /// Vec is always sorted by id — binary search, not a linear scan. The
+    /// invariant is asserted on push (O(1)) and once per tick in step_world.
     pub fn entity(&self, id: u64) -> Option<&Entity> {
-        self.entities.iter().find(|e| e.id == id)
+        entity_index_sorted(&self.entities, id).map(|i| &self.entities[i])
     }
 
     pub fn entity_mut(&mut self, id: u64) -> Option<&mut Entity> {
-        self.entities.iter_mut().find(|e| e.id == id)
+        entity_index_sorted(&self.entities, id).map(|i| &mut self.entities[i])
+    }
+
+    /// The only sanctioned way to add an entity: enforces the sorted-by-id
+    /// invariant every lookup (and the renderer's binary searches) relies on.
+    pub fn push_entity(&mut self, entity: Entity) {
+        debug_assert!(
+            self.entities.last().map_or(true, |last| last.id < entity.id),
+            "entity ids must be pushed in ascending order (id {} after {})",
+            entity.id,
+            self.entities.last().map(|e| e.id).unwrap_or(0),
+        );
+        self.entities.push(entity);
+    }
+
+    /// Debug-only full check of the sorted-by-id invariant (used once per
+    /// tick; push_entity covers the incremental case).
+    pub fn entities_sorted_by_id(&self) -> bool {
+        self.entities.windows(2).all(|w| w[0].id < w[1].id)
     }
 
     pub fn log(&mut self, line: String) {
@@ -218,5 +259,49 @@ impl GameWorld {
     /// Does a mutation of this entity id invalidate the static slab?
     pub fn is_static_visual(&self, id: u64) -> bool {
         self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
+    }
+}
+
+/// Binary search over the sorted-by-id entity slice. Shared by the world's
+/// own lookups and the renderer's per-part owner resolution so every consumer
+/// leans on ONE enforced invariant instead of private assumptions.
+pub fn entity_index_sorted(entities: &[Entity], id: u64) -> Option<usize> {
+    entities.binary_search_by_key(&id, |e| e.id).ok()
+}
+
+#[cfg(test)]
+mod id_lookup_tests {
+    use super::*;
+
+    fn ent(id: u64) -> Entity {
+        Entity {
+            id,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lookup_after_push_and_retain() {
+        let mut w = GameWorld::default();
+        for id in [1u64, 2, 5, 9, 12] {
+            w.push_entity(ent(id));
+        }
+        assert!(w.entities_sorted_by_id());
+        assert_eq!(w.entity(5).map(|e| e.id), Some(5));
+        assert!(w.entity(3).is_none());
+        w.entities.retain(|e| e.id != 5);
+        assert!(w.entities_sorted_by_id());
+        assert!(w.entity(5).is_none());
+        assert_eq!(w.entity_mut(12).map(|e| e.id), Some(12));
+        assert_eq!(entity_index_sorted(&w.entities, 9), Some(2));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ascending order")]
+    fn out_of_order_push_asserts() {
+        let mut w = GameWorld::default();
+        w.push_entity(ent(7));
+        w.push_entity(ent(3));
     }
 }

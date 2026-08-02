@@ -5,9 +5,10 @@
 use crate::CallbackSlot;
 use makepad_math::*;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum BodyKind {
     /// Doesn't move on its own; the world for everything else to stand on.
+    #[default]
     Static,
     /// Script-driven velocity, no gravity, no collision response on itself.
     /// Moving platforms; things standing on it are carried.
@@ -20,8 +21,9 @@ pub enum BodyKind {
 /// same approximation the Godot corpus made (collision boxes under any model).
 /// Each shape is a shared unit geometry; rendering batches per shape, so a
 /// mixed scene still costs one draw call per shape per pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Shape {
+    #[default]
     Box = 0,
     Sphere = 1,
     Cylinder = 2,
@@ -59,7 +61,7 @@ impl Shape {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Entity {
     pub id: u64,
     pub kind: BodyKind,
