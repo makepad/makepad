@@ -315,11 +315,18 @@ fn local_worker(shared: &Shared, config: &Config) {
 fn remote_worker(host: &str, shared: &Shared, config: &Config) {
     // Bootstrap: build the bake tool on the box (no-op when cached).
     println!("mapfleet: {host} bootstrap build");
-    match remote_run(host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
-        Ok(0) => println!("mapfleet: {host} bootstrap ready"),
-        other => {
-            eprintln!("mapfleet: {host} bootstrap failed ({other:?}) — worker disabled");
-            return;
+    loop {
+        match remote_run(host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
+            Ok(0) => {
+                println!("mapfleet: {host} bootstrap ready");
+                break;
+            }
+            other => {
+                // Box may be mid-fix (toolchain, link.exe, git pull) —
+                // keep retrying so it joins the moment it is healthy.
+                eprintln!("mapfleet: {host} bootstrap failed ({other:?}) — retry in 5min");
+                thread::sleep(Duration::from_secs(300));
+            }
         }
     }
     // Bootstrap runs pre-marker (warm compile during the spool wait);
