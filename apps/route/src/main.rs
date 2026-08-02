@@ -100,7 +100,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.inner_size: vec2(1280, 840)
+                window.inner_size: vec2(3400, 2050)
                 pass.clear_color: vec4(0.08, 0.10, 0.12, 1.0)
                 body +: {
                     View{
@@ -111,9 +111,12 @@ script_mod! {
                         map := MapView{
                             width: Fill
                             height: Fill
+                            // GPU-opt benchmark scene: AMS side view at the
+                            // lowest zoom that shows 3D geometry.
                             center_lon: 4.8952
                             center_lat: 52.3702
-                            zoom: 13.0
+                            zoom: 15.6
+                            tilt: 60.0
                             min_zoom: 3.0
                             mbtiles_path: "local/maps/nl-kf-test.mbtiles"
                             detail_mbtiles_path: "local/maps/nl-kf-test.mbtiles"
