@@ -5,6 +5,7 @@ use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
     append_tessellated_geometry_decked, compute_clip_radii, pack_vector_vertices,
+    VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
@@ -364,10 +365,15 @@ impl TileBuffers {
         if road_indices.is_empty() || road_vertices.is_empty() {
             return;
         }
-        let vertex_base = (self.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        // icon_vertices is GPU-PACKED at this point (12-slot stride); the
+        // cached road decals are kept as logical 19-float records — pack
+        // them on the way in and base indices on the packed stride.
+        let vertex_base =
+            (self.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX) as u32;
         self.icon_indices
             .extend(road_indices.iter().map(|index| index + vertex_base));
-        self.icon_vertices.extend_from_slice(road_vertices);
+        self.icon_vertices
+            .extend_from_slice(&pack_vector_vertices(road_vertices));
         self.road_icon_indices.clear();
         self.road_icon_indices.extend_from_slice(road_indices);
         self.road_icon_vertices.clear();
