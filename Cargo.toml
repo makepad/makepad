@@ -6,6 +6,8 @@ workspace.members = [
     "libs/game/math",
     "libs/game/render",
     "libs/game/sim",
+    "libs/game/blocks",
+    "libs/game/net",
     # === examples ===
     "examples/hotload_ui",
     "examples/teamtalk",
