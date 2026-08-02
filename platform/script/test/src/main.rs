@@ -4489,6 +4489,200 @@ pub fn main() {
     let runaway_value = vm.with_instruction_limit(1024, |vm| vm.eval(runaway));
     assert!(runaway_value.is_err());
 
+    // ========================================
+    // GC campaign: host transients, escape barrier, eager-free contract
+    // (game.md M0 — 60Hz hosts must not grow the heap per tick)
+    // ========================================
+    {
+        let mut std0 = 0usize;
+        let vm = &mut ScriptVm {
+            host: &mut 0,
+            std: &mut std0,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        // Host-side module with a native that returns its own args object —
+        // exercises the ret==args guard on the native eager-free site.
+        let host_mod = vm.heap_mut().new_object();
+        let _host_ref = vm.heap_mut().new_object_ref(host_mod);
+        vm.add_method(host_mod, id!(echo), &[], |_vm, args| args.into());
+        vm.set_injected_global(id!(host), host_mod.into());
+
+        let exports = vm.heap_mut().new_object();
+        let _exports_ref = vm.heap_mut().new_object_ref(exports);
+        vm.set_injected_global(id!(exports), exports.into());
+
+        vm.eval(script! {
+            let retained = []
+            exports.tick_scalar = |x| x + 1.0
+            exports.on_tick = |input| input.jump
+            exports.keep = |input| retained.push(input)
+            exports.read_kept = |i| retained[i].jump
+            exports.echo_res = host.echo(1.5)
+        });
+        let errs = vm.take_errors();
+        assert!(errs.is_empty(), "gc-campaign eval errors: {:?}", errs);
+
+        let tick_scalar = vm.heap_mut().value(exports, id!(tick_scalar).into(), NoTrap);
+        let on_tick = vm.heap_mut().value(exports, id!(on_tick).into(), NoTrap);
+        let keep = vm.heap_mut().value(exports, id!(keep).into(), NoTrap);
+        let read_kept = vm.heap_mut().value(exports, id!(read_kept).into(), NoTrap);
+        assert!(tick_scalar.as_object().is_some());
+
+        // ret==args guard: the native returned its args scope; storing it in
+        // exports escaped it, so it must still be a live, readable object.
+        let echo_res = vm.heap_mut().value(exports, id!(echo_res).into(), NoTrap);
+        let echo_obj = echo_res.as_object().expect("echo_res must be an object");
+        let echo_v0 = vm.heap_mut().vec_value(echo_obj, 0, NoTrap);
+        assert_eq!(echo_v0.as_f64(), Some(1.5));
+
+        // Escape barrier: storing an object value tags it REFFED.
+        let a = vm.heap_mut().new_object();
+        let b = vm.heap_mut().new_object();
+        assert!(!vm.heap().is_object_reffed(b));
+        vm.heap_mut().set_value(a, id!(x).into(), b.into(), NoTrap);
+        assert!(vm.heap().is_object_reffed(b), "escape barrier must tag stored objects");
+
+        // Flat heap at "60Hz": scalar args container, released each tick.
+        vm.gc();
+        let base = vm.heap().live_object_len();
+        for i in 0..5000 {
+            let args = vm.heap_mut().new_object();
+            vm.heap_mut().set_object_storage_vec2(args);
+            vm.heap_mut().clear_object_deep(args);
+            vm.heap_mut()
+                .vec_push_unchecked(args, NIL, ScriptValue::from_f64(i as f64));
+            let r = vm.call_with_args_object(tick_scalar, args);
+            assert!(!r.is_err());
+            assert!(!vm.thread().is_paused());
+            vm.release_transient(args.into());
+        }
+        let after = vm.heap().live_object_len();
+        assert_eq!(
+            after, base,
+            "released scalar-args ticks must keep the object heap flat ({} -> {})",
+            base, after
+        );
+
+        // Nested input object (the gamemaker input pattern): the bind-time
+        // escape barrier tags arg values REFFED (a closure could capture the
+        // call scope), so release_transient(input) is a designed NO-OP — the
+        // container is reclaimed eagerly, the inputs by GC. Bounded sawtooth,
+        // flat after gc.
+        vm.gc();
+        let base = vm.heap().live_object_len();
+        for i in 0..2000 {
+            let input = vm.heap_mut().new_object();
+            vm.heap_mut()
+                .set_value(input, id!(jump).into(), ScriptValue::from_f64(i as f64), NoTrap);
+            let args = vm.heap_mut().new_object();
+            vm.heap_mut().set_object_storage_vec2(args);
+            vm.heap_mut().clear_object_deep(args);
+            vm.heap_mut().vec_push_unchecked(args, NIL, input.into());
+            let r = vm.call_with_args_object(on_tick, args);
+            assert_eq!(r.as_f64(), Some(i as f64));
+            assert!(!vm.thread().is_paused());
+            vm.release_transient(args.into());
+            vm.release_transient(input.into()); // no-op: bind barrier tagged it
+        }
+        vm.gc();
+        let after = vm.heap().live_object_len();
+        assert_eq!(
+            after, base,
+            "input-object ticks must return to baseline after gc ({} -> {})",
+            base, after
+        );
+
+        // Closure-capture coverage (the release-vs-capture hazard): on_tick
+        // creates a closure that outlives the call and reads the bound input
+        // through the captured scope. release_transient on that input MUST
+        // no-op, and the read must still work after GC. Without the bind-time
+        // barrier this is a use-after-free.
+        vm.eval(script! {
+            exports.on_tick2 = |input| {
+                exports.later = || input.jump
+            }
+        });
+        let errs = vm.take_errors();
+        assert!(errs.is_empty(), "on_tick2 eval errors: {:?}", errs);
+        let on_tick2 = vm.heap_mut().value(exports, id!(on_tick2).into(), NoTrap);
+        {
+            let input = vm.heap_mut().new_object();
+            vm.heap_mut().set_value(
+                input,
+                id!(jump).into(),
+                ScriptValue::from_f64(777.0),
+                NoTrap,
+            );
+            let args = vm.heap_mut().new_object();
+            vm.heap_mut().set_object_storage_vec2(args);
+            vm.heap_mut().clear_object_deep(args);
+            vm.heap_mut().vec_push_unchecked(args, NIL, input.into());
+            let r = vm.call_with_args_object(on_tick2, args);
+            assert!(!r.is_err());
+            vm.release_transient(args.into());
+            vm.release_transient(input.into()); // must no-op: captured by closure
+            let later = vm.heap_mut().value(exports, id!(later).into(), NoTrap);
+            let v = vm.call(later, &[]);
+            assert_eq!(v.as_f64(), Some(777.0), "closure-captured input must survive release");
+            vm.gc();
+            let v = vm.call(later, &[]);
+            assert_eq!(v.as_f64(), Some(777.0), "closure-captured input must survive release + GC");
+        }
+
+        // Retained-by-script transients survive release + GC: keep() pushes
+        // the input into a script array (escape barrier fires), so release
+        // is a no-op and GC keeps it alive via the body scope.
+        for i in 0..100 {
+            let input = vm.heap_mut().new_object();
+            vm.heap_mut().set_value(
+                input,
+                id!(jump).into(),
+                ScriptValue::from_f64(1000.0 + i as f64),
+                NoTrap,
+            );
+            let args = vm.heap_mut().new_object();
+            vm.heap_mut().set_object_storage_vec2(args);
+            vm.heap_mut().clear_object_deep(args);
+            vm.heap_mut().vec_push_unchecked(args, NIL, input.into());
+            let r = vm.call_with_args_object(keep, args);
+            assert!(!r.is_err());
+            vm.release_transient(args.into());
+            vm.release_transient(input.into()); // must no-op: script retained it
+        }
+        vm.gc();
+        let v = vm.call(read_kept, &[ScriptValue::from_f64(50.0)]);
+        assert_eq!(
+            v.as_f64(),
+            Some(1050.0),
+            "script-retained transient must survive release + GC"
+        );
+        let errs = vm.take_errors();
+        assert!(errs.is_empty(), "gc-campaign call errors: {:?}", errs);
+
+        // Bare-VM mark/sweep (the isolate round-robin pass shape): a parked
+        // ScriptVmBase collects churned garbage without any Cx installed.
+        let mut bx2 = Box::new(ScriptVmBase::new());
+        // settle: collect module-init temporaries before taking the baseline
+        bx2.heap.mark(&bx2.threads, &bx2.code);
+        bx2.heap.sweep(false);
+        let base2 = bx2.heap.live_object_len();
+        for _ in 0..3000 {
+            bx2.heap.new_object();
+        }
+        assert!(bx2.heap.needs_gc(), "3000 garbage objects must trip needs_gc");
+        bx2.heap.mark(&bx2.threads, &bx2.code);
+        bx2.heap.sweep(false);
+        assert_eq!(
+            bx2.heap.live_object_len(),
+            base2,
+            "bare mark/sweep must reclaim unrooted churn"
+        );
+        assert!(!bx2.heap.needs_gc());
+
+        println!("GC campaign tests passed");
+    }
+
     println!("Test done");
 
     // ========================================

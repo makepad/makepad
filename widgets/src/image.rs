@@ -239,7 +239,7 @@ impl Image {
                 Some(data) => data,
                 None => {
                     let resources = cx.script_data.resources.resources.borrow();
-                    if let Some(res) = resources.iter().find(|r| r.handle == handle) {
+                    if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
                         if res.is_error() {
                             drop(resources);
                             self.src_loaded = true;
@@ -258,7 +258,7 @@ impl Image {
             let resources = cx.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .find(|r| r.handle == handle)
+                .find(|r| r.has_handle(handle))
                 .map(|r| PathBuf::from(&r.abs_path))
                 .unwrap_or_else(|| PathBuf::from("http_resource"))
         };

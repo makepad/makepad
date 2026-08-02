@@ -207,6 +207,7 @@ impl ScriptHeap {
         key: ScriptValue,
         sself: ScriptValue,
     ) {
+        self.escape_value(sself);
         let object = &mut self.objects[ptr];
         object.map_insert(key, sself);
     }
@@ -240,6 +241,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        self.escape_value(value);
         let object = &mut self.objects[ptr];
         if object.tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot set vec key on frozen vec");
@@ -493,6 +495,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        self.escape_value(value);
         if let Some(key_id) = key.as_id() {
             let object = &self.objects[ptr];
             if !object.tag.is_deep() {
@@ -551,6 +554,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        self.escape_value(value);
         let root_ptr = ptr;
         let mut ptr = ptr;
         loop {
@@ -614,6 +618,7 @@ impl ScriptHeap {
         key: LiveId,
         value: ScriptValue,
     ) -> Option<ScriptObject> {
+        self.escape_value(value);
         // if we already have sself value we have to shadow the scope
         let object = &mut self.objects[ptr];
         if let Some(_) = object.map.get(&key.into()) {
@@ -1140,6 +1145,20 @@ impl ScriptHeap {
                 target.index
             );
         }
+        // escape barrier: source's values become reachable from target
+        let vec_len = self.objects[source].vec.len();
+        for i in 0..vec_len {
+            let v = self.objects[source].vec[i].value;
+            self.escape_value(v);
+        }
+        let map_vals: Vec<ScriptValue> = self.objects[source]
+            .map
+            .iter()
+            .map(|(_, v)| v.value)
+            .collect();
+        for v in map_vals {
+            self.escape_value(v);
+        }
         let (target_obj, source_obj) = if target.index > source.index {
             let (o1, o2) = self.objects.slots_split_at_mut(target.index as usize);
             (&mut o2[0].data, &mut o1[source.index as usize].data)
@@ -1165,6 +1184,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        self.escape_value(value);
         let object = &mut self.objects[ptr];
         if object.tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot push to frozen vec");
