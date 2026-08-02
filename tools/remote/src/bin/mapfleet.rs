@@ -10,11 +10,14 @@
 //! after). Resume ledger = existing cell-NNN-baked.mbtiles files, shared
 //! with world-slabs.sh — STOP that driver before running mapfleet.
 //!
-//!   mapfleet --hosts ip:port,ip:port,... \
+//!   mapfleet [--hosts ip:port,...] [--hosts-file fleet-hosts.txt] \
 //!            [--cells tools/map_tiles/world-cells.txt] \
 //!            [--store local/maps/world-detail.store] \
 //!            [--out local/maps/world-cells] \
 //!            [--mkmap local/maps/world.mkmap] [--local-worker]
+//!
+//! The hosts FILE is polled every 30s: append "ip:port" lines any time
+//! and new compute nodes join the running spiral live.
 
 #[path = "../protocol.rs"]
 mod protocol;
@@ -43,6 +46,7 @@ const BRIDGE_DZ: &str = "local/maps/nl-bridge-dz.mbtiles";
 
 struct Config {
     hosts: Vec<String>,
+    hosts_file: Option<PathBuf>,
     cells: PathBuf,
     store: PathBuf,
     out: PathBuf,
@@ -55,9 +59,10 @@ struct Shared {
     next: AtomicUsize,
     weave_dirty: AtomicBool,
     stop: AtomicBool,
-    /// One slice at a time: pbf-base reads the big store; two concurrent
-    /// slices thrash it for no win (slicing is minutes, baking is hours).
-    slice_lock: Mutex<()>,
+    /// At most two concurrent slices: the store is read-only so parallel
+    /// slicing is safe, and with 8 workers a single-slice rule becomes
+    /// the pipeline limiter; more than two thrashes the disk.
+    slice_gate: Mutex<usize>,
 }
 
 fn main() {
@@ -91,15 +96,40 @@ fn main() {
         next: AtomicUsize::new(0),
         weave_dirty: AtomicBool::new(false),
         stop: AtomicBool::new(false),
-        slice_lock: Mutex::new(()),
+        slice_gate: Mutex::new(0),
     });
     let config = Arc::new(config);
 
     let mut handles = Vec::new();
+    let mut known_hosts: std::collections::HashSet<String> = Default::default();
     for host in config.hosts.clone() {
+        known_hosts.insert(host.clone());
         let shared = shared.clone();
         let config = config.clone();
         handles.push(thread::spawn(move || remote_worker(&host, &shared, &config)));
+    }
+    if let Some(hosts_file) = config.hosts_file.clone() {
+        let shared_watch = shared.clone();
+        let config_watch = config.clone();
+        handles.push(thread::spawn(move || loop {
+            if shared_watch.next.load(Ordering::SeqCst) >= shared_watch.cells.len() {
+                return;
+            }
+            if let Ok(text) = std::fs::read_to_string(&hosts_file) {
+                for line in text.lines().map(str::trim) {
+                    if line.is_empty() || line.starts_with('#') || known_hosts.contains(line) {
+                        continue;
+                    }
+                    known_hosts.insert(line.to_string());
+                    println!("mapfleet: compute node joined: {line}");
+                    let host = line.to_string();
+                    let shared = shared_watch.clone();
+                    let config = config_watch.clone();
+                    thread::spawn(move || remote_worker(&host, &shared, &config));
+                }
+            }
+            thread::sleep(Duration::from_secs(30));
+        }));
     }
     if config.local_worker || config.hosts.is_empty() {
         let shared = shared.clone();
@@ -120,6 +150,7 @@ fn main() {
 fn parse_args() -> Result<Config, String> {
     let mut config = Config {
         hosts: Vec::new(),
+        hosts_file: None,
         cells: "tools/map_tiles/world-cells.txt".into(),
         store: "local/maps/world-detail.store".into(),
         out: "local/maps/world-cells".into(),
@@ -141,6 +172,10 @@ fn parse_args() -> Result<Config, String> {
                     .map(str::to_string)
                     .filter(|h| !h.is_empty())
                     .collect();
+                index += 2;
+            }
+            "--hosts-file" => {
+                config.hosts_file = Some(take(index)?.into());
                 index += 2;
             }
             "--cells" => {
@@ -208,7 +243,15 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
     if base.exists() {
         return Ok(true);
     }
-    let _guard = shared.slice_lock.lock().unwrap();
+    loop {
+        let mut active = shared.slice_gate.lock().unwrap();
+        if *active < 2 {
+            *active += 1;
+            break;
+        }
+        drop(active);
+        thread::sleep(Duration::from_secs(5));
+    }
     println!("mapfleet: {name} slice {bbox}");
     let status = Command::new("./target/release/mptiles-run")
         .args(["pbf-base", "local/maps/pbf/planet-latest.osm.pbf"])
@@ -217,6 +260,7 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         .arg(&config.store)
         .args(["--bbox", bbox])
         .status()?;
+    *shared.slice_gate.lock().unwrap() -= 1;
     if !status.success() {
         let _ = std::fs::remove_file(&base);
         return Ok(false);
