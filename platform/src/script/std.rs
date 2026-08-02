@@ -154,7 +154,7 @@ impl Cx {
                         .map(|r| r.handle);
                     if let Some(handle) = handle {
                         let resources = self.script_data.resources.resources.borrow();
-                        if let Some(res) = resources.iter().find(|r| r.handle == handle) {
+                        if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
                             format!(
                                 "abs_path={} web_url={:?} dependency_path={:?}",
                                 res.abs_path, res.web_url, res.dependency_path
