@@ -31,9 +31,19 @@ pub fn read_u32(r: &mut dyn Read) -> io::Result<u32> {
 }
 
 pub fn write_msg(w: &mut dyn Write, tag: u8, payload: &[u8]) -> io::Result<()> {
+    if payload.len() > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("frame payload {} exceeds the u32 wire limit", payload.len()),
+        ));
+    }
     w.write_all(&[tag])?;
     write_u32(w, payload.len() as u32)?;
-    w.write_all(payload)?;
+    // macOS write(2) rejects single writes over 2^31-1 bytes with EINVAL;
+    // feed the socket in bounded chunks.
+    for chunk in payload.chunks(256 * 1024 * 1024) {
+        w.write_all(chunk)?;
+    }
     w.flush()
 }
 
