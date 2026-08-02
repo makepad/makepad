@@ -6088,6 +6088,7 @@ fn build_tile_buffers_from_features_profiled(
                     .and_then(|field| field.as_ref());
                 let mut sub_verts;
                 let mut sub_indices;
+                let mut sub_offsets: Vec<[f32; 2]> = Vec::new();
                 let (verts, indices, deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
                     match field {
                         // Only faces whose bbox touches lifted cells pay the
@@ -6111,7 +6112,21 @@ fn build_tile_buffers_from_features_profiled(
                             let clock = std::time::Instant::now();
                             sub_verts = face.verts.clone();
                             sub_indices = face.indices.clone();
-                            subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            if face.morph_offsets.len() == face.verts.len()
+                                && face.emissive <= 0.001
+                            {
+                                sub_offsets = face.morph_offsets.clone();
+                                subdivide_face_mesh_morph(
+                                    &mut sub_verts,
+                                    &mut sub_indices,
+                                    &mut sub_offsets,
+                                    3.0,
+                                    field,
+                                );
+                            } else {
+                                sub_offsets = Vec::new();
+                                subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
+                            }
                             prof_subdiv_ms += clock.elapsed().as_secs_f64() * 1000.0;
                             let clock = std::time::Instant::now();
                             let deck: Vec<f32> = sub_verts
@@ -6190,19 +6205,24 @@ fn build_tile_buffers_from_features_profiled(
                         }
                     }
                 }
-                // Morphable body: flat, non-emissive faces whose offsets
-                // survived 1:1 (the dz-subdivided path regenerates verts,
-                // so it stays pinned this round) ride the expandable-stroke
-                // band — the live zoom re-widths them per frame and the
-                // expanded branch zeroes the fragment params it never used.
-                let body_morph = deck.is_none()
-                    && face.emissive <= 0.001
-                    && face.morph_offsets.len() == verts.len()
-                    && face.morph_offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0);
+                // Morphable body: non-emissive faces whose offsets are
+                // 1:1 with the emitted verts — the dz-subdivided path
+                // carries them through midpoint averaging, so decked city
+                // centers morph too (pinned kf16 geometry there was the
+                // magnified-wide-roads glitch). Deck heights ride the
+                // expanded layout's per-vertex override.
+                let body_offsets: &[[f32; 2]] = if deck.is_some() {
+                    &sub_offsets
+                } else {
+                    &face.morph_offsets
+                };
+                let body_morph = face.emissive <= 0.001
+                    && body_offsets.len() == verts.len()
+                    && body_offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0);
                 if body_morph {
                     let anchors: Vec<[f32; 2]> = verts
                         .iter()
-                        .zip(&face.morph_offsets)
+                        .zip(body_offsets)
                         .map(|(v, o)| [v.x - o[0], v.y - o[1]])
                         .collect();
                     append_expanded_stroke_geometry(
@@ -6220,7 +6240,7 @@ fn build_tile_buffers_from_features_profiled(
                         },
                         EXPAND_CLASS_ROAD,
                         0.0,
-                        None,
+                        deck.as_deref(),
                     );
                 } else {
                     append_tessellated_geometry_decked(

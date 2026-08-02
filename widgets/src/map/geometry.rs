@@ -2881,7 +2881,22 @@ pub fn subdivide_face_mesh(
     max_edge: f32,
     field: &DzField,
 ) {
-    subdivide_face_mesh_impl(verts, indices, None, max_edge, field);
+    subdivide_face_mesh_impl(verts, indices, None, None, max_edge, field);
+}
+
+/// `subdivide_face_mesh` carrying the GPU-morph offset channel: edge
+/// midpoints inherit the average of their endpoints' offsets, so decked
+/// city-center faces stay morphable after dz refinement (they were the
+/// pinned-wide roads at deep zoom).
+pub fn subdivide_face_mesh_morph(
+    verts: &mut Vec<VVertex>,
+    indices: &mut Vec<u32>,
+    offsets: &mut Vec<[f32; 2]>,
+    max_edge: f32,
+    field: &DzField,
+) {
+    assert_eq!(verts.len(), offsets.len());
+    subdivide_face_mesh_impl(verts, indices, None, Some(offsets), max_edge, field);
 }
 
 /// `subdivide_face_mesh` with a scalar channel riding on every generated
@@ -2896,13 +2911,14 @@ pub fn subdivide_face_mesh_decked(
     field: &DzField,
 ) {
     assert_eq!(verts.len(), decks.len());
-    subdivide_face_mesh_impl(verts, indices, Some(decks), max_edge, field);
+    subdivide_face_mesh_impl(verts, indices, Some(decks), None, max_edge, field);
 }
 
 fn subdivide_face_mesh_impl(
     verts: &mut Vec<VVertex>,
     indices: &mut Vec<u32>,
     mut values: Option<&mut Vec<f32>>,
+    mut offsets: Option<&mut Vec<[f32; 2]>>,
     max_edge: f32,
     field: &DzField,
 ) {
@@ -2956,6 +2972,13 @@ fn subdivide_face_mesh_impl(
                     return midpoint;
                 }
                 let (vi, vj) = (verts[i as usize], verts[j as usize]);
+                let offset = offsets
+                    .as_deref()
+                    .map(|offsets| {
+                        let a = offsets[i as usize];
+                        let b = offsets[j as usize];
+                        [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+                    });
                 let value = values
                     .as_deref()
                     .map(|values| (values[i as usize] + values[j as usize]) * 0.5);
@@ -2969,6 +2992,9 @@ fn subdivide_face_mesh_impl(
                 });
                 if let Some(value) = value {
                     values.as_deref_mut().unwrap().push(value);
+                }
+                if let Some(offset) = offset {
+                    offsets.as_deref_mut().unwrap().push(offset);
                 }
                 let midpoint = (verts.len() - 1) as u32;
                 midpoints.insert(key, midpoint);
