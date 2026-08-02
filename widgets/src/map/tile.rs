@@ -1860,7 +1860,8 @@ pub fn build_tile_buffers_from_mvt(
     let want_buildings = buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM;
     let mut bridge_corridors = Vec::<BridgeCorridor>::new();
     // Bridge corridors want the detail archive from bucket 14 in 3D.
-    let want_detail_points = icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
+    let want_detail_points = !faces_bake_sink_armed()
+        && icon_inclusion_zoom(render_zoom) >= ICON_MIN_ZOOM as f32;
     let want_detail_platforms = render_zoom >= 16;
     // Road elevation is camera-independent. Outside solved bridge-dz
     // coverage collect the heuristic corridors in flat mode too, making
@@ -4423,7 +4424,7 @@ fn build_tile_buffers_from_features_profiled(
                 h.write(&building_units_per_m.to_bits().to_le_bytes());
                 h.write(&render_scale.to_bits().to_le_bytes());
                 h.write(&(building_jobs.len() as u32).to_le_bytes());
-                for job in &building_jobs {
+                for job in building_jobs.iter().filter(|_| !faces_bake_sink_armed()) {
                     h.write(&job.height_m.to_bits().to_le_bytes());
                     h.write(&job.base_m.to_bits().to_le_bytes());
                     h.write(&(job.polygon.len() as u32).to_le_bytes());
@@ -4482,7 +4483,7 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 paths.push(std::mem::take(ring));
             };
-            for job in &building_jobs {
+            for job in building_jobs.iter().filter(|_| !faces_bake_sink_armed()) {
                 let height = job.height_m;
                 if height <= 0.5 {
                     continue;
@@ -5032,7 +5033,7 @@ fn build_tile_buffers_from_features_profiled(
         // instance it by memcpy + anchor/zbias patch. Dense park tiles at
         // the icon horizon carry thousands — the per-tree sin/cos rebuild
         // was most of the buildings stage there.
-        if !tree_points_3d.is_empty() {
+        if !tree_points_3d.is_empty() && !faces_bake_sink_armed() {
             let mut template_verts = Vec::<f32>::new();
             let mut template_indices = Vec::<u32>::new();
             let mut template_zbias = 0.0f32;

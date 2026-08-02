@@ -36,6 +36,7 @@ fn main() {
     let output = Path::new(&args[2]);
     let mut bridge_dz_path: Option<String> = None;
     let mut quality = 10u32;
+    let mut recompress = false;
     let mut limit = usize::MAX;
     let mut threshold_ms = 60.0f64;
     let mut buckets: Vec<u32> = DEFAULT_BUCKETS.to_vec();
@@ -52,6 +53,11 @@ fn main() {
             "--bridge-dz" => {
                 bridge_dz_path = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--recompress" => {
+                recompress = true;
+                i += 1;
+                continue;
             }
             "--brotli-quality" => {
                 quality = args[i + 1].parse().expect("quality");
@@ -197,7 +203,22 @@ fn main() {
                     break;
                 };
                 if !zooms.contains(&(zoom as u32)) || seq >= limit {
-                    let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
+                    if recompress {
+                        // Fleet mode: cells arrive sliced at a throwaway
+                        // quality; the worker re-encodes EVERY tile at the
+                        // target quality so compression parallelizes over
+                        // the whole fleet and the final archive is uniform.
+                        let raw = codec.decode(&blob).expect("codec decode");
+                        let compressed = compress_tile(
+                            &TileCompression::Brotli { quality },
+                            None,
+                            &raw,
+                        )
+                        .expect("compress");
+                        let _ = tx.send((seq, Baked::Raw(zoom, col, row, compressed), 0));
+                    } else {
+                        let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
+                    }
                     continue;
                 }
                 let raw = codec.decode(&blob).expect("codec decode");
@@ -232,7 +253,21 @@ fn main() {
                     baked_buckets.clear();
                 }
                 if baked_buckets.is_empty() {
-                    let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
+                    if recompress {
+                        // Fleet mode: cells arrive sliced at a throwaway
+                        // quality; the worker re-encodes EVERY tile at the
+                        // target quality so compression parallelizes over
+                        // the whole fleet and the final archive is uniform.
+                        let compressed = compress_tile(
+                            &TileCompression::Brotli { quality },
+                            None,
+                            &pbf,
+                        )
+                        .expect("compress");
+                        let _ = tx.send((seq, Baked::Raw(zoom, col, row, compressed), 0));
+                    } else {
+                        let _ = tx.send((seq, Baked::Verbatim(zoom, col, row, blob), 0));
+                    }
                 } else {
                     let field = encode_baked_faces_field(&baked_buckets);
                     let field_len = field.len();
