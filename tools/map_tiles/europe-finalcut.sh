@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")/../.."
 IN=local/maps/europe-base-br.mbtiles
-OUT=local/maps/europe-base-br-v4.mbtiles
+OUT=local/maps/europe-base-br-v5.mbtiles
 MKMAP=local/maps/europe-base-br.mkmap
 LOG=local/maps/europe-finalcut.log
 BIN=./target/release/makepad-map-tiles
@@ -19,7 +19,7 @@ phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 phase "v3 faces+shadow bake (zooms 10-14, buckets 14-17 at z14 / native below, threshold 100ms)"
 "$BAKE" "$IN" "$OUT" \
     --bridge-dz local/maps/nl-bridge-dz.mbtiles \
-    --zooms 10,11,12,13,14 --buckets 14,15,16,17 --threshold-ms 100 2>&1 | tee -a "$LOG"
+    --zooms 10,11,12,13,14 --buckets 14,16 --threshold-ms 100 2>&1 | tee -a "$LOG"
 
 phase "decode-sanity"
 "$BIN" verify-mbtiles "$OUT" --stride 200 2>&1 | tee -a "$LOG"
