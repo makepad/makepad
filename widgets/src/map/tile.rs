@@ -82,6 +82,9 @@ pub enum TileLoadState {
         casing_geometry: Option<Geometry>,
         stroke_geometry: Option<Geometry>,
         icon_geometry: Option<Geometry>,
+        /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
+        /// only when the view can actually reveal them.
+        icon_high_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -199,6 +202,69 @@ pub struct PinHit {
     pub lift_m: f32,
 }
 
+/// Zoom floor above which icons go to the high (street) band; the draw
+/// skips that band entirely below view ~16.25.
+pub const ICON_HIGH_BAND_FLOOR: f32 = 16.01;
+
+/// Partition icon geometry by per-vertex zoom floor (slot 15): triangles
+/// whose vertices carry a floor above the threshold move to the high band.
+/// One O(n) pass on the builder thread; vertex records are remapped
+/// per-band so both halves are self-contained (verts, indices) pairs.
+fn split_icon_band(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) -> (Vec<f32>, Vec<u32>) {
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let mut is_high = vec![false; vert_count];
+    let mut any_high = false;
+    for (vi, record) in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX).enumerate() {
+        if record[15] > ICON_HIGH_BAND_FLOOR {
+            is_high[vi] = true;
+            any_high = true;
+        }
+    }
+    if !any_high {
+        return (Vec::new(), Vec::new());
+    }
+    let mut low_vertices = Vec::new();
+    let mut low_indices = Vec::new();
+    let mut high_vertices = Vec::new();
+    let mut high_indices = Vec::new();
+    // Old vertex index -> new index in its band (u32::MAX = unmapped).
+    let mut remap = vec![u32::MAX; vert_count];
+    for tri in indices.chunks_exact(3) {
+        let high = is_high[tri[0] as usize];
+        let (band_verts, band_indices) = if high {
+            (&mut high_vertices, &mut high_indices)
+        } else {
+            (&mut low_vertices, &mut low_indices)
+        };
+        for &old in tri {
+            let slot = &mut remap[old as usize];
+            if *slot == u32::MAX || (is_high[old as usize] != high) {
+                // (mixed triangles duplicate the odd vertex into this band)
+            }
+            let mapped = if *slot != u32::MAX && is_high[old as usize] == high {
+                *slot
+            } else {
+                let new_index = (band_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                let start = old as usize * VECTOR_FLOATS_PER_VERTEX;
+                band_verts.extend_from_slice(
+                    &vertices[start..start + VECTOR_FLOATS_PER_VERTEX],
+                );
+                if is_high[old as usize] == high {
+                    *slot = new_index;
+                }
+                new_index
+            };
+            band_indices.push(mapped);
+        }
+    }
+    *vertices = low_vertices;
+    *indices = low_indices;
+    (high_vertices, high_indices)
+}
+
 #[derive(Debug)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
@@ -210,6 +276,12 @@ pub struct TileBuffers {
     pub stroke_vertices: Vec<f32>,
     pub icon_indices: Vec<u32>,
     pub icon_vertices: Vec<f32>,
+    /// Street-band icons (per-vertex zoom floor > ICON_HIGH_BAND_FLOOR):
+    /// the z18 horizon carries millions of shader-collapsed icon verts
+    /// that mid zooms never show — split out so the draw skips the whole
+    /// band below the floor instead of vertex-processing it every frame.
+    pub icon_high_indices: Vec<u32>,
+    pub icon_high_vertices: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -238,6 +310,8 @@ impl TileBuffers {
             + self.stroke_indices.len()
             + self.stroke_vertices.len()
             + self.icon_indices.len()
+            + self.icon_high_indices.len()
+            + self.icon_high_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len())
@@ -5825,6 +5899,8 @@ fn build_tile_buffers_from_features_profiled(
             stroke_vertices: Vec::new(),
             icon_indices: Vec::new(),
             icon_vertices: Vec::new(),
+            icon_high_indices: Vec::new(),
+            icon_high_vertices: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -6758,6 +6834,10 @@ fn build_tile_buffers_from_features_profiled(
     } else {
         String::new()
     };
+    let mut icon_vertices = icon_vertices;
+    let mut icon_indices = icon_indices;
+    let (icon_high_vertices, icon_high_indices) =
+        split_icon_band(&mut icon_vertices, &mut icon_indices);
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -6768,6 +6848,8 @@ fn build_tile_buffers_from_features_profiled(
         stroke_vertices,
         icon_indices,
         icon_vertices,
+        icon_high_indices,
+        icon_high_vertices,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
@@ -9556,6 +9638,8 @@ mod bridge_probe_tests {
             stroke_vertices: Vec::new(),
             icon_indices: vec![0],
             icon_vertices: vec![1.0; VECTOR_FLOATS_PER_VERTEX],
+            icon_high_indices: Vec::new(),
+            icon_high_vertices: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
