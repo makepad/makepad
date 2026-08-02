@@ -17,6 +17,17 @@ pub struct MountPoint {
     pub path: PathBuf,
 }
 
+/// Directories that must never enter the file tree, the fs watcher or the
+/// git-status cascade: build output and bulk data (map archives, stores,
+/// toolchains). A background bake writing thousands of files under local/
+/// re-sorted the whole tree per fs-event burst and hung studio at boot.
+fn heavy_nonproject_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "local" | ".rustup" | "build" | "refdump" | "traces"
+    )
+}
+
 #[derive(Default)]
 pub struct VirtualFs {
     mounts: HashMap<String, MountPoint>,
@@ -580,7 +591,7 @@ impl VirtualFs {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == ".git" || name == "target" {
+                if heavy_nonproject_dir(&name) {
                     continue;
                 }
                 if path.is_dir() {
@@ -624,7 +635,7 @@ impl VirtualFs {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == ".git" || name == "target" {
+                if heavy_nonproject_dir(&name) {
                     continue;
                 }
                 if path.is_dir() {
@@ -671,7 +682,7 @@ impl VirtualFs {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == ".git" || name == "target" {
+                if heavy_nonproject_dir(&name) {
                     continue;
                 }
                 if path.is_dir() {
@@ -790,16 +801,10 @@ impl VirtualFs {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name == ".git" {
-                    return None;
-                }
-                if name == ".makepad" {
+                if heavy_nonproject_dir(&name) || name == ".makepad" {
                     return None;
                 }
                 if skip_branch_dir && name == "branch" {
-                    return None;
-                }
-                if name == "target" {
                     return None;
                 }
                 Some((name, entry.path()))
