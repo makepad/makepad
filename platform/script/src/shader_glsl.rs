@@ -39,6 +39,11 @@ impl ShaderOutput {
             .unwrap_or(0);
 
         out.push_str(shared_defs);
+        out.push_str(
+            "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
+vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
+        );
+
         self.glsl_write_uniform_blocks(vm, out);
         self.glsl_write_texture_uniforms(out);
         self.glsl_write_vertex_globals(vm, out);
@@ -57,6 +62,11 @@ impl ShaderOutput {
             .unwrap_or(0);
 
         out.push_str(shared_defs);
+        out.push_str(
+            "vec2 _mp_unpack2f16(float x){ return unpackHalf2x16(floatBitsToUint(x)); }\n\
+vec4 _mp_unpack4u8(float x){ return unpackUnorm4x8(floatBitsToUint(x)); }\n",
+        );
+
         self.glsl_write_uniform_blocks(vm, out);
         self.glsl_write_texture_uniforms(out);
         self.glsl_write_fragment_globals(vm, out);
