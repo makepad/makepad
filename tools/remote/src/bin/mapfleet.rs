@@ -39,6 +39,11 @@ const BAKE_ARGS: &[&str] = &[
     "15,16,17,18",
     "--threshold-ms",
     "100",
+    // The whole fleet does the compression: every tile re-encodes at q11
+    // on the worker; the slice ships a throwaway-q2 intermediate.
+    "--brotli-quality",
+    "11",
+    "--recompress",
 ];
 /// NL bbox: cells intersecting it bake with the bridge-dz sidecar.
 const NL: (f64, f64, f64, f64) = (3.2, 50.7, 7.3, 53.6);
@@ -259,9 +264,8 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         .args(["--store"])
         .arg(&config.store)
         .args(["--bbox", bbox])
-        // q10 matches the bake's re-encode quality at 2-3x the encode
-        // speed of the q11 default — the slicer must keep ten bakers fed.
-        .args(["--brotli-quality", "10"])
+        // Throwaway intermediate: the fleet re-encodes everything at q11.
+        .args(["--brotli-quality", "2"])
         .status()?;
     *shared.slice_gate.lock().unwrap() -= 1;
     if !status.success() {
