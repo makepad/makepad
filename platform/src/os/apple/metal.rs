@@ -814,6 +814,14 @@ impl Cx {
         // one-buffer-per-pass behavior so per-pass GPU spans stay real.
         let batch_this_pass =
             !Self::gpu_profile_enabled() && matches!(mode, DrawPassMode::Texture);
+        if !batch_this_pass {
+            // Entering a present-bound pass: commit the batched offscreen
+            // work NOW so the GPU pipelines it under this pass's CPU encode.
+            if let Some(shared) = metal_cx.frame_command_buffer.take() {
+                let () = unsafe { msg_send![shared, commit] };
+                let () = unsafe { msg_send![shared, release] };
+            }
+        }
         let command_buffer: ObjcId = if batch_this_pass {
             if let Some(buffer) = metal_cx.frame_command_buffer {
                 buffer
@@ -917,12 +925,6 @@ impl Cx {
             };
         }
 
-        if !matches!(mode, DrawPassMode::Texture) {
-            if let Some(shared) = metal_cx.frame_command_buffer.take() {
-                let () = unsafe { msg_send![shared, commit] };
-                let () = unsafe { msg_send![shared, release] };
-            }
-        }
         match mode {
             DrawPassMode::MTKView(view) => {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
