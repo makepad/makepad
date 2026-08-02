@@ -2127,6 +2127,9 @@ impl Widget for MapView {
                     icon_high_geometry,
                     fringe_geometry,
                     fill_3d_geometry,
+                    wall_geometry,
+                    tree_geometry,
+                    tree_cross_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -2249,52 +2252,59 @@ impl Widget for MapView {
                 // bulk of the fill vertex mass. Flat views sit inside the
                 // near radius everywhere, so nothing changes at top-down.
                 if pass == 0 {
-                    if let Some(volume) = fill_3d_geometry {
-                        let tile_center_px = dvec2(
-                            tile_offset.x + TILE_SIZE * scale * 0.5,
-                            tile_offset.y + TILE_SIZE * scale * 0.5,
-                        );
-                        let focus = rect.pos + rect.size * 0.5;
-                        let dist = ((tile_center_px.x - focus.x).powi(2)
-                            + (tile_center_px.y - focus.y).powi(2))
-                        .sqrt();
-                        // Tilt-aware radii: the visible map-plane span
-                        // stretches by 1/tilt_cos, so the near radius must
-                        // too — the whole frustum keeps full 3D and only
-                        // the deep horizon (beyond the blur) sinks.
-                        let stretch = 1.0 / self.tilt_cos().max(0.35);
-                        let near = rect.size.y * 0.9 * stretch;
-                        let far = near * 1.7;
-                        let lod = (1.0 - ((dist - near) / (far - near)).clamp(0.0, 1.0)) as f32;
-                        if lod > 0.003 {
-                            let volume_id = volume.geometry_id();
-                            self.draw_map.draw_geometry(
-                                cx,
-                                volume_id,
-                                map_scale,
-                                screen_offset,
-                                fade_alpha,
-                                stroke_width_correction(entry.bucket, view_zoom),
-                                view_rot_uniform,
-                                rot_pivot_uniform,
-                                tilt_uniform,
-                                view_zoom as f32,
-                                // Distance LOD sinks heights instead of
-                                // fading alpha: translucent buildings read
-                                // as broken; sinking reads as natural.
-                                lod * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
-                                    fade_alpha
-                                } else {
-                                    1.0
-                                },
-                                terrain_org,
-                                terrain_span,
-                                terrain_uvfit,
-                                &terrain_tex,
-                                0.0,
-                                terrain_fill_lift,
-                            );
+                    let tile_center_px = dvec2(
+                        tile_offset.x + TILE_SIZE * scale * 0.5,
+                        tile_offset.y + TILE_SIZE * scale * 0.5,
+                    );
+                    let focus = rect.pos + rect.size * 0.5;
+                    let dist = ((tile_center_px.x - focus.x).powi(2)
+                        + (tile_center_px.y - focus.y).powi(2))
+                    .sqrt();
+                    // Tilt-aware radii: the whole frustum keeps 3D; only
+                    // the deep horizon sinks (perf-never-breaks-the-picture).
+                    let stretch = 1.0 / self.tilt_cos().max(0.35);
+                    let near = rect.size.y * 0.9 * stretch;
+                    let far = near * 1.7;
+                    let lod = (1.0 - ((dist - near) / (far - near)).clamp(0.0, 1.0)) as f32;
+                    // LOD rings: near = full detail; mid = roofs + crossed-
+                    // quad trees ("roofs only"); far = heights sink to 0.
+                    let bands: [(&Option<Geometry>, f32, f32); 4] = [
+                        (fill_3d_geometry, 0.003, 1.01),
+                        (wall_geometry, 0.55, 1.01),
+                        (tree_geometry, 0.55, 1.01),
+                        (tree_cross_geometry, 0.003, 0.55),
+                    ];
+                    for (band, min_lod, max_lod) in bands {
+                        if lod <= min_lod || lod > max_lod {
+                            continue;
                         }
+                        let Some(volume) = band else { continue };
+                        let volume_id = volume.geometry_id();
+                        self.draw_map.draw_geometry(
+                            cx,
+                            volume_id,
+                            map_scale,
+                            screen_offset,
+                            fade_alpha,
+                            stroke_width_correction(entry.bucket, view_zoom),
+                            view_rot_uniform,
+                            rot_pivot_uniform,
+                            tilt_uniform,
+                            view_zoom as f32,
+                            // Distance LOD sinks heights, never alpha:
+                            // translucent buildings read as broken.
+                            lod * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                fade_alpha
+                            } else {
+                                1.0
+                            },
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            &terrain_tex,
+                            0.0,
+                            terrain_fill_lift,
+                        );
                     }
                 }
                 // AA fringes ride the casing pass, but only where 1px edge
@@ -2358,6 +2368,9 @@ impl Widget for MapView {
                     icon_high_geometry,
                     fringe_geometry,
                     fill_3d_geometry,
+                    wall_geometry,
+                    tree_geometry,
+                    tree_cross_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -3003,6 +3016,19 @@ impl MapView {
         } else {
             None
         };
+        let mut band = |indices: Vec<u32>, vertices: Vec<f32>| {
+            if indices.is_empty() || vertices.is_empty() {
+                None
+            } else {
+                let geometry = Geometry::new(cx);
+                geometry.update(cx, indices, vertices);
+                Some(geometry)
+            }
+        };
+        let wall_geometry = band(buffers.wall_indices, buffers.wall_vertices);
+        let tree_geometry = band(buffers.tree_indices, buffers.tree_vertices);
+        let tree_cross_geometry =
+            band(buffers.tree_cross_indices, buffers.tree_cross_vertices);
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
@@ -3050,6 +3076,9 @@ impl MapView {
                     icon_high_geometry,
                     fringe_geometry,
                     fill_3d_geometry,
+                    wall_geometry,
+                    tree_geometry,
+                    tree_cross_geometry,
                     feature_count: if reuse_road_core {
                         buffers.feature_count.max(old_feature_count)
                     } else {
