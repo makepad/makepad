@@ -88,6 +88,8 @@ pub enum TileLoadState {
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
         fringe_geometry: Option<Geometry>,
+        /// 3D volume geometry, distance-faded from the view focus.
+        fill_3d_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -307,6 +309,10 @@ pub struct TileBuffers {
     /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
     pub fringe_indices: Vec<u32>,
     pub fringe_vertices: Vec<f32>,
+    /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
+    /// tilt so the far field skips its vertex mass.
+    pub fill_3d_indices: Vec<u32>,
+    pub fill_3d_vertices: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -339,6 +345,8 @@ impl TileBuffers {
             + self.icon_high_vertices.len()
             + self.fringe_indices.len()
             + self.fringe_vertices.len()
+            + self.fill_3d_indices.len()
+            + self.fill_3d_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len())
@@ -4186,6 +4194,11 @@ fn build_tile_buffers_from_features_profiled(
     }
 
     profiler.lap("fills", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+    // Everything appended to the fill buffers from here through the
+    // buildings lap is 3D volume (walls, roofs, trees, skirts): split off
+    // as fill_3d so distant tiles under tilt can skip/fade it.
+    let fill_3d_vert_start = fill_vertices.len();
+    let fill_3d_index_start = fill_indices.len();
 
     // Cast-shadow union outlines, kept for the tree/signal contact discs:
     // a tree already standing in a building's shadow must not stack its
@@ -5269,7 +5282,13 @@ fn build_tile_buffers_from_features_profiled(
         }
     }
 
-    profiler.lap("buildings", &format!("fill={}KB", fill_vertices.len() * 4 / 1024));
+    let fill_3d_vertices = fill_vertices.split_off(fill_3d_vert_start);
+    let mut fill_3d_indices = fill_indices.split_off(fill_3d_index_start);
+    let fill_3d_base = (fill_3d_vert_start / VECTOR_FLOATS_PER_VERTEX) as u32;
+    for index in fill_3d_indices.iter_mut() {
+        *index -= fill_3d_base;
+    }
+    profiler.lap("buildings", &format!("fill={}KB", fill_3d_vertices.len() * 4 / 1024));
 
     let mut union_tiers =
         HashMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
@@ -5930,6 +5949,8 @@ fn build_tile_buffers_from_features_profiled(
             icon_high_vertices: Vec::new(),
             fringe_indices: Vec::new(),
             fringe_vertices: Vec::new(),
+            fill_3d_indices: Vec::new(),
+            fill_3d_vertices: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -6885,6 +6906,8 @@ fn build_tile_buffers_from_features_profiled(
         icon_high_vertices,
         fringe_indices,
         fringe_vertices,
+        fill_3d_indices,
+        fill_3d_vertices,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
