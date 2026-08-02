@@ -85,6 +85,9 @@ pub enum TileLoadState {
         /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
         /// only when the view can actually reveal them.
         icon_high_geometry: Option<Geometry>,
+        /// Analytic AA fringes — skipped at strong tilt where blur and
+        /// density hide 1px edge AA.
+        fringe_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -214,11 +217,30 @@ fn split_icon_band(
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) -> (Vec<f32>, Vec<u32>) {
+    split_band_by(vertices, indices, |record| record[15] > ICON_HIGH_BAND_FLOOR)
+}
+
+/// Partition the analytic AA fringes (stroke_mult sentinel 2e6, slot 8)
+/// out of the casing buffer: at strong tilt the tilt-shift blur and
+/// geometry density hide 1px edge AA, and the fringes are ~2/3 of the
+/// casing vertex mass on street tiles.
+fn split_fringe_band(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) -> (Vec<f32>, Vec<u32>) {
+    split_band_by(vertices, indices, |record| record[8] > 1.5e6)
+}
+
+fn split_band_by(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    predicate: impl Fn(&[f32]) -> bool,
+) -> (Vec<f32>, Vec<u32>) {
     let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
     let mut is_high = vec![false; vert_count];
     let mut any_high = false;
     for (vi, record) in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX).enumerate() {
-        if record[15] > ICON_HIGH_BAND_FLOOR {
+        if predicate(record) {
             is_high[vi] = true;
             any_high = true;
         }
@@ -282,6 +304,9 @@ pub struct TileBuffers {
     /// band below the floor instead of vertex-processing it every frame.
     pub icon_high_indices: Vec<u32>,
     pub icon_high_vertices: Vec<f32>,
+    /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
+    pub fringe_indices: Vec<u32>,
+    pub fringe_vertices: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -312,6 +337,8 @@ impl TileBuffers {
             + self.icon_indices.len()
             + self.icon_high_indices.len()
             + self.icon_high_vertices.len()
+            + self.fringe_indices.len()
+            + self.fringe_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len())
@@ -5901,6 +5928,8 @@ fn build_tile_buffers_from_features_profiled(
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            fringe_indices: Vec::new(),
+            fringe_vertices: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -6838,6 +6867,10 @@ fn build_tile_buffers_from_features_profiled(
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
         split_icon_band(&mut icon_vertices, &mut icon_indices);
+    let mut casing_vertices = casing_vertices;
+    let mut casing_indices = casing_indices;
+    let (fringe_vertices, fringe_indices) =
+        split_fringe_band(&mut casing_vertices, &mut casing_indices);
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -6850,6 +6883,8 @@ fn build_tile_buffers_from_features_profiled(
         icon_vertices,
         icon_high_indices,
         icon_high_vertices,
+        fringe_indices,
+        fringe_vertices,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
