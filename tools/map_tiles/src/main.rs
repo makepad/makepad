@@ -31,7 +31,7 @@ Usage:
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
   makepad-map-tiles bridge-bake <detail.mbtiles> <output.mbtiles> --bbox w,s,e,n [--ahn DIR] [--base base.mbtiles] [--zoom 14]
   makepad-map-tiles transmux <source.mbtiles> <output.mkmap> [--shard-cap-bytes N]
-  makepad-map-tiles mkmap-verify <source.mbtiles> <dir.mkmap> [stride]
+  makepad-map-tiles mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
   makepad-map-tiles verify-mbtiles <archive.mbtiles> [--stride N]
 
 The legacy form without the 'versatiles' command is also accepted.
@@ -142,17 +142,23 @@ fn run() -> Result<(), String> {
     if args.first().is_some_and(|arg| arg == "transmux") {
         return mkmap::transmux(mkmap::parse_transmux_options(&args)?);
     }
-    // mkmap-verify <source.mbtiles> <dir.mkmap> [stride]
+    // mkmap-verify <source.mbtiles>... <dir.mkmap> [stride]
     if args.first().is_some_and(|arg| arg == "mkmap-verify") {
         if args.len() < 3 {
-            return Err("mkmap-verify needs <source.mbtiles> <dir.mkmap>".to_string());
+            return Err("mkmap-verify needs <source.mbtiles>... <dir.mkmap>".to_string());
         }
-        let stride = args
-            .get(3)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(37_u64)
-            .max(1);
-        return mkmap::verify(Path::new(&args[1]), Path::new(&args[2]), stride);
+        // A numeric last arg is the stride; the arg before it (or the
+        // last) is the mkmap dir; everything else is the source list.
+        let (stride, dir_index) = match args.last().and_then(|v| v.parse::<u64>().ok()) {
+            Some(stride) if args.len() >= 4 => (stride.max(1), args.len() - 2),
+            _ => (37_u64, args.len() - 1),
+        };
+        let sources: Vec<std::path::PathBuf> =
+            args[1..dir_index].iter().map(Into::into).collect();
+        if sources.is_empty() {
+            return Err("mkmap-verify needs at least one source".to_string());
+        }
+        return mkmap::verify(&sources, Path::new(&args[dir_index]), stride);
     }
     if args.first().is_some_and(|arg| arg == "bridge-bake") {
         return bridge_bake::bake(bridge_bake::parse_bake_options(&args)?);

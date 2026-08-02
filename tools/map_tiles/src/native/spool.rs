@@ -180,6 +180,101 @@ impl BlockSpoolWriter {
         Ok(&mut self.open.get_mut(&key).unwrap().writer)
     }
 
+    /// Flush and report the exact on-disk state: (records, bytes, per-block
+    /// file name + length). A pass stamp built from this is enough to
+    /// resume the spool at this boundary after a crash.
+    pub fn snapshot(&mut self) -> Result<(u64, u64, Vec<(String, u64)>), String> {
+        self.flush_open()?;
+        let mut blocks = Vec::with_capacity(self.blocks.len());
+        for key in &self.blocks {
+            let path = block_path(&self.dir, *key);
+            let len = fs::metadata(&path)
+                .map_err(|err| format!("stat {}: {err}", path.display()))?
+                .len();
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("{} has no file name", path.display()))?;
+            blocks.push((name, len));
+        }
+        Ok((self.records, self.bytes, blocks))
+    }
+
+    /// Reopen an existing spool at a stamped pass boundary: truncate every
+    /// stamped block to its recorded length, delete block files the stamp
+    /// does not know (partial output of the pass that died), restore the
+    /// counters.
+    pub fn resume(
+        dir: &Path,
+        stamped: &[(String, u64)],
+        records: u64,
+        bytes: u64,
+    ) -> Result<Self, String> {
+        if !dir.is_dir() {
+            return Err(format!("{} is not a spool directory", dir.display()));
+        }
+        let mut blocks = BTreeSet::new();
+        let mut expected: FastHashMap<String, u64> = FastHashMap::default();
+        for (name, len) in stamped {
+            let key = parse_block_name(name)
+                .ok_or_else(|| format!("pass stamp lists invalid block name {name}"))?;
+            let path = dir.join(name);
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|err| format!("open {}: {err}", path.display()))?;
+            let actual = file
+                .metadata()
+                .map_err(|err| format!("stat {}: {err}", path.display()))?
+                .len();
+            if actual < *len {
+                return Err(format!(
+                    "{} is shorter ({actual}) than its pass stamp ({len}); the spool cannot be resumed",
+                    path.display()
+                ));
+            }
+            file.set_len(*len)
+                .map_err(|err| format!("truncate {}: {err}", path.display()))?;
+            blocks.insert(key);
+            expected.insert(name.clone(), *len);
+        }
+        let listing =
+            fs::read_dir(dir).map_err(|err| format!("read {}: {err}", dir.display()))?;
+        for entry in listing {
+            let entry = entry.map_err(|err| format!("read {}: {err}", dir.display()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if parse_block_name(&name).is_none() {
+                continue;
+            }
+            if !expected.contains_key(&name) {
+                fs::remove_file(entry.path())
+                    .map_err(|err| format!("remove {}: {err}", entry.path().display()))?;
+            }
+        }
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            open: FastHashMap::default(),
+            open_capacity: 384,
+            clock: 0,
+            blocks,
+            records,
+            bytes,
+            scratch: Vec::new(),
+        })
+    }
+
+    /// Flush every open block writer so readers gated on the streaming
+    /// frontier only ever see fully-persisted records.
+    pub fn flush_open(&mut self) -> Result<(), String> {
+        for entry in self.open.values_mut() {
+            entry
+                .writer
+                .flush()
+                .map_err(|err| format!("flush block spool: {err}"))?;
+        }
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<SpoolSummary, String> {
         for entry in self.open.values_mut() {
             entry
@@ -253,12 +348,18 @@ fn write_record(writer: &mut impl Write, key: RecordKey, payload: &[u8]) -> Resu
         .map_err(|err| format!("write native tile spool: {err}"))
 }
 
-fn read_record(reader: &mut impl Read) -> Result<Option<SpoolRecord>, String> {
+/// live_tail: the spool is still being appended by pass 4 — a partial
+/// record at end-of-file is the writer's torn tail, not corruption. The
+/// frontier gate guarantees such records never belong to the tiles being
+/// read, so they are skipped as end-of-block. Never set on a completed
+/// spool, where a torn record IS corruption.
+fn read_record(reader: &mut impl Read, live_tail: bool) -> Result<Option<SpoolRecord>, String> {
     let mut header = [0_u8; RECORD_HEADER_LEN];
     let mut filled = 0;
     while filled < header.len() {
         match reader.read(&mut header[filled..]) {
             Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) if live_tail => return Ok(None),
             Ok(0) => return Err("truncated native tile spool header".to_string()),
             Ok(count) => filled += count,
             Err(err) => return Err(format!("read native tile spool: {err}")),
@@ -273,9 +374,15 @@ fn read_record(reader: &mut impl Read) -> Result<Option<SpoolRecord>, String> {
     };
     let length = u32::from_le_bytes(header[13..17].try_into().unwrap()) as usize;
     let mut payload = vec![0_u8; length];
-    reader
-        .read_exact(&mut payload)
-        .map_err(|err| format!("read native tile spool payload: {err}"))?;
+    let mut payload_filled = 0;
+    while payload_filled < payload.len() {
+        match reader.read(&mut payload[payload_filled..]) {
+            Ok(0) if live_tail => return Ok(None),
+            Ok(0) => return Err("truncated native tile spool payload".to_string()),
+            Ok(count) => payload_filled += count,
+            Err(err) => return Err(format!("read native tile spool payload: {err}")),
+        }
+    }
     Ok(Some(SpoolRecord { key, payload }))
 }
 
@@ -291,6 +398,7 @@ impl SortedBlock {
         dir: &Path,
         key: BlockKey,
         memory_limit: Option<usize>,
+        live_tail: bool,
     ) -> Result<Self, String> {
         let source_path = block_path(dir, key);
         let memory_limit = memory_limit.unwrap_or(DEFAULT_SORT_MEMORY).max(1024 * 1024);
@@ -302,7 +410,7 @@ impl SortedBlock {
         let mut chunk_paths = Vec::new();
         let mut records = Vec::new();
         let mut bytes = 0_usize;
-        while let Some(record) = read_record(&mut reader)? {
+        while let Some(record) = read_record(&mut reader, live_tail)? {
             bytes = bytes
                 .checked_add(RECORD_HEADER_LEN + record.payload.len())
                 .ok_or_else(|| "spool sort memory count overflow".to_string())?;
@@ -371,7 +479,10 @@ fn write_sorted_chunk(
     records: &mut Vec<SpoolRecord>,
 ) -> Result<PathBuf, String> {
     records.sort_unstable_by_key(|record| record.key);
-    let path = dir.join(format!("block-{}-{}.sort-{index}", key.y, key.x));
+    // The pid keeps concurrent bbox slices that share an edge block from
+    // clobbering each other's sort chunks.
+    let pid = std::process::id();
+    let path = dir.join(format!("block-{}-{}.sort-{pid}-{index}", key.y, key.x));
     let file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -423,7 +534,7 @@ where
         let mut input = MergeInput {
             reader: BufReader::with_capacity(1024 * 1024, file),
         };
-        let record = read_record(&mut input.reader)?;
+        let record = read_record(&mut input.reader, false)?;
         if let Some(record) = &record {
             heap.push(Reverse(HeapItem {
                 key: record.key,
@@ -438,7 +549,7 @@ where
             .take()
             .ok_or_else(|| "spool merge heap referenced no record".to_string())?;
         callback(record)?;
-        let next = read_record(&mut inputs[item.input].reader)?;
+        let next = read_record(&mut inputs[item.input].reader, false)?;
         if let Some(record) = &next {
             heap.push(Reverse(HeapItem {
                 key: record.key,
@@ -552,6 +663,93 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_resume_rolls_back_to_the_stamped_boundary() {
+        let dir = temp_dir("makepad-spool-resume");
+        let spool_dir = dir.join("spool");
+        let mut writer = BlockSpoolWriter::create(&spool_dir).unwrap();
+        // "Pass N": two records in one block.
+        writer.push(257, 259, &feature(9, 30)).unwrap();
+        writer.push(256, 258, &feature(4, 10)).unwrap();
+        let (records, bytes, stamped) = writer.snapshot().unwrap();
+        assert_eq!(records, 2);
+        assert_eq!(stamped.len(), 1);
+        // "Pass N+1" dies mid-flight: appends to the stamped block, opens a
+        // new block, and leaves a torn half-record at the stamped block's
+        // tail.
+        writer.push(257, 259, &feature(11, 50)).unwrap();
+        writer.push(600, 600, &feature(12, 60)).unwrap();
+        writer.flush_open().unwrap();
+        drop(writer);
+        use std::io::Write as _;
+        let mut torn = OpenOptions::new()
+            .append(true)
+            .open(spool_dir.join(&stamped[0].0))
+            .unwrap();
+        torn.write_all(&[0xAB, 0xCD, 0xEF]).unwrap();
+        drop(torn);
+
+        let mut writer =
+            BlockSpoolWriter::resume(&spool_dir, &stamped, records, bytes).unwrap();
+        // The unstamped block is gone, the stamped block is truncated back.
+        assert_eq!(
+            fs::metadata(spool_dir.join(&stamped[0].0)).unwrap().len(),
+            stamped[0].1
+        );
+        assert!(!spool_dir.join("block-2-2.spool").exists());
+        // The resumed writer continues and the reader sees exactly the
+        // stamped records plus the re-run pass's records.
+        writer.push(257, 259, &feature(21, 70)).unwrap();
+        let summary = writer.finish().unwrap();
+        assert_eq!(summary.records, 3);
+        let sorted = SortedBlock::prepare(&spool_dir, BlockKey { x: 1, y: 1 }, None, false)
+            .unwrap();
+        let mut ids = Vec::new();
+        let sorted = records_to_tiles(sorted, BlockKey { x: 1, y: 1 }, |_, _, features| {
+            ids.extend(features.iter().map(|f| f.id));
+            Ok(())
+        })
+        .unwrap();
+        drop(sorted);
+        ids.sort();
+        assert_eq!(ids, vec![4, 9, 21]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_tail_reader_stops_cleanly_at_a_torn_record() {
+        let dir = temp_dir("makepad-spool-livetail");
+        let spool_dir = dir.join("spool");
+        let mut writer = BlockSpoolWriter::create(&spool_dir).unwrap();
+        writer.push(256, 258, &feature(4, 10)).unwrap();
+        writer.push(257, 259, &feature(9, 30)).unwrap();
+        let summary = writer.finish().unwrap();
+        let block = summary.blocks[0];
+        // Simulate the pass-4 writer's torn tail mid-append.
+        use std::io::Write as _;
+        let mut torn = OpenOptions::new()
+            .append(true)
+            .open(block_path(&spool_dir, block))
+            .unwrap();
+        torn.write_all(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap();
+        drop(torn);
+
+        // Complete-store read: torn tail is corruption.
+        assert!(SortedBlock::prepare(&spool_dir, block, None, false).is_err());
+        // Live read: torn tail is the writer's in-flight record — skipped.
+        let sorted = SortedBlock::prepare(&spool_dir, block, None, true).unwrap();
+        let mut ids = Vec::new();
+        let sorted = records_to_tiles(sorted, block, |_, _, features| {
+            ids.extend(features.iter().map(|f| f.id));
+            Ok(())
+        })
+        .unwrap();
+        drop(sorted);
+        ids.sort();
+        assert_eq!(ids, vec![4, 9]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn external_sort_groups_tiles_and_merges_feature_paths() {
         let dir = temp_dir("makepad-native-spool");
         let spool_dir = dir.join("spool");
@@ -563,7 +761,7 @@ mod tests {
         let summary = writer.finish().unwrap();
         assert_eq!(summary.blocks, vec![BlockKey { x: 1, y: 1 }]);
 
-        let sorted = SortedBlock::prepare(&spool_dir, summary.blocks[0], Some(1024 * 1024))
+        let sorted = SortedBlock::prepare(&spool_dir, summary.blocks[0], Some(1024 * 1024), false)
             .unwrap();
         let mut tiles = Vec::new();
         let sorted = records_to_tiles(sorted, summary.blocks[0], |x, y, features| {
