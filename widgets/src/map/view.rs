@@ -4985,16 +4985,12 @@ impl MapView {
         // reveal by the live icon_zoom uniform, so the only restyle event
         // left on the whole zoom axis is the single 14<->16 crossover —
         // and both keyframes morph to identical widths at that zoom.
-        // Band-TOP keyframes: serving zooms sit AT or BELOW their
-        // keyframe, so the face width correction is >= 1 and the morph
-        // only ever widens (outward morph of an opaque union is safe;
-        // inward morph inverts narrow features — the bowtie garbage).
-        let raw = self.view_zoom().round() as u32;
-        match raw {
-            0..=14 => raw,
-            15 => 15,
-            _ => 18,
-        }
+        // Integer keyframes, switch-only (user call 2026-08-02): every
+        // integer bucket 15-18 is baked and swaps at the half-zoom like
+        // classic vector maps; GPU-expanded strokes stay smooth through
+        // the crossings and the face morph remains an opt-in experiment
+        // (/tmp/mp_face_morph) rather than the shipping path.
+        (self.view_zoom().round() as u32).min(18)
     }
 
     fn source_mode_label(&self) -> &'static str {
