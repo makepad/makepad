@@ -7480,6 +7480,16 @@ impl MvtSink for MvtLocalCollector {
             "building:levels", "min_height", "building:min_level", "location", "place",
             "parking", "surface", "access", "service", "link", "rail", "waterway", "ref",
         ];
+        // Point layers add the (bounded) icon-matcher key set: every key
+        // icons.rs or the point/attraction routing in merge_detail_features
+        // reads. micro POIs carry dozens of address/name-translation tags
+        // that nothing consumes — at the kf16 icon horizon this parse was
+        // ~140ms/tile with the whitelist forced off.
+        const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
+            "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office",
+            "operator", "shop", "osm_layer", "kerb", "bus", "shelter",
+        ];
+        static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
         static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *NO_WHITELIST
             .get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some())
@@ -7488,6 +7498,15 @@ impl MvtSink for MvtLocalCollector {
         }
         match self.layer_filter {
             LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
+            LayerParseFilter::DetailLayers { points: true, .. } => Some(
+                POINT_KEYS
+                    .get_or_init(|| {
+                        let mut keys: Vec<&'static str> = DETAIL_WAY_KEYS.to_vec();
+                        keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
+                        keys
+                    })
+                    .as_slice(),
+            ),
             _ => None,
         }
     }
