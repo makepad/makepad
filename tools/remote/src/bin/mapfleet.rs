@@ -259,6 +259,9 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         .args(["--store"])
         .arg(&config.store)
         .args(["--bbox", bbox])
+        // q10 matches the bake's re-encode quality at 2-3x the encode
+        // speed of the q11 default — the slicer must keep ten bakers fed.
+        .args(["--brotli-quality", "10"])
         .status()?;
     *shared.slice_gate.lock().unwrap() -= 1;
     if !status.success() {
