@@ -27,6 +27,12 @@ script_mod! {
         cam_c: uniform(0.0)
         cam_d: uniform(1.0)
         cam_pivot: uniform(vec2(0.0, 0.0))
+        // Pan/zoom delta applied BEFORE the camera matrix: glyphs are
+        // emitted in CACHED placement space and ride these uniforms every
+        // frame, exactly like tile geometry rides map_offset — no CPU
+        // re-transform between frames, so labels can never trail the map.
+        cam_scale: uniform(1.0)
+        cam_shift: uniform(vec2(0.0, 0.0))
         // self.upright (instance from the Rust struct): 1.0 = screen-upright
         // label (place names, pin/brand text) — its ANCHOR tracks the camera
         // delta but its orientation must not; the re-place keeps such labels
@@ -43,14 +49,22 @@ script_mod! {
                 scaled.x * sn + scaled.y * cs
             ) + origin
             if self.upright > 0.5 {
-                let anchor_rel = origin + vec2(0.0, self.lift) - self.cam_pivot
+                let anchor2 = origin * self.cam_scale + self.cam_shift
+                let anchor_rel = anchor2 + vec2(0.0, self.lift) - self.cam_pivot
                 let cam_anchor = vec2(
                     anchor_rel.x * self.cam_a + anchor_rel.y * self.cam_b,
                     anchor_rel.x * self.cam_c + anchor_rel.y * self.cam_d
                 ) + self.cam_pivot - vec2(0.0, self.lift)
-                rotated = rotated - origin + cam_anchor
+                var offs = rotated - origin
+                if self.billboard < 0.5 {
+                    // Street-cap/city names scale with the gesture; text
+                    // inside zoom-constant pins keeps its pixel size.
+                    offs = offs * self.cam_scale
+                }
+                rotated = offs + cam_anchor
             } else {
-                let cam_rel = rotated + vec2(0.0, self.lift) - self.cam_pivot
+                let q = rotated * self.cam_scale + self.cam_shift
+                let cam_rel = q + vec2(0.0, self.lift) - self.cam_pivot
                 rotated = vec2(
                     cam_rel.x * self.cam_a + cam_rel.y * self.cam_b,
                     cam_rel.x * self.cam_c + cam_rel.y * self.cam_d
@@ -120,6 +134,10 @@ pub struct DrawRotatedText {
     /// anchor and re-applies the lift, so lifted labels track rotation.
     #[live(0.0)]
     pub lift: f32,
+    /// 1.0 = pin-interior text: anchor tracks the pan/zoom delta but glyph
+    /// offsets and size stay constant screen px (like the pin mesh).
+    #[live(0.0)]
+    pub billboard: f32,
 }
 
 impl DrawRotatedText {
@@ -133,6 +151,14 @@ impl DrawRotatedText {
         self.draw_vars.set_uniform(cx, live_id!(cam_d), &[m[3]]);
         self.draw_vars
             .set_uniform(cx, live_id!(cam_pivot), &[pivot.x, pivot.y]);
+    }
+
+    /// Pan/zoom delta uniforms applied before the camera matrix: cached
+    /// glyphs render at `p * scale + shift` per frame, GPU-side.
+    pub fn set_pan_delta(&mut self, cx: &mut Cx, scale: f32, shift: Vec2f) {
+        self.draw_vars.set_uniform(cx, live_id!(cam_scale), &[scale]);
+        self.draw_vars
+            .set_uniform(cx, live_id!(cam_shift), &[shift.x, shift.y]);
     }
 }
 
@@ -233,6 +259,7 @@ impl DrawRotatedText {
         let saved_font_scale = self.draw_super.font_scale;
         self.draw_super.font_scale = 1.0;
         self.upright = 0.0;
+        self.billboard = 0.0;
         for glyph in glyphs {
             self.draw_glyph_at(
                 cx,
@@ -269,6 +296,7 @@ impl DrawRotatedText {
         let saved_font_scale = self.draw_super.font_scale;
         self.draw_super.font_scale = 1.0;
         self.upright = 1.0;
+        self.billboard = 1.0;
         let scaled_anchor =
             Point::new(anchor.x * scale + offset.x, anchor.y * scale + offset.y);
         for glyph in glyphs {
@@ -286,6 +314,7 @@ impl DrawRotatedText {
             );
         }
         self.upright = 0.0;
+        self.billboard = 0.0;
         self.draw_super.font_scale = saved_font_scale;
     }
 
@@ -306,6 +335,7 @@ impl DrawRotatedText {
         let saved_font_scale = self.draw_super.font_scale;
         self.draw_super.font_scale = 1.0;
         self.upright = 1.0;
+        self.billboard = 0.0;
         let anchor = Point::new(anchor.x * scale + offset.x, anchor.y * scale + offset.y);
         for glyph in glyphs {
             self.draw_glyph_at(
