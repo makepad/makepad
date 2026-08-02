@@ -69,6 +69,42 @@ impl EntityState {
     }
 }
 
+/// Construction data for one entity: the parts that rarely or never change.
+///
+/// Split from [`EntityState`] on purpose. State is volatile, unreliable and
+/// sent every tick; a descriptor is what a client needs to *create* the thing
+/// in the first place, so it travels on the reliable channel and only when it
+/// changes. Without the split, either every datagram would carry a tag string
+/// or a joining client would see poses for entities it cannot build.
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub struct EntityDesc {
+    pub id: u64,
+    /// Where it was created. Statics never move and are therefore absent from
+    /// the per-tick state stream, so this is the only place a joining client
+    /// learns where the ground and the scenery are.
+    pub pos: [f32; 3],
+    pub half: [f32; 3],
+    pub color: [f32; 4],
+    pub scale: [f32; 3],
+    /// BodyKind discriminant, mapped by the session layer.
+    pub kind: u8,
+    /// Visual shape discriminant.
+    pub shape: u8,
+    pub glow: f32,
+    pub flags: u16,
+    pub tag: String,
+}
+
+impl EntityDesc {
+    pub fn is_finite(&self) -> bool {
+        self.pos.iter().all(|v| v.is_finite())
+            && self.half.iter().all(|v| v.is_finite())
+            && self.color.iter().all(|v| v.is_finite())
+            && self.scale.iter().all(|v| v.is_finite())
+            && self.glow.is_finite()
+    }
+}
+
 /// One player's input for a tick. Camera yaw travels with the input so the
 /// host can resolve camera-relative movement itself — the client's camera rig
 /// stays pure presentation (game.md §Multiplayer model).
@@ -133,6 +169,13 @@ pub enum HostToClient {
     StateBatch {
         tick: u64,
         entities: Vec<EntityState>,
+    },
+    /// Construction data for entities the client may not have yet. Reliable
+    /// and ordered, sent after `Welcome` for the whole world and thereafter
+    /// only for what actually appeared or was restyled.
+    Descriptors {
+        tick: u64,
+        descs: Vec<EntityDesc>,
     },
     Event {
         tick: u64,

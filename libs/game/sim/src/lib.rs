@@ -17,6 +17,7 @@
 
 pub mod dynamics;
 pub mod entity;
+pub mod player;
 pub mod queries;
 pub mod step;
 pub mod terrain;
@@ -24,6 +25,7 @@ pub mod world;
 
 pub use dynamics::*;
 pub use entity::*;
+pub use player::*;
 pub use queries::*;
 pub use step::*;
 pub use terrain::*;

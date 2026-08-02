@@ -54,6 +54,9 @@ impl Default for PlaneConfig {
 #[derive(Clone, Debug)]
 pub struct Plane {
     pub entity: u64,
+    /// Which player drives this when `control` is `Player`. Defaults to the
+    /// local device (player 0), so single-player games never mention it.
+    pub owner: makepad_game_sim::PlayerId,
     pub config: PlaneConfig,
     pub control: ControlSource,
     pub input: DriveInput,
@@ -67,6 +70,7 @@ impl Plane {
     pub fn new(entity: u64, config: PlaneConfig, control: ControlSource) -> Self {
         Self {
             entity,
+            owner: makepad_game_sim::PlayerId::LOCAL,
             config,
             control,
             input: DriveInput::default(),

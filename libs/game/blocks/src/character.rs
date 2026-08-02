@@ -65,6 +65,9 @@ pub struct CharacterPose {
 #[derive(Clone, Debug)]
 pub struct Character {
     pub entity: u64,
+    /// Which player drives this when `control` is `Player`. Defaults to the
+    /// local device (player 0), so single-player games never mention it.
+    pub owner: makepad_game_sim::PlayerId,
     pub config: CharacterConfig,
     pub control: ControlSource,
     pub input: DriveInput,
@@ -83,6 +86,7 @@ impl Character {
     ) -> Self {
         Self {
             entity,
+            owner: makepad_game_sim::PlayerId::LOCAL,
             config,
             control,
             input: DriveInput::default(),

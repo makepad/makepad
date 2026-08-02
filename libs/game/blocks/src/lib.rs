@@ -85,6 +85,11 @@ pub struct Blocks {
     pub race: RaceKit,
     /// This device's input, refreshed by the host before `pre_step`.
     pub player_input: DriveInput,
+    /// Per-player intent (M2). The host fills one entry per connected player
+    /// and bot each tick; a block driven by `ControlSource::Player` reads the
+    /// entry for its `owner`. An empty map means single-player, where every
+    /// owner resolves to `player_input` — so the local path is unchanged.
+    pub player_inputs: std::collections::HashMap<makepad_game_sim::PlayerId, DriveInput>,
 }
 
 impl Blocks {
@@ -99,6 +104,7 @@ impl Blocks {
             // The player's live input is device state, not world content: it
             // survives a reload exactly like a held key does.
             player_input: self.player_input,
+            player_inputs: std::mem::take(&mut self.player_inputs),
             ..Default::default()
         };
     }
@@ -112,7 +118,9 @@ impl Blocks {
     }
 
     /// Drop block state whose entity is gone (removed, expired, rolled back).
-    fn reconcile(&mut self, world: &GameWorld) {
+    /// Public because a network client rebuilds its entity list wholesale from
+    /// replicated state and must drop block state for anything that vanished.
+    pub fn reconcile(&mut self, world: &GameWorld) {
         let alive = |id: u64| world.entity(id).is_some();
         self.cars.retain(|c| alive(c.entity));
         self.characters.retain(|c| alive(c.entity));
@@ -124,18 +132,27 @@ impl Blocks {
     /// Phase 1: turn intent into motion — runs BEFORE the sim step.
     pub fn pre_step(&mut self, world: &mut GameWorld) {
         self.reconcile(world);
-        let player = self.player_input;
+        let fallback = self.player_input;
+        let inputs = &self.player_inputs;
+        // One player's intent, whichever source filled it. Single-player leaves
+        // the map empty and every block reads `player_input`, exactly as before.
+        let intent = |owner: makepad_game_sim::PlayerId| -> DriveInput {
+            inputs.get(&owner).copied().unwrap_or(fallback)
+        };
         for brain in self.brains.iter_mut() {
             brain.tick(world);
         }
         for car in self.cars.iter_mut() {
-            car.tick(world, &player);
+            let input = intent(car.owner);
+            car.tick(world, &input);
         }
         for character in self.characters.iter_mut() {
-            character.tick(world, &player);
+            let input = intent(character.owner);
+            character.tick(world, &input);
         }
         for plane in self.planes.iter_mut() {
-            plane.tick(world, &player);
+            let input = intent(plane.owner);
+            plane.tick(world, &input);
         }
     }
 

@@ -14,7 +14,8 @@ use makepad_game_render::{
     DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws, GameRenderer,
     SkinnedBatch, SkinnedDraw,
 };
-use makepad_game_sim::{step_world, BodyKind, Entity, GameWorld, Shape, SkyConfig, TICK_DT};
+use makepad_game_session::{Session, SessionEvent};
+use makepad_game_sim::{BodyKind, Entity, GameWorld, Shape, SkyConfig, TICK_DT};
 use makepad_widgets::*;
 
 script_mod! {
@@ -91,6 +92,13 @@ pub struct ArcadeView {
     renderer: GameRenderer,
     #[rust]
     world: GameWorld,
+    /// Multiplayer role for this device. `ARCADE_HOST=1` hosts a room;
+    /// `ARCADE_JOIN=<tcp_addr>` joins one. Unset means single-player, which is
+    /// the same code path with a `Session::Local`.
+    #[rust]
+    session: Session,
+    #[rust]
+    session_status: String,
     #[rust(false)]
     world_built: bool,
     #[rust]
@@ -500,13 +508,66 @@ impl ArcadeView {
         }
         let _ = w;
         self.blocks.player_input = self.player_input();
-        self.blocks.pre_step(&mut self.world);
-        step_world(&mut self.world);
-        self.world.tick += 1;
-        self.world.time += TICK_DT as f64;
-        self.blocks.post_step(&mut self.world);
+        // One tick, whichever role this device holds: Local and Host simulate,
+        // a Client applies host truth and derives the rest.
+        let now = self.world.tick as f64 * TICK_DT as f64;
+        for event in self
+            .session
+            .tick(&mut self.world, &mut self.blocks, now)
+        {
+            self.session_status = match event {
+                SessionEvent::Joined { name, .. } => format!("{name} joined"),
+                SessionEvent::Left { name, .. } => format!("{name} left"),
+                SessionEvent::Disconnected { reason } => format!("disconnected: {reason:?}"),
+            };
+            log!("arcade: {}", self.session_status);
+        }
         if let Some(knight) = &mut self.knight {
             knight.tick();
+        }
+    }
+
+    /// Read the room configuration from the environment. Kept env-driven on
+    /// purpose: it is the same switch a headless test client uses, so the
+    /// multiplayer path is exercised without a window.
+    fn start_session(&mut self) {
+        const SECRET: &[u8] = b"makepad-arcade-lan";
+        if std::env::var("ARCADE_HOST").is_ok() {
+            match Session::host("arcade", SECRET) {
+                Ok(session) => {
+                    if let Some((tcp, udp)) = session.host_addrs() {
+                        log!("arcade: hosting on tcp {tcp} / udp {udp}");
+                        log!("arcade: join with ARCADE_JOIN={tcp}");
+                    }
+                    self.session = session;
+                }
+                Err(e) => log!("arcade: could not host: {e}"),
+            }
+            return;
+        }
+        let Ok(addr) = std::env::var("ARCADE_JOIN") else {
+            return;
+        };
+        let Ok(tcp) = addr.parse::<std::net::SocketAddr>() else {
+            log!("arcade: ARCADE_JOIN must be host:port, got {addr}");
+            return;
+        };
+        // The host's UDP port is its TCP port + 0 by convention only when it
+        // was bound explicitly; ask for both to be passed when they differ.
+        let udp: std::net::SocketAddr = std::env::var("ARCADE_JOIN_UDP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(tcp);
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+        match Session::join(id, "player", tcp, udp, SECRET, 0.0) {
+            Ok(session) => {
+                log!("arcade: joined {tcp}");
+                self.session = session;
+            }
+            Err(e) => log!("arcade: could not join {tcp}: {e}"),
         }
     }
 
@@ -657,8 +718,13 @@ impl Widget for ArcadeView {
                 DrawPassClearDepth::ClearWith(1.0),
             );
             cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
-            self.build_world();
-            self.spawn_blocks();
+            self.start_session();
+            // A client's world arrives from the host; building a local one
+            // would only be overwritten on the first state batch.
+            if self.session.simulates() {
+                self.build_world();
+                self.spawn_blocks();
+            }
             self.next_frame = cx.new_next_frame();
         }
         self.view_rect = rect;
