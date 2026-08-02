@@ -3,3 +3,13 @@ name = "makepad-remote"
 version = "0.1.0"
 edition = "2021"
 description = "Remote file-sync and cargo runner for Makepad"
+
+[workspace]
+
+[[bin]]
+name = "makepad-remote"
+path = "src/main.rs"
+
+[[bin]]
+name = "mapfleet"
+path = "src/bin/mapfleet.rs"
