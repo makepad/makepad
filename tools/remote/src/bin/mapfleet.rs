@@ -59,9 +59,9 @@ struct Shared {
     next: AtomicUsize,
     weave_dirty: AtomicBool,
     stop: AtomicBool,
-    /// At most two concurrent slices: the store is read-only so parallel
-    /// slicing is safe, and with 8 workers a single-slice rule becomes
-    /// the pipeline limiter; more than two thrashes the disk.
+    /// At most three concurrent slices: the store is read-only so parallel
+    /// slicing is safe; ten workers need a fresh cell every couple of
+    /// minutes and the NVMe sustains three readers without thrash.
     slice_gate: Mutex<usize>,
 }
 
@@ -245,7 +245,7 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
     }
     loop {
         let mut active = shared.slice_gate.lock().unwrap();
-        if *active < 2 {
+        if *active < 3 {
             *active += 1;
             break;
         }
