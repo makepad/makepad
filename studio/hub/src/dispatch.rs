@@ -2320,10 +2320,14 @@ impl HubCore {
         let Some(rest) = virtual_path.strip_prefix(&prefix) else {
             return false;
         };
-        rest == ".git"
-            || rest.starts_with(".git/")
-            || rest == ".makepad"
-            || rest.starts_with(".makepad/")
+        if rest == ".makepad" || rest.starts_with(".makepad/") {
+            return true;
+        }
+        // Same bulk-dir set the tree scan skips (virtual_fs
+        // heavy_nonproject_dir): events from bake/build churn under these
+        // must not reach the reload path at all.
+        let top = rest.split('/').next().unwrap_or(rest);
+        crate::virtual_fs::heavy_nonproject_dir(top)
     }
 
     fn should_ignore_virtual_path(&self, mount: &str, virtual_path: &str) -> bool {
