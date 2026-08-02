@@ -4662,38 +4662,46 @@ fn build_tile_buffers_from_features_profiled(
                 );
             }
         }
-        for (x, y) in &tree_points_3d {
+        // Every street tree is the same mesh (shading depends on normals
+        // and the sun, not the anchor): build ONE tree at the origin and
+        // instance it by memcpy + anchor/zbias patch. Dense park tiles at
+        // the icon horizon carry thousands — the per-tree sin/cos rebuild
+        // was most of the buildings stage there.
+        if !tree_points_3d.is_empty() {
+            let mut template_verts = Vec::<f32>::new();
+            let mut template_indices = Vec::<u32>::new();
+            let mut template_zbias = 0.0f32;
             append_wall_quad(
-                (*x - arm, *y),
-                (*x + arm, *y),
+                (-arm, 0.0),
+                (arm, 0.0),
                 0.0,
                 7.5,
                 trunk_color,
                 trunk_ao,
                 (0.0, 0.0),
                 MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
             append_wall_quad(
-                (*x, *y - arm),
-                (*x, *y + arm),
+                (0.0, -arm),
+                (0.0, arm),
                 0.0,
                 7.5,
                 trunk_color,
                 trunk_ao,
                 (0.0, 0.0),
                 MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
             // Street-tree proportions vs buildings: ~11.5m total. The
             // canopy is a PROLATE ellipsoid (taller than wide) on a tall
             // trunk — scaling the ball uniformly reads as a bush.
             append_ball(
-                (*x, *y),
+                (0.0, 0.0),
                 2.9 * units_per_m,
                 4.0,
                 7.5,
@@ -4702,17 +4710,78 @@ fn build_tile_buffers_from_features_profiled(
                 canopy_segs_v,
                 &theme.shiny.sun,
                 MAT_CANOPY,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
+                &mut template_verts,
+                &mut template_indices,
+                &mut template_zbias,
             );
-            feature_count += 1;
+            let floats = template_verts.len();
+            let vert_count = (floats / VECTOR_FLOATS_PER_VERTEX) as u32;
+            fill_vertices.reserve(floats * tree_points_3d.len());
+            fill_indices.reserve(template_indices.len() * tree_points_3d.len());
+            for (instance, (x, y)) in tree_points_3d.iter().enumerate() {
+                let base_vert =
+                    (fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                let zbias_shift = fill_zbias + instance as f32 * template_zbias;
+                let start = fill_vertices.len();
+                fill_vertices.extend_from_slice(&template_verts);
+                for record in fill_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX)
+                {
+                    record[0] += *x;
+                    record[1] += *y;
+                    record[18] += zbias_shift;
+                }
+                fill_indices
+                    .extend(template_indices.iter().map(|i| i + base_vert));
+                let _ = vert_count;
+                feature_count += 1;
+            }
+            fill_zbias += tree_points_3d.len() as f32 * template_zbias;
         }
     }
 
     // Dynamic stalk heights: every flying marker clears the building under
     // it by ~8 m (a 100 m tower gets a 108 m pin), plus a small
     // deterministic stagger so clustered pins don't form one flat plane.
+    // Cell grid over building rings: the stalk-clearance scan was
+    // icons x groups x rings, and the icon horizon multiplied the icon
+    // side by ~10 (75ms on center tiles). A point query now touches one
+    // cell's candidates.
+    let lift_grid: CellMap<Vec<u32>> = {
+        const LIFT_CELL: f32 = 24.0;
+        let mut grid: CellMap<Vec<u32>> = CellMap::default();
+        for (group_index, group) in building_groups.iter().enumerate() {
+            if group.height_m <= 0.0 {
+                continue;
+            }
+            for ring in &group.rings {
+                if ring.signed_area <= 0.0 {
+                    continue;
+                }
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                for &(x, y) in &ring.points {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+                for cy in (min_y / LIFT_CELL).floor() as i32..=(max_y / LIFT_CELL).floor() as i32
+                {
+                    for cx in
+                        (min_x / LIFT_CELL).floor() as i32..=(max_x / LIFT_CELL).floor() as i32
+                    {
+                        let cell = grid.entry((cx, cy)).or_default();
+                        if cell.last() != Some(&(group_index as u32)) {
+                            cell.push(group_index as u32);
+                        }
+                    }
+                }
+            }
+        }
+        grid
+    };
     let job_lifts: Vec<f32> = icon_jobs
         .iter()
         .map(|job| {
@@ -4722,17 +4791,22 @@ fn build_tile_buffers_from_features_profiled(
             }
             let (px, py) = job.0;
             let mut clearance = 0.0f32;
-            for group in &building_groups {
-                if group.height_m <= clearance {
-                    continue;
-                }
-                for ring in &group.rings {
-                    if ring.signed_area <= 0.0 {
+            const LIFT_CELL: f32 = 24.0;
+            let key = ((px / LIFT_CELL).floor() as i32, (py / LIFT_CELL).floor() as i32);
+            if let Some(candidates) = lift_grid.get(&key) {
+                for &group_index in candidates {
+                    let group = &building_groups[group_index as usize];
+                    if group.height_m <= clearance {
                         continue;
                     }
-                    if point_in_ring((px, py), &ring.points) {
-                        clearance = clearance.max(group.height_m);
-                        break;
+                    for ring in &group.rings {
+                        if ring.signed_area <= 0.0 {
+                            continue;
+                        }
+                        if point_in_ring((px, py), &ring.points) {
+                            clearance = clearance.max(group.height_m);
+                            break;
+                        }
                     }
                 }
             }
