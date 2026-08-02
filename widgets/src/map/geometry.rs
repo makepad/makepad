@@ -2574,6 +2574,21 @@ pub fn build_paint_faces(
                                     ];
                                 }
                             }
+                            // Direction-only smoothing: renormalize to the
+                            // full half-width so the displaced edge keeps
+                            // CONSTANT width along curves (magnitude decay
+                            // at bends read as casing pinch/swell).
+                            for off in offs.iter_mut() {
+                                let len = (off[0] * off[0] + off[1] * off[1]).sqrt();
+                                *off = if len > 1e-4 {
+                                    [
+                                        off[0] / len * group.half_width,
+                                        off[1] / len * group.half_width,
+                                    ]
+                                } else {
+                                    [0.0, 0.0]
+                                };
+                            }
                         }
                         for (point, off) in ring.iter().zip(offs) {
                             normal_map.insert(
