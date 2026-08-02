@@ -1,4 +1,3 @@
-use super::FastHashMap;
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -31,49 +30,8 @@ struct GroupIndexEntry {
     length: u32,
 }
 
-#[derive(Debug)]
-struct CacheEntry<T> {
-    value: T,
-    used: u64,
-}
-
-struct StoreIndex {
-    sorted: Vec<GroupIndexEntry>,
-    direct: Option<Vec<Option<GroupIndexEntry>>>,
-}
-
-impl StoreIndex {
-    fn new(sorted: Vec<GroupIndexEntry>) -> Self {
-        const MAX_DIRECT_GROUPS: u64 = 4_000_000;
-        let direct = sorted
-            .last()
-            .map(|entry| entry.group_id)
-            .filter(|group_id| *group_id <= MAX_DIRECT_GROUPS)
-            .map(|max_group_id| {
-                let mut direct = vec![None; max_group_id as usize + 1];
-                for entry in &sorted {
-                    direct[entry.group_id as usize] = Some(*entry);
-                }
-                direct
-            });
-        Self { sorted, direct }
-    }
-
-    fn get(&self, group_id: u64) -> Option<GroupIndexEntry> {
-        if let Some(direct) = &self.direct {
-            return direct.get(group_id as usize).copied().flatten();
-        }
-        find_entry(&self.sorted, group_id)
-    }
-}
-
 fn write_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_le_bytes());
-}
-
-/// Node-group cache size: MAKEPAD_NODE_CACHE_MIB (default 8192 MiB).
-pub fn node_cache_groups_public() -> usize {
-    node_cache_groups()
 }
 
 /// The whole node store decoded into RAM: lock-free shared lookups for
@@ -154,14 +112,6 @@ impl FlatNodeStore {
             None => Ok(None),
         }
     }
-}
-
-fn node_cache_groups() -> usize {
-    let mib = std::env::var("MAKEPAD_NODE_CACHE_MIB")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(8192);
-    (mib * 4 / 3).max(256)
 }
 
 fn write_u32(output: &mut Vec<u8>, value: u32) {
@@ -513,104 +463,6 @@ fn encode_node_chunk(nodes: &[NodeCoord]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-pub struct NodeStore {
-    path: PathBuf,
-    file: File,
-    entries: StoreIndex,
-    cache: FastHashMap<u64, CacheEntry<DecodedNodeGroup>>,
-    cache_capacity: usize,
-    cache_clock: u64,
-    last_group: Option<u64>,
-    // FIFO eviction: O(1) amortized. The old min_by_key full scan was
-    // O(cache) per miss — with a Europe-sized cache that scan WAS the
-    // pass-3 bottleneck.
-    eviction_queue: std::collections::VecDeque<u64>,
-}
-
-impl NodeStore {
-    pub fn open(data_path: &Path, index_path: &Path) -> Result<Self, String> {
-        let mut file =
-            File::open(data_path).map_err(|err| format!("open {}: {err}", data_path.display()))?;
-        verify_data_magic(&mut file, data_path, NODE_DATA_MAGIC)?;
-        Ok(Self {
-            path: data_path.to_path_buf(),
-            file,
-            entries: StoreIndex::new(read_index(index_path, NODE_INDEX_MAGIC)?),
-            cache: FastHashMap::default(),
-            // ~0.75MB per decoded group; 16384 groups ~= 12GB. The old 256
-            // (128MB) thrashed on Europe-scale way resolution — cache-miss
-            // zlib re-decode was ~115us per way, the whole pass-3 cost.
-            cache_capacity: node_cache_groups(),
-            cache_clock: 0,
-            last_group: None,
-            eviction_queue: std::collections::VecDeque::new(),
-        })
-    }
-
-    /// Same store with an explicit group-cache budget (parallel way
-    /// resolution gives each worker its own slice of the total).
-    pub fn open_with_cache(
-        data_path: &Path,
-        index_path: &Path,
-        cache_groups: usize,
-    ) -> Result<Self, String> {
-        let mut store = Self::open(data_path, index_path)?;
-        store.cache_capacity = cache_groups.max(64);
-        Ok(store)
-    }
-
-    pub fn get(&mut self, id: i64) -> Result<Option<NodeCoord>, String> {
-        if id < 0 {
-            return Ok(None);
-        }
-        let group_id = id as u64 >> NODE_GROUP_SHIFT;
-        let Some(entry) = self.entries.get(group_id) else {
-            return Ok(None);
-        };
-        let group = self.group(entry)?;
-        group.get(id)
-    }
-
-    fn group(&mut self, entry: GroupIndexEntry) -> Result<&DecodedNodeGroup, String> {
-        self.cache_clock += 1;
-        if self.last_group == Some(entry.group_id) {
-            let cached = self.cache.get_mut(&entry.group_id).unwrap();
-            cached.used = self.cache_clock;
-            return Ok(&cached.value);
-        }
-        if self.cache.contains_key(&entry.group_id) {
-            let cached = self.cache.get_mut(&entry.group_id).unwrap();
-            cached.used = self.cache_clock;
-            self.last_group = Some(entry.group_id);
-            return Ok(&cached.value);
-        }
-        while self.cache.len() >= self.cache_capacity {
-            let Some(candidate) = self.eviction_queue.pop_front() else {
-                break;
-            };
-            self.cache.remove(&candidate);
-        }
-        self.file
-            .seek(SeekFrom::Start(entry.offset))
-            .map_err(|err| format!("seek {}: {err}", self.path.display()))?;
-        let mut bytes = vec![0_u8; entry.length as usize];
-        self.file
-            .read_exact(&mut bytes)
-            .map_err(|err| format!("read {}: {err}", self.path.display()))?;
-        let group = decode_node_group(&bytes, entry.group_id)?;
-        self.eviction_queue.push_back(entry.group_id);
-        self.cache.insert(
-            entry.group_id,
-            CacheEntry {
-                value: group,
-                used: self.cache_clock,
-            },
-        );
-        self.last_group = Some(entry.group_id);
-        Ok(&self.cache.get(&entry.group_id).unwrap().value)
-    }
-}
-
 #[derive(Debug)]
 struct DecodedNodeChunk {
     positions: Box<[u16; 256]>,
@@ -739,13 +591,6 @@ fn decode_node_chunk(bytes: &[u8]) -> Result<DecodedNodeChunk, String> {
         positions,
         coordinates,
     })
-}
-
-fn find_entry(entries: &[GroupIndexEntry], group_id: u64) -> Option<GroupIndexEntry> {
-    entries
-        .binary_search_by_key(&group_id, |entry| entry.group_id)
-        .ok()
-        .map(|index| entries[index])
 }
 
 pub struct WayStoreBuilder {
@@ -942,86 +787,6 @@ impl FlatWayStore {
             Some(group) => group.get(id),
             None => Ok(None),
         }
-    }
-}
-
-pub struct WayStore {
-    path: PathBuf,
-    file: File,
-    entries: StoreIndex,
-    cache: FastHashMap<u64, CacheEntry<DecodedWayGroup>>,
-    cache_capacity: usize,
-    cache_clock: u64,
-    last_group: Option<u64>,
-}
-
-impl WayStore {
-    pub fn open(data_path: &Path, index_path: &Path) -> Result<Self, String> {
-        let mut file =
-            File::open(data_path).map_err(|err| format!("open {}: {err}", data_path.display()))?;
-        verify_data_magic(&mut file, data_path, WAY_DATA_MAGIC)?;
-        Ok(Self {
-            path: data_path.to_path_buf(),
-            file,
-            entries: StoreIndex::new(read_index(index_path, WAY_INDEX_MAGIC)?),
-            cache: FastHashMap::default(),
-            cache_capacity: 128,
-            cache_clock: 0,
-            last_group: None,
-        })
-    }
-
-    pub fn get(&mut self, id: i64) -> Result<Option<&[i64]>, String> {
-        if id < 0 {
-            return Ok(None);
-        }
-        let group_id = id as u64 >> WAY_GROUP_SHIFT;
-        let Some(entry) = self.entries.get(group_id) else {
-            return Ok(None);
-        };
-        let group = self.group(entry)?;
-        group.get(id)
-    }
-
-    fn group(&mut self, entry: GroupIndexEntry) -> Result<&DecodedWayGroup, String> {
-        self.cache_clock += 1;
-        if self.last_group == Some(entry.group_id) {
-            let cached = self.cache.get_mut(&entry.group_id).unwrap();
-            cached.used = self.cache_clock;
-            return Ok(&cached.value);
-        }
-        if self.cache.contains_key(&entry.group_id) {
-            let cached = self.cache.get_mut(&entry.group_id).unwrap();
-            cached.used = self.cache_clock;
-            self.last_group = Some(entry.group_id);
-            return Ok(&cached.value);
-        }
-        if self.cache.len() >= self.cache_capacity {
-            let oldest = *self
-                .cache
-                .iter()
-                .min_by_key(|(_, cached)| cached.used)
-                .map(|(group_id, _)| group_id)
-                .unwrap();
-            self.cache.remove(&oldest);
-        }
-        self.file
-            .seek(SeekFrom::Start(entry.offset))
-            .map_err(|err| format!("seek {}: {err}", self.path.display()))?;
-        let mut bytes = vec![0_u8; entry.length as usize];
-        self.file
-            .read_exact(&mut bytes)
-            .map_err(|err| format!("read {}: {err}", self.path.display()))?;
-        let group = decode_way_group(&bytes, entry.group_id)?;
-        self.cache.insert(
-            entry.group_id,
-            CacheEntry {
-                value: group,
-                used: self.cache_clock,
-            },
-        );
-        self.last_group = Some(entry.group_id);
-        Ok(&self.cache.get(&entry.group_id).unwrap().value)
     }
 }
 
@@ -1287,7 +1052,7 @@ mod tests {
         }
         assert_eq!(builder.finish().unwrap(), nodes.len() as u64);
 
-        let mut store = NodeStore::open(&data, &index).unwrap();
+        let store = FlatNodeStore::load(&data, &index).unwrap();
         for node in nodes {
             assert_eq!(store.get(node.id).unwrap(), Some(node));
         }
@@ -1315,7 +1080,7 @@ mod tests {
         }
         assert_eq!(builder.finish().unwrap(), ways.len() as u64);
 
-        let mut store = WayStore::open(&data, &index).unwrap();
+        let store = FlatWayStore::load(&data, &index).unwrap();
         for (id, refs) in &ways {
             assert_eq!(store.get(*id).unwrap(), Some(refs.as_slice()));
         }

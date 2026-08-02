@@ -11,7 +11,7 @@ pub use base::{convert_base, default_base_options, BaseOptions, ProgressBaseline
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use geom::{
-    emit_lines, emit_point, emit_polygons, group_polygon_rings, project_decimicro, project_node,
+    emit_point, group_polygon_rings, project_decimicro, project_node,
     project_path, PolygonPart, SourcePath,
 };
 use makepad_mbtile_reader::MbtilesWriter;
@@ -27,7 +27,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use store::{
-    NodeCoord, NodeStore, NodeStoreBuilder, PagedBitset, PagedBitsetWriter, WayStore,
+    NodeStoreBuilder, PagedBitset, PagedBitsetWriter,
     WayStoreBuilder,
 };
 
@@ -116,6 +116,42 @@ struct ConversionStats {
     missing_relation_nodes: u64,
     missing_relation_ways: u64,
 }
+
+/// Serialize/deserialize ConversionStats for pass-resume stamps. The field
+/// list must track the struct: from_json fails closed on a missing field,
+/// but a NEW struct field also has to be added here to survive a resume.
+macro_rules! conversion_stats_json {
+    ($($field:ident),* $(,)?) => {
+        impl ConversionStats {
+            fn to_json(&self) -> serde_json::Value {
+                let mut map = serde_json::Map::new();
+                $(map.insert(stringify!($field).to_string(), self.$field.into());)*
+                serde_json::Value::Object(map)
+            }
+            fn from_json(value: &serde_json::Value) -> Result<Self, String> {
+                let mut stats = Self::default();
+                $(stats.$field = value
+                    .get(stringify!($field))
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| format!(
+                        "pass stamp stats missing field {}", stringify!($field)
+                    ))?;)*
+                Ok(stats)
+            }
+        }
+    };
+}
+conversion_stats_json!(
+    nodes, tagged_nodes, ways, tagged_ways, relations, tagged_relations,
+    relation_way_members, relation_node_members, relation_relation_members,
+    source_tags, building, building_part, height, min_height, building_levels,
+    building_min_level, roof_shape, roof_height, roof_levels, roof_direction,
+    roof_orientation, roof_angle, building_material, building_colour,
+    roof_material, roof_colour, node_tile_records, way_line_tile_records,
+    way_polygon_tile_records, relation_point_tile_records,
+    relation_line_tile_records, relation_polygon_tile_records,
+    missing_relation_nodes, missing_relation_ways,
+);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TagFlags {
@@ -310,6 +346,7 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         &mut stats,
     )?;
     println!("  pass 2 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    write_pass_stamp(&options, 2, &mut spool, &stats)?;
 
     println!("Pass 3/5: resolving ways and writing tagged way features");
     let stage_started = Instant::now();
@@ -321,15 +358,30 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         &mut stats,
     )?;
     println!("  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+    write_pass_stamp(&options, 3, &mut spool, &stats)?;
 
+    run_relations_and_finish(&options, header, &paths, spool, stats, started)
+}
+
+/// Pass 4 (relations) plus the finishing tail — shared by the fresh path
+/// and pass-stamp resume.
+fn run_relations_and_finish(
+    options: &DetailOptions,
+    header: PbfHeaderInfo,
+    paths: &NativePaths,
+    mut spool: BlockSpoolWriter,
+    mut stats: ConversionStats,
+    started: Instant,
+) -> Result<(), String> {
     println!("Pass 4/5: assembling tagged relation geometries");
     let stage_started = Instant::now();
     build_relations(
         &options.source,
-        &paths,
+        paths,
         options.zoom,
         &mut spool,
         &mut stats,
+        &options.store.join("spool-frontier.txt"),
     )?;
     println!("  pass 4 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     let spool = spool.finish()?;
@@ -343,7 +395,7 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
     let report = stats.report(&options.source, options.zoom);
     fs::write(&paths.audit, &report)
         .map_err(|err| format!("write {}: {err}", paths.audit.display()))?;
-    write_complete_marker(&options, &paths, &spool)?;
+    write_complete_marker(options, paths, &spool)?;
 
     if options.no_tiles {
         println!("Pass 5/5 skipped (--no-tiles): store complete after pass 4");
@@ -352,7 +404,7 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
     }
     println!("Pass 5/5: external-sort blocks and stream MBTiles");
     let stage_started = Instant::now();
-    let output_stats = finish_tiles(&options, &spool, header.bounds)?;
+    let output_stats = finish_tiles(options, &spool, header.bounds)?;
     println!("  pass 5 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
     print!("{report}");
     println!(
@@ -363,6 +415,45 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         started.elapsed().as_secs_f64()
     );
     println!("Scratch retained at {}", options.store.display());
+    Ok(())
+}
+
+/// Stamp a completed pass: exact spool block lengths + counters + stats,
+/// written atomically. An interrupted later pass resumes here instead of
+/// restarting the whole spool.
+fn write_pass_stamp(
+    options: &DetailOptions,
+    pass: u8,
+    spool: &mut BlockSpoolWriter,
+    stats: &ConversionStats,
+) -> Result<(), String> {
+    let (records, bytes, blocks) = spool.snapshot()?;
+    let source_bytes = options
+        .source
+        .metadata()
+        .map_err(|err| format!("stat {}: {err}", options.source.display()))?
+        .len();
+    let mut block_map = serde_json::Map::new();
+    for (name, len) in blocks {
+        block_map.insert(name, len.into());
+    }
+    let marker = serde_json::json!({
+        "format": "makepad-native-detail-pass-stamp-v1",
+        "pass": pass,
+        "source_bytes": source_bytes,
+        "zoom": options.zoom,
+        "records": records,
+        "bytes": bytes,
+        "stats": stats.to_json(),
+        "blocks": block_map,
+    });
+    let path = options.store.join(format!("spool.pass{pass}.json"));
+    let bytes = serde_json::to_vec_pretty(&marker)
+        .map_err(|err| format!("serialize {}: {err}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes).map_err(|err| format!("write {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .map_err(|err| format!("publish {}: {err}", path.display()))?;
     Ok(())
 }
 
@@ -409,6 +500,9 @@ fn finish_existing_detail(
         ));
     }
     let paths = NativePaths::new(&options.store);
+    if !paths.complete.exists() {
+        return resume_partial_detail(options, header, &paths);
+    }
     let marker_bytes = fs::read(&paths.complete).map_err(|err| {
         format!(
             "{} is incomplete and cannot be resumed (read {}: {err})",
@@ -476,6 +570,121 @@ fn finish_existing_detail(
     );
     println!("Scratch retained at {}", options.store.display());
     Ok(())
+}
+
+/// Resume an interrupted conversion from its newest pass stamp: verify the
+/// stamp matches the source, roll the spool back to the stamped block
+/// lengths, then run the remaining passes.
+fn resume_partial_detail(
+    options: &DetailOptions,
+    header: &PbfHeaderInfo,
+    paths: &NativePaths,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut stamp = None;
+    for pass in [3u8, 2u8] {
+        let path = options.store.join(format!("spool.pass{pass}.json"));
+        if !path.exists() {
+            continue;
+        }
+        let bytes =
+            fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|err| format!("parse {}: {err}", path.display()))?;
+        if value.get("format").and_then(|v| v.as_str())
+            != Some("makepad-native-detail-pass-stamp-v1")
+        {
+            return Err(format!("{} has an unsupported pass stamp", path.display()));
+        }
+        stamp = Some((pass, path, value));
+        break;
+    }
+    let Some((stamp_pass, stamp_path, stamp)) = stamp else {
+        return Err(format!(
+            "{} is incomplete and has no pass stamp; delete it and restart",
+            options.store.display()
+        ));
+    };
+    let stamp_zoom = stamp
+        .get("zoom")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{} has no zoom", stamp_path.display()))?;
+    if stamp_zoom != u64::from(options.zoom) {
+        return Err(format!(
+            "scratch zoom {stamp_zoom} does not match requested zoom {}",
+            options.zoom
+        ));
+    }
+    let source_bytes = options
+        .source
+        .metadata()
+        .map_err(|err| format!("stat {}: {err}", options.source.display()))?
+        .len();
+    let stamp_source_bytes = stamp
+        .get("source_bytes")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{} has no source_bytes", stamp_path.display()))?;
+    if stamp_source_bytes != source_bytes {
+        return Err(format!(
+            "scratch source size {stamp_source_bytes} does not match {} bytes for {}",
+            source_bytes,
+            options.source.display()
+        ));
+    }
+    // A stale pass-4 frontier describes records the rollback below removes
+    // from disk — drop it before touching the blocks so nothing gates on it.
+    let frontier_path = options.store.join("spool-frontier.txt");
+    if frontier_path.exists() {
+        fs::remove_file(&frontier_path)
+            .map_err(|err| format!("remove {}: {err}", frontier_path.display()))?;
+    }
+    let records = stamp
+        .get("records")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{} has no records", stamp_path.display()))?;
+    let bytes = stamp
+        .get("bytes")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{} has no bytes", stamp_path.display()))?;
+    let blocks = stamp
+        .get("blocks")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("{} has no blocks", stamp_path.display()))?;
+    let mut stamped = Vec::with_capacity(blocks.len());
+    for (name, len) in blocks {
+        let len = len
+            .as_u64()
+            .ok_or_else(|| format!("{} block {name} has no length", stamp_path.display()))?;
+        stamped.push((name.clone(), len));
+    }
+    let mut stats = ConversionStats::from_json(
+        stamp
+            .get("stats")
+            .ok_or_else(|| format!("{} has no stats", stamp_path.display()))?,
+    )?;
+    let mut spool = BlockSpoolWriter::resume(&paths.spool, &stamped, records, bytes)?;
+
+    println!("Native OSM detail conversion (resumed after pass {stamp_pass})");
+    println!("  source: {}", options.source.display());
+    println!("  output: {}", options.output.display());
+    println!("  store:  {}", options.store.display());
+    println!("  zoom:   {}", options.zoom);
+    println!("  spool rolled back to {} blocks, {} records", stamped.len(), records);
+
+    if stamp_pass == 2 {
+        println!("Pass 3/5: resolving ways and writing tagged way features");
+        let stage_started = Instant::now();
+        build_ways(
+            &options.source,
+            paths,
+            options.zoom,
+            &mut spool,
+            &mut stats,
+        )?;
+        println!("  pass 3 completed in {:.1}s", stage_started.elapsed().as_secs_f64());
+        write_pass_stamp(options, 3, &mut spool, &stats)?;
+    }
+    run_relations_and_finish(options, header.clone(), paths, spool, stats, started)
 }
 
 fn validate_detail_options(options: &DetailOptions) -> Result<(), String> {
@@ -895,6 +1104,7 @@ struct RelationJob {
 }
 
 struct RelationOut {
+    seq: usize,
     batch: PreparedBatch,
     missing_nodes: u64,
     missing_ways: u64,
@@ -906,6 +1116,7 @@ fn build_relations(
     zoom: u8,
     spool: &mut BlockSpoolWriter,
     stats: &mut ConversionStats,
+    frontier_path: &Path,
 ) -> Result<(), String> {
     use std::sync::mpsc::sync_channel;
     use std::sync::{Arc, Mutex};
@@ -924,16 +1135,177 @@ fn build_relations(
         "  stores loaded in {:.1}s",
         load_start.elapsed().as_secs_f64()
     );
+    // ---- 4a: collect relation jobs, bbox-scan, NL-spiral sort ----
+    // Jobs process in ascending distance-from-NL of their bbox NEAREST
+    // point; the writer publishes a monotone "frontier" distance below
+    // which every relation is spooled. Combined with passes 2-3 being
+    // complete, any cell whose FARTHEST corner is under the frontier is
+    // fully spooled — the bake fleet starts on it while this pass runs.
+    let mut jobs: Vec<Option<RelationJob>> = Vec::new();
+    let mut total = 0u64;
+    let mut tagged = 0u64;
+    {
+        let mut progress = Progress::new("relations collected");
+        visit_pbf(source, |element| {
+            let Element::Relation(relation) = element else {
+                return Ok(());
+            };
+            total += 1;
+            progress.tick(1);
+            let tags = collect_tags(relation.tags());
+            if tags.is_empty() {
+                return Ok(());
+            }
+            tagged += 1;
+            stats.add_tags(inspect_tag_flags(&tags));
+            let is_multipolygon = tag_value(&tags, "type") == Some("multipolygon");
+            let mut members = Vec::new();
+            let mut nested = 0u64;
+            for member in relation.members() {
+                let role = member.role().map_err(|err| {
+                    format!("read relation {} member role: {err}", relation.id())
+                })?;
+                match member.member_type {
+                    RelMemberType::Node => members.push((0u8, member.member_id, false)),
+                    RelMemberType::Way => {
+                        members.push((1u8, member.member_id, role == "inner"))
+                    }
+                    RelMemberType::Relation => nested += 1,
+                }
+            }
+            let mut owned_tags: Vec<(String, String)> = tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            if nested != 0 {
+                owned_tags.push((
+                    "__makepad_nested_relation_members".to_string(),
+                    nested.to_string(),
+                ));
+            }
+            jobs.push(Some(RelationJob {
+                id: relation.id(),
+                tags: owned_tags,
+                members,
+                is_multipolygon,
+            }));
+            Ok(())
+        })?;
+        progress.finish();
+    }
+
+    // NL anchor in global units (same web-mercator projection as parse).
+    let (anchor_x, anchor_y) = geom::project_lon_lat(
+        geom::SPIRAL_ANCHOR_LON,
+        geom::SPIRAL_ANCHOR_LAT,
+        zoom,
+    );
+
+    let keys: Vec<f64> = {
+        let mut progress = Progress::new("relation bboxes scanned");
+        let job_count = jobs.len();
+        let mut keys = vec![-1.0f64; job_count];
+        let scan_workers = std::thread::available_parallelism()
+            .map(|n| (n.get().saturating_sub(2)).clamp(4, 14))
+            .unwrap_or(4);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let flat_nodes_scan = Arc::clone(&flat_nodes);
+        let flat_ways_scan = Arc::clone(&flat_ways);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..scan_workers {
+                let next = &next;
+                let jobs = &jobs;
+                let flat_nodes = Arc::clone(&flat_nodes_scan);
+                let flat_ways = Arc::clone(&flat_ways_scan);
+                handles.push(scope.spawn(move || -> Result<Vec<(usize, f64)>, String> {
+                    let mut local = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if index >= job_count {
+                            break;
+                        }
+                        let Some(job) = &jobs[index] else { continue };
+                        let mut min_x = i64::MAX;
+                        let mut min_y = i64::MAX;
+                        let mut max_x = i64::MIN;
+                        let mut max_y = i64::MIN;
+                        for &(kind, member_id, _) in &job.members {
+                            if kind == 0 {
+                                if let Some(node) = flat_nodes.get(member_id)? {
+                                    min_x = min_x.min(node.x);
+                                    min_y = min_y.min(node.y);
+                                    max_x = max_x.max(node.x);
+                                    max_y = max_y.max(node.y);
+                                }
+                                continue;
+                            }
+                            if let Some(refs) = flat_ways.get(member_id)? {
+                                for &node_id in refs {
+                                    if let Some(node) = flat_nodes.get(node_id)? {
+                                        min_x = min_x.min(node.x);
+                                        min_y = min_y.min(node.y);
+                                        max_x = max_x.max(node.x);
+                                        max_y = max_y.max(node.y);
+                                    }
+                                }
+                            }
+                        }
+                        let key = if min_x == i64::MAX {
+                            -1.0
+                        } else {
+                            let dx = if anchor_x < min_x as f64 {
+                                min_x as f64 - anchor_x
+                            } else if anchor_x > max_x as f64 {
+                                anchor_x - max_x as f64
+                            } else {
+                                0.0
+                            };
+                            let dy = if anchor_y < min_y as f64 {
+                                min_y as f64 - anchor_y
+                            } else if anchor_y > max_y as f64 {
+                                anchor_y - max_y as f64
+                            } else {
+                                0.0
+                            };
+                            (dx * dx + dy * dy).sqrt()
+                        };
+                        local.push((index, key));
+                    }
+                    Ok(local)
+                }));
+            }
+            for handle in handles {
+                match handle.join() {
+                    Ok(Ok(local)) => {
+                        progress.tick(local.len() as u64);
+                        for (index, key) in local {
+                            keys[index] = key;
+                        }
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => return Err("bbox scan worker panicked".to_string()),
+                }
+            }
+            Ok(())
+        })?;
+        progress.finish();
+        keys
+    };
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    order.sort_by(|&a, &b| keys[a].partial_cmp(&keys[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let sorted_keys: Vec<f64> = order.iter().map(|&i| keys[i]).collect();
+    let sorted_keys = Arc::new(sorted_keys);
+
     let mut progress = Progress::new("relations assembled");
     let workers = std::thread::available_parallelism()
-        .map(|n| (n.get().saturating_sub(3)).clamp(4, 12))
+        .map(|n| (n.get().saturating_sub(2)).clamp(4, 14))
         .unwrap_or(4);
-    let (job_tx, job_rx) = sync_channel::<RelationJob>(4096);
+    let (job_tx, job_rx) = sync_channel::<(usize, RelationJob)>(4096);
     let job_rx = Arc::new(Mutex::new(job_rx));
     let (out_tx, out_rx) = sync_channel::<Result<RelationOut, String>>(4096);
 
-    let result: Result<(u64, u64, u64, u64, u64, u64, u64), String> =
-        std::thread::scope(|scope| {
+    let result: Result<(u64, u64, u64, u64, u64), String> = std::thread::scope(|scope| {
             for _ in 0..workers {
                 let job_rx = Arc::clone(&job_rx);
                 let out_tx = out_tx.clone();
@@ -942,7 +1314,7 @@ fn build_relations(
                 scope.spawn(move || {
                     loop {
                         let job = { job_rx.lock().unwrap().recv() };
-                        let Ok(job) = job else {
+                        let Ok((seq, job)) = job else {
                             break;
                         };
                         let assembled = (|| -> Result<RelationOut, String> {
@@ -1013,6 +1385,7 @@ fn build_relations(
                                 )?;
                             }
                             Ok(RelationOut {
+                                seq,
                                 batch: PreparedBatch {
                                     tags: job.tags,
                                     features,
@@ -1029,7 +1402,17 @@ fn build_relations(
             }
             drop(out_tx);
 
+            let writer_keys = Arc::clone(&sorted_keys);
             let writer = scope.spawn(move || -> Result<(u64, u64, u64, u64, u64), String> {
+                // The frontier file publishes the spiral key (global-unit
+                // distance from the NL anchor) of the FIRST unfinished
+                // relation. Every relation strictly below it is fully on
+                // disk, so a bake cell whose farthest corner sits below
+                // the frontier can slice while this pass keeps running.
+                let job_count = writer_keys.len();
+                let mut completed = vec![false; job_count];
+                let mut low_water = 0usize;
+                let mut last_frontier = Instant::now();
                 let mut point_records = 0u64;
                 let mut line_records = 0u64;
                 let mut polygon_records = 0u64;
@@ -1057,7 +1440,32 @@ fn build_relations(
                             _ => line_records += 1,
                         }
                     }
+                    progress.tick(1);
+                    if out.seq < job_count {
+                        completed[out.seq] = true;
+                    }
+                    while low_water < job_count && completed[low_water] {
+                        low_water += 1;
+                    }
+                    if last_frontier.elapsed() >= Duration::from_secs(5) {
+                        spool.flush_open()?;
+                        let frontier = if low_water >= job_count {
+                            f64::MAX
+                        } else {
+                            writer_keys[low_water]
+                        };
+                        write_frontier(frontier_path, frontier)?;
+                        last_frontier = Instant::now();
+                    }
                 }
+                spool.flush_open()?;
+                let frontier = if low_water >= job_count {
+                    f64::MAX
+                } else {
+                    writer_keys[low_water]
+                };
+                write_frontier(frontier_path, frontier)?;
+                progress.finish();
                 Ok((
                     point_records,
                     line_records,
@@ -1067,72 +1475,27 @@ fn build_relations(
                 ))
             });
 
-            let mut total = 0u64;
-            let mut tagged = 0u64;
-            let visit_result = visit_pbf(source, |element| {
-                let Element::Relation(relation) = element else {
-                    return Ok(());
+            let mut feed_err = None;
+            for (seq, &index) in order.iter().enumerate() {
+                let Some(job) = jobs[index].take() else {
+                    continue;
                 };
-                total += 1;
-                progress.tick(1);
-                let tags = collect_tags(relation.tags());
-                if tags.is_empty() {
-                    return Ok(());
+                if job_tx.send((seq, job)).is_err() {
+                    feed_err = Some("relation assembler workers exited early".to_string());
+                    break;
                 }
-                tagged += 1;
-                stats.add_tags(inspect_tag_flags(&tags));
-                let is_multipolygon = tag_value(&tags, "type") == Some("multipolygon");
-                let mut members = Vec::new();
-                let mut nested = 0u64;
-                for member in relation.members() {
-                    let role = member.role().map_err(|err| {
-                        format!("read relation {} member role: {err}", relation.id())
-                    })?;
-                    match member.member_type {
-                        RelMemberType::Node => members.push((0u8, member.member_id, false)),
-                        RelMemberType::Way => {
-                            members.push((1u8, member.member_id, role == "inner"))
-                        }
-                        RelMemberType::Relation => nested += 1,
-                    }
-                }
-                let mut owned_tags: Vec<(String, String)> = tags
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                if nested != 0 {
-                    owned_tags.push((
-                        "__makepad_nested_relation_members".to_string(),
-                        nested.to_string(),
-                    ));
-                }
-                job_tx
-                    .send(RelationJob {
-                        id: relation.id(),
-                        tags: owned_tags,
-                        members,
-                        is_multipolygon,
-                    })
-                    .map_err(|_| "relation assembler workers exited early".to_string())?;
-                Ok(())
-            });
+            }
             drop(job_tx);
             let (points, lines, polygons, missing_nodes, missing_ways) = match writer.join() {
                 Ok(result) => result?,
                 Err(_) => return Err("relation spool writer panicked".to_string()),
             };
-            visit_result?;
-            Ok((
-                total,
-                tagged,
-                points,
-                lines,
-                polygons,
-                missing_nodes,
-                missing_ways,
-            ))
+            if let Some(err) = feed_err {
+                return Err(err);
+            }
+            Ok((points, lines, polygons, missing_nodes, missing_ways))
         });
-    let (total, tagged, points, lines, polygons, missing_nodes, missing_ways) = result?;
+    let (points, lines, polygons, missing_nodes, missing_ways) = result?;
     stats.relations += total;
     stats.tagged_relations += tagged;
     stats.relation_point_tile_records += points;
@@ -1140,25 +1503,17 @@ fn build_relations(
     stats.relation_polygon_tile_records += polygons;
     stats.missing_relation_nodes += missing_nodes;
     stats.missing_relation_ways += missing_ways;
-    progress.finish();
     Ok(())
 }
 
-fn resolve_nodes(
-    store: &mut NodeStore,
-    refs: &[i64],
-    object_id: i64,
-) -> Result<Vec<NodeCoord>, String> {
-    let mut result = Vec::with_capacity(refs.len());
-    for &node_id in refs {
-        let Some(node) = store.get(node_id)? else {
-            return Err(format!(
-                "OSM object {object_id} references missing node {node_id}"
-            ));
-        };
-        result.push(node);
-    }
-    Ok(result)
+/// Atomically publish the pass-4 streaming frontier: the spiral key of the
+/// first relation not yet spooled (f64::MAX once the pass is done).
+fn write_frontier(path: &Path, value: f64) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("{value}\n"))
+        .map_err(|err| format!("write {}: {err}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|err| format!("publish {}: {err}", path.display()))?;
+    Ok(())
 }
 
 fn resolve_projected_refs_flat(
@@ -1187,33 +1542,6 @@ fn resolve_projected_refs_flat(
     }
     let closed = count > 2 && first_id == last_id;
     Ok((result, closed))
-}
-
-fn resolve_projected_refs(
-    store: &mut NodeStore,
-    refs: impl Iterator<Item = i64>,
-    object_id: i64,
-) -> Result<(Vec<geom::GlobalPoint>, bool), String> {
-    let (minimum, maximum) = refs.size_hint();
-    let mut result = Vec::with_capacity(maximum.unwrap_or(minimum));
-    let mut first_id = None;
-    let mut last_id = None;
-    let mut count = 0_usize;
-    for node_id in refs {
-        let Some(node) = store.get(node_id)? else {
-            return Err(format!(
-                "OSM object {object_id} references missing node {node_id}"
-            ));
-        };
-        first_id.get_or_insert(node_id);
-        last_id = Some(node_id);
-        count += 1;
-        let point = project_node(node);
-        if result.last() != Some(&point) {
-            result.push(point);
-        }
-    }
-    Ok((result, count > 2 && first_id == last_id))
 }
 
 fn finish_tiles(
@@ -1272,7 +1600,7 @@ fn finish_tiles(
         .ok_or_else(|| "--sort-memory-mib overflow".to_string())?;
     let mut progress = Progress::new("spool blocks encoded");
     for &block in &spool.blocks {
-        let sorted = SortedBlock::prepare(&spool.dir, block, Some(sort_memory))?;
+        let sorted = SortedBlock::prepare(&spool.dir, block, Some(sort_memory), false)?;
         let mut sorted = records_to_tiles(sorted, block, |x, y, features| {
             let pbf = encode_tile(features)?;
             let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());

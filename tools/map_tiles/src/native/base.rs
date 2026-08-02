@@ -207,7 +207,11 @@ impl TileSink for MbtilesSink {
 // Store validation (reuses the pbf-detail completion marker)
 // ---------------------------------------------------------------------------
 
-fn validate_store(options: &BaseOptions) -> Result<(), String> {
+/// Frontier slack required beyond the bbox's farthest corner: one z14 tile
+/// of global units, covering the anchor-vs-corner rounding differences.
+const FRONTIER_MARGIN: f64 = 4096.0;
+
+fn validate_store(options: &BaseOptions) -> Result<bool, String> {
     if !options.store.is_dir() {
         return Err(format!(
             "{} is not a directory; run pbf-detail first to build the store",
@@ -215,27 +219,99 @@ fn validate_store(options: &BaseOptions) -> Result<(), String> {
         ));
     }
     let marker_path = options.store.join("spool.complete.json");
-    let marker_bytes = fs::read(&marker_path).map_err(|err| {
-        format!(
-            "{} is incomplete and cannot be used for pbf-base (read {}: {err})",
-            options.store.display(),
-            marker_path.display()
-        )
-    })?;
-    let marker: serde_json::Value = serde_json::from_slice(&marker_bytes)
-        .map_err(|err| format!("parse {}: {err}", marker_path.display()))?;
-    if marker.get("format").and_then(|value| value.as_str())
-        != Some("makepad-native-detail-spool-v1")
-    {
+    if !marker_path.exists() {
+        return validate_live_store(options);
+    }
+    let marker = read_store_marker(&marker_path, "makepad-native-detail-spool-v1")?;
+    check_marker_identity(options, &marker, &marker_path)?;
+    Ok(false)
+}
+
+/// The spool is still being written by pass 4. A bbox slice is valid once
+/// the published streaming frontier strictly exceeds the distance from the
+/// NL spiral anchor to the bbox's FARTHEST corner: every relation that
+/// could touch the bbox then has a spiral key below the frontier and is
+/// fully on disk (passes 2-3 finished before the frontier file existed).
+fn validate_live_store(options: &BaseOptions) -> Result<bool, String> {
+    let Some(bbox) = options.bbox else {
         return Err(format!(
-            "{} has an unsupported native detail marker",
-            marker_path.display()
+            "{} is incomplete; only --bbox slices may read a live store via the streaming frontier",
+            options.store.display()
+        ));
+    };
+    let stamp_path = options.store.join("spool.pass3.json");
+    if !stamp_path.exists() {
+        return Err(format!(
+            "{} is incomplete and has no pass-3 stamp; pass 4 has not started",
+            options.store.display()
         ));
     }
+    let stamp = read_store_marker(&stamp_path, "makepad-native-detail-pass-stamp-v1")?;
+    check_marker_identity(options, &stamp, &stamp_path)?;
+    let frontier_path = options.store.join("spool-frontier.txt");
+    let frontier_text = fs::read_to_string(&frontier_path).map_err(|err| {
+        format!(
+            "{} is incomplete and has no streaming frontier yet (read {}: {err})",
+            options.store.display(),
+            frontier_path.display()
+        )
+    })?;
+    let frontier: f64 = frontier_text
+        .trim()
+        .parse()
+        .map_err(|err| format!("parse {}: {err}", frontier_path.display()))?;
+    let needed = bbox_far_corner_distance(bbox) + FRONTIER_MARGIN;
+    if frontier <= needed {
+        return Err(format!(
+            "streaming frontier {frontier:.0} does not yet cover bbox {} (needs > {needed:.0}); retry later",
+            bbox.as_csv()
+        ));
+    }
+    println!(
+        "  live store: frontier {frontier:.0} covers bbox (far corner {:.0})",
+        needed - FRONTIER_MARGIN
+    );
+    Ok(true)
+}
+
+/// Distance in global mercator units from the NL spiral anchor to the
+/// farthest corner of a lon/lat bbox. A mercator rect's farthest point
+/// from any anchor is one of its four corners.
+fn bbox_far_corner_distance(bbox: GeoBounds) -> f64 {
+    let (anchor_x, anchor_y) = super::geom::project_lon_lat(
+        super::geom::SPIRAL_ANCHOR_LON,
+        super::geom::SPIRAL_ANCHOR_LAT,
+        DETAIL_ZOOM,
+    );
+    let mut far = 0.0_f64;
+    for lon in [bbox.west, bbox.east] {
+        for lat in [bbox.south, bbox.north] {
+            let (x, y) = super::geom::project_lon_lat(lon, lat, DETAIL_ZOOM);
+            far = far.max(((x - anchor_x).powi(2) + (y - anchor_y).powi(2)).sqrt());
+        }
+    }
+    far
+}
+
+fn read_store_marker(path: &Path, format: &str) -> Result<serde_json::Value, String> {
+    let bytes = fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let marker: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    if marker.get("format").and_then(|value| value.as_str()) != Some(format) {
+        return Err(format!("{} has an unsupported marker format", path.display()));
+    }
+    Ok(marker)
+}
+
+fn check_marker_identity(
+    options: &BaseOptions,
+    marker: &serde_json::Value,
+    path: &Path,
+) -> Result<(), String> {
     let marker_zoom = marker
         .get("zoom")
         .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no zoom", marker_path.display()))?;
+        .ok_or_else(|| format!("{} has no zoom", path.display()))?;
     if marker_zoom != u64::from(DETAIL_ZOOM) {
         return Err(format!(
             "store detail zoom {marker_zoom} is not {DETAIL_ZOOM}; pbf-base requires a z{DETAIL_ZOOM} store"
@@ -249,7 +325,7 @@ fn validate_store(options: &BaseOptions) -> Result<(), String> {
     let marker_source_bytes = marker
         .get("source_bytes")
         .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("{} has no source_bytes", marker_path.display()))?;
+        .ok_or_else(|| format!("{} has no source_bytes", path.display()))?;
     if marker_source_bytes != source_bytes {
         return Err(format!(
             "store was built from a {marker_source_bytes}-byte PBF but {} is {source_bytes} bytes",
@@ -526,6 +602,7 @@ fn measure_compression(
 /// combined tiles plus partial low-zoom base tiles synthesized from the
 /// sampled tiles' own fragments (representative string tables at every
 /// zoom, even though their geometry covers one z14 tile each).
+#[allow(clippy::too_many_arguments)]
 fn sample_tiles(
     spool_dir: &Path,
     blocks: &[BlockKey],
@@ -533,6 +610,7 @@ fn sample_tiles(
     pyramid_top: u8,
     emit_detail_zoom: bool,
     tile_bounds: Option<TileBounds>,
+    live_spool: bool,
 ) -> Result<Vec<Vec<u8>>, String> {
     let block_count = blocks.len().min(DICT_SAMPLE_BLOCKS).max(1);
     let per_block = DICT_SAMPLE_TILES / block_count;
@@ -552,6 +630,7 @@ fn sample_tiles(
                     pyramid_top,
                     emit_detail_zoom,
                     tile_bounds,
+                    live_spool,
                 )
             }));
         }
@@ -582,11 +661,12 @@ fn sample_block(
     pyramid_top: u8,
     emit_detail_zoom: bool,
     tile_bounds: Option<TileBounds>,
+    live_spool: bool,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut samples = Vec::new();
     {
         clean_stale_chunks(spool_dir, block)?;
-        let sorted = SortedBlock::prepare(spool_dir, block, Some(sort_memory))?;
+        let sorted = SortedBlock::prepare(spool_dir, block, Some(sort_memory), live_spool)?;
         let mut tile_index = 0_usize;
         let mut taken = 0_usize;
         let mut sorted = records_to_tiles(sorted, block, |x, y, features| {
@@ -649,7 +729,10 @@ fn sample_block(
 // ---------------------------------------------------------------------------
 
 fn clean_stale_chunks(dir: &Path, key: BlockKey) -> Result<(), String> {
-    let prefix = format!("block-{}-{}.sort-", key.y, key.x);
+    // Pid-scoped: a concurrent bbox slice may be sorting the same edge
+    // block, and its live chunks must survive. Foreign stale chunks are
+    // swept by the dispatcher between runs.
+    let prefix = format!("block-{}-{}.sort-{}-", key.y, key.x, std::process::id());
     for entry in fs::read_dir(dir).map_err(|err| format!("read {}: {err}", dir.display()))? {
         let entry = entry.map_err(|err| format!("read {} entry: {err}", dir.display()))?;
         if entry
@@ -798,6 +881,7 @@ fn run_phase1(
     tile_bounds: Option<TileBounds>,
     progress: ProgressContext,
     sample_out: Option<&SampleState>,
+    live_spool: bool,
 ) -> Result<Vec<Option<SpoolSummary>>, String> {
     let z14_dir = work.join("z14-tiles");
     if emit_detail_zoom {
@@ -1073,7 +1157,7 @@ fn run_phase1(
                     }
                     let block = blocks[block_index];
                     clean_stale_chunks(spool_dir, block)?;
-                    let sorted = SortedBlock::prepare(spool_dir, block, Some(sort_memory))?;
+                    let sorted = SortedBlock::prepare(spool_dir, block, Some(sort_memory), live_spool)?;
                     let mut seq = 0_u64;
                     let mut sorted = records_to_tiles(sorted, block, |x, y, features| {
                         if tile_bounds.is_some_and(|bounds| !bounds.contains(x, y)) {
@@ -1267,7 +1351,7 @@ fn write_archive(
             let sorter_blocks = summary.blocks.clone();
             let sorter = scope.spawn(move || -> Result<(), String> {
                 for block in sorter_blocks {
-                    let sorted = SortedBlock::prepare(&sorter_dir, block, Some(sort_memory))?;
+                    let sorted = SortedBlock::prepare(&sorter_dir, block, Some(sort_memory), false)?;
                     if sorted_tx.send((block, sorted)).is_err() {
                         return Ok(());
                     }
@@ -1500,7 +1584,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
-    validate_store(&options)?;
+    let live_spool = validate_store(&options)?;
     let header = super::read_pbf_header(&options.source)?;
 
     let started = Instant::now();
@@ -1570,6 +1654,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
             pyramid_top,
             emit_detail_zoom,
             tile_bounds,
+            live_spool,
         )?;
         let dictionary = build_dictionary(&samples)?;
         let ab =
@@ -1611,6 +1696,7 @@ pub fn convert_base(options: BaseOptions) -> Result<(), String> {
             br_over_gzip,
         },
         (!options.use_dict).then_some(&sample_state),
+        live_spool,
     )?;
     if !options.use_dict {
         let samples = std::mem::take(&mut *sample_state.tiles.lock().unwrap());
