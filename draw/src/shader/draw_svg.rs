@@ -91,7 +91,7 @@ script_mod! {
             self.v_world = shifted;
 
             // Early clip rejection in final draw space.
-            let cr = self.geom.clip_radius * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
+            let cr = g_p3c.y * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
                 let clip = vec4(
