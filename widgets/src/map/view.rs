@@ -1667,6 +1667,10 @@ pub struct MapView {
     zoom_settle_timer: Timer,
     #[rust]
     tile_fade_timer: Timer,
+    #[rust]
+    archive_watch_timer: Timer,
+    #[rust]
+    archive_watch_mtime: Option<std::time::SystemTime>,
     // Label placement cache: while panning at the same zoom over the same
     // tiles, last placement's glyphs are redrawn shifted by the pan delta
     // instead of re-scanning/re-shaping/re-colliding thousands of labels.
@@ -1850,6 +1854,39 @@ impl Widget for MapView {
             self.rain_frame_index = (self.rain_frame_index + 1) % self.rain_frames.len();
             self.retune_rain_timer(cx);
             self.redraw(cx);
+        }
+        // Growing-archive watch: the world spiral atomically swaps the
+        // shard dir as cells weave in. Workers reopen per batch already;
+        // here we notice the new index, drop Failed placeholders and let
+        // the visible loop re-request — the map grows live, no restart.
+        if self.archive_watch_timer.is_event(event).is_some()
+            || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles)
+        {
+            let path = std::path::PathBuf::from(self.active_mbtiles_path());
+            let probe = if makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(&path) {
+                path.join("root.mkidx")
+            } else {
+                path
+            };
+            let mtime = std::fs::metadata(&probe).and_then(|m| m.modified()).ok();
+            if mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || mtime.is_some();
+                self.archive_watch_mtime = mtime;
+                if had {
+                    let before = self.tiles.len();
+                    self.tiles.retain(|_, entry| {
+                        !matches!(entry.state, TileLoadState::Failed { .. })
+                    });
+                    if self.tiles.len() != before {
+                        log!(
+                            "MapView: archive changed — cleared {} failed tiles for reload",
+                            before - self.tiles.len()
+                        );
+                    }
+                    self.redraw(cx);
+                }
+            }
+            self.archive_watch_timer = cx.start_timeout(5.0);
         }
         if self.tile_fade_timer.is_event(event).is_some() {
             self.redraw(cx);
