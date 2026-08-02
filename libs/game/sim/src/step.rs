@@ -13,6 +13,10 @@ use crate::world::GameWorld;
 use crate::TICK_DT;
 
 pub fn step_world(world: &mut GameWorld) {
+    // The sorted-by-id invariant backs every binary-search lookup (world +
+    // renderer). push_entity asserts incrementally; this catches everything
+    // else (retain/rollback) once per tick in debug builds.
+    debug_assert!(world.entities_sorted_by_id());
     let gravity = world.gravity;
     let statics: Vec<Entity> = world
         .entities
