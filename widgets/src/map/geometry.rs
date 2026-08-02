@@ -2659,7 +2659,15 @@ pub fn build_paint_faces(
                     .collect()
             };
             let morph_offsets = offsets_for(&tess_verts);
-            let morph_fringe_offsets = offsets_for(&fringe_verts);
+            // Fringe verts are [boundary, outer-carrier] pairs: the carrier
+            // must translate RIGIDLY with its boundary partner or the
+            // one-pixel AA band inflates into a smear at corr > 1 (the
+            // dirty road edges mid-band). Copy the boundary offset onto
+            // the outer partner.
+            let mut morph_fringe_offsets = offsets_for(&fringe_verts);
+            for pair in morph_fringe_offsets.chunks_exact_mut(2) {
+                pair[1] = pair[0];
+            }
             faces.push(PaintFace {
                 color: group.color,
                 emissive: group.emissive,
