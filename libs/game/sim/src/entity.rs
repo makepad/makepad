@@ -5,7 +5,7 @@
 use crate::CallbackSlot;
 use makepad_math::*;
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
 pub enum BodyKind {
     /// Doesn't move on its own; the world for everything else to stand on.
     #[default]
@@ -169,7 +169,7 @@ pub struct Beam {
 
 /// Where a HUD slot pins to the pane. Slots sharing an anchor stack downward
 /// in insertion order.
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum HudAnchor {
     TopLeft,
     Top,
@@ -196,7 +196,7 @@ impl HudAnchor {
 }
 
 /// One line of screen text. `size`/`color.w` of 0 mean "use the slot default".
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct HudSlot {
     pub text: String,
     pub color: Vec4f,
@@ -205,7 +205,7 @@ pub struct HudSlot {
 }
 
 /// A HUD gauge (speedometer, boost). Fraction 0..1 fills left to right.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HudBar {
     pub name: String,
     pub fraction: f32,
@@ -273,7 +273,7 @@ pub enum SaveVal {
     Str(String),
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct PadState {
     pub axis_x: f64,
     pub axis_z: f64,

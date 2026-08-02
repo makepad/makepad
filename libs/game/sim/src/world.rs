@@ -25,6 +25,12 @@ use crate::CallbackSlot;
 #[derive(Default, Clone)]
 pub struct GameWorld {
     pub entities: Vec<Entity>,
+    /// The player roster (M2). Slot 0 is always this device, and its input
+    /// still lives in the `held`/`pressed`/`pad`/`cam_yaw` fields below — a
+    /// single-player world therefore evaluates exactly the expressions it did
+    /// before players existed, which is what keeps input tapes byte-identical.
+    /// Remote and bot players carry their own input in the roster.
+    pub players: crate::player::Players,
     /// box3d dynamics layer (M1a): mirrored statics/kinematics + rigid
     /// bodies. Reconciled against `entities` each tick — never mutated by
     /// spawn/remove paths directly.
@@ -33,6 +39,10 @@ pub struct GameWorld {
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
     pub on_touch: Option<CallbackSlot>,
+    /// Fired when a player joins or leaves the room (M2). The session layer
+    /// raises the events; the host resolves the slot and calls the closure.
+    pub on_join: Option<CallbackSlot>,
+    pub on_leave: Option<CallbackSlot>,
     pub timers: Vec<GameTimer>,
     /// HUD text, keyed by slot name ("center"/"top"/"hint" + any the script
     /// invents), each pinned to an anchor. Replace-on-set; empty text removes.
@@ -171,6 +181,79 @@ impl GameWorld {
         }
     }
 
+    // ── players (M2) ────────────────────────────────────────────────────
+
+    /// Mirror this device's input into player slot 0. Called once per tick by
+    /// the host before script/blocks run, so `game.player_input(0)` and the
+    /// on_tick input object agree. The device fields stay authoritative — this
+    /// copies *out* of them, never into them.
+    pub fn sync_local_player(&mut self) {
+        let (held, pressed, pad) = (self.held.clone(), self.pressed.clone(), self.pad);
+        let (yaw, dx, dy) = (self.cam_yaw, self.look_dx, self.look_dy);
+        let local = self.players.local_mut();
+        local.input.held = held;
+        local.input.pressed = pressed;
+        local.input.pad = pad;
+        local.input.cam_yaw = yaw;
+        local.input.look_dx = dx;
+        local.input.look_dy = dy;
+    }
+
+    /// Is this action held for a specific player? Player 0 reads the device
+    /// fields directly (identical to [`Self::action_held`]); everyone else
+    /// reads their replicated input.
+    pub fn action_held_for(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
+        if player.is_local_slot() {
+            return self.action_held(action);
+        }
+        self.players
+            .get(player)
+            .map_or(false, |p| p.input.held(action))
+    }
+
+    pub fn action_pressed_for(&self, player: crate::player::PlayerId, action: LiveId) -> bool {
+        if player.is_local_slot() {
+            return self.action_pressed(action);
+        }
+        self.players
+            .get(player)
+            .map_or(false, |p| p.input.pressed(action))
+    }
+
+    /// Camera-relative movement for one player.
+    ///
+    /// This is the review's tightest knot resolved (game.md finding 2): the
+    /// rotation uses *that player's* `cam_yaw`, which for a remote player
+    /// arrived inside their input packet, so nothing about the camera rig has
+    /// to replicate. For player 0 the yaw is the world camera's and the
+    /// expression is character-for-character the one the input object has
+    /// always evaluated — including the `f32::cos` widened to f64, which is
+    /// why this helper exists rather than a "tidier" shared formula.
+    pub fn player_move(&self, player: crate::player::PlayerId) -> (f64, f64) {
+        let (axis_x, axis_z, yaw) = if player.is_local_slot() {
+            let key = |name: LiveId| self.held.contains(&name);
+            let axis_x = ((key(live_id!(right)) as i8 - key(live_id!(left)) as i8) as f64
+                + self.pad.axis_x)
+                .clamp(-1.0, 1.0);
+            let axis_z = ((key(live_id!(down)) as i8 - key(live_id!(up)) as i8) as f64
+                + self.pad.axis_z)
+                .clamp(-1.0, 1.0);
+            (axis_x, axis_z, self.cam_yaw)
+        } else {
+            match self.players.get(player) {
+                Some(p) => {
+                    let (x, z) = p.input.axes();
+                    (x, z, p.input.cam_yaw)
+                }
+                None => return (0.0, 0.0),
+            }
+        };
+        (
+            axis_x * yaw.cos() as f64 - axis_z * yaw.sin() as f64,
+            axis_x * yaw.sin() as f64 + axis_z * yaw.cos() as f64,
+        )
+    }
+
     /// Reset everything a re-eval rebuilds. The HOST is responsible for two
     /// things alongside this call: stopping sustained audio (the synth is not
     /// a sim concern) and releasing the callback slots this discards (the
@@ -185,6 +268,8 @@ impl GameWorld {
         self.gravity = 30.0;
         self.on_tick = None;
         self.on_touch = None;
+        self.on_join = None;
+        self.on_leave = None;
         self.timers.clear();
         self.hud_slots.clear();
         self.hud_bars.clear();
@@ -209,6 +294,13 @@ impl GameWorld {
         // Fresh box3d world; the mirror rebuilds from entities at the next
         // reconcile, so rollback/reset can never leak orphan bodies.
         self.dynamics = crate::dynamics::RigidDynamics::new();
+        // Players are connections, not world content: an edit must not kick
+        // the room. Their bodies are gone though, so the references go with
+        // them — script re-spawns and re-assigns during the same eval.
+        for player in self.players.iter_mut() {
+            player.entity = 0;
+            player.hud = crate::player::PlayerHud::default();
+        }
         // The doc contract: game.time() restarts at 0 on every reload. The
         // tick counter stays monotonic (log stamps, timer scheduling).
         // save_data deliberately survives — that's what game.save is FOR.

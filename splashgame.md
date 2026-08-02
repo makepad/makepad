@@ -280,3 +280,36 @@ Attach an AI to any mover. Re-issuing a brain on the same entity replaces it.
 
 A complete 4-car race is ~60 lines — see
 `examples/gamemaker/resources/fixtures/racing.splash`.
+
+## Players (multiplayer)
+
+Every world has at least one player: id `0`, this device. A hosted room adds one
+per connected client, plus any bots the game creates. Blocks take `player:` to
+say who drives them.
+
+| verb | what it does |
+|---|---|
+| `game.players()` | all player ids, local first — **Shared** |
+| `game.player_name(p)` | display name — **Shared** |
+| `game.player_entity(p)` | the entity this player drives, 0 if none — **Shared** |
+| `game.player_input(p)` | that player's input object (same shape `on_tick` gets) |
+| `game.bot(name)` | add a host-side player with no device — **Shared** |
+| `game.on_join(fn(p))` | someone joined the room |
+| `game.on_leave(fn(p))` | someone left; their body is freed for you |
+
+Movement stays camera-relative per player: `move_x`/`move_z` are rotated by *that
+player's* camera yaw, which travels inside their input packet. A client's camera
+is presentation only and never replicates.
+
+**Replication tiers.** The host simulates; clients receive. What crosses the wire
+is decided per field, not per entity:
+
+- **Shared** — position, velocity, size, body kind, tag, score, lap progress.
+  Host to clients, every tick.
+- **Derived** — facing yaw, walk-cycle blending, part animation, scale and glow
+  easing, blob shadows. Never sent: a client recomputes these from Shared state,
+  which is why 200 moving props cost nothing to rotate.
+- **Local** — camera, audio, particles. This device's business alone.
+
+Gameplay must not depend on Local state, or late joiners will see a different
+game from everyone else.

@@ -206,6 +206,9 @@ pub struct Host {
     entity_seq: HashMap<u64, u32>,
     /// World state handed to joiners so they can reconstruct mid-session.
     pending_snapshot: Option<(u64, Vec<EntityState>)>,
+    /// Construction data for that snapshot, sent right behind the welcome on
+    /// the same reliable stream so ordering is guaranteed.
+    pending_descs: Option<(u64, Vec<EntityDesc>)>,
     pub stats: NetStats,
 }
 
@@ -243,6 +246,7 @@ impl Host {
             players: HashMap::new(),
             entity_seq: HashMap::new(),
             pending_snapshot: None,
+            pending_descs: None,
             stats: NetStats::default(),
         })
     }
@@ -471,6 +475,18 @@ impl Host {
                     },
                     PacketClass::Control,
                 );
+                if let Some((desc_tick, descs)) = self.pending_descs.clone() {
+                    if !descs.is_empty() {
+                        self.send_to(
+                            index,
+                            &HostToClient::Descriptors {
+                                tick: desc_tick,
+                                descs,
+                            },
+                            PacketClass::Control,
+                        );
+                    }
+                }
                 let _ = self.connections[index].flush();
                 events.push(HostEvent::Joined { player, name });
                 true
@@ -623,6 +639,24 @@ impl Host {
     pub fn set_snapshot(&mut self, tick: u64, entities: Vec<EntityState>) {
         self.pending_snapshot = Some((tick, entities));
     }
+
+    /// The construction data a joiner needs for the current snapshot.
+    pub fn set_descriptors(&mut self, tick: u64, descs: Vec<EntityDesc>) {
+        self.pending_descs = Some((tick, descs));
+    }
+
+    /// Reliable delta for entities that just appeared or were restyled.
+    pub fn broadcast_descriptors(&mut self, tick: u64, descs: Vec<EntityDesc>) {
+        if descs.is_empty() {
+            return;
+        }
+        let msg = HostToClient::Descriptors { tick, descs };
+        for i in 0..self.connections.len() {
+            if self.connections[i].player.is_some() {
+                self.send_to(i, &msg, PacketClass::Control);
+            }
+        }
+    }
 }
 
 /// What a client application observes.
@@ -630,6 +664,7 @@ impl Host {
 pub enum ClientEvent {
     Welcome { player: PlayerId, tick: u64 },
     State { tick: u64 },
+    Descriptors { tick: u64 },
     Event { tick: u64, event: GameEvent },
     Disconnected { reason: LeaveReason },
 }
@@ -647,6 +682,8 @@ pub struct Client {
     /// Latest applied state per entity, keyed by id — the client's view of the
     /// world. Cleared on (re)join.
     pub entities: HashMap<u64, EntityState>,
+    /// Construction data for those entities, filled from `Descriptors`.
+    pub descs: HashMap<u64, EntityDesc>,
     entity_seq: HashMap<u64, u32>,
     pub last_tick: u64,
     pub stats: NetStats,
@@ -688,6 +725,7 @@ impl Client {
             host_id: None,
             player: None,
             entities: HashMap::new(),
+            descs: HashMap::new(),
             entity_seq: HashMap::new(),
             last_tick: 0,
             stats: NetStats::default(),
@@ -801,6 +839,7 @@ impl Client {
                 // A (re)join replaces the world wholesale, so stale sequence
                 // state from a previous session cannot suppress fresh updates.
                 self.entities.clear();
+                self.descs.clear();
                 self.entity_seq.clear();
                 self.last_tick = tick;
                 for state in snapshot {
@@ -835,6 +874,17 @@ impl Client {
                 self.last_tick = self.last_tick.max(tick);
                 events.push(ClientEvent::State { tick });
             }
+            HostToClient::Descriptors { tick, descs } => {
+                for desc in descs {
+                    if desc.is_finite() {
+                        self.descs.insert(desc.id, desc);
+                    } else {
+                        self.stats.malformed += 1;
+                    }
+                }
+                self.last_tick = self.last_tick.max(tick);
+                events.push(ClientEvent::Descriptors { tick });
+            }
             HostToClient::Event { tick, event } => {
                 match &event {
                     GameEvent::Spawn { id, state, .. } => {
@@ -845,6 +895,7 @@ impl Client {
                     }
                     GameEvent::Remove { id } => {
                         self.entities.remove(id);
+                        self.descs.remove(id);
                         self.entity_seq.remove(id);
                     }
                     _ => {}

@@ -123,6 +123,9 @@ pub struct Wheel {
 #[derive(Clone, Debug)]
 pub struct Car {
     pub entity: u64,
+    /// Which player drives this when `control` is `Player`. Defaults to the
+    /// local device (player 0), so single-player games never mention it.
+    pub owner: makepad_game_sim::PlayerId,
     pub config: CarConfig,
     pub control: ControlSource,
     pub input: DriveInput,
@@ -152,6 +155,7 @@ impl Car {
         }
         Self {
             entity,
+            owner: makepad_game_sim::PlayerId::LOCAL,
             config,
             control,
             input: DriveInput::default(),

@@ -2890,6 +2890,107 @@ fn game_dispatch(
             });
             NIL
         }
+        // ── players (M2 multiplayer) ────────────────────────────────────
+        x if x == live_id!(players) => {
+            let ids: Vec<u32> = world.borrow().players.ids().iter().map(|p| p.0).collect();
+            let array = vm.bx.heap.new_array();
+            for id in ids {
+                vm.bx
+                    .heap
+                    .array_push(array, ScriptValue::from_f64(id as f64), NoTrap);
+            }
+            array.into()
+        }
+        x if x == live_id!(player_name) => {
+            let id = makepad_game_sim::PlayerId(arg_f32(vm, args, 0) as u32);
+            let name = world
+                .borrow()
+                .players
+                .get(id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            vm.bx.heap.new_string_from_str(&name)
+        }
+        x if x == live_id!(player_entity) => {
+            let id = makepad_game_sim::PlayerId(arg_f32(vm, args, 0) as u32);
+            let entity = world.borrow().players.get(id).map_or(0, |p| p.entity);
+            ScriptValue::from_f64(entity as f64)
+        }
+        x if x == live_id!(player_input) => {
+            let id = makepad_game_sim::PlayerId(arg_f32(vm, args, 0) as u32);
+            let w = world.borrow();
+            let (move_x, move_z) = w.player_move(id);
+            let (axis_x, axis_z) = match w.players.get(id) {
+                Some(p) if !id.is_local_slot() => p.input.axes(),
+                _ => {
+                    let key = |name: LiveId| w.held.contains(&name);
+                    (
+                        ((key(live_id!(right)) as i8 - key(live_id!(left)) as i8) as f64
+                            + w.pad.axis_x)
+                            .clamp(-1.0, 1.0),
+                        ((key(live_id!(down)) as i8 - key(live_id!(up)) as i8) as f64
+                            + w.pad.axis_z)
+                            .clamp(-1.0, 1.0),
+                    )
+                }
+            };
+            let actions = [
+                (live_id!(left), id!(left_pressed)),
+                (live_id!(right), id!(right_pressed)),
+                (live_id!(up), id!(up_pressed)),
+                (live_id!(down), id!(down_pressed)),
+                (live_id!(jump), id!(jump_pressed)),
+                (live_id!(shoot), id!(shoot_pressed)),
+                (live_id!(grab), id!(grab_pressed)),
+                (live_id!(reset), id!(reset_pressed)),
+            ];
+            let states: Vec<(LiveId, LiveId, bool, bool)> = actions
+                .iter()
+                .map(|(a, p)| (*a, *p, w.action_held_for(id, *a), w.action_pressed_for(id, *a)))
+                .collect();
+            drop(w);
+            let obj = vm.bx.heap.new_object();
+            vm.bx.heap.set_object_storage_auto(obj);
+            let heap = &mut vm.bx.heap;
+            for (action, pressed_key, is_held, was_pressed) in states {
+                heap.set_value(obj, action.into(), ScriptValue::from_bool(is_held), NoTrap);
+                heap.set_value(
+                    obj,
+                    pressed_key.into(),
+                    ScriptValue::from_bool(was_pressed),
+                    NoTrap,
+                );
+            }
+            heap.set_value(obj, id!(axis_x).into(), ScriptValue::from_f64(axis_x), NoTrap);
+            heap.set_value(obj, id!(axis_z).into(), ScriptValue::from_f64(axis_z), NoTrap);
+            heap.set_value(obj, id!(move_x).into(), ScriptValue::from_f64(move_x), NoTrap);
+            heap.set_value(obj, id!(move_z).into(), ScriptValue::from_f64(move_z), NoTrap);
+            obj.into()
+        }
+        x if x == live_id!(bot) => {
+            let name = arg_string(vm, args, 0);
+            let name = if name.is_empty() { "bot".to_string() } else { name };
+            let id = world
+                .borrow_mut()
+                .players
+                .add(name, makepad_game_sim::PlayerSource::Bot);
+            ScriptValue::from_f64(id.0 as f64)
+        }
+        x if x == live_id!(on_join) || x == live_id!(on_leave) => {
+            let func = arg(vm, args, 0);
+            let slot = fn_ref(vm, func)
+                .map(|func| callbacks.borrow_mut().alloc(eval_gen.get(), func));
+            let joining = method == live_id!(on_join);
+            let old = {
+                let mut w = world.borrow_mut();
+                let target = if joining { &mut w.on_join } else { &mut w.on_leave };
+                std::mem::replace(target, slot)
+            };
+            if let Some(old) = old {
+                callbacks.borrow_mut().free(old);
+            }
+            NIL
+        }
         // ── building blocks (libs/game/blocks) ──────────────────────────
         x if x == live_id!(car) => spawn_car(vm, world, blocks, args),
         x if x == live_id!(character) => spawn_character(vm, world, blocks, args),
@@ -4022,6 +4123,13 @@ const GAME_API: &[(&str, &str)] = &[
     ("finished", "(id) -> did this racer finish"),
     ("score", "(id, points) — add to a racer's score"),
     ("score_of", "(id) -> score"),
+    ("players", "() -> [player ids]"),
+    ("player_name", "(player) -> name"),
+    ("player_entity", "(player) -> entity id (0 = none)"),
+    ("player_input", "(player) -> input object"),
+    ("bot", "(name) -> player id"),
+    ("on_join", "(fn(player))"),
+    ("on_leave", "(fn(player))"),
     ("box", "({pos, size, color, tag, sensor, collide, body, gravity, vel, life, hits, glow, face|rot_y, turn_rate, shape, density, friction, restitution})"),
     ("block", " — alias of game.box"),
     ("mover", " — same options as box (kinematic character, turn_rate default 7)"),
