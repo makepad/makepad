@@ -4250,6 +4250,16 @@ impl MapView {
         let t1 = self.tilt_cos() as f32;
         let m = [dc, -ds / t0, t1 * ds, t1 * dc / t0];
         self.draw_label.set_camera_delta(cx.cx, m, pivot);
+        // Pan/zoom ride uniforms too (same-frame as the tile map_offset):
+        // glyphs below emit in CACHED placement space, scale 1, no offset.
+        self.draw_label.set_pan_delta(
+            cx.cx,
+            scale,
+            Vec2f {
+                x: extra_offset.x,
+                y: extra_offset.y,
+            },
+        );
         self.draw_label.begin_glyph_batch(cx);
         for i in 0..self.scratch_accepted_plans.len() {
             let (_, start, end, color_class, post_icon, upright, anchor, baked_lift) =
@@ -4265,30 +4275,31 @@ impl MapView {
                 self.draw_label.draw_super.color = halo_color;
                 for offset in HALO_OFFSETS {
                     let off = Vec2f {
-                        x: offset.0 + extra_offset.x,
-                        y: offset.1 + extra_offset.y,
+                        x: offset.0,
+                        y: offset.1,
                     };
                     if billboard {
                         self.draw_label
-                            .draw_path_glyphs_billboard(cx, glyphs, scale, off, anchor);
+                            .draw_path_glyphs_billboard(cx, glyphs, 1.0, off, anchor);
                     } else if upright {
                         self.draw_label
-                            .draw_path_glyphs_upright(cx, glyphs, scale, off, anchor);
+                            .draw_path_glyphs_upright(cx, glyphs, 1.0, off, anchor);
                     } else {
-                        self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, off);
+                        self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, off);
                     }
                 }
             }
             self.draw_label.draw_super.color =
                 label_class_color(color_class, label_color, dark_theme);
+            let zero = Vec2f { x: 0.0, y: 0.0 };
             if billboard {
                 self.draw_label
-                    .draw_path_glyphs_billboard(cx, glyphs, scale, extra_offset, anchor);
+                    .draw_path_glyphs_billboard(cx, glyphs, 1.0, zero, anchor);
             } else if upright {
                 self.draw_label
-                    .draw_path_glyphs_upright(cx, glyphs, scale, extra_offset, anchor);
+                    .draw_path_glyphs_upright(cx, glyphs, 1.0, zero, anchor);
             } else {
-                self.draw_label.draw_path_glyphs_scaled(cx, glyphs, scale, extra_offset);
+                self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, zero);
             }
         }
         self.draw_label.lift = 0.0;
