@@ -2119,6 +2119,7 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    fringe_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -2235,6 +2236,34 @@ impl Widget for MapView {
                             },
                     terrain_fill_lift,
                 );
+                // AA fringes ride the casing pass, but only where 1px edge
+                // AA is visible: at strong tilt the tilt-shift blur and
+                // 3D density hide it, and the fringes are ~2/3 of the
+                // casing vertex mass on street tiles.
+                if pass == 1 && self.tilt < 25.0 {
+                    if let Some(fringe) = fringe_geometry {
+                        let fringe_id = fringe.geometry_id();
+                        self.draw_map.draw_geometry(
+                            cx,
+                            fringe_id,
+                            map_scale,
+                            screen_offset,
+                            if reused_road_pass { 1.0 } else { fade_alpha },
+                            stroke_width_correction(entry.bucket, view_zoom),
+                            view_rot_uniform,
+                            rot_pivot_uniform,
+                            tilt_uniform,
+                            view_zoom as f32,
+                            1.0,
+                            terrain_org,
+                            terrain_span,
+                            terrain_uvfit,
+                            &terrain_tex,
+                            if tilt_rad > 1e-4 { pass_boost } else { 0.0 },
+                            terrain_fill_lift,
+                        );
+                    }
+                }
             }
         }
 
@@ -2266,6 +2295,7 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    fringe_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -2893,6 +2923,15 @@ impl MapView {
         } else {
             None
         };
+        let fringe_geometry = if !buffers.fringe_indices.is_empty()
+            && !buffers.fringe_vertices.is_empty()
+        {
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, buffers.fringe_indices, buffers.fringe_vertices);
+            Some(geometry)
+        } else {
+            None
+        };
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
@@ -2938,6 +2977,7 @@ impl MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    fringe_geometry,
                     feature_count: if reuse_road_core {
                         buffers.feature_count.max(old_feature_count)
                     } else {
