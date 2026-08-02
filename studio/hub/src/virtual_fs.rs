@@ -21,7 +21,7 @@ pub struct MountPoint {
 /// git-status cascade: build output and bulk data (map archives, stores,
 /// toolchains). A background bake writing thousands of files under local/
 /// re-sorted the whole tree per fs-event burst and hung studio at boot.
-fn heavy_nonproject_dir(name: &str) -> bool {
+pub fn heavy_nonproject_dir(name: &str) -> bool {
     matches!(
         name,
         ".git" | "target" | "local" | ".rustup" | "build" | "refdump" | "traces"
