@@ -1,0 +1,14 @@
+[package]
+name = "makepad-arcade"
+version = "0.1.0"
+edition = "2021"
+description = "Makepad Arcade — networked AI game sandbox (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-game-math = { path = "../../libs/game/math" }
+makepad-game-sim = { path = "../../libs/game/sim" }
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
