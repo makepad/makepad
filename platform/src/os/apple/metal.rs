@@ -812,8 +812,15 @@ impl Cx {
         // Frame batching: offscreen texture passes share one retained
         // command buffer; window modes flush it. Profiling mode keeps the
         // one-buffer-per-pass behavior so per-pass GPU spans stay real.
-        let batch_this_pass =
-            !Self::gpu_profile_enabled() && matches!(mode, DrawPassMode::Texture);
+        // Frame batching regressed badly at large window sizes (3fps —
+        // suspicion: hazard-serialized encoders on one buffer defeating
+        // per-pass parallelism). Opt-in until understood.
+        static BATCH_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let batch_enabled =
+            *BATCH_ON.get_or_init(|| std::env::var_os("MAKEPAD_BATCH_PASSES").is_some());
+        let batch_this_pass = batch_enabled
+            && !Self::gpu_profile_enabled()
+            && matches!(mode, DrawPassMode::Texture);
         if !batch_this_pass {
             // Entering a present-bound pass: commit the batched offscreen
             // work NOW so the GPU pipelines it under this pass's CPU encode.
