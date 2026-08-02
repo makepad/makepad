@@ -3,6 +3,11 @@
 # Waits for the planet download, then: spool -> base -> bake -> shards.
 # Progress: tail -f local/maps/world-build.log ; status per phase below.
 set -e
+set -o pipefail
+# Single-instance lock: a raced duplicate corrupted the spool once.
+LOCK="/tmp/$(basename $0).lock"
+if ! mkdir "$LOCK" 2>/dev/null; then echo "another instance holds $LOCK — exiting"; exit 1; fi
+trap 'rmdir "$LOCK"' EXIT
 cd "$(dirname "$0")/../.."
 PBF=local/maps/pbf/planet-latest.osm.pbf
 STORE=local/maps/world-detail.store
