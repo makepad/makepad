@@ -27,6 +27,10 @@ script_mod! {
         map_offset: uniform(vec2(0.0, 0.0))
         tile_fade: uniform(1.0)
         width_correction: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        // Face variant, clamped >= 1: union faces may only WIDEN (inward
+        // morph inverts narrow features); stale cross-band tiles render at
+        // keyframe width magnified instead of garbling.
+        face_correction: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         // Live view zoom for per-icon zoom floors (param4 on shape 20):
         // stale deeper-bucket tiles must not flash markers on zoom-out.
         icon_zoom: uniform(24.0)
@@ -373,12 +377,24 @@ script_mod! {
             if shape_id > 99.5 {
                 shape_id = shape_id - 100.0;
                 expanded = 1.0;
+                var cls = self.geom.param3;
                 var corr = self.width_correction.x;
-                if self.geom.param3 > 2.5 {
+                if cls > 3.5 {
+                    // Face band (class + 4): clamped corrections.
+                    cls = cls - 4.0;
+                    corr = self.face_correction.x;
+                    if cls > 2.5 {
+                        corr = self.face_correction.w;
+                    } else if cls > 1.5 {
+                        corr = self.face_correction.z;
+                    } else if cls > 0.5 {
+                        corr = self.face_correction.y;
+                    }
+                } else if cls > 2.5 {
                     corr = self.width_correction.w;
-                } else if self.geom.param3 > 1.5 {
+                } else if cls > 1.5 {
                     corr = self.width_correction.z;
-                } else if self.geom.param3 > 0.5 {
+                } else if cls > 0.5 {
                     corr = self.width_correction.y;
                 }
                 let off = vec2(self.geom.param1, self.geom.param2);
@@ -1292,6 +1308,17 @@ impl DrawMapVector {
             cx.cx,
             live_id!(width_correction),
             &width_correction,
+        );
+        let face_correction: [f32; 4] = [
+            width_correction[0].max(1.0),
+            width_correction[1].max(1.0),
+            width_correction[2].max(1.0),
+            width_correction[3].max(1.0),
+        ];
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(face_correction),
+            &face_correction,
         );
         self.draw_super
             .draw_vars
