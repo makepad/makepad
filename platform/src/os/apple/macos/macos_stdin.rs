@@ -15,6 +15,7 @@ use crate::{
     web_socket::WebSocketMessage,
     window::CxWindowPool,
 };
+use crate::makepad_objc_sys::{msg_send, sel, sel_impl};
 use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 
 /// Local swapchain for client-side texture management
@@ -55,6 +56,11 @@ impl Cx {
         stdin_windows: &mut [StdinWindow],
         time: f32,
     ) {
+        // Safety flush for frame-batched offscreen passes (see macos.rs).
+        if let Some(shared) = metal_cx.frame_command_buffer.take() {
+            let () = unsafe { msg_send![shared, commit] };
+            let () = unsafe { msg_send![shared, release] };
+        }
         //self.demo_time_repaint = false;
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);

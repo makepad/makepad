@@ -409,6 +409,13 @@ impl Cx {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        // Safety flush: if a previous repaint batched offscreen passes but
+        // no window pass followed (texture-only frame), commit that work
+        // now so it is never stranded.
+        if let Some(shared) = metal_cx.frame_command_buffer.take() {
+            let () = unsafe { msg_send![shared, commit] };
+            let () = unsafe { msg_send![shared, release] };
+        }
         let time_now = with_macos_app(|app| app.time_now() as f32);
         for draw_pass_id in &passes_todo {
             match self.passes[*draw_pass_id].parent.clone() {

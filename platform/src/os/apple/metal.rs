@@ -809,7 +809,24 @@ impl Cx {
             }
         }
 
-        let command_buffer: ObjcId = unsafe { msg_send![metal_cx.command_queue, commandBuffer] };
+        // Frame batching: offscreen texture passes share one retained
+        // command buffer; window modes flush it. Profiling mode keeps the
+        // one-buffer-per-pass behavior so per-pass GPU spans stay real.
+        let batch_this_pass =
+            !Self::gpu_profile_enabled() && matches!(mode, DrawPassMode::Texture);
+        let command_buffer: ObjcId = if batch_this_pass {
+            if let Some(buffer) = metal_cx.frame_command_buffer {
+                buffer
+            } else {
+                let buffer: ObjcId =
+                    unsafe { msg_send![metal_cx.command_queue, commandBuffer] };
+                let buffer: ObjcId = unsafe { msg_send![buffer, retain] };
+                metal_cx.frame_command_buffer = Some(buffer);
+                buffer
+            }
+        } else {
+            unsafe { msg_send![metal_cx.command_queue, commandBuffer] }
+        };
         let encoder: ObjcId = unsafe {
             msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]
         };
@@ -900,6 +917,12 @@ impl Cx {
             };
         }
 
+        if !matches!(mode, DrawPassMode::Texture) {
+            if let Some(shared) = metal_cx.frame_command_buffer.take() {
+                let () = unsafe { msg_send![shared, commit] };
+                let () = unsafe { msg_send![shared, release] };
+            }
+        }
         match mode {
             DrawPassMode::MTKView(view) => {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
@@ -925,15 +948,19 @@ impl Cx {
                 );
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(
-                    None,
-                    None,
-                    gpu_frame_group_key,
-                    false,
-                    gpu_counters,
-                    gpu_profile_label.clone(),
-                    command_buffer,
-                );
+                if !batch_this_pass {
+                    self.commit_command_buffer(
+                        None,
+                        None,
+                        gpu_frame_group_key,
+                        false,
+                        gpu_counters,
+                        gpu_profile_label.clone(),
+                        command_buffer,
+                    );
+                }
+                // Batched: encoder already ended; the shared buffer commits
+                // with the window pass.
             }
             DrawPassMode::StdinTexture => {
                 self.commit_command_buffer(
@@ -1397,6 +1424,13 @@ pub struct MetalCx {
     /// MTLTexture. Prevents Metal command-buffer aborts on iOS where sampling
     /// from nil is a GPU fault.
     fallback_texture: ObjcId,
+    /// Frame-batched command buffer: offscreen texture passes append their
+    /// encoders here instead of committing one buffer each — a 12-pass
+    /// blur pyramid was paying ~1ms commit/schedule latency PER PASS. The
+    /// final window pass presents and commits it. Retained (see retain in
+    /// draw_pass); None outside a frame or when MAKEPAD_GPU_PROFILE=1
+    /// (profiling keeps per-pass buffers for per-pass GPU spans).
+    pub frame_command_buffer: Option<ObjcId>,
 }
 
 #[derive(Clone, Default)]
@@ -1454,6 +1488,7 @@ impl MetalCx {
             command_queue: unsafe { msg_send![device, newCommandQueue] },
             device,
             fallback_texture,
+            frame_command_buffer: None,
         }
     }
 }
