@@ -4,6 +4,11 @@
 # grown shard set. The app watches the woven dir and shows NL first, live,
 # rings appearing as they land. Resume-safe: baked cells are skipped.
 set -e
+set -o pipefail
+# Single-instance lock: a raced duplicate corrupted the spool once.
+LOCK="/tmp/$(basename $0).lock"
+if ! mkdir "$LOCK" 2>/dev/null; then echo "another instance holds $LOCK — exiting"; exit 1; fi
+trap 'rmdir "$LOCK"' EXIT
 cd "$(dirname "$0")/../.."
 STORE=local/maps/world-detail.store
 PBF=local/maps/pbf/planet-latest.osm.pbf
