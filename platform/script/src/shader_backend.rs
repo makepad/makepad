@@ -1078,6 +1078,8 @@ impl ShaderBackend {
                 id_lut!(ddx);
                 id_lut!(ddy);
                 id_lut!(_mp_inverse);
+                id_lut!(_mp_unpack2f16);
+                id_lut!(_mp_unpack4u8);
                 id_lut!(rsqrt);
                 id_lut!(fmod);
                 id_lut!(frac);
@@ -1132,6 +1134,8 @@ impl ShaderBackend {
                 id!(dFdx) => id!(dfdx),
                 id!(dFdy) => id!(dfdy),
                 id!(inverse) => id!(_mp_inverse),
+                id!(unpack2f16) => id!(_mp_unpack2f16),
+                id!(unpack4u8) => id!(_mp_unpack4u8),
                 id!(inverseSqrt) => id!(rsqrt),
                 id!(modf) => id!(fmod),
                 id!(discard) => id!(discard_fragment),

@@ -1341,6 +1341,22 @@ pub fn type_table_builtin(
             );
             return builtins.pod_void;
         }
+        // Packed-attribute unpackers: one f32 slot carrying two f16s or
+        // four unorm8s (packed map vertex format). Scalar float in.
+        id!(unpack2f16) | id!(unpack4u8) => {
+            if args.len() != 1 || !is_any_float(args[0]) {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin {:?} requires 1 float arg",
+                    name
+                );
+                return builtins.pod_void;
+            }
+            if name == id!(unpack2f16) {
+                return builtins.pod_vec2f;
+            }
+            return builtins.pod_vec4f;
+        }
         // Float 2 arguments
         id!(atan2) | id!(pow) | id!(modf) => {
             if args.len() != 2 {
