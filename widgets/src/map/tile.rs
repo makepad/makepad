@@ -4727,16 +4727,35 @@ fn build_tile_buffers_from_features_profiled(
                             );
                         }
                     }
-                    let rings: Vec<Vec<[f64; 2]>> = acc
-                        .into_iter()
-                        .flat_map(|shape| shape.into_iter())
-                        .collect();
-                    if !rings.is_empty() {
-                        captured_building_groups.push(BakedBuildingGroup {
-                            height_m: height_q as f32 / 2.0,
-                            tint,
-                            rings,
-                        });
+                    // ONE group per connected shape: a group's ring set is
+                    // one polygon-with-holes for the roof earcut — merging
+                    // separate blocks into one ring list turns disjoint
+                    // outers into phantom holes. Winding normalizes to the
+                    // extruder's y-down convention (outer signed area > 0,
+                    // holes < 0) — i_overlay's output orientation differs.
+                    for shape in acc {
+                        let mut rings: Vec<Vec<[f64; 2]>> = Vec::with_capacity(shape.len());
+                        for (ring_index, mut ring) in shape.into_iter().enumerate() {
+                            // Same shoelace form as polygon_signed_area so
+                            // the outer test matches the extruder exactly.
+                            let mut area = 0.0f64;
+                            for i in 0..ring.len() {
+                                let j = (i + 1) % ring.len();
+                                area += ring[i][0] * ring[j][1] - ring[j][0] * ring[i][1];
+                            }
+                            let outer = ring_index == 0;
+                            if (outer && area < 0.0) || (!outer && area > 0.0) {
+                                ring.reverse();
+                            }
+                            rings.push(ring);
+                        }
+                        if !rings.is_empty() {
+                            captured_building_groups.push(BakedBuildingGroup {
+                                height_m: height_q as f32 / 2.0,
+                                tint,
+                                rings,
+                            });
+                        }
                     }
                 }
             } else if let Some(bake) = baked_faces
