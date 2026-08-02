@@ -91,6 +91,9 @@ pub enum TileLoadState {
         fringe_geometry: Option<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
         fill_3d_geometry: Option<Geometry>,
+        wall_geometry: Option<Geometry>,
+        tree_geometry: Option<Geometry>,
+        tree_cross_geometry: Option<Geometry>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -314,6 +317,15 @@ pub struct TileBuffers {
     /// tilt so the far field skips its vertex mass.
     pub fill_3d_indices: Vec<u32>,
     pub fill_3d_vertices: Vec<f32>,
+    /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
+    pub wall_indices: Vec<u32>,
+    pub wall_vertices: Vec<f32>,
+    /// Full canopy balls (MAT_CANOPY) — near ring only.
+    pub tree_indices: Vec<u32>,
+    pub tree_vertices: Vec<f32>,
+    /// Crossed-quad tree stand-ins for the mid/far rings.
+    pub tree_cross_indices: Vec<u32>,
+    pub tree_cross_vertices: Vec<f32>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -348,6 +360,12 @@ impl TileBuffers {
             + self.fringe_vertices.len()
             + self.fill_3d_indices.len()
             + self.fill_3d_vertices.len()
+            + self.wall_indices.len()
+            + self.wall_vertices.len()
+            + self.tree_indices.len()
+            + self.tree_vertices.len()
+            + self.tree_cross_indices.len()
+            + self.tree_cross_vertices.len()
             + self.icon_vertices.len()
             + self.road_icon_indices.len()
             + self.road_icon_vertices.len())
@@ -4205,6 +4223,8 @@ fn build_tile_buffers_from_features_profiled(
     // as fill_3d so distant tiles under tilt can skip/fade it.
     let fill_3d_vert_start = fill_vertices.len();
     let fill_3d_index_start = fill_indices.len();
+    let mut tree_cross_vertices: Vec<f32> = Vec::new();
+    let mut tree_cross_indices: Vec<u32> = Vec::new();
 
     // Cast-shadow union outlines, kept for the tree/signal contact discs:
     // a tree already standing in a building's shadow must not stack its
@@ -4891,6 +4911,37 @@ fn build_tile_buffers_from_features_profiled(
                 &mut template_indices,
                 &mut template_zbias,
             );
+            // Mid/far-ring stand-in: two crossed vertical quads per tree
+            // (canopy color, canopy material) — 8 verts vs ~70.
+            let cross_r = 2.6 * units_per_m;
+            for (x, y) in tree_points_3d.iter() {
+                append_wall_quad(
+                    (*x - cross_r, *y),
+                    (*x + cross_r, *y),
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    (0.0, 1.0),
+                    MAT_CANOPY,
+                    &mut tree_cross_vertices,
+                    &mut tree_cross_indices,
+                    &mut fill_zbias,
+                );
+                append_wall_quad(
+                    (*x, *y - cross_r),
+                    (*x, *y + cross_r),
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    (1.0, 0.0),
+                    MAT_CANOPY,
+                    &mut tree_cross_vertices,
+                    &mut tree_cross_indices,
+                    &mut fill_zbias,
+                );
+            }
             let floats = template_verts.len();
             fill_vertices.reserve(floats * tree_points_3d.len());
             fill_indices.reserve(template_indices.len() * tree_points_3d.len());
@@ -5957,6 +6008,12 @@ fn build_tile_buffers_from_features_profiled(
             fringe_vertices: Vec::new(),
             fill_3d_indices: Vec::new(),
             fill_3d_vertices: Vec::new(),
+            wall_indices: Vec::new(),
+            wall_vertices: Vec::new(),
+            tree_indices: Vec::new(),
+            tree_vertices: Vec::new(),
+            tree_cross_indices: Vec::new(),
+            tree_cross_vertices: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
@@ -6898,6 +6955,21 @@ fn build_tile_buffers_from_features_profiled(
     let mut casing_indices = casing_indices;
     let (fringe_vertices, fringe_indices) =
         split_fringe_band(&mut casing_vertices, &mut casing_indices);
+    // 3D band sub-splits by material (param3, slot 14): walls skip at the
+    // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
+    // out. Materials were authored per-append so the predicate is exact.
+    let mut fill_3d_vertices = fill_3d_vertices;
+    let mut fill_3d_indices = fill_3d_indices;
+    let (wall_vertices, wall_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| record[14] > 0.5 && record[14] < 1.5,
+    );
+    let (tree_vertices, tree_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| record[14] > 3.5 && record[14] < 4.5,
+    );
     // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
     // main-thread pack was 10-15ms per street tile and throttled the
     // upload drain to one tile per frame).
@@ -6908,6 +6980,9 @@ fn build_tile_buffers_from_features_profiled(
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
     let fringe_vertices = pack_vector_vertices(&fringe_vertices);
+    let wall_vertices = pack_vector_vertices(&wall_vertices);
+    let tree_vertices = pack_vector_vertices(&tree_vertices);
+    let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);
     TileBuffers {
         pin_hits,
         fill_indices,
@@ -6924,6 +6999,12 @@ fn build_tile_buffers_from_features_profiled(
         fringe_vertices,
         fill_3d_indices,
         fill_3d_vertices,
+        wall_indices,
+        wall_vertices,
+        tree_indices,
+        tree_vertices,
+        tree_cross_indices,
+        tree_cross_vertices,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
@@ -6961,6 +7042,30 @@ fn simplify_wall_ring(ring: &[(f32, f32)], min_edge: f32) -> Vec<(f32, f32)> {
         let last = *out.last().unwrap();
         if (first.0 - last.0).powi(2) + (first.1 - last.1).powi(2) < min_sq {
             out.pop();
+        }
+    }
+    // Collinear-run merge: drop vertices whose turn is under ~2 degrees —
+    // the adjacent wall quads fuse into one (same plane, same shade, same
+    // silhouette). Footprint digitization noise makes these runs common.
+    if out.len() > 4 {
+        let mut merged = Vec::with_capacity(out.len());
+        let n = out.len();
+        for i in 0..n {
+            let prev = out[(i + n - 1) % n];
+            let cur = out[i];
+            let next = out[(i + 1) % n];
+            let (ax, ay) = (cur.0 - prev.0, cur.1 - prev.1);
+            let (bx, by) = (next.0 - cur.0, next.1 - cur.1);
+            let cross = ax * by - ay * bx;
+            let dot = ax * bx + ay * by;
+            let len2 = ((ax * ax + ay * ay) * (bx * bx + by * by)).sqrt();
+            let straight = len2 > 1e-9 && dot > 0.0 && cross.abs() / len2 < 0.035;
+            if !straight {
+                merged.push(cur);
+            }
+        }
+        if merged.len() >= 3 {
+            out = merged;
         }
     }
     out
