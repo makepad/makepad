@@ -6216,7 +6216,11 @@ fn build_tile_buffers_from_features_profiled(
                 } else {
                     &face.morph_offsets
                 };
-                let body_morph = face.emissive <= 0.001
+                static FACE_MORPH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let face_morph_on = *FACE_MORPH
+                    .get_or_init(|| std::env::var_os("MAKEPAD_FACE_MORPH").is_some());
+                let body_morph = face_morph_on
+                    && face.emissive <= 0.001
                     && body_offsets.len() == verts.len()
                     && body_offsets.iter().any(|o| o[0] != 0.0 || o[1] != 0.0);
                 if body_morph {
@@ -6305,7 +6309,8 @@ fn build_tile_buffers_from_features_profiled(
                     // boundary vertices' offsets so the AA edge tracks the
                     // morphed face edge; carrier outer verts pin (u-ramp
                     // stretches, coverage stays one pixel by fwidth).
-                    let fringe_morph = fr_deck.is_none()
+                    let fringe_morph = face_morph_on
+                        && fr_deck.is_none()
                         && face.emissive <= 0.001
                         && face.morph_fringe_offsets.len() == fr_verts.len()
                         && face
