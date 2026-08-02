@@ -4236,6 +4236,10 @@ fn build_tile_buffers_from_features_profiled(
     // Baked shadows consumed: gates the runtime deck-shadow dissolve off
     // (the baked shapes already contain the deck set).
     let mut shadow_baked_hit = false;
+    // v4 building-dissolve capture: filled in the buildings block (jobs
+    // are local there), consumed by the bake sink.
+    let mut captured_building_sig = 0u64;
+    let mut captured_building_groups: Vec<BakedBuildingGroup> = Vec::new();
     // Grounded building footprints (positive winding), kept so deck
     // shadows can subtract them exactly like the building shadows did.
     let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -4660,6 +4664,125 @@ fn build_tile_buffers_from_features_profiled(
             }
         }
         profiler.lap("b-shadow", "");
+        // v4 block dissolve: same-height touching buildings union at BAKE
+        // time so shared interior walls never reach the extruder. Runtime
+        // pays ZERO booleans — a signature HIT swaps the eligible jobs for
+        // the baked union groups; a MISS keeps the per-building path.
+        {
+            let eligible = |job: &BuildingJob| job.base_m.abs() < 0.01;
+            let building_sig = {
+                use std::hash::Hasher;
+                let mut h = FnvStdHasher(0x9e37_79b9_97f4_a7c5);
+                for job in building_jobs.iter().filter(|job| eligible(job)) {
+                    h.write(&job.height_m.to_bits().to_le_bytes());
+                    h.write(&job.tint.unwrap_or(0).to_le_bytes());
+                    h.write(&(job.polygon.len() as u32).to_le_bytes());
+                    for ring in &job.polygon {
+                        h.write(&(ring.len() as u32).to_le_bytes());
+                        for &(x, y) in ring {
+                            h.write(&x.to_bits().to_le_bytes());
+                            h.write(&y.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                h.0
+            };
+            if faces_bake_sink_armed() {
+                use i_overlay::core::fill_rule::FillRule as IoFillRule;
+                use i_overlay::core::overlay_rule::OverlayRule;
+                use i_overlay::float::simplify::SimplifyShape;
+                use i_overlay::float::single::SingleFloatOverlay;
+                use std::collections::BTreeMap;
+                let mut by_key: BTreeMap<(i32, u32), Vec<Vec<[f64; 2]>>> = BTreeMap::new();
+                for job in building_jobs.iter().filter(|job| eligible(job)) {
+                    let key = (
+                        (job.height_m * 2.0).round() as i32,
+                        job.tint.map_or(0, |t| t | 0x8000_0000),
+                    );
+                    by_key.entry(key).or_default().extend(
+                        job.polygon.iter().map(|ring| {
+                            ring.iter()
+                                .map(|&(x, y)| [x as f64, y as f64])
+                                .collect::<Vec<_>>()
+                        }),
+                    );
+                }
+                captured_building_sig = building_sig;
+                for ((height_q, tint), rings) in by_key {
+                    const CHUNK: usize = 3000;
+                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+                    for chunk in rings.chunks(CHUNK) {
+                        let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+                        if acc.is_empty() {
+                            acc = part;
+                        } else {
+                            let part_paths: Vec<Vec<[f64; 2]>> = part
+                                .iter()
+                                .flat_map(|shape| shape.iter().cloned())
+                                .collect();
+                            acc = part_paths.overlay(
+                                &acc,
+                                OverlayRule::Union,
+                                IoFillRule::NonZero,
+                            );
+                        }
+                    }
+                    let rings: Vec<Vec<[f64; 2]>> = acc
+                        .into_iter()
+                        .flat_map(|shape| shape.into_iter())
+                        .collect();
+                    if !rings.is_empty() {
+                        captured_building_groups.push(BakedBuildingGroup {
+                            height_m: height_q as f32 / 2.0,
+                            tint,
+                            rings,
+                        });
+                    }
+                }
+            } else if let Some(bake) = baked_faces
+                .as_ref()
+                .filter(|bake| {
+                    bake.bucket == render_zoom
+                        && bake.building_signature == building_sig
+                        && !bake.buildings.is_empty()
+                })
+            {
+                let dissolved: Vec<BuildingJob> = bake
+                    .buildings
+                    .iter()
+                    .map(|group| {
+                        let polygon: Vec<Vec<(f32, f32)>> = group
+                            .rings
+                            .iter()
+                            .map(|ring| {
+                                ring.iter().map(|p| (p[0] as f32, p[1] as f32)).collect()
+                            })
+                            .collect();
+                        let min_y = polygon
+                            .iter()
+                            .flat_map(|ring| ring.iter().map(|p| p.1))
+                            .fold(f32::MAX, f32::min);
+                        BuildingJob {
+                            polygon,
+                            height_m: group.height_m,
+                            base_m: 0.0,
+                            tint: (group.tint != 0).then(|| group.tint & 0x7fff_ffff),
+                            min_y,
+                        }
+                    })
+                    .collect();
+                building_jobs.retain(|job| !eligible(job));
+                building_jobs.extend(dissolved);
+                // Preserve the north->south paint order the pre-dissolve
+                // sort established (walls paint over northern neighbors).
+                building_jobs.sort_by(|a, b| {
+                    a.min_y
+                        .partial_cmp(&b.min_y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                profiler.lap("b-dissolved", &format!("groups={}", bake.buildings.len()));
+            }
+        }
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -5990,6 +6113,8 @@ fn build_tile_buffers_from_features_profiled(
             shadow_signature: captured_shadow_sig,
             shadow_shapes,
             shadow_footprints: building_shadow_footprints.clone(),
+            building_signature: captured_building_sig,
+            buildings: std::mem::take(&mut captured_building_groups),
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
         return TileBuffers {
@@ -8203,7 +8328,7 @@ const BAKED_FACES_FIELD: u32 = 101;
 // until the archive is rebaked.
 // v3: bucket body gains shadow_signature + dissolved shadow shapes +
 // grounded footprints after the regions (same running checksum).
-const BAKED_FACES_VERSION: u8 = 3;
+const BAKED_FACES_VERSION: u8 = 4;
 /// Cascade coordinates are snapped to 1/64 unit (geometry.rs SNAP), so a
 /// x64 fixed-point roundtrip is EXACT.
 const BAKED_FACES_COORD_SCALE: f64 = 64.0;
@@ -8380,6 +8505,19 @@ pub struct BakedFacesBucket {
     pub shadow_signature: u64,
     pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
     pub shadow_footprints: Vec<Vec<[f64; 2]>>,
+    /// v4: same-height building blocks pre-dissolved at bake time —
+    /// shared interior walls vanish before the extruder ever sees them.
+    /// Guarded by its own input signature; empty on v3 streams.
+    pub building_signature: u64,
+    pub buildings: Vec<BakedBuildingGroup>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BakedBuildingGroup {
+    pub height_m: f32,
+    /// 0 = untinted; otherwise the tint color with bit 31 set.
+    pub tint: u32,
+    pub rings: Vec<Vec<[f64; 2]>>,
 }
 
 /// Encode buckets into the complete field-101 bytes to append to a tile.
@@ -8409,6 +8547,21 @@ pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
             .map(|ring| vec![ring.clone()])
             .collect();
         write_shapes(&footprint_shapes, &mut body, &mut checksum);
+        // v4 building section: pre-dissolved same-height blocks.
+        body.extend_from_slice(&bucket.building_signature.to_le_bytes());
+        write_faces_varint(bucket.buildings.len() as u64, &mut body);
+        for group in &bucket.buildings {
+            write_faces_varint(
+                zigzag_encode((group.height_m * 16.0).round() as i64),
+                &mut body,
+            );
+            write_faces_varint(group.tint as u64, &mut body);
+            write_shapes(
+                &[group.rings.clone()],
+                &mut body,
+                &mut checksum,
+            );
+        }
         blob.extend_from_slice(&checksum.to_le_bytes());
         write_faces_varint(body.len() as u64, &mut blob);
         blob.extend_from_slice(&body);
@@ -8477,7 +8630,8 @@ pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFace
         skip_pb_field(tile_data, &mut pos, wire).ok()?;
     }
     let blob = blob?;
-    if blob.first() != Some(&BAKED_FACES_VERSION) {
+    let stream_version = *blob.first()?;
+    if stream_version != 3 && stream_version != BAKED_FACES_VERSION {
         return None;
     }
     let mut pos = 1usize;
@@ -8531,6 +8685,35 @@ pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFace
             .into_iter()
             .filter_map(|mut shape| (!shape.is_empty()).then(|| shape.swap_remove(0)))
             .collect();
+        let mut building_signature = 0u64;
+        let mut buildings = Vec::new();
+        if stream_version >= 4 {
+            if bpos + 8 > body.len() {
+                return None;
+            }
+            building_signature =
+                u64::from_le_bytes(body[bpos..bpos + 8].try_into().ok()?);
+            bpos += 8;
+            let group_count = read_pb_varint(body, &mut bpos).ok()? as usize;
+            if group_count > 100_000 {
+                return None;
+            }
+            for _ in 0..group_count {
+                let height_q = zigzag_decode(read_pb_varint(body, &mut bpos).ok()?);
+                let tint = read_pb_varint(body, &mut bpos).ok()? as u32;
+                let mut shape = read_shapes(body, &mut bpos, &mut checksum)?;
+                let rings = if shape.is_empty() {
+                    Vec::new()
+                } else {
+                    shape.swap_remove(0)
+                };
+                buildings.push(BakedBuildingGroup {
+                    height_m: height_q as f32 / 16.0,
+                    tint,
+                    rings,
+                });
+            }
+        }
         if checksum != stored_checksum {
             return None;
         }
@@ -8541,6 +8724,8 @@ pub fn parse_baked_faces(tile_data: &[u8], want_bucket: u32) -> Option<BakedFace
             shadow_signature,
             shadow_shapes,
             shadow_footprints,
+            building_signature,
+            buildings,
         });
     }
     None
@@ -8577,6 +8762,10 @@ fn baked_layer_discriminant(layer_name: &str) -> Option<u8> {
         "street_polygons" => Some(13),
         _ => None,
     }
+}
+
+fn zigzag_encode(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
 }
 
 fn zigzag_decode(value: u64) -> i64 {
