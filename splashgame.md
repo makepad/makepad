@@ -236,3 +236,47 @@ names above (`left right up down jump shoot grab`).
   on > 0.55. Note the camera yaw is NOT an entity yaw — entities face
   `(-sin(e_yaw), -cos(e_yaw))`; the x sign differs. Don't equate the two —
   that's why chase cams belong to `camera({chase})`, not hand-rolled math.
+
+## Building blocks
+
+High-level prefabs. **The engine runs these at 60Hz** — you call the verb once
+to create and configure, then the block drives itself. Don't reimplement their
+behaviour in `on_tick`; steer them with `game.drive` or let them run.
+
+All block state is **Shared tier**: laps, scores, positions and control intent
+replicate to other players. Animation blending is Derived (recomputed from
+velocity), so it costs nothing over the network.
+
+| verb | what you get |
+|---|---|
+| `game.car({pos, color, player: true, top_speed, accel, grip, seats})` | A driveable raycast vehicle on a rigid chassis: suspension, grip, arcade steering, and it will not roll over. Returns the entity id. |
+| `game.character({pos, color, player: true, model, speed, jump, view: "third"})` | A walker on the mover sweep (0.55 step-up, jumps, camera-relative movement) with idle↔walk↔run blending driven by its own speed. |
+| `game.plane({pos, color, player: true, thrust, lift_speed})` | Arcade flight: lift from airspeed, auto-level, weathervane stability. Holding pitch loops; it cannot stall or spin. |
+| `game.drive(id, {steer, throttle, brake, handbrake, pitch, roll, move_x, move_z, jump})` | Feed control intent to any block — this is how script-driven or AI opponents are controlled. |
+| `game.autodrive(car, {points: [vec3, ...], pace})` | Hands a car a racing line to follow. `pace` is 0..1 of its top speed. |
+| `game.speed(id)` | Forward speed for a car, airspeed for a plane, planar speed otherwise. |
+
+### Brains
+
+Attach an AI to any mover. Re-issuing a brain on the same entity replaces it.
+
+| verb | behaviour |
+|---|---|
+| `game.wander(id, {home, range, speed, pause})` | Amble to random points near home, pausing between trips. |
+| `game.chase(id, {tag, range, catch, speed})` | Hunt the nearest entity carrying `tag`. `game.caught(id)` returns who it reached this tick. |
+| `game.patrol(id, {points: [vec3, ...], speed, loop})` | Walk a fixed route (ping-pongs when `loop: false`). |
+
+### Race kit
+
+| verb | behaviour |
+|---|---|
+| `game.spawnpoint({pos, yaw})` | Declares a start slot; returns its index. |
+| `game.checkpoint({pos, size})` | Declares a gate. Gates are numbered in declaration order and **must be crossed in order** — cutting the course scores nothing. |
+| `game.place(id, slot)` | Puts an entity on a start slot and enters it in the race. |
+| `game.race({laps})` | (Re)starts lap tracking. Call it again to restart a race. |
+| `game.standings()` | `[{entity, lap, checkpoint, finished, score}]`, leader first. |
+| `game.lap(id)` / `game.rank(id)` / `game.finished(id)` | Per-racer progress. |
+| `game.score(id, points)` / `game.score_of(id)` | Scoring for non-racing games too. |
+
+A complete 4-car race is ~60 lines — see
+`examples/gamemaker/resources/fixtures/racing.splash`.
