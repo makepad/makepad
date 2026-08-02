@@ -98,6 +98,27 @@ impl RigidDynamics {
         self.mirror.len() + self.terrain_body.iter().len()
     }
 
+    /// box3d body backing a Rigid entity, once the mirror has reconciled it
+    /// (None on the entity's spawn tick). The vehicle/plane blocks drive their
+    /// chassis through this handle — forces go INTO box3d, and the pose comes
+    /// back out through the normal read-back, so no block ever writes a pose
+    /// the reconcile would have to fight over.
+    pub fn rigid_body_of(&self, entity_id: u64) -> Option<BodyId> {
+        let at = self.find(entity_id)?;
+        (self.mirror[at].kind == MirrorKind::Rigid).then(|| self.mirror[at].body)
+    }
+
+    /// Adopt this tick's read-back as the baseline for `entity_id`, so a pose
+    /// the caller wrote straight into box3d isn't seen as an outside write by
+    /// the next reconcile (which would teleport the body back).
+    pub fn sync_baseline(&mut self, entity_id: u64, pos: Vec3f, orient: Quat, vel: Vec3f) {
+        if let Some(at) = self.find(entity_id) {
+            self.mirror[at].pos = pos;
+            self.mirror[at].orient = orient;
+            self.mirror[at].vel = vel;
+        }
+    }
+
     fn find(&self, entity_id: u64) -> Option<usize> {
         self.mirror
             .binary_search_by_key(&entity_id, |m| m.entity_id)

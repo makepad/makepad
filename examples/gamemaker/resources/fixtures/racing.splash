@@ -1,0 +1,72 @@
+// Speedway — a complete 4-car race built only from blocks.
+// The engine drives the cars, tracks the laps and sorts the standings; this
+// file is layout and rules. Compare with sandbox3d.splash, where every actor
+// hand-rolled its own physics and AI.
+
+let LAPS = 3
+let TRACK = [
+    vec3(0, 0, -60), vec3(34, 0, -52), vec3(52, 0, -30), vec3(56, 0, 0),
+    vec3(52, 0, 30), vec3(34, 0, 52), vec3(0, 0, 60), vec3(-34, 0, 52),
+    vec3(-52, 0, 30), vec3(-56, 0, 0), vec3(-52, 0, -30), vec3(-34, 0, -52),
+]
+let COLORS = [#xe8594f, #x4f8fe8, #x4fe87a, #xe8d24f]
+let NAMES = ["You", "Rosa", "Kim", "Bex"]
+
+game.sky({})
+game.terrain({size: 260, cells: 81, smooth: true, seed: 4, freq: 0.006, amp: 3,
+              plaza: {r: 120, ramp: 20, h: 0}, color: #x6b8f4a})
+
+// Track surface: a slab under every corner, plus barriers on the outside.
+for p in TRACK {
+    game.box({pos: vec3(p.x, 0.1, p.z), size: vec3(22, 0.2, 22), color: #x3b3f47, collide: false})
+    let out = p.normalized()
+    game.box({pos: vec3(out.x * 15 + p.x, 1.2, out.z * 15 + p.z),
+              size: vec3(6, 2.4, 6), color: #xd8d8d8, tag: "wall"})
+}
+
+// Start grid + gates. One spawnpoint and one checkpoint per corner.
+for i in 0..TRACK.len() {
+    game.checkpoint({pos: vec3(TRACK[i].x, 3, TRACK[i].z), size: vec3(11, 6, 11)})
+}
+for i in 0..4 {
+    game.spawnpoint({pos: vec3(-6 + i * 4, 1.5, -60 + (i % 2) * 6), yaw: 0})
+}
+
+// Four cars: seat 0 is the player, the rest follow the racing line.
+let cars = []
+for i in 0..4 {
+    let car = game.car({color: COLORS[i], player: i == 0, top_speed: 26 - i * 0.5})
+    game.place(car, i)
+    game.label(car, NAMES[i])
+    if i > 0 {
+        game.autodrive(car, {points: TRACK, pace: 0.86 + i * 0.03})
+    }
+    cars.push(car)
+}
+game.camera({chase: cars[0], height: 3.2, boom: 13, pitch: -0.22, lag: 0.25})
+game.race({laps: LAPS})
+
+let done = false
+game.on_tick(|dt, input| {
+    // Standings board, leader first.
+    let board = ""
+    let order = game.standings()
+    for i in 0..order.len() {
+        let s = order[i]
+        board = board + (i + 1) + ". " + game.tag(s.entity) + "  lap " + min(s.lap + 1, LAPS) + "/" + LAPS + "\n"
+    }
+    game.text("board", board, {anchor: "top_left"})
+    game.bar("speed", game.speed(cars[0]) / 26, {anchor: "bottom"})
+
+    if !done && game.finished(cars[0]) {
+        done = true
+        game.text("center", "P" + game.rank(cars[0]) + " — press R to race again", {})
+        game.jingle("C5 E5 G5 C6", 140)
+    }
+    if input.reset_pressed {
+        done = false
+        game.text("center", "", {})
+        for i in 0..4 { game.place(cars[i], i) }
+        game.race({laps: LAPS})
+    }
+})

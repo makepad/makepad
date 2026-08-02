@@ -5,6 +5,9 @@
 //! makepad-game-render into an offscreen pass composited into the pane.
 //! Mouse drag orbits, wheel zooms — the same raw-event pattern GameView uses.
 
+use makepad_game_blocks::{
+    Blocks, Car, CarConfig, Character, CharacterConfig, ControlSource, DriveInput,
+};
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
@@ -37,6 +40,9 @@ script_mod! {
     }
 }
 
+/// KeyCode isn't Hash, so held keys live in a small Vec.
+type KeySet = Vec<KeyCode>;
+
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
 pub struct ArcadeView {
     #[uid]
@@ -67,6 +73,12 @@ pub struct ArcadeView {
     draw_list: DrawList,
     #[rust]
     knight: Option<Knight>,
+    /// Engine-side blocks: the drivable car and the patrolling character.
+    #[rust]
+    blocks: Blocks,
+    /// Held keys for the local player (arrow keys / WASD drive the car).
+    #[rust]
+    keys: KeySet,
     #[rust]
     knight_texture: Option<Texture>,
     #[new]
@@ -387,6 +399,68 @@ impl ArcadeView {
 
     /// The demo's "game logic" — what a script or blocks component will do
     /// later, done directly in Rust here.
+    /// Spawn the driveable car and the patrolling Knight, proving blocks work
+    /// outside gamemaker: no script VM anywhere in this app.
+    fn spawn_blocks(&mut self) {
+        self.blocks.clear();
+        let w = &mut self.world;
+        w.next_id += 1;
+        let car = w.next_id;
+        w.push_entity(Entity {
+            id: car,
+            kind: BodyKind::Rigid,
+            pos: vec3f(-3.0, 2.0, -4.0),
+            half: vec3f(0.9, 0.4, 1.6),
+            color: vec4(0.86, 0.32, 0.28, 1.0),
+            tag: "car".to_string(),
+            collide: true,
+            gravity_scale: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.7,
+            ..Default::default()
+        });
+        w.mark_render_dirty();
+        self.blocks.cars.push(Car::new(
+            car,
+            CarConfig::default(),
+            ControlSource::Player,
+        ));
+
+        // The Knight already exists as a mover; give it a character block so
+        // its walk animation is driven by real velocity.
+        let knight_entity = w
+            .entities
+            .iter()
+            .find(|e| e.tag == "knight")
+            .map(|e| e.id);
+        if let Some(id) = knight_entity {
+            self.blocks.characters.push(Character::new(
+                id,
+                CharacterConfig::default(),
+                ControlSource::Script,
+                Some("Knight".to_string()),
+            ));
+        }
+    }
+
+    /// Local player's intent from the keyboard: arrows/WASD steer and drive.
+    fn player_input(&self) -> DriveInput {
+        let down = |k: KeyCode| self.keys.contains(&k);
+        let steer = (down(KeyCode::ArrowRight) || down(KeyCode::KeyD)) as i8 as f32
+            - (down(KeyCode::ArrowLeft) || down(KeyCode::KeyA)) as i8 as f32;
+        let throttle = (down(KeyCode::ArrowUp) || down(KeyCode::KeyW)) as i8 as f32
+            - (down(KeyCode::ArrowDown) || down(KeyCode::KeyS)) as i8 as f32;
+        DriveInput {
+            steer,
+            throttle,
+            brake: down(KeyCode::Space) as i8 as f32,
+            ..Default::default()
+        }
+    }
+
     fn run_tick(&mut self) {
         let w = &mut self.world;
         let t = w.time as f32;
@@ -424,9 +498,13 @@ impl ArcadeView {
                 w.dynamics.rigid_spin(*id, vec3f(0.6 * side, 0.9, 0.3));
             }
         }
-        step_world(w);
-        w.tick += 1;
-        w.time += TICK_DT as f64;
+        let _ = w;
+        self.blocks.player_input = self.player_input();
+        self.blocks.pre_step(&mut self.world);
+        step_world(&mut self.world);
+        self.world.tick += 1;
+        self.world.time += TICK_DT as f64;
+        self.blocks.post_step(&mut self.world);
         if let Some(knight) = &mut self.knight {
             knight.tick();
         }
@@ -463,6 +541,17 @@ impl WidgetNode for ArcadeView {
 
 impl Widget for ArcadeView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        match event {
+            Event::KeyDown(key) => {
+                if !self.keys.contains(&key.key_code) {
+                    self.keys.push(key.key_code);
+                }
+            }
+            Event::KeyUp(key) => {
+                self.keys.retain(|k| *k != key.key_code);
+            }
+            _ => {}
+        }
         if self.next_frame.is_event(event).is_some() {
             let time = cx.seconds_since_app_start();
             let last = self.last_time.replace(time).unwrap_or(time);
@@ -569,6 +658,7 @@ impl Widget for ArcadeView {
             );
             cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
             self.build_world();
+            self.spawn_blocks();
             self.next_frame = cx.new_next_frame();
         }
         self.view_rect = rect;

@@ -131,6 +131,11 @@ impl GameWorld {
         let mut world = Self::default();
         world.orbit_yaw = 0.6;
         world.orbit_pitch = -0.35;
+        // xorshift64* is a fixed point at zero, so an unseeded world would
+        // hand out rand() == 0 forever. reset_content seeds it on every eval,
+        // which hid this from gamemaker; a world built straight through the
+        // sim API (arcade, tests, blocks) never calls reset_content.
+        world.rng = 0x9E37_79B9_7F4A_7C15;
         world
     }
 
