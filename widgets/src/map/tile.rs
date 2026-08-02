@@ -3181,6 +3181,55 @@ impl TileProfiler {
     }
 }
 
+/// Deck (overpass) ground-shadow shapes: chunked dissolve of the swept
+/// slab quads, minus grounded building footprints. Deterministic per
+/// (tile, bucket) — baked into the shadow section at capture time; the
+/// runtime only runs this on a shadow-bake MISS.
+fn dissolve_deck_shadows(
+    deck_shadow_paths: Vec<Vec<[f64; 2]>>,
+    building_shadow_footprints: &[Vec<[f64; 2]>],
+) -> Vec<Vec<Vec<[f64; 2]>>> {
+    use i_overlay::core::fill_rule::FillRule as IoFillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::simplify::SimplifyShape;
+    use i_overlay::float::single::SingleFloatOverlay;
+    const DECK_SHADOW_CHUNK: usize = 3000;
+    let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
+        deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
+    } else {
+        let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
+        for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
+            let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
+            if acc.is_empty() {
+                acc = part;
+            } else {
+                let part_paths: Vec<Vec<[f64; 2]>> = part
+                    .iter()
+                    .flat_map(|shape| shape.iter().cloned())
+                    .collect();
+                acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
+            }
+        }
+        acc
+    };
+    if !building_shadow_footprints.is_empty() {
+        let mut acc = shapes;
+        for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
+            let subject: Vec<Vec<[f64; 2]>> = acc
+                .iter()
+                .flat_map(|shape| shape.iter().cloned())
+                .collect();
+            acc = subject.overlay(
+                &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
+                OverlayRule::Difference,
+                IoFillRule::NonZero,
+            );
+        }
+        shapes = acc;
+    }
+    shapes
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
@@ -4040,6 +4089,9 @@ fn build_tile_buffers_from_features_profiled(
     // Shadow input signature captured when the runtime pipeline runs, so
     // the faces-bake sink stores it with the shapes.
     let mut captured_shadow_sig = 0u64;
+    // Baked shadows consumed: gates the runtime deck-shadow dissolve off
+    // (the baked shapes already contain the deck set).
+    let mut shadow_baked_hit = false;
     // Grounded building footprints (positive winding), kept so deck
     // shadows can subtract them exactly like the building shadows did.
     let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -4244,6 +4296,7 @@ fn build_tile_buffers_from_features_profiled(
                     bake.bucket == render_zoom && bake.shadow_signature == shadow_sig
                 });
             if let Some(bake) = baked_shadow {
+                shadow_baked_hit = true;
                 building_shadow_footprints = bake.shadow_footprints.clone();
                 building_shadow_shapes = bake.shadow_shapes.clone();
                 profiler.lap("b-sh-baked", &format!("shapes={}", building_shadow_shapes.len()));
@@ -5741,12 +5794,22 @@ fn build_tile_buffers_from_features_profiled(
         } else {
             compute_visible_regions(&groups)
         };
+        // The baked shadow set = building shadows ++ dissolved deck
+        // shadows (concat matches the runtime's two separate emits
+        // exactly, overlap behavior included).
+        let mut shadow_shapes = building_shadow_shapes.clone();
+        if !deck_shadow_paths.is_empty() {
+            shadow_shapes.extend(dissolve_deck_shadows(
+                std::mem::take(&mut deck_shadow_paths),
+                &building_shadow_footprints,
+            ));
+        }
         let bucket = BakedFacesBucket {
             bucket: render_zoom,
             signature: input_sig,
             regions,
             shadow_signature: captured_shadow_sig,
-            shadow_shapes: building_shadow_shapes.clone(),
+            shadow_shapes,
             shadow_footprints: building_shadow_footprints.clone(),
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
@@ -5898,6 +5961,7 @@ fn build_tile_buffers_from_features_profiled(
     let cap_eps = 0.05_f32;
     // Sort key gains a level-class prefix: sunk faces (tunnels) paint
     // before ALL surface content — under plazas, casings, everything.
+    let events_build_clock = std::time::Instant::now();
     let mut events: Vec<((u8, u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
     for (face_index, face) in faces.iter().enumerate() {
         let level_class = if face.level < 0 { 0u8 } else { 1 };
@@ -5952,45 +6016,13 @@ fn build_tile_buffers_from_features_profiled(
 
     // Dissolve + emit the collected deck shadows (minus building
     // footprints, same rule as building shadows: never on a roof).
-    if !deck_shadow_paths.is_empty() {
-        use i_overlay::core::fill_rule::FillRule as IoFillRule;
-        use i_overlay::core::overlay_rule::OverlayRule;
-        use i_overlay::float::simplify::SimplifyShape;
-        use i_overlay::float::single::SingleFloatOverlay;
-        const DECK_SHADOW_CHUNK: usize = 3000;
-        let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
-            deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
-        } else {
-            let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-            for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
-                let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-                if acc.is_empty() {
-                    acc = part;
-                } else {
-                    let part_paths: Vec<Vec<[f64; 2]>> = part
-                        .iter()
-                        .flat_map(|shape| shape.iter().cloned())
-                        .collect();
-                    acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-                }
-            }
-            acc
-        };
-        if !building_shadow_footprints.is_empty() {
-            let mut acc = shapes;
-            for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
-                let subject: Vec<Vec<[f64; 2]>> = acc
-                    .iter()
-                    .flat_map(|shape| shape.iter().cloned())
-                    .collect();
-                acc = subject.overlay(
-                    &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                    OverlayRule::Difference,
-                    IoFillRule::NonZero,
-                );
-            }
-            shapes = acc;
-        }
+    // On a shadow-bake HIT the baked shapes already contain the deck
+    // shadows (concatenated at capture) — the dissolve is bake/MISS-only.
+    if !shadow_baked_hit && !deck_shadow_paths.is_empty() {
+        let shapes = dissolve_deck_shadows(
+            std::mem::take(&mut deck_shadow_paths),
+            &building_shadow_footprints,
+        );
         let fill_clip_bounds = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
         emit_shadow_shapes(
             shapes,
@@ -6073,9 +6105,17 @@ fn build_tile_buffers_from_features_profiled(
     let mut prof_subdiv_ms = 0.0f64;
     let mut prof_sample_ms = 0.0f64;
     let mut prof_face_verts_out = 0usize;
+    let mut prof_skirt_ms = 0.0f64;
+    let mut prof_body_ms = 0.0f64;
+    let mut prof_fringe_ms = 0.0f64;
+    let mut prof_stroke_arm_ms = 0.0f64;
+    let mut prof_face_arm_ms = 0.0f64;
+    let prof_events_build_ms = events_build_clock.elapsed().as_secs_f64() * 1e3;
+    let events_loop_clock = std::time::Instant::now();
     for ((_, phase, _, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(face_index) => {
+                let whole_face_clock = std::time::Instant::now();
                 let face = &faces[*face_index];
                 let face_param5 =
                     road_semantic_param5(face.level, face.phase, face.depth_micro);
@@ -6140,6 +6180,7 @@ fn build_tile_buffers_from_features_profiled(
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
+                let face_clock = std::time::Instant::now();
                 // Deck side walls first (under the face): top verts (v=0)
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
@@ -6205,6 +6246,8 @@ fn build_tile_buffers_from_features_profiled(
                         }
                     }
                 }
+                prof_skirt_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                let face_clock = std::time::Instant::now();
                 // Morphable body: non-emissive faces whose offsets are
                 // 1:1 with the emitted verts — the dz-subdivided path
                 // carries them through midpoint averaging, so decked city
@@ -6272,6 +6315,8 @@ fn build_tile_buffers_from_features_profiled(
                     );
                 }
                 casing_zbias += VECTOR_ZBIAS_STEP;
+                prof_body_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                let face_clock = std::time::Instant::now();
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
                 if !face.fringe_verts.is_empty() {
@@ -6376,6 +6421,8 @@ fn build_tile_buffers_from_features_profiled(
                     }
                     casing_zbias += VECTOR_ZBIAS_STEP;
                 }
+                prof_fringe_ms += face_clock.elapsed().as_secs_f64() * 1e3;
+                prof_face_arm_ms += whole_face_clock.elapsed().as_secs_f64() * 1e3;
                 feature_count += 1;
             }
             RoadPaintEvent::Stroke {
@@ -6384,6 +6431,7 @@ fn build_tile_buffers_from_features_profiled(
                 start_cap,
                 end_cap,
             } => {
+                let arm_clock = std::time::Instant::now();
                 let near_corridor = stroke_corridors_available && part_near_corridor(part);
                 let param5 = if pass.deck_m < 0.0 {
                     // Patterned tunnels have no physical sunk mesh; keep
@@ -6416,20 +6464,29 @@ fn build_tile_buffers_from_features_profiled(
                     &mut casing_zbias,
                     param5,
                 );
+                prof_stroke_arm_ms += arm_clock.elapsed().as_secs_f64() * 1e3;
                 feature_count += 1;
             }
         }
     }
 
+    let prof_events_loop_ms = events_loop_clock.elapsed().as_secs_f64() * 1e3;
     let sp = crate::map::geometry::stroke_prof_take();
     profiler.lap(
         "emit",
         &format!(
-            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={} | strokes: calls={} verts={} densify={:.1}ms tess={:.1}ms deck={:.1}ms expand={:.1}ms",
+            "events={} subdiv={:.1}ms sample={:.1}ms sub_verts={} skirt={:.1} body={:.1} fringe={:.1} arm={:.1} facearm={:.1} ebuild={:.1} eloop={:.1} | strokes: calls={} verts={} densify={:.1}ms tess={:.1}ms deck={:.1}ms expand={:.1}ms",
             events.len(),
             prof_subdiv_ms,
             prof_sample_ms,
             prof_face_verts_out,
+            prof_skirt_ms,
+            prof_body_ms,
+            prof_fringe_ms,
+            prof_stroke_arm_ms,
+            prof_face_arm_ms,
+            prof_events_build_ms,
+            prof_events_loop_ms,
             sp.calls,
             sp.verts,
             sp.densify_ms,
