@@ -1,4 +1,5 @@
 use super::geometry::*;
+use crate::makepad_draw::vector::pack_vector_vertices;
 use super::icons::ICON_MIN_ZOOM;
 use super::label::*;
 use super::overlay::*;
@@ -361,9 +362,16 @@ script_mod! {
         }
 
         vertex: fn() {
+            // Packed-vertex preamble: f16 pairs / unorm8x4 unpack once.
+            let g_uv = unpack2f16(self.geom.uv)
+            let g_color = unpack4u8(self.geom.color)
+            let g_ds = unpack2f16(self.geom.dist_shape)
+            let g_p03 = unpack2f16(self.geom.p03)
+            let g_p12 = unpack2f16(self.geom.p12)
+            let g_clipr = unpack2f16(self.geom.clipr).x
             let pos = vec2(self.geom.x, self.geom.y);
             var transformed = pos * self.map_scale + self.map_offset;
-            var shape_id = self.geom.shape_id;
+            var shape_id = g_ds.y;
             var expanded = 0.0;
             var expand_slack = 0.0;
             var surface_decal = 0.0;
@@ -376,7 +384,7 @@ script_mod! {
             if shape_id > 99.5 {
                 shape_id = shape_id - 100.0;
                 expanded = 1.0;
-                var cls = self.geom.param3;
+                var cls = g_p03.y;
                 var corr = self.width_correction.x;
                 if cls > 3.5 {
                     // Face band (class + 4): clamped corrections.
@@ -396,7 +404,7 @@ script_mod! {
                 } else if cls > 0.5 {
                     corr = self.width_correction.y;
                 }
-                let off = vec2(self.geom.param1, self.geom.param2);
+                let off = vec2(g_p12.x, g_p12.y);
                 transformed = transformed + off * self.map_scale * corr;
                 expand_slack = length(off) * (corr + 1.0);
             }
@@ -406,8 +414,8 @@ script_mod! {
             // gives every glyph vertex the same projection/depth basis as
             // the road directly beneath it instead of rotating a flat card
             // around one lifted anchor.
-            if shape_id > 19.5 && shape_id < 20.5 && self.geom.param3 > 1.5 {
-                let off = vec2(self.geom.param1, self.geom.param2);
+            if shape_id > 19.5 && shape_id < 20.5 && g_p03.y > 1.5 {
+                let off = vec2(g_p12.x, g_p12.y);
                 transformed = transformed + off;
                 terrain_pos = terrain_pos + off;
                 surface_decal = 1.0;
@@ -483,8 +491,8 @@ script_mod! {
                     return
                 }
                 if surface_decal < 0.5 {
-                    var off = vec2(self.geom.param1, self.geom.param2);
-                    if self.geom.param3 > 0.5 {
+                    var off = vec2(g_p12.x, g_p12.y);
+                    if g_p03.y > 0.5 {
                         off = vec2(
                             off.x * self.view_rot.x - off.y * self.view_rot.y,
                             off.x * self.view_rot.y + off.y * self.view_rot.x
@@ -495,37 +503,37 @@ script_mod! {
                 }
             }
 
-            self.v_tcoord = vec2(self.geom.u, self.geom.v);
-            self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
+            self.v_tcoord = vec2(g_uv.x, g_uv.y);
+            self.v_color = vec4(g_color.x, g_color.y, g_color.z, g_color.w);
             self.v_stroke_mult = self.geom.stroke_mult;
             // stroke distances are tile-local; scale so dash patterns stay in screen px
-            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
+            self.v_stroke_dist = g_ds.x * self.map_scale.x;
             self.v_shape_id = shape_id;
-            self.v_param0 = self.geom.param0;
+            self.v_param0 = g_p03.x;
             self.v_param5 = self.geom.param5;
 
-            let grad_type = self.geom.param0;
+            let grad_type = g_p03.x;
             if expanded > 0.5 {
                 self.v_param1 = 0.0;
                 self.v_param2 = 0.0;
                 self.v_param3 = 0.0;
                 self.v_param4 = 0.0;
             } else if grad_type > 0.5 && grad_type < 1.5 {
-                let p0 = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
-                let p1 = vec2(self.geom.param3, self.geom.param4) * self.map_scale + self.map_offset;
+                let p0 = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
+                let p1 = vec2(g_p03.y, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
                 self.v_param4 = p1.y;
             } else if grad_type > 1.5 {
-                let center = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
+                let center = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
-                self.v_param3 = self.geom.param3 * self.map_scale.x;
+                self.v_param3 = g_p03.y * self.map_scale.x;
                 self.v_param4 = self.geom.param4 * self.map_scale.y;
             } else if shape_id > 0.5 && shape_id < 19.5 {
-                let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.map_scale + self.map_offset;
-                let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.map_scale + self.map_offset;
+                let bbox_min = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
+                let bbox_max = vec2(g_p03.y, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
@@ -541,8 +549,8 @@ script_mod! {
                 self.v_param4 = 0.0;
             } else if shape_id < 0.5
                 && (
-                    (self.geom.param3 > 2.5 && self.geom.param3 < 3.5)
-                    || (self.geom.param3 > 4.5 && self.geom.param3 < 5.5)
+                    (g_p03.y > 2.5 && g_p03.y < 3.5)
+                    || (g_p03.y > 4.5 && g_p03.y < 5.5)
                 ) {
                 // Water/green-area materials: param1/2 are free on these
                 // fills — carry a map-anchored UV for the per-pixel noise
@@ -550,19 +558,19 @@ script_mod! {
                 let mat_uv = pos * self.map_scale;
                 self.v_param1 = mat_uv.x;
                 self.v_param2 = mat_uv.y;
-                self.v_param3 = self.geom.param3;
+                self.v_param3 = g_p03.y;
                 self.v_param4 = self.geom.param4;
             } else {
-                self.v_param1 = self.geom.param1;
-                self.v_param2 = self.geom.param2;
-                self.v_param3 = self.geom.param3;
+                self.v_param1 = g_p12.x;
+                self.v_param2 = g_p12.y;
+                self.v_param3 = g_p03.y;
                 self.v_param4 = self.geom.param4;
             }
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            let cr = (self.geom.clip_radius + expand_slack) * max(self.map_scale.x, self.map_scale.y);
+            let cr = (g_clipr + expand_slack) * max(self.map_scale.x, self.map_scale.y);
             let clip = vec4(
                 max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
                 max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
@@ -2928,7 +2936,7 @@ impl MapView {
         let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_indices, buffers.fill_vertices);
+            geometry.update(cx, buffers.fill_indices, pack_vector_vertices(&buffers.fill_vertices));
             Some(geometry)
         } else {
             None
@@ -2937,7 +2945,7 @@ impl MapView {
         let new_casing_geometry =
             if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
+                geometry.update(cx, buffers.casing_indices, pack_vector_vertices(&buffers.casing_vertices));
                 Some(geometry)
             } else {
                 None
@@ -2951,7 +2959,7 @@ impl MapView {
         let new_stroke_geometry =
             if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
                 let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.stroke_indices, buffers.stroke_vertices);
+                geometry.update(cx, buffers.stroke_indices, pack_vector_vertices(&buffers.stroke_vertices));
                 Some(geometry)
             } else {
                 None
@@ -2965,7 +2973,7 @@ impl MapView {
         let icon_geometry = if !buffers.icon_indices.is_empty() && !buffers.icon_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.icon_indices, buffers.icon_vertices);
+            geometry.update(cx, buffers.icon_indices, pack_vector_vertices(&buffers.icon_vertices));
             Some(geometry)
         } else {
             None
@@ -2974,7 +2982,7 @@ impl MapView {
             && !buffers.icon_high_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.icon_high_indices, buffers.icon_high_vertices);
+            geometry.update(cx, buffers.icon_high_indices, pack_vector_vertices(&buffers.icon_high_vertices));
             Some(geometry)
         } else {
             None
@@ -2983,7 +2991,7 @@ impl MapView {
             && !buffers.fringe_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fringe_indices, buffers.fringe_vertices);
+            geometry.update(cx, buffers.fringe_indices, pack_vector_vertices(&buffers.fringe_vertices));
             Some(geometry)
         } else {
             None
@@ -2992,7 +3000,7 @@ impl MapView {
             && !buffers.fill_3d_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_3d_indices, buffers.fill_3d_vertices);
+            geometry.update(cx, buffers.fill_3d_indices, pack_vector_vertices(&buffers.fill_3d_vertices));
             Some(geometry)
         } else {
             None
