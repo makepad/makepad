@@ -7,12 +7,18 @@
 //!
 //! Boxes run: `cargo run -p makepad-remote --release -- --server` from a
 //! repo checkout (first job on each box compiles the bake tool, cached
-//! after). Resume ledger = existing cell-NNN-baked.mbtiles files, shared
-//! with world-slabs.sh — STOP that driver before running mapfleet.
+//! after). Resume ledger = existing cell-NNN-baked.mbtiles files.
+//!
+//! Streaming: cell work does NOT wait for the whole spool. Pass 4
+//! publishes store/spool-frontier.txt (spiral distance below which every
+//! relation is on disk); a cell may slice once the frontier strictly
+//! clears its farthest corner, so the fleet starts on NL while the spool
+//! is still assembling the far side of the planet.
 //!
 //!   mapfleet [--hosts ip:port,...] [--hosts-file fleet-hosts.txt] \
 //!            [--cells tools/map_tiles/world-cells.txt] \
 //!            [--store local/maps/world-detail.store] \
+//!            [--pbf local/maps/pbf/planet-latest.osm.pbf] \
 //!            [--out local/maps/world-cells] \
 //!            [--mkmap local/maps/world.mkmap] [--local-worker]
 //!
@@ -20,10 +26,11 @@
 //! and new compute nodes join the running spiral live.
 
 #[path = "../protocol.rs"]
+#[allow(dead_code)] // shared with main.rs; each binary uses a subset
 mod protocol;
 use protocol::*;
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +61,7 @@ struct Config {
     hosts_file: Option<PathBuf>,
     cells: PathBuf,
     store: PathBuf,
+    pbf: PathBuf,
     out: PathBuf,
     mkmap: PathBuf,
     local_worker: bool,
@@ -62,6 +70,9 @@ struct Config {
 struct Shared {
     cells: Vec<String>, // "w,s,e,n" per line, spiral order
     next: AtomicUsize,
+    /// Cells a worker is actively slicing/baking. The final weave waits
+    /// for this to drain so late arrivals are never left out of the shard.
+    active: AtomicUsize,
     weave_dirty: AtomicBool,
     stop: AtomicBool,
     /// At most three concurrent slices: the store is read-only so parallel
@@ -88,10 +99,12 @@ fn main() {
         .filter(|line| !line.is_empty())
         .collect();
     std::fs::create_dir_all(&config.out).ok();
+    sweep_stale_sort_chunks(&config);
 
     let shared = Arc::new(Shared {
         cells,
         next: AtomicUsize::new(0),
+        active: AtomicUsize::new(0),
         weave_dirty: AtomicBool::new(false),
         stop: AtomicBool::new(false),
         slice_gate: Mutex::new(0),
@@ -134,14 +147,24 @@ fn main() {
         let config = config.clone();
         handles.push(thread::spawn(move || local_worker(&shared, &config)));
     }
-    {
+    let weave_handle = {
         let shared = shared.clone();
         let config = config.clone();
-        handles.push(thread::spawn(move || weave_loop(&shared, &config)));
-    }
+        thread::spawn(move || weave_loop(&shared, &config))
+    };
     for handle in handles {
         let _ = handle.join();
     }
+    // Hot-joined workers (hosts-file watcher) are detached — drain them.
+    while shared.next.load(Ordering::SeqCst) < shared.cells.len()
+        || shared.active.load(Ordering::SeqCst) > 0
+    {
+        thread::sleep(Duration::from_secs(10));
+    }
+    shared.stop.store(true, Ordering::SeqCst);
+    let _ = weave_handle.join();
+    // One last weave so the final arrivals are in the served shard set.
+    weave(&shared, &config);
     println!("mapfleet: spiral complete");
 }
 
@@ -151,6 +174,7 @@ fn parse_args() -> Result<Config, String> {
         hosts_file: None,
         cells: "tools/map_tiles/world-cells.txt".into(),
         store: "local/maps/world-detail.store".into(),
+        pbf: "local/maps/pbf/planet-latest.osm.pbf".into(),
         out: "local/maps/world-cells".into(),
         mkmap: "local/maps/world.mkmap".into(),
         local_worker: false,
@@ -184,6 +208,10 @@ fn parse_args() -> Result<Config, String> {
                 config.store = take(index)?.into();
                 index += 2;
             }
+            "--pbf" => {
+                config.pbf = take(index)?.into();
+                index += 2;
+            }
             "--out" => {
                 config.out = take(index)?.into();
                 index += 2;
@@ -202,11 +230,77 @@ fn parse_args() -> Result<Config, String> {
     Ok(config)
 }
 
-fn wait_for_spool(config: &Config) {
-    let marker = config.store.join("SPOOL_COMPLETE");
-    while !marker.exists() {
-        thread::sleep(Duration::from_secs(60));
+/// Slicers (pbf-base) suffix sort chunks with their pid; a crashed slice
+/// leaks its chunks. Swept at dispatcher startup, when no slicer runs.
+fn sweep_stale_sort_chunks(config: &Config) {
+    let spool = config.store.join("spool");
+    let Ok(entries) = std::fs::read_dir(&spool) else {
+        return;
+    };
+    let mut swept = 0_u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("block-") && name.contains(".sort-") {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                swept += 1;
+            }
+        }
     }
+    if swept > 0 {
+        println!("mapfleet: swept {swept} stale sort chunks");
+    }
+}
+
+/// Same web-mercator global units as tools/map_tiles native/geom.rs
+/// project_lon_lat — the frontier file publishes distances in this metric.
+const DETAIL_ZOOM: u8 = 14;
+const MVT_EXTENT: f64 = 4096.0;
+const SPIRAL_ANCHOR: (f64, f64) = (5.2, 52.2);
+/// Stricter than pbf-base's own 1-tile margin so its gate stays cold.
+const FRONTIER_MARGIN: f64 = 2.0 * MVT_EXTENT;
+
+fn project_lon_lat(lon: f64, lat: f64) -> (f64, f64) {
+    let lat = lat.clamp(-85.06, 85.06);
+    let world = ((1_u64 << DETAIL_ZOOM) as f64) * MVT_EXTENT;
+    let x = (lon + 180.0) / 360.0 * world;
+    let sin_lat = lat.to_radians().sin();
+    let y =
+        (0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI)) * world;
+    (x, y)
+}
+
+/// A cell is ready when the spool is complete, or when the pass-4
+/// streaming frontier strictly clears the distance from the NL anchor to
+/// the cell's FARTHEST corner: no unfinished relation can touch it.
+fn cell_ready(config: &Config, bbox: &str) -> bool {
+    if config.store.join("SPOOL_COMPLETE").exists()
+        || config.store.join("spool.complete.json").exists()
+    {
+        return true;
+    }
+    let Ok(text) = std::fs::read_to_string(config.store.join("spool-frontier.txt")) else {
+        return false;
+    };
+    let Ok(frontier) = text.trim().parse::<f64>() else {
+        return false;
+    };
+    let parts: Vec<f64> = bbox
+        .split(',')
+        .filter_map(|value| value.parse().ok())
+        .collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    let (anchor_x, anchor_y) = project_lon_lat(SPIRAL_ANCHOR.0, SPIRAL_ANCHOR.1);
+    let mut far = 0.0_f64;
+    for lon in [parts[0], parts[2]] {
+        for lat in [parts[1], parts[3]] {
+            let (x, y) = project_lon_lat(lon, lat);
+            far = far.max(((x - anchor_x).powi(2) + (y - anchor_y).powi(2)).sqrt());
+        }
+    }
+    frontier > far + FRONTIER_MARGIN
 }
 
 fn cell_paths(config: &Config, index: usize) -> (String, PathBuf, PathBuf) {
@@ -226,6 +320,24 @@ fn claim_cell(shared: &Shared, config: &Config) -> Option<(usize, String)> {
         if baked.exists() {
             continue; // resume ledger: already done
         }
+        // Cells are in NL-spiral order — the same order the pass-4
+        // frontier advances — so each worker blocks on its own claimed
+        // cell and they unblock in sequence as the frontier grows.
+        let mut waited = false;
+        while !cell_ready(config, &shared.cells[index]) {
+            if shared.stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            if !waited {
+                println!(
+                    "mapfleet: cell-{:03} waiting for streaming frontier",
+                    index + 1
+                );
+                waited = true;
+            }
+            thread::sleep(Duration::from_secs(30));
+        }
+        shared.active.fetch_add(1, Ordering::SeqCst);
         return Some((index, shared.cells[index].clone()));
     }
 }
@@ -258,19 +370,32 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         thread::sleep(Duration::from_secs(5));
     }
     println!("mapfleet: {name} slice {bbox}");
-    let status = Command::new("./target/release/mptiles-run")
-        .args(["pbf-base", "local/maps/pbf/planet-latest.osm.pbf"])
+    let output = Command::new("./target/release/mptiles-run")
+        .arg("pbf-base")
+        .arg(&config.pbf)
         .arg(&base)
         .args(["--store"])
         .arg(&config.store)
         .args(["--bbox", bbox])
         // Throwaway intermediate: the fleet re-encodes everything at q11.
         .args(["--brotli-quality", "2"])
-        .status()?;
+        .output()?;
     *shared.slice_gate.lock().unwrap() -= 1;
-    if !status.success() {
+    if !output.status.success() {
         let _ = std::fs::remove_file(&base);
-        return Ok(false);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The only benign failure: a bbox with no spool blocks is ocean.
+        if text.contains("selects no spool blocks") {
+            return Ok(false);
+        }
+        return Err(io::Error::other(format!(
+            "pbf-base failed: {}",
+            text.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+        )));
     }
     Ok(true)
 }
@@ -282,7 +407,6 @@ fn mark_empty(config: &Config, index: usize) {
 }
 
 fn local_worker(shared: &Shared, config: &Config) {
-    wait_for_spool(config);
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config) else {
             return;
@@ -291,31 +415,40 @@ fn local_worker(shared: &Shared, config: &Config) {
         match slice_cell(shared, config, index, &bbox) {
             Ok(false) => {
                 mark_empty(config, index);
+                shared.active.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
             Err(err) => {
-                eprintln!("mapfleet: {name} slice error: {err}");
+                eprintln!("mapfleet: {name} slice error: {err} — requeue");
+                requeue(shared, index);
+                shared.active.fetch_sub(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(30));
                 continue;
             }
             Ok(true) => {}
         }
         println!("mapfleet: {name} bake (local)");
+        // Bake into a temp name: the ledger name must appear atomically —
+        // the weaver and the resume ledger both trust its existence.
+        let baked_tmp = baked.with_extension("mbtiles.tmp");
+        let _ = std::fs::remove_file(&baked_tmp);
         let mut cmd = Command::new("./target/release/mpbake-run");
-        cmd.arg(&base).arg(&baked).args(BAKE_ARGS);
+        cmd.arg(&base).arg(&baked_tmp).args(BAKE_ARGS);
         if intersects_nl(&bbox) {
             cmd.args(["--bridge-dz", BRIDGE_DZ]);
         }
         match cmd.status() {
-            Ok(status) if status.success() => {
+            Ok(status) if status.success() && std::fs::rename(&baked_tmp, &baked).is_ok() => {
                 let _ = std::fs::remove_file(&base);
                 shared.weave_dirty.store(true, Ordering::SeqCst);
                 println!("mapfleet: {name} baked (local)");
             }
             other => {
-                let _ = std::fs::remove_file(&baked);
+                let _ = std::fs::remove_file(&baked_tmp);
                 eprintln!("mapfleet: {name} local bake failed: {other:?}");
             }
         }
+        shared.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -336,9 +469,8 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
             }
         }
     }
-    // Bootstrap runs pre-marker (warm compile during the spool wait);
-    // cell work gates on the honest marker like everyone else.
-    wait_for_spool(config);
+    // Bootstrap runs while the spool spins up; cell work self-gates on
+    // the streaming frontier inside claim_cell.
     let mut pushed_bridge_dz = false;
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config) else {
@@ -348,10 +480,14 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
         match slice_cell(shared, config, index, &bbox) {
             Ok(false) => {
                 mark_empty(config, index);
+                shared.active.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
             Err(err) => {
-                eprintln!("mapfleet: {name} slice error: {err}");
+                eprintln!("mapfleet: {name} slice error: {err} — requeue");
+                requeue(shared, index);
+                shared.active.fetch_sub(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_secs(30));
                 continue;
             }
             Ok(true) => {}
@@ -392,7 +528,6 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                     }
                     Err(err) => {
                         eprintln!("mapfleet: {name} pull from {host} failed: {err} — requeue");
-                        let _ = std::fs::remove_file(&baked);
                         requeue(shared, index);
                     }
                 }
@@ -400,9 +535,12 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
             other => {
                 eprintln!("mapfleet: {name} on {host} failed ({other:?}) — requeue, backoff");
                 requeue(shared, index);
+                shared.active.fetch_sub(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(30));
+                continue;
             }
         }
+        shared.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -478,54 +616,59 @@ fn remote_pull(host: &str, remote_path: &str, local_path: &Path) -> io::Result<(
         local_path.display(),
         data.len() as f64 / 1e6
     );
-    std::fs::write(local_path, data)?;
+    // Temp + rename: the ledger name must never exist half-written.
+    let tmp = local_path.with_extension("mbtiles.tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, local_path)?;
     Ok(())
 }
 
 /// Re-weave the world shard set whenever new cells land; coalesces bursts.
+/// Runs until the stop flag; main does one final weave() after the drain.
 fn weave_loop(shared: &Shared, config: &Config) {
     loop {
         thread::sleep(Duration::from_secs(10));
-        let done = shared.next.load(Ordering::SeqCst) >= shared.cells.len();
-        if !shared.weave_dirty.swap(false, Ordering::SeqCst) {
-            if done {
-                return;
+        if shared.weave_dirty.swap(false, Ordering::SeqCst) {
+            weave(shared, config);
+        } else if shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+    }
+}
+
+fn weave(shared: &Shared, config: &Config) {
+    let mut baked: Vec<PathBuf> = Vec::new();
+    for index in 0..shared.cells.len() {
+        let (_, _, path) = cell_paths(config, index);
+        // Empty ledger placeholders mark ocean cells; skip them.
+        if path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            baked.push(path);
+        }
+    }
+    if baked.is_empty() {
+        return;
+    }
+    println!("mapfleet: weaving {} cells", baked.len());
+    let next_dir = config.mkmap.with_extension("mkmap.next");
+    let prev_dir = config.mkmap.with_extension("mkmap.prev");
+    let _ = std::fs::remove_dir_all(&next_dir);
+    let mut cmd = Command::new("./target/release/mptiles-run");
+    cmd.arg("transmux");
+    for path in &baked {
+        cmd.arg(path);
+    }
+    cmd.arg(&next_dir);
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            let _ = std::fs::remove_dir_all(&prev_dir);
+            if config.mkmap.exists() {
+                let _ = std::fs::rename(&config.mkmap, &prev_dir);
             }
-            continue;
-        }
-        let mut baked: Vec<PathBuf> = Vec::new();
-        for index in 0..shared.cells.len() {
-            let (_, _, path) = cell_paths(config, index);
-            // Empty ledger placeholders mark ocean cells; skip them.
-            if path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-                baked.push(path);
+            match std::fs::rename(&next_dir, &config.mkmap) {
+                Ok(()) => println!("mapfleet: world LIVE with {} cells", baked.len()),
+                Err(err) => eprintln!("mapfleet: swap failed: {err}"),
             }
         }
-        if baked.is_empty() {
-            continue;
-        }
-        println!("mapfleet: weaving {} cells", baked.len());
-        let next_dir = config.mkmap.with_extension("mkmap.next");
-        let prev_dir = config.mkmap.with_extension("mkmap.prev");
-        let _ = std::fs::remove_dir_all(&next_dir);
-        let mut cmd = Command::new("./target/release/mptiles-run");
-        cmd.arg("transmux");
-        for path in &baked {
-            cmd.arg(path);
-        }
-        cmd.arg(&next_dir);
-        match cmd.status() {
-            Ok(status) if status.success() => {
-                let _ = std::fs::remove_dir_all(&prev_dir);
-                if config.mkmap.exists() {
-                    let _ = std::fs::rename(&config.mkmap, &prev_dir);
-                }
-                match std::fs::rename(&next_dir, &config.mkmap) {
-                    Ok(()) => println!("mapfleet: world LIVE with {} cells", baked.len()),
-                    Err(err) => eprintln!("mapfleet: swap failed: {err}"),
-                }
-            }
-            other => eprintln!("mapfleet: weave failed: {other:?}"),
-        }
+        other => eprintln!("mapfleet: weave failed: {other:?}"),
     }
 }

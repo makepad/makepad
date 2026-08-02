@@ -18,6 +18,10 @@ MKMAP=local/maps/world-base-br.mkmap
 LOG=local/maps/world-build.log
 BIN=./target/release/mptiles-run
 BAKE=./target/release/mpbake-run
+# The -run names are copies (instance-lock/watchdog isolation). Refresh
+# them from the canonical binaries so a launch never runs stale code.
+cp -f ./target/release/makepad-map-tiles "$BIN"
+cp -f ./target/release/makepad-map-bake "$BAKE"
 
 phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 

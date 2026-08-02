@@ -136,6 +136,7 @@ fn hilbert_xy_to_d(zoom: u8, mut x: u32, mut y: u32) -> u64 {
     d
 }
 
+#[cfg(test)]
 fn hilbert_d_to_xy(zoom: u8, mut d: u64) -> (u32, u32) {
     let side = 1_u32 << zoom;
     let (mut x, mut y) = (0_u32, 0_u32);
@@ -161,6 +162,7 @@ pub fn tile_id(zoom: u8, x: u32, y: u32) -> u64 {
     zoom_base_id(zoom) + hilbert_xy_to_d(zoom, x, y)
 }
 
+#[cfg(test)]
 pub fn tile_id_to_zxy(id: u64) -> (u8, u32, u32) {
     let mut zoom = 0_u8;
     while zoom < 31 && zoom_base_id(zoom + 1) <= id {
@@ -375,7 +377,7 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
     const DIR_ENTRY_ESTIMATE: u64 = 12;
     const DIR_FIXED_ESTIMATE: u64 = 4096;
 
-    let mut finalize_shard = |shard_index: &mut u32,
+    let finalize_shard = |shard_index: &mut u32,
                               shard_buffer: &mut Vec<u8>,
                               shard_entries: &mut Vec<LeafEntry>,
                               root: &mut Vec<RootRecord>|
@@ -540,7 +542,9 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
 
     // Pass 3: verification (mandatory).
     println!("mkmap: pass 3/3 verification");
-    verify(&options.source, &options.output, options.sample_stride)
+    let mut source_paths = vec![options.source.clone()];
+    source_paths.extend(options.extra_sources.iter().cloned());
+    verify(&source_paths, &options.output, options.sample_stride)
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +682,7 @@ fn decode_brotli_section(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Verify an mkmap directory against its source archive: every shard under
 /// the cap, the index resolving every tile, and sampled tiles byte-identical.
-pub fn verify(source: &Path, mkmap: &Path, sample_stride: u64) -> Result<(), String> {
+pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(), String> {
     let mut container = MkmapReader::open(mkmap)?;
     // Shard cap re-check straight from the filesystem.
     for shard in 0..container.shard_count {
@@ -703,32 +707,44 @@ pub fn verify(source: &Path, mkmap: &Path, sample_stride: u64) -> Result<(), Str
         ));
     }
 
-    let mut reader = MbtilesReader::open(source)
-        .map_err(|err| format!("open {}: {err}", source.display()))?;
-    let mut listed: Vec<(u8, u32, u32)> = Vec::new();
-    reader
-        .for_each_tile(|tile| {
-            let zoom = tile.zoom_level as u8;
-            let axis = 1_u32 << zoom;
-            listed.push((
-                zoom,
-                tile.tile_column as u32,
-                axis - 1 - tile.tile_row as u32,
-            ));
-        })
-        .map_err(|err| format!("scan source: {err}"))?;
-    if listed.len() as u64 != container.tile_count {
+    // Expected tile set: union over ALL sources with the same
+    // first-source-wins ownership as the weave, so each tile is byte-
+    // compared against the source that actually supplied it.
+    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(sources.len());
+    for path in sources {
+        readers.push(
+            MbtilesReader::open(path)
+                .map_err(|err| format!("open {}: {err}", path.display()))?,
+        );
+    }
+    let mut owner: HashMap<u64, (usize, u8, u32, u32)> = HashMap::new();
+    for (src, reader) in readers.iter_mut().enumerate() {
+        reader
+            .for_each_tile(|tile| {
+                let zoom = tile.zoom_level as u8;
+                let axis = 1_u32 << zoom;
+                let x = tile.tile_column as u32;
+                let y = axis - 1 - tile.tile_row as u32;
+                owner.entry(tile_id(zoom, x, y)).or_insert((src, zoom, x, y));
+            })
+            .map_err(|err| format!("scan {}: {err}", sources[src].display()))?;
+    }
+    if owner.len() as u64 != container.tile_count {
         return Err(format!(
-            "VERIFICATION FAILED: index declares {} tiles, source has {}",
+            "VERIFICATION FAILED: index declares {} tiles, sources have {}",
             container.tile_count,
-            listed.len()
+            owner.len()
         ));
     }
     // Resolve in Hilbert order so leaf loads are sequential.
-    listed.sort_unstable_by_key(|&(zoom, x, y)| tile_id(zoom, x, y));
+    let mut listed: Vec<(u64, usize, u8, u32, u32)> = owner
+        .into_iter()
+        .map(|(id, (src, zoom, x, y))| (id, src, zoom, x, y))
+        .collect();
+    listed.sort_unstable_by_key(|&(id, ..)| id);
     let mut resolved = 0_u64;
     let mut compared = 0_u64;
-    for (index, &(zoom, x, y)) in listed.iter().enumerate() {
+    for (index, &(_, src, zoom, x, y)) in listed.iter().enumerate() {
         let blob_ref = container
             .resolve(zoom, x, y)?
             .ok_or_else(|| {
@@ -739,7 +755,7 @@ pub fn verify(source: &Path, mkmap: &Path, sample_stride: u64) -> Result<(), Str
             let from_shard =
                 container.read_range(blob_ref.shard, blob_ref.offset, blob_ref.len)?;
             let axis = 1_i64 << zoom;
-            let from_source = reader
+            let from_source = readers[src]
                 .get_tile(i64::from(zoom), i64::from(x), axis - 1 - i64::from(y))
                 .map_err(|err| format!("read source z{zoom}/{x}/{y}: {err}"))?
                 .ok_or_else(|| format!("source lost z{zoom}/{x}/{y}"))?;
@@ -753,8 +769,9 @@ pub fn verify(source: &Path, mkmap: &Path, sample_stride: u64) -> Result<(), Str
         }
     }
     println!(
-        "mkmap: verification OK — {} shards under cap, {resolved} tiles resolved, {compared} sampled byte-identical",
-        container.shard_count
+        "mkmap: verification OK — {} shards under cap, {resolved} tiles resolved, {compared} sampled byte-identical against {} sources",
+        container.shard_count,
+        readers.len()
     );
     Ok(())
 }

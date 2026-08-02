@@ -24,18 +24,30 @@ pub struct PolygonPart {
     pub holes: Vec<Vec<GlobalPoint>>,
 }
 
-pub fn project_decimicro(id: i64, lon: i32, lat: i32, zoom: u8) -> NodeCoord {
-    let lon = f64::from(lon) * 1e-7;
-    let lat = (f64::from(lat) * 1e-7).clamp(-MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
+/// Global-unit web-mercator projection of a lon/lat. Shared by node
+/// parsing, the pass-4 spiral sort, and the pbf-base frontier gate so
+/// their distances are directly comparable.
+pub fn project_lon_lat(lon: f64, lat: f64, zoom: u8) -> (f64, f64) {
+    let lat = lat.clamp(-MAX_MERCATOR_LAT, MAX_MERCATOR_LAT);
     let world = ((1_u64 << zoom) as f64) * MVT_EXTENT as f64;
     let normalized_x = (lon + 180.0) / 360.0;
     let sin_lat = lat.to_radians().sin();
     let normalized_y =
         0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI);
+    (normalized_x * world, normalized_y * world)
+}
+
+/// NL spiral anchor: the world build radiates outward from here, and the
+/// streaming frontier publishes distances from this point.
+pub const SPIRAL_ANCHOR_LON: f64 = 5.2;
+pub const SPIRAL_ANCHOR_LAT: f64 = 52.2;
+
+pub fn project_decimicro(id: i64, lon: i32, lat: i32, zoom: u8) -> NodeCoord {
+    let (x, y) = project_lon_lat(f64::from(lon) * 1e-7, f64::from(lat) * 1e-7, zoom);
     NodeCoord {
         id,
-        x: (normalized_x * world).round() as i64,
-        y: (normalized_y * world).round() as i64,
+        x: x.round() as i64,
+        y: y.round() as i64,
     }
 }
 
@@ -83,114 +95,6 @@ pub fn emit_point<T: TagPair>(
         std::iter::once(points.as_slice()),
     )?;
     Ok(1)
-}
-
-pub fn emit_lines<T: TagPair>(
-    spool: &mut BlockSpoolWriter,
-    zoom: u8,
-    layer: Layer,
-    osm_type: OsmType,
-    id: i64,
-    closed: bool,
-    tags: &[T],
-    paths: &[Vec<GlobalPoint>],
-) -> Result<u64, String> {
-    let mut emitted = 0_u64;
-    for path in paths {
-        if path.len() < 2 {
-            continue;
-        }
-        let Some((min_x, min_y, max_x, max_y)) = bounds(path) else {
-            continue;
-        };
-        let range = tile_range(zoom, min_x, min_y, max_x, max_y, TILE_BUFFER)?;
-        for tile_y in range.y_min..=range.y_max {
-            for tile_x in range.x_min..=range.x_max {
-                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
-                let clipped = clip_line(path, rect);
-                if clipped.is_empty() {
-                    continue;
-                }
-                let mut local_paths = Vec::with_capacity(clipped.len());
-                for clipped_path in clipped {
-                    let mut local = Vec::with_capacity(clipped_path.len());
-                    for point in clipped_path {
-                        local.push(to_local(point, tile_x, tile_y)?);
-                    }
-                    remove_consecutive_duplicates(&mut local);
-                    if local.len() >= 2 {
-                        local_paths.push(local);
-                    }
-                }
-                if local_paths.is_empty() {
-                    continue;
-                }
-                spool.push_parts(
-                    tile_x,
-                    tile_y,
-                    layer,
-                    GeometryType::LineString,
-                    osm_type,
-                    id,
-                    closed,
-                    tags,
-                    local_paths.iter().map(Vec::as_slice),
-                )?;
-                emitted += 1;
-            }
-        }
-    }
-    Ok(emitted)
-}
-
-pub fn emit_polygons<T: TagPair>(
-    spool: &mut BlockSpoolWriter,
-    zoom: u8,
-    layer: Layer,
-    osm_type: OsmType,
-    id: i64,
-    tags: &[T],
-    polygons: &[PolygonPart],
-) -> Result<u64, String> {
-    let mut emitted = 0_u64;
-    for polygon in polygons {
-        if polygon.outer.len() < 3 {
-            continue;
-        }
-        let Some((min_x, min_y, max_x, max_y)) = bounds(&polygon.outer) else {
-            continue;
-        };
-        let range = tile_range(zoom, min_x, min_y, max_x, max_y, TILE_BUFFER)?;
-        for tile_y in range.y_min..=range.y_max {
-            for tile_x in range.x_min..=range.x_max {
-                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
-                let mut outer = clip_ring(&polygon.outer, rect);
-                if !normalize_ring(&mut outer, true) {
-                    continue;
-                }
-                let mut paths = vec![to_local_ring(&outer, tile_x, tile_y)?];
-                for hole in &polygon.holes {
-                    let mut clipped = clip_ring(hole, rect);
-                    if normalize_ring(&mut clipped, false) {
-                        paths.push(to_local_ring(&clipped, tile_x, tile_y)?);
-                    }
-                }
-                spool.push_parts(
-                    tile_x,
-                    tile_y,
-                    layer,
-                    GeometryType::Polygon,
-                    osm_type,
-                    id,
-                    true,
-                    tags,
-                    paths.iter().map(Vec::as_slice),
-                )?;
-                emitted += 1;
-            }
-        }
-    }
-    Ok(emitted)
 }
 
 /// A feature fully localized to one tile, ready for the spool writer —
