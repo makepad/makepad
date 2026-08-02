@@ -2260,10 +2260,15 @@ impl Widget for MapView {
                     let dist = ((tile_center_px.x - focus.x).powi(2)
                         + (tile_center_px.y - focus.y).powi(2))
                     .sqrt();
-                    // Tilt-aware radii: the whole frustum keeps 3D; only
-                    // the deep horizon sinks (perf-never-breaks-the-picture).
-                    let stretch = 1.0 / self.tilt_cos().max(0.35);
-                    let near = rect.size.y * 0.9 * stretch;
+                    // Ring radii from the actual frustum extent: the near
+                    // ring must contain every visible tile CENTER with
+                    // margin (a tile diagonal), under any rotation and the
+                    // full tilt stretch — visible geometry never drops
+                    // below full detail (perf-never-breaks-the-picture).
+                    let half_w = rect.size.x * 0.5;
+                    let half_h = rect.size.y * 0.5 / self.tilt_cos().max(0.2);
+                    let frustum = (half_w * half_w + half_h * half_h).sqrt();
+                    let near = frustum * 1.35 + TILE_SIZE * scale;
                     let far = near * 1.7;
                     let lod = (1.0 - ((dist - near) / (far - near)).clamp(0.0, 1.0)) as f32;
                     // LOD rings: near = full detail; mid = roofs + crossed-
