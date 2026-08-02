@@ -2118,6 +2118,7 @@ impl Widget for MapView {
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
+                    icon_high_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -2129,7 +2130,7 @@ impl Widget for MapView {
                 // tile (baked at z16+) hides its symbols the moment the
                 // view drops below icon level, instead of splattering
                 // hundreds of full-size shop icons across the region.
-                if pass == 3
+                if pass >= 3
                     && (view_zoom < 7.75
                         || (entry.bucket >= ICON_MIN_ZOOM
                             && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
@@ -2140,7 +2141,8 @@ impl Widget for MapView {
                     0 => fill_geometry,
                     1 => casing_geometry,
                     2 => stroke_geometry,
-                    _ => icon_geometry,
+                    3 => icon_geometry,
+                    _ => icon_high_geometry,
                 };
                 let scale = 2.0_f64.powf(view_zoom - key.z as f64);
                 let tile_offset = map_offset
@@ -2165,7 +2167,8 @@ impl Widget for MapView {
                         0 => &fade.fill_geometry,
                         1 => &fade.casing_geometry,
                         2 => &fade.stroke_geometry,
-                        _ => &fade.icon_geometry,
+                        3 => &fade.icon_geometry,
+                        _ => &None,
                     };
                     if let Some(outgoing) = outgoing {
                         let outgoing_id = outgoing.geometry_id();
@@ -2246,7 +2249,13 @@ impl Widget for MapView {
         let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
         let icons_start = std::time::Instant::now();
 
-        for pass in 3..4 {
+        for pass in 3..5 {
+            // Pass 4: street-band icons (zoom floor > 16) — whole band
+            // skipped below the reveal zoom instead of vertex-processing
+            // millions of shader-collapsed glyphs every frame.
+            if pass == 4 && view_zoom < 16.25 {
+                continue;
+            }
             for key in &draw_tiles {
                 let Some(entry) = self.tiles.get(key) else {
                     continue;
@@ -2256,6 +2265,7 @@ impl Widget for MapView {
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
+                    icon_high_geometry,
                     ..
                 } = &entry.state
                 else {
@@ -2267,7 +2277,7 @@ impl Widget for MapView {
                 // tile (baked at z16+) hides its symbols the moment the
                 // view drops below icon level, instead of splattering
                 // hundreds of full-size shop icons across the region.
-                if pass == 3
+                if pass >= 3
                     && (view_zoom < 7.75
                         || (entry.bucket >= ICON_MIN_ZOOM
                             && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
@@ -2278,7 +2288,8 @@ impl Widget for MapView {
                     0 => fill_geometry,
                     1 => casing_geometry,
                     2 => stroke_geometry,
-                    _ => icon_geometry,
+                    3 => icon_geometry,
+                    _ => icon_high_geometry,
                 };
                 let scale = 2.0_f64.powf(view_zoom - key.z as f64);
                 let tile_offset = map_offset
@@ -2303,7 +2314,8 @@ impl Widget for MapView {
                         0 => &fade.fill_geometry,
                         1 => &fade.casing_geometry,
                         2 => &fade.stroke_geometry,
-                        _ => &fade.icon_geometry,
+                        3 => &fade.icon_geometry,
+                        _ => &None,
                     };
                     if let Some(outgoing) = outgoing {
                         let outgoing_id = outgoing.geometry_id();
@@ -2872,6 +2884,15 @@ impl MapView {
         } else {
             None
         };
+        let icon_high_geometry = if !buffers.icon_high_indices.is_empty()
+            && !buffers.icon_high_vertices.is_empty()
+        {
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, buffers.icon_high_indices, buffers.icon_high_vertices);
+            Some(geometry)
+        } else {
+            None
+        };
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
@@ -2916,6 +2937,7 @@ impl MapView {
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
+                    icon_high_geometry,
                     feature_count: if reuse_road_core {
                         buffers.feature_count.max(old_feature_count)
                     } else {
