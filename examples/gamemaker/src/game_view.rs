@@ -28,6 +28,7 @@ use makepad_widgets::*;
 // game.md): entity/terrain/world data, the fixed-step physics and the spatial
 // queries moved there verbatim. This file keeps the host: script isolate,
 // verb dispatch, rendering, input devices, agent RPC.
+use makepad_game_blocks::{Blocks, BrainKind, CarConfig, CharacterConfig, ControlSource, PlaneConfig};
 use makepad_game_sim::{
     collect_touches, step_world, world_raycast, Beam, BodyKind, CallbackSlot, Entity, GameTimer,
     GameWorld, HudAnchor, HudBar, HudSlot, LabelDef, PadState, Part, SaveVal, Shape, SkyConfig,
@@ -246,6 +247,9 @@ struct WorldSnapshot {
     cam_speed_tighten: f32,
     cam_fov: f32,
     time: f64,
+    /// Blocks travel with the world: a rolled-back world whose cars stayed
+    /// behind would drive entities that no longer exist.
+    blocks: Blocks,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -315,6 +319,11 @@ pub struct GameView {
     /// dispatch closure the same way `world` is.
     #[rust]
     callbacks: Rc<RefCell<CallbackTable>>,
+    /// Engine-side building blocks (cars, characters, brains, race kit).
+    /// Shared with the dispatch closure like `world`; snapshotted beside it so
+    /// a failed eval rolls both back together.
+    #[rust]
+    blocks: Rc<RefCell<Blocks>>,
     /// Current eval generation, mirrored for the dispatch closure so runtime
     /// callback registrations are tagged with the world that made them.
     #[rust]
@@ -554,6 +563,7 @@ impl GameView {
                 cam_speed_tighten: world.cam_speed_tighten,
                 cam_fov: world.cam_fov,
                 time: world.time,
+                blocks: std::mem::take(&mut *self.blocks.borrow_mut()),
             };
             world.reset_content();
             snapshot
@@ -622,6 +632,7 @@ impl GameView {
             // Roll back so the kid keeps the world that worked.
             {
                 let mut world = self.world.borrow_mut();
+                *self.blocks.borrow_mut() = snapshot.blocks;
                 world.entities = snapshot.entities;
                 world.next_id = snapshot.next_id;
                 world.parts = snapshot.parts;
@@ -675,13 +686,22 @@ impl GameView {
     fn register_game_handle(&mut self, cx: &mut Cx) {
         let world = self.world.clone();
         let callbacks = self.callbacks.clone();
+        let blocks = self.blocks.clone();
         let eval_gen = self.eval_gen_cell.clone();
         let vm_id = self.vm_id;
         cx.with_script_vm_id(vm_id, |vm| {
             let game_type = vm.new_handle_type(id_lut!(game));
             let dispatch_world = world.clone();
             vm.set_handle_call(game_type, move |vm, args, method| {
-                game_dispatch(vm, &dispatch_world, &callbacks, &eval_gen, args, method)
+                game_dispatch(
+                    vm,
+                    &dispatch_world,
+                    &callbacks,
+                    &blocks,
+                    &eval_gen,
+                    args,
+                    method,
+                )
             });
             struct GameHandleGc;
             impl ScriptHandleGc for GameHandleGc {
@@ -1035,6 +1055,33 @@ impl GameView {
             .get_or_insert_with(|| cx.perf_monitor.channel("physics", 0x58ffd0))
     }
 
+    /// The local player's control intent, in the shape blocks consume. Camera
+    /// relative for walking (what the kid means by "left" is screen-left) and
+    /// raw axes for steering, matching the input object scripts already see.
+    fn block_player_input(&self, world: &GameWorld) -> makepad_game_blocks::DriveInput {
+        let held = |name: LiveId| world.action_held(name);
+        let axis_x = ((held(live_id!(right)) as i8 - held(live_id!(left)) as i8) as f64
+            + world.pad.axis_x)
+            .clamp(-1.0, 1.0) as f32;
+        let axis_z = ((held(live_id!(down)) as i8 - held(live_id!(up)) as i8) as f64
+            + world.pad.axis_z)
+            .clamp(-1.0, 1.0) as f32;
+        let yaw = world.cam_yaw;
+        let (sin_yaw, cos_yaw) = makepad_game_sim::math::sincos(yaw);
+        makepad_game_blocks::DriveInput {
+            steer: axis_x,
+            throttle: -axis_z,
+            brake: if held(live_id!(grab)) { 1.0 } else { 0.0 },
+            handbrake: if held(live_id!(shoot)) { 1.0 } else { 0.0 },
+            move_x: axis_x * cos_yaw - axis_z * sin_yaw,
+            move_z: axis_x * sin_yaw + axis_z * cos_yaw,
+            jump: held(live_id!(jump)),
+            jump_pressed: world.action_pressed(live_id!(jump)),
+            pitch: -axis_z,
+            roll: axis_x,
+        }
+    }
+
     fn run_tick(&mut self, cx: &mut Cx) {
         let tick_t0 = std::time::Instant::now();
         let in_test = self.tick_test_run(cx);
@@ -1191,10 +1238,20 @@ impl GameView {
         let t_phys = std::time::Instant::now();
         let touch_events = {
             let mut world = self.world.borrow_mut();
+            let mut blocks = self.blocks.borrow_mut();
+            // Blocks drive BEFORE the sim (their decisions land this tick) and
+            // observe AFTER it (laps/standings see final positions).
+            if !blocks.is_empty() {
+                blocks.player_input = self.block_player_input(&world);
+                blocks.pre_step(&mut world);
+            }
             step_world(&mut world);
             world.tick += 1;
             world.time += TICK_DT as f64;
             world.pressed.clear();
+            if !blocks.is_empty() {
+                blocks.post_step(&mut world);
+            }
             collect_touches(&world)
         };
         {
@@ -1593,6 +1650,308 @@ fn list_value(vm: &mut ScriptVm, v: ScriptValue, index: usize) -> ScriptValue {
     } else {
         NIL
     }
+}
+
+
+// ── block spawn helpers (libs/game/blocks) ──────────────────────────────
+
+fn opts_f32(vm: &mut ScriptVm, opts: ScriptObject, key: LiveId, default: f32) -> f32 {
+    opts_value(vm, opts, key)
+        .as_f64()
+        .map(|v| v as f32)
+        .unwrap_or(default)
+}
+
+fn opts_string(vm: &mut ScriptVm, opts: ScriptObject, key: LiveId) -> String {
+    let v = opts_value(vm, opts, key);
+    if v.is_nil() {
+        return String::new();
+    }
+    vm.bx.heap.temp_string_with(|heap, out| {
+        heap.cast_to_string(v, out);
+        out.to_string()
+    })
+}
+
+fn opts_vec3(vm: &mut ScriptVm, opts: ScriptObject, key: LiveId) -> Option<Vec3f> {
+    let v = opts_value(vm, opts, key);
+    if v.is_nil() {
+        return None;
+    }
+    Some(value_vec3(vm, v))
+}
+
+/// Read a `[vec3, vec3, ...]` option into a route.
+fn read_point_list(vm: &mut ScriptVm, opts: ScriptObject, key: LiveId) -> Vec<Vec3f> {
+    let value = opts_value(vm, opts, key);
+    let mut points = Vec::new();
+    if let Some(array) = value.as_array() {
+        let len = vm.bx.heap.array_len(array);
+        for i in 0..len {
+            let item = vm.bx.heap.array_index_unchecked(array, i);
+            if !item.is_nil() {
+                points.push(value_vec3(vm, item));
+            }
+        }
+    }
+    points
+}
+
+fn set_brain(blocks: &Rc<RefCell<Blocks>>, entity: u64, kind: BrainKind) -> ScriptValue {
+    let mut blocks = blocks.borrow_mut();
+    // Re-issuing a brain on the same entity replaces it, so a hot-reload
+    // can't stack two behaviours on one actor.
+    blocks.brains.retain(|b| b.entity != entity);
+    blocks
+        .brains
+        .push(makepad_game_blocks::Brain::new(entity, kind));
+    ScriptValue::from_f64(entity as f64)
+}
+
+/// Shared body for game.car / game.plane: spawn the rigid chassis, then the
+/// block that drives it.
+fn spawn_block_body(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    opts: ScriptObject,
+    default_size: Vec3f,
+    tag: &str,
+) -> u64 {
+    let pos = opts_vec3(vm, opts, id!(pos)).unwrap_or(vec3f(0.0, 2.0, 0.0));
+    let size = opts_vec3(vm, opts, id!(size)).unwrap_or(default_size);
+    let color = {
+        let v = opts_value(vm, opts, id!(color));
+        if v.is_nil() {
+            vec4(0.85, 0.35, 0.3, 1.0)
+        } else {
+            value_color(vm, v)
+        }
+    };
+    let tag_opt = {
+        let s = opts_string(vm, opts, id!(tag));
+        if s.is_empty() {
+            tag.to_string()
+        } else {
+            s
+        }
+    };
+    let mut world = world.borrow_mut();
+    world.next_id += 1;
+    let id = world.next_id;
+    world.push_entity(Entity {
+        id,
+        kind: BodyKind::Rigid,
+        pos,
+        half: size * 0.5,
+        color,
+        tag: tag_opt,
+        collide: true,
+        gravity_scale: 1.0,
+        speed_mult: 1.0,
+        scale: vec3f(1.0, 1.0, 1.0),
+        scale_target: vec3f(1.0, 1.0, 1.0),
+        turn_rate: 6.0,
+        density: 1.0,
+        friction: 0.7,
+        restitution: 0.0,
+        ..Default::default()
+    });
+    world.mark_render_dirty();
+    id
+}
+
+fn spawn_car(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    blocks: &Rc<RefCell<Blocks>>,
+    args: ScriptObject,
+) -> ScriptValue {
+    let opts_val = arg(vm, args, 0);
+    let Some(opts) = opts_val.as_object() else {
+        return NIL;
+    };
+    warn_unknown_keys(
+        vm,
+        world,
+        "car",
+        opts,
+        &[
+            id!(pos),
+            id!(size),
+            id!(color),
+            id!(tag),
+            id!(player),
+            id!(top_speed),
+            id!(accel),
+            id!(braking),
+            id!(grip),
+            id!(steer_rate),
+            id!(seats),
+        ],
+    );
+    let mut config = CarConfig::default();
+    config.top_speed = opts_f32(vm, opts, id!(top_speed), config.top_speed);
+    config.accel = opts_f32(vm, opts, id!(accel), config.accel);
+    config.braking = opts_f32(vm, opts, id!(braking), config.braking);
+    config.grip = opts_f32(vm, opts, id!(grip), config.grip);
+    config.steer_rate = opts_f32(vm, opts, id!(steer_rate), config.steer_rate);
+    config.seats = opts_f32(vm, opts, id!(seats), 1.0) as u32;
+    let player = opts_value(vm, opts, id!(player)).as_bool().unwrap_or(false);
+    let id = spawn_block_body(vm, world, opts, vec3f(1.8, 0.8, 3.2), "car");
+    let control = if player {
+        ControlSource::Player
+    } else {
+        ControlSource::Script
+    };
+    blocks
+        .borrow_mut()
+        .cars
+        .push(makepad_game_blocks::Car::new(id, config, control));
+    ScriptValue::from_f64(id as f64)
+}
+
+fn spawn_plane(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    blocks: &Rc<RefCell<Blocks>>,
+    args: ScriptObject,
+) -> ScriptValue {
+    let opts_val = arg(vm, args, 0);
+    let Some(opts) = opts_val.as_object() else {
+        return NIL;
+    };
+    warn_unknown_keys(
+        vm,
+        world,
+        "plane",
+        opts,
+        &[
+            id!(pos),
+            id!(size),
+            id!(color),
+            id!(tag),
+            id!(player),
+            id!(thrust),
+            id!(top_speed),
+            id!(lift_speed),
+            id!(auto_level),
+        ],
+    );
+    let mut config = PlaneConfig::default();
+    config.thrust = opts_f32(vm, opts, id!(thrust), config.thrust);
+    config.top_speed = opts_f32(vm, opts, id!(top_speed), config.top_speed);
+    config.lift_speed = opts_f32(vm, opts, id!(lift_speed), config.lift_speed);
+    config.auto_level = opts_f32(vm, opts, id!(auto_level), config.auto_level);
+    let player = opts_value(vm, opts, id!(player)).as_bool().unwrap_or(false);
+    let id = spawn_block_body(vm, world, opts, vec3f(2.4, 0.8, 3.2), "plane");
+    let control = if player {
+        ControlSource::Player
+    } else {
+        ControlSource::Script
+    };
+    blocks
+        .borrow_mut()
+        .planes
+        .push(makepad_game_blocks::Plane::new(id, config, control));
+    ScriptValue::from_f64(id as f64)
+}
+
+fn spawn_character(
+    vm: &mut ScriptVm,
+    world: &Rc<RefCell<GameWorld>>,
+    blocks: &Rc<RefCell<Blocks>>,
+    args: ScriptObject,
+) -> ScriptValue {
+    let opts_val = arg(vm, args, 0);
+    let Some(opts) = opts_val.as_object() else {
+        return NIL;
+    };
+    warn_unknown_keys(
+        vm,
+        world,
+        "character",
+        opts,
+        &[
+            id!(pos),
+            id!(size),
+            id!(color),
+            id!(tag),
+            id!(player),
+            id!(model),
+            id!(speed),
+            id!(jump),
+            id!(view),
+        ],
+    );
+    let mut config = CharacterConfig::default();
+    config.speed = opts_f32(vm, opts, id!(speed), config.speed);
+    config.jump = opts_f32(vm, opts, id!(jump), config.jump);
+    if opts_string(vm, opts, id!(view)) == "first" {
+        config.view = makepad_game_blocks::character::ViewMode::First;
+    }
+    let model = {
+        let s = opts_string(vm, opts, id!(model));
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    let player = opts_value(vm, opts, id!(player)).as_bool().unwrap_or(false);
+    let pos = opts_vec3(vm, opts, id!(pos)).unwrap_or(vec3f(0.0, 2.0, 0.0));
+    let size = opts_vec3(vm, opts, id!(size)).unwrap_or(vec3f(0.8, 1.6, 0.8));
+    let color = {
+        let v = opts_value(vm, opts, id!(color));
+        if v.is_nil() {
+            vec4(0.29, 0.5, 0.84, 1.0)
+        } else {
+            value_color(vm, v)
+        }
+    };
+    let tag = {
+        let s = opts_string(vm, opts, id!(tag));
+        if s.is_empty() {
+            "player".to_string()
+        } else {
+            s
+        }
+    };
+    let id = {
+        let mut world = world.borrow_mut();
+        world.next_id += 1;
+        let id = world.next_id;
+        world.push_entity(Entity {
+            id,
+            kind: BodyKind::Mover,
+            pos,
+            half: size * 0.5,
+            color,
+            tag,
+            collide: true,
+            gravity_scale: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            auto_face: true,
+            turn_rate: config.turn_rate,
+            density: 1.0,
+            ..Default::default()
+        });
+        world.mark_render_dirty();
+        id
+    };
+    let control = if player {
+        ControlSource::Player
+    } else {
+        ControlSource::Script
+    };
+    blocks
+        .borrow_mut()
+        .characters
+        .push(makepad_game_blocks::Character::new(
+            id, config, control, model,
+        ));
+    ScriptValue::from_f64(id as f64)
 }
 
 fn spawn_entity(
@@ -2073,6 +2432,7 @@ fn game_dispatch(
     vm: &mut ScriptVm,
     world: &Rc<RefCell<GameWorld>>,
     callbacks: &Rc<RefCell<CallbackTable>>,
+    blocks: &Rc<RefCell<Blocks>>,
     eval_gen: &Rc<std::cell::Cell<u64>>,
     args: ScriptObject,
     method: LiveId,
@@ -2443,6 +2803,7 @@ fn game_dispatch(
                 }
                 world.reset_content();
             }
+            blocks.borrow_mut().clear();
             crate::synth::stop_all_tones();
             NIL
         }
@@ -2528,6 +2889,337 @@ fn game_dispatch(
                 }
             });
             NIL
+        }
+        // ── building blocks (libs/game/blocks) ──────────────────────────
+        x if x == live_id!(car) => spawn_car(vm, world, blocks, args),
+        x if x == live_id!(character) => spawn_character(vm, world, blocks, args),
+        x if x == live_id!(plane) => spawn_plane(vm, world, blocks, args),
+        x if x == live_id!(drive) => {
+            let id = arg_id(vm, args, 0);
+            let opts_val = arg(vm, args, 1);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(
+                vm,
+                world,
+                "drive",
+                opts,
+                &[
+                    id!(steer),
+                    id!(throttle),
+                    id!(brake),
+                    id!(handbrake),
+                    id!(pitch),
+                    id!(roll),
+                    id!(move_x),
+                    id!(move_z),
+                    id!(jump),
+                ],
+            );
+            let read = |vm: &mut ScriptVm, key: LiveId| {
+                opts_value(vm, opts, key).as_f64().map(|v| v as f32)
+            };
+            let (steer, throttle, brake, handbrake, pitch, roll, move_x, move_z) = (
+                read(vm, id!(steer)),
+                read(vm, id!(throttle)),
+                read(vm, id!(brake)),
+                read(vm, id!(handbrake)),
+                read(vm, id!(pitch)),
+                read(vm, id!(roll)),
+                read(vm, id!(move_x)),
+                read(vm, id!(move_z)),
+            );
+            let jump = opts_value(vm, opts, id!(jump)).as_bool();
+            let found = blocks.borrow_mut().drive(id, |input| {
+                if let Some(v) = steer {
+                    input.steer = v;
+                }
+                if let Some(v) = throttle {
+                    input.throttle = v;
+                }
+                if let Some(v) = brake {
+                    input.brake = v;
+                }
+                if let Some(v) = handbrake {
+                    input.handbrake = v;
+                }
+                if let Some(v) = pitch {
+                    input.pitch = v;
+                }
+                if let Some(v) = roll {
+                    input.roll = v;
+                }
+                if let Some(v) = move_x {
+                    input.move_x = v;
+                }
+                if let Some(v) = move_z {
+                    input.move_z = v;
+                }
+                if let Some(v) = jump {
+                    input.jump = v;
+                    input.jump_pressed = v;
+                }
+            });
+            ScriptValue::from_bool(found)
+        }
+        x if x == live_id!(autodrive) => {
+            let id = arg_id(vm, args, 0);
+            let opts_val = arg(vm, args, 1);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "autodrive", opts, &[id!(points), id!(pace)]);
+            let points = read_point_list(vm, opts, id!(points));
+            let pace = opts_value(vm, opts, id!(pace))
+                .as_f64()
+                .map(|v| v as f32)
+                .unwrap_or(1.0);
+            let mut blocks = blocks.borrow_mut();
+            if let Some(car) = blocks.car_mut(id) {
+                car.route = points;
+                car.route_at = 0;
+                car.route_pace = pace.clamp(0.0, 1.0);
+                car.control = ControlSource::Script;
+                return ScriptValue::from_bool(true);
+            }
+            ScriptValue::from_bool(false)
+        }
+        x if x == live_id!(speed) => {
+            let id = arg_id(vm, args, 0);
+            let blocks = blocks.borrow();
+            let speed = blocks
+                .cars
+                .iter()
+                .find(|c| c.entity == id)
+                .map(|c| c.speed)
+                .or_else(|| {
+                    blocks
+                        .planes
+                        .iter()
+                        .find(|p| p.entity == id)
+                        .map(|p| p.airspeed)
+                })
+                .unwrap_or_else(|| {
+                    world
+                        .borrow()
+                        .entity(id)
+                        .map(|e| (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt())
+                        .unwrap_or(0.0)
+                });
+            ScriptValue::from_f64(speed as f64)
+        }
+        // ── brains ──────────────────────────────────────────────────────
+        x if x == live_id!(wander) => {
+            let id = arg_id(vm, args, 0);
+            let opts_val = arg(vm, args, 1);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "wander", opts, &[id!(range), id!(speed), id!(pause), id!(home)]);
+            let home = opts_vec3(vm, opts, id!(home)).unwrap_or_else(|| {
+                world.borrow().entity(id).map(|e| e.pos).unwrap_or_default()
+            });
+            let range = opts_f32(vm, opts, id!(range), 8.0);
+            let speed = opts_f32(vm, opts, id!(speed), 3.0);
+            let pause = opts_f32(vm, opts, id!(pause), 0.8);
+            set_brain(
+                blocks,
+                id,
+                BrainKind::Wander {
+                    home,
+                    range,
+                    speed,
+                    pause,
+                },
+            )
+        }
+        x if x == live_id!(chase) => {
+            let id = arg_id(vm, args, 0);
+            let opts_val = arg(vm, args, 1);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(
+                vm,
+                world,
+                "chase",
+                opts,
+                &[id!(tag), id!(target), id!(range), id!(catch), id!(speed)],
+            );
+            let tag = opts_string(vm, opts, id!(tag));
+            let target = opts_value(vm, opts, id!(target))
+                .as_f64()
+                .map(|v| v as u64)
+                .unwrap_or(0);
+            let range = opts_f32(vm, opts, id!(range), 30.0);
+            let catch = opts_f32(vm, opts, id!(catch), 1.5);
+            let speed = opts_f32(vm, opts, id!(speed), 5.0);
+            set_brain(
+                blocks,
+                id,
+                BrainKind::Chase {
+                    tag,
+                    target,
+                    range,
+                    catch,
+                    speed,
+                },
+            )
+        }
+        x if x == live_id!(patrol) => {
+            let id = arg_id(vm, args, 0);
+            let opts_val = arg(vm, args, 1);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "patrol", opts, &[id!(points), id!(speed), id!(loop)]);
+            let points = read_point_list(vm, opts, id!(points));
+            let speed = opts_f32(vm, opts, id!(speed), 4.0);
+            let looping = opts_value(vm, opts, id!(loop)).as_bool().unwrap_or(true);
+            set_brain(
+                blocks,
+                id,
+                BrainKind::Patrol {
+                    points,
+                    speed,
+                    looping,
+                },
+            )
+        }
+        x if x == live_id!(caught) => {
+            let id = arg_id(vm, args, 0);
+            let caught = blocks
+                .borrow()
+                .brains
+                .iter()
+                .find(|b| b.entity == id)
+                .map(|b| b.caught)
+                .unwrap_or(0);
+            ScriptValue::from_f64(caught as f64)
+        }
+        // ── race kit ────────────────────────────────────────────────────
+        x if x == live_id!(spawnpoint) => {
+            let opts_val = arg(vm, args, 0);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "spawnpoint", opts, &[id!(pos), id!(yaw)]);
+            let pos = opts_vec3(vm, opts, id!(pos)).unwrap_or_default();
+            let yaw = opts_f32(vm, opts, id!(yaw), 0.0);
+            let slot = blocks.borrow_mut().race.add_spawn(pos, yaw);
+            ScriptValue::from_f64(slot as f64)
+        }
+        x if x == live_id!(checkpoint) => {
+            let opts_val = arg(vm, args, 0);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "checkpoint", opts, &[id!(pos), id!(size)]);
+            let pos = opts_vec3(vm, opts, id!(pos)).unwrap_or_default();
+            let size = opts_vec3(vm, opts, id!(size)).unwrap_or(vec3f(6.0, 4.0, 6.0));
+            let index = blocks
+                .borrow_mut()
+                .race
+                .add_checkpoint(pos, size * 0.5, 0);
+            ScriptValue::from_f64(index as f64)
+        }
+        x if x == live_id!(place) => {
+            let id = arg_id(vm, args, 0);
+            let slot = arg_f32(vm, args, 1) as usize;
+            let mut world = world.borrow_mut();
+            let ok = blocks.borrow_mut().race.place(&mut world, slot, id);
+            ScriptValue::from_bool(ok)
+        }
+        x if x == live_id!(race) => {
+            let opts_val = arg(vm, args, 0);
+            let Some(opts) = opts_val.as_object() else {
+                return NIL;
+            };
+            warn_unknown_keys(vm, world, "race", opts, &[id!(laps)]);
+            let laps = opts_f32(vm, opts, id!(laps), 3.0) as u32;
+            blocks.borrow_mut().race.start(laps);
+            NIL
+        }
+        x if x == live_id!(standings) => {
+            let order = blocks.borrow().race.order();
+            let array = vm.bx.heap.new_array();
+            for standing in order {
+                let obj = vm.bx.heap.new_object();
+                let heap = &mut vm.bx.heap;
+                heap.set_value(
+                    obj,
+                    id!(entity).into(),
+                    ScriptValue::from_f64(standing.entity as f64),
+                    NoTrap,
+                );
+                heap.set_value(
+                    obj,
+                    id!(lap).into(),
+                    ScriptValue::from_f64(standing.lap as f64),
+                    NoTrap,
+                );
+                heap.set_value(
+                    obj,
+                    id!(checkpoint).into(),
+                    ScriptValue::from_f64(standing.checkpoint as f64),
+                    NoTrap,
+                );
+                heap.set_value(
+                    obj,
+                    id!(finished).into(),
+                    ScriptValue::from_bool(standing.finished),
+                    NoTrap,
+                );
+                heap.set_value(
+                    obj,
+                    id!(score).into(),
+                    ScriptValue::from_f64(standing.score as f64),
+                    NoTrap,
+                );
+                vm.bx.heap.array_push(array, obj.into(), NoTrap);
+            }
+            array.into()
+        }
+        x if x == live_id!(lap) => {
+            let id = arg_id(vm, args, 0);
+            let lap = blocks
+                .borrow()
+                .race
+                .standing_of(id)
+                .map(|s| s.lap)
+                .unwrap_or(0);
+            ScriptValue::from_f64(lap as f64)
+        }
+        x if x == live_id!(rank) => {
+            let id = arg_id(vm, args, 0);
+            ScriptValue::from_f64(blocks.borrow().race.rank_of(id) as f64)
+        }
+        x if x == live_id!(finished) => {
+            let id = arg_id(vm, args, 0);
+            let finished = blocks
+                .borrow()
+                .race
+                .standing_of(id)
+                .map(|s| s.finished)
+                .unwrap_or(false);
+            ScriptValue::from_bool(finished)
+        }
+        x if x == live_id!(score) => {
+            let id = arg_id(vm, args, 0);
+            let points = arg_f32(vm, args, 1);
+            blocks.borrow_mut().race.add_score(id, points as i32);
+            NIL
+        }
+        x if x == live_id!(score_of) => {
+            let id = arg_id(vm, args, 0);
+            let score = blocks
+                .borrow()
+                .race
+                .standing_of(id)
+                .map(|s| s.score)
+                .unwrap_or(0);
+            ScriptValue::from_f64(score as f64)
         }
         x if x == live_id!(walk) => {
             let id = arg_id(vm, args, 0);
@@ -3309,6 +4001,27 @@ fn game_dispatch(
 /// The full verb surface, for `game.api()` dumps and typo suggestions.
 /// Keep in sync with `game_dispatch` and splashgame.md.
 const GAME_API: &[(&str, &str)] = &[
+    // ── building blocks: the engine drives these; script just configures ──
+    ("car", "({pos, size, color, tag, player, top_speed, accel, braking, grip, steer_rate, seats}) -> id — raycast vehicle, engine-driven"),
+    ("character", "({pos, size, color, tag, player, model, speed, jump, view}) -> id — walker with idle/walk/run blending"),
+    ("plane", "({pos, size, color, tag, player, thrust, top_speed, lift_speed, auto_level}) -> id — arcade flight"),
+    ("drive", "(id, {steer, throttle, brake, handbrake, pitch, roll, move_x, move_z, jump}) — set control intent (AI/script)"),
+    ("autodrive", "(id, {points: [vec3], pace}) — waypoint driver for a car"),
+    ("speed", "(id) -> forward speed (car), airspeed (plane), planar speed (anything else)"),
+    ("wander", "(id, {home, range, speed, pause}) — amble near home"),
+    ("chase", "(id, {tag, target, range, catch, speed}) — hunt the nearest tagged entity"),
+    ("patrol", "(id, {points: [vec3], speed, loop}) — walk a route"),
+    ("caught", "(id) -> entity a chase brain caught this tick (0 = none)"),
+    ("spawnpoint", "({pos, yaw}) -> slot — start grid position"),
+    ("checkpoint", "({pos, size}) -> index — race gate; must be crossed in order"),
+    ("place", "(id, slot) — put an entity on a spawnpoint and enter it in the race"),
+    ("race", "({laps}) — (re)start lap tracking over the declared checkpoints"),
+    ("standings", "() -> [{entity, lap, checkpoint, finished, score}] leader first"),
+    ("lap", "(id) -> laps completed"),
+    ("rank", "(id) -> 1-based position"),
+    ("finished", "(id) -> did this racer finish"),
+    ("score", "(id, points) — add to a racer's score"),
+    ("score_of", "(id) -> score"),
     ("box", "({pos, size, color, tag, sensor, collide, body, gravity, vel, life, hits, glow, face|rot_y, turn_rate, shape, density, friction, restitution})"),
     ("block", " — alias of game.box"),
     ("mover", " — same options as box (kinematic character, turn_rate default 7)"),
