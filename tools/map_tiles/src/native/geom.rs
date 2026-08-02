@@ -305,32 +305,112 @@ pub fn prepare_polygons(
             continue;
         };
         let range = tile_range(zoom, min_x, min_y, max_x, max_y, TILE_BUFFER)?;
-        for tile_y in range.y_min..=range.y_max {
-            for tile_x in range.x_min..=range.x_max {
-                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
-                let mut outer = clip_ring(&polygon.outer, rect);
-                if !normalize_ring(&mut outer, true) {
-                    continue;
-                }
-                let mut paths = vec![to_local_ring(&outer, tile_x, tile_y)?];
-                for hole in &polygon.holes {
-                    let mut clipped = clip_ring(hole, rect);
-                    if normalize_ring(&mut clipped, false) {
-                        paths.push(to_local_ring(&clipped, tile_x, tile_y)?);
-                    }
-                }
-                out.push(PreparedFeature {
-                    tile_x,
-                    tile_y,
-                    layer,
-                    geometry_type: GeometryType::Polygon,
-                    osm_type,
-                    id,
-                    closed: true,
-                    paths,
-                });
+        // Recursive bisection instead of full-ring-per-tile: a continental
+        // boundary (millions of points x millions of bbox tiles) made the
+        // direct product astronomically slow — the planet spool sat on one
+        // core for hours clipping a single relation. Halving the tile range
+        // and clipping ONCE per half means each point participates in
+        // O(log tiles) clips (the geojson-vt scheme). Each half-clip uses
+        // the half's buffered span rect, so per-tile buffered output is
+        // byte-identical to the direct method (see bisect equivalence test).
+        bisect_polygon(
+            layer,
+            osm_type,
+            id,
+            &polygon.outer,
+            &polygon.holes,
+            range.x_min,
+            range.x_max,
+            range.y_min,
+            range.y_max,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bisect_polygon(
+    layer: Layer,
+    osm_type: OsmType,
+    id: i64,
+    outer: &[GlobalPoint],
+    holes: &[Vec<GlobalPoint>],
+    x_min: u32,
+    x_max: u32,
+    y_min: u32,
+    y_max: u32,
+    out: &mut Vec<PreparedFeature>,
+) -> Result<(), String> {
+    if outer.len() < 3 {
+        return Ok(());
+    }
+    if x_min == x_max && y_min == y_max {
+        let rect = tile_rect(x_min, y_min, TILE_BUFFER);
+        let mut clipped = clip_ring(outer, rect);
+        if !normalize_ring(&mut clipped, true) {
+            return Ok(());
+        }
+        let mut paths = vec![to_local_ring(&clipped, x_min, y_min)?];
+        for hole in holes {
+            let mut clipped = clip_ring(hole, rect);
+            if normalize_ring(&mut clipped, false) {
+                paths.push(to_local_ring(&clipped, x_min, y_min)?);
             }
         }
+        out.push(PreparedFeature {
+            tile_x: x_min,
+            tile_y: y_min,
+            layer,
+            geometry_type: GeometryType::Polygon,
+            osm_type,
+            id,
+            closed: true,
+            paths,
+        });
+        return Ok(());
+    }
+    // Split the longer axis at the tile midpoint; clip both rings against
+    // each half's buffered span before recursing so the point counts
+    // shrink geometrically down the tree.
+    let split_x = (x_max - x_min) >= (y_max - y_min);
+    let halves: [(u32, u32, u32, u32); 2] = if split_x {
+        let mid = x_min + (x_max - x_min) / 2;
+        [(x_min, mid, y_min, y_max), (mid + 1, x_max, y_min, y_max)]
+    } else {
+        let mid = y_min + (y_max - y_min) / 2;
+        [(x_min, x_max, y_min, mid), (x_min, x_max, mid + 1, y_max)]
+    };
+    for (hx_min, hx_max, hy_min, hy_max) in halves {
+        let lo = tile_rect(hx_min, hy_min, TILE_BUFFER);
+        let hi = tile_rect(hx_max, hy_max, TILE_BUFFER);
+        let span = Rect {
+            min_x: lo.min_x,
+            min_y: lo.min_y,
+            max_x: hi.max_x,
+            max_y: hi.max_y,
+        };
+        let clipped_outer = clip_ring(outer, span);
+        if clipped_outer.len() < 3 {
+            continue;
+        }
+        let clipped_holes: Vec<Vec<GlobalPoint>> = holes
+            .iter()
+            .map(|hole| clip_ring(hole, span))
+            .filter(|hole| hole.len() >= 3)
+            .collect();
+        bisect_polygon(
+            layer,
+            osm_type,
+            id,
+            &clipped_outer,
+            &clipped_holes,
+            hx_min,
+            hx_max,
+            hy_min,
+            hy_max,
+            out,
+        )?;
     }
     Ok(())
 }
@@ -698,6 +778,134 @@ fn point_in_ring(point: GlobalPoint, ring: &[GlobalPoint]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bisect_polygon_matches_direct_per_tile_clipping() {
+        // A jagged star-ish ring spanning a 7x5 tile area, plus a hole.
+        let ring: Vec<GlobalPoint> = (0..600)
+            .map(|i| {
+                let a = i as f64 / 600.0 * std::f64::consts::TAU;
+                let r = MVT_EXTENT as f64 * (2.0 + 1.3 * (a * 7.0).sin());
+                GlobalPoint {
+                    x: (MVT_EXTENT as f64 * 3.5 + r * a.cos()) as i64,
+                    y: (MVT_EXTENT as f64 * 2.5 + r * a.sin()) as i64,
+                }
+            })
+            .collect();
+        let hole: Vec<GlobalPoint> = (0..64)
+            .map(|i| {
+                let a = i as f64 / 64.0 * std::f64::consts::TAU;
+                let r = MVT_EXTENT as f64 * 0.6;
+                GlobalPoint {
+                    x: (MVT_EXTENT as f64 * 3.5 + r * a.cos()) as i64,
+                    y: (MVT_EXTENT as f64 * 2.5 + r * a.sin()) as i64,
+                }
+            })
+            .rev()
+            .collect();
+        let (min_x, min_y, max_x, max_y) = bounds(&ring).unwrap();
+        let range = tile_range(9, min_x, min_y, max_x, max_y, TILE_BUFFER).unwrap();
+
+        // Direct method: full ring clipped against every tile.
+        let mut direct: Vec<PreparedFeature> = Vec::new();
+        for tile_y in range.y_min..=range.y_max {
+            for tile_x in range.x_min..=range.x_max {
+                let rect = tile_rect(tile_x, tile_y, TILE_BUFFER);
+                let mut outer = clip_ring(&ring, rect);
+                if !normalize_ring(&mut outer, true) {
+                    continue;
+                }
+                let mut paths = vec![to_local_ring(&outer, tile_x, tile_y).unwrap()];
+                let mut clipped = clip_ring(&hole, rect);
+                if normalize_ring(&mut clipped, false) {
+                    paths.push(to_local_ring(&clipped, tile_x, tile_y).unwrap());
+                }
+                direct.push(PreparedFeature {
+                    tile_x,
+                    tile_y,
+                    layer: Layer::OsmPolygons,
+                    geometry_type: GeometryType::Polygon,
+                    osm_type: OsmType::Way,
+                    id: 7,
+                    closed: true,
+                    paths,
+                });
+            }
+        }
+
+        let mut bisected: Vec<PreparedFeature> = Vec::new();
+        bisect_polygon(
+            Layer::OsmPolygons,
+            OsmType::Way,
+            7,
+            &ring,
+            &[hole.clone()],
+            range.x_min,
+            range.x_max,
+            range.y_min,
+            range.y_max,
+            &mut bisected,
+        )
+        .unwrap();
+
+        let key = |f: &PreparedFeature| (f.tile_x, f.tile_y);
+        let mut direct_sorted = direct;
+        let mut bisect_sorted = bisected;
+        direct_sorted.sort_by_key(key);
+        bisect_sorted.sort_by_key(key);
+        assert_eq!(direct_sorted.len(), bisect_sorted.len());
+        // Direct clipping emits zero-area spikes ALONG the buffered clip
+        // boundary that bisection's intermediate clips collapse — the
+        // rings are geometrically identical, not byte-identical. Compare
+        // signed area plus the interior (non-boundary) vertex sequence.
+        let ring_area = |path: &[TilePoint]| -> f64 {
+            let mut area = 0.0f64;
+            for i in 0..path.len() {
+                let j = (i + 1) % path.len();
+                area += path[i].x as f64 * path[j].y as f64
+                    - path[j].x as f64 * path[i].y as f64;
+            }
+            area / 2.0
+        };
+        let boundary_min = -TILE_BUFFER as i32;
+        let boundary_max = (MVT_EXTENT + TILE_BUFFER) as i32;
+        let interior = |path: &[TilePoint]| -> Vec<TilePoint> {
+            let mut kept: Vec<TilePoint> = path
+                .iter()
+                .copied()
+                .filter(|p| {
+                    p.x != boundary_min
+                        && p.x != boundary_max
+                        && p.y != boundary_min
+                        && p.y != boundary_max
+                })
+                .collect();
+            // Rotation-normalize the cyclic sequence.
+            if let Some(min_index) = kept
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| (p.x, p.y))
+                .map(|(i, _)| i)
+            {
+                kept.rotate_left(min_index);
+            }
+            kept
+        };
+        for (a, b) in direct_sorted.iter().zip(&bisect_sorted) {
+            assert_eq!(key(a), key(b));
+            assert_eq!(a.paths.len(), b.paths.len(), "tile {:?} path count", key(a));
+            for (pa, pb) in a.paths.iter().zip(&b.paths) {
+                let area_a = ring_area(pa);
+                let area_b = ring_area(pb);
+                assert!(
+                    (area_a - area_b).abs() <= 1.0,
+                    "tile {:?} area diverged: {area_a} vs {area_b}",
+                    key(a)
+                );
+                assert_eq!(interior(pa), interior(pb), "tile {:?} interior", key(a));
+            }
+        }
+    }
+
     use super::*;
 
     fn node(id: i64, x: i32, y: i32) -> NodeCoord {
