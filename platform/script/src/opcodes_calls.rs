@@ -112,7 +112,13 @@ impl<'a> ScriptVm<'a> {
 
                 self.bx.threads.cur().trap.ip = ip;
                 self.bx.threads.cur().push_stack_value(ret);
-                self.bx.heap.free_object_if_unreffed(args);
+                // Eager-free the args scope. Safe: a call handler that stores
+                // args must set_reffed/new_object_ref it (escape-barriered
+                // stores do this automatically), and a handler returning args
+                // is guarded here.
+                if ret.as_object() != Some(args) {
+                    self.bx.heap.free_object_if_unreffed(args);
+                }
                 self.bx.threads.cur().trap.goto_next();
                 return true; // Call complete
             }
@@ -161,7 +167,13 @@ impl<'a> ScriptVm<'a> {
 
                     self.bx.threads.cur().trap.ip = ip;
                     self.bx.threads.cur().push_stack_value(ret);
-                    self.bx.heap.free_object_if_unreffed(args); // DISABLED: investigating RootObject already freed
+                    // Eager-free the native call's args scope. Safe: natives
+                    // that store args must set_reffed it (task.rs does; the
+                    // escape barrier covers stores through checked funnels),
+                    // and a native returning args itself is guarded here.
+                    if ret.as_object() != Some(args) {
+                        self.bx.heap.free_object_if_unreffed(args);
+                    }
                     self.bx.threads.cur().trap.goto_next();
                     return true; // Native complete: caller should handle pop_to_me
                 }

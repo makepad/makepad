@@ -78,6 +78,10 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        // Escape barrier at bind time: a closure created inside the call
+        // captures the scope via its proto chain, which retains bound arg
+        // values past the call — eager-freeing them must be a no-op then.
+        self.escape_value(value);
         let object = &self.objects[top_ptr];
 
         // which arg number?
@@ -118,6 +122,8 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        // see unnamed_fn_arg: closure capture retains bound args
+        self.escape_value(value);
         let object = &self.objects[top_ptr];
 
         if let Some(ptr) = object.proto.as_object() {
@@ -150,6 +156,10 @@ impl ScriptHeap {
         args: &[ScriptValue],
         trap: ScriptTrap,
     ) -> ScriptValue {
+        // see unnamed_fn_arg: closure capture retains bound args
+        for value in args {
+            self.escape_value(*value);
+        }
         let object = &self.objects[top_ptr];
         if let Some(ptr) = object.proto.as_object() {
             for (index, value) in args.iter().enumerate() {

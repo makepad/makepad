@@ -38,6 +38,7 @@ impl ScriptHeap {
     }
 
     pub fn array_push(&mut self, array: ScriptArray, value: ScriptValue, trap: ScriptTrap) {
+        self.escape_value(value);
         let array = &mut self.arrays[array];
         if array.tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
@@ -57,6 +58,12 @@ impl ScriptHeap {
     }
 
     pub fn array_push_vec(&mut self, array: ScriptArray, object: ScriptObject, trap: ScriptTrap) {
+        // escape barrier: the object's vec values become reachable from the array
+        let vec_len = self.objects[object].vec.len();
+        for i in 0..vec_len {
+            let v = self.objects[object].vec[i].value;
+            self.escape_value(v);
+        }
         let array = &mut self.arrays[array];
         if array.tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
@@ -90,6 +97,10 @@ impl ScriptHeap {
             }
         };
 
+        // escape barrier: source values become reachable from target
+        for v in &values {
+            self.escape_value(*v);
+        }
         let target_arr = &mut self.arrays[target];
         if target_arr.tag.is_immutable() {
             script_err_immutable!(trap, "array is immutable");
@@ -234,6 +245,7 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
+        self.escape_value(value);
         let array = &mut self.arrays[array];
         if array.tag.is_immutable() {
             return script_err_immutable!(trap, "array is immutable");

@@ -731,7 +731,7 @@ impl Cx {
         // Loaded yet, allow direct dependency lookup as a synchronous fallback.
         if self.os_type().is_web() {
             let resources = self.script_data.resources.resources.borrow();
-            if let Some(res) = resources.iter().find(|res| res.handle == handle) {
+            if let Some(res) = resources.iter().find(|res| res.has_handle(handle)) {
                 if let Some(dep_path) = res.dependency_path.as_deref() {
                     if let Ok(data) = self.get_dependency(dep_path) {
                         return Some(data);
@@ -748,7 +748,7 @@ impl Cx {
         let resources = self.script_data.resources.resources.borrow();
         resources
             .iter()
-            .find(|res| res.handle == handle)
+            .find(|res| res.has_handle(handle))
             .map(|res| res.abs_path.clone())
     }
 
@@ -761,7 +761,7 @@ impl Cx {
             let resources = self.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .find(|res| res.handle == handle)
+                .find(|res| res.has_handle(handle))
                 .map(|res| res.abs_path.clone())
         };
 
