@@ -174,8 +174,21 @@ pub fn append_expanded_stroke_geometry(
     let ramp = (total_dist * 0.35).min(96.0).max(1e-3);
 
     let base = (acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    acc_verts.reserve(verts.len() * VECTOR_FLOATS_PER_VERTEX);
-    for (vi, (v, anchor)) in verts.iter().zip(anchors).enumerate() {
+    let start = acc_verts.len();
+    let floats = verts.len() * VECTOR_FLOATS_PER_VERTEX;
+    // One resize + slot writes into the zeroed tail: the per-vertex
+    // extend_from_slice of a stack array still re-checked capacity and
+    // copied through a temporary 19 floats at a time — measurable on the
+    // face/fringe path that now routes every morphable surface here.
+    acc_verts.resize(start + floats, 0.0);
+    let shape_id = params.shape_id + EXPAND_STROKE_SHAPE_OFFSET;
+    let decked = deck_m > 0.0 || deck_override.is_some();
+    for (vi, ((v, anchor), record)) in verts
+        .iter()
+        .zip(anchors)
+        .zip(acc_verts[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX))
+        .enumerate()
+    {
         let deck_v = if let Some(decks) = deck_override {
             decks.get(vi).copied().unwrap_or(0.0)
         } else if deck_m > 0.0 {
@@ -188,32 +201,30 @@ pub fn append_expanded_stroke_geometry(
         // A lifted deck is semantically ABOVE whatever it crosses: bump its
         // tilt micro-depth with the lift, or high-rank strokes underneath
         // (rail over secondary) still depth-win near the crossing.
-        let param5 = if deck_m > 0.0 || deck_override.is_some() {
+        let param5 = if decked {
             params.params[5] + 0.30 * (deck_v / 2.0).min(1.0)
         } else {
             params.params[5]
         };
-        acc_verts.extend_from_slice(&[
-            anchor[0],
-            anchor[1],
-            v.u,
-            v.v,
-            params.color[0],
-            params.color[1],
-            params.color[2],
-            params.color[3],
-            params.stroke_mult,
-            v.stroke_dist,
-            params.shape_id + EXPAND_STROKE_SHAPE_OFFSET,
-            params.params[0],
-            v.x - anchor[0],
-            v.y - anchor[1],
-            expand_class,
-            deck_v,
-            param5,
-            v.clip_radius,
-            params.zbias,
-        ]);
+        record[0] = anchor[0];
+        record[1] = anchor[1];
+        record[2] = v.u;
+        record[3] = v.v;
+        record[4] = params.color[0];
+        record[5] = params.color[1];
+        record[6] = params.color[2];
+        record[7] = params.color[3];
+        record[8] = params.stroke_mult;
+        record[9] = v.stroke_dist;
+        record[10] = shape_id;
+        record[11] = params.params[0];
+        record[12] = v.x - anchor[0];
+        record[13] = v.y - anchor[1];
+        record[14] = expand_class;
+        record[15] = deck_v;
+        record[16] = param5;
+        record[17] = v.clip_radius;
+        record[18] = params.zbias;
     }
 
     acc_indices.extend(indices.iter().map(|&idx| base + idx));
