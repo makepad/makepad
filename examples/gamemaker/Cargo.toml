@@ -13,3 +13,4 @@ makepad-ai = { path = "../../libs/makepad_ai" }
 makepad-converse = { path = "../../libs/converse" }
 makepad-game-sim = { path = "../../libs/game/sim" }
 makepad-game-render = { path = "../../libs/game/render" }
+makepad-game-blocks = { path = "../../libs/game/blocks" }
