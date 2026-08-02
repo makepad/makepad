@@ -217,16 +217,36 @@ impl<'a> ScriptVm<'a> {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous_remaining = self.bx.threads.cur_ref().instruction_limit_remaining;
-        self.bx.threads.cur().instruction_limit_remaining = Some(
-            previous_remaining
-                .map(|remaining| remaining.min(instruction_limit))
-                .unwrap_or(instruction_limit),
-        );
+        let applied = previous_remaining
+            .map(|remaining| remaining.min(instruction_limit))
+            .unwrap_or(instruction_limit);
+        self.bx.threads.cur().instruction_limit_remaining = Some(applied);
+        // If f() runs no script at all, exit_remaining is never written —
+        // seed it so consumed reads 0 in that case.
+        self.bx.last_limit_exit_remaining = applied;
         let result = f(self);
+        // Record what this call actually charged: hosts running several
+        // calls against ONE cumulative budget (e.g. a game tick where
+        // on_tick + timers + touch events share a pool) read it back via
+        // last_limit_consumed and shrink the next call's limit accordingly.
+        // A completed run wipes the thread's remaining to None (Return/Bail
+        // in handle_trap_on), which stashes it in last_limit_exit_remaining.
+        let remaining_now = self
+            .bx
+            .threads
+            .cur_ref()
+            .instruction_limit_remaining
+            .unwrap_or(self.bx.last_limit_exit_remaining);
+        self.bx.last_limit_consumed = applied.saturating_sub(remaining_now);
         if !self.bx.threads.cur_ref().is_paused() {
             self.bx.threads.cur().instruction_limit_remaining = previous_remaining;
         }
         result
+    }
+
+    /// Instructions charged by the most recent `with_instruction_limit` call.
+    pub fn last_limit_consumed(&self) -> usize {
+        self.bx.last_limit_consumed
     }
 
     pub fn heap(&self) -> &ScriptHeap {
@@ -666,7 +686,11 @@ impl<'a> ScriptVm<'a> {
         Some(match self.bx.threads.cur().trap.on.take().unwrap() {
             ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
             ScriptTrapOn::Return(value) => {
-                self.bx.threads.cur().instruction_limit_remaining = None;
+                // Preserve the remaining allowance for consumption accounting
+                // (with_instruction_limit reads it after the None wipe).
+                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                    self.bx.last_limit_exit_remaining = rem;
+                }
                 value
             }
             ScriptTrapOn::Bail(value) => {
@@ -685,7 +709,9 @@ impl<'a> ScriptVm<'a> {
                         break;
                     }
                 }
-                self.bx.threads.cur().instruction_limit_remaining = None;
+                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                    self.bx.last_limit_exit_remaining = rem;
+                }
                 value
             }
         })
@@ -1377,6 +1403,12 @@ pub struct ScriptVmBase {
     /// agent editing the script live).
     pub captured_errors: Option<Vec<String>>,
     pub run_budget: Option<ScriptRunBudget>,
+    /// Instructions charged by the most recent with_instruction_limit call
+    /// (see ScriptVm::last_limit_consumed).
+    pub last_limit_consumed: usize,
+    /// The thread's remaining allowance at Return/Bail, stashed because
+    /// handle_trap_on wipes instruction_limit_remaining to None on exit.
+    pub last_limit_exit_remaining: usize,
 }
 
 impl ScriptVmBase {
@@ -1392,6 +1424,8 @@ impl ScriptVmBase {
             silence_errors: false,
             captured_errors: None,
             run_budget: None,
+            last_limit_consumed: 0,
+            last_limit_exit_remaining: 0,
         }
     }
 
@@ -1425,6 +1459,8 @@ impl ScriptVmBase {
             silence_errors: false,
             captured_errors: None,
             run_budget: None,
+            last_limit_consumed: 0,
+            last_limit_exit_remaining: 0,
         }
     }
 }
