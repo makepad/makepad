@@ -29,23 +29,7 @@ echo "planet pbf: $SIZE1 bytes" | tee -a "$LOG"
 phase "spool (pbf-detail)"
 "$BIN" pbf-detail "$PBF" "$DETAIL_TMP" --store "$STORE" --sort-memory-mib 2048 2>&1 | tee -a "$LOG"
 
-phase "base (pbf-base)"
-"$BIN" pbf-base "$PBF" "$BASE" --store "$STORE" 2>&1 | tee -a "$LOG"
-
-phase "prune spool"
-rm -rf "$STORE" "$DETAIL_TMP"
-df -h . | tail -1 | tee -a "$LOG"
-
-phase "bake (buckets 15-18, v4 streams)"
-"$BAKE" "$BASE" "$BAKED" \
-    --zooms 10,11,12,13,14 --buckets 15,16,17,18 --threshold-ms 100 2>&1 | tee -a "$LOG"
-
-phase "decode-sanity"
-"$BIN" verify-mbtiles "$BAKED" --stride 37 2>&1 | tee -a "$LOG"
-
-phase "transmux to .mkmap shards"
-rm -rf "$MKMAP"
-"$BIN" transmux "$BAKED" "$MKMAP" 2>&1 | tee -a "$LOG"
-"$BIN" mkmap-verify "$BAKED" "$MKMAP" 97 2>&1 | tee -a "$LOG"
-
-phase "done"
+phase "spool-complete"
+# The slab driver (world-slabs.sh) takes over from here: Europe-outward
+# pbf-base --bbox slabs, per-slab bake, weave into the serving shard set.
+touch local/maps/world-detail.store/SPOOL_COMPLETE
