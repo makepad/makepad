@@ -1692,6 +1692,10 @@ pub struct MapView {
     #[rust]
     perf_ms_geo: f64,
     #[rust]
+    perf_ms_icons: f64,
+    #[rust]
+    perf_ms_tail: f64,
+    #[rust]
     perf_ms_labels: f64,
     #[rust]
     perf_ms_max: f64,
@@ -2241,6 +2245,7 @@ impl Widget for MapView {
         let full_place =
             self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
         let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
+        let icons_start = std::time::Instant::now();
 
         for pass in 3..4 {
             for key in &draw_tiles {
@@ -2441,6 +2446,11 @@ impl Widget for MapView {
         }
 
         let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        // icons_ms spans the icon pass through overlays; tail = whatever
+        // the section timers do not cover (uniform churn, overhead).
+        let icons_ms = icons_start.elapsed().as_secs_f64() * 1000.0;
+        self.perf_ms_icons += icons_ms;
+        self.perf_ms_tail += (total_ms - geo_ms - labels_ms - icons_ms).max(0.0);
         self.perf_frames += 1;
         self.perf_ms_total += total_ms;
         self.perf_ms_geo += geo_ms;
@@ -2464,11 +2474,13 @@ impl Widget for MapView {
                 };
                 let _ = writeln!(
                     file,
-                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} max_ms:{:.2} gap_avg_ms:{:.2} gap_max_ms:{:.2} gaps>12ms:{}/{} full_places:{} glyphs:{} z:{:.2}",
+                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} icons_ms:{:.2} tail_ms:{:.2} max_ms:{:.2} gap_avg_ms:{:.2} gap_max_ms:{:.2} gaps>12ms:{}/{} full_places:{} glyphs:{} z:{:.2}",
                     self.perf_frames,
                     self.perf_ms_total / frames,
                     self.perf_ms_geo / frames,
                     self.perf_ms_labels / frames,
+                    self.perf_ms_icons / frames,
+                    self.perf_ms_tail / frames,
                     self.perf_ms_max,
                     gap_avg,
                     self.perf_ms_gap_max,
@@ -2482,6 +2494,8 @@ impl Widget for MapView {
             self.perf_frames = 0;
             self.perf_ms_total = 0.0;
             self.perf_ms_geo = 0.0;
+            self.perf_ms_icons = 0.0;
+            self.perf_ms_tail = 0.0;
             self.perf_ms_labels = 0.0;
             self.perf_ms_max = 0.0;
             self.perf_ms_gap_max = 0.0;
