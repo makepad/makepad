@@ -3038,6 +3038,15 @@ impl MapView {
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
         let new_baked_3d = self.baked_3d_mode;
+        // The grow-heights animation is the flat->3D MODE reveal. Once 3D
+        // is established on screen, arriving tiles (fresh, rebuilt at a new
+        // bucket, or re-entering after eviction) must NOT replay it — the
+        // city is already standing and a per-tile pop reads as a flash.
+        let three_d_established = new_baked_3d
+            && self
+                .tiles
+                .values()
+                .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
         let fade = if old_fill.is_some()
             || old_icon.is_some()
             || fade_casing_geometry.is_some()
@@ -3046,7 +3055,7 @@ impl MapView {
             Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: old_bucket,
-                grow_heights: new_baked_3d && !old_baked_3d,
+                grow_heights: new_baked_3d && !old_baked_3d && !three_d_established,
                 reuse_road_core,
                 fill_geometry: old_fill,
                 // Stable road geometry stays current across a mode switch;
@@ -3059,7 +3068,7 @@ impl MapView {
             Some(TileFade {
                 started: std::time::Instant::now(),
                 bucket: buffers.render_zoom,
-                grow_heights: new_baked_3d,
+                grow_heights: new_baked_3d && !three_d_established,
                 reuse_road_core: false,
                 fill_geometry: None,
                 casing_geometry: None,
