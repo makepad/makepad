@@ -4669,7 +4669,33 @@ fn build_tile_buffers_from_features_profiled(
         // pays ZERO booleans — a signature HIT swaps the eligible jobs for
         // the baked union groups; a MISS keeps the per-building path.
         {
-            let eligible = |job: &BuildingJob| job.base_m.abs() < 0.01;
+            // Deterministic dissolve-eligibility, identical at bake and
+            // runtime (both sides hash only eligible jobs): grounded, and
+            // NOT part of a monster same-height set — the Westland
+            // greenhouse belt puts thousands of identical-height rings in
+            // one tile and the union blowup got the bake jetsam-killed.
+            let mut key_jobs: std::collections::HashMap<(i32, u32), (u32, u64)> =
+                std::collections::HashMap::new();
+            for job in building_jobs.iter().filter(|job| job.base_m.abs() < 0.01) {
+                let key = (
+                    (job.height_m * 2.0).round() as i32,
+                    job.tint.map_or(0, |t| t | 0x8000_0000),
+                );
+                let points: u64 = job.polygon.iter().map(|r| r.len() as u64).sum();
+                let entry = key_jobs.entry(key).or_default();
+                entry.0 += 1;
+                entry.1 += points;
+            }
+            let group_ok = |job: &BuildingJob| {
+                let key = (
+                    (job.height_m * 2.0).round() as i32,
+                    job.tint.map_or(0, |t| t | 0x8000_0000),
+                );
+                key_jobs
+                    .get(&key)
+                    .is_some_and(|&(count, points)| count <= 800 && points <= 120_000)
+            };
+            let eligible = |job: &BuildingJob| job.base_m.abs() < 0.01 && group_ok(job);
             let building_sig = {
                 use std::hash::Hasher;
                 let mut h = FnvStdHasher(0x9e37_79b9_97f4_a7c5);
