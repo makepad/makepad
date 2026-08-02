@@ -4,10 +4,10 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
-use makepad_game_sim::{BodyKind, GameWorld, Shape, Terrain};
+use makepad_game_sim::{entity_index_sorted, BodyKind, GameWorld, Shape, Terrain};
 
 use crate::geometry::shape_geometry_data;
-use crate::shaders::{DrawGameAlpha, DrawGameCube, DrawGameSky, DrawGameTerrain};
+use crate::shaders::{DrawGameAlpha, DrawGameCube, DrawGameSkinned, DrawGameSky, DrawGameTerrain};
 
 /// The host widget's themed draw structs, lent to the renderer per frame.
 /// They stay `#[live]` fields on the widget so script-side styling applies.
@@ -43,6 +43,26 @@ pub struct GameRenderer {
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     terrain_geometry: Option<Geometry>,
     terrain_revision: u64,
+    /// GPU meshes for CPU-skinned characters, keyed by caller id, re-uploaded
+    /// every frame (the skinning happens CPU-side; see skin.rs).
+    skinned_geometries: Vec<(u64, Geometry)>,
+}
+
+/// One CPU-skinned mesh instance for [`GameRenderer::draw_scene_full`].
+/// `vertices` is the PbrVertex float layout `SkinnedModel::skin_to_pbr` emits.
+pub struct SkinnedDraw {
+    pub key: u64,
+    pub vertices: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub transform: Mat4f,
+}
+
+/// The skinned characters for one frame, drawn between the opaque and alpha
+/// passes (so blob shadows and sensor ghosts blend over them correctly).
+pub struct SkinnedBatch<'a> {
+    pub skinned: &'a mut DrawGameSkinned,
+    pub texture: &'a Texture,
+    pub items: Vec<SkinnedDraw>,
 }
 
 fn perf_us(t0: std::time::Instant) -> u64 {
@@ -194,12 +214,9 @@ impl GameRenderer {
         }
         // Settled parts of static owners.
         for p in world.parts.iter().filter(|p| !p.anim_active) {
-            // Entity ids are spawn-ordered, so the list stays sorted: binary
-            // search instead of a linear scan (this runs per part).
-            let Some(owner) = world
-                .entities
-                .binary_search_by_key(&p.owner, |e| e.id)
-                .ok()
+            // Entity ids are spawn-ordered, so the list stays sorted; the
+            // shared sim helper owns (and debug-asserts) that invariant.
+            let Some(owner) = entity_index_sorted(&world.entities, p.owner)
                 .map(|i| &world.entities[i])
                 .filter(|e| e.kind == BodyKind::Static)
             else {
@@ -223,6 +240,41 @@ impl GameRenderer {
         }
     }
 
+    /// Upload + draw the skinned batch inside the already-open scene pass.
+    fn draw_skinned_inner(&mut self, cx: &mut Cx3d, batch: SkinnedBatch, fog: (Vec3f, f32)) {
+        for item in batch.items {
+            let geometry_id = match self
+                .skinned_geometries
+                .iter()
+                .position(|(key, _)| *key == item.key)
+            {
+                Some(at) => {
+                    let geometry = &self.skinned_geometries[at].1;
+                    geometry.update(cx.cx, item.indices, item.vertices);
+                    geometry.geometry_id()
+                }
+                None => {
+                    let geometry = Geometry::new(cx.cx);
+                    geometry.update(cx.cx, item.indices, item.vertices);
+                    let id = geometry.geometry_id();
+                    self.skinned_geometries.push((item.key, geometry));
+                    id
+                }
+            };
+            batch.skinned.draw_vars.geometry_id = Some(geometry_id);
+            batch.skinned.transform = item.transform;
+            batch.skinned.depth_clip = 1.0;
+            batch.skinned.fog_color = fog.0;
+            batch.skinned.fog_density = fog.1;
+            batch.skinned.draw_vars.set_texture(0, batch.texture);
+            if batch.skinned.draw_vars.can_instance() {
+                let new_area = cx.add_instance(&batch.skinned.draw_vars);
+                batch.skinned.draw_vars.area =
+                    cx.update_area_refs(batch.skinned.draw_vars.area, new_area);
+            }
+        }
+    }
+
     /// Encode the whole 3D scene for one view. `draw_list` is the host's
     /// scene draw list (begun/ended here, exactly as before the move).
     pub fn draw_scene(
@@ -232,6 +284,19 @@ impl GameRenderer {
         draws: &mut GameDraws,
         world: &GameWorld,
         scene_state: SceneState3D,
+    ) -> RenderStats {
+        self.draw_scene_full(cx, draw_list, draws, world, scene_state, None)
+    }
+
+    /// [`draw_scene`] plus an optional skinned-character batch.
+    pub fn draw_scene_full(
+        &mut self,
+        cx: &mut Cx3d,
+        draw_list: &mut DrawList,
+        draws: &mut GameDraws,
+        world: &GameWorld,
+        scene_state: SceneState3D,
+        skinned: Option<SkinnedBatch>,
     ) -> RenderStats {
         let mut stats = RenderStats::default();
         let camera_pos = scene_state.camera_pos;
@@ -305,11 +370,7 @@ impl GameRenderer {
         // the per-shape loops below must not re-scan entities per part.
         let mut dyn_parts: Vec<(usize, usize)> = Vec::new();
         for (part_index, part) in world.parts.iter().enumerate() {
-            let Some(owner_index) = world
-                .entities
-                .binary_search_by_key(&part.owner, |e| e.id)
-                .ok()
-            else {
+            let Some(owner_index) = entity_index_sorted(&world.entities, part.owner) else {
                 continue;
             };
             if world.entities[owner_index].kind != BodyKind::Static || part.anim_active {
@@ -445,6 +506,11 @@ impl GameRenderer {
             if let Some(mi) = draws.cube.cube.many_instances.take() {
                 cx.end_many_instances(mi);
             }
+        }
+
+        // 3.5 Skinned characters — after all opaque, before alpha blending.
+        if let Some(batch) = skinned {
+            self.draw_skinned_inner(cx, batch, (fog_color, fog_density));
         }
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,

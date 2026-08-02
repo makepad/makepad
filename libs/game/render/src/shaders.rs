@@ -94,6 +94,48 @@ script_mod! {
         }
     }
 
+    // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
+    // ny_nz_uv.zw), textured, lit and fogged like the terrain.
+    mod.draw.DrawGameSkinned = mod.std.set_type_default() do #(DrawGameSkinned::script_shader(vm)){
+        alpha_blend: false
+        backface_culling: true
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        tex: texture_2d(float)
+        v_light: varying(float)
+        v_uv: varying(vec2f)
+        world: varying(vec4f)
+        v_fog: varying(float)
+
+        vertex: fn() {
+            let pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
+            let normal_in = vec3(self.geom.pos_nx.w, self.geom.ny_nz_uv.x, self.geom.ny_nz_uv.y)
+            let model_view = self.draw_list.view_transform * self.transform
+            let world_normal = normalize((model_view * vec4(normal_in.x, normal_in.y, normal_in.z, 0.0)).xyz)
+            self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
+            let view_pos = self.draw_pass.camera_view * self.world
+            let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)
+            self.v_light = 0.34 + dp * 0.66
+            self.v_uv = vec2(self.geom.ny_nz_uv.z, self.geom.ny_nz_uv.w)
+            self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos
+        }
+
+        pixel: fn() {
+            let albedo = self.tex.sample_as_bgra(self.v_uv)
+            let lit = albedo.xyz * self.v_light
+            return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
     // The smooth terrain mesh: per-vertex colored triangles, flat normals.
     mod.draw.DrawGameTerrain = mod.std.set_type_default() do #(DrawGameTerrain::script_shader(vm)){
         alpha_blend: false
@@ -176,6 +218,24 @@ pub struct DrawGameSky {
     pub sky_ground: Vec3f,
     #[live(vec3(0.3, 0.4, 0.3))]
     pub sky_bottom: Vec3f,
+}
+
+/// Skinned character mesh (PbrVertex layout, uv in ny_nz_uv.zw, textured).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGameSkinned {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub transform: Mat4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(vec3(0.35, 0.8, 0.45))]
+    pub light_dir: Vec3f,
+    #[live(vec3(0.75, 0.87, 0.96))]
+    pub fog_color: Vec3f,
+    #[live(0.0)]
+    pub fog_density: f32,
 }
 
 /// The smooth terrain mesh (PbrVertex layout: per-vertex color).

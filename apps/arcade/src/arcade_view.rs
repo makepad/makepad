@@ -5,9 +5,11 @@
 //! makepad-game-render into an offscreen pass composited into the pane.
 //! Mouse drag orbits, wheel zooms — the same raw-event pattern GameView uses.
 
+use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
-    DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws, GameRenderer,
+    DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws, GameRenderer,
+    SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_sim::{step_world, BodyKind, Entity, GameWorld, Shape, SkyConfig, TICK_DT};
 use makepad_widgets::*;
@@ -27,6 +29,9 @@ script_mod! {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
         draw_terrain +: {
+            light_dir: vec3(0.35, 0.8, 0.45)
+        }
+        draw_skinned +: {
             light_dir: vec3(0.35, 0.8, 0.45)
         }
     }
@@ -52,12 +57,18 @@ pub struct ArcadeView {
     draw_sky: DrawGameSky,
     #[live]
     draw_terrain: DrawGameTerrain,
+    #[live]
+    draw_skinned: DrawGameSkinned,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
     clear_color: Vec4f,
     #[new]
     pass: DrawPass,
     #[new]
     draw_list: DrawList,
+    #[rust]
+    knight: Option<Knight>,
+    #[rust]
+    knight_texture: Option<Texture>,
     #[new]
     color_texture: Texture,
     #[new]
@@ -133,6 +144,105 @@ fn spawn(
         glow: 0.0,
     });
     id
+}
+
+/// The stock skinned character (KayKit Knight, CC0) + its animation state.
+/// Assets are fetched by apps/arcade/download_assets.sh — everything here
+/// degrades gracefully when they're absent.
+struct Knight {
+    model: SkinnedModel,
+    texture_png: Vec<u8>,
+    idle: usize,
+    walk: usize,
+    pose_idle: PoseBuffer,
+    pose_walk: PoseBuffer,
+    blended: PoseBuffer,
+    palette: Vec<Mat4f>,
+    idle_time: f32,
+    walk_time: f32,
+    /// 0 = idle, 1 = walking — eased toward the patrol state each tick.
+    blend: f32,
+    angle: f32,
+    pos: Vec3f,
+    yaw: f32,
+}
+
+impl Knight {
+    fn load() -> Option<Knight> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/characters");
+        let glb = match std::fs::read(format!("{dir}/knight.glb")) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                log!("arcade: no skinned character — run apps/arcade/download_assets.sh");
+                return None;
+            }
+        };
+        let texture_png = std::fs::read(format!("{dir}/knight_texture.png")).ok()?;
+        let model = match SkinnedModel::parse_glb(&glb) {
+            Ok(model) => model,
+            Err(err) => {
+                log!("arcade: knight.glb failed to parse: {err}");
+                return None;
+            }
+        };
+        let idle = model.clip_index("idle")?;
+        let walk = model
+            .clip_index("walking_a")
+            .or_else(|| model.clip_index("walk"))?;
+        log!(
+            "arcade: knight loaded — {} joints, {} verts, {} clips",
+            model.joint_count(),
+            model.vertex_count(),
+            model.clips.len()
+        );
+        Some(Knight {
+            model,
+            texture_png,
+            idle,
+            walk,
+            pose_idle: PoseBuffer::new(),
+            pose_walk: PoseBuffer::new(),
+            blended: PoseBuffer::new(),
+            palette: Vec::new(),
+            idle_time: 0.0,
+            walk_time: 0.0,
+            blend: 0.0,
+            angle: 0.0,
+            pos: vec3f(10.0, 0.0, 0.0),
+            yaw: 0.0,
+        })
+    }
+
+    /// Patrol brain: walk the pillar ring for 6s, stand for 2s. Facing follows
+    /// the walk direction (the visual-only yaw convention); animation state is
+    /// Derived-tier — recomputed from motion, never authoritative.
+    fn tick(&mut self) {
+        let dt = TICK_DT;
+        let cycle = self.idle_time + self.walk_time; // monotonic clock
+        let phase = cycle - (cycle / 8.0).floor() * 8.0;
+        let walking = phase < 6.0;
+        let target = if walking { 1.0 } else { 0.0 };
+        self.blend += (target - self.blend) * 0.08;
+        if walking {
+            self.angle += dt * 0.22;
+            // Between the props (cone at r≈12) and the pillar ring (r=18).
+            let radius = 15.0;
+            self.pos = vec3f(
+                makepad_game_math::cos(self.angle) * radius,
+                0.0,
+                makepad_game_math::sin(self.angle) * radius,
+            );
+            // Tangent of the circle — the direction we're moving in.
+            let dir = vec3f(
+                -makepad_game_math::sin(self.angle),
+                0.0,
+                makepad_game_math::cos(self.angle),
+            );
+            self.yaw = makepad_game_math::atan2(dir.x, dir.z);
+        }
+        self.idle_time += dt;
+        self.walk_time += dt;
+    }
 }
 
 impl ArcadeView {
@@ -231,6 +341,7 @@ impl ArcadeView {
             vec4(0.3, 0.85, 0.5, 1.0),
             "bouncer",
         );
+        self.knight = Knight::load();
         self.world_built = true;
     }
 
@@ -261,6 +372,9 @@ impl ArcadeView {
         step_world(w);
         w.tick += 1;
         w.time += TICK_DT as f64;
+        if let Some(knight) = &mut self.knight {
+            knight.tick();
+        }
     }
 
     fn scene(&self, rect: Rect, time: f64) -> Option<SceneState3D> {
@@ -308,6 +422,13 @@ impl Widget for ArcadeView {
             // world has settled (~2s), then the harness kills the app.
             if self.world.tick == 120 {
                 if let Some(path) = std::env::var_os("ARCADE_CAPTURE") {
+                    cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
+                }
+            }
+            // Second capture much later in the anim cycle: a different pose
+            // proves the animation actually advances.
+            if self.world.tick == 300 {
+                if let Some(path) = std::env::var_os("ARCADE_CAPTURE2") {
                     cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
                 }
             }
@@ -405,6 +526,59 @@ impl Widget for ArcadeView {
         cx.begin_pass(&self.pass, None);
         if let Some(scene_state) = self.scene(rect, cx.time()) {
             set_pass_camera(cx.cx, &self.pass, &scene_state);
+            // Knight texture is created before Cx3d mutably borrows cx.
+            if let Some(knight) = &self.knight {
+                if self.knight_texture.is_none() {
+                    match ImageBuffer::from_png(&knight.texture_png) {
+                        Ok(image) => {
+                            self.knight_texture = Some(image.into_new_texture(cx.cx))
+                        }
+                        Err(err) => log!("arcade: knight texture failed: {:?}", err),
+                    }
+                }
+            }
+            // The skinned character: sample → blend → palette → CPU skin.
+            // Items are prepared before the draw so the batch borrows stay
+            // disjoint from GameDraws.
+            let mut skinned_items = Vec::new();
+            if let Some(knight) = &mut self.knight {
+                if self.knight_texture.is_some() {
+                    knight
+                        .model
+                        .sample_clip(knight.idle, knight.idle_time, &mut knight.pose_idle);
+                    knight
+                        .model
+                        .sample_clip(knight.walk, knight.walk_time, &mut knight.pose_walk);
+                    SkinnedModel::blend_pose(
+                        &knight.pose_idle,
+                        &knight.pose_walk,
+                        knight.blend,
+                        &mut knight.blended,
+                    );
+                    knight.model.palette(&knight.blended, &mut knight.palette);
+                    let mut vertices = Vec::new();
+                    knight.model.skin_to_pbr(&knight.palette, &mut vertices);
+                    let mut transform = Mat4f::rotation(vec3f(0.0, knight.yaw, 0.0));
+                    transform.v[12] = knight.pos.x;
+                    transform.v[13] = knight.pos.y;
+                    transform.v[14] = knight.pos.z;
+                    skinned_items.push(SkinnedDraw {
+                        key: 1,
+                        vertices,
+                        indices: knight.model.indices().to_vec(),
+                        transform,
+                    });
+                }
+            }
+            let batch = match (&mut self.draw_skinned, &self.knight_texture) {
+                (skinned, Some(texture)) if !skinned_items.is_empty() => Some(SkinnedBatch {
+                    skinned,
+                    texture,
+                    items: skinned_items,
+                }),
+                _ => None,
+            };
+
             let cx3d = &mut Cx3d::new(cx.cx);
             let mut draws = GameDraws {
                 cube: &mut self.draw_cube,
@@ -412,8 +586,14 @@ impl Widget for ArcadeView {
                 sky: &mut self.draw_sky,
                 terrain: &mut self.draw_terrain,
             };
-            self.renderer
-                .draw_scene(cx3d, &mut self.draw_list, &mut draws, &self.world, scene_state);
+            self.renderer.draw_scene_full(
+                cx3d,
+                &mut self.draw_list,
+                &mut draws,
+                &self.world,
+                scene_state,
+                batch,
+            );
         }
         cx.end_pass(&self.pass);
 

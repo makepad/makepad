@@ -16,6 +16,7 @@ pub mod hud;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
+pub mod skin;
 
 pub use geometry::*;
 pub use hud::*;
