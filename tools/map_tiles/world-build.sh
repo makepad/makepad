@@ -32,7 +32,7 @@ fi
 echo "planet pbf: $SIZE1 bytes" | tee -a "$LOG"
 
 phase "spool (pbf-detail)"
-"$BIN" pbf-detail "$PBF" "$DETAIL_TMP" --store "$STORE" --sort-memory-mib 2048 2>&1 | tee -a "$LOG"
+"$BIN" pbf-detail "$PBF" "$DETAIL_TMP" --store "$STORE" --sort-memory-mib 2048 --no-tiles 2>&1 | tee -a "$LOG"
 
 phase "spool-complete"
 # The slab driver (world-slabs.sh) takes over from here: Europe-outward
