@@ -10049,10 +10049,22 @@ mod bridge_probe_tests {
             casing_vertices: Vec::new(),
             stroke_indices: Vec::new(),
             stroke_vertices: Vec::new(),
+            // icon_vertices holds GPU-PACKED records post-finalize; the
+            // cached road decals stay logical 19-float and pack on append.
             icon_indices: vec![0],
-            icon_vertices: vec![1.0; VECTOR_FLOATS_PER_VERTEX],
+            icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
+            fringe_indices: Vec::new(),
+            fringe_vertices: Vec::new(),
+            fill_3d_indices: Vec::new(),
+            fill_3d_vertices: Vec::new(),
+            wall_indices: Vec::new(),
+            wall_vertices: Vec::new(),
+            tree_indices: Vec::new(),
+            tree_vertices: Vec::new(),
+            tree_cross_indices: Vec::new(),
+            tree_cross_vertices: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
@@ -10064,7 +10076,10 @@ mod bridge_probe_tests {
         let road_vertices = vec![2.0; VECTOR_FLOATS_PER_VERTEX * 2];
         buffers.append_cached_road_icons(&[0, 1], &road_vertices);
         assert_eq!(buffers.icon_indices, vec![0, 1, 2]);
-        assert_eq!(buffers.icon_vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+        assert_eq!(
+            buffers.icon_vertices.len(),
+            VECTOR_PACKED_FLOATS_PER_VERTEX * 3
+        );
         assert_eq!(buffers.road_icon_indices, vec![0, 1]);
         assert_eq!(buffers.road_icon_vertices, road_vertices);
     }
