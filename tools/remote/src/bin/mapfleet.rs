@@ -75,6 +75,9 @@ struct Shared {
     active: AtomicUsize,
     weave_dirty: AtomicBool,
     stop: AtomicBool,
+    /// Cells whose slice is too large to ship over the wire — only the
+    /// local worker may take them.
+    local_only: Mutex<std::collections::HashSet<usize>>,
     /// At most three concurrent slices: the store is read-only so parallel
     /// slicing is safe; ten workers need a fresh cell every couple of
     /// minutes and the NVMe sustains three readers without thrash.
@@ -107,6 +110,7 @@ fn main() {
         active: AtomicUsize::new(0),
         weave_dirty: AtomicBool::new(false),
         stop: AtomicBool::new(false),
+        local_only: Mutex::new(Default::default()),
         slice_gate: Mutex::new(0),
     });
     let config = Arc::new(config);
@@ -310,7 +314,7 @@ fn cell_paths(config: &Config, index: usize) -> (String, PathBuf, PathBuf) {
     (name, base, baked)
 }
 
-fn claim_cell(shared: &Shared, config: &Config) -> Option<(usize, String)> {
+fn claim_cell(shared: &Shared, config: &Config, remote: bool) -> Option<(usize, String)> {
     loop {
         let index = shared.next.fetch_add(1, Ordering::SeqCst);
         if index >= shared.cells.len() {
@@ -319,6 +323,9 @@ fn claim_cell(shared: &Shared, config: &Config) -> Option<(usize, String)> {
         let (_, _, baked) = cell_paths(config, index);
         if baked.exists() {
             continue; // resume ledger: already done
+        }
+        if remote && shared.local_only.lock().unwrap().contains(&index) {
+            continue;
         }
         // Cells are in NL-spiral order — the same order the pass-4
         // frontier advances — so each worker blocks on its own claimed
@@ -408,7 +415,7 @@ fn mark_empty(config: &Config, index: usize) {
 
 fn local_worker(shared: &Shared, config: &Config) {
     while !shared.stop.load(Ordering::SeqCst) {
-        let Some((index, bbox)) = claim_cell(shared, config) else {
+        let Some((index, bbox)) = claim_cell(shared, config, false) else {
             return;
         };
         let (name, base, baked) = cell_paths(config, index);
@@ -473,7 +480,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
     // the streaming frontier inside claim_cell.
     let mut pushed_bridge_dz = false;
     while !shared.stop.load(Ordering::SeqCst) {
-        let Some((index, bbox)) = claim_cell(shared, config) else {
+        let Some((index, bbox)) = claim_cell(shared, config, true) else {
             return;
         };
         let (name, base, baked) = cell_paths(config, index);
@@ -491,6 +498,19 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                 continue;
             }
             Ok(true) => {}
+        }
+        // Oversized slices cannot ship (2GB socket-write ceiling, worker
+        // RAM); hand them to the local worker and move on.
+        let slice_bytes = std::fs::metadata(&base).map(|m| m.len()).unwrap_or(0);
+        if slice_bytes > 3_500_000_000 {
+            println!(
+                "mapfleet: {name} slice {:.1} GB too large for the wire — local-only",
+                slice_bytes as f64 / 1e9
+            );
+            shared.local_only.lock().unwrap().insert(index);
+            requeue(shared, index);
+            shared.active.fetch_sub(1, Ordering::SeqCst);
+            continue;
         }
         let needs_dz = intersects_nl(&bbox);
         let mut files: Vec<(String, PathBuf)> =
