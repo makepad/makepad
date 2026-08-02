@@ -1006,6 +1006,47 @@ pub fn inverse_sqrt(x: f32) -> f32 {
 pub fn inverse(m: Mat4f) -> Mat4f {
     m.invert()
 }
+pub fn unpack2f16(x: f32) -> Vec2f {
+    let bits = x.to_bits();
+    fn half(h: u32) -> f32 {
+        let sign = ((h >> 15) & 1) << 31;
+        let exp = (h >> 10) & 0x1f;
+        let frac = h & 0x3ff;
+        let out = if exp == 0 {
+            if frac == 0 {
+                sign
+            } else {
+                let mut exp = 127 - 15 + 1;
+                let mut frac = frac;
+                while frac & 0x400 == 0 {
+                    frac <<= 1;
+                    exp -= 1;
+                }
+                sign | ((exp as u32) << 23) | ((frac & 0x3ff) << 13)
+            }
+        } else if exp == 0x1f {
+            sign | 0x7f80_0000 | (frac << 13)
+        } else {
+            sign | ((exp + 127 - 15) << 23) | (frac << 13)
+        };
+        f32::from_bits(out)
+    }
+    Vec2f {
+        x: half(bits & 0xffff),
+        y: half(bits >> 16),
+    }
+}
+
+pub fn unpack4u8(x: f32) -> Vec4f {
+    let bits = x.to_bits();
+    Vec4f {
+        x: (bits & 0xff) as f32 / 255.0,
+        y: ((bits >> 8) & 0xff) as f32 / 255.0,
+        z: ((bits >> 16) & 0xff) as f32 / 255.0,
+        w: ((bits >> 24) & 0xff) as f32 / 255.0,
+    }
+}
+
 pub fn modf(x: f32, y: f32) -> f32 {
     x - y * (x / y).floor()
 }
