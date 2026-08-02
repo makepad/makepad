@@ -1,6 +1,5 @@
 workspace.members = [
-    "widgets/dll",
-    # === apps ===
+    # === app ===
     "apps/route",
     # === examples ===
     "examples/hotload_ui",
@@ -40,47 +39,18 @@ workspace.members = [
     "examples/cad",
     "examples/box3d",
     "examples/hello_world",
-    "libs/box3d",
-    "libs/gif",
-    "libs/gltf",
-    "libs/splat",
-    "libs/latex_math",
-    "libs/mbtile_reader",
-    "libs/map_nav",
-    "libs/geodata",
-    "libs/makepad_ai",
-    "libs/tesla",
-    "libs/converse",
-    "libs/pdf_parse",
-    "libs/regex",
-    "libs/svg",
-    "libs/apple_sys",
-    "libs/mlx",
-    "libs/mlx/cli",
-    "libs/shared_bytes",
-    "libs/tsdf",
-    "platform/network",
-    "libs/filesystem_watcher",
-    "libs/live_reload_core",
-    "platform/script/test",
-    "platform/script/std",
-    "platform/studio",
+    # === xr app ===
+    "xr",
+    # === studio ===
     "studio/hub",
-    "libs/makepad_test",
-    "libs/makepad_test/macros",
     "studio/desktop",
+    # === necessary tools ===
     "tools/cargo_makepad",
-    "tools/tui_test",
-    "tools/profiler",
     "tools/map_tiles",
     "tools/map_bake",
-    "libs/mb3d",
-    "libs/openexr",
-    "libs/git",
-    "libs/fast_inflate",
-    "libs/lz4",
-    "xr",
-    "libs/cef",
+    "tools/remote",
+    # === tests ===
+    "platform/script/test",
 ]
 
 workspace.exclude = [
