@@ -71,3 +71,14 @@ spool + bake.
    artifact (node store, way bits, relation output, bucket merge) —
    write a per-pass completion stamp and resume from the last complete
    pass. A ~3h un-resumable process WILL someday die at hour 2.9.
+
+8. **Largest-first relation scheduling.** The monster boundary
+   multipolygons cluster at the end and serialize the pass finale on 3-4
+   straggler threads (observed: ~40+ min of tail). Sort the work queue
+   by member/point count descending so the monsters start at hour zero.
+
+9. **Segment-bbox prefilter in clip_ring (the tail's real cost).**
+   Straggler stacks sit in clip_ring: giant rings clip FULLY against
+   every tile bucket they span — O(points x tiles). Index the ring's
+   segments by bbox once, clip only the segments touching each tile:
+   near-linear total. This one turns the monster tail into noise.
