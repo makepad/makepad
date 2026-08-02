@@ -2549,12 +2549,36 @@ pub fn build_paint_faces(
                         continue;
                     }
                     if morphable {
-                        for (point, normal) in
-                            ring.iter().zip(ring_outward_normals(ring))
-                        {
+                        // Scale to the keyframe half-width, then smooth the
+                        // offset VECTORS along the ring (circular 1-2-1
+                        // kernel, 3 passes). At the keyframe corr is exactly
+                        // 1 and offsets cancel, so smoothing costs zero
+                        // fidelity there — it only straightens the morph
+                        // path, killing the sawtooth where junction
+                        // wrap-arounds swing the miter direction per vertex.
+                        let mut offs: Vec<[f32; 2]> = ring_outward_normals(ring)
+                            .into_iter()
+                            .map(|n| [n[0] * group.half_width, n[1] * group.half_width])
+                            .collect();
+                        let n = offs.len();
+                        if n >= 3 {
+                            for _ in 0..3 {
+                                let prev = offs.clone();
+                                for i in 0..n {
+                                    let a = prev[(i + n - 1) % n];
+                                    let b = prev[i];
+                                    let c = prev[(i + 1) % n];
+                                    offs[i] = [
+                                        (a[0] + 2.0 * b[0] + c[0]) * 0.25,
+                                        (a[1] + 2.0 * b[1] + c[1]) * 0.25,
+                                    ];
+                                }
+                            }
+                        }
+                        for (point, off) in ring.iter().zip(offs) {
                             normal_map.insert(
                                 normal_key(point[0] as f32, point[1] as f32),
-                                normal,
+                                off,
                             );
                         }
                     }
@@ -2629,9 +2653,7 @@ pub fn build_paint_faces(
                     .map(|v| {
                         normal_map
                             .get(&normal_key(v.x, v.y))
-                            .map(|n| {
-                                [n[0] * group.half_width, n[1] * group.half_width]
-                            })
+                            .copied()
                             .unwrap_or([0.0, 0.0])
                     })
                     .collect()
