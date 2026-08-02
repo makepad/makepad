@@ -614,7 +614,7 @@ impl ViewSplat {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources
             .iter()
-            .find(|resource| resource.handle == handle)?;
+            .find(|resource| resource.has_handle(handle))?;
         Some((PathBuf::from(&resource.abs_path), resource.is_error()))
     }
 
