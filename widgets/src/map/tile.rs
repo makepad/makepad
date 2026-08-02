@@ -4,7 +4,7 @@ use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
-    append_tessellated_geometry_decked, compute_clip_radii,
+    append_tessellated_geometry_decked, compute_clip_radii, pack_vector_vertices,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
     VECTOR_FLOATS_PER_VERTEX, VECTOR_ZBIAS_STEP,
@@ -6892,6 +6892,16 @@ fn build_tile_buffers_from_features_profiled(
     let mut casing_indices = casing_indices;
     let (fringe_vertices, fringe_indices) =
         split_fringe_band(&mut casing_vertices, &mut casing_indices);
+    // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
+    // main-thread pack was 10-15ms per street tile and throttled the
+    // upload drain to one tile per frame).
+    let fill_vertices = pack_vector_vertices(&fill_vertices);
+    let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
+    let casing_vertices = pack_vector_vertices(&casing_vertices);
+    let stroke_vertices = pack_vector_vertices(&stroke_vertices);
+    let icon_vertices = pack_vector_vertices(&icon_vertices);
+    let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
+    let fringe_vertices = pack_vector_vertices(&fringe_vertices);
     TileBuffers {
         pin_hits,
         fill_indices,
