@@ -18,9 +18,17 @@ use crate::CallbackSlot;
 /// widget and the native `game` handle registered into the isolate, so script
 /// calls mutate it synchronously — no async widget trampoline, deterministic
 /// ordering, and world-building during eval completes before eval returns.
-#[derive(Default)]
+///
+/// Clone is a full snapshot: plain data plus the box3d world via its
+/// bit-exact snapshot round trip (see dynamics.rs) — the basis for the
+/// rollback ring / replay / join-state dump (game.md).
+#[derive(Default, Clone)]
 pub struct GameWorld {
     pub entities: Vec<Entity>,
+    /// box3d dynamics layer (M1a): mirrored statics/kinematics + rigid
+    /// bodies. Reconciled against `entities` each tick — never mutated by
+    /// spawn/remove paths directly.
+    pub dynamics: crate::dynamics::RigidDynamics,
     pub next_id: u64,
     pub gravity: f32,
     pub on_tick: Option<CallbackSlot>,
@@ -193,6 +201,9 @@ impl GameWorld {
         self.cam_fov = 40.0;
         self.cam_shake = 0.0;
         self.rng = 0x9E37_79B9_7F4A_7C15;
+        // Fresh box3d world; the mirror rebuilds from entities at the next
+        // reconcile, so rollback/reset can never leak orphan bodies.
+        self.dynamics = crate::dynamics::RigidDynamics::new();
         // The doc contract: game.time() restarts at 0 on every reload. The
         // tick counter stays monotonic (log stamps, timer scheduling).
         // save_data deliberately survives — that's what game.save is FOR.

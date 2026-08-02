@@ -15,6 +15,10 @@ pub enum BodyKind {
     Kinematic,
     /// Gravity + collides with static/kinematic. Players and NPCs.
     Mover,
+    /// Full box3d rigid-body dynamics (M1a): stacks, tumbles, takes impulses.
+    /// Collides with statics/kinematics/other rigids — NOT with movers (v1
+    /// contract; movers keep the kinematic sweep). Shared replication tier.
+    Rigid,
 }
 
 /// Visual shape of an entity or part. Physics stays the entity's AABB — the
@@ -113,8 +117,17 @@ pub struct Entity {
     pub scale_target: Vec3f,
     /// Emission energy: 0 = matte, ~3 = glowing eyes, ramps at runtime.
     pub glow: f32,
-    /// Visual-only shape; collision stays the AABB.
+    /// Visual-only shape; collision stays the AABB. Exception: a Rigid with
+    /// shape:"sphere" gets a box3d sphere collider (radius = half.x) so it
+    /// rolls — the one place visual and collision shape agree.
     pub shape: Shape,
+    /// Full orientation, read back from box3d each tick — Rigid only
+    /// (identity for everything else; movers/statics rotate via `yaw`).
+    pub orient: Quat,
+    /// Rigid material params, applied when the box3d body is created.
+    pub density: f32,
+    pub friction: f32,
+    pub restitution: f32,
 }
 
 /// A purely visual box welded to an entity — eyes, arms, hats. No collision,
