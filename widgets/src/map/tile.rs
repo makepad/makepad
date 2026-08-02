@@ -6950,37 +6950,73 @@ fn append_icon_mesh_offset_scaled(
     out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    for vertex in &mesh.verts {
-        out_vertices.extend_from_slice(&[
-            anchor.0,
-            anchor.1,
-            vertex.u,
-            vertex.v,
-            color[0],
-            color[1],
-            color[2],
-            color[3],
-            1e6, // stroke_mult: fill
-            vertex.stroke_dist,
-            ICON_SHAPE_ID,
-            0.0,      // param0: solid color
-            // param1/2: screen-px offset from the anchor
-            vertex.x * scale + screen_offset.0,
-            vertex.y * scale + screen_offset.1,
-            0.0,
-            // param4: this icon's view-zoom floor; the shader collapses the
-            // vertex when the live view zoom is below it (no stale flash).
-            min_zoom,
-            // Tilt depth: a SMALL camera-ward bias -- enough to clear the
-            // marker's own ground pixel (fill/stroke micro-ranks are tiny),
-            // small enough that buildings meaningfully in FRONT occlude
-            // the marker, keeping the 3D illusion honest.
-            0.35,
-            24.0, // clip_radius: generous, avoids pop-in at view edges
-            *zbias,
-        ]);
+    // Template cache: for a given (mesh, color, scale, offset) every
+    // instance differs only in anchor, zoom floor and zbias. City-center
+    // tiles at the icon horizon write tens of MB of icon vertices — the
+    // per-vertex construction loop was ~half of the emit stage. Build the
+    // 19-float block once, memcpy, patch 4 slots.
+    thread_local! {
+        static ICON_TEMPLATES: std::cell::RefCell<
+            HashMap<(usize, [u32; 4], u32, u32, u32), Vec<f32>>,
+        > = std::cell::RefCell::new(HashMap::new());
     }
+    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+    let key = (
+        mesh as *const IconMesh as usize,
+        [
+            color[0].to_bits(),
+            color[1].to_bits(),
+            color[2].to_bits(),
+            color[3].to_bits(),
+        ],
+        scale.to_bits(),
+        screen_offset.0.to_bits(),
+        screen_offset.1.to_bits(),
+    );
+    ICON_TEMPLATES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let template = cache.entry(key).or_insert_with(|| {
+            let mut block = Vec::with_capacity(mesh.verts.len() * VECTOR_FLOATS_PER_VERTEX);
+            for vertex in &mesh.verts {
+                block.extend_from_slice(&[
+                    0.0,
+                    0.0,
+                    vertex.u,
+                    vertex.v,
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3],
+                    1e6, // stroke_mult: fill
+                    vertex.stroke_dist,
+                    ICON_SHAPE_ID,
+                    0.0, // param0: solid color
+                    // param1/2: screen-px offset from the anchor
+                    vertex.x * scale + screen_offset.0,
+                    vertex.y * scale + screen_offset.1,
+                    0.0,
+                    // param4: per-instance view-zoom floor (patched); the
+                    // shader collapses the vertex below it.
+                    0.0,
+                    // Tilt depth: a SMALL camera-ward bias -- enough to
+                    // clear the marker's own ground pixel, small enough
+                    // that buildings meaningfully in FRONT still occlude.
+                    0.35,
+                    24.0, // clip_radius: generous, avoids view-edge pop-in
+                    0.0,
+                ]);
+            }
+            block
+        });
+        let start = out_vertices.len();
+        out_vertices.extend_from_slice(template);
+        for record in out_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX) {
+            record[0] = anchor.0;
+            record[1] = anchor.1;
+            record[15] = min_zoom;
+            record[18] = *zbias;
+        }
+    });
     for index in &mesh.indices {
         out_indices.push(base + index);
     }
