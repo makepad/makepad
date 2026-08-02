@@ -1,0 +1,8 @@
+[package]
+name = "makepad-game-math"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic cross-arch f32 math kernel for Makepad Arcade (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
