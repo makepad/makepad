@@ -197,6 +197,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     let mut store = None;
     let mut zoom = None;
     let mut sort_memory_mib = None;
+    let mut no_tiles = false;
     let mut index = 3;
     while index < args.len() {
         match args[index].as_str() {
@@ -230,6 +231,10 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
                     })?);
                 index += 2;
             }
+            "--no-tiles" => {
+                no_tiles = true;
+                index += 1;
+            }
             value => return Err(format!("unknown pbf-detail argument '{value}'\n\n{USAGE}")),
         }
     }
@@ -241,6 +246,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     if let Some(sort_memory_mib) = sort_memory_mib {
         options.sort_memory_mib = sort_memory_mib;
     }
+    options.no_tiles = no_tiles;
     Ok(options)
 }
 

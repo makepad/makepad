@@ -73,6 +73,10 @@ pub struct DetailOptions {
     pub store: PathBuf,
     pub zoom: u8,
     pub sort_memory_mib: usize,
+    /// Skip pass 5 (the standalone detail mbtiles): the spool store is
+    /// complete and consumable after pass 4 — pbf-base and the fleet
+    /// never read the pass-5 output.
+    pub no_tiles: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -341,6 +345,11 @@ pub fn convert_detail(options: DetailOptions) -> Result<(), String> {
         .map_err(|err| format!("write {}: {err}", paths.audit.display()))?;
     write_complete_marker(&options, &paths, &spool)?;
 
+    if options.no_tiles {
+        println!("Pass 5/5 skipped (--no-tiles): store complete after pass 4");
+        println!("Scratch retained at {}", options.store.display());
+        return Ok(());
+    }
     println!("Pass 5/5: external-sort blocks and stream MBTiles");
     let stage_started = Instant::now();
     let output_stats = finish_tiles(&options, &spool, header.bounds)?;
@@ -1362,6 +1371,7 @@ pub fn default_detail_options(source: PathBuf, output: PathBuf, store: PathBuf) 
         store,
         zoom: DEFAULT_ZOOM,
         sort_memory_mib: 256,
+        no_tiles: false,
     }
 }
 
