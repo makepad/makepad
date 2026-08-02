@@ -1156,6 +1156,8 @@ impl ShaderBackend {
                     id!(inverseSqrt) => id!(inversesqrt),
                     id!(modf) => id!(mod),
                     id!(atan2) => id!(atan),
+                    id!(unpack2f16) => id!(_mp_unpack2f16),
+                    id!(unpack4u8) => id!(_mp_unpack4u8),
                     x => x,
                 }
             }
@@ -1165,6 +1167,11 @@ impl ShaderBackend {
                     id!(dFdx) => id!(dpdx),
                     id!(dFdy) => id!(dpdy),
                     id!(inverseSqrt) => id!(inverseSqrt),
+                    // WGSL helpers to be emitted when the backend lands:
+                    // fn _mp_unpack2f16(x: f32) -> vec2<f32> {
+                    //     return unpack2x16float(bitcast<u32>(x)); }
+                    id!(unpack2f16) => id!(_mp_unpack2f16),
+                    id!(unpack4u8) => id!(_mp_unpack4u8),
                     x => x,
                 }
             }
@@ -1176,6 +1183,8 @@ impl ShaderBackend {
                     id!(dFdx) => id!(dFdx),               // no-op in CPU (returns 0)
                     id!(dFdy) => id!(dFdy),               // no-op in CPU (returns 0)
                     id!(discard) => id!(discard),         // no-op in CPU
+                    id!(unpack2f16) => id!(unpack2f16),   // shader_runtime impl
+                    id!(unpack4u8) => id!(unpack4u8),     // shader_runtime impl
                     x => x,
                 }
             }
