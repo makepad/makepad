@@ -2460,6 +2460,24 @@ impl Widget for MapView {
         }
         if self.perf_frames >= 240 {
             use std::io::Write;
+            // GPU time per presented frame from the platform monitor
+            // (command-buffer start->end, completion-handler thread).
+            cx.cx.perf_monitor.set_enabled(true);
+            let mut gpu_frames = Vec::new();
+            cx.cx.perf_monitor.read(&mut gpu_frames);
+            let mut gpu_sum_us = 0u64;
+            let mut gpu_max_us = 0u32;
+            let mut gpu_n = 0u64;
+            for frame in &gpu_frames {
+                let us = frame.channel_us[crate::makepad_draw::makepad_platform::perf_monitor::PERF_CHANNEL_GPU.0];
+                if us > 0 {
+                    gpu_sum_us += us as u64;
+                    gpu_max_us = gpu_max_us.max(us);
+                    gpu_n += 1;
+                }
+            }
+            let gpu_avg_ms = if gpu_n > 0 { gpu_sum_us as f64 / gpu_n as f64 / 1000.0 } else { 0.0 };
+            let gpu_max_ms = gpu_max_us as f64 / 1000.0;
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -2473,7 +2491,7 @@ impl Widget for MapView {
                 };
                 let _ = writeln!(
                     file,
-                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} icons_ms:{:.2} tail_ms:{:.2} max_ms:{:.2} gap_avg_ms:{:.2} gap_max_ms:{:.2} gaps>12ms:{}/{} full_places:{} glyphs:{} z:{:.2}",
+                    "frames:{} avg_ms:{:.2} geo_ms:{:.2} labels_ms:{:.2} icons_ms:{:.2} tail_ms:{:.2} max_ms:{:.2} gpu_ms:{:.2} gpu_max:{:.2} gap_avg_ms:{:.2} gap_max_ms:{:.2} gaps>12ms:{}/{} full_places:{} glyphs:{} z:{:.2}",
                     self.perf_frames,
                     self.perf_ms_total / frames,
                     self.perf_ms_geo / frames,
@@ -2481,6 +2499,8 @@ impl Widget for MapView {
                     self.perf_ms_icons / frames,
                     self.perf_ms_tail / frames,
                     self.perf_ms_max,
+                    gpu_avg_ms,
+                    gpu_max_ms,
                     gap_avg,
                     self.perf_ms_gap_max,
                     self.perf_gaps_over_12ms,
