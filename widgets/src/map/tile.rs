@@ -356,6 +356,10 @@ enum RoadVerticalClass {
 /// (real width bit patterns never collide with it).
 const NO_CASING_BITS: u32 = u32::MAX;
 
+/// Expand-class band offset selecting the CLAMPED face correction in the
+/// shader (faces only widen; strokes keep the exact curve).
+pub const FACE_MORPH_CLASS_OFFSET: f32 = 4.0;
+
 /// Cascade-input dump lever: env for headless runs, file flag for
 /// studio-launched apps (their env is the studio's).
 fn cascade_dump_armed() -> bool {
@@ -6287,7 +6291,7 @@ fn build_tile_buffers_from_features_profiled(
                             params: [0.0, 0.0, 0.0, 0.0, 0.0, face_param5],
                             zbias: casing_zbias,
                         },
-                        EXPAND_CLASS_ROAD,
+                        EXPAND_CLASS_ROAD + FACE_MORPH_CLASS_OFFSET,
                         0.0,
                         deck.as_deref(),
                     );
@@ -6390,7 +6394,7 @@ fn build_tile_buffers_from_features_profiled(
                                 ],
                                 zbias: casing_zbias,
                             },
-                            EXPAND_CLASS_ROAD,
+                            EXPAND_CLASS_ROAD + FACE_MORPH_CLASS_OFFSET,
                             0.0,
                             None,
                         );
