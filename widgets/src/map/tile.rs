@@ -6217,8 +6217,10 @@ fn build_tile_buffers_from_features_profiled(
                     &face.morph_offsets
                 };
                 static FACE_MORPH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                let face_morph_on = *FACE_MORPH
-                    .get_or_init(|| std::env::var_os("MAKEPAD_FACE_MORPH").is_some());
+                let face_morph_on = *FACE_MORPH.get_or_init(|| {
+                    std::env::var_os("MAKEPAD_FACE_MORPH").is_some()
+                        || std::path::Path::new("/tmp/mp_face_morph").exists()
+                });
                 let body_morph = face_morph_on
                     && face.emissive <= 0.001
                     && body_offsets.len() == verts.len()
