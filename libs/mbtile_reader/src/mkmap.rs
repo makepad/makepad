@@ -89,7 +89,7 @@ fn parse_metadata_kv(bytes: &[u8]) -> Result<HashMap<String, String>> {
     let mut cursor = 0_usize;
     let count = read_varint(bytes, &mut cursor)? as usize;
     let mut out = HashMap::with_capacity(count);
-    let mut read_string = |cursor: &mut usize| -> Result<String> {
+    let read_string = |cursor: &mut usize| -> Result<String> {
         let len = read_varint(bytes, cursor)? as usize;
         let slice = bytes.get(*cursor..*cursor + len).ok_or_else(corrupt)?;
         *cursor += len;

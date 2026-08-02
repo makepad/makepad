@@ -8,7 +8,6 @@ use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
-use makepad_mbtile_reader::MbtilesReader;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;

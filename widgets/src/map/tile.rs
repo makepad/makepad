@@ -373,7 +373,7 @@ fn cascade_dump_armed() -> bool {
 /// bake serves the light/dark/circuit themes (which by contract only
 /// recolor). Field order is the derived Ord = the tier paint order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
-struct RoadSurfaceKey {
+pub(crate) struct RoadSurfaceKey {
     sort_rank: i16,
     class_id: u32,
     center_width_bits: u32,
@@ -4772,7 +4772,6 @@ fn build_tile_buffers_from_features_profiled(
                 &mut template_zbias,
             );
             let floats = template_verts.len();
-            let vert_count = (floats / VECTOR_FLOATS_PER_VERTEX) as u32;
             fill_vertices.reserve(floats * tree_points_3d.len());
             fill_indices.reserve(template_indices.len() * tree_points_3d.len());
             for (instance, (x, y)) in tree_points_3d.iter().enumerate() {
@@ -4789,7 +4788,6 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 fill_indices
                     .extend(template_indices.iter().map(|i| i + base_vert));
-                let _ = vert_count;
                 feature_count += 1;
             }
             fill_zbias += tree_points_3d.len() as f32 * template_zbias;
