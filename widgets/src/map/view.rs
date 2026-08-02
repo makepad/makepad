@@ -4958,11 +4958,15 @@ impl MapView {
         // reveal by the live icon_zoom uniform, so the only restyle event
         // left on the whole zoom axis is the single 14<->16 crossover —
         // and both keyframes morph to identical widths at that zoom.
+        // Band-TOP keyframes: serving zooms sit AT or BELOW their
+        // keyframe, so the face width correction is >= 1 and the morph
+        // only ever widens (outward morph of an opaque union is safe;
+        // inward morph inverts narrow features — the bowtie garbage).
         let raw = self.view_zoom().round() as u32;
         match raw {
             0..=14 => raw,
-            15 => 14,
-            _ => 16,
+            15 => 15,
+            _ => 18,
         }
     }
 
