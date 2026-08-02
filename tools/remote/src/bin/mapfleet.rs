@@ -377,10 +377,14 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         thread::sleep(Duration::from_secs(5));
     }
     println!("mapfleet: {name} slice {bbox}");
+    // Slice into a temp name and rename on success: base.exists() is the
+    // "slice complete" signal and must never match a half-written file.
+    let base_tmp = base.with_extension("mbtiles.tmp");
+    let _ = std::fs::remove_file(&base_tmp);
     let output = Command::new("./target/release/mptiles-run")
         .arg("pbf-base")
         .arg(&config.pbf)
-        .arg(&base)
+        .arg(&base_tmp)
         .args(["--store"])
         .arg(&config.store)
         .args(["--bbox", bbox])
@@ -388,8 +392,10 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
         .args(["--brotli-quality", "2"])
         .output()?;
     *shared.slice_gate.lock().unwrap() -= 1;
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&base);
+    if output.status.success() {
+        std::fs::rename(&base_tmp, &base)?;
+    } else {
+        let _ = std::fs::remove_file(&base_tmp);
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -479,6 +485,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
     // Bootstrap runs while the spool spins up; cell work self-gates on
     // the streaming frontier inside claim_cell.
     let mut pushed_bridge_dz = false;
+    let mut last_fail: Option<usize> = None;
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config, true) else {
             return;
@@ -553,13 +560,28 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                 }
             }
             other => {
-                eprintln!("mapfleet: {name} on {host} failed ({other:?}) — requeue, backoff");
+                if last_fail == Some(index) {
+                    // Second consecutive failure of this cell on this box
+                    // (low RAM/disk for the frame, sick toolchain, ...):
+                    // hand the cell to the local worker and move on.
+                    eprintln!(
+                        "mapfleet: {name} failed twice on {host} ({other:?}) — routing local"
+                    );
+                    shared.local_only.lock().unwrap().insert(index);
+                    last_fail = None;
+                } else {
+                    eprintln!(
+                        "mapfleet: {name} on {host} failed ({other:?}) — requeue, backoff"
+                    );
+                    last_fail = Some(index);
+                }
                 requeue(shared, index);
                 shared.active.fetch_sub(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_secs(30));
                 continue;
             }
         }
+        last_fail = None;
         shared.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
