@@ -95,6 +95,10 @@ pub struct ArcadeView {
     orbit_last_abs: Option<DVec2>,
     #[rust]
     view_rect: Rect,
+    #[rust]
+    captured_1: bool,
+    #[rust]
+    captured_2: bool,
 }
 
 /// Entity literal with the same defaults gamemaker's spawn verb uses.
@@ -142,6 +146,10 @@ fn spawn(
         scale: vec3f(1.0, 1.0, 1.0),
         scale_target: vec3f(1.0, 1.0, 1.0),
         glow: 0.0,
+            orient: Quat::default(),
+        density: 1.0,
+        friction: 0.6,
+        restitution: 0.0,
     });
     id
 }
@@ -341,6 +349,38 @@ impl ArcadeView {
             vec4(0.3, 0.85, 0.5, 1.0),
             "bouncer",
         );
+        // Rigid-body corner (M1a): a crate stack + two balls on real box3d
+        // dynamics. The tick loop kicks the stack periodically to show off
+        // impulses/tumbling; between kicks it settles and sleeps.
+        for i in 0..6 {
+            let id = spawn(
+                w,
+                BodyKind::Rigid,
+                Shape::Box,
+                vec3f(-9.0 + (i as f32) * 0.04, 0.55 + i as f32 * 1.05, -9.0),
+                vec3f(1.0, 1.0, 1.0),
+                vec4(0.9, 0.6 - 0.06 * i as f32, 0.2, 1.0),
+                "rigid_crate",
+            );
+            if let Some(e) = w.entity_mut(id) {
+                e.restitution = 0.05;
+            }
+        }
+        for i in 0..2 {
+            let id = spawn(
+                w,
+                BodyKind::Rigid,
+                Shape::Sphere,
+                vec3f(-6.0 + i as f32 * 1.6, 5.0, -10.0),
+                vec3f(1.1, 1.1, 1.1),
+                vec4(0.4, 0.5, 0.95, 1.0),
+                "rigid_ball",
+            );
+            if let Some(e) = w.entity_mut(id) {
+                e.restitution = 0.5;
+                e.friction = 0.4;
+            }
+        }
         self.knight = Knight::load();
         self.world_built = true;
     }
@@ -367,6 +407,21 @@ impl ArcadeView {
                         e.vel = vec3f(0.0, 0.0, 0.0);
                     }
                 }
+            }
+        }
+        // Kick the rigid corner every 5 seconds: crates tumble, balls fly.
+        if w.tick % 300 == 200 {
+            let ids: Vec<u64> = w
+                .entities
+                .iter()
+                .filter(|e| e.tag == "rigid_crate" || e.tag == "rigid_ball")
+                .map(|e| e.id)
+                .collect();
+            for (i, id) in ids.iter().enumerate() {
+                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                w.dynamics
+                    .rigid_impulse(*id, vec3f(2.5 * side, 7.0, 2.0));
+                w.dynamics.rigid_spin(*id, vec3f(0.6 * side, 0.9, 0.3));
             }
         }
         step_world(w);
@@ -420,14 +475,18 @@ impl Widget for ArcadeView {
             }
             // Test hook: ARCADE_CAPTURE=<path.png> grabs a GPU frame once the
             // world has settled (~2s), then the harness kills the app.
-            if self.world.tick == 120 {
+            // `>=` + take-once: the accumulator can step several ticks per
+            // frame, so an exact tick compare would skip silently.
+            if self.world.tick >= 120 && !self.captured_1 {
+                self.captured_1 = true;
                 if let Some(path) = std::env::var_os("ARCADE_CAPTURE") {
                     cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
                 }
             }
             // Second capture much later in the anim cycle: a different pose
             // proves the animation actually advances.
-            if self.world.tick == 300 {
+            if self.world.tick >= 300 && !self.captured_2 {
+                self.captured_2 = true;
                 if let Some(path) = std::env::var_os("ARCADE_CAPTURE2") {
                     cx.capture_next_frame_to_file(std::path::PathBuf::from(path));
                 }

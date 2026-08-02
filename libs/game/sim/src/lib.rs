@@ -15,12 +15,14 @@
 //! scaffolding (SlotMap/GameRng/World) is the target shape for later stages;
 //! GameWorld below is the live parity-oracle sim.
 
+pub mod dynamics;
 pub mod entity;
 pub mod queries;
 pub mod step;
 pub mod terrain;
 pub mod world;
 
+pub use dynamics::*;
 pub use entity::*;
 pub use queries::*;
 pub use step::*;

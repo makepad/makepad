@@ -67,7 +67,7 @@ game.on_tick(|dt, input| {
 
 | call | meaning |
 |---|---|
-| `game.box({pos, size, color, tag, sensor, collide, body, glow, shape, rot_y})` | a solid. `sensor: true` = no collision, reports touches (goals, pickups), drawn translucent. `collide: false` = opaque DECORATION — looks solid, no physics (rotated road slabs!). `rot_y: 0.6` turns the visual (collision stays the axis box). `body: "kinematic"` = script-moved platform (set its vel; movers standing on it are carried). `glow: 2` = emissive |
+| `game.box({pos, size, color, tag, sensor, collide, body, glow, shape, rot_y, density, friction, restitution})` | a solid. `sensor: true` = no collision, reports touches (goals, pickups), drawn translucent. `collide: false` = opaque DECORATION — looks solid, no physics (rotated road slabs!). `rot_y: 0.6` turns the visual (collision stays the axis box). `body: "kinematic"` = script-moved platform (set its vel; movers standing on it are carried). `body: "rigid"` = REAL physics (box3d): stacks, tumbles, rotates, bounces — crates, balls, dominoes. Rigids collide with statics/kinematics/each other, NOT with movers; `density`/`friction`/`restitution` tune the material; `shape:"sphere"` rigids roll (collider radius = half width). Rigid state is shared-tier (networked); `push` gives a real impulse. `glow: 2` = emissive |
 | `game.mover({pos, size, color, tag, gravity, turn_rate, shape})` | a character: gravity + collides with the world. `gravity: 0` floats. Movers **auto-face where they walk** (front = -z); `turn_rate` rad/s (default 7) |
 | `game.spawn({pos, vel, size, color, tag, life, hits, gravity, glow, shape})` | a projectile: auto-removed after `life` seconds; `hits: true` reports everything it touches through `on_touch` (creatures AND walls) |
 | `game.part(owner, {pos, size, color, glow, rot_x/rot_y/rot_z, shape})` → part id | a visual-only shape welded to an entity IN ITS FRAME (turns and scales with it; front = -z): eyes, arms, ears, horns, hats, wheels. No collision; dies with its owner |
@@ -139,7 +139,7 @@ controller is never locked out of something you built.
 | `game.attach(id, owner, offset)` / `game.detach(id)` | seat-mount (vehicles, carrying) — rider faces with the owner |
 | `game.attach(id, owner, {pos, mode: "ride", spin: 2})` | latch ON someone (headcrab): pinned each frame, model spins |
 | `game.speed_mult(id, 0.5)` | scale an entity's walk speed engine-side (debuffs) until changed |
-| `game.push(id, v)` | ADD to velocity (a shunt, a gust) — `set_vel` overwrites, `push` nudges. Movers pass through each other: to bump someone, detect overlap (`hits`/`on_touch`/`overlap_sphere`) and `push` them |
+| `game.push(id, v)` | ADD to velocity (a shunt, a gust) — `set_vel` overwrites, `push` nudges. Movers pass through each other: to bump someone, detect overlap (`hits`/`on_touch`/`overlap_sphere`) and `push` them. On a `body:"rigid"` entity this is a true mass-scaled impulse (same Δv feel; wakes the body) |
 | `game.raycast(from, dir, max)` | → nil or `{hit, pos, normal, dist}`. Hits terrain (`hit` = -1), walls, creatures, decor. THE sense for wall-avoiding AI, brake-for-the-car-ahead, line of sight, aimed guns. It also hits the caster — cast from just outside your own body, or skip a hit whose id is you |
 | `game.overlap_sphere(pos, r)` | → array of entity ids near a point |
 | `game.ground_normal(x, z)` | → terrain surface normal (align cars to slopes) |

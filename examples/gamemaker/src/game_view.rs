@@ -744,6 +744,7 @@ impl GameView {
                     BodyKind::Static => "static",
                     BodyKind::Kinematic => "kinematic",
                     BodyKind::Mover => "mover",
+                    BodyKind::Rigid => "rigid",
                 },
                 e.pos.x, e.pos.y, e.pos.z,
                 e.vel.x, e.vel.y, e.vel.z,
@@ -1626,6 +1627,9 @@ fn spawn_entity(
             id!(rot_y),
             id!(turn_rate),
             id!(shape),
+            id!(density),
+            id!(friction),
+            id!(restitution),
         ],
     );
     let pos_v = opts_value(vm, opts, id!(pos));
@@ -1674,6 +1678,10 @@ fn spawn_entity(
         match body.as_str() {
             "kinematic" => BodyKind::Kinematic,
             "mover" => BodyKind::Mover,
+            // Full box3d dynamics (M1a): stacks, tumbles, impulses. Shared
+            // replication tier; collides with statics/kinematics/rigids,
+            // not with movers.
+            "rigid" => BodyKind::Rigid,
             _ => kind,
         }
     };
@@ -1699,6 +1707,19 @@ fn spawn_entity(
     };
     let collide = collide_v.as_bool().unwrap_or(true);
     let turn_rate = if turn_v.is_nil() { 7.0 } else { vm.bx.heap.cast_to_f64(turn_v, ip) as f32 };
+    // Rigid material params (harmless defaults on every other body kind).
+    let f32_or = |vm: &mut ScriptVm, key: LiveId, default: f32| -> f32 {
+        let v = opts_value(vm, opts, key);
+        if v.is_nil() {
+            default
+        } else {
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            vm.bx.heap.cast_to_f64(v, ip) as f32
+        }
+    };
+    let density = f32_or(vm, id!(density), 1.0).max(0.01);
+    let friction = f32_or(vm, id!(friction), 0.6).clamp(0.0, 4.0);
+    let restitution = f32_or(vm, id!(restitution), 0.0).clamp(0.0, 1.0);
 
     let shape_v = opts_value(vm, opts, id!(shape));
     let shape = if shape_v.is_nil() {
@@ -1749,6 +1770,10 @@ fn spawn_entity(
         scale: vec3f(1.0, 1.0, 1.0),
         scale_target: vec3f(1.0, 1.0, 1.0),
         glow,
+        orient: Quat::default(),
+        density,
+        friction,
+        restitution,
     });
     ScriptValue::from_f64(id as f64)
 }
@@ -1984,6 +2009,10 @@ fn spawn_terrain(
                 scale_target: vec3f(1.0, 1.0, 1.0),
                 glow: 0.0,
                 shape: Shape::Box,
+                            orient: Quat::default(),
+                density: 1.0,
+                friction: 0.6,
+                restitution: 0.0,
             });
         }
         return ScriptValue::from_f64(count as f64);
@@ -2029,6 +2058,10 @@ fn spawn_terrain(
                 scale_target: vec3f(1.0, 1.0, 1.0),
                 glow: 0.0,
                 shape: Shape::Box,
+                            orient: Quat::default(),
+                density: 1.0,
+                friction: 0.6,
+                restitution: 0.0,
             });
             spawned += 1;
         }
@@ -3087,7 +3120,20 @@ fn game_dispatch(
             let id = arg_id(vm, args, 0);
             let v_raw = arg(vm, args, 1);
             let v = value_vec3(vm, v_raw);
-            if let Some(e) = world.borrow_mut().entity_mut(id) {
+            let mut world = world.borrow_mut();
+            let is_rigid = world
+                .entity(id)
+                .map_or(false, |e| e.kind == BodyKind::Rigid);
+            if is_rigid {
+                // Rigid: a real mass-scaled impulse (same Δv semantics).
+                // Falls back to a velocity write for a body spawned this
+                // eval — reconcile seeds the body with entity.vel.
+                if !world.dynamics.rigid_impulse(id, v) {
+                    if let Some(e) = world.entity_mut(id) {
+                        e.vel = e.vel + v;
+                    }
+                }
+            } else if let Some(e) = world.entity_mut(id) {
                 e.vel = e.vel + v;
             }
             NIL
@@ -3263,7 +3309,7 @@ fn game_dispatch(
 /// The full verb surface, for `game.api()` dumps and typo suggestions.
 /// Keep in sync with `game_dispatch` and splashgame.md.
 const GAME_API: &[(&str, &str)] = &[
-    ("box", "({pos, size, color, tag, sensor, collide, body, gravity, vel, life, hits, glow, face|rot_y, turn_rate, shape})"),
+    ("box", "({pos, size, color, tag, sensor, collide, body, gravity, vel, life, hits, glow, face|rot_y, turn_rate, shape, density, friction, restitution})"),
     ("block", " — alias of game.box"),
     ("mover", " — same options as box (kinematic character, turn_rate default 7)"),
     ("spawn", " — same options as box (dynamic body; vel, life, hits)"),

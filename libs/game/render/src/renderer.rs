@@ -4,7 +4,7 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
-use makepad_game_sim::{entity_index_sorted, BodyKind, GameWorld, Shape, Terrain};
+use makepad_game_sim::{entity_index_sorted, BodyKind, Entity, GameWorld, Shape, Terrain};
 
 use crate::geometry::shape_geometry_data;
 use crate::shaders::{DrawGameAlpha, DrawGameCube, DrawGameSkinned, DrawGameSky, DrawGameTerrain};
@@ -146,6 +146,28 @@ impl GameRenderer {
         let id = geometry.geometry_id();
         *slot = Some(geometry);
         id
+    }
+
+    /// Rotation part of an entity's transform. Rigids carry a full box3d
+    /// orientation quat (M1a); everything else rotates by visual yaw exactly
+    /// as before. Column-major, same layout as Mat4f::rotation.
+    fn entity_rotation(e: &Entity) -> Mat4f {
+        if e.kind == BodyKind::Rigid {
+            let (x, y, z, w) = (e.orient.x, e.orient.y, e.orient.z, e.orient.w);
+            let mut m = Mat4f::identity();
+            m.v[0] = 1.0 - 2.0 * (y * y + z * z);
+            m.v[1] = 2.0 * (x * y + w * z);
+            m.v[2] = 2.0 * (x * z - w * y);
+            m.v[4] = 2.0 * (x * y - w * z);
+            m.v[5] = 1.0 - 2.0 * (x * x + z * z);
+            m.v[6] = 2.0 * (y * z + w * x);
+            m.v[8] = 2.0 * (x * z + w * y);
+            m.v[9] = 2.0 * (y * z - w * x);
+            m.v[10] = 1.0 - 2.0 * (x * x + y * y);
+            m
+        } else {
+            Mat4f::rotation(vec3f(0.0, e.yaw, 0.0))
+        }
     }
 
     /// PERF: pack one instance in the exact slice layout `DrawCube::draw`
@@ -417,7 +439,7 @@ impl GameRenderer {
                 .iter()
                 .filter(|e| !e.sensor && e.kind != BodyKind::Static && e.shape == shape)
             {
-                let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
+                let mut transform = Self::entity_rotation(e);
                 transform.v[12] = e.pos.x;
                 transform.v[13] = e.pos.y;
                 transform.v[14] = e.pos.z;
@@ -441,7 +463,7 @@ impl GameRenderer {
                     continue;
                 }
                 let owner = &world.entities[owner_index];
-                let mut owner_frame = Mat4f::rotation(vec3f(0.0, owner.yaw, 0.0));
+                let mut owner_frame = Self::entity_rotation(owner);
                 owner_frame.v[12] = owner.pos.x;
                 owner_frame.v[13] = owner.pos.y;
                 owner_frame.v[14] = owner.pos.z;
@@ -521,10 +543,11 @@ impl GameRenderer {
             let has_static = !self.static_slab_alpha[shape_index].is_empty();
             let has_dynamic_sensor = dyn_sensor_shapes[shape_index];
             let has_shadows = shape == Shape::Box
-                && world
-                    .entities
-                    .iter()
-                    .any(|e| e.kind == BodyKind::Mover && !e.sensor && e.attached_to == 0);
+                && world.entities.iter().any(|e| {
+                    matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
+                        && !e.sensor
+                        && e.attached_to == 0
+                });
             if !has_static && !has_dynamic_sensor && !has_shadows {
                 continue;
             }
@@ -540,7 +563,9 @@ impl GameRenderer {
             }
             if has_shadows {
                 for e in world.entities.iter().filter(|e| {
-                    e.kind == BodyKind::Mover && !e.sensor && e.attached_to == 0
+                    matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
+                        && !e.sensor
+                        && e.attached_to == 0
                 }) {
                     // Ground under the mover: terrain, or the tallest static
                     // box top.
@@ -592,7 +617,7 @@ impl GameRenderer {
                 .iter()
                 .filter(|e| e.sensor && e.kind != BodyKind::Static && e.shape == shape)
             {
-                let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
+                let mut transform = Self::entity_rotation(e);
                 transform.v[12] = e.pos.x;
                 transform.v[13] = e.pos.y;
                 transform.v[14] = e.pos.z;

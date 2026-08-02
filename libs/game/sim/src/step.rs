@@ -235,12 +235,34 @@ pub fn step_world(world: &mut GameWorld) {
         world.parts.retain(|p| ids.contains(&p.owner));
         world.labels.retain(|l| ids.contains(&l.owner));
     }
+
+    // box3d dynamics layer (M1a): reconcile the body mirror against the
+    // post-retain entity set, step the solver, read rigid poses back. Runs
+    // LAST so a rigid spawned/removed/rolled-back this tick is already
+    // settled in the entity list. Movers never touch this path.
+    {
+        let GameWorld {
+            dynamics,
+            entities,
+            terrain,
+            gravity,
+            ..
+        } = world;
+        crate::dynamics::reconcile(dynamics, entities, terrain.as_ref(), *gravity);
+        crate::dynamics::step_dynamics(dynamics, entities);
+    }
 }
 
 pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
     let mut touches = Vec::new();
     for sensor in world.entities.iter().filter(|e| e.sensor) {
-        for other in world.entities.iter().filter(|e| e.kind == BodyKind::Mover) {
+        // Rigid inclusion is additive: with no Rigid entities the pair set is
+        // identical to the pre-M1a scan (tape parity).
+        for other in world
+            .entities
+            .iter()
+            .filter(|e| matches!(e.kind, BodyKind::Mover | BodyKind::Rigid))
+        {
             if overlaps(sensor.pos, sensor.half, other.pos, other.half) {
                 touches.push((sensor.id, other.id));
             }
@@ -257,7 +279,10 @@ pub fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
             if other.id == hitter.id
                 || other.sensor
                 || other.hits
-                || !matches!(other.kind, BodyKind::Mover | BodyKind::Kinematic)
+                || !matches!(
+                    other.kind,
+                    BodyKind::Mover | BodyKind::Kinematic | BodyKind::Rigid
+                )
             {
                 continue;
             }
