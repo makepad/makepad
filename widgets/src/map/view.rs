@@ -1078,12 +1078,17 @@ const MISSING_RECHECK_FRAMES: u64 = 1800;
 const TILT_MAX_DEG: f64 = 78.0;
 /// Accumulated pan (screen px) before labels are re-placed; must stay under
 /// LABEL_VIEW_MARGIN so cached placements keep covering the viewport edge.
-const LABEL_REPLACE_PAN_PX: f64 = 48.0;
+// Pure pan shifts the cached placement affinely, so mid-gesture full
+// re-places are almost pure waste: every 48px+125ms the collision pass
+// (5-20ms) hitched the frame and let label winners flicker — the "labels
+// pan async from the map" feel. Ride the cache for most of a viewport
+// and re-place at rest (the gesture-end timeout below always fires one).
+const LABEL_REPLACE_PAN_PX: f64 = 420.0;
 /// Minimum frames between full label re-placements while the cached
 /// placement is still usable (a full place costs up to ~20ms — 2-3 dropped
 /// frames at 120Hz — and tile arrivals during panning invalidated the cache
 /// almost every other frame).
-const LABEL_REPLACE_MIN_SECONDS: f64 = 0.12;
+const LABEL_REPLACE_MIN_SECONDS: f64 = 0.30;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
