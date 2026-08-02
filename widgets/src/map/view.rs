@@ -2252,8 +2252,13 @@ impl Widget for MapView {
                         let dist = ((tile_center_px.x - focus.x).powi(2)
                             + (tile_center_px.y - focus.y).powi(2))
                         .sqrt();
-                        let near = rect.size.y * 0.75;
-                        let far = rect.size.y * 1.5;
+                        // Tilt-aware radii: the visible map-plane span
+                        // stretches by 1/tilt_cos, so the near radius must
+                        // too — the whole frustum keeps full 3D and only
+                        // the deep horizon (beyond the blur) sinks.
+                        let stretch = 1.0 / self.tilt_cos().max(0.35);
+                        let near = rect.size.y * 0.9 * stretch;
+                        let far = near * 1.7;
                         let lod = (1.0 - ((dist - near) / (far - near)).clamp(0.0, 1.0)) as f32;
                         if lod > 0.003 {
                             let volume_id = volume.geometry_id();
