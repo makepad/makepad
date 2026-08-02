@@ -125,7 +125,7 @@ fn main() {
     // keyed reorder buffer before writing.
     let mut work: Vec<(u8, u32, u32, Vec<u8>, Option<Vec<u8>>, bool)> = Vec::new();
     {
-        let mut probe_dz = |zoom: u8, col: u32, row: u32| -> (Option<Vec<u8>>, bool) {
+        let probe_dz = |zoom: u8, col: u32, row: u32| -> (Option<Vec<u8>>, bool) {
             if zoom != 14 {
                 return (None, false);
             }
