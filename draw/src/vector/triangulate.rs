@@ -57,12 +57,16 @@ pub fn pack_vector_record(record: &[f32]) -> [f32; VECTOR_PACKED_FLOATS_PER_VERT
         pack_pair_f16(record[2], record[3]),
         pack_unorm8x4(record[4], record[5], record[6], record[7]),
         record[8],
-        pack_pair_f16(record[9], record[10]),
-        pack_pair_f16(record[11], record[14]),
+        // stroke_dist stays f32: multi-km merged roads exceed f16 range
+        // (inf -> NaN varyings) and dash phase needs the precision.
+        record[9],
+        pack_pair_f16(record[11], record[10]),
         pack_pair_f16(record[12], record[13]),
+        // clip_radius clamped into f16 range: huge radii mean "never
+        // clipped" either way.
+        pack_pair_f16(record[14], record[17].min(60000.0)),
         record[15],
         record[16],
-        pack_pair_f16(record[17], 0.0),
         record[18],
     ]
 }

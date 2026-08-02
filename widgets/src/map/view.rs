@@ -364,13 +364,12 @@ script_mod! {
             // Packed-vertex preamble: f16 pairs / unorm8x4 unpack once.
             let g_uv = unpack2f16(self.geom.uv)
             let g_color = unpack4u8(self.geom.color)
-            let g_ds = unpack2f16(self.geom.dist_shape)
-            let g_p03 = unpack2f16(self.geom.p03)
+            let g_p0s = unpack2f16(self.geom.p0s)
             let g_p12 = unpack2f16(self.geom.p12)
-            let g_clipr = unpack2f16(self.geom.clipr).x
+            let g_p3c = unpack2f16(self.geom.p3c)
             let pos = vec2(self.geom.x, self.geom.y);
             var transformed = pos * self.map_scale + self.map_offset;
-            var shape_id = g_ds.y;
+            var shape_id = g_p0s.y;
             var expanded = 0.0;
             var expand_slack = 0.0;
             var surface_decal = 0.0;
@@ -383,7 +382,7 @@ script_mod! {
             if shape_id > 99.5 {
                 shape_id = shape_id - 100.0;
                 expanded = 1.0;
-                var cls = g_p03.y;
+                var cls = g_p3c.x;
                 var corr = self.width_correction.x;
                 if cls > 3.5 {
                     // Face band (class + 4): clamped corrections.
@@ -413,7 +412,7 @@ script_mod! {
             // gives every glyph vertex the same projection/depth basis as
             // the road directly beneath it instead of rotating a flat card
             // around one lifted anchor.
-            if shape_id > 19.5 && shape_id < 20.5 && g_p03.y > 1.5 {
+            if shape_id > 19.5 && shape_id < 20.5 && g_p3c.x > 1.5 {
                 let off = vec2(g_p12.x, g_p12.y);
                 transformed = transformed + off;
                 terrain_pos = terrain_pos + off;
@@ -491,7 +490,7 @@ script_mod! {
                 }
                 if surface_decal < 0.5 {
                     var off = vec2(g_p12.x, g_p12.y);
-                    if g_p03.y > 0.5 {
+                    if g_p3c.x > 0.5 {
                         off = vec2(
                             off.x * self.view_rot.x - off.y * self.view_rot.y,
                             off.x * self.view_rot.y + off.y * self.view_rot.x
@@ -506,12 +505,12 @@ script_mod! {
             self.v_color = vec4(g_color.x, g_color.y, g_color.z, g_color.w);
             self.v_stroke_mult = self.geom.stroke_mult;
             // stroke distances are tile-local; scale so dash patterns stay in screen px
-            self.v_stroke_dist = g_ds.x * self.map_scale.x;
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
             self.v_shape_id = shape_id;
-            self.v_param0 = g_p03.x;
+            self.v_param0 = g_p0s.x;
             self.v_param5 = self.geom.param5;
 
-            let grad_type = g_p03.x;
+            let grad_type = g_p0s.x;
             if expanded > 0.5 {
                 self.v_param1 = 0.0;
                 self.v_param2 = 0.0;
@@ -519,7 +518,7 @@ script_mod! {
                 self.v_param4 = 0.0;
             } else if grad_type > 0.5 && grad_type < 1.5 {
                 let p0 = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
-                let p1 = vec2(g_p03.y, self.geom.param4) * self.map_scale + self.map_offset;
+                let p1 = vec2(g_p3c.x, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
@@ -528,11 +527,11 @@ script_mod! {
                 let center = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
-                self.v_param3 = g_p03.y * self.map_scale.x;
+                self.v_param3 = g_p3c.x * self.map_scale.x;
                 self.v_param4 = self.geom.param4 * self.map_scale.y;
             } else if shape_id > 0.5 && shape_id < 19.5 {
                 let bbox_min = vec2(g_p12.x, g_p12.y) * self.map_scale + self.map_offset;
-                let bbox_max = vec2(g_p03.y, self.geom.param4) * self.map_scale + self.map_offset;
+                let bbox_max = vec2(g_p3c.x, self.geom.param4) * self.map_scale + self.map_offset;
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
@@ -548,8 +547,8 @@ script_mod! {
                 self.v_param4 = 0.0;
             } else if shape_id < 0.5
                 && (
-                    (g_p03.y > 2.5 && g_p03.y < 3.5)
-                    || (g_p03.y > 4.5 && g_p03.y < 5.5)
+                    (g_p3c.x > 2.5 && g_p3c.x < 3.5)
+                    || (g_p3c.x > 4.5 && g_p3c.x < 5.5)
                 ) {
                 // Water/green-area materials: param1/2 are free on these
                 // fills — carry a map-anchored UV for the per-pixel noise
@@ -557,19 +556,19 @@ script_mod! {
                 let mat_uv = pos * self.map_scale;
                 self.v_param1 = mat_uv.x;
                 self.v_param2 = mat_uv.y;
-                self.v_param3 = g_p03.y;
+                self.v_param3 = g_p3c.x;
                 self.v_param4 = self.geom.param4;
             } else {
                 self.v_param1 = g_p12.x;
                 self.v_param2 = g_p12.y;
-                self.v_param3 = g_p03.y;
+                self.v_param3 = g_p3c.x;
                 self.v_param4 = self.geom.param4;
             }
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            let cr = (g_clipr + expand_slack) * max(self.map_scale.x, self.map_scale.y);
+            let cr = (g_p3c.y + expand_slack) * max(self.map_scale.x, self.map_scale.y);
             let clip = vec4(
                 max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
                 max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),

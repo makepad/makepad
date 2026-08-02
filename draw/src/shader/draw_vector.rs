@@ -35,25 +35,25 @@ script_mod! {
             let pos = vec2(self.geom.x, self.geom.y);
             let g_uv = unpack2f16(self.geom.uv)
             let g_color = unpack4u8(self.geom.color)
-            let g_ds = unpack2f16(self.geom.dist_shape)
-            let g_p03 = unpack2f16(self.geom.p03)
+            let g_p0s = unpack2f16(self.geom.p0s)
             let g_p12 = unpack2f16(self.geom.p12)
+            let g_p3c = unpack2f16(self.geom.p3c)
             self.v_tcoord = g_uv;
             self.v_color = g_color;
             self.v_stroke_mult = self.geom.stroke_mult;
-            self.v_stroke_dist = g_ds.x;
-            self.v_shape_id = g_ds.y;
-            self.v_param0 = g_p03.x;
+            self.v_stroke_dist = self.geom.stroke_dist;
+            self.v_shape_id = g_p0s.y;
+            self.v_param0 = g_p0s.x;
             self.v_param1 = g_p12.x;
             self.v_param2 = g_p12.y;
-            self.v_param3 = g_p03.y;
+            self.v_param3 = g_p3c.x;
             self.v_param4 = self.geom.param4;
             self.v_param5 = self.geom.param5;
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
             // Early clip rejection in local space.
-            let cr = unpack2f16(self.geom.clipr).x;
+            let cr = unpack2f16(self.geom.p3c).y;
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
                 let clip = vec4(
