@@ -189,6 +189,8 @@ struct CxWidgetAsync {
     heap_to_vm: HashMap<usize, SplashVmId>,
     isolated_vms: IsolatedScriptVms,
     current_vm_id: SplashVmId,
+    /// Round-robin cursor for the per-pump isolate GC pass (last vm id serviced).
+    gc_rr_last: u64,
 }
 
 #[derive(Default)]
@@ -1083,6 +1085,33 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         }
 
         break;
+    }
+
+    // Isolate maintenance — runs on every pump, cheap when idle. Without
+    // this, isolated Splash VMs never garbage-collect at all (only the app
+    // VM has a paint-loop GC): a 60Hz script host accumulates per-tick
+    // objects forever, and dead isolates only reclaimed on the next alloc.
+    gc_dead_splash_isolates(cx);
+    let state = cx.global::<CxWidgetAsync>();
+    if !state.isolated_vms.vms.is_empty() {
+        // Round-robin: give at most one isolate a GC opportunity per pump,
+        // gated on the heap's own growth heuristic (needs_gc). Mark/sweep
+        // runs directly on the parked ScriptVmBase — no Cx install needed.
+        // An isolate currently installed on Cx is absent from the map and
+        // naturally skipped.
+        let mut ids: Vec<u64> = state.isolated_vms.vms.keys().map(|v| v.0).collect();
+        ids.sort_unstable();
+        let last = state.gc_rr_last;
+        let next = ids.iter().copied().find(|id| *id > last).unwrap_or(ids[0]);
+        state.gc_rr_last = next;
+        if let Some(iso) = state.isolated_vms.vms.get_mut(&SplashVmId(next)) {
+            if let Some(bx) = iso.vm.as_mut() {
+                if bx.heap.needs_gc() {
+                    bx.heap.mark(&bx.threads, &bx.code);
+                    bx.heap.sweep(false);
+                }
+            }
+        }
     }
 
     progressed
