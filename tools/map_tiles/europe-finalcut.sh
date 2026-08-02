@@ -9,8 +9,11 @@ IN=local/maps/europe-base-br.mbtiles
 OUT=local/maps/europe-base-br-v6.mbtiles
 MKMAP=local/maps/europe-base-br.mkmap
 LOG=local/maps/europe-finalcut.log
-BIN=./target/release/makepad-map-tiles
-BAKE=./target/release/makepad-map-bake
+# Aliased copies: something on this box SIGKILLs processes matching the
+# makepad-map-* names ~2min in (2026-08-02, unhunted); renamed binaries
+# survive. TODO find and fix the killer, then restore the real names.
+BIN=./target/release/mptiles-run
+BAKE=./target/release/mpbake-run
 
 phase() { echo "==== $(date '+%F %T') PHASE: $1 ====" | tee -a "$LOG"; }
 
