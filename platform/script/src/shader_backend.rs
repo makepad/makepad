@@ -1111,8 +1111,15 @@ impl ShaderBackend {
                 id_lut!(inverse);
                 id_lut!(inversesqrt);
                 id_lut!(mod);
+                // Packed-attribute unpack wrappers (emitted in the GLSL
+                // preamble). Without lut registration the ids print as
+                // hex hashes — invalid identifiers starting with digits.
+                id_lut!(_mp_unpack2f16);
+                id_lut!(_mp_unpack4u8);
             }
             Self::Wgsl => {
+                id_lut!(_mp_unpack2f16);
+                id_lut!(_mp_unpack4u8);
                 // Builtin function names
                 id_lut!(dpdx);
                 id_lut!(dpdy);
