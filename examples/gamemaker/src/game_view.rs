@@ -14,7 +14,6 @@
 // port lands; the script API below is the stable surface.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -24,6 +23,16 @@ use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use makepad_widgets::makepad_script::numeric::NumericValue;
 use makepad_widgets::widget_async::{CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID};
 use makepad_widgets::*;
+
+// The simulation core lives in makepad-game-sim now (M0 stage A extraction,
+// game.md): entity/terrain/world data, the fixed-step physics and the spatial
+// queries moved there verbatim. This file keeps the host: script isolate,
+// verb dispatch, rendering, input devices, agent RPC.
+use makepad_game_sim::{
+    camera_boom_limit, camera_shake_offset, collect_touches, step_world, world_raycast, Beam,
+    BodyKind, CallbackSlot, Entity, GameTimer, GameWorld, HudAnchor, HudBar, HudSlot, LabelDef,
+    PadState, Part, SaveVal, Shape, SkyConfig, Terrain, TERRAIN_ID, TICK_DT,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -243,7 +252,6 @@ pub struct DrawGameTerrain {
     pub fog_density: f32,
 }
 
-const TICK_DT: f32 = 1.0 / 60.0;
 const EVAL_INSTRUCTION_LIMIT: usize = 2_000_000;
 const TICK_INSTRUCTION_LIMIT: usize = 500_000;
 const AGENT_POLL_TICKS: u64 = 15;
@@ -282,364 +290,7 @@ fn perf_us(t0: std::time::Instant) -> u64 {
     t0.elapsed().as_micros() as u64
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum BodyKind {
-    /// Doesn't move on its own; the world for everything else to stand on.
-    Static,
-    /// Script-driven velocity, no gravity, no collision response on itself.
-    /// Moving platforms; things standing on it are carried.
-    Kinematic,
-    /// Gravity + collides with static/kinematic. Players and NPCs.
-    Mover,
-}
 
-/// Visual shape of an entity or part. Physics stays the entity's AABB — the
-/// same approximation the Godot corpus made (collision boxes under any model).
-/// Each shape is a shared unit geometry; rendering batches per shape, so a
-/// mixed scene still costs one draw call per shape per pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Shape {
-    Box = 0,
-    Sphere = 1,
-    Cylinder = 2,
-    Cone = 3,
-    Wedge = 4,
-}
-
-impl Shape {
-    pub const ALL: [Shape; 5] = [
-        Shape::Box,
-        Shape::Sphere,
-        Shape::Cylinder,
-        Shape::Cone,
-        Shape::Wedge,
-    ];
-
-    pub fn index(self) -> usize {
-        match self {
-            Shape::Box => 0,
-            Shape::Sphere => 1,
-            Shape::Cylinder => 2,
-            Shape::Cone => 3,
-            Shape::Wedge => 4,
-        }
-    }
-
-    pub fn parse(name: &str) -> Shape {
-        match name {
-            "sphere" | "ball" => Shape::Sphere,
-            "cylinder" => Shape::Cylinder,
-            "cone" => Shape::Cone,
-            "wedge" | "ramp" => Shape::Wedge,
-            _ => Shape::Box,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Entity {
-    pub id: u64,
-    pub kind: BodyKind,
-    pub pos: Vec3f,
-    pub vel: Vec3f,
-    pub half: Vec3f,
-    pub color: Vec4f,
-    pub tag: String,
-    pub sensor: bool,
-    /// `collide: false` = opaque decoration: renders like a solid, but no
-    /// physics, no touch reports (rotated road slabs, arches, scenery).
-    /// Distinct from `sensor`, which is translucent AND reports touches.
-    pub collide: bool,
-    pub gravity_scale: f32,
-    pub on_floor: bool,
-    /// Entity id this mover rests on (for kinematic carry), 0 = none.
-    pub floor_id: u64,
-    /// Riding another entity (vehicle seats): physics skips this mover and
-    /// pins it to the owner at the given offset. 0 = free.
-    pub attached_to: u64,
-    pub attach_offset: Vec3f,
-    /// Ride mode ("ride" vs the default "seat"): a latched rider (headcrab).
-    /// Seat riders face where their owner faces; ride riders spin their model
-    /// at `attach_spin` rad/s (the scrabbling).
-    pub attach_ride: bool,
-    pub attach_spin: f32,
-    /// Engine-side scale on game.walk velocities (headcrab debuff): the
-    /// player script never needs to know something slowed it down.
-    pub speed_mult: f32,
-    /// Seconds until auto-removal; 0 = forever. Projectiles.
-    pub life: f32,
-    /// Report contacts with every other solid entity through on_touch
-    /// (movers pass through each other spatially, but a `hits` entity still
-    /// sees the overlap; wall stops from the sweep are reported too).
-    pub hits: bool,
-    /// Transient: solid id a `hits` entity swept into this tick.
-    pub hit_wall: u64,
-    /// Visual model yaw (radians). Physics stays an unrotated AABB — Godot's
-    /// CharacterBody does exactly the same: only the Model child rotates.
-    pub yaw: f32,
-    /// Movers turn to face their walk direction unless the script took over
-    /// with game.face().
-    pub auto_face: bool,
-    /// Radians/second toward the facing target (Godot actors used 5.5–10).
-    pub turn_rate: f32,
-    /// Visual model scale (physics half untouched); lerped toward the target
-    /// like Godot's `_model.scale.lerp(target, delta*6)` curls.
-    pub scale: Vec3f,
-    pub scale_target: Vec3f,
-    /// Emission energy: 0 = matte, ~3 = glowing eyes, ramps at runtime.
-    pub glow: f32,
-    /// Visual-only shape; collision stays the AABB.
-    pub shape: Shape,
-}
-
-/// A purely visual box welded to an entity — eyes, arms, hats. No collision,
-/// no physics. Offsets/rotation are OWNER-LOCAL (front at -z) and rotate/scale
-/// with the owner's model; gone when the owner goes. Each field pairs with a
-/// target the engine lerps toward (game.move_part), which is how arms reach.
-#[derive(Clone)]
-pub struct Part {
-    pub id: u64,
-    pub owner: u64,
-    pub offset: Vec3f,
-    pub rot: Vec3f,
-    pub half: Vec3f,
-    pub target_offset: Vec3f,
-    pub target_rot: Vec3f,
-    pub target_half: Vec3f,
-    /// Lerp rate/second (Godot's arm reach used ~9).
-    pub rate: f32,
-    pub color: Vec4f,
-    pub glow: f32,
-    pub shape: Shape,
-    /// True while easing toward targets (game.move_part re-arms it). Settled
-    /// parts skip the easing math AND stay eligible for the static slab.
-    pub anim_active: bool,
-}
-
-/// Smooth heightfield: vertex heights on an N×N grid (row-major z*cells+x),
-/// rendered as one triangulated mesh (flat per-tri normals, Godot-style) and
-/// collided by height lookup instead of per-column AABBs.
-#[derive(Clone)]
-pub struct Terrain {
-    /// Vertices per side (the API's `cells` value).
-    pub cells: usize,
-    pub cell_size: f32,
-    /// World x/z of vertex (0,0); the grid is square and centered.
-    pub origin: f32,
-    pub heights: Vec<f32>,
-    pub colors: Vec<Vec4f>,
-    /// Bumped on every rebuild so the GPU mesh regenerates lazily.
-    pub revision: u64,
-}
-
-/// Reported as the hit id when a sweep stops against the terrain.
-pub const TERRAIN_ID: u64 = u64::MAX;
-
-impl Terrain {
-    /// Piecewise-planar ground height at (x, z): the two triangles per cell,
-    /// same split the mesh uses, so collision and pixels agree. None outside.
-    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
-        let fx = (x - self.origin) / self.cell_size;
-        let fz = (z - self.origin) / self.cell_size;
-        if fx < 0.0 || fz < 0.0 {
-            return None;
-        }
-        let max = (self.cells - 1) as f32;
-        if fx >= max || fz >= max {
-            return None;
-        }
-        let ix = fx.floor() as usize;
-        let iz = fz.floor() as usize;
-        let u = fx - ix as f32;
-        let v = fz - iz as f32;
-        let h = |gx: usize, gz: usize| self.heights[gz * self.cells + gx];
-        let (h00, h10, h01, h11) = (h(ix, iz), h(ix + 1, iz), h(ix, iz + 1), h(ix + 1, iz + 1));
-        Some(if u + v < 1.0 {
-            h00 + (h10 - h00) * u + (h01 - h00) * v
-        } else {
-            h11 + (h01 - h11) * (1.0 - u) + (h10 - h11) * (1.0 - v)
-        })
-    }
-
-    /// Surface normal of the triangle under (x, z) — the SAME triangle
-    /// height_at picks, so cars can align to the slope they collide with.
-    pub fn normal_at(&self, x: f32, z: f32) -> Option<Vec3f> {
-        let fx = (x - self.origin) / self.cell_size;
-        let fz = (z - self.origin) / self.cell_size;
-        if fx < 0.0 || fz < 0.0 {
-            return None;
-        }
-        let max = (self.cells - 1) as f32;
-        if fx >= max || fz >= max {
-            return None;
-        }
-        let ix = fx.floor() as usize;
-        let iz = fz.floor() as usize;
-        let u = fx - ix as f32;
-        let v = fz - iz as f32;
-        let h = |gx: usize, gz: usize| self.heights[gz * self.cells + gx];
-        let s = self.cell_size;
-        let x0 = self.origin + ix as f32 * s;
-        let z0 = self.origin + iz as f32 * s;
-        // Same diagonal split as height_at / the mesh.
-        let (a, b, c) = if u + v < 1.0 {
-            (
-                vec3f(x0, h(ix, iz), z0),
-                vec3f(x0 + s, h(ix + 1, iz), z0),
-                vec3f(x0, h(ix, iz + 1), z0 + s),
-            )
-        } else {
-            (
-                vec3f(x0 + s, h(ix + 1, iz + 1), z0 + s),
-                vec3f(x0, h(ix, iz + 1), z0 + s),
-                vec3f(x0 + s, h(ix + 1, iz), z0),
-            )
-        };
-        let normal = Vec3f::cross(b - a, c - a);
-        let normal = if normal.y < 0.0 { normal * -1.0 } else { normal };
-        let len = normal.length();
-        if len <= 1.0e-6 {
-            return Some(vec3f(0.0, 1.0, 0.0));
-        }
-        Some(normal * (1.0 / len))
-    }
-
-    /// Max ground height under an AABB footprint (corners + center) — what a
-    /// box standing here rests on.
-    pub fn floor_under(&self, pos: Vec3f, half: Vec3f) -> Option<f32> {
-        let probes = [
-            (pos.x, pos.z),
-            (pos.x - half.x, pos.z - half.z),
-            (pos.x + half.x, pos.z - half.z),
-            (pos.x - half.x, pos.z + half.z),
-            (pos.x + half.x, pos.z + half.z),
-        ];
-        let mut best: Option<f32> = None;
-        for (x, z) in probes {
-            if let Some(h) = self.height_at(x, z) {
-                best = Some(best.map_or(h, |b: f32| b.max(h)));
-            }
-        }
-        best
-    }
-}
-
-/// Immediate-mode stretched box between two points (grapple cables, lasers,
-/// tow ropes). Scripts re-issue it every tick from on_tick; anything not
-/// re-issued is gone next tick — no lifecycle to leak.
-#[derive(Clone, Copy)]
-pub struct Beam {
-    pub from: Vec3f,
-    pub to: Vec3f,
-    /// Full thickness of the cable box.
-    pub size: f32,
-    pub color: Vec4f,
-    pub glow: f32,
-}
-
-/// Where a HUD slot pins to the pane. Slots sharing an anchor stack downward
-/// in insertion order.
-#[derive(Clone, Copy, PartialEq, Default)]
-pub enum HudAnchor {
-    TopLeft,
-    Top,
-    TopRight,
-    #[default]
-    Center,
-    BottomLeft,
-    Bottom,
-    BottomRight,
-}
-
-impl HudAnchor {
-    fn parse(name: &str) -> HudAnchor {
-        match name {
-            "top_left" => HudAnchor::TopLeft,
-            "top" => HudAnchor::Top,
-            "top_right" => HudAnchor::TopRight,
-            "bottom_left" => HudAnchor::BottomLeft,
-            "bottom" => HudAnchor::Bottom,
-            "bottom_right" => HudAnchor::BottomRight,
-            _ => HudAnchor::Center,
-        }
-    }
-}
-
-/// One line of screen text. `size`/`color.w` of 0 mean "use the slot default".
-#[derive(Clone, Default)]
-pub struct HudSlot {
-    pub text: String,
-    pub color: Vec4f,
-    pub size: f32,
-    pub anchor: HudAnchor,
-}
-
-/// A HUD gauge (speedometer, boost). Fraction 0..1 fills left to right.
-#[derive(Clone)]
-pub struct HudBar {
-    pub name: String,
-    pub fraction: f32,
-    pub color: Vec4f,
-    pub anchor: HudAnchor,
-}
-
-/// A billboard nametag. Each entity has at most one DEFAULT label (the plain
-/// `game.label(id, text)` form) plus any number of extra ones ("HELP!").
-#[derive(Clone)]
-pub struct LabelDef {
-    pub lid: u64,
-    pub owner: u64,
-    pub text: String,
-    /// Height above the entity center; NAN = auto (half.y + 0.7).
-    pub height: f32,
-    /// w = 0 → style default color.
-    pub color: Vec4f,
-    /// 0 → style default size.
-    pub size: f32,
-    pub default: bool,
-}
-
-/// Sky + atmosphere, set from script with game.sky({...}). Off by default so
-/// existing indoor/abstract games keep their dark backdrop.
-#[derive(Clone, Copy)]
-pub struct SkyConfig {
-    pub top: Vec4f,
-    pub horizon: Vec4f,
-    pub ground: Vec4f,
-    pub ground_bottom: Vec4f,
-    /// Exponential distance-fog density toward the horizon color.
-    pub fog: f32,
-}
-
-impl Default for SkyConfig {
-    fn default() -> Self {
-        // The Godot game's ProceduralSkyMaterial numbers.
-        Self {
-            top: vec4(0.32, 0.58, 0.9, 1.0),
-            horizon: vec4(0.75, 0.87, 0.96, 1.0),
-            ground: vec4(0.68, 0.75, 0.66, 1.0),
-            ground_bottom: vec4(0.3, 0.4, 0.3, 1.0),
-            fog: 0.004,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct GameTimer {
-    id: u64,
-    at_tick: u64,
-    /// 0 = one-shot (game.after); N = re-arm every N ticks (game.every).
-    interval_ticks: u64,
-    func: ScriptObjectRef,
-}
-
-/// One persisted save value (game.save/game.load). Numbers and strings only —
-/// enough for best laps, high scores, unlocked things.
-#[derive(Clone)]
-pub enum SaveVal {
-    Num(f64),
-    Str(String),
-}
 
 /// Serialized form of the save map (micro_serde has no HashMap support).
 #[derive(SerJson, DeJson, Default)]
@@ -683,389 +334,64 @@ struct PeekRun {
     next_at_tick: u64,
 }
 
-/// Everything the script API reads/writes. Shared (Rc<RefCell>) between the
-/// widget and the native `game` handle registered into the isolate, so script
-/// calls mutate it synchronously — no async widget trampoline, deterministic
-/// ordering, and world-building during eval completes before eval returns.
+
+
+/// Host-side slot table mapping the sim's opaque `CallbackSlot`s to script
+/// closures (the sim never holds a ScriptObjectRef — game.md). Entries are
+/// tagged with the eval generation that allocated them: a successful eval
+/// frees every earlier generation (that world is gone), a failed eval frees
+/// exactly the generation it created (the world rolled back to the snapshot,
+/// whose slots are older). Point frees happen at replace/cancel/one-shot
+/// sites, where the slot index is known-live.
 #[derive(Default)]
-pub struct GameWorld {
-    pub entities: Vec<Entity>,
-    next_id: u64,
-    pub gravity: f32,
-    on_tick: Option<ScriptObjectRef>,
-    on_touch: Option<ScriptObjectRef>,
-    timers: Vec<GameTimer>,
-    /// HUD text, keyed by slot name ("center"/"top"/"hint" + any the script
-    /// invents), each pinned to an anchor. Replace-on-set; empty text removes.
-    pub hud_slots: Vec<(String, HudSlot)>,
-    /// HUD gauges, keyed by name.
-    pub hud_bars: Vec<HudBar>,
-    pub crosshair: bool,
-    /// Camera requests from script.
-    pub cam_target: Vec3f,
-    pub cam_distance: f32,
-    pub cam_follow: u64,
-    pub cam_side: bool,
-    /// Third-person rig: pivot entity (0 = off), pivot height, boom length.
-    pub cam_third: u64,
-    pub cam_height: f32,
-    pub cam_boom: f32,
-    /// Chase rig (camera({chase: id})): renders exactly like third_person
-    /// (setting chase also sets cam_third) but additionally eases the orbit
-    /// yaw to sit BEHIND the target every tick. Authority: script write >
-    /// mouse this-tick > rig easing. 0 = off (mouse owns the orbit again).
-    pub cam_chase: u64,
-    /// Ease time-constant in seconds (smaller = tighter).
-    pub cam_lag: f32,
-    /// Seconds of mouse authority after a drag ends before the rig resumes.
-    pub cam_recenter: f32,
-    /// Scales the ease rate up with target speed: rate = (1/lag)·(1+speed·this).
-    pub cam_speed_tighten: f32,
-    /// One-shot angle sets from script, consumed by the widget next tick —
-    /// the writable half of the chase-cam API (the mouse owns the angles
-    /// otherwise, so writes go through the same authoritative widget state).
-    pub cam_pitch_request: Option<f32>,
-    pub cam_yaw_request: Option<f32>,
-    /// Widget state mirrored into the world each tick, so scripts can read
-    /// the full camera pose and hand control back gracefully after drags.
-    pub cam_pitch: f32,
-    pub cam_dragging: bool,
-    /// Mouse orbit delta accumulated since the last tick (0 while not
-    /// dragging, always 0 under tapes).
-    pub look_dx: f64,
-    pub look_dy: f64,
-    /// Vertical field of view (degrees). Racing games widen it with speed.
-    pub cam_fov: f32,
-    /// Decaying random camera offset amplitude (game.cam_shake).
-    pub cam_shake: f32,
-    /// game.save/game.load persistence. NOT cleared on eval — surviving
-    /// edits is the whole point (best laps). Loaded from save_path at
-    /// project switch; flushed by the widget at most once a second.
-    pub save_data: std::collections::HashMap<String, SaveVal>,
-    pub save_path: Option<PathBuf>,
-    pub save_dirty: bool,
-    /// Immediate-mode cables, cleared at the top of every tick.
-    pub beams: Vec<Beam>,
-    /// Input state, written by the ActionMap / tape, read by script.
-    held: HashSet<LiveId>,
-    pressed: HashSet<LiveId>,
-    /// Gamepad state, merged with the keyboard at read time (never into
-    /// `held`, so a pad release can't cancel a held key). Stick is analog.
-    pad: PadState,
-    /// Decoration: visual-only child boxes and billboard nametags.
-    pub parts: Vec<Part>,
-    pub labels: Vec<LabelDef>,
-    /// Smooth heightfield ground (game.terrain smooth mode).
-    pub terrain: Option<Terrain>,
-    /// Sky/fog, enabled by game.sky().
-    pub sky: Option<SkyConfig>,
-    /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
-    /// camera-relative movement ("run where the camera looks").
-    pub cam_yaw: f32,
-    /// Seeded per eval, so wander AI is repeatable under input tapes — an
-    /// improvement over the Godot corpus, which called randomize().
-    rng: u64,
-    pub tick: u64,
-    pub time: f64,
-    log_pending: Vec<String>,
-    /// PERF: bumped whenever anything a STATIC entity contributes to the
-    /// screen changes (spawn/remove/restyle/sky). The renderer caches packed
-    /// instance slabs for static content keyed by this — bump it or your
-    /// static edit won't show.
-    pub render_rev: u64,
+struct CallbackTable {
+    entries: Vec<Option<(u64, ScriptObjectRef)>>,
+    free: Vec<u32>,
 }
 
-#[derive(Default, Clone, Copy)]
-pub struct PadState {
-    pub axis_x: f64,
-    pub axis_z: f64,
-    pub jump: bool,
-    pub jump_pressed: bool,
-    pub shoot: bool,
-    pub shoot_pressed: bool,
-    pub grab: bool,
-    pub grab_pressed: bool,
-    /// Gamepad Y — the "reset my car" action (keyboard R).
-    pub reset: bool,
-    pub reset_pressed: bool,
-}
-
-impl GameWorld {
-    /// Keyboard OR gamepad. The pad's stick maps onto the four directions at
-    /// half deflection so `held("left")` works the same on both.
-    fn action_held(&self, action: LiveId) -> bool {
-        if self.held.contains(&action) {
-            return true;
-        }
-        match action {
-            x if x == live_id!(jump) => self.pad.jump,
-            x if x == live_id!(shoot) => self.pad.shoot,
-            x if x == live_id!(grab) => self.pad.grab,
-            x if x == live_id!(reset) => self.pad.reset,
-            x if x == live_id!(left) => self.pad.axis_x < -0.5,
-            x if x == live_id!(right) => self.pad.axis_x > 0.5,
-            x if x == live_id!(up) => self.pad.axis_z < -0.5,
-            x if x == live_id!(down) => self.pad.axis_z > 0.5,
-            _ => false,
+impl CallbackTable {
+    fn alloc(&mut self, generation: u64, func: ScriptObjectRef) -> CallbackSlot {
+        if let Some(index) = self.free.pop() {
+            self.entries[index as usize] = Some((generation, func));
+            CallbackSlot(index)
+        } else {
+            self.entries.push(Some((generation, func)));
+            CallbackSlot(self.entries.len() as u32 - 1)
         }
     }
 
-    fn action_pressed(&self, action: LiveId) -> bool {
-        if self.pressed.contains(&action) {
-            return true;
-        }
-        match action {
-            x if x == live_id!(jump) => self.pad.jump_pressed,
-            x if x == live_id!(shoot) => self.pad.shoot_pressed,
-            x if x == live_id!(grab) => self.pad.grab_pressed,
-            x if x == live_id!(reset) => self.pad.reset_pressed,
-            _ => false,
-        }
+    fn get(&self, slot: CallbackSlot) -> Option<ScriptObjectRef> {
+        self.entries
+            .get(slot.0 as usize)?
+            .as_ref()
+            .map(|(_, func)| func.clone())
     }
 
-    fn reset_content(&mut self) {
-        self.entities.clear();
-        self.parts.clear();
-        self.labels.clear();
-        self.terrain = None;
-        self.sky = None;
-        self.next_id = 0;
-        self.gravity = 30.0;
-        self.on_tick = None;
-        self.on_touch = None;
-        self.timers.clear();
-        self.hud_slots.clear();
-        self.hud_bars.clear();
-        self.crosshair = false;
-        self.beams.clear();
-        self.cam_target = vec3f(0.0, 2.0, 0.0);
-        self.cam_distance = 18.0;
-        self.cam_follow = 0;
-        self.cam_side = false;
-        self.cam_third = 0;
-        self.cam_height = 1.6;
-        self.cam_boom = 10.0;
-        self.cam_chase = 0;
-        self.cam_lag = 0.3;
-        self.cam_recenter = 1.2;
-        self.cam_speed_tighten = 0.0;
-        self.cam_pitch_request = None;
-        self.cam_yaw_request = None;
-        self.cam_fov = 40.0;
-        self.cam_shake = 0.0;
-        self.rng = 0x9E37_79B9_7F4A_7C15;
-        // The doc contract: game.time() restarts at 0 on every reload. The
-        // tick counter stays monotonic (log stamps, timer scheduling).
-        // save_data deliberately survives — that's what game.save is FOR.
-        self.time = 0.0;
-        // A rebuilt world must never inherit a stuck engine hum either.
-        crate::synth::stop_all_tones();
-        // A rebuilt world must never alias a previous world's slab revision.
-        self.mark_render_dirty();
-    }
-
-    /// Find a HUD slot by name (mut), or None.
-    fn hud_slot_mut(&mut self, name: &str) -> Option<&mut HudSlot> {
-        self.hud_slots
-            .iter_mut()
-            .find(|(n, _)| n == name)
-            .map(|(_, s)| s)
-    }
-
-    fn rand(&mut self) -> f64 {
-        // xorshift64* — cheap, deterministic, plenty for wander timers.
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 7;
-        self.rng ^= self.rng << 17;
-        (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    fn entity(&self, id: u64) -> Option<&Entity> {
-        self.entities.iter().find(|e| e.id == id)
-    }
-
-    fn entity_mut(&mut self, id: u64) -> Option<&mut Entity> {
-        self.entities.iter_mut().find(|e| e.id == id)
-    }
-
-    fn log(&mut self, line: String) {
-        self.log_pending.push(line);
-    }
-
-    /// See `render_rev`. Call after mutating anything static-visible.
-    fn mark_render_dirty(&mut self) {
-        self.render_rev = self.render_rev.wrapping_add(1);
-    }
-
-    /// Does a mutation of this entity id invalidate the static slab?
-    fn is_static_visual(&self, id: u64) -> bool {
-        self.entity(id).map_or(false, |e| e.kind == BodyKind::Static)
-    }
-}
-
-/// Decaying random camera offset (game.cam_shake). Hash of the tick, NOT the
-/// world rng — pixels may wobble, simulation must not. Pinned to zero in tapes.
-fn camera_shake_offset(world: &GameWorld, in_test: bool) -> Vec3f {
-    if in_test || world.cam_shake <= 0.001 {
-        return vec3f(0.0, 0.0, 0.0);
-    }
-    let mut h = world.tick.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h ^= h >> 33;
-    let fx = ((h & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
-    let fy = (((h >> 16) & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
-    let fz = (((h >> 32) & 0xFFFF) as f32 / 65535.0) * 2.0 - 1.0;
-    vec3f(fx, fy, fz) * world.cam_shake * 0.35
-}
-
-/// game.raycast: march a ray against the terrain heightfield and every solid
-/// AABB (sensors skipped; `collide:false` decor IS hit — it's visually solid,
-/// and the grapple/AI wall-senses should see it). Returns (id, point, normal,
-/// distance); TERRAIN_ID for ground hits.
-fn world_raycast(world: &GameWorld, from: Vec3f, dir: Vec3f, max: f32) -> Option<(u64, Vec3f, Vec3f, f32)> {
-    let len = dir.length();
-    if len <= 1.0e-6 || max <= 0.0 {
-        return None;
-    }
-    let dir = dir * (1.0 / len);
-    const STEP: f32 = 0.15;
-    let steps = ((max / STEP).ceil() as usize).max(1);
-    let mut prev = from;
-    for i in 1..=steps {
-        let t = (i as f32 * STEP).min(max);
-        let p = from + dir * t;
-        if let Some(terrain) = &world.terrain {
-            if let Some(h) = terrain.height_at(p.x, p.z) {
-                if p.y <= h {
-                    // Refine between prev and p for a tighter hit point.
-                    let hit = (prev + p) * 0.5;
-                    let normal = terrain
-                        .normal_at(hit.x, hit.z)
-                        .unwrap_or(vec3f(0.0, 1.0, 0.0));
-                    return Some((TERRAIN_ID, vec3f(hit.x, h, hit.z), normal, t));
-                }
-            }
-        }
-        for e in &world.entities {
-            if e.sensor {
-                continue;
-            }
-            if (p.x - e.pos.x).abs() < e.half.x
-                && (p.y - e.pos.y).abs() < e.half.y
-                && (p.z - e.pos.z).abs() < e.half.z
-            {
-                // Face normal: the axis the ray is deepest along, pushed
-                // back out — right for boxes, close enough for shapes.
-                let rel = p - e.pos;
-                let dx = (rel.x / e.half.x).abs();
-                let dy = (rel.y / e.half.y).abs();
-                let dz = (rel.z / e.half.z).abs();
-                let normal = if dx >= dy && dx >= dz {
-                    vec3f(rel.x.signum(), 0.0, 0.0)
-                } else if dy >= dz {
-                    vec3f(0.0, rel.y.signum(), 0.0)
-                } else {
-                    vec3f(0.0, 0.0, rel.z.signum())
-                };
-                let hit = (prev + p) * 0.5;
-                return Some((e.id, hit, normal, t));
-            }
-        }
-        prev = p;
-    }
-    None
-}
-
-/// How far the third-person boom may extend before hitting geometry: march
-/// from the pivot toward the camera and stop at terrain or any solid box.
-/// Entities tagged "scenery" are ignored (Godot keeps trees on a layer the
-/// camera ray never sees, so foliage doesn't yank the view in).
-fn camera_boom_limit(world: &GameWorld, pivot: Vec3f, dir: Vec3f, boom: f32) -> f32 {
-    const STEPS: i32 = 32;
-    for i in 1..=STEPS {
-        let t = boom * i as f32 / STEPS as f32;
-        let p = pivot + dir * t;
-        if let Some(terrain) = &world.terrain {
-            if let Some(h) = terrain.height_at(p.x, p.z) {
-                if p.y < h + 0.2 {
-                    return (t - 0.5).max(1.0);
-                }
-            }
-        }
-        for e in &world.entities {
-            if e.sensor || e.tag == "scenery" {
-                continue;
-            }
-            if !matches!(e.kind, BodyKind::Static | BodyKind::Kinematic) {
-                continue;
-            }
-            if (p.x - e.pos.x).abs() < e.half.x
-                && (p.y - e.pos.y).abs() < e.half.y
-                && (p.z - e.pos.z).abs() < e.half.z
-            {
-                return (t - 0.5).max(1.0);
+    fn free(&mut self, slot: CallbackSlot) {
+        if let Some(entry) = self.entries.get_mut(slot.0 as usize) {
+            if entry.take().is_some() {
+                self.free.push(slot.0);
             }
         }
     }
-    boom
-}
 
-fn axis_get(v: Vec3f, axis: usize) -> f32 {
-    match axis {
-        0 => v.x,
-        1 => v.y,
-        _ => v.z,
-    }
-}
-
-fn axis_set(v: &mut Vec3f, axis: usize, value: f32) {
-    match axis {
-        0 => v.x = value,
-        1 => v.y = value,
-        _ => v.z = value,
-    }
-}
-
-fn overlaps(a_pos: Vec3f, a_half: Vec3f, b_pos: Vec3f, b_half: Vec3f) -> bool {
-    (a_pos.x - b_pos.x).abs() < a_half.x + b_half.x
-        && (a_pos.y - b_pos.y).abs() < a_half.y + b_half.y
-        && (a_pos.z - b_pos.z).abs() < a_half.z + b_half.z
-}
-
-/// Move one axis and clamp against every solid; returns (clamped, hit_dir, hit_id).
-fn sweep_axis(
-    entities: &[Entity],
-    self_id: u64,
-    pos: Vec3f,
-    half: Vec3f,
-    axis: usize,
-    delta: f32,
-) -> (f32, f32, u64) {
-    let mut new_axis = axis_get(pos, axis) + delta;
-    let mut hit = 0.0f32;
-    let mut hit_id = 0u64;
-    for other in entities {
-        if other.id == self_id || other.sensor {
-            continue;
-        }
-        if !matches!(other.kind, BodyKind::Static | BodyKind::Kinematic) {
-            continue;
-        }
-        let mut probe = pos;
-        axis_set(&mut probe, axis, new_axis);
-        if overlaps(probe, half, other.pos, other.half) {
-            let gap = axis_get(half, axis) + axis_get(other.half, axis);
-            if delta > 0.0 {
-                new_axis = new_axis.min(axis_get(other.pos, axis) - gap);
-                hit = 1.0;
-                hit_id = other.id;
-            } else if delta < 0.0 {
-                new_axis = new_axis.max(axis_get(other.pos, axis) + gap);
-                hit = -1.0;
-                hit_id = other.id;
+    fn free_generation(&mut self, generation: u64) {
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if entry.as_ref().is_some_and(|(g, _)| *g == generation) {
+                *entry = None;
+                self.free.push(index as u32);
             }
         }
     }
-    (new_axis, hit, hit_id)
+
+    fn free_generations_before(&mut self, generation: u64) {
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if entry.as_ref().is_some_and(|(g, _)| *g < generation) {
+                *entry = None;
+                self.free.push(index as u32);
+            }
+        }
+    }
 }
 
 /// Snapshot taken before a re-eval so a broken script never replaces a
@@ -1077,8 +403,8 @@ struct WorldSnapshot {
     terrain: Option<Terrain>,
     sky: Option<SkyConfig>,
     gravity: f32,
-    on_tick: Option<ScriptObjectRef>,
-    on_touch: Option<ScriptObjectRef>,
+    on_tick: Option<CallbackSlot>,
+    on_touch: Option<CallbackSlot>,
     timers: Vec<GameTimer>,
     hud_slots: Vec<(String, HudSlot)>,
     hud_bars: Vec<HudBar>,
@@ -1170,6 +496,14 @@ pub struct GameView {
     slab_instance_count: u64,
     #[rust]
     world: Rc<RefCell<GameWorld>>,
+    /// Slot table for script callbacks (see CallbackTable). Shared with the
+    /// dispatch closure the same way `world` is.
+    #[rust]
+    callbacks: Rc<RefCell<CallbackTable>>,
+    /// Current eval generation, mirrored for the dispatch closure so runtime
+    /// callback registrations are tagged with the world that made them.
+    #[rust]
+    eval_gen_cell: Rc<std::cell::Cell<u64>>,
     #[rust]
     vm_id: SplashVmId,
     #[rust]
@@ -1370,6 +704,8 @@ impl GameView {
             self.register_game_handle(cx);
         }
         self.eval_generation += 1;
+        // Runtime registrations (dispatch) tag slots with this generation.
+        self.eval_gen_cell.set(self.eval_generation);
 
         // Last-good: keep a copy of the world; the eval rebuilds from scratch.
         let snapshot = {
@@ -1381,8 +717,8 @@ impl GameView {
                 terrain: world.terrain.take(),
                 sky: world.sky.take(),
                 gravity: world.gravity,
-                on_tick: world.on_tick.clone(),
-                on_touch: world.on_touch.clone(),
+                on_tick: world.on_tick,
+                on_touch: world.on_touch,
                 timers: std::mem::take(&mut world.timers),
                 hud_slots: std::mem::take(&mut world.hud_slots),
                 hud_bars: std::mem::take(&mut world.hud_bars),
@@ -1404,6 +740,9 @@ impl GameView {
             world.reset_content();
             snapshot
         };
+        // reset_content is pure sim now: the host stops sustained audio
+        // alongside it (a rebuilt world must never inherit a stuck hum).
+        crate::synth::stop_all_tones();
 
         let self_id = self.self_id();
         // The trailing "\n;" finalizes the stream: eval_with_append_source is a
@@ -1449,11 +788,19 @@ impl GameView {
         if errors.is_empty() {
             self.last_eval_ok = true;
             self.last_eval_error = None;
+            // The old world is gone for good: release every callback slot
+            // earlier generations registered (the snapshot is dropped below).
+            self.callbacks
+                .borrow_mut()
+                .free_generations_before(generation);
             let count = self.world.borrow().entities.len();
             self.append_log(&format!("eval #{generation}: ok, {count} entities"));
             self.write_agent_file("last_error.txt", "");
         } else {
             self.last_eval_ok = false;
+            // The failed eval's registrations die with it; the snapshot's
+            // (older-generation) slots stay live for the rollback below.
+            self.callbacks.borrow_mut().free_generation(generation);
             // Roll back so the kid keeps the world that worked.
             {
                 let mut world = self.world.borrow_mut();
@@ -1505,12 +852,14 @@ impl GameView {
     /// Register the synchronous `game` native handle into this view's isolate.
     fn register_game_handle(&mut self, cx: &mut Cx) {
         let world = self.world.clone();
+        let callbacks = self.callbacks.clone();
+        let eval_gen = self.eval_gen_cell.clone();
         let vm_id = self.vm_id;
         cx.with_script_vm_id(vm_id, |vm| {
             let game_type = vm.new_handle_type(id_lut!(game));
             let dispatch_world = world.clone();
             vm.set_handle_call(game_type, move |vm, args, method| {
-                game_dispatch(vm, &dispatch_world, args, method)
+                game_dispatch(vm, &dispatch_world, &callbacks, &eval_gen, args, method)
             });
             struct GameHandleGc;
             impl ScriptHandleGc for GameHandleGc {
@@ -1944,8 +1293,9 @@ impl GameView {
         // object so the hot path costs no cross-boundary calls.
         let (on_tick, input_snapshot) = {
             let world = self.world.borrow();
-            (world.on_tick.clone(), self.input_snapshot(&world))
+            (world.on_tick, self.input_snapshot(&world))
         };
+        let on_tick = on_tick.and_then(|slot| self.callbacks.borrow().get(slot));
         if let Some(on_tick) = on_tick {
             let t0 = std::time::Instant::now();
             self.call_script_fn2(cx, on_tick, ScriptValue::from_f64(TICK_DT as f64), input_snapshot);
@@ -1974,7 +1324,14 @@ impl GameView {
         if !due.is_empty() {
             let t0 = std::time::Instant::now();
             for timer in due {
-                self.call_script_fn0(cx, timer.func);
+                let func = self.callbacks.borrow().get(timer.func);
+                if let Some(func) = func {
+                    self.call_script_fn0(cx, func);
+                }
+                if timer.interval_ticks == 0 {
+                    // A fired one-shot releases its slot (repeats re-armed above).
+                    self.callbacks.borrow_mut().free(timer.func);
+                }
             }
             let us = perf_us(t0);
             self.perf.script_us += us;
@@ -1997,7 +1354,8 @@ impl GameView {
             let ch = self.perf_physics_channel(cx);
             cx.perf_monitor.add(ch, us);
         }
-        let on_touch = self.world.borrow().on_touch.clone();
+        let on_touch = self.world.borrow().on_touch;
+        let on_touch = on_touch.and_then(|slot| self.callbacks.borrow().get(slot));
         if let Some(on_touch) = on_touch {
             let t0 = std::time::Instant::now();
             for (a, b) in touch_events {
@@ -2107,20 +1465,29 @@ impl GameView {
             let args_obj = vm.bx.heap.new_object();
             vm.bx.heap.set_object_storage_vec2(args_obj);
             vm.bx.heap.clear_object_deep(args_obj);
+            // Host transients: unchecked pushes keep args/input releasable after
+            // the call (a checked store would tag them escaped). If the script
+            // retains either, release_transient no-ops and GC owns them.
+            let mut input_val = None;
             for value in args {
                 // NIL positional slots become the fresh input snapshot.
                 let value = if value.is_nil() {
-                    Self::build_input_object(vm, &world.borrow())
+                    let input = Self::build_input_object(vm, &world.borrow());
+                    input_val = Some(input);
+                    input
                 } else {
                     *value
                 };
-                let trap = vm.bx.threads.cur().trap.pass();
-                vm.bx.heap.vec_push(args_obj, NIL, value, trap);
+                vm.bx.heap.vec_push_unchecked(args_obj, NIL, value);
             }
             vm.bx.captured_errors = Some(Vec::new());
             let _ = vm.with_instruction_limit(TICK_INSTRUCTION_LIMIT, |vm| {
                 vm.call_with_args_object_with_me(func.as_object().into(), args_obj, NIL)
             });
+            vm.release_transient(args_obj.into());
+            if let Some(input) = input_val {
+                vm.release_transient(input);
+            }
             vm.take_errors()
         });
         if !errors.is_empty() {
@@ -3564,6 +2931,8 @@ fn spawn_terrain(
 fn game_dispatch(
     vm: &mut ScriptVm,
     world: &Rc<RefCell<GameWorld>>,
+    callbacks: &Rc<RefCell<CallbackTable>>,
+    eval_gen: &Rc<std::cell::Cell<u64>>,
     args: ScriptObject,
     method: LiveId,
 ) -> ScriptValue {
@@ -3917,7 +3286,23 @@ fn game_dispatch(
             vec3_value(vm, pos)
         }
         x if x == live_id!(reset) => {
-            world.borrow_mut().reset_content();
+            // Release this world's callback slots, then wipe. The synth stop
+            // moved host-side too (reset_content is pure sim now).
+            {
+                let mut world = world.borrow_mut();
+                let mut callbacks = callbacks.borrow_mut();
+                if let Some(slot) = world.on_tick.take() {
+                    callbacks.free(slot);
+                }
+                if let Some(slot) = world.on_touch.take() {
+                    callbacks.free(slot);
+                }
+                for timer in world.timers.drain(..) {
+                    callbacks.free(timer.func);
+                }
+                world.reset_content();
+            }
+            crate::synth::stop_all_tones();
             NIL
         }
         x if x == live_id!(gravity) => {
@@ -3927,12 +3312,23 @@ fn game_dispatch(
         }
         x if x == live_id!(on_tick) => {
             let func = arg(vm, args, 0);
-            world.borrow_mut().on_tick = fn_ref(vm, func);
+            let slot = fn_ref(vm, func)
+                .map(|func| callbacks.borrow_mut().alloc(eval_gen.get(), func));
+            let old = std::mem::replace(&mut world.borrow_mut().on_tick, slot);
+            if let Some(old) = old {
+                // Re-registration replaces: the previous closure is released.
+                callbacks.borrow_mut().free(old);
+            }
             NIL
         }
         x if x == live_id!(on_touch) => {
             let func = arg(vm, args, 0);
-            world.borrow_mut().on_touch = fn_ref(vm, func);
+            let slot = fn_ref(vm, func)
+                .map(|func| callbacks.borrow_mut().alloc(eval_gen.get(), func));
+            let old = std::mem::replace(&mut world.borrow_mut().on_touch, slot);
+            if let Some(old) = old {
+                callbacks.borrow_mut().free(old);
+            }
             NIL
         }
         x if x == live_id!(after) => {
@@ -3942,13 +3338,14 @@ fn game_dispatch(
             let mut world = world.borrow_mut();
             let at_tick = world.tick + (secs.max(0.0) / TICK_DT) as u64;
             if let Some(func) = func {
+                let slot = callbacks.borrow_mut().alloc(eval_gen.get(), func);
                 world.next_id += 1;
                 let id = world.next_id;
                 world.timers.push(GameTimer {
                     id,
                     at_tick,
                     interval_ticks: 0,
-                    func,
+                    func: slot,
                 });
                 return ScriptValue::from_f64(id as f64);
             }
@@ -3963,13 +3360,14 @@ fn game_dispatch(
             let interval_ticks = ((secs.max(0.02) / TICK_DT) as u64).max(1);
             let at_tick = world.tick + interval_ticks;
             if let Some(func) = func {
+                let slot = callbacks.borrow_mut().alloc(eval_gen.get(), func);
                 world.next_id += 1;
                 let id = world.next_id;
                 world.timers.push(GameTimer {
                     id,
                     at_tick,
                     interval_ticks,
-                    func,
+                    func: slot,
                 });
                 return ScriptValue::from_f64(id as f64);
             }
@@ -3977,7 +3375,17 @@ fn game_dispatch(
         }
         x if x == live_id!(cancel) => {
             let id = arg_id(vm, args, 0);
-            world.borrow_mut().timers.retain(|t| t.id != id);
+            let mut world = world.borrow_mut();
+            let mut callbacks = callbacks.borrow_mut();
+            world.timers.retain(|t| {
+                if t.id == id {
+                    // A cancelled timer releases its closure slot.
+                    callbacks.free(t.func);
+                    false
+                } else {
+                    true
+                }
+            });
             NIL
         }
         x if x == live_id!(walk) => {
@@ -4852,260 +4260,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-// ── physics ─────────────────────────────────────────────────────────────
-
-fn step_world(world: &mut GameWorld) {
-    let gravity = world.gravity;
-    let statics: Vec<Entity> = world
-        .entities
-        .iter()
-        // Sensors report touches but never collide; `collide: false` decor
-        // neither collides nor reports — both documented contracts.
-        .filter(|e| {
-            !e.sensor && e.collide && matches!(e.kind, BodyKind::Static | BodyKind::Kinematic)
-        })
-        .cloned()
-        .collect();
-    // Cloned like `statics` above: the mover loop holds &mut entities.
-    let terrain = world.terrain.clone();
-    /// A step this tall walks up for free (Godot floor snapping over the
-    /// terraced 0.5 steps); anything taller is a cliff wall.
-    const CLIMB: f32 = 0.55;
-
-    // Kinematics move first (script set their velocity).
-    for e in world.entities.iter_mut() {
-        if e.kind == BodyKind::Kinematic {
-            e.pos = e.pos + e.vel * TICK_DT;
-        }
-    }
-
-    for e in world.entities.iter_mut() {
-        if e.kind != BodyKind::Mover {
-            continue;
-        }
-        // Riders are pinned to their vehicle after this loop, not simulated.
-        if e.attached_to != 0 {
-            continue;
-        }
-        // Carried by the platform we stand on.
-        if e.on_floor && e.floor_id != 0 {
-            if let Some(base) = statics.iter().find(|s| s.id == e.floor_id) {
-                if base.kind == BodyKind::Kinematic {
-                    e.pos = e.pos + base.vel * TICK_DT;
-                }
-            }
-        }
-
-        e.vel.y -= gravity * e.gravity_scale * TICK_DT;
-
-        // Axis-separated sweeps: x, z, then y (so walking into a wall while
-        // falling doesn't stick, and floors resolve last for on_floor).
-        e.hit_wall = 0;
-        let feet = e.pos.y - e.half.y;
-        let (nx, hx, hx_id) = sweep_axis(&statics, e.id, e.pos, e.half, 0, e.vel.x * TICK_DT);
-        e.pos.x = nx;
-        if hx != 0.0 {
-            e.vel.x = 0.0;
-            e.hit_wall = hx_id;
-        }
-        // Terrain cliffs block sideways movement; steps ≤ CLIMB pass (the y
-        // pass snaps the mover up onto them).
-        if let Some(t) = &terrain {
-            if let Some(ground) = t.floor_under(e.pos, e.half) {
-                if ground > feet + CLIMB {
-                    e.pos.x = nx - e.vel.x * TICK_DT;
-                    e.vel.x = 0.0;
-                    if e.hit_wall == 0 {
-                        e.hit_wall = TERRAIN_ID;
-                    }
-                }
-            }
-        }
-        let (nz, hz, hz_id) = sweep_axis(&statics, e.id, e.pos, e.half, 2, e.vel.z * TICK_DT);
-        e.pos.z = nz;
-        if hz != 0.0 {
-            e.vel.z = 0.0;
-            if e.hit_wall == 0 {
-                e.hit_wall = hz_id;
-            }
-        }
-        if let Some(t) = &terrain {
-            if let Some(ground) = t.floor_under(e.pos, e.half) {
-                if ground > feet + CLIMB {
-                    e.pos.z = nz - e.vel.z * TICK_DT;
-                    e.vel.z = 0.0;
-                    if e.hit_wall == 0 {
-                        e.hit_wall = TERRAIN_ID;
-                    }
-                }
-            }
-        }
-        let (ny, hy, hy_id) = sweep_axis(&statics, e.id, e.pos, e.half, 1, e.vel.y * TICK_DT);
-        e.pos.y = ny;
-        e.on_floor = false;
-        e.floor_id = 0;
-        if hy != 0.0 {
-            if e.vel.y < 0.0 {
-                e.on_floor = true;
-                e.floor_id = hy_id;
-            }
-            e.vel.y = 0.0;
-            if e.hit_wall == 0 && e.hits {
-                // A lobbed projectile landing counts as a hit too.
-                e.hit_wall = hy_id;
-            }
-        }
-        // The terrain is a floor: feet never sink below the ground surface.
-        if let Some(t) = &terrain {
-            if let Some(ground) = t.floor_under(e.pos, e.half) {
-                let floor_y = ground + e.half.y;
-                if e.pos.y <= floor_y {
-                    e.pos.y = floor_y;
-                    if e.vel.y <= 0.0 {
-                        e.on_floor = true;
-                        e.floor_id = 0;
-                        if e.hit_wall == 0 && e.hits {
-                            e.hit_wall = TERRAIN_ID;
-                        }
-                        e.vel.y = 0.0;
-                    }
-                }
-            }
-        }
-    }
-
-    // Pin riders to their owners (vehicle seats, latched headcrabs). One pass
-    // after integration, same frame the owner moved — the Godot mount pattern.
-    let owner_pose: Vec<(u64, Vec3f, f32)> =
-        world.entities.iter().map(|e| (e.id, e.pos, e.yaw)).collect();
-    for e in world.entities.iter_mut() {
-        if e.attached_to == 0 {
-            continue;
-        }
-        if let Some((_, base, owner_yaw)) =
-            owner_pose.iter().find(|(id, _, _)| *id == e.attached_to)
-        {
-            e.pos = *base + e.attach_offset;
-            e.vel = vec3f(0.0, 0.0, 0.0);
-            if e.attach_ride {
-                // A latched rider scrabbles: its model spins in place.
-                e.yaw += e.attach_spin * TICK_DT;
-            } else {
-                // A seated passenger faces where the vehicle faces.
-                e.yaw = *owner_yaw;
-            }
-        } else {
-            // Owner despawned: let go rather than freezing in the air.
-            e.attached_to = 0;
-        }
-    }
-
-    // Visual animation: facing, model scale, part poses. Rendering-only
-    // state, but stepped with physics so input tapes replay identically.
-    for e in world.entities.iter_mut() {
-        if e.auto_face && e.kind == BodyKind::Mover {
-            let speed = (e.vel.x * e.vel.x + e.vel.z * e.vel.z).sqrt();
-            if speed > 0.2 {
-                // Godot's shared _drive(): face where you walk, turn-rate
-                // clamped, fronts at -z.
-                let want = (-e.vel.x).atan2(-e.vel.z);
-                let mut diff = want - e.yaw;
-                while diff > std::f32::consts::PI {
-                    diff -= std::f32::consts::TAU;
-                }
-                while diff < -std::f32::consts::PI {
-                    diff += std::f32::consts::TAU;
-                }
-                let max_turn = e.turn_rate * TICK_DT;
-                e.yaw += diff.clamp(-max_turn, max_turn);
-            }
-        }
-        let ease = (6.0 * TICK_DT).min(1.0);
-        e.scale = e.scale + (e.scale_target - e.scale) * ease;
-    }
-    // Part easing runs only while a move_part animation is live; on arrival the
-    // part snaps to its target and settles, making it slab-eligible again.
-    let mut settled_owners: Vec<u64> = Vec::new();
-    for part in world.parts.iter_mut() {
-        if !part.anim_active {
-            continue;
-        }
-        let ease = (part.rate * TICK_DT).min(1.0);
-        part.offset = part.offset + (part.target_offset - part.offset) * ease;
-        part.rot = part.rot + (part.target_rot - part.rot) * ease;
-        part.half = part.half + (part.target_half - part.half) * ease;
-        let remaining = (part.target_offset - part.offset).length()
-            + (part.target_rot - part.rot).length()
-            + (part.target_half - part.half).length();
-        if remaining < 1.0e-3 {
-            part.offset = part.target_offset;
-            part.rot = part.target_rot;
-            part.half = part.target_half;
-            part.anim_active = false;
-            settled_owners.push(part.owner);
-        }
-    }
-    if !settled_owners.is_empty()
-        && settled_owners.iter().any(|o| world.is_static_visual(*o))
-    {
-        // A static owner's decoration finished moving: it re-enters the slab.
-        world.mark_render_dirty();
-    }
-
-    // Projectile lifetimes: `life` seconds, then gone.
-    let mut expired = false;
-    for e in world.entities.iter_mut() {
-        if e.life > 0.0 {
-            e.life -= TICK_DT;
-            if e.life <= 0.0 {
-                e.life = f32::NEG_INFINITY;
-                expired = true;
-            }
-        }
-    }
-    if expired {
-        world.entities.retain(|e| e.life != f32::NEG_INFINITY);
-    }
-
-    // Decoration follows its owner out (lifetime, game.remove, whatever).
-    if !world.parts.is_empty() || !world.labels.is_empty() {
-        let ids: HashSet<u64> = world.entities.iter().map(|e| e.id).collect();
-        world.parts.retain(|p| ids.contains(&p.owner));
-        world.labels.retain(|l| ids.contains(&l.owner));
-    }
-}
-
-fn collect_touches(world: &GameWorld) -> Vec<(u64, u64)> {
-    let mut touches = Vec::new();
-    for sensor in world.entities.iter().filter(|e| e.sensor) {
-        for other in world.entities.iter().filter(|e| e.kind == BodyKind::Mover) {
-            if overlaps(sensor.pos, sensor.half, other.pos, other.half) {
-                touches.push((sensor.id, other.id));
-            }
-        }
-    }
-    // `hits` entities (projectiles) report movers/kinematics they overlap —
-    // movers pass through each other spatially, so overlap IS the hit — plus
-    // whatever solid the sweep stopped them against this tick.
-    for hitter in world.entities.iter().filter(|e| e.hits) {
-        if hitter.hit_wall != 0 {
-            touches.push((hitter.id, hitter.hit_wall));
-        }
-        for other in world.entities.iter() {
-            if other.id == hitter.id
-                || other.sensor
-                || other.hits
-                || !matches!(other.kind, BodyKind::Mover | BodyKind::Kinematic)
-            {
-                continue;
-            }
-            if overlaps(hitter.pos, hitter.half, other.pos, other.half) {
-                touches.push((hitter.id, other.id));
-            }
-        }
-    }
-    touches
-}
 
 // ── widget plumbing ─────────────────────────────────────────────────────
 
