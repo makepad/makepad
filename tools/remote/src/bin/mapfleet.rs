@@ -84,37 +84,6 @@ fn main() {
         .collect();
     std::fs::create_dir_all(&config.out).ok();
 
-    // Eager bootstrap: the boxes' first-time bake-tool compile (~10-15
-    // min) runs DURING the spool wait, so cells dispatch the moment the
-    // marker drops. Idempotent — the per-worker bootstrap no-ops after.
-    let mut eager: Vec<String> = config.hosts.clone();
-    if let Some(hosts_file) = &config.hosts_file {
-        if let Ok(text) = std::fs::read_to_string(hosts_file) {
-            for line in text.lines().map(str::trim) {
-                if !line.is_empty() && !line.starts_with('#') {
-                    eager.push(line.to_string());
-                }
-            }
-        }
-    }
-    eager.dedup();
-    for host in eager {
-        thread::spawn(move || {
-            println!("mapfleet: {host} eager bootstrap build");
-            match remote_run(&host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
-                Ok(0) => println!("mapfleet: {host} bootstrap ready"),
-                other => eprintln!("mapfleet: {host} eager bootstrap failed: {other:?}"),
-            }
-        });
-    }
-
-    // Wait for the spool if it has not finished yet.
-    let marker = config.store.join("SPOOL_COMPLETE");
-    while !marker.exists() {
-        println!("mapfleet: waiting for spool marker {}", marker.display());
-        thread::sleep(Duration::from_secs(120));
-    }
-
     let shared = Arc::new(Shared {
         cells,
         next: AtomicUsize::new(0),
@@ -228,6 +197,13 @@ fn parse_args() -> Result<Config, String> {
     Ok(config)
 }
 
+fn wait_for_spool(config: &Config) {
+    let marker = config.store.join("SPOOL_COMPLETE");
+    while !marker.exists() {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
 fn cell_paths(config: &Config, index: usize) -> (String, PathBuf, PathBuf) {
     let name = format!("cell-{:03}", index + 1);
     let base = config.out.join(format!("{name}-base.mbtiles"));
@@ -299,6 +275,7 @@ fn mark_empty(config: &Config, index: usize) {
 }
 
 fn local_worker(shared: &Shared, config: &Config) {
+    wait_for_spool(config);
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config) else {
             return;
@@ -339,12 +316,15 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
     // Bootstrap: build the bake tool on the box (no-op when cached).
     println!("mapfleet: {host} bootstrap build");
     match remote_run(host, &["build", "-p", "makepad-map-bake", "--release"], &[]) {
-        Ok(0) => {}
+        Ok(0) => println!("mapfleet: {host} bootstrap ready"),
         other => {
             eprintln!("mapfleet: {host} bootstrap failed ({other:?}) — worker disabled");
             return;
         }
     }
+    // Bootstrap runs pre-marker (warm compile during the spool wait);
+    // cell work gates on the honest marker like everyone else.
+    wait_for_spool(config);
     let mut pushed_bridge_dz = false;
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config) else {
