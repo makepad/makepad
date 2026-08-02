@@ -70,23 +70,7 @@ script_mod! {
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
 
         fragment: fn(){
-            // Tile crossfade as a DITHERED dissolve, not alpha: a semi-
-            // transparent incoming tile writes depth and lets the clear
-            // color bleed through the outgoing one — the arrival "flash".
-            // Surviving fragments stay fully opaque (correct depth, no
-            // bleed); coverage ramps with the fade via an ordered 4x4
-            // Bayer threshold, which the tilt-shift blur reads as smooth.
-            if self.tile_fade < 0.999 {
-                let cell = vec2(
-                    modf(floor(self.v_world.x), 4.0),
-                    modf(floor(self.v_world.y), 4.0)
-                )
-                let bayer = modf(cell.x * 4.0 + cell.y * 9.0 + cell.x * cell.y * 3.0, 16.0)
-                if (bayer + 0.5) / 16.0 > self.tile_fade {
-                    discard()
-                }
-            }
-            var color = self.pixel() * self.fill_pattern()
+            var color = self.pixel() * self.tile_fade * self.fill_pattern()
             color = self.material_fx(color)
             // Dashed tunnel gaps and the zero-coverage tails of analytic
             // vectors are transparent. Discard them before depth_clip so an
@@ -3129,6 +3113,10 @@ impl MapView {
                 icon_geometry: None,
             })
         };
+        // In an established 3D scene tiles snap in whole: any fade of
+        // opaque 3D reads as a flash (user call — fades are for 2D and
+        // for the one flat->3D mode reveal).
+        let fade = if three_d_established { None } else { fade };
         cx.stop_timer(self.tile_fade_timer);
         self.tile_fade_timer = cx.start_timeout(0.016);
 
