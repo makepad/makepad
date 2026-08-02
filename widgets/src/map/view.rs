@@ -2262,13 +2262,16 @@ impl Widget for MapView {
                                 volume_id,
                                 map_scale,
                                 screen_offset,
-                                fade_alpha * lod,
+                                fade_alpha,
                                 stroke_width_correction(entry.bucket, view_zoom),
                                 view_rot_uniform,
                                 rot_pivot_uniform,
                                 tilt_uniform,
                                 view_zoom as f32,
-                                if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                // Distance LOD sinks heights instead of
+                                // fading alpha: translucent buildings read
+                                // as broken; sinking reads as natural.
+                                lod * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
                                     fade_alpha
                                 } else {
                                     1.0
