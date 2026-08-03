@@ -16,37 +16,41 @@ use {
     unicode_segmentation::UnicodeSegmentation,
 };
 
-/// Returns `true` if `text` is guaranteed to contain no right-to-left
-/// characters, so that the Unicode Bidirectional Algorithm can be skipped
-/// entirely. False negatives (returning `false` for pure-LTR text containing
-/// characters in these blocks that happen to be non-RTL) are acceptable —
-/// we just run BiDi in that case. False positives would cause mis-rendering,
-/// so the ranges below are the full Unicode blocks that contain any strong
-/// RTL characters, rather than the exact RTL code points.
-fn is_definitely_ltr(text: &str) -> bool {
-    // Optimised common case: pure ASCII is always LTR, and `is_ascii` uses
-    // a SIMD-accelerated byte scan.
-    if text.is_ascii() {
-        return true;
+#[inline]
+fn ascii_cluster_index(bytes: &[u8], index: usize) -> usize {
+    if bytes[index] == b'\n' && index > 0 && bytes[index - 1] == b'\r' {
+        index - 1
+    } else {
+        index
     }
-    !text.chars().any(|c| {
-        let c = c as u32;
-        // BMP blocks containing any strong RTL characters: Hebrew, Arabic,
-        // Syriac, Thaana, NKo, Samaritan, Mandaic, Syriac Supplement and
-        // Arabic Extended-A/B.
-        (0x0590..=0x08FF).contains(&c)
-            // Alphabetic Presentation Forms (Hebrew ligatures) through
-            // Arabic Presentation Forms-A.
-            || (0xFB1D..=0xFDFF).contains(&c)
-            // Arabic Presentation Forms-B.
-            || (0xFE70..=0xFEFF).contains(&c)
-            // Ancient RTL scripts (Imperial Aramaic, Phoenician, etc.) in
-            // the Supplementary Multilingual Plane.
-            || (0x10800..=0x10FFF).contains(&c)
-            // More modern SMP RTL blocks (Mende Kikakui, Adlam, Arabic
-            // Mathematical Alphabetic Symbols, etc.).
-            || (0x1E800..=0x1EFFF).contains(&c)
-    })
+}
+
+fn can_skip_bidi(text: &str, direction: Direction) -> bool {
+    if direction != Direction::Ltr {
+        return false;
+    }
+    text.is_ascii()
+        || text.chars().all(|c| {
+            c.is_ascii()
+                || matches!(
+                    unicode_bidi::bidi_class(c),
+                    unicode_bidi::BidiClass::B
+                        | unicode_bidi::BidiClass::BN
+                        | unicode_bidi::BidiClass::CS
+                        | unicode_bidi::BidiClass::EN
+                        | unicode_bidi::BidiClass::ES
+                        | unicode_bidi::BidiClass::ET
+                        | unicode_bidi::BidiClass::L
+                        | unicode_bidi::BidiClass::NSM
+                        | unicode_bidi::BidiClass::ON
+                        | unicode_bidi::BidiClass::S
+                        | unicode_bidi::BidiClass::WS
+                )
+        })
+}
+
+fn can_skip_visual_runs(direction: Direction, is_pure_ltr: bool) -> bool {
+    direction == Direction::Ltr && is_pure_ltr
 }
 
 /// Float wrapper that supports Hash and Eq via bit representation.
@@ -164,12 +168,9 @@ impl Shaper {
             println!("WARNING: encountered empty font family");
         } else {
             let text: &str = &params.text;
-            // Fast path: when the text is guaranteed to contain no RTL
-            // characters, skip the Unicode Bidirectional Algorithm entirely
-            // and shape as a single LTR run. This avoids BiDi's classification
-            // pass and vec allocations for the common case of ASCII / Latin /
-            // Greek / Cyrillic / CJK / emoji text.
-            if is_definitely_ltr(text) {
+            // Explicit LTR text whose bidi classes cannot alter embedding
+            // levels or visual run order can be shaped as one LTR run.
+            if can_skip_bidi(text, params.direction) {
                 self.shape_recursive(
                     text,
                     &params.fonts[0],
@@ -181,17 +182,14 @@ impl Shaper {
                     &mut glyphs,
                 );
             } else {
-                // The text contains at least one possibly-RTL character, so
-                // run the Unicode Bidirectional Algorithm to resolve embedding
-                // levels and segment the text into visual runs. Shaping each
-                // run in its resolved direction keeps mixed LTR/RTL strings
-                // from stomping on each other visually.
+                // Text with bidi-sensitive classes and explicit RTL direction require
+                // the Unicode Bidirectional Algorithm to resolve levels and runs.
                 let default_level = match params.direction {
                     Direction::Ltr => Some(unicode_bidi::Level::ltr()),
                     Direction::Rtl => Some(unicode_bidi::Level::rtl()),
                 };
                 let bidi = unicode_bidi::ParagraphBidiInfo::new(text, default_level);
-                if bidi.is_pure_ltr {
+                if can_skip_visual_runs(params.direction, bidi.is_pure_ltr) {
                     // BiDi confirmed everything resolved to LTR after all
                     // (e.g. isolated presentation-form characters), so a
                     // single LTR shape call is still correct and avoids the
@@ -383,10 +381,19 @@ impl Shaper {
             Direction::Ltr => unicode_buffer.set_direction(rustybuzz::Direction::LeftToRight),
             Direction::Rtl => unicode_buffer.set_direction(rustybuzz::Direction::RightToLeft),
         }
-        for (index, grapheme) in text[start..end].grapheme_indices(true) {
-            let cluster = start + index;
-            for char in grapheme.chars() {
-                unicode_buffer.add(char, cluster as u32);
+        let text_run = &text[start..end];
+        if text_run.is_ascii() {
+            let bytes = text_run.as_bytes();
+            for (index, &byte) in bytes.iter().enumerate() {
+                let index = ascii_cluster_index(bytes, index);
+                unicode_buffer.add(byte as char, (start + index) as u32);
+            }
+        } else {
+            for (index, grapheme) in text_run.grapheme_indices(true) {
+                let cluster = start + index;
+                for char in grapheme.chars() {
+                    unicode_buffer.add(char, cluster as u32);
+                }
             }
         }
         // Convert the caller's `(tag, value)` feature pairs into rustybuzz's
@@ -464,4 +471,96 @@ pub struct ShapedGlyph {
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ascii_cluster_index, can_skip_bidi, can_skip_visual_runs, Direction, Ems, ShapeParams,
+        Settings, Shaper,
+    };
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{
+            font::{Font, FontId},
+            font_face::FontFace,
+            layouter,
+            rasterizer::Rasterizer,
+        },
+    };
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    fn test_font() -> Rc<Font> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../widgets/resources/IBMPlexSans-Text.ttf");
+        let data = SharedBytes::from_file_mmap_or_read(path).expect("font bytes should load");
+        Rc::new(Font::new(
+            FontId::from(0xB1_D1_u64),
+            Rc::new(RefCell::new(Rasterizer::new(
+                layouter::Settings::default().loader.rasterizer,
+            ))),
+            FontFace::from_data_and_index(data, 0).expect("font face should load"),
+            0.0,
+            0.0,
+        ))
+    }
+
+    #[test]
+    fn ascii_crlf_keeps_reference_grapheme_cluster() {
+        let text = "\r\n";
+        let expected: Vec<_> = text
+            .grapheme_indices(true)
+            .flat_map(|(cluster, grapheme)| grapheme.bytes().map(move |_| cluster))
+            .collect();
+        let actual: Vec<_> = (0..text.len())
+            .map(|index| ascii_cluster_index(text.as_bytes(), index))
+            .collect();
+
+        assert_eq!(expected, vec![0, 0]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bidi_shortcut_accepts_ltr_text_without_bidi_controls() {
+        assert!(can_skip_bidi("plain ASCII", Direction::Ltr));
+        assert!(can_skip_bidi("caf\u{e9}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{6f22}\u{5b57}", Direction::Ltr));
+        assert!(can_skip_bidi("\u{1f44b}", Direction::Ltr));
+        assert!(!can_skip_bidi("plain ASCII", Direction::Rtl));
+        assert!(!can_skip_bidi("\u{5d0}\u{5d1}\u{5d2}", Direction::Ltr));
+        assert!(!can_skip_bidi("\u{645}\u{631}\u{62d}\u{628}\u{627}", Direction::Ltr));
+        assert!(!can_skip_bidi("\u{200F}", Direction::Ltr));
+        assert!(!can_skip_bidi("\u{202E}", Direction::Ltr));
+        assert!(!can_skip_bidi("\u{2067}", Direction::Ltr));
+    }
+
+    #[test]
+    fn visual_run_shortcut_requires_ltr_direction() {
+        assert!(can_skip_visual_runs(Direction::Ltr, true));
+        assert!(!can_skip_visual_runs(Direction::Rtl, true));
+        assert!(!can_skip_visual_runs(Direction::Ltr, false));
+    }
+
+    #[test]
+    fn rtl_ascii_uses_requested_base_direction() {
+        let shaped = Shaper::new(Settings { cache_size: 0 }).shape(ShapeParams {
+            text: "()".into(),
+            fonts: Rc::from(vec![test_font()]),
+            direction: Direction::Rtl,
+            letter_spacing: Ems::default(),
+            word_spacing: Ems::default(),
+            features: Rc::new(Vec::new()),
+        });
+
+        assert_eq!(
+            shaped
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.cluster)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+    }
 }

@@ -7,7 +7,7 @@ use crate::{
     makepad_math::*,
     makepad_wasm_bridge::*,
     os::web::from_wasm::*,
-    texture::TextureFormat,
+    texture::{TextureFormat, TextureUpdated},
 };
 
 impl Cx {
@@ -91,8 +91,9 @@ impl Cx {
 
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.format.is_vec() {
-                        if cxtexture.alloc_vec() {}
-                        if !cxtexture.take_updated().is_empty() {
+                        let needs_realloc = cxtexture.alloc_vec();
+                        let updated = cxtexture.take_updated();
+                        if !updated.is_empty() {
                             match &cxtexture.format {
                                 TextureFormat::VecBGRAu8_32 {
                                     width,
@@ -141,11 +142,22 @@ impl Cx {
                                     data,
                                     ..
                                 } => {
+                                    let Some(rect) =
+                                        updated.upload_rect(*width, *height, needs_realloc)
+                                    else {
+                                        continue;
+                                    };
                                     self.os.from_wasm(FromWasmAllocTextureImage2D_RGBAf32 {
                                         texture_id: texture_id.0,
                                         width: *width,
                                         height: *height,
                                         data: WasmPtrF32::new((*data).as_ref().unwrap()),
+                                        is_partial: !needs_realloc
+                                            && matches!(updated, TextureUpdated::Partial(_)),
+                                        x: rect.origin.x,
+                                        y: rect.origin.y,
+                                        update_width: rect.size.width,
+                                        update_height: rect.size.height,
                                     });
                                 }
                                 TextureFormat::VecCubeBGRAu8_32 {

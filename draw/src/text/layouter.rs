@@ -423,7 +423,7 @@ impl LayoutContext {
                 Some(text) => self.append_text(&text),
                 None => {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
-                    if next_word.chars().all(|char| char.is_whitespace()) {
+                    if is_all_whitespace(next_word) {
                         self.layout_directly(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
@@ -657,8 +657,9 @@ struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
     font_size_in_lpxs: f32,
-    lens: Vec<usize>,
-    widths_in_lpxs: Vec<f32>,
+    prefix_lens: Vec<usize>,
+    prefix_widths_in_lpxs: Vec<f32>,
+    front: usize,
 }
 
 impl Fitter {
@@ -678,24 +679,29 @@ impl Fitter {
         if matches!(segment_kind, SegmentKind::Word) {
             merge_segments_for_line_breaking(&text, &mut lens);
         }
-        let widths_in_lpxs: Vec<_> = lens
-            .iter()
-            .copied()
-            .scan(0, |state, len| {
-                let start = *state;
-                let end = start + len;
-                let segment = font_family.get_or_shape(text.substr(start..end));
-                let width_in_lpxs = segment.width_in_ems * font_size_in_lpxs;
-                *state = end;
-                Some(width_in_lpxs)
-            })
-            .collect();
+        let mut prefix_widths_in_lpxs = Vec::with_capacity(lens.len() + 1);
+        prefix_widths_in_lpxs.push(0.0);
+        let mut offset = 0;
+        for len in &lens {
+            let start = offset;
+            let end = start + *len;
+            let segment = font_family.get_or_shape(text.substr(start..end));
+            let width = segment.width_in_ems * font_size_in_lpxs;
+            let previous = *prefix_widths_in_lpxs.last().unwrap();
+            prefix_widths_in_lpxs.push(previous + width);
+            offset = end;
+        }
+        let mut prefix_lens = lens;
+        for index in 1..prefix_lens.len() {
+            prefix_lens[index] += prefix_lens[index - 1];
+        }
         Self {
             text,
             font_family,
             font_size_in_lpxs,
-            lens,
-            widths_in_lpxs,
+            prefix_lens,
+            prefix_widths_in_lpxs,
+            front: 0,
         }
     }
 
@@ -704,12 +710,20 @@ impl Fitter {
     }
 
     fn next_len(&self) -> usize {
-        self.lens[0]
+        self.prefix_lens[self.front] - self.consumed_len()
+    }
+
+    fn consumed_len(&self) -> usize {
+        if self.front == 0 {
+            0
+        } else {
+            self.prefix_lens[self.front - 1]
+        }
     }
 
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
-        let mut max_count = self.lens.len() + 1;
+        let mut max_count = self.prefix_lens.len() - self.front + 1;
         let mut best_count = None;
         while min_count < max_count {
             let mid_count = (min_count + max_count) / 2;
@@ -721,12 +735,12 @@ impl Fitter {
             }
         }
         if let Some(mut best_count) = best_count {
+            let consumed_len = self.consumed_len();
             while best_count > 0 {
-                let best_len = self.lens[..best_count].iter().sum();
+                let best_len = self.prefix_lens[self.front + best_count - 1] - consumed_len;
                 let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
                 if best_text.width_in_ems * self.font_size_in_lpxs <= wrap_width_in_lpxs {
-                    self.lens.drain(..best_count);
-                    self.widths_in_lpxs.drain(..best_count);
+                    self.front += best_count;
                     self.text = self.text.substr(best_len..);
                     return Some(best_text);
                 }
@@ -745,13 +759,14 @@ impl Fitter {
         //
         // The final candidate is shaped and checked exactly in `fit()` before it
         // is accepted, so this estimate can never allow an overflowing row.
-        let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
+        let estimated_width_in_lpxs =
+            self.prefix_widths_in_lpxs[self.front + count] - self.prefix_widths_in_lpxs[self.front];
         estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
 
     fn pop(&mut self) -> usize {
-        let len = self.lens.remove(0);
-        self.widths_in_lpxs.remove(0);
+        let len = self.next_len();
+        self.front += 1;
         self.text = self.text.substr(len..);
         len
     }
@@ -780,7 +795,7 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
         while i < lens.len() {
             let seg_end = byte_offset + lens[i];
             let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_before_char) {
+            if is_all_no_break_before(seg_text) {
                 lens[i - 1] += lens[i];
                 lens.remove(i);
             } else {
@@ -798,7 +813,7 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
         while i + 1 < lens.len() {
             let seg_end = byte_offset + lens[i];
             let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_after_char) {
+            if is_all_no_break_after(seg_text) {
                 lens[i + 1] = lens[i] + lens[i + 1];
                 lens.remove(i);
             } else {
@@ -806,6 +821,35 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
                 i += 1;
             }
         }
+    }
+}
+
+fn is_all_whitespace(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| byte.is_ascii_whitespace())
+    } else {
+        text.chars().all(char::is_whitespace)
+    }
+}
+
+fn is_all_no_break_before(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'.' | b',' | b':' | b';' | b'!' | b'?' | b')' | b']' | b'}' | b'%'
+            )
+        })
+    } else {
+        text.chars().all(is_no_break_before_char)
+    }
+}
+
+fn is_all_no_break_after(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| matches!(byte, b'(' | b'[' | b'{'))
+    } else {
+        text.chars().all(is_no_break_after_char)
     }
 }
 
@@ -1233,6 +1277,22 @@ impl LaidoutRow {
                 next_glyph_group[0].origin_in_lpxs.x
             });
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let text = &self.text[start..end];
+            if text.is_ascii() {
+                let byte_count = text.len();
+                if byte_count == 0 {
+                    continue;
+                }
+                let byte_width_in_lpxs = width_in_lpxs / byte_count as f32;
+                let mut current_x_in_lpxs = start_x_in_lpxs;
+                for byte_index in 0..byte_count {
+                    if x_in_lpxs < current_x_in_lpxs + 0.5 * byte_width_in_lpxs {
+                        return start + byte_index;
+                    }
+                    current_x_in_lpxs += byte_width_in_lpxs;
+                }
+                continue;
+            }
             let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut current_x_in_lpxs = start_x_in_lpxs;
@@ -1267,6 +1327,17 @@ impl LaidoutRow {
                     next_glyph_group[0].origin_in_lpxs.x
                 });
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let text = &self.text[start..end];
+            if text.is_ascii() {
+                if text.is_empty() {
+                    continue;
+                }
+                if (start..end).contains(&index) {
+                    let byte_width_in_lpxs = width_in_lpxs / text.len() as f32;
+                    return start_x_in_lpxs + (index - start) as f32 * byte_width_in_lpxs;
+                }
+                continue;
+            }
             let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut current_x_in_lpxs = start_x_in_lpxs;
@@ -1323,11 +1394,53 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, parse_text_atlas_size_value, LaidoutText, LayoutOptions,
-        Layouter, OwnedLayoutParams, Settings, Size, Style, LAYOUT_CACHE_MAX_BYTES,
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, BorrowedLayoutParams, Fitter,
+        LaidoutText, LayoutOptions, Layouter, OwnedLayoutParams, SegmentKind, Settings, Size,
+        Style, LAYOUT_CACHE_MAX_BYTES,
     };
-    use std::rc::Rc;
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{
+            font::FontId,
+            font_family::FontFamilyId,
+            loader::{FontDefinition, FontFamilyDefinition},
+            selection::Cursor,
+        },
+    };
+    use std::{path::PathBuf, rc::Rc};
     use unicode_segmentation::UnicodeSegmentation;
+
+    fn bundled_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    }
+
+    fn test_layouter() -> (Layouter, FontFamilyId) {
+        let mut layouter = Layouter::new(Default::default());
+        let font_id: FontId = 0xFACE_FEED_u64.into();
+        let font_family_id: FontFamilyId = 0xFACE_F00D_u64.into();
+        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+            .expect("font bytes should load");
+
+        layouter.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        layouter.define_font_family(
+            font_family_id,
+            FontFamilyDefinition {
+                font_ids: vec![font_id],
+                expected_member_count: 1,
+            },
+        );
+        (layouter, font_family_id)
+    }
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {
@@ -1587,5 +1700,91 @@ mod tests {
         // the excess without waiting for a new insert.
         layouter.advance_cache_generation();
         assert!(layouter.cache_bytes <= LAYOUT_CACHE_MAX_BYTES);
+    }
+
+    #[test]
+    fn wrapped_ascii_layout_preserves_all_input_text() {
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = (0..96)
+            .map(|index| format!("word{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laidout = layouter.get_or_layout(BorrowedLayoutParams {
+            text: &text,
+            style: Style {
+                font_family_id,
+                font_size_in_pts: 10.0,
+                color: None,
+            },
+            options: LayoutOptions {
+                max_width_in_lpxs: Some(180.0),
+                wrap: true,
+                ..Default::default()
+            },
+        });
+
+        assert!(laidout.rows.len() > 1);
+        let consumed_text_len: usize = laidout
+            .rows
+            .iter()
+            .map(|row| row.text.len() + usize::from(row.newline))
+            .sum();
+        assert_eq!(consumed_text_len, text.len());
+    }
+
+    #[test]
+    fn fitter_preserves_exact_width_after_advancing_front() {
+        const FONT_SIZE_IN_LPXS: f32 = 16.0;
+        const WRAP_WIDTH_IN_LPXS: f32 = 40.0;
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = "AV AV AV AV AV AV";
+        let mut fitter = Fitter::new(
+            text.into(),
+            layouter.get_or_load_font_family(font_family_id),
+            FONT_SIZE_IN_LPXS,
+            SegmentKind::Word,
+        );
+        let mut consumed_len = 0;
+        let mut fitted_chunks = 0;
+
+        while !fitter.is_empty() {
+            if let Some(shaped) = fitter.fit(WRAP_WIDTH_IN_LPXS) {
+                assert!(shaped.width_in_ems * FONT_SIZE_IN_LPXS <= WRAP_WIDTH_IN_LPXS);
+                consumed_len += shaped.text.len();
+                fitted_chunks += 1;
+            } else {
+                consumed_len += fitter.pop();
+            }
+        }
+
+        assert!(fitted_chunks > 1);
+        assert_eq!(consumed_len, text.len());
+    }
+
+    #[test]
+    fn ascii_hit_testing_roundtrips_byte_indices() {
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = "plain ascii";
+        let laidout = layouter.get_or_layout(BorrowedLayoutParams {
+            text,
+            style: Style {
+                font_family_id,
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions::default(),
+        });
+        let row = &laidout.rows[0];
+
+        for index in 0..=text.len() {
+            let x_in_lpxs = row.index_to_x_in_lpxs(index);
+            assert_eq!(row.x_in_lpxs_to_index(x_in_lpxs), index);
+            let position = laidout.cursor_to_position(Cursor {
+                index,
+                prefer_next_row: false,
+            });
+            assert_eq!(position.row_index, 0);
+            assert_eq!(position.x_in_lpxs, x_in_lpxs);
+        }
     }
 }

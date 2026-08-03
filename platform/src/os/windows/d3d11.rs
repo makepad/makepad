@@ -1530,9 +1530,15 @@ impl CxTexture {
                         right: (bx + bw) as u32, bottom: (by + bh) as u32, back: 1,
                     };
                     let src = unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
-                    let resource: ID3D11Resource = self.os.texture.as_ref().unwrap().cast().unwrap();
                     unsafe {
-                        d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, src, row_pitch, 0);
+                        d3d11_cx.context.UpdateSubresource(
+                            self.os.texture.as_ref().unwrap(),
+                            0,
+                            &dst_box,
+                            src,
+                            row_pitch,
+                            0,
+                        );
                     }
                     self.os.vec_uploaded_height = (by + bh).max(self.os.vec_uploaded_height);
                 }
@@ -1579,7 +1585,14 @@ impl CxTexture {
                 left: 0, top: 0, front: 0, right: width as u32, bottom: height as u32, back: 1,
             };
             unsafe {
-                d3d11_cx.context.UpdateSubresource(&resource, 0, &dst_box, data_ptr as *const _, row_pitch, 0);
+                d3d11_cx.context.UpdateSubresource(
+                    texture.as_ref().unwrap(),
+                    0,
+                    &dst_box,
+                    data_ptr as *const _,
+                    row_pitch,
+                    0,
+                );
             }
             let mut shader_resource_view = None;
             unsafe {

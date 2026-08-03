@@ -775,7 +775,8 @@ export class WasmWebGL extends WasmWebBrowser {
 
   FromWasmAllocTextureImage2D_RGBAf32(args) {
     let gl = this.gl;
-    let gl_tex = this.textures[args.texture_id] || gl.createTexture();
+    let old_tex = this.textures[args.texture_id];
+    let gl_tex = old_tex || gl.createTexture();
 
     gl.bindTexture(gl.TEXTURE_2D, gl_tex);
     // Data textures are sampled as lookup tables; avoid interpolation artifacts.
@@ -788,17 +789,41 @@ export class WasmWebGL extends WasmWebBrowser {
       args.data.ptr,
       args.width * args.height * 4,
     );
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA32F,
-      args.width,
-      args.height,
-      0,
-      gl.RGBA,
-      gl.FLOAT,
-      data_array,
-    );
+    if (args.is_partial && old_tex) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, args.width);
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, args.x);
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, args.y);
+      try {
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          args.x,
+          args.y,
+          args.update_width,
+          args.update_height,
+          gl.RGBA,
+          gl.FLOAT,
+          data_array,
+        );
+      } finally {
+        gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+        gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+        gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+      }
+    } else {
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA32F,
+        args.width,
+        args.height,
+        0,
+        gl.RGBA,
+        gl.FLOAT,
+        data_array,
+      );
+    }
     this.textures[args.texture_id] = gl_tex;
   }
 

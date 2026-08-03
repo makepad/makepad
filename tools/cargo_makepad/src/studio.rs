@@ -511,6 +511,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::LogCleared
             | HubToClient::RunViewCreated { .. }
             | HubToClient::QueryLogResults { .. }
+            | HubToClient::QueryProfilerResults { .. }
             | HubToClient::Screenshot { .. }
             | HubToClient::WidgetTreeDump { .. }
             | HubToClient::WidgetQuery { .. }

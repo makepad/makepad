@@ -266,6 +266,11 @@ pub struct FromWasmAllocTextureImage2D_RGBAf32 {
     pub width: usize,
     pub height: usize,
     pub data: WasmPtrF32,
+    pub is_partial: bool,
+    pub x: usize,
+    pub y: usize,
+    pub update_width: usize,
+    pub update_height: usize,
 }
 
 #[allow(non_camel_case_types)]

@@ -200,7 +200,7 @@ impl ShaderFnCompiler {
 
                             // Skip phi handling if type is void
                             if ty != vm.bx.code.builtins.pod.pod_void {
-                                self.out.push_str(&format!("{} = {};\n", phi, val));
+                                writeln!(self.out, "{} = {};", phi, val).ok();
                                 let ty_name = if let Some(name) = vm.bx.heap.pod_type_name(ty) {
                                     output.backend.map_pod_name(name)
                                 } else {
@@ -225,7 +225,7 @@ impl ShaderFnCompiler {
                         let outer_phi = self.find_and_mark_outer_phi();
                         if let Some(outer_phi) = outer_phi {
                             // Assign to the outer phi (flag is already set by find_and_mark_outer_phi)
-                            self.out.push_str(&format!("{} = {};\n", outer_phi, val));
+                            writeln!(self.out, "{} = {};", outer_phi, val).ok();
                         }
                         // If no outer phi, the value is discarded (this shouldn't happen in well-formed code)
                     }
@@ -386,7 +386,7 @@ impl ShaderFnCompiler {
                         *phi = Some(s.clone());
                         s
                     };
-                    self.out.push_str(&format!("{} = {};\n", phi_name, val));
+                    writeln!(self.out, "{} = {};", phi_name, val).ok();
                 }
                 self.stack.free_string(val);
             }

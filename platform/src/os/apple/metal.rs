@@ -1972,7 +1972,8 @@ impl CxTexture {
     }*/
 
     fn update_vec_texture(&mut self, metal_cx: &MetalCx) -> u64 {
-        if self.alloc_vec() {
+        let needs_realloc = self.alloc_vec();
+        if needs_realloc {
             let alloc = self.alloc.as_ref().unwrap();
 
             let descriptor = RcObjcId::from_owned(
@@ -2194,15 +2195,34 @@ impl CxTexture {
                 data,
                 ..
             } => {
-                update_data(
-                    &self.os.texture,
-                    *width,
-                    *height,
-                    16,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                );
-                (*width as u64)
-                    .saturating_mul(*height as u64)
+                let Some(rect) = update.upload_rect(*width, *height, needs_realloc) else {
+                    return 0;
+                };
+                let data = data.as_ref().unwrap();
+                let float_offset = (rect.origin.y * *width + rect.origin.x) * 4;
+                let region = MTLRegion {
+                    origin: MTLOrigin {
+                        x: rect.origin.x as u64,
+                        y: rect.origin.y as u64,
+                        z: 0,
+                    },
+                    size: MTLSize {
+                        width: rect.size.width as u64,
+                        height: rect.size.height as u64,
+                        depth: 1,
+                    },
+                };
+                let _: () = unsafe {
+                    msg_send![
+                        self.os.texture.as_ref().unwrap().as_id(),
+                        replaceRegion: region
+                        mipmapLevel: 0u64
+                        withBytes: data.as_ptr().add(float_offset) as *const std::ffi::c_void
+                        bytesPerRow: (*width as u64) * 16u64
+                    ]
+                };
+                (rect.size.width as u64)
+                    .saturating_mul(rect.size.height as u64)
                     .saturating_mul(16)
             }
             TextureFormat::VecMipRGBAf32 {

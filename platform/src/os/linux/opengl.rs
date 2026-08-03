@@ -2276,6 +2276,45 @@ impl Default for CxOsTexture {
     }
 }
 
+fn partial_texture_updates_supported(format: &TextureFormat, os_type: &OsType) -> bool {
+    if cfg!(ohos_sim) {
+        return false;
+    }
+    !matches!(format, TextureFormat::VecRGBAf32 { .. }) || matches!(os_type, OsType::LinuxWindow(_))
+}
+
+#[cfg(test)]
+mod partial_texture_update_policy_tests {
+    use super::*;
+
+    fn rgba_f32() -> TextureFormat {
+        TextureFormat::VecRGBAf32 {
+            width: 8,
+            height: 4,
+            data: None,
+            updated: TextureUpdated::Empty,
+        }
+    }
+
+    #[test]
+    fn rgba_f32_partial_updates_are_desktop_linux_only() {
+        let format = rgba_f32();
+        assert!(partial_texture_updates_supported(
+            &format,
+            &OsType::LinuxWindow(Default::default()),
+        ));
+        assert!(!partial_texture_updates_supported(&format, &OsType::LinuxDirect));
+        assert!(!partial_texture_updates_supported(
+            &format,
+            &OsType::Android(Default::default()),
+        ));
+        assert!(!partial_texture_updates_supported(
+            &format,
+            &OsType::OpenHarmony(Default::default()),
+        ));
+    }
+}
+
 impl CxTexture {
     /// Updates or creates a texture based on the current texture format.
     ///
@@ -2292,7 +2331,7 @@ impl CxTexture {
     ///
     /// Note: This method assumes that the texture format doesn't change between updates.
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
-    pub fn update_vec_texture(&mut self, gl: &LibGl, _os_type: &OsType) {
+    pub fn update_vec_texture(&mut self, gl: &LibGl, os_type: &OsType) {
         fn gl_unpack_alignment(bytes_per_pixel: usize) -> i32 {
             if bytes_per_pixel % 8 == 0 {
                 8
@@ -2566,8 +2605,9 @@ impl CxTexture {
             const ATLAS_INPLACE_UPDATES: bool =
                 cfg!(not(any(target_env = "ohos", target_os = "android")));
             let is_append_atlas = matches!(self.format, TextureFormat::VecRGBAf32 { .. });
-            let allow_partial_texture_updates =
-                DO_PARTIAL_TEXTURE_UPDATES && (!is_append_atlas || ATLAS_INPLACE_UPDATES);
+            let allow_partial_texture_updates = partial_texture_updates_supported(&self.format, os_type)
+                && DO_PARTIAL_TEXTURE_UPDATES
+                && (!is_append_atlas || ATLAS_INPLACE_UPDATES);
             let unpack_alignment = gl_unpack_alignment(bytes_per_pixel);
 
             match updated {

@@ -15,6 +15,7 @@ use crate::value::*;
 use crate::vm::*;
 use crate::*;
 use makepad_live_id::*;
+use std::borrow::Cow;
 use std::fmt::Write;
 
 impl ShaderFnCompiler {
@@ -877,13 +878,14 @@ impl ShaderFnCompiler {
     ) {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
-        let arg_types = args.clone();
-        let resolved_arg_types =
-            Self::resolve_script_call_arg_types(vm, fnobj, &arg_types, self.trap.pass());
+        let resolved_arg_types = matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
+            .then(|| {
+                Self::resolve_script_call_arg_types(vm, fnobj, &args, self.trap.pass())
+            });
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
-        if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
-            out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
+        if let Some(resolved_arg_types) = resolved_arg_types {
+            out = Self::glsl_rewrite_call_args(vm, out, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
         out.push_str(")");
@@ -929,22 +931,28 @@ impl ShaderFnCompiler {
 
     fn glsl_rewrite_call_args(
         vm: &ScriptVm,
-        raw_args: &str,
-        arg_types: &[ShaderType],
+        raw_args: String,
         resolved_arg_types: &[ScriptPodType],
     ) -> String {
-        let mut parts = Self::split_call_args_top_level(raw_args);
-        if parts.is_empty() || arg_types.is_empty() || parts.len() < arg_types.len() {
-            return raw_args.to_string();
+        if resolved_arg_types.is_empty() {
+            return raw_args;
+        }
+        if !resolved_arg_types.iter().copied().any(|resolved_ty| {
+            vm.bx.heap.pod_types[resolved_ty.index as usize]
+                .ty
+                .is_float_type()
+        }) {
+            return raw_args;
         }
 
-        let explicit_start = parts.len() - arg_types.len();
-        let explicit_len = arg_types.len().min(resolved_arg_types.len());
-        for i in 0..explicit_len {
-            if !matches!(arg_types[i], ShaderType::AbstractInt) {
-                continue;
-            }
-            let resolved_ty = resolved_arg_types[i];
+        let mut parts = Self::split_call_args_top_level(&raw_args);
+        if parts.is_empty() || parts.len() < resolved_arg_types.len() {
+            return raw_args;
+        }
+
+        let mut changed = false;
+        let explicit_start = parts.len() - resolved_arg_types.len();
+        for (i, resolved_ty) in resolved_arg_types.iter().copied().enumerate() {
             if !vm.bx.heap.pod_types[resolved_ty.index as usize]
                 .ty
                 .is_float_type()
@@ -954,14 +962,19 @@ impl ShaderFnCompiler {
             let arg_index = explicit_start + i;
             let value = parts[arg_index].trim();
             if Self::is_simple_int_literal(value) {
-                parts[arg_index] = format!("{}.0", value);
+                parts[arg_index] = Cow::Owned(format!("{}.0", value));
+                changed = true;
             }
         }
 
-        parts.join(", ")
+        if changed {
+            parts.join(", ")
+        } else {
+            raw_args
+        }
     }
 
-    fn split_call_args_top_level(raw_args: &str) -> Vec<String> {
+    fn split_call_args_top_level(raw_args: &str) -> Vec<Cow<'_, str>> {
         if raw_args.trim().is_empty() {
             return Vec::new();
         }
@@ -980,7 +993,7 @@ impl ShaderFnCompiler {
                 '{' => brace_depth += 1,
                 '}' => brace_depth = brace_depth.saturating_sub(1),
                 ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                    out.push(raw_args[start..idx].trim().to_string());
+                    out.push(Cow::Borrowed(raw_args[start..idx].trim()));
                     start = idx + ch.len_utf8();
                 }
                 _ => {}
@@ -988,7 +1001,7 @@ impl ShaderFnCompiler {
         }
 
         if start < raw_args.len() {
-            out.push(raw_args[start..].trim().to_string());
+            out.push(Cow::Borrowed(raw_args[start..].trim()));
         }
         out
     }
@@ -1842,8 +1855,8 @@ impl ShaderFnCompiler {
                             method_id,
                             pod_ty,
                             self_s_slice,
-                            &self_s,
                         ) {
+                            self.stack.free_string(self_s);
                             return;
                         }
                     }
@@ -1868,9 +1881,9 @@ impl ShaderFnCompiler {
                     return;
                 } else {
                     // Try to resolve as PodType static method in script scope
-                    if self.handle_pod_type_method_call_args(
-                        vm, output, opargs, method_id, self_id, &self_s,
-                    ) {
+                    if self.handle_pod_type_method_call_args(vm, output, opargs, method_id, self_id)
+                    {
+                        self.stack.free_string(self_s);
                         return;
                     }
 
@@ -1904,15 +1917,9 @@ impl ShaderFnCompiler {
 
             // self_ty is directly a Pod type (not an Id that resolves to a Pod)
             if let ShaderType::Pod(pod_ty) = self_ty {
-                if self.handle_pod_method_call_args(
-                    vm,
-                    output,
-                    opargs,
-                    method_id,
-                    pod_ty,
-                    &self_s.clone(),
-                    &self_s,
-                ) {
+                if self.handle_pod_method_call_args(vm, output, opargs, method_id, pod_ty, &self_s)
+                {
+                    self.stack.free_string(self_s);
                     return;
                 }
                 // Method not found on pod type
@@ -2187,7 +2194,6 @@ impl ShaderFnCompiler {
         method_id: LiveId,
         pod_ty: ScriptPodType,
         self_s_slice: &str,
-        self_s: &String,
     ) -> bool {
         // First check for known shader builtin methods (mix, clamp, etc.)
         // These translate to builtin shader functions: x.mix(y, a) -> mix(x, y, a)
@@ -2199,7 +2205,6 @@ impl ShaderFnCompiler {
                 self_ty: pod_ty,
                 args: vec![(ShaderType::Pod(pod_ty), self_arg)],
             });
-            self.stack.free_string(self_s.clone());
             self.maybe_pop_to_me(vm, output, opargs);
             return true;
         }
@@ -2269,7 +2274,6 @@ impl ShaderFnCompiler {
                         });
                     }
                 }
-                self.stack.free_string(self_s.clone());
                 self.maybe_pop_to_me(vm, output, opargs);
                 return true;
             }
@@ -2295,7 +2299,6 @@ impl ShaderFnCompiler {
         opargs: OpcodeArgs,
         method_id: LiveId,
         self_id: LiveId,
-        self_s: &String,
     ) -> bool {
         let value = vm
             .bx
@@ -2332,7 +2335,6 @@ impl ShaderFnCompiler {
                             });
                         }
                     }
-                    self.stack.free_string(self_s.clone());
                     self.maybe_pop_to_me(vm, output, opargs);
                     return true;
                 }

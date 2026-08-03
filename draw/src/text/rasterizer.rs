@@ -602,7 +602,15 @@ impl MultiPlaneAllocator {
         if size.width == 0 || size.height == 0 {
             return None;
         }
-        let mut candidates = self.planes[0].free_rects().to_vec();
+        let mut candidates = Vec::new();
+        for free in self.planes[0].free_rects().iter().copied() {
+            if free.size.width >= size.width && free.size.height >= size.height {
+                candidates.push(free);
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
         for plane in 1..4 {
             let mut next = Vec::new();
             for a in candidates.iter().copied() {
