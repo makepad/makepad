@@ -301,6 +301,13 @@ pub struct GameView {
     /// Script tone id -> synth voice id.
     #[rust]
     tone_voices: ToneVoices,
+    /// Particle requests. gamemaker has no particle renderer (Arcade owns
+    /// the pretty pass), so these are drained and dropped — the verbs still
+    /// work, they just draw nothing here.
+    #[rust]
+    particles: Rc<RefCell<Vec<makepad_game_sim::ParticleRequest>>>,
+    #[rust]
+    next_emitter: Rc<std::cell::Cell<u64>>,
     #[rust]
     vm_id: SplashVmId,
     #[rust]
@@ -679,6 +686,10 @@ impl GameView {
             audio: self.audio.clone(),
             eval_gen: self.eval_gen_cell.clone(),
             next_tone: self.next_tone.clone(),
+            // Particles are device-local and gamemaker has no particle
+            // renderer, so its queue is drained and dropped each eval.
+            particles: self.particles.clone(),
+            next_emitter: self.next_emitter.clone(),
         };
         let verbs = makepad_game_script::dispatch::verb_table();
         let vm_id = self.vm_id;
@@ -1309,6 +1320,9 @@ impl GameView {
     /// Play what the verb table queued. Sustained tones carry script-side
     /// handles, so the mapping to real synth voices lives here.
     fn drain_audio(&mut self) {
+        // Drop queued particle requests: no particle renderer here, and an
+        // undrained queue would grow for the life of the game.
+        self.particles.borrow_mut().clear();
         let requests = std::mem::take(&mut *self.audio.borrow_mut());
         for request in requests {
             match request {
@@ -1318,6 +1332,22 @@ impl GameView {
                         self.world
                             .borrow_mut()
                             .log(format!("sfx: unknown sound \"{name}\""));
+                    }
+                }
+                // Positional one-shot: gamemaker's synth is 2D, so the
+                // listener distance becomes a gain scale (audio3d owns the
+                // math so every host attenuates the same way).
+                AudioRequest::SfxAt { name, pitch, at, range } => {
+                    let (pos, yaw) = {
+                        let w = self.world.borrow();
+                        (w.cam_target, w.cam_yaw)
+                    };
+                    let listener = makepad_game_script::audio3d::Listener::from_yaw(pos, yaw);
+                    let placed = makepad_game_script::audio3d::place(&listener, at, range);
+                    if placed.gain > 0.01 && !crate::synth::play_named(&name, pitch) {
+                        self.world
+                            .borrow_mut()
+                            .log(format!("sfx_at: unknown sound \"{name}\""));
                     }
                 }
                 AudioRequest::Beep { freq, to, ms, wave, gain } => {

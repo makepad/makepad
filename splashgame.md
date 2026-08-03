@@ -178,6 +178,32 @@ House style: give every creature a face (`game.part` eyes) and a name
 (`game.label`) — two lines each, do it without being asked. Build big
 characters from many parts and animate them with `move_part`/`scale`/`glow`.
 
+## Light and weather
+
+| call | meaning |
+|---|---|
+| `game.sun({time_of_day: 8.5})` | one sun for the whole scene: 0..24 local hours. Morning and evening are warm and throw long shadows, noon is white and short |
+| `game.sun({dir: vec3(0.3, 0.9, 0.2), color: vec3(1.0, 0.9, 0.7)})` | or aim it yourself. `ambient` lifts the shadow side, `shadow_alpha` (0..1) sets how dark cast shadows draw |
+
+Objects cast real shadows that stretch and swing as the sun moves — you get
+them for free, there is nothing to turn on.
+
+## Particles (device-local — never affects the game)
+
+| call | meaning |
+|---|---|
+| `game.particles(id, {kind: "smoke", rate: 20})` → emitter | a continuous emitter that FOLLOWS an entity: exhaust, fire, a dust trail |
+| `game.particles(vec3(x,y,z), {kind: "dust"})` → emitter | or pinned to a spot |
+| `game.burst(vec3(x,y,z), {kind: "spark", count: 16})` | a one-shot puff: impacts, pickups, explosions |
+| `game.particles_stop(emitter)` | stop one emitter |
+
+Kinds: `spark` (fast, falls), `smoke` (rises, grows), `dust` (drifts, settles),
+`trail` (fades in place). Tune with `life size color spread speed gravity`.
+
+Particles are **cosmetic only**. They never collide, never touch game state,
+and each device draws its own — so never make a rule depend on one. A phone may
+draw fewer than a PC in the same game, and that is fine by design.
+
 ## Sound (all synthesized — never files)
 
 | call | meaning |
@@ -188,6 +214,7 @@ characters from many parts and animate them with `move_part`/`scale`/`glow`.
 | `game.tone({freq: 80, wave: "saw", gain: 0.15})` → tone id | a SUSTAINED tone — the car-engine primitive. Starts and keeps sounding |
 | `game.tone_set(id, {freq: 80 + speed * 6})` | retune it per tick — smoothed, never retriggers |
 | `game.tone_stop(id)` | fade it out. Tones also stop on every reload (no stuck hums) |
+| `game.sfx_at(vec3(x,y,z), "clank", {range: 40})` | same bank, but POSITIONED: quieter with distance, panned left/right by where it is relative to the camera. Use it for anything with a place — impacts, engines, other players |
 
 Add sounds without being asked — jumps, pickups, winning. They make it real.
 
