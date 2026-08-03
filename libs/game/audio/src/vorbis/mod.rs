@@ -122,19 +122,8 @@ pub fn decode(bytes: &[u8]) -> Result<Pcm, AudioError> {
                 }
             }
         }
-        let start = center.saturating_sub(n / 2);
-        let need = start + n;
-        if need > MAX_SAMPLES_PER_CHANNEL {
+        if !overlap_add(&mut out, &block.channels, center, n) {
             break;
-        }
-        for (ch, samples) in block.channels.iter().enumerate() {
-            let buf = &mut out[ch];
-            if buf.len() < need {
-                buf.resize(need, 0.0);
-            }
-            for (i, s) in samples.iter().enumerate() {
-                buf[start + i] += s;
-            }
         }
         prev_center = Some(center);
         prev_n = n;
@@ -198,19 +187,8 @@ pub fn debug_raw(bytes: &[u8]) -> Result<(Vec<Vec<f32>>, usize, u64), AudioError
         if prev_center.is_some() && first_center.is_none() {
             first_center = Some(center);
         }
-        let start = center.saturating_sub(n / 2);
-        let need = start + n;
-        if need > MAX_SAMPLES_PER_CHANNEL {
+        if !overlap_add(&mut out, &block.channels, center, n) {
             break;
-        }
-        for (ch, samples) in block.channels.iter().enumerate() {
-            let buf = &mut out[ch];
-            if buf.len() < need {
-                buf.resize(need, 0.0);
-            }
-            for (i, s) in samples.iter().enumerate() {
-                buf[start + i] += s;
-            }
         }
         prev_center = Some(center);
         prev_n = n;
@@ -536,6 +514,47 @@ fn decode_packet(packet: &[u8], ident: &Ident, setup: &Setup) -> Result<Option<B
 }
 
 /// The window for one block, accounting for long/short neighbours.
+/// Lap one decoded block into the output at its window centre.
+///
+/// A block's window is centred on `center` and reaches `n/2` either side, so an
+/// early long block can begin BEFORE sample zero — a 2048-sample block whose
+/// centre is 832 starts at -192. Those leading samples lie outside the stream
+/// and must be DROPPED. Clamping the start to zero instead slides the whole
+/// block later by the underflow, which corrupts every sample until the centres
+/// grow past `n/2`: that is precisely why files opening `[256, 256, 2048, ...]`
+/// decoded with a wrong head and a correct body.
+///
+/// Shared by `decode` and `debug_raw` so a diagnostic can never disagree with
+/// the decoder it is meant to diagnose.
+///
+/// Returns false when the block would exceed the sample cap.
+fn overlap_add(out: &mut [Vec<f32>], channels: &[Vec<f32>], center: usize, n: usize) -> bool {
+    let start_signed = center as i64 - (n as i64) / 2;
+    let (start, skip) = if start_signed < 0 {
+        (0usize, (-start_signed) as usize)
+    } else {
+        (start_signed as usize, 0usize)
+    };
+    // Entirely before the stream: nothing of this block is audible.
+    if skip >= n {
+        return true;
+    }
+    let need = start + (n - skip);
+    if need > MAX_SAMPLES_PER_CHANNEL {
+        return false;
+    }
+    for (ch, samples) in channels.iter().enumerate() {
+        let Some(buf) = out.get_mut(ch) else { continue };
+        if buf.len() < need {
+            buf.resize(need, 0.0);
+        }
+        for (i, s) in samples.iter().enumerate().skip(skip) {
+            buf[start + i - skip] += s;
+        }
+    }
+    true
+}
+
 fn lapped_window(n: usize, short_n: usize, prev_long: bool, next_long: bool) -> Vec<f32> {
     let left_n = if prev_long { n } else { short_n };
     let right_n = if next_long { n } else { short_n };

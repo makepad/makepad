@@ -66,6 +66,43 @@ fn mono_vorbis_matches_the_system_decoder() {
     assert!(c > 0.999, "correlation {c:.6} — decoder disagrees with reference");
 }
 
+/// Stereo must be sample-exact too, and the file that pins it is deliberately
+/// one that opens `[256, 256, 2048, ...]`. An early long block's window starts
+/// before sample zero, and clamping that start to zero instead of dropping the
+/// out-of-stream samples slid the block later — corrupting the head while the
+/// body stayed correct, which reads as "mostly right" on any averaged metric.
+/// Correlation alone hid it at 0.82, so this asserts per-sample agreement.
+#[test]
+fn stereo_vorbis_with_an_early_long_block_matches_sample_for_sample() {
+    let p = Path::new(KENNEY).join("impact-sounds/impactSoft_medium_003.ogg");
+    let Some(want) = reference(&p, "stereo") else {
+        eprintln!("skip: run apps/arcade/download_assets.sh (or no afconvert)");
+        return;
+    };
+    let got = audio::decode(&std::fs::read(&p).unwrap()).expect("decode ogg");
+    assert_eq!(got.channels, 2, "fixture must be stereo to pin coupling");
+    assert_eq!(got.channels, want.channels, "channel count");
+
+    let c = corr(&got.samples, &want.samples);
+    // afconvert trims a further 128 frames off the front, so compare the
+    // overlap rather than the lengths.
+    let n = got.samples.len().min(want.samples.len());
+    let close = (0..n)
+        .filter(|&i| (got.samples[i] - want.samples[i]).abs() < 1.0e-4)
+        .count();
+    let pct = 100.0 * close as f64 / n as f64;
+    eprintln!(
+        "stereo: got {} frames, ref {} frames, corr {c:.6}, {pct:.2}% samples equal",
+        got.frames(),
+        want.frames()
+    );
+    assert!(c > 0.999, "correlation {c:.6} — stereo decode disagrees");
+    assert!(
+        pct > 99.0,
+        "only {pct:.2}% of samples match — a correct body can hide a wrong head"
+    );
+}
+
 /// The stream's own granule position is the authority on length; the system
 /// decoder trims a further half-window, so compare against the file, not it.
 #[test]
