@@ -209,6 +209,34 @@ pub struct ShaderOutput {
     pub uses_derivatives: bool,
     /// Monotonic temporary id source for Rust backend expression hoisting.
     pub rust_tmp_counter: usize,
+    /// Monotonic id source for loop-guard locals, so nested guards never
+    /// collide (see [`crate::shader_control::LOOP_GUARD_MAX_ITERS`]).
+    pub loop_guard_counter: usize,
+    /// Total emitted source bytes across every function body compiled into
+    /// this shader. Bounded by [`MAX_EMITTED_BYTES`]: a call graph that
+    /// branches (each call site *inlines* via `compile_fn`) expands
+    /// exponentially with depth, and `recur_block` only stops true
+    /// recursion — not `f1` calling `f2` twice calling `f3` twice.
+    pub emitted_bytes: usize,
+    /// Set once the emitted-size budget is blown, so the error is raised
+    /// exactly once rather than at every subsequent write.
+    pub size_exceeded: bool,
+}
+
+/// Ceiling on total emitted shader source. Real shaders here run to tens of
+/// kilobytes (the largest built-in measured ~29 KB), so this is roughly 30x
+/// headroom while still catching exponential inlining long before it can
+/// exhaust memory or hang the compiler.
+pub const MAX_EMITTED_BYTES: usize = 1 << 20;
+
+impl ShaderOutput {
+    /// Unique local name for a loop guard, so nested `loop{}` bodies each get
+    /// their own counter instead of shadowing one another.
+    pub(crate) fn next_loop_guard(&mut self) -> String {
+        let n = self.loop_guard_counter;
+        self.loop_guard_counter += 1;
+        format!("_mp_loop_guard_{n}")
+    }
 }
 
 /// Mapping of uniform buffer type names to their assigned buffer indices
