@@ -302,3 +302,31 @@ fn perf_smoke_100_movers_50_rigids_terrain() {
         total / 600.0
     );
 }
+
+/// A generated game handed the solver an infinite extent and took the whole
+/// process down. NaN is absorbed by `max`, but INFINITY survives it and
+/// poisons every plane normal to NaN — box3d's face query then never beats its
+/// -f32::MAX starting separation, leaves max_face_index at the -1 sentinel,
+/// and that sentinel is cast through u8 into 255 and used as an array index.
+/// The port is faithful to upstream C there (C reads garbage where Rust
+/// panics), so the boundary is the right place to refuse the value.
+#[test]
+fn absurd_entity_dimensions_cannot_crash_the_solver() {
+    for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.0, -5.0] {
+        let mut w = GameWorld::new();
+        w.reset_content();
+        w.push_entity(ent(1, BodyKind::Static, vec3f(0.0, -0.5, 0.0), vec3f(20.0, 0.5, 20.0)));
+        let mut e = ent(2, BodyKind::Rigid, vec3f(0.0, 3.0, 0.0), vec3f(bad, bad, bad));
+        e.density = bad;
+        w.push_entity(e);
+        // Must not panic, and must still be stepping a coherent world.
+        for _ in 0..30 {
+            step_world(&mut w);
+        }
+        let p = w.entity(2).unwrap().pos;
+        assert!(
+            p.x.is_finite() && p.y.is_finite() && p.z.is_finite(),
+            "half {bad} left a non-finite pose {p:?}"
+        );
+    }
+}
