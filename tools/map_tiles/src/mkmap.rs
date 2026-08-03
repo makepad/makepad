@@ -307,13 +307,71 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
             options.output.display()
         ));
     }
-    let mut source_paths = vec![options.source.clone()];
-    source_paths.extend(options.extra_sources.iter().cloned());
-    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(source_paths.len());
-    for path in &source_paths {
-        readers.push(
-            MbtilesReader::open(path).map_err(|err| format!("open {}: {err}", path.display()))?,
+    let all_paths: Vec<PathBuf> = std::iter::once(options.source.clone())
+        .chain(options.extra_sources.iter().cloned())
+        .collect();
+
+    // Pass 1: enumerate all sources' tiles, map to Hilbert ids. Duplicate
+    // ids resolve FIRST-SOURCE-WINS (weave: world low-zoom slab first,
+    // then spiral cells — each cell's clipped world tiles lose).
+    // A source that fails to open or scan (e.g. a corrupt cell mbtiles) is
+    // SKIPPED with a loud warning instead of aborting the whole weave —
+    // the operator deletes the corrupt ledger file so a later fleet pass
+    // rebakes that cell.
+    println!("mkmap: pass 1/3 enumerating tiles ({} sources)", all_paths.len());
+    let mut source_paths: Vec<PathBuf> = Vec::with_capacity(all_paths.len());
+    let mut readers: Vec<MbtilesReader> = Vec::with_capacity(all_paths.len());
+    let mut sources_bytes = 0_u64;
+    let mut tiles: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
+    let mut min_zoom = u8::MAX;
+    let mut max_zoom = 0_u8;
+    for path in &all_paths {
+        let mut reader = match MbtilesReader::open(path) {
+            Ok(reader) => reader,
+            Err(err) => {
+                eprintln!(
+                    "mkmap: WARNING skipping unreadable source {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        let src = readers.len() as u32;
+        let mut local: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
+        let mut local_min = u8::MAX;
+        let mut local_max = 0_u8;
+        let scanned = reader.for_each_tile(|tile| {
+            let zoom = tile.zoom_level as u8;
+            let x = tile.tile_column as u32;
+            let axis = 1_u32 << zoom;
+            let y = axis - 1 - tile.tile_row as u32; // TMS -> XYZ
+            local.push((tile_id(zoom, x, y), zoom, x, y, src));
+            local_min = local_min.min(zoom);
+            local_max = local_max.max(zoom);
+        });
+        if let Err(err) = scanned {
+            eprintln!(
+                "mkmap: WARNING skipping corrupt source {}: {err}",
+                path.display()
+            );
+            continue;
+        }
+        tiles.extend(local);
+        min_zoom = min_zoom.min(local_min);
+        max_zoom = max_zoom.max(local_max);
+        sources_bytes += fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        source_paths.push(path.clone());
+        readers.push(reader);
+    }
+    if source_paths.len() < all_paths.len() {
+        eprintln!(
+            "mkmap: WARNING {} of {} sources skipped — output will have holes until they are rebaked",
+            all_paths.len() - source_paths.len(),
+            all_paths.len()
         );
+    }
+    if tiles.is_empty() {
+        return Err("source archives contain no tiles".to_string());
     }
     let metadata = readers[0]
         .get_metadata()
@@ -324,29 +382,17 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
             return Err(format!("{}: dictionary differs from first source", path.display()));
         }
     }
-
-    // Pass 1: enumerate all sources' tiles, map to Hilbert ids. Duplicate
-    // ids resolve FIRST-SOURCE-WINS (weave: world low-zoom slab first,
-    // then spiral cells — each cell's clipped world tiles lose).
-    println!("mkmap: pass 1/3 enumerating tiles ({} sources)", readers.len());
-    let mut tiles: Vec<(u64, u8, u32, u32, u32)> = Vec::new();
-    let mut min_zoom = u8::MAX;
-    let mut max_zoom = 0_u8;
-    for (src, reader) in readers.iter_mut().enumerate() {
-        reader
-            .for_each_tile(|tile| {
-                let zoom = tile.zoom_level as u8;
-                let x = tile.tile_column as u32;
-                let axis = 1_u32 << zoom;
-                let y = axis - 1 - tile.tile_row as u32; // TMS -> XYZ
-                tiles.push((tile_id(zoom, x, y), zoom, x, y, src as u32));
-                min_zoom = min_zoom.min(zoom);
-                max_zoom = max_zoom.max(zoom);
-            })
-            .map_err(|err| format!("scan {}: {err}", source_paths[src].display()))?;
-    }
-    if tiles.is_empty() {
-        return Err("source archives contain no tiles".to_string());
+    // Disk preflight: refuse before writing gigabytes that cannot fit.
+    // The woven output is bounded by the summed source sizes (dedup only
+    // shrinks it); require half that plus slack, which comfortably covers
+    // the real ratio observed on cell weaves.
+    if let Some(free) = free_disk_bytes(&options.output) {
+        let needed = sources_bytes / 2 + 5_000_000_000;
+        if free < needed {
+            return Err(format!(
+                "insufficient disk for weave: {free} bytes free, ~{needed} needed — free space and retry"
+            ));
+        }
     }
     // Stable resolution: sort by (id, src) then keep the first of each id.
     tiles.sort_unstable_by_key(|&(id, _, _, _, src)| (id, src));
@@ -540,11 +586,24 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
         started.elapsed().as_secs_f64()
     );
 
-    // Pass 3: verification (mandatory).
+    // Pass 3: verification (mandatory) — against the READABLE sources.
     println!("mkmap: pass 3/3 verification");
-    let mut source_paths = vec![options.source.clone()];
-    source_paths.extend(options.extra_sources.iter().cloned());
     verify(&source_paths, &options.output, options.sample_stride)
+}
+
+/// Free bytes on the filesystem holding `path` (via df; None if that
+/// fails — preflight then simply doesn't gate).
+fn free_disk_bytes(path: &Path) -> Option<u64> {
+    let probe = path.parent().filter(|p| p.exists()).unwrap_or(Path::new("."));
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(probe)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().nth(1)?;
+    let avail_kb: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(avail_kb * 1024)
 }
 
 // ---------------------------------------------------------------------------
