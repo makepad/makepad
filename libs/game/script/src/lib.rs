@@ -7,13 +7,15 @@
 mod build;
 pub mod callbacks;
 pub mod audio3d;
+pub mod compose;
 pub mod dispatch;
 pub mod host;
 pub mod input;
 pub mod sandbox;
 pub mod value;
 
-pub use dispatch::{AudioRequest, Ctx, ToneWave, VerbFn, VERBS};
+pub use compose::{kit_from_index, level_placements, PlacedTile};
+pub use dispatch::{AudioRequest, Ctx, ModelRequest, ToneWave, VerbFn, VERBS};
 pub use host::{EvalReport, ScriptHost};
 pub use sandbox::{strip_capabilities, Trust};
 

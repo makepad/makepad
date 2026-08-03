@@ -455,6 +455,22 @@ impl AssetIndex {
         self.postings = postings;
     }
 
+    /// Build an index directly from entries, skipping the filesystem walk.
+    ///
+    /// The models are gitignored, so anything that wants to test *behaviour*
+    /// over a library — ranking, variety, kit fitting, the script verbs —
+    /// otherwise has to either download 200 MB or skip. A synthetic index
+    /// keeps those tests hermetic and fast, and it exercises the same postings
+    /// and query paths a real build produces.
+    pub fn from_entries(entries: Vec<AssetEntry>) -> AssetIndex {
+        let mut index = AssetIndex {
+            entries,
+            ..Default::default()
+        };
+        index.build_postings();
+        index
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

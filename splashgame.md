@@ -34,8 +34,11 @@ adding a verb = a match arm in `examples/gamemaker/src/game_view.rs`
   `push(xs, v)` function; calling one is an error that stops the game),
   `xs.len()`, `xs[i]`, and `for x in xs { }`. `game.find("tag")` and
   `game.overlap_sphere(pos, r)` hand you arrays to walk the same way.
-- Everything is procedural: colored shapes and synthesized sound. No image,
-  model, or audio files — no files besides game.splash.
+- **Use the stock library.** ~4,700 CC0 models ship with Arcade — houses,
+  vehicles, trees, rocks, furniture, dungeon and road tiles, rigged
+  characters. A scene built from bare `game.box` primitives looks cheap; the
+  same scene with real models looks like a game. See **The stock library**.
+  Sound is synthesized; the only file a game itself owns is `game.splash`.
 - ALWAYS check `./tools/ag errors` after editing. Empty = live. Error = the
   player still sees the OLD world.
 
@@ -182,6 +185,82 @@ overlapping the lens clips open instead of filling the screen) are automatic.
 House style: give every creature a face (`game.part` eyes) and a name
 (`game.label`) — two lines each, do it without being asked. Build big
 characters from many parts and animate them with `move_part`/`scale`/`glow`.
+
+## The stock library — ~4,700 CC0 models
+
+Arcade ships Kenney's low-poly library: houses, vehicles, trees, rocks, walls,
+furniture, food, weapons, road and dungeon tiles, and rigged characters.
+**Reach for these before `game.box`.** A scene of coloured primitives reads as
+a prototype; the same layout with real models reads as a game.
+
+| call | meaning |
+|---|---|
+| `game.find_model("pine tree", {count: 4})` | search → **a LIST of DISTINCT model ids**. Options: `count`, `spread` (`mixed` default / `kinds` / `variants`), `seed`, `kind` (`model`/`sound`), `rigged: true`, `max_size` |
+| `game.find_palette("village", 7)` | → `{pack, group: [ids], ...}` — a MATCHED set from ONE art pack |
+| `game.model(id, {pos, yaw, scale, collide, tag})` | place one. Ids come from `find_model` — never invent one; a wrong id reports near-misses and places nothing |
+| `game.kits()` | → `[{pack, tiles, tile_size, roles}]` — the packs whose tiles snap together |
+| `game.cast()` | → `[{joints, members, states}]` — rigged characters, grouped by shared rig (one animation set drives every member of a group) |
+
+### The three rules that decide whether it looks good
+
+1. **Never place result #1 five times.** This is the single most common way to
+   make a scene look cheap. `find_model` returns a list precisely so you can
+   walk it — a village wants five different houses, a wood wants several
+   species and several variants of each.
+2. **One art pack per region.** Spreading across the whole library gives a
+   suburban house beside a hex-tile house beside a sci-fi house. Use
+   `find_palette` for a region, or keep to one `pack`.
+3. **Generate layouts; don't hand-place a hundred things.** `game.town`,
+   `game.dungeon` and `game.road_network` lay real tiles with correct corners
+   and junctions, which is tedious and error-prone by hand.
+
+```
+// WRONG — one house, five times
+let h = game.find_model("house")[0]
+for i in 0..5 { game.model(h, {pos: vec3(i * 8.0, 0.0, 0.0)}) }
+
+// RIGHT — five different houses, all from one pack, all facing the street
+let houses = game.find_model("suburban house", {count: 5, seed: 3})
+for i in 0..5 {
+    game.model(houses[i], {pos: vec3(i * 8.0 - 16.0, 0.0, -10.0), yaw: 0.0})
+}
+```
+
+## Building a place (composition)
+
+Tiles from a kit snap onto a grid; the generators pick corners, junctions and
+dead ends from how the layout actually connects, so you never name a piece.
+
+| call | meaning |
+|---|---|
+| `game.road_network({kit, paths: [[vec3, vec3, ...], ...], seed})` | polylines → a road. Two paths that cross give a crossroad, one that tees gives a T — automatically |
+| `game.town({roads_kit, buildings_kit, props_kit, extent: 24, block: 4, density: 0.8, seed})` | a street grid with buildings FRONTING the streets |
+| `game.dungeon({kit, extent: 32, min_room: 5, depth: 4, seed})` | rooms + corridors, every room reachable. Returns `{tiles, entrance, exit}` — spawn the player at `entrance` |
+
+All three return `{tiles}` (a count) and take `collide` (default on for towns
+and dungeons, off for roads so cars drive over them). All are
+**seed-deterministic**: the same seed gives the same level every load.
+
+`modular-dungeon-kit`, `modular-cave-kit` and `modular-space-kit` share one
+role vocabulary — the same `game.dungeon` call gives a crypt, a cavern or a
+space station purely by swapping `kit`.
+
+```
+// A small place: a road, a village along it, and a dungeon to find.
+let d = game.dungeon({kit: "kenney/modular-dungeon-kit", extent: 24, seed: 5})
+game.town({
+    roads_kit: "kenney/city-kit-roads",
+    buildings_kit: "kenney/city-kit-suburban",
+    extent: 20, block: 5, density: 0.7, seed: 5,
+})
+let trees = game.find_model("pine tree", {count: 4, seed: 5})
+for i in 0..24 {
+    let a = i * 0.26
+    game.model(trees[i % 4], {pos: vec3(cos(a) * 34.0, 0.0, sin(a) * 34.0)})
+}
+let hero = game.mover({pos: d.entrance, size: vec3(0.6, 1.7, 0.6)})
+game.camera({third_person: hero, boom: 9, pitch: -0.3})
+```
 
 ## Light and weather
 

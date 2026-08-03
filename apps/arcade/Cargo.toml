@@ -21,6 +21,7 @@ makepad-game-session = { path = "../../libs/game/session" }
 makepad-game-blocks = { path = "../../libs/game/blocks" }
 makepad-game-render = { path = "../../libs/game/render" }
 makepad-game-assets = { path = "../../libs/game/assets" }
+makepad-game-gen = { path = "../../libs/game/gen" }
 makepad-game-script = { path = "../../libs/game/script" }
 makepad-game-net = { path = "../../libs/game/net" }
 makepad-game-coedit = { path = "../../libs/game/coedit" }

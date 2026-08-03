@@ -7,7 +7,12 @@
 
 use crate::build::{spawn_entity, spawn_entity_unchecked, spawn_terrain};
 use crate::callbacks::CallbackTable;
+use crate::compose::{kit_from_index, level_placements, KitUse, PlacedTile};
 use crate::value::*;
+use makepad_game_assets::{AssetIndex, AssetKind, Filters, Spread, VarietyParams};
+use makepad_game_gen::{
+    dungeon, road_network, town, DungeonParams, Kit, Level, RoadParams, TownParams,
+};
 use makepad_game_blocks::{
     Blocks, Brain, BrainKind, Car, CarConfig, Character, CharacterConfig, ControlSource, Plane,
     PlaneConfig,
@@ -64,6 +69,30 @@ pub enum AudioRequest {
     StopAllTones,
 }
 
+/// A stock model the script asked for, queued for the host to load and draw.
+///
+/// Same shape of contract as [`AudioRequest`] and `ParticleRequest`: the verb
+/// runs synchronously and cheaply, and the part that needs a `Cx` (reading a
+/// GLB, uploading a texture, adding a draw batch) happens host-side. It also
+/// means a game can place props with no renderer attached at all, which is
+/// what lets the headless eval prove a scene without a window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelRequest {
+    /// Asset id, e.g. `kenney/nature-kit/tree_pineDefaultA`. Already resolved
+    /// against the index by the verb, so the host can trust it exists.
+    pub id: String,
+    pub pos: Vec3f,
+    pub yaw: f32,
+    /// Uniform scale. The host also scales to a target height when asked, but
+    /// a script that knows its model can say so directly.
+    pub scale: f32,
+    /// Spawn collider entities from the model's parts. Off for ground decals
+    /// and anything a player should walk over.
+    pub collide: bool,
+    /// Tag for the collider entities, so a game can find or filter them.
+    pub tag: String,
+}
+
 /// Everything a verb may touch. Cloned handles, so verbs can borrow narrowly
 /// and drop before calling back into the heap (the re-entrancy rule that
 /// gamemaker's `game.load`/`ground_peak` learned the hard way).
@@ -82,6 +111,13 @@ pub struct Ctx {
     pub particles: Rc<RefCell<Vec<ParticleRequest>>>,
     /// Next emitter handle, minted host-side like tone ids.
     pub next_emitter: Rc<Cell<u64>>,
+    /// The stock library, when the host has one. `None` is not an error: a
+    /// game built from primitives must still run on a machine that never
+    /// downloaded the packs, so the asset verbs report a clear message rather
+    /// than failing the eval.
+    pub assets: Rc<Option<AssetIndex>>,
+    /// Stock model placements, drained by the host each eval.
+    pub models: Rc<RefCell<Vec<ModelRequest>>>,
 }
 
 pub type VerbFn = fn(&mut ScriptVm, &Ctx, ScriptObject) -> ScriptValue;
@@ -1806,6 +1842,465 @@ fn v_reset(_vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
 
 /// `(name, fn, signature)` — the signature strings are what `game.api()`
 /// prints and what splashgame.md documents.
+// ---------------------------------------------------------------- library
+//
+// The verbs that turn 4,700 stock models from a warehouse into a vocabulary.
+//
+// The eval harness proved these were the missing piece: generated games looked
+// bare, and so did our own hand-written "model answer" fixture, because bare
+// primitives were the only thing the engine exposed. Capability the model is
+// never told about does not get used.
+
+/// Report an asset problem the way an unknown verb is reported: loudly, with a
+/// suggestion. A silently-absent prop is the hardest failure to diagnose,
+/// because the source looks right and the world is simply emptier than asked.
+fn asset_error(vm: &mut ScriptVm, ctx: &Ctx, msg: String) {
+    ctx.world.borrow_mut().log(msg.clone());
+    if let Some(sink) = vm.bx.captured_errors.as_mut() {
+        sink.push(msg);
+    }
+}
+
+fn library<'a>(vm: &mut ScriptVm, ctx: &'a Ctx, verb: &str) -> Option<&'a AssetIndex> {
+    match ctx.assets.as_ref() {
+        Some(index) if !index.is_empty() => Some(index),
+        _ => {
+            asset_error(
+                vm,
+                ctx,
+                format!(
+                    "game.{verb}: no stock library on this device — run apps/arcade/download_assets.sh"
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn str_list(vm: &mut ScriptVm, items: impl IntoIterator<Item = String>) -> ScriptValue {
+    let out = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_vec2(out);
+    for s in items {
+        let v = vm.bx.heap.new_string_from_str(&s);
+        vm.bx.heap.vec_push_unchecked(out, NIL, v);
+    }
+    out.into()
+}
+
+/// `game.find(query, {count, spread, seed, kind, rigged, max_size})` -> [ids]
+///
+/// Always a LIST, even for one hit, and the results are DISTINCT models. That
+/// shape is deliberate: the single most common way to make a scene look cheap
+/// is to take result #1 and place it five times, and an API that returns one
+/// model invites exactly that.
+fn v_find_models(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let query = arg_string(vm, args, 0);
+    let opts = opts_of(vm, args, 1);
+    let (mut count, mut seed, mut spread, mut filters) =
+        (1usize, 0u64, Spread::Mixed, Filters::default());
+    if let Some(o) = opts {
+        warn_unknown_keys(
+            vm,
+            &ctx.world,
+            "find_model",
+            o,
+            &[
+                id!(count),
+                id!(spread),
+                id!(seed),
+                id!(kind),
+                id!(rigged),
+                id!(max_size),
+            ],
+        );
+        count = opt_f32(vm, o, id!(count), 1.0).max(1.0) as usize;
+        seed = opt_f32(vm, o, id!(seed), 0.0) as u64;
+        if let Some(s) = opt_string(vm, o, id!(spread)) {
+            spread = match s.as_str() {
+                "kinds" => Spread::Kinds,
+                "variants" => Spread::Variants,
+                _ => Spread::Mixed,
+            };
+        }
+        if let Some(k) = opt_string(vm, o, id!(kind)) {
+            filters.kind = match k.as_str() {
+                "sound" => Some(AssetKind::Sound),
+                "music" => Some(AssetKind::Music),
+                _ => Some(AssetKind::Model),
+            };
+        }
+        filters.rigged_only = opt_bool(vm, o, id!(rigged), false);
+        let max = opt_f32(vm, o, id!(max_size), 0.0);
+        if max > 0.0 {
+            filters.max_extent = Some(max);
+        }
+    }
+    let Some(index) = library(vm, ctx, "find_model") else {
+        return str_list(vm, []);
+    };
+    let params = VarietyParams {
+        count,
+        spread,
+        seed,
+        filters,
+    };
+    let ids: Vec<String> = index
+        .find_many(&query, &params)
+        .into_iter()
+        .map(|e| e.id.clone())
+        .collect();
+    if ids.is_empty() {
+        asset_error(
+            vm,
+            ctx,
+            format!("game.find_model: nothing matches \"{query}\" — try plainer words, or a use ('something to sit on')"),
+        );
+    }
+    str_list(vm, ids)
+}
+
+/// `game.palette(query, seed)` -> {group: [ids]} — a matched set from ONE pack.
+///
+/// The counterpart to variety: spreading maximally across the library gives
+/// five houses in five art styles, which is the junk-drawer failure reached
+/// from the other direction. A palette keeps a region coherent.
+fn v_palette(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let query = arg_string(vm, args, 0);
+    let seed = arg_f32(vm, args, 1) as u64;
+    let Some(index) = library(vm, ctx, "find_palette") else {
+        return nil();
+    };
+    let Some(palette) = index.palette(&query, seed) else {
+        asset_error(vm, ctx, format!("game.find_palette: no coherent set for \"{query}\""));
+        return nil();
+    };
+    let out = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_auto(out);
+    let pack = vm.bx.heap.new_string_from_str(&palette.pack);
+    vm.bx.heap.set_value(out, id!(pack).into(), pack, NoTrap);
+    for (group, ids) in &palette.groups {
+        let list = str_list(vm, ids.clone());
+        vm.bx
+            .heap
+            .set_value(out, LiveId::from_str(group).into(), list, NoTrap);
+    }
+    out.into()
+}
+
+/// `game.kits()` -> [{pack, tiles, tile_size, roles}] — the composable packs.
+fn v_kits(vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    let Some(index) = library(vm, ctx, "kits") else {
+        return str_list(vm, []);
+    };
+    let kits = index.kits();
+    let out = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_vec2(out);
+    for k in kits {
+        let row = vm.bx.heap.new_object();
+        vm.bx.heap.set_object_storage_auto(row);
+        let pack = vm.bx.heap.new_string_from_str(&format!("kenney/{}", k.pack));
+        vm.bx.heap.set_value(row, id!(pack).into(), pack, NoTrap);
+        vm.bx
+            .heap
+            .set_value(row, id!(tiles).into(), num(k.tiles as f64), NoTrap);
+        vm.bx.heap.set_value(
+            row,
+            id!(tile_size).into(),
+            num(k.tile_size.unwrap_or(1.0) as f64),
+            NoTrap,
+        );
+        let roles = str_list(vm, k.roles.iter().map(|(r, _)| r.clone()));
+        vm.bx.heap.set_value(row, id!(roles).into(), roles, NoTrap);
+        vm.bx.heap.vec_push_unchecked(out, NIL, row.into());
+    }
+    out.into()
+}
+
+/// `game.cast()` -> [{joints, members, states}] — rigged characters by shared
+/// rig. Grouped by joint count rather than pack because the useful fact is
+/// that one animation set drives every member.
+fn v_cast(vm: &mut ScriptVm, ctx: &Ctx, _args: ScriptObject) -> ScriptValue {
+    let Some(index) = library(vm, ctx, "cast") else {
+        return str_list(vm, []);
+    };
+    let casts = index.casts();
+    let out = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_vec2(out);
+    for c in casts {
+        let row = vm.bx.heap.new_object();
+        vm.bx.heap.set_object_storage_auto(row);
+        vm.bx
+            .heap
+            .set_value(row, id!(joints).into(), num(c.joints as f64), NoTrap);
+        let members = str_list(vm, c.members.clone());
+        vm.bx.heap.set_value(row, id!(members).into(), members, NoTrap);
+        let states = str_list(vm, c.shared_states.clone());
+        vm.bx.heap.set_value(row, id!(states).into(), states, NoTrap);
+        vm.bx.heap.vec_push_unchecked(out, NIL, row.into());
+    }
+    out.into()
+}
+
+/// Queue one model, spawning its collider unless told not to.
+///
+/// Colliders come from the kit pitch or the model's own bounds, spawned as
+/// hidden static entities — the same shape the demo builds in Rust, so a
+/// scripted prop is exactly as solid as a hand-placed one.
+fn place_model(
+    vm: &mut ScriptVm,
+    ctx: &Ctx,
+    id: &str,
+    pos: Vec3f,
+    yaw: f32,
+    scale: f32,
+    collide: bool,
+    tag: &str,
+    half: Option<Vec3f>,
+    centre: Option<Vec3f>,
+) {
+    ctx.models.borrow_mut().push(ModelRequest {
+        id: id.to_string(),
+        pos,
+        yaw,
+        scale,
+        collide,
+        tag: tag.to_string(),
+    });
+    // A tile knows its own box from the kit pitch; a loose prop does not until
+    // the host has read its GLB, so only the former spawns a collider here and
+    // the latter is spawned host-side after load.
+    if collide {
+        if let (Some(half), Some(centre)) = (half, centre) {
+            crate::compose::spawn_collider(&mut ctx.world.borrow_mut(), centre, half, tag);
+        }
+    }
+    let _ = vm;
+}
+
+/// `game.model(id, {pos, yaw, scale, collide, tag})`
+fn v_model(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = arg_string(vm, args, 0);
+    let opts = opts_of(vm, args, 1);
+    let (mut pos, mut yaw, mut scale, mut collide, mut tag) =
+        (vec3f(0.0, 0.0, 0.0), 0.0f32, 1.0f32, true, "scenery".to_string());
+    if let Some(o) = opts {
+        warn_unknown_keys(
+            vm,
+            &ctx.world,
+            "model",
+            o,
+            &[id!(pos), id!(yaw), id!(scale), id!(collide), id!(tag)],
+        );
+        pos = opt_vec3(vm, o, id!(pos), pos);
+        yaw = opt_f32(vm, o, id!(yaw), 0.0);
+        scale = opt_f32(vm, o, id!(scale), 1.0);
+        collide = opt_bool(vm, o, id!(collide), true);
+        if let Some(t) = opt_string(vm, o, id!(tag)) {
+            tag = t;
+        }
+    }
+    let Some(index) = library(vm, ctx, "model") else {
+        return nil();
+    };
+    // resolve_or_explain returns near-misses, which is what lets a wrong id be
+    // fixed in one turn instead of rendering nothing and saying nothing.
+    match index.resolve_or_explain(&id) {
+        Ok(entry) => {
+            let id = entry.id.clone();
+            place_model(vm, ctx, &id, pos, yaw, scale, collide, &tag, None, None);
+            num(1.0)
+        }
+        Err(explain) => {
+            asset_error(vm, ctx, format!("game.model: {explain}"));
+            nil()
+        }
+    }
+}
+
+/// Shared tail of the composition verbs: flatten a level into model requests.
+fn emit_level(vm: &mut ScriptVm, ctx: &Ctx, level: &Level, kits: &[Kit], collide: bool) -> ScriptValue {
+    let tiles: Vec<PlacedTile> = level_placements(level, kits);
+    let count = tiles.len();
+    for t in tiles {
+        place_model(
+            vm,
+            ctx,
+            &t.model,
+            t.pos,
+            t.yaw,
+            1.0,
+            collide,
+            "scenery",
+            Some(t.half),
+            Some(t.centre),
+        );
+    }
+    let out = vm.bx.heap.new_object();
+    vm.bx.heap.set_object_storage_auto(out);
+    vm.bx
+        .heap
+        .set_value(out, id!(tiles).into(), num(count as f64), NoTrap);
+    if let Some(e) = level.entrance {
+        let v = vec3_value(vm, e);
+        vm.bx.heap.set_value(out, id!(entrance).into(), v, NoTrap);
+    }
+    if let Some(e) = level.exit {
+        let v = vec3_value(vm, e);
+        vm.bx.heap.set_value(out, id!(exit).into(), v, NoTrap);
+    }
+    out.into()
+}
+
+/// Resolve a kit option to a generator kit, reporting clearly when absent.
+fn kit_opt(
+    vm: &mut ScriptVm,
+    ctx: &Ctx,
+    verb: &str,
+    opts: Option<ScriptObject>,
+    key: LiveId,
+    required: bool,
+    usage: KitUse,
+) -> Option<Kit> {
+    let name = opts.and_then(|o| opt_string(vm, o, key));
+    let Some(name) = name else {
+        if required {
+            asset_error(vm, ctx, format!("game.{verb}: needs a `{key}` kit — see game.kits()"));
+        }
+        return None;
+    };
+    let index = library(vm, ctx, verb)?;
+    match kit_from_index(index, &name, usage) {
+        Some(kit) => Some(kit),
+        None => {
+            asset_error(
+                vm,
+                ctx,
+                format!("game.{verb}: `{name}` is not a modular kit — game.kits() lists the ones that tile"),
+            );
+            None
+        }
+    }
+}
+
+/// `game.road_network({kit, paths, seed, collide})`
+fn v_road_network(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let opts = opts_of(vm, args, 0);
+    if let Some(o) = opts {
+        warn_unknown_keys(vm, &ctx.world, "road_network", o, &[id!(kit), id!(paths), id!(seed), id!(collide)]);
+    }
+    let Some(kit) = kit_opt(vm, ctx, "road_network", opts, id!(kit), true, KitUse::Structure) else {
+        return nil();
+    };
+    let (seed, collide, paths) = match opts {
+        Some(o) => {
+            let seed = opt_f32(vm, o, id!(seed), 0.0) as u64;
+            let collide = opt_bool(vm, o, id!(collide), false);
+            // `paths` is a list of point-lists.
+            let v = opts_value(vm, o, id!(paths));
+            let n = list_len(vm, v);
+            let mut paths: Vec<Vec<Vec3f>> = Vec::with_capacity(n);
+            for i in 0..n {
+                let item = list_value(vm, v, i);
+                let m = list_len(vm, item);
+                let mut pts = Vec::with_capacity(m);
+                for j in 0..m {
+                    let p = list_value(vm, item, j);
+                    pts.push(value_vec3(vm, p));
+                }
+                if !pts.is_empty() {
+                    paths.push(pts);
+                }
+            }
+            (seed, collide, paths)
+        }
+        None => (0, false, Vec::new()),
+    };
+    if paths.is_empty() {
+        asset_error(vm, ctx, "game.road_network: needs `paths: [[vec3, ...], ...]`".to_string());
+        return nil();
+    }
+    let level = road_network(&kit, &RoadParams { seed, paths: &paths });
+    emit_level(vm, ctx, &level, std::slice::from_ref(&kit), collide)
+}
+
+/// `game.town({roads_kit, buildings_kit, props_kit, extent, block, density, seed})`
+fn v_town(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let opts = opts_of(vm, args, 0);
+    if let Some(o) = opts {
+        warn_unknown_keys(
+            vm,
+            &ctx.world,
+            "town",
+            o,
+            &[
+                id!(roads_kit),
+                id!(buildings_kit),
+                id!(props_kit),
+                id!(extent),
+                id!(block),
+                id!(density),
+                id!(seed),
+                id!(collide),
+            ],
+        );
+    }
+    let Some(roads) = kit_opt(vm, ctx, "town", opts, id!(roads_kit), true, KitUse::Structure) else {
+        return nil();
+    };
+    let buildings = kit_opt(vm, ctx, "town", opts, id!(buildings_kit), false, KitUse::Buildings);
+    let props = kit_opt(vm, ctx, "town", opts, id!(props_kit), false, KitUse::Props);
+    let mut p = TownParams::default();
+    let mut collide = true;
+    if let Some(o) = opts {
+        p.seed = opt_f32(vm, o, id!(seed), 0.0) as u64;
+        let extent = opt_f32(vm, o, id!(extent), 24.0).max(4.0) as i32;
+        p.extent = (extent, extent);
+        p.block = opt_f32(vm, o, id!(block), 4.0).max(2.0) as i32;
+        p.density = opt_f32(vm, o, id!(density), 0.8).clamp(0.0, 1.0);
+        collide = opt_bool(vm, o, id!(collide), true);
+    }
+    p.buildings = buildings.as_ref();
+    p.props = props.as_ref();
+    let level = town(&roads, &p);
+    let mut kits = vec![roads];
+    if let Some(k) = buildings {
+        kits.push(k);
+    }
+    if let Some(k) = props {
+        kits.push(k);
+    }
+    emit_level(vm, ctx, &level, &kits, collide)
+}
+
+/// `game.dungeon({kit, extent, min_room, depth, seed})` -> {tiles, entrance, exit}
+fn v_dungeon(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let opts = opts_of(vm, args, 0);
+    if let Some(o) = opts {
+        warn_unknown_keys(
+            vm,
+            &ctx.world,
+            "dungeon",
+            o,
+            &[id!(kit), id!(extent), id!(min_room), id!(depth), id!(seed), id!(collide)],
+        );
+    }
+    let Some(kit) = kit_opt(vm, ctx, "dungeon", opts, id!(kit), true, KitUse::Structure) else {
+        return nil();
+    };
+    let mut p = DungeonParams::default();
+    let mut collide = true;
+    if let Some(o) = opts {
+        p.seed = opt_f32(vm, o, id!(seed), 0.0) as u64;
+        let extent = opt_f32(vm, o, id!(extent), 32.0).max(8.0) as i32;
+        p.extent = (extent, extent);
+        p.min_room = opt_f32(vm, o, id!(min_room), 5.0).max(3.0) as i32;
+        p.depth = opt_f32(vm, o, id!(depth), 4.0).clamp(1.0, 8.0) as u32;
+        collide = opt_bool(vm, o, id!(collide), true);
+    }
+    let level = dungeon(&kit, &p);
+    emit_level(vm, ctx, &level, std::slice::from_ref(&kit), collide)
+}
+
 pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("box", v_box, "({pos, size, color, tag, sensor, collide, body, glow, shape, rot_y, density, friction, restitution}) -> id"),
     ("block", v_box, "alias of box"),
@@ -1918,6 +2413,16 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("format", v_format, "(value, decimals) -> string"),
     ("api", v_api, "() — log every verb and signature"),
     ("reset", v_reset, "() — wipe world content, timers, callbacks, blocks, tones"),
+    // ---- stock library: 4,700 CC0 models. Scenes built from primitives look
+    // cheap; these are how a game gets real artwork.
+    ("find_model", v_find_models, "(query, {count, spread: mixed|kinds|variants, seed, kind, rigged, max_size}) -> [ids] — ALWAYS a list of DISTINCT models; ask for several and place a different one each time"),
+    ("find_palette", v_palette, "(query, seed) -> {pack, group: [ids]} — a matched set from ONE art pack, for a coherent region"),
+    ("model", v_model, "(id, {pos, yaw, scale, collide, tag}) — place a stock model; ids come from game.find, never guessed"),
+    ("kits", v_kits, "() -> [{pack, tiles, tile_size, roles}] — packs whose tiles snap together"),
+    ("cast", v_cast, "() -> [{joints, members, states}] — rigged characters grouped by shared rig"),
+    ("road_network", v_road_network, "({kit, paths: [[vec3,...],...], seed, collide}) -> {tiles} — junction types fall out of the layout"),
+    ("town", v_town, "({roads_kit, buildings_kit, props_kit, extent, block, density, seed, collide}) -> {tiles} — streets with buildings fronting them"),
+    ("dungeon", v_dungeon, "({kit, extent, min_room, depth, seed, collide}) -> {tiles, entrance, exit} — rooms and corridors, every room reachable"),
 ];
 
 /// Built once per isolate: LiveId -> verb. Replaces gamemaker's linear chain.
@@ -1991,6 +2496,20 @@ mod tests {
             next_tone: Rc::new(Cell::new(0)),
             particles: Rc::new(RefCell::new(Vec::new())),
             next_emitter: Rc::new(Cell::new(0)),
+            // No library in unit tests: the asset verbs must report clearly
+            // rather than fail, and that path deserves coverage too.
+            assets: Rc::new(None),
+            models: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// A ctx with a synthetic two-tile kit, so the composition verbs can be
+    /// exercised without the 200 MB download. The kit is deliberately
+    /// incomplete (no crossroad) to also cover the superset fallback.
+    fn ctx_with_library(world: GameWorld, index: AssetIndex) -> Ctx {
+        Ctx {
+            assets: Rc::new(Some(index)),
+            ..ctx_with(world)
         }
     }
 
@@ -2495,10 +3014,13 @@ mod tests {
     fn the_verb_surface_matches_gamemakers() {
         // Gamemaker runs on this table now, so this pins the shared surface:
         // 102 at the migration, +5 for the pretty pass (sfx_at, sun,
-        // particles, burst, particles_stop).
+        // particles, burst, particles_stop), +8 for the stock library
+        // (find_model, find_palette, model, kits, cast, road_network, town,
+        // dungeon) — the verbs that turn 4,700 models from a warehouse into
+        // a vocabulary the AI can actually write with.
         assert_eq!(
             VERBS.len(),
-            107,
+            115,
             "verb count changed — sync with splashgame.md"
         );
     }
@@ -2593,6 +3115,259 @@ mod tests {
             );
         }
     }
+    // ── the stock library: search, variety, placement, composition ──────
+
+    /// A synthetic library: one road kit whose tiles cover the roles a layout
+    /// needs, plus several distinct houses so variety has something to spread
+    /// across. Hermetic — the real packs are gitignored.
+    fn test_index() -> AssetIndex {
+        use makepad_game_assets::AssetEntry;
+        fn model(pack: &str, name: &str, role: Option<&'static str>, kit: bool) -> AssetEntry {
+            makepad_game_assets::AssetEntry {
+                id: format!("kenney/{pack}/{name}"),
+                name: name.to_string(),
+                kind: AssetKind::Model,
+                path: std::path::PathBuf::from(format!("{pack}/{name}.glb")),
+                source: makepad_game_assets::Source::Kenney,
+                pack: pack.to_string(),
+                license: "CC0",
+                credit: "Kenney",
+                categories: vec![],
+                keywords: name
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect(),
+                themes: vec![],
+                rigged: false,
+                animated: false,
+                clips: vec![],
+                joints: 0,
+                role,
+                kit,
+                size: Some([1.0, 0.5, 1.0]),
+                format: "glb".to_string(),
+                duration: None,
+                loops: false,
+                decodable: true,
+                bytes: 0,
+            }
+        }
+        AssetIndex::from_entries(vec![
+            model("city-kit-roads", "road-straight", Some("straight"), true),
+            model("city-kit-roads", "road-corner", Some("corner"), true),
+            model("city-kit-roads", "road-crossroad", Some("junction"), true),
+            model("city-kit-roads", "road-end", Some("end"), true),
+            model("city-kit-roads", "road-floor", Some("floor"), true),
+            model("suburbs", "house-type-a", None, false),
+            model("suburbs", "house-type-b", None, false),
+            model("suburbs", "house-type-c", None, false),
+        ])
+    }
+
+    /// The fix for "the AI places the same model five times": results are a
+    /// LIST of DISTINCT ids, so asking for three houses cannot return one
+    /// house three times.
+    #[test]
+    fn find_model_returns_distinct_ids_not_one_repeated() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with_library(GameWorld::new(), test_index());
+        let q = vm.bx.heap.new_string_from_str("house");
+        let opts = opts_of_pairs(&mut vm, &[(id!(count), num(3.0))]);
+        let out = call("find_model", &mut vm, &ctx, &[q, opts]);
+        let n = list_len(&vm, out);
+        assert_eq!(n, 3, "asked for three houses");
+        let mut ids: Vec<String> = (0..n)
+            .map(|i| {
+                let v = list_value(&mut vm, out, i);
+                value_string(&mut vm, v)
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "three houses must be three DIFFERENT houses");
+    }
+
+    /// A bad id must fail loudly with near-misses. Rendering nothing and
+    /// saying nothing is the single hardest failure for an AI to recover
+    /// from — it cannot fix what it cannot see.
+    #[test]
+    fn a_wrong_model_id_reports_near_misses() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with_library(GameWorld::new(), test_index());
+        let bad = vm.bx.heap.new_string_from_str("kenney/suburbs/house-type-z");
+        let out = call("model", &mut vm, &ctx, &[bad]);
+        assert!(out.is_nil(), "a bad id must not silently succeed");
+        assert!(ctx.models.borrow().is_empty(), "nothing may be queued");
+        let log = ctx.world.borrow().log_pending.join("\n");
+        assert!(log.contains("game.model:"), "not reported: {log}");
+        assert!(
+            log.contains("house-type-a") || log.contains("did you mean") || log.contains("house"),
+            "no near-miss offered: {log}"
+        );
+    }
+
+    /// A placed model queues for the host AND becomes solid, so a scripted
+    /// prop is exactly as real as a hand-placed one.
+    #[test]
+    fn placing_a_model_queues_it_for_the_host() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with_library(GameWorld::new(), test_index());
+        let good = vm.bx.heap.new_string_from_str("kenney/suburbs/house-type-a");
+        let pos = vec3_value(&mut vm, vec3f(4.0, 0.0, -2.0));
+        let opts = opts_of_pairs(&mut vm, &[(id!(pos), pos)]);
+        call("model", &mut vm, &ctx, &[good, opts]);
+        let queued = ctx.models.borrow();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, "kenney/suburbs/house-type-a");
+        assert_eq!(queued[0].pos, vec3f(4.0, 0.0, -2.0));
+    }
+
+    /// Composition: a road network lays real tiles and makes them solid.
+    #[test]
+    fn a_road_network_places_tiles_and_collides() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with_library(GameWorld::new(), test_index());
+        let kit = vm.bx.heap.new_string_from_str("kenney/city-kit-roads");
+        // One straight run of four cells.
+        let path = {
+            let outer = vm.bx.heap.new_object();
+            vm.bx.heap.set_object_storage_vec2(outer);
+            let inner = vm.bx.heap.new_object();
+            vm.bx.heap.set_object_storage_vec2(inner);
+            for x in [0.0f32, 3.0] {
+                let p = vec3_value(&mut vm, vec3f(x, 0.0, 0.0));
+                vm.bx.heap.vec_push_unchecked(inner, NIL, p);
+            }
+            vm.bx.heap.vec_push_unchecked(outer, NIL, inner.into());
+            outer.into()
+        };
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[
+                (id!(kit), kit),
+                (id!(paths), path),
+                (id!(collide), ScriptValue::from_bool(true)),
+            ],
+        );
+        let out = call("road_network", &mut vm, &ctx, &[opts]);
+        let tiles = vm.bx.heap.value(out.as_object().unwrap(), id!(tiles).into(), NoTrap);
+        let tiles = value_f32(&mut vm, tiles);
+        assert!(tiles >= 4.0, "expected a run of tiles, got {tiles}");
+        assert_eq!(ctx.models.borrow().len(), tiles as usize, "every tile drawn");
+        assert_eq!(
+            ctx.world.borrow().entities.len(),
+            tiles as usize,
+            "every tile solid"
+        );
+    }
+
+    /// Same seed, same layout — a game must look the same each time it loads,
+    /// and multiplayer replicates a level as (kit, seed, params).
+    #[test]
+    fn composition_is_seed_deterministic() {
+        let run = || {
+            let mut h = Harness::new();
+            let mut vm = h.vm();
+            let ctx = ctx_with_library(GameWorld::new(), test_index());
+            let kit = vm.bx.heap.new_string_from_str("kenney/city-kit-roads");
+            let opts = opts_of_pairs(
+                &mut vm,
+                &[(id!(kit), kit), (id!(extent), num(12.0)), (id!(seed), num(7.0))],
+            );
+            call("dungeon", &mut vm, &ctx, &[opts]);
+            let m = ctx.models.borrow();
+            m.iter().map(|r| (r.id.clone(), r.pos, r.yaw)).collect::<Vec<_>>()
+        };
+        let a = run();
+        let b = run();
+        assert!(!a.is_empty(), "the dungeon must produce tiles");
+        assert_eq!(a, b, "same seed must give the same level");
+    }
+
+    /// Absent library is not an error: a game built from primitives still
+    /// runs on a machine that never downloaded the packs.
+    #[test]
+    fn asset_verbs_explain_themselves_without_a_library() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let q = vm.bx.heap.new_string_from_str("house");
+        let out = call("find_model", &mut vm, &ctx, &[q]);
+        assert_eq!(list_len(&vm, out), 0);
+        let log = ctx.world.borrow().log_pending.join("\n");
+        assert!(
+            log.contains("download_assets.sh"),
+            "must say how to fix it: {log}"
+        );
+    }
+
+    /// Every `game.X(` the scenery fixture calls must exist.
+    ///
+    /// Reads the file rather than listing verbs by hand, so a fixture written
+    /// against a verb that was renamed (or never existed) fails here instead
+    /// of at load time in front of a player. `game.find` vs `find_model` was
+    /// exactly that mistake, caught by the duplicate-name test.
+    #[test]
+    fn village_fixture_verbs_all_exist() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../examples/gamemaker/resources/fixtures/village.splash"
+        );
+        let Ok(src) = std::fs::read_to_string(path) else {
+            return; // fixture not in this checkout
+        };
+        let table = verb_table();
+        let mut checked = 0;
+        for (i, _) in src.match_indices("game.") {
+            let rest = &src[i + 5..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            // Only calls, not field reads on a returned object.
+            if name.is_empty() || !rest[name.len()..].starts_with('(') {
+                continue;
+            }
+            assert!(
+                table.contains_key(&LiveId::from_str(&name)),
+                "village.splash calls game.{name}, which the table lacks"
+            );
+            checked += 1;
+        }
+        assert!(checked > 8, "fixture parsed oddly — only {checked} calls");
+    }
+
+    /// The documentation is half the feature: a verb the model is never told
+    /// about does not get used. This pins that the library verbs actually
+    /// reached splashgame.md, which is loaded into the system prompt.
+    #[test]
+    fn splashgame_documents_the_library_verbs() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../splashgame.md");
+        let Ok(doc) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for verb in [
+            "find_model",
+            "find_palette",
+            "game.model(",
+            "game.town(",
+            "game.dungeon(",
+            "game.road_network(",
+        ] {
+            assert!(doc.contains(verb), "splashgame.md never mentions {verb}");
+        }
+        // The bare-primitives claim actively suppressed the whole library.
+        assert!(
+            !doc.contains("No image,\n  model, or audio files"),
+            "splashgame.md still tells the model it has no models"
+        );
+    }
+
     // ── the pretty pass: sun / particles / positional audio ─────────────
 
     #[test]

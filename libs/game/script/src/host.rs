@@ -8,7 +8,8 @@
 //! cannot forget a field.
 
 use crate::callbacks::CallbackTable;
-use crate::dispatch::{suggest, verb_table, AudioRequest, Ctx, VerbFn};
+use crate::dispatch::{suggest, verb_table, AudioRequest, Ctx, ModelRequest, VerbFn};
+use makepad_game_assets::AssetIndex;
 use crate::sandbox::{strip_capabilities, Trust};
 use makepad_game_blocks::Blocks;
 use makepad_game_sim::*;
@@ -41,6 +42,12 @@ pub struct ScriptHost {
     eval_gen: Rc<Cell<u64>>,
     next_tone: Rc<Cell<u64>>,
     next_emitter: Rc<Cell<u64>>,
+    /// The stock library. Shared rather than owned because building it probes
+    /// ~5,000 GLBs (~1.8 s) — a host builds it once and hands the same index
+    /// to every game it loads.
+    assets: Rc<Option<AssetIndex>>,
+    /// Stock model placements queued by this eval, drained by the host.
+    models: Rc<RefCell<Vec<ModelRequest>>>,
     verbs: Rc<HashMap<LiveId, VerbFn>>,
     vm_id: SplashVmId,
     /// Checkpoint identity for streaming eval. gamemaker abuses the widget's
@@ -78,6 +85,8 @@ impl ScriptHost {
             eval_gen: Rc::new(Cell::new(0)),
             next_tone: Rc::new(Cell::new(0)),
             next_emitter: Rc::new(Cell::new(0)),
+            assets: Rc::new(None),
+            models: Rc::new(RefCell::new(Vec::new())),
             verbs: Rc::new(verb_table()),
             vm_id: MAIN_SPLASH_VM_ID,
             body_id: next_body_id(),
@@ -139,7 +148,25 @@ impl ScriptHost {
             audio: self.audio.clone(),
             eval_gen: self.eval_gen.clone(),
             next_tone: self.next_tone.clone(),
+            assets: self.assets.clone(),
+            models: self.models.clone(),
         }
+    }
+
+    /// Hand this host the stock library. Absent by default, and absence is not
+    /// an error — a game built from primitives must still run on a machine
+    /// that never downloaded the packs, so the asset verbs report a clear
+    /// message instead of failing the eval.
+    pub fn set_assets(&mut self, assets: Rc<Option<AssetIndex>>) {
+        self.assets = assets;
+    }
+
+    /// Drain the stock models this eval asked for. The host loads the GLBs,
+    /// hands them to the renderer, and spawns colliders for loose props from
+    /// the model's own parts (tiles already carry theirs, since a kit knows
+    /// its grid pitch before anything is read from disk).
+    pub fn take_models(&self) -> Vec<ModelRequest> {
+        std::mem::take(&mut *self.models.borrow_mut())
     }
 
     /// Feed source; a no-op when unchanged so an mtime poll is cheap.

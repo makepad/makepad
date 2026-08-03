@@ -7,6 +7,9 @@
 pub use makepad_widgets;
 
 pub mod ai;
+/// The Zelda-scale world build. Layout is pure and testable; see the module
+/// docs for why it is split from realisation.
+pub mod bigworld;
 pub mod capability;
 pub mod library;
 pub mod pair_server;
