@@ -305,7 +305,11 @@ if [[ -f "$MANIFEST" ]]; then
 		[[ "$usable" == "true" ]] || continue
 		want_pack "$slug" "$core" || continue
 		dest="$MODELS/$slug"
-		if [[ -d "$dest" ]] && [[ $(find "$dest" -iname '*.glb' -o -iname '*.gltf' | wc -l | tr -d ' ') -ge "$models" ]]; then
+		# The marker is written only after a COMPLETE extraction (models plus
+		# any texture atlas). Counting models alone declared a pack cached when
+		# its colormap.png had never been extracted at all — 48 of 52 packs
+		# rendered untextured while the script cheerfully reported them cached.
+		if [[ -f "$dest/.extracted" ]] && [[ $(find "$dest" -iname '*.glb' -o -iname '*.gltf' | wc -l | tr -d ' ') -ge "$models" ]]; then
 			cached=$((cached + 1))
 			continue
 		fi
@@ -319,14 +323,19 @@ if [[ -f "$MANIFEST" ]]; then
 		mkdir -p "$dest"
 		unzip -qo "$zip" -d "$zip.d" 2>/dev/null
 		chmod -R u+w "$zip.d" 2>/dev/null
-		# GLB is self-contained, so prefer it and skip the OBJ/FBX/DAE copies
-		# entirely — they are most of the archive and we cannot load them.
+		# Prefer GLB and skip the OBJ/FBX/DAE copies — they are most of the
+		# archive and we cannot load them. NOTE GLB is NOT self-contained here:
+		# Kenney materials reference an external Textures/colormap.png shared
+		# by the whole pack, so the PNGs come too (they are tiny — 212 atlases
+		# total about 42 KB). Without them every model renders white.
+		find "$zip.d" -iname '*.png' -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
 		if [[ $(find "$zip.d" -iname '*.glb' | wc -l | tr -d ' ') -gt 0 ]]; then
 			find "$zip.d" -iname '*.glb' -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
 		else
 			find "$zip.d" \( -iname '*.gltf' -o -iname '*.bin' \) -exec sh -c 'mv -f "$1" "$2/$(basename "$1")"' _ {} "$dest" \;
 		fi
 		rm -rf "$zip.d" "$zip"
+		: >"$dest/.extracted"
 		# Be a good guest: pace requests so a full run is a trickle, not a flood.
 		sleep 1
 	done < <(manifest_rows)
