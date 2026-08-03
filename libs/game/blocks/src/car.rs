@@ -183,6 +183,28 @@ impl Car {
         self.wheels.iter().filter(|w| w.grounded).count()
     }
 
+    /// How far below the chassis origin the ROAD is, along the chassis's own
+    /// down axis.
+    ///
+    /// Anything bolted to a wheeled body — the visual mesh, a shadow, a skid
+    /// decal — needs this number, and it is emphatically not half the chassis
+    /// box. A raycast vehicle hangs its wheels *below* its collision box: the
+    /// suspension probes down from the mount plane (`wheel.mount.y == 0`, so
+    /// the chassis origin) and the tyre meets the ground a wheel radius past
+    /// whatever the spring has not compressed. With the default kart that is
+    /// 0.74 units against a 0.4 half-height, so a mesh sat on the box floats
+    /// clear of the road by the 0.34-unit difference — most of a wheel.
+    ///
+    /// Read from the live suspension rather than computed from the spring
+    /// constant, so it stays true under load, on a slope and over a bump
+    /// without this file having to know the world's gravity. `last_length` is
+    /// the full rest length while a wheel is airborne, which is exactly where
+    /// a hanging wheel sits.
+    pub fn contact_drop(&self) -> f32 {
+        let sum: f32 = self.wheels.iter().map(|w| w.last_length).sum();
+        sum / self.wheels.len() as f32 + self.config.wheel_radius
+    }
+
     pub fn tick(&mut self, world: &mut GameWorld, player: &DriveInput) {
         if self.control == ControlSource::Player {
             self.input = *player;

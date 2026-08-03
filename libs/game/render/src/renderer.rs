@@ -254,6 +254,52 @@ pub struct ModelInstance {
     pub transform: Mat4f,
 }
 
+impl ModelInstance {
+    /// Hang a model off a moving body, anchored by the MODEL's own measured
+    /// bounds rather than by the body's collision box.
+    ///
+    /// Kenney authors a model with its origin on the surface it stands on:
+    /// every vehicle in `car-kit`, `racing`, `retro-urban-kit` and
+    /// `toy-car-kit` measures `min.y == 0` with the tyres at zero, and a prop
+    /// puts its feet there the same way. Some kits do not — track and road
+    /// pieces carry a skirt below zero, ground tiles a slab — so the anchor
+    /// is READ from `bounds`, never assumed. `min.y` is the model's floor
+    /// wherever the exporter left it.
+    ///
+    /// `frame` is the body's world rotation and position with no scale (see
+    /// [`GameRenderer::rigid_transform`]). `drop` is how far below the body's
+    /// origin, **along the body's own down axis**, that floor should sit —
+    /// i.e. where the ground is relative to the body. For anything resting
+    /// directly on its box that is the box's half height; for a wheeled body
+    /// it is not, because the box never touches the road (see
+    /// `blocks::Car::contact_drop`). Applying it in body space rather than
+    /// world Y is what keeps the mesh bolted on when the body pitches.
+    pub fn on_body(
+        model: String,
+        bounds: (Vec3f, Vec3f),
+        scale: f32,
+        drop: f32,
+        frame: &Mat4f,
+    ) -> Self {
+        let (min, max) = bounds;
+        // Model space → body space: uniform scale, then move the model's own
+        // floor to `drop` below the origin and its own horizontal centre onto
+        // the body's axis. Both are measured, so a kit that authors its origin
+        // in a corner of the scene grid still lands on the body.
+        let mut local = Mat4f::identity();
+        local.v[0] = scale;
+        local.v[5] = scale;
+        local.v[10] = scale;
+        local.v[12] = -(min.x + max.x) * 0.5 * scale;
+        local.v[13] = -drop - min.y * scale;
+        local.v[14] = -(min.z + max.z) * 0.5 * scale;
+        Self {
+            model,
+            transform: Mat4f::mul(frame, &local),
+        }
+    }
+}
+
 fn perf_us(t0: std::time::Instant) -> u64 {
     t0.elapsed().as_micros() as u64
 }

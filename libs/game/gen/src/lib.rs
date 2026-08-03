@@ -19,6 +19,7 @@ pub mod mesh;
 pub mod rng;
 pub mod scatter;
 pub mod spline;
+pub mod terrain;
 pub mod texgen;
 pub mod tree;
 

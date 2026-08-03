@@ -287,6 +287,228 @@ fn car_laps_an_oval_within_a_time_window() {
     );
 }
 
+// ------------------------------------------------------- the car's own mesh
+//
+// A car is a box3d box plus four suspension rays; what the player SEES is a
+// stock GLB hung off that box. The two are joined by one number — how far
+// below the chassis origin the road is — and getting it wrong is invisible to
+// every test above, because the physics is perfect either way and only the
+// picture is wrong. The car shipped floating a third of a metre in the air.
+//
+// So these assert the joint, against a real model's real vertices.
+
+const PACKS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../apps/arcade/resources/models/kenney"
+);
+
+fn kenney(rel: &str) -> Option<makepad_game_render::model::StaticModel> {
+    let bytes = std::fs::read(std::path::Path::new(PACKS).join(rel)).ok()?;
+    makepad_game_render::model::StaticModel::parse_glb(&bytes).ok()
+}
+
+/// Reproduces `ArcadeView::vehicle_instance`: scale the model's length onto
+/// the chassis length, then hand the placement the two facts it is allowed to
+/// use — the model's measured bounds and where the car says the road is.
+fn place(
+    model: &makepad_game_render::model::StaticModel,
+    world: &GameWorld,
+    car: &Car,
+) -> Mat4f {
+    let e = world.entity(car.entity).unwrap();
+    let native_len = (model.max.z - model.min.z)
+        .max(model.max.x - model.min.x)
+        .max(0.001);
+    let s = (e.half.z * 2.0) / native_len;
+    makepad_game_render::renderer::ModelInstance::on_body(
+        "vehicle".to_string(),
+        (model.min, model.max),
+        s,
+        car.contact_drop(),
+        &makepad_game_render::renderer::GameRenderer::rigid_transform(e),
+    )
+    .transform
+}
+
+/// Lowest y of every vertex after the placement transform — the bottom of the
+/// car as drawn, not as declared.
+fn lowest_drawn_y(model: &makepad_game_render::model::StaticModel, m: &Mat4f) -> f32 {
+    let stride = makepad_game_render::model::MODEL_VERTEX_FLOATS;
+    model
+        .vertices
+        .chunks(stride)
+        .map(|v| m.v[1] * v[0] + m.v[5] * v[1] + m.v[9] * v[2] + m.v[13])
+        .fold(f32::MAX, f32::min)
+}
+
+/// The number the picture hangs on. It is NOT the chassis half-height: the
+/// wheels hold the collision box clear of the ground, so a mesh sat on the box
+/// floats by the difference.
+#[test]
+fn the_road_under_a_car_is_not_its_collision_box() {
+    let (world, blocks, chassis) = car_world();
+    let car = &blocks.cars[0];
+    let e = world.entity(chassis).unwrap();
+    // `ground()` puts the road surface at y = 0.
+    let drop = car.contact_drop();
+    assert!(
+        (e.pos.y - drop).abs() < 0.02,
+        "contact_drop says the road is at y={}, it is at 0 (chassis at {})",
+        e.pos.y - drop,
+        e.pos.y
+    );
+    assert!(
+        drop > e.half.y + 0.2,
+        "the box bottom ({}) and the contact patch ({drop}) have converged — \
+         if that is real the suspension changed, and this test should be \
+         rewritten rather than relaxed",
+        e.half.y
+    );
+}
+
+/// Kenney's vehicles are authored with the origin ON the road: the tyres sit
+/// at y = 0 and the body rises from there. Measured, not assumed — the fix
+/// for the floating car reads `min.y`, and this is what says reading it is
+/// worth anything.
+#[test]
+fn kenney_authors_a_vehicle_standing_on_its_wheels() {
+    let mut checked = 0;
+    for rel in [
+        "toy-car-kit/vehicle-truck.glb",
+        "toy-car-kit/vehicle-racer.glb",
+        "car-kit/sedan.glb",
+        "car-kit/ambulance.glb",
+        "racing/vehicle-truck-red.glb",
+        "retro-urban-kit/truck-green.glb",
+    ] {
+        let Some(m) = kenney(rel) else { continue };
+        checked += 1;
+        assert!(
+            m.min.y.abs() < 1.0e-3,
+            "{rel}: origin is not on the road, min.y = {}",
+            m.min.y
+        );
+        assert!(m.max.y > 0.2, "{rel}: nothing above the origin?");
+    }
+    if checked == 0 {
+        eprintln!("SKIP: no model packs — run apps/arcade/download_assets.sh");
+    }
+}
+
+/// The whole claim, end to end: settle a car on the road under real physics,
+/// place a real Kenney model on it the way the app does, and look at where
+/// its lowest vertex actually ends up. Tyres on the tarmac, or it is wrong.
+#[test]
+fn a_vehicle_models_wheels_touch_the_road_it_rests_on() {
+    let Some(model) = kenney("toy-car-kit/vehicle-truck.glb") else {
+        eprintln!("SKIP: no model packs — run apps/arcade/download_assets.sh");
+        return;
+    };
+    let (world, blocks, _) = car_world();
+    let m = place(&model, &world, &blocks.cars[0]);
+    let lowest = lowest_drawn_y(&model, &m);
+    // 1 cm on a 3.2-unit car, against the 0.34 the chassis-box rule was out
+    // by. The settled error is ~3e-6 — the anchor is exact while the wheels
+    // are down — so the slack here is only for suspension wobble, not for a
+    // wrong rule to hide in.
+    assert!(
+        lowest.abs() < 0.01,
+        "the car is drawn with its lowest point {lowest} off the road it is \
+         resting on (positive = floating, negative = sunk)"
+    );
+}
+
+/// Same claim while the car is tilted: the anchor is an offset in the
+/// chassis's own space, so it has to ride the chassis over a kerb. Applied in
+/// world Y — the rule a walker uses, and the one the car inherited — it looks
+/// right parked and slides out from under the car the moment it leans.
+///
+/// On flat ground this proves nothing: the force model puts no roll moment on
+/// the chassis at all (car.rs — that is the whole reason it cannot flip), so
+/// the car must be made to lean by the road, not by the driving.
+#[test]
+fn the_model_stays_bolted_to_a_leaning_chassis() {
+    let Some(model) = kenney("toy-car-kit/vehicle-truck.glb") else {
+        eprintln!("SKIP: no model packs — run apps/arcade/download_assets.sh");
+        return;
+    };
+    let mut world = world_with_ground();
+    // A kerb under the right-hand wheels only (they sit at x = +0.75), low
+    // enough that the chassis box rides over rather than into it.
+    block(&mut world, vec3f(1.2, 0.1, -14.0), vec3f(1.2, 0.1, 12.0));
+    let chassis = rigid(&mut world, vec3f(0.0, 1.0, 0.0), vec3f(0.9, 0.4, 1.6));
+    let mut blocks = Blocks::new();
+    blocks.cars.push(Car::new(
+        chassis,
+        CarConfig::default(),
+        ControlSource::Script,
+    ));
+    run(&mut world, &mut blocks, 60);
+    blocks.cars[0].input.throttle = 1.0;
+
+    let mut worst = 0.0f32;
+    let mut leaned = 0.0f32;
+    for _ in 0..60 * 6 {
+        tick(&mut world, &mut blocks);
+        let e = world.entity(chassis).unwrap();
+        let up = rotate_quat(e.orient, vec3f(0.0, 1.0, 0.0));
+        leaned = leaned.max(1.0 - up.y);
+        // Where the chassis says its contact patch is, along its OWN down
+        // axis, and where the mesh's floor plane actually landed.
+        let drop = blocks.cars[0].contact_drop();
+        let want = e.pos - up * drop;
+        let m = place(&model, &world, &blocks.cars[0]);
+        let got = vec3f(m.v[12], m.v[13], m.v[14]);
+        worst = worst.max((got - want).length());
+    }
+    assert!(
+        leaned > 0.002,
+        "the car never left level, so this proved nothing (max lean {leaned})"
+    );
+    assert!(
+        worst < 1.0e-3,
+        "the mesh anchor drifted {worst} from the chassis contact patch \
+         while leaning"
+    );
+}
+
+/// The anchor is READ from the bounds, never assumed, so a kit that authors
+/// its models away from the origin still lands on the car. `racing-kit` is
+/// that kit: its cars sit where they fell in the scene grid, offset in x and
+/// z with a skirt below zero. Hermetic — the one test here that still has
+/// teeth on a checkout with no model packs.
+#[test]
+fn a_model_authored_off_the_origin_still_lands_on_the_body() {
+    // Bounds measured from racing-kit/raceCarRed.glb.
+    let min = vec3f(-0.7144, -0.0335, -1.3359);
+    let max = vec3f(0.0144, 0.3635, 0.0100);
+    let mut frame = Mat4f::identity();
+    frame.v[12] = 5.0;
+    frame.v[13] = 2.0;
+    frame.v[14] = -3.0;
+    let m = makepad_game_render::renderer::ModelInstance::on_body(
+        "m".to_string(),
+        (min, max),
+        2.0,
+        0.75,
+        &frame,
+    )
+    .transform;
+    // The model's own floor ends up exactly `drop` below the body origin...
+    let floor = m.v[5] * min.y + m.v[13];
+    assert!(
+        (floor - (2.0 - 0.75)).abs() < 1.0e-5,
+        "floor landed at {floor}, wanted 1.25"
+    );
+    // ...and its own horizontal centre on the body's axis, not its origin.
+    let cx = m.v[0] * (min.x + max.x) * 0.5 + m.v[12];
+    let cz = m.v[10] * (min.z + max.z) * 0.5 + m.v[14];
+    assert!(
+        (cx - 5.0).abs() < 1.0e-5 && (cz + 3.0).abs() < 1.0e-5,
+        "model centre landed at ({cx}, {cz}), wanted (5, -3)"
+    );
+}
+
 #[test]
 fn character_walks_and_steps_up_but_is_blocked_by_a_wall() {
     // The 0.55 step-up is a TERRAIN contract (step.rs CLIMB) — static boxes
