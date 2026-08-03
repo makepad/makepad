@@ -97,7 +97,15 @@ script_mod! {
     // (spark index, seed, age). Nothing is stepped and nothing is uploaded
     // per frame — see firework.rs for why that is the whole point.
     mod.draw.DrawGameFirework = mod.std.set_type_default() do #(DrawGameFirework::script_shader(vm)){
-        ..mod.draw.DrawCube
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        // The shared spark sheet uses the CubeVertex layout: geom_pos.xy is
+        // the billboard corner and geom_id is the spark index.
+        geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
+        world: varying(vec4f)
         // Additive: overlapping sparks should brighten toward white the way
         // real ones do, not composite over each other and go muddy.
         alpha_blend: true
@@ -199,8 +207,8 @@ script_mod! {
             // and going straight to camera_view puts every spark wherever the
             // scene's world transform is not identity — which on an XR stage
             // is always, and cost an afternoon here.
-            let world4 = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
-            let view_pos = self.draw_pass.camera_view * world4
+            self.world = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
+            let view_pos = self.draw_pass.camera_view * self.world
             let life_t = clamp(t / self.launch_life.w, 0.0, 1.0)
             // Sparks shrink as they burn out; the rising shell is a small dot.
             let size = self.params.z * (1.0 - life_t * 0.75)
@@ -252,6 +260,10 @@ script_mod! {
 
         pixel: fn() {
             return self.spark_pixel(self.v_uv, self.v_color)
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
 
     }
@@ -584,31 +596,28 @@ pub struct DrawGameAlpha {
 /// Four floats at a time is the shape the hardware wants anyway; the packing
 /// costs nothing and removes the class of bug entirely.
 ///
-/// # OPEN BUG: these instances are not reaching the shader
+/// # Why this derefs DrawVars and not DrawCube
 ///
-/// Diagnosed by encoding the instance values as colour on a fixed clip-space
-/// quad and reading them off the framebuffer. Two facts pin it down:
+/// It used to deref `DrawCube`, and every instance field read back garbage —
+/// the burst rendered at the world origin and the spark size ignored whatever
+/// Rust wrote. Encoding the instance values as colour on a fixed clip-space
+/// quad settled it: the decoded numbers CHANGED WHEN THE CAMERA ROTATED.
+/// Instance data cannot depend on the view, so the shader was reading view
+/// memory — the fields were bound at the wrong offsets, not merely wrong.
 ///
-///  1. Scaling `params.z` (spark size) by 25x in Rust changes NOTHING on
-///     screen — so the shader never sees the value being written.
-///  2. The decoded colours CHANGE WHEN THE CAMERA ROTATES. Instance data
-///     cannot depend on the view, so what the shader reads at these offsets
-///     is not this struct — it is view/camera memory.
-///
-/// Together that says the fields are bound at the wrong offset rather than
-/// carrying wrong values. The likely cause is the `DrawVars::as_slice()`
-/// pointer trick (CLAUDE.md pitfall 16): it reads contiguously from DrawVars
-/// into the following `#[live]` fields, so appending instances after a
-/// `#[deref] DrawCube` only works if DrawCube's own tail is entirely instance
-/// data. `DrawGameSky` appends to DrawCube the same way and works, so the
-/// difference between the two is where the answer is.
-///
-/// Until then the fireworks are gated behind ARCADE_FIREWORKS=1.
+/// Inheriting `DrawCube` brings its own instance fields along, and appending
+/// more after them puts these at offsets the script-side layout does not
+/// account for. `DrawGameShadow` — the one shader here that instances
+/// correctly — derefs `DrawVars` and declares its uniform buffers, vertex
+/// buffer and varyings explicitly, so its instance fields are the only ones
+/// and the layout is unambiguous. This now follows that pattern.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawGameFirework {
     #[deref]
-    pub draw_super: DrawCube,
+    pub draw_vars: DrawVars,
+    #[live(1.0)]
+    pub depth_clip: f32,
     /// xyz = burst point, w = seconds since the burst (negative = climbing).
     #[live(vec4(0.0, 30.0, 0.0, 0.0))]
     pub origin_age: Vec4f,
