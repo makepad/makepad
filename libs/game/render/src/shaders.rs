@@ -150,7 +150,7 @@ script_mod! {
             return 1.0
         }
 
-        spark_color: fn(life_t: float, heat: float, rnd: float, speed_t: float) -> vec4 {
+        spark_color: fn(life_t: float, heat: float, rnd: float, style: float) -> vec4 {
             let twinkle = 0.7 + 0.3 * sin(rnd * 63.0 + life_t * 40.0)
             let tint = mix(self.color, self.color_tail, life_t * life_t)
             let rgb = mix(tint.xyz, vec3(1.0, 1.0, 1.0), heat)
@@ -206,7 +206,10 @@ script_mod! {
             // demos is a 2D trick for filling a disc — in 3D it just turns the
             // sphere to mush.) A few percent of jitter keeps the edge from
             // looking machined.
-            let speed = self.params.x * (0.94 + 0.06 * r3)
+            // A willow throws its stars gently and lets them fall — that is
+            // the whole effect, so it is a speed change, not a colour one.
+            let is_willow = step(1.5, self.params.w)
+            let speed = self.params.x * (0.94 + 0.06 * r3) * mix(1.0, 0.55, is_willow)
 
             // 40ms between beads: close enough to read as a continuous streak,
             // far enough that the beads are visible the way they are in a
@@ -222,7 +225,16 @@ script_mod! {
             // burst; a softer k reads as a thrown handful.
             let k = 3.08
             let drag = (1.0 - exp(0.0 - k * t)) / k
-            let fall = 0.5 * 7.5 * t * t
+            // A star does NOT free-fall. It is a few grams of burning
+            // composition with a lot of drag, so it reaches terminal velocity
+            // almost immediately and then DRIFTS — which is why a real shell
+            // hangs and ours plummeted.
+            //
+            // Vertical fall under linear drag: quadratic for the first instant,
+            // then a constant descent at terminal velocity. `vt` is ~7 m/s,
+            // and one world unit is one metre here (a character is 1.8 tall).
+            let vt = mix(7.0, 11.0, is_willow)
+            let fall = vt * (t - (1.0 - exp(0.0 - k * t)) / k)
             let origin = self.origin_age.xyz
             let burst = origin + dir * speed * drag - vec3(0.0, fall, 0.0)
                 + self.spark_motion(dir, t, r1)
@@ -272,7 +284,7 @@ script_mod! {
             // style colour the leading edge differently from the middle.
             let heat = clamp(1.0 - t * 4.0, 0.0, 1.0)
             let speed_t = r3
-            let styled = self.spark_color(life_t, heat, r1, speed_t)
+            let styled = self.spark_color(life_t, heat, r1, self.params.w)
             let bead_fade = (1.0 - tail_t * 0.85)
             self.v_color = vec4(
                 styled.x,
