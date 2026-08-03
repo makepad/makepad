@@ -17,6 +17,53 @@ for Quest. The Quest column is an ESTIMATE until it is run on device.**
 
 The sim is nowhere near the limiting factor. Draw calls and CPU skinning are.
 
+## Vertex and instance bandwidth
+
+Quest is bandwidth-bound before it is ALU-bound, so this is the number that
+matters most on device.
+
+| stream | before | after | note |
+|---|---|---|---|
+| cube instance | 44 floats / **176 B** | 32 floats / **128 B** | **−27 %**, measured from the compiled shader (`RenderStats::instance_floats`), not counted by hand |
+| mesh vertex (PbrVertex) | 16 floats / 64 B | unchanged | see "not yet landed" below |
+
+The instance saving came from moving `sun_color`, `sun_sky`, `sun_ground` and
+`fog_color` **off the instance stream into shader uniforms**. They are
+identical for every instance in a batch, so as instance fields they were 12
+floats of pure duplication per cube. `fog_density` stays per-instance because
+shadows switch it off individually. At the demo's instance counts that is
+48 B × every cube in the frame, every frame.
+
+### Packed vertices — designed, not yet landed
+
+The constraint found while investigating: **vertex attributes in this engine
+are f32-only**. There is no u8/u16/i16 attribute type, so "compress the
+vertex" means bit-packing into f32 lanes and unpacking in the shader. The
+engine already provides `unpack2f16` and `unpack4u8` as builtins on every
+backend (Metal/GLSL/HLSL/WGSL), and `geom.VectorVertexPacked` is the house
+precedent — `uv: f32` holding two f16s, `color: f32` holding four unorm8s.
+
+A packed skinned/terrain vertex would therefore be:
+
+| field | packing | floats |
+|---|---|---|
+| position | 3 × f32 (kept exact) | 3 |
+| normal | octahedral, 2 × f16 in one lane | 1 |
+| uv | 2 × f16 in one lane | 1 |
+| colour | 4 × unorm8 in one lane | 1 |
+| **total** | | **6 floats / 24 B** vs 16 floats / 64 B — **−62 %** |
+
+The Knight is the biggest single vertex load in the app: 3716 verts, and
+because skinning is CPU-side it is **re-uploaded every frame** — 238 KB/frame
+today, 89 KB/frame packed. Joint indices/weights are not in the uploaded
+stream at all (skinning happens before upload), so they cost nothing here.
+
+Blocker for a later session: the packed layout needs a new pod vertex type
+registered as `geom.*`, which also needs a placeholder `GeometryGen` — and
+`GeometryGen::from_triangle_*` plus its `shared()` helper live inside `draw/`
+and are not reachable from `libs/game/render`. Either export them or register
+the type from `draw/geometry_gen.rs` alongside `PbrVertex`.
+
 ## Rendering
 
 One draw call per shape per pass, plus one per skinned character. Particles and
@@ -42,6 +89,25 @@ CPU cost stays negligible even at 4000. The real limit is **overdraw**: every
 particle is an alpha-blended quad, and a Quest fills pixels far more slowly
 than it runs this loop. Hence the 500 cap there — it is a fill-rate budget, not
 a CPU one.
+
+### CPU light bake (bake.rs), measured release
+
+| stage | cost | when it runs |
+|---|---|---|
+| AO (per static, 5 face samples × 8 rays) | **15 µs** | world edits only — sun-independent |
+| sun visibility (1 ray per static + per probe) | **34 µs** | world edits **and** whenever the sun swings past 0.03 rad |
+| probe lattice sky term | **61 µs** | world edits only |
+
+Measured on the demo world (12 statics, 13 occluders, 605 probes). Debug
+builds are ~50× slower (5.7 ms for the probe pass) — measure in release.
+
+The split matters: AO is the expensive half and does not depend on the sun, so
+a day/night cycle only pays the 34 µs sun pass. A ray that starts above the
+heightfield's highest point and travels upward skips the terrain march
+entirely, which is what keeps the probe pass in microseconds.
+
+Bake output costs **zero** bandwidth and zero GPU: it is folded into the
+instance colours the renderer was already sending.
 
 ### Shadow tiers
 

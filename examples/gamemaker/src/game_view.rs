@@ -1546,6 +1546,9 @@ impl GameView {
             alpha: &mut self.draw_alpha,
             sky: &mut self.draw_sky,
             terrain: &mut self.draw_terrain,
+            // Legacy blob tier: gamemaker is the tape/parity oracle, so it
+            // keeps the shadows it has always drawn. Arcade opts in.
+            shadow: None,
         };
         let stats = self
             .renderer

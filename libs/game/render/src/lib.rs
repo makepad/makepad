@@ -11,6 +11,7 @@
 //! theming keeps working — the widget lends them per frame via [`GameDraws`].
 //! Camera state is per-view ([`CameraRig`]) — nothing here assumes one view.
 
+pub mod bake;
 pub mod geometry;
 pub mod hud;
 pub mod renderer;
@@ -20,8 +21,10 @@ pub mod skin;
 pub mod stage;
 pub mod particles;
 pub mod shadow;
+pub mod shadow_mesh;
 pub mod sun;
 
+pub use bake::*;
 pub use geometry::*;
 pub use hud::*;
 pub use renderer::*;
@@ -30,6 +33,7 @@ pub use shaders::*;
 pub use stage::*;
 pub use particles::*;
 pub use shadow::*;
+pub use shadow_mesh::*;
 pub use sun::*;
 
 use makepad_draw::*;
