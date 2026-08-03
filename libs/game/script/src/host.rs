@@ -35,6 +35,7 @@ pub struct ScriptHost {
     callbacks: Rc<RefCell<CallbackTable>>,
     audio: Rc<RefCell<Vec<AudioRequest>>>,
     eval_gen: Rc<Cell<u64>>,
+    next_tone: Rc<Cell<u64>>,
     verbs: Rc<HashMap<LiveId, VerbFn>>,
     vm_id: SplashVmId,
     /// Checkpoint identity for streaming eval. gamemaker abuses the widget's
@@ -66,6 +67,7 @@ impl ScriptHost {
             callbacks: Rc::new(RefCell::new(CallbackTable::default())),
             audio: Rc::new(RefCell::new(Vec::new())),
             eval_gen: Rc::new(Cell::new(0)),
+            next_tone: Rc::new(Cell::new(0)),
             verbs: Rc::new(verb_table()),
             vm_id: MAIN_SPLASH_VM_ID,
             body_id: next_body_id(),
@@ -95,6 +97,7 @@ impl ScriptHost {
             callbacks: self.callbacks.clone(),
             audio: self.audio.clone(),
             eval_gen: self.eval_gen.clone(),
+            next_tone: self.next_tone.clone(),
         }
     }
 
