@@ -6,9 +6,11 @@
 //! encode, drawable wait); apps register their own channels for anything
 //! else they want plotted (physics, script tick, audio…):
 //!
-//!     let ch = cx.perf_monitor_channel("physics", 0x6aa9ff);
-//!     ...
-//!     cx.perf_monitor_add(ch, t0.elapsed().as_micros() as u64);
+//! ```ignore
+//! let ch = cx.perf_monitor_channel("physics", 0x6aa9ff);
+//! // ...
+//! cx.perf_monitor_add(ch, t0.elapsed().as_micros() as u64);
+//! ```
 //!
 //! Collection is off until something (normally the PerfGraph widget) calls
 //! `set_enabled(true)`; disabled adds are a single branch.
