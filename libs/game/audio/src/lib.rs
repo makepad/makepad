@@ -30,6 +30,7 @@ pub use director::{AudioDirector, Category, Placement, SoundEvent};
 pub use materials::{ImpactCurve, Material, MaterialPair};
 pub use mixer::{Mixer, Priority, VoiceHandle, VoiceSpec};
 pub use rng::LocalRng;
+pub use vorbis::debug_block_sizes;
 
 
 /// Decoded audio: interleaved samples in [-1, 1].
