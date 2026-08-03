@@ -13,6 +13,7 @@
 
 pub mod ao;
 pub mod bake;
+pub mod firework;
 pub mod geometry;
 pub mod hud;
 pub mod model;

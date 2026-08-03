@@ -15,6 +15,7 @@ use crate::shadow_mesh::{caster_points, skinned_proxy_points, Receiver, ShadowMe
 use crate::model::StaticModel;
 use crate::stage::Stage;
 use crate::particles::ParticleInstance;
+use crate::shaders::DrawGameFirework;
 use crate::sun::GameSun;
 use crate::thermometer::{Quality, Thermometer};
 
@@ -28,6 +29,9 @@ pub struct GameDraws<'a> {
     /// Silhouette shadow mesh (shadow_mesh.rs). Optional so a host that has
     /// not adopted it yet keeps the blob tier.
     pub shadow: Option<&'a mut DrawGameShadow>,
+    /// Fireworks. Optional so a host that does not want a sky show pays
+    /// nothing — not even the shared spark geometry.
+    pub firework: Option<&'a mut DrawGameFirework>,
 }
 
 /// Per-frame render counters, handed back for the host's profiler.
@@ -40,6 +44,8 @@ pub struct RenderStats {
     /// Sky dome drawn this frame (suppressed on an MR stage — the room is
     /// the environment). Tests assert the suppression.
     pub sky_drawn: bool,
+    /// Firework shells drawn — one GPU instance each.
+    pub firework_shells: u64,
     /// Terrain mesh drawn this frame (suppressed on an MR stage).
     pub terrain_drawn: bool,
     /// Shadow-catcher quad drawn under the diorama (MR only).
@@ -103,6 +109,11 @@ pub struct GameRenderer {
     /// Device-local particles for this frame (particles.rs). Set by the
     /// host before drawing; never simulation state, never replicated.
     particle_instances: Vec<ParticleInstance>,
+    /// One shell per entry — this is the whole per-frame firework upload.
+    firework_instances: Vec<crate::firework::FireworkInstance>,
+    /// The shared spark sheet: SPARKS_PER_SHELL quads, built once and indexed
+    /// by every shell.
+    spark_geometry: Option<Geometry>,
     /// Scratch for this frame's silhouette shadow mesh; reused so a steady
     /// scene does not reallocate. Uploaded as one geometry, drawn once.
     shadow_mesh: ShadowMeshBuilder,
@@ -367,6 +378,8 @@ impl Default for GameRenderer {
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             particle_instances: Vec::new(),
+            firework_instances: Vec::new(),
+            spark_geometry: None,
             // 60Hz until the host says otherwise, and dormant regardless
             // until someone reports a frame time.
             thermometer: Thermometer::new(60.0),
@@ -459,6 +472,24 @@ impl GameRenderer {
 
     /// Hand this frame's particles to the renderer. They join the alpha
     /// batch, so any number of them still costs zero extra draw calls.
+    pub fn set_fireworks(&mut self, instances: Vec<crate::firework::FireworkInstance>) {
+        self.firework_instances = instances;
+    }
+
+    /// Build the spark sheet once. Its size is fixed by SPARKS_PER_SHELL, so
+    /// it never needs rebuilding the way the terrain mesh does.
+    fn ensure_spark_geometry(&mut self, cx: &mut Cx) -> GeometryId {
+        if let Some(g) = &self.spark_geometry {
+            return g.geometry_id();
+        }
+        let (indices, vertices) = crate::firework::spark_sheet_vertices();
+        let geometry = Geometry::new(cx);
+        geometry.update(cx, indices, vertices);
+        let id = geometry.geometry_id();
+        self.spark_geometry = Some(geometry);
+        id
+    }
+
     pub fn set_particles(&mut self, instances: Vec<ParticleInstance>) {
         self.particle_instances = instances;
     }
@@ -1689,6 +1720,36 @@ impl GameRenderer {
                 draws.alpha.cube.cube.draw(cx);
                 stats.dyn_instances += 1;
                 stats.shadow_catcher_drawn = true;
+            }
+        }
+
+        // 6. Fireworks, last of all: additive and depth-write-off, so they
+        // must come after every opaque surface has laid down the depth they
+        // test against. ONE instance per shell — the GPU expands each into
+        // SPARKS_PER_SHELL sparks from a closed form (firework.rs).
+        if let Some(fw) = draws.firework.as_deref_mut() {
+            if !self.firework_instances.is_empty() && shows_environment {
+                let geometry_id = self.ensure_spark_geometry(cx.cx);
+                fw.draw_super.draw_vars.geometry_id = Some(geometry_id);
+                fw.draw_super.many_instances =
+                    cx.begin_many_instances(&fw.draw_super.draw_vars);
+                for f in &self.firework_instances {
+                    fw.draw_super.transform = Mat4f::identity();
+                    fw.origin_age = vec4(f.origin.x, f.origin.y, f.origin.z, f.age);
+                    fw.launch_life = vec4(f.launch.x, f.launch.y, f.launch.z, f.life);
+                    // EMPIRICAL, not derived. Measured against the render: 0.0015 draws a
+                    // ~200px blob, so a few-pixel spark is ~1/25 of that. The unit
+                    // this is in is NOT world units as the billboard maths implies,
+                    // which is a real loose end — see the note in shaders.rs.
+                    fw.params = vec4(f.speed, f.seed, 0.00006, 0.0);
+                    fw.color = f.color;
+                    fw.color_tail = f.color_tail;
+                    fw.draw_super.draw(cx);
+                }
+                if let Some(mi) = fw.draw_super.many_instances.take() {
+                    cx.end_many_instances(mi);
+                }
+                stats.firework_shells = self.firework_instances.len() as u64;
             }
         }
 
