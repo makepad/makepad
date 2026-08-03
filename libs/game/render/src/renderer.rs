@@ -6,8 +6,12 @@
 use makepad_draw::*;
 use makepad_game_sim::{entity_index_sorted, BodyKind, Entity, GameWorld, Shape, Terrain};
 
+use crate::bake::{BakeSettings, BakeStats, LightBake};
 use crate::geometry::shape_geometry_data;
-use crate::shaders::{DrawGameAlpha, DrawGameCube, DrawGameSkinned, DrawGameSky, DrawGameTerrain};
+use crate::shaders::{
+    DrawGameAlpha, DrawGameCube, DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain,
+};
+use crate::shadow_mesh::{caster_points, skinned_proxy_points, Receiver, ShadowMeshBuilder};
 use crate::stage::Stage;
 use crate::particles::ParticleInstance;
 use crate::sun::GameSun;
@@ -19,6 +23,9 @@ pub struct GameDraws<'a> {
     pub alpha: &'a mut DrawGameAlpha,
     pub sky: &'a mut DrawGameSky,
     pub terrain: &'a mut DrawGameTerrain,
+    /// Silhouette shadow mesh (shadow_mesh.rs). Optional so a host that has
+    /// not adopted it yet keeps the blob tier.
+    pub shadow: Option<&'a mut DrawGameShadow>,
 }
 
 /// Per-frame render counters, handed back for the host's profiler.
@@ -41,6 +48,11 @@ pub struct RenderStats {
     pub projected_shadows: u64,
     /// Device-local particles drawn this frame.
     pub particles: u64,
+    /// What the CPU light bake cost (bake.rs). Zero on frames it skipped.
+    pub bake: BakeStats,
+    /// Floats per cube instance, read from the compiled shader rather than
+    /// counted by hand — this is the number the bandwidth budget is about.
+    pub instance_floats: u32,
 }
 
 /// GPU-side caches for one view family: unit shape geometries, the packed
@@ -53,7 +65,10 @@ pub struct GameRenderer {
     // valid while slab_rev == world.render_rev.
     static_slab: [Vec<f32>; 5],
     static_slab_alpha: [Vec<f32>; 5],
-    slab_rev: Option<u64>,
+    /// `(world.render_rev, bake.generation())` — the slabs carry baked light
+    /// in their colours, so a rebake invalidates them exactly like a world
+    /// edit does.
+    slab_key: Option<(u64, u64)>,
     slab_instance_count: u64,
     /// GPU mesh for the smooth terrain, rebuilt when the revision changes.
     terrain_geometry: Option<Geometry>,
@@ -73,6 +88,22 @@ pub struct GameRenderer {
     /// Device-local particles for this frame (particles.rs). Set by the
     /// host before drawing; never simulation state, never replicated.
     particle_instances: Vec<ParticleInstance>,
+    /// Scratch for this frame's silhouette shadow mesh; reused so a steady
+    /// scene does not reallocate. Uploaded as one geometry, drawn once.
+    shadow_mesh: ShadowMeshBuilder,
+    shadow_geometry: Option<Geometry>,
+    shadow_points: Vec<Vec3f>,
+    /// Statics do not move, so their silhouettes are built once per
+    /// (world edit, sun position) and memcpy'd into the frame mesh instead
+    /// of being re-projected every frame. This is what makes static cast
+    /// shadows affordable at all.
+    static_shadow_mesh: ShadowMeshBuilder,
+    static_shadow_key: Option<(u64, u64)>,
+    static_shadow_count: u64,
+    /// CPU-baked occlusion (bake.rs), folded into instance colours. Renderer
+    /// state by construction: the sim has no field for it, so a device may
+    /// bake at a different quality than its peers without diverging.
+    bake: LightBake,
 }
 
 /// One CPU-skinned mesh instance for [`GameRenderer::draw_scene_full`].
@@ -96,24 +127,42 @@ fn perf_us(t0: std::time::Instant) -> u64 {
     t0.elapsed().as_micros() as u64
 }
 
+/// Fold a baked shade multiplier into an instance colour.
+///
+/// Emissive surfaces opt out in proportion to their glow: a beacon in a
+/// tunnel is the light source, so darkening it reads as a bug rather than
+/// as occlusion. Alpha is never touched — for the alpha batch that would
+/// change coverage, not brightness.
+fn shade_color(color: Vec4f, shade: f32, glow: f32) -> Vec4f {
+    let k = shade + (1.0 - shade) * glow.clamp(0.0, 1.0);
+    vec4(color.x * k, color.y * k, color.z * k, color.w)
+}
+
 /// Write one [`GameSun`] into every game shader. This is the whole of the
 /// T7 unification on the game side: before it, cube/terrain/skinned each
 /// hardcoded their own ambient/direct split and five script blocks set the
 /// light direction by hand. Skinned is applied in `draw_skinned_inner`,
 /// which owns that struct.
-pub(crate) fn apply_sun(draws: &mut GameDraws, sun: &GameSun) {
-    sun.write_into(
-        &mut draws.cube.cube.light_dir,
-        &mut draws.cube.sun_color,
-        &mut draws.cube.sun_sky,
-        &mut draws.cube.sun_ground,
+pub(crate) fn apply_sun(cx: &Cx, draws: &mut GameDraws, sun: &GameSun, fog_color: Vec3f) {
+    // The cube family batches thousands of instances, so its sun and fog
+    // colour ride in uniforms; only the direction stays per-instance (it
+    // belongs to DrawCube, shared with consumers outside this crate).
+    draws.cube.cube.light_dir = sun.dir;
+    sun.write_uniforms(cx, &mut draws.cube.cube.draw_vars);
+    draws
+        .cube
+        .cube
+        .draw_vars
+        .set_uniform(cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
+    draws.alpha.cube.cube.light_dir = sun.dir;
+    sun.write_uniforms(cx, &mut draws.alpha.cube.cube.draw_vars);
+    draws.alpha.cube.cube.draw_vars.set_uniform(
+        cx,
+        live_id!(fog_color),
+        &[fog_color.x, fog_color.y, fog_color.z],
     );
-    sun.write_into(
-        &mut draws.alpha.cube.cube.light_dir,
-        &mut draws.alpha.cube.sun_color,
-        &mut draws.alpha.cube.sun_sky,
-        &mut draws.alpha.cube.sun_ground,
-    );
+    // Terrain and skinned draw one instance each, so there is nothing to
+    // save by moving their sun off the instance stream.
     sun.write_into(
         &mut draws.terrain.light_dir,
         &mut draws.terrain.sun_color,
@@ -131,7 +180,7 @@ impl Default for GameRenderer {
             shape_geometries: Default::default(),
             static_slab: Default::default(),
             static_slab_alpha: Default::default(),
-            slab_rev: None,
+            slab_key: None,
             slab_instance_count: 0,
             terrain_geometry: None,
             terrain_revision: 0,
@@ -139,6 +188,13 @@ impl Default for GameRenderer {
             stage: Stage::default(),
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             particle_instances: Vec::new(),
+            shadow_mesh: ShadowMeshBuilder::default(),
+            shadow_geometry: None,
+            shadow_points: Vec::new(),
+            static_shadow_mesh: ShadowMeshBuilder::default(),
+            static_shadow_key: None,
+            static_shadow_count: 0,
+            bake: LightBake::default(),
         }
     }
 }
@@ -169,6 +225,25 @@ impl GameRenderer {
     /// batch, so any number of them still costs zero extra draw calls.
     pub fn set_particles(&mut self, instances: Vec<ParticleInstance>) {
         self.particle_instances = instances;
+    }
+
+    /// How much CPU the light bake may spend (bake.rs). Lower `ao_rays` and
+    /// `max_probes` on standalone XR; see apps/arcade/BUDGETS.md. Setting
+    /// `ao_strength` and `shadow_strength` to 0 turns the bake off visually
+    /// while leaving the rest of the pipeline untouched.
+    pub fn bake_settings(&self) -> BakeSettings {
+        self.bake.settings()
+    }
+
+    pub fn set_bake_settings(&mut self, settings: BakeSettings) {
+        self.bake.set_settings(settings);
+    }
+
+    /// Baked shade multiplier for a moving object, from the probe lattice.
+    /// Public so a host can tint something the renderer does not own (the
+    /// skinned characters go through this).
+    pub fn dynamic_shade(&self, p: Vec3f) -> f32 {
+        self.bake.dynamic_shade(p)
     }
 
     /// Ground height under a caster: the terrain, or the tallest static box
@@ -431,6 +506,9 @@ impl GameRenderer {
             if e.sensor && color.w >= 0.99 {
                 color.w = 0.35;
             }
+            // Baked occlusion rides in the colour we were already sending —
+            // no extra instance field, no shader work, no draw call.
+            color = shade_color(color, self.bake.static_shade(e.id), e.glow);
             self.pack_cube_instance(draws, e.sensor, e.shape.index(), transform, size, color, e.glow);
         }
         // Settled parts of static owners.
@@ -457,7 +535,63 @@ impl GameRenderer {
                 p.half.y * 2.0 * owner.scale.y,
                 p.half.z * 2.0 * owner.scale.z,
             );
-            self.pack_cube_instance(draws, false, p.shape.index(), transform, size, p.color, p.glow);
+            // A part inherits its owner's bake — it is bolted to it.
+            let color = shade_color(p.color, self.bake.static_shade(owner.id), p.glow);
+            self.pack_cube_instance(draws, false, p.shape.index(), transform, size, color, p.glow);
+        }
+    }
+
+    /// Build the silhouette shadows every static casts. Cached against
+    /// (render_rev, bake generation) — statics do not move, so this runs on
+    /// world edits and sun swings only.
+    ///
+    /// Two guards decide what casts. A floor is not a caster: an entity whose
+    /// top barely clears what it stands on has nothing to throw, and a slab
+    /// wider than the whole scene would hull to a shadow over everything.
+    fn rebuild_static_shadows(&mut self, world: &GameWorld, sun: &GameSun) {
+        self.static_shadow_mesh.clear();
+        self.static_shadow_count = 0;
+        for e in world.entities.iter() {
+            if e.kind != BodyKind::Static || e.sensor || e.color.w < 0.99 {
+                continue;
+            }
+            let half = vec3f(
+                e.half.x * e.scale.x,
+                e.half.y * e.scale.y,
+                e.half.z * e.scale.z,
+            );
+            let Some(ground) = Self::ground_under(world, e) else {
+                continue;
+            };
+            // Stands up enough to cast, and is not itself the ground.
+            if e.pos.y + half.y - ground < 0.3 {
+                continue;
+            }
+            if half.x.max(half.z) > 24.0 {
+                continue;
+            }
+            let mut transform = Mat4f::rotation(vec3f(0.0, e.yaw, 0.0));
+            transform.v[12] = e.pos.x;
+            transform.v[13] = e.pos.y;
+            transform.v[14] = e.pos.z;
+            caster_points(
+                e.shape,
+                &transform,
+                vec3f(half.x * 2.0, half.y * 2.0, half.z * 2.0),
+                &mut self.shadow_points,
+            );
+            let receiver = Receiver {
+                base_y: ground,
+                terrain: world.terrain.as_ref(),
+            };
+            if crate::shadow_mesh::build_caster_shadow(
+                &self.shadow_points,
+                sun,
+                &receiver,
+                &mut self.static_shadow_mesh,
+            ) {
+                self.static_shadow_count += 1;
+            }
         }
     }
 
@@ -552,11 +686,6 @@ impl GameRenderer {
         // passthrough feed.
         let shows_environment = self.stage.shows_environment();
 
-        // One sun for every shader this frame (sun.rs). Written before any
-        // batch begins, because instance fields are snapshotted per draw.
-        let sun = crate::sun::resolve_sun(&world.sun);
-        apply_sun(draws, &sun);
-
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
             Some(sky) if shows_environment => {
@@ -564,6 +693,12 @@ impl GameRenderer {
             }
             _ => (vec3(0.75, 0.87, 0.96), 0.0),
         };
+
+        // One sun for every shader this frame (sun.rs). Written before any
+        // batch begins, because instance fields are snapshotted per draw and
+        // uniforms are captured when the draw item opens.
+        let sun = crate::sun::resolve_sun(&world.sun);
+        apply_sun(cx.cx, draws, &sun, fog_color);
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn first).
         if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment) {
@@ -606,22 +741,52 @@ impl GameRenderer {
         // (bump it — mark_render_dirty — or your static edit won't show);
         // dynamics (movers, their parts, beams, blob shadows) re-pack every
         // frame. One draw call per shape per pass; empty batches are skipped.
-        draws.cube.fog_color = fog_color;
+        // fog_color is a uniform now (set in apply_sun); only the density
+        // stays per-instance, because shadows switch it off individually.
         draws.cube.fog_density = fog_density;
-        draws.alpha.cube.fog_color = fog_color;
         draws.alpha.cube.fog_density = fog_density;
+
+        // CPU light bake (bake.rs). Geometry-dependent occlusion is baked
+        // once per world edit; the sun term is one ray per target and
+        // refreshes whenever the sun swings, so a day cycle moves the baked
+        // shadows instead of freezing them at dawn. Both land in the colours
+        // packed below — the GPU never learns this happened.
+        self.bake.update(world, &sun);
+        stats.bake = self.bake.stats();
 
         let vars_ready = draws.cube.cube.draw_vars.can_instance()
             && draws.alpha.cube.cube.draw_vars.can_instance();
-        if vars_ready && self.slab_rev != Some(world.render_rev) {
+        let slab_key = (world.render_rev, self.bake.generation());
+        if vars_ready && self.slab_key != Some(slab_key) {
             let t0 = std::time::Instant::now();
             self.rebuild_static_slabs(draws, world);
             stats.slab_us += perf_us(t0);
             stats.slab_rebuilds += 1;
-            self.slab_rev = Some(world.render_rev);
+            self.slab_key = Some(slab_key);
         }
         stats.static_instances = self.slab_instance_count;
         stats.dyn_instances = 0;
+        stats.instance_floats = draws.cube.cube.draw_vars.as_slice().len() as u32;
+
+        // Silhouette shadows accumulate into one mesh across the alpha loop
+        // below and are drawn once at the end. A host that has not adopted
+        // the shadow shader keeps the old blob-only behaviour.
+        let shadow_mesh_enabled = draws.shadow.is_some();
+        self.shadow_mesh.clear();
+        if shadow_mesh_enabled {
+            // Static casters: a pillar's shadow is the same every frame until
+            // the world or the sun changes, so build it on that key and splice
+            // the cache in. Without this, static shadows would cost a full
+            // hull projection per pillar per frame for no new information.
+            let key = (world.render_rev, self.bake.generation());
+            if self.static_shadow_key != Some(key) {
+                self.rebuild_static_shadows(world, &sun);
+                self.static_shadow_key = Some(key);
+            }
+            self.shadow_mesh.append(&self.static_shadow_mesh);
+            stats.shadows += self.static_shadow_count;
+            stats.projected_shadows += self.static_shadow_count;
+        }
 
         // PERF: resolve dynamic parts and shape membership ONCE per frame —
         // the per-shape loops below must not re-scan entities per part.
@@ -685,7 +850,10 @@ impl GameRenderer {
                     e.half.y * 2.0 * e.scale.y,
                     e.half.z * 2.0 * e.scale.z,
                 );
-                draws.cube.cube.color = e.color;
+                // Movers sample the baked probe lattice, so a crate rolling
+                // under a bridge darkens without a shadow map or a pass.
+                draws.cube.cube.color =
+                    shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = e.glow;
                 draws.cube.cube.draw(cx);
@@ -713,7 +881,8 @@ impl GameRenderer {
                     part.half.y * 2.0 * owner.scale.y,
                     part.half.z * 2.0 * owner.scale.z,
                 );
-                draws.cube.cube.color = part.color;
+                draws.cube.cube.color =
+                    shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
                 draws.cube.cube.depth_clip = 1.0;
                 draws.cube.glow = part.glow;
                 draws.cube.cube.draw(cx);
@@ -767,6 +936,35 @@ impl GameRenderer {
 
         // 3.5 Skinned characters — after all opaque, before alpha blending.
         if let Some(batch) = skinned {
+            // A character's shadow comes from its POSED vertices, decimated
+            // to ~64 samples: person-shaped, and it walks when they walk.
+            // Projecting all 3716 would cost more than the shadow is worth.
+            if shadow_mesh_enabled {
+                let ground = world
+                    .terrain
+                    .as_ref()
+                    .and_then(|t| {
+                        let p = batch.items.first()?;
+                        t.height_at(p.transform.v[12], p.transform.v[14])
+                    })
+                    .unwrap_or(0.0);
+                for item in batch.items.iter() {
+                    skinned_proxy_points(&item.vertices, &item.transform, &mut self.shadow_points);
+                    let receiver = Receiver {
+                        base_y: ground,
+                        terrain: world.terrain.as_ref(),
+                    };
+                    if crate::shadow_mesh::build_caster_shadow(
+                        &self.shadow_points,
+                        &sun,
+                        &receiver,
+                        &mut self.shadow_mesh,
+                    ) {
+                        stats.shadows += 1;
+                        stats.projected_shadows += 1;
+                    }
+                }
+            }
             self.draw_skinned_inner(cx, batch, (fog_color, fog_density), &sun);
         }
 
@@ -798,10 +996,11 @@ impl GameRenderer {
                 }
             }
             if has_shadows {
-                // Tiered cast shadows (shadow.rs): the nearest casters get a
-                // real projected silhouette, the rest fall back to blobs.
-                // Both cost one instance in this same batch, so the budget
-                // buys fidelity, not draw calls.
+                // Tiered cast shadows: the nearest casters get a real
+                // silhouette MESH (shadow_mesh.rs, accumulated below and
+                // drawn as one geometry); everything else falls back to a
+                // blob quad in this batch. So the budget buys fidelity, and
+                // the whole shadow layer is at most two draw calls.
                 for (e, ground, projected) in
                     Self::shadow_casters(world, camera_pos, self.shadow_budget)
                 {
@@ -810,11 +1009,35 @@ impl GameRenderer {
                         e.half.y * e.scale.y,
                         e.half.z * e.scale.z,
                     );
-                    let quad = if projected {
-                        crate::shadow::project_box_shadow(e.pos, half, ground, &sun)
-                    } else {
-                        crate::shadow::blob_shadow(e.pos, half, ground, &sun)
-                    };
+                    if projected && shadow_mesh_enabled {
+                        // Silhouette tier: hull of the caster's own points,
+                        // draped over whatever it lands on.
+                        let mut transform = Self::entity_rotation(e);
+                        transform.v[12] = e.pos.x;
+                        transform.v[13] = e.pos.y;
+                        transform.v[14] = e.pos.z;
+                        caster_points(
+                            e.shape,
+                            &transform,
+                            vec3f(half.x * 2.0, half.y * 2.0, half.z * 2.0),
+                            &mut self.shadow_points,
+                        );
+                        let receiver = Receiver {
+                            base_y: ground,
+                            terrain: world.terrain.as_ref(),
+                        };
+                        if crate::shadow_mesh::build_caster_shadow(
+                            &self.shadow_points,
+                            &sun,
+                            &receiver,
+                            &mut self.shadow_mesh,
+                        ) {
+                            stats.shadows += 1;
+                            stats.projected_shadows += 1;
+                        }
+                        continue;
+                    }
+                    let quad = crate::shadow::blob_shadow(e.pos, half, ground, &sun);
                     let Some(quad) = quad else { continue };
                     // No fog on a shadow. It lies ON ground that is already
                     // fogged, so fogging it again mixes its RGB toward the
@@ -835,9 +1058,6 @@ impl GameRenderer {
                     draws.alpha.cube.cube.draw(cx);
                     stats.dyn_instances += 1;
                     stats.shadows += 1;
-                    if projected {
-                        stats.projected_shadows += 1;
-                    }
                 }
                 draws.alpha.cube.fog_density = fog_density;
             }
@@ -899,6 +1119,26 @@ impl GameRenderer {
             }
             if let Some(mi) = draws.alpha.cube.cube.many_instances.take() {
                 cx.end_many_instances(mi);
+            }
+        }
+
+        // 4.5 The silhouette shadow layer: every caster's hull, one geometry,
+        // ONE draw call. Drawn after the alpha batches so it lies over the
+        // ground it darkens; depth test on / depth write off means
+        // overlapping shadows can never fight each other for the buffer.
+        if !self.shadow_mesh.is_empty() {
+            if let Some(shadow) = draws.shadow.as_deref_mut() {
+                let geometry = self.shadow_geometry.get_or_insert_with(|| Geometry::new(cx.cx));
+                geometry.update(
+                    cx.cx,
+                    std::mem::take(&mut self.shadow_mesh.indices),
+                    std::mem::take(&mut self.shadow_mesh.vertices),
+                );
+                shadow.draw_vars.geometry_id = Some(geometry.geometry_id());
+                if shadow.draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&shadow.draw_vars);
+                    shadow.draw_vars.area = cx.update_area_refs(shadow.draw_vars.area, new_area);
+                }
             }
         }
 

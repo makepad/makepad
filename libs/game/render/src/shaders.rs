@@ -20,9 +20,19 @@ script_mod! {
     }
 
     // The game cube: DrawCube + per-instance emission and distance fog.
+    //
+    // The sun and fog COLOUR are uniforms, not instances. They are identical
+    // for every instance in a batch, so as instance fields they cost 12
+    // floats (48 bytes) per cube of pure duplication — the single largest
+    // waste in the stream on a bandwidth-bound tiler. `fog_density` stays
+    // per-instance because shadows switch it off individually.
     mod.draw.DrawGameCube = mod.std.set_type_default() do #(DrawGameCube::script_shader(vm)){
         ..mod.draw.DrawCube
         v_fog: varying(float)
+        fog_color: uniform(vec3(0.75, 0.87, 0.96))
+        sun_color: uniform(vec3(0.72, 0.72, 0.72))
+        sun_sky: uniform(vec3(0.28, 0.28, 0.28))
+        sun_ground: uniform(vec3(0.28, 0.28, 0.28))
 
         vertex: fn() {
             let pos = self.get_size() * self.geom.geom_pos + self.get_pos()
@@ -144,6 +154,49 @@ script_mod! {
         }
     }
 
+    // Silhouette shadow mesh (shadow_mesh.rs): every caster's hull for the
+    // whole frame, in ONE geometry and ONE draw call.
+    //
+    // Z-fighting is handled structurally rather than by tuning:
+    //   * geometry is offset along the RECEIVER's normal on the CPU, with a
+    //     slope-scaled term (world-up would slide the shadow along a slope),
+    //   * `depth_write: false` — shadows never occlude each other or anything
+    //     else, so overlapping casters cannot fight for the depth buffer,
+    //   * depth TEST stays on, so a shadow is still hidden by geometry in
+    //     front of it.
+    // Per-vertex alpha (colour.w) gives the soft rim for free.
+    mod.draw.DrawGameShadow = mod.std.set_type_default() do #(DrawGameShadow::script_shader(vm)){
+        alpha_blend: true
+        depth_write: false
+        backface_culling: false
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        v_alpha: varying(float)
+        world: varying(vec4f)
+
+        vertex: fn() {
+            let pos = vec3(self.geom.pos_nx.x, self.geom.pos_nx.y, self.geom.pos_nx.z)
+            self.world = self.draw_list.view_transform * vec4(pos.x, pos.y, pos.z, 1.0)
+            self.v_alpha = self.geom.color.w
+            let view_pos = self.draw_pass.camera_view * self.world
+            self.vertex_pos = self.draw_pass.camera_projection * view_pos
+        }
+
+        pixel: fn() {
+            // Premultiplied black: RGB 0 leaves exactly ground*(1-a), a true
+            // multiplicative shadow. Unpremultiplied dark RGB would ADD light.
+            return vec4(0.0, 0.0, 0.0, self.v_alpha * self.shadow_scale)
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+    }
+
     // The smooth terrain mesh: per-vertex colored triangles, flat normals.
     mod.draw.DrawGameTerrain = mod.std.set_type_default() do #(DrawGameTerrain::script_shader(vm)){
         alpha_blend: false
@@ -193,8 +246,13 @@ pub struct DrawGameTexture {
     pub draw_super: DrawQuad,
 }
 
-/// DrawCube + per-instance emission (`glow`) and per-instance fog params.
-/// Instance-field rule: only #[live] instance fields after the deref chain.
+/// DrawCube + per-instance emission (`glow`) and per-instance fog density.
+///
+/// Instance-field rule: only #[live] instance fields after the deref chain —
+/// `DrawVars::as_slice` reads them contiguously. The sun terms and fog colour
+/// are deliberately NOT here: they are shader uniforms (see the script block
+/// above) set once per frame through [`crate::sun::GameSun::write_uniforms`],
+/// which keeps 48 bytes of identical data out of every instance.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawGameCube {
@@ -202,18 +260,8 @@ pub struct DrawGameCube {
     pub cube: DrawCube,
     #[live(0.0)]
     pub glow: f32,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub fog_color: Vec3f,
     #[live(0.0)]
     pub fog_density: f32,
-    /// Sun terms, written every frame from one [`crate::sun::GameSun`].
-    /// Defaults reproduce the legacy hardcoded 0.28/0.72 split.
-    #[live(vec3(0.72, 0.72, 0.72))]
-    pub sun_color: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_sky: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_ground: Vec3f,
 }
 
 /// Alpha-blended variant: water, sensor ghosts, blob shadows.
@@ -263,6 +311,22 @@ pub struct DrawGameSkinned {
     pub sun_sky: Vec3f,
     #[live(vec3(0.28, 0.28, 0.28))]
     pub sun_ground: Vec3f,
+}
+
+/// Silhouette shadow mesh: all casters' hulls in one geometry, one draw call.
+/// Position and per-vertex alpha only — no lighting, no fog (a shadow lies on
+/// ground that is already fogged; fogging it again mixes it toward the bright
+/// horizon and a distant shadow comes out lighter than what it darkens).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawGameShadow {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    /// Global dimmer, so a device can soften shadows without a rebuild.
+    #[live(1.0)]
+    pub shadow_scale: f32,
 }
 
 /// The smooth terrain mesh (PbrVertex layout: per-vertex color).

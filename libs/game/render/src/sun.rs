@@ -106,6 +106,16 @@ impl GameSun {
         *ground = self.ground;
     }
 
+    /// The single write path into a shader's sun UNIFORMS, for shaders whose
+    /// batches are large enough that carrying the sun per instance is pure
+    /// duplication (the cube family). Same values as [`Self::write_into`],
+    /// different destination — so "one sun" still holds.
+    pub fn write_uniforms(&self, cx: &Cx, vars: &mut DrawVars) {
+        vars.set_uniform(cx, live_id!(sun_color), &[self.color.x, self.color.y, self.color.z]);
+        vars.set_uniform(cx, live_id!(sun_sky), &[self.sky.x, self.sky.y, self.sky.z]);
+        vars.set_uniform(cx, live_id!(sun_ground), &[self.ground.x, self.ground.y, self.ground.z]);
+    }
+
     /// Horizontal (ground-plane) part of the sun direction, unit length.
     /// This is the direction a shadow is cast *away* from.
     pub fn dir_ground(&self) -> Vec2f {

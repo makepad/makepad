@@ -64,7 +64,7 @@ const SHADOW_LIFT: f32 = 0.03;
 /// object reads as a stain, and the fade has reached zero anyway.
 pub const MAX_SHADOW_DROP: f32 = 8.0;
 /// Darkest a shadow gets directly under its caster.
-const BASE_SHADOW_ALPHA: f32 = 0.35;
+pub const BASE_SHADOW_ALPHA: f32 = 0.35;
 
 /// Project an axis-aligned box's silhouette onto the ground plane at
 /// `ground_y`. Returns `None` when the caster is below the ground, too far
