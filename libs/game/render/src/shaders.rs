@@ -583,6 +583,27 @@ pub struct DrawGameAlpha {
 ///
 /// Four floats at a time is the shape the hardware wants anyway; the packing
 /// costs nothing and removes the class of bug entirely.
+///
+/// # OPEN BUG: these instances are not reaching the shader
+///
+/// Diagnosed by encoding the instance values as colour on a fixed clip-space
+/// quad and reading them off the framebuffer. Two facts pin it down:
+///
+///  1. Scaling `params.z` (spark size) by 25x in Rust changes NOTHING on
+///     screen — so the shader never sees the value being written.
+///  2. The decoded colours CHANGE WHEN THE CAMERA ROTATES. Instance data
+///     cannot depend on the view, so what the shader reads at these offsets
+///     is not this struct — it is view/camera memory.
+///
+/// Together that says the fields are bound at the wrong offset rather than
+/// carrying wrong values. The likely cause is the `DrawVars::as_slice()`
+/// pointer trick (CLAUDE.md pitfall 16): it reads contiguously from DrawVars
+/// into the following `#[live]` fields, so appending instances after a
+/// `#[deref] DrawCube` only works if DrawCube's own tail is entirely instance
+/// data. `DrawGameSky` appends to DrawCube the same way and works, so the
+/// difference between the two is where the answer is.
+///
+/// Until then the fireworks are gated behind ARCADE_FIREWORKS=1.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawGameFirework {
