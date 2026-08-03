@@ -15,6 +15,12 @@ pub struct OggPackets {
     pub packets: Vec<Vec<u8>>,
     /// Granule position of the last page — Vorbis' total sample count.
     pub last_granule: u64,
+    /// `(packets completed through this page, granule position)` per page.
+    /// Vorbis signals encoder delay through the granule of the first audio
+    /// page: the samples decoded up to that point exceed the samples the page
+    /// claims, and the excess is discarded from the FRONT. Without per-page
+    /// granules there is no way to recover that leading trim.
+    pub page_ends: Vec<(usize, u64)>,
     pub serial: u32,
 }
 
@@ -32,6 +38,7 @@ pub fn read_packets(bytes: &[u8]) -> Result<OggPackets, AudioError> {
     let mut pos = 0usize;
     let mut serial: Option<u32> = None;
     let mut last_granule = 0u64;
+    let mut page_ends: Vec<(usize, u64)> = Vec::new();
 
     while pos + HEADER_LEN <= bytes.len() {
         if &bytes[pos..pos + 4] != CAPTURE {
@@ -109,6 +116,7 @@ pub fn read_packets(bytes: &[u8]) -> Result<OggPackets, AudioError> {
         if granule != u64::MAX {
             last_granule = granule;
         }
+        page_ends.push((packets.len(), granule));
         if body_end <= pos {
             return Err(AudioError::Malformed);
         }
@@ -121,6 +129,7 @@ pub fn read_packets(bytes: &[u8]) -> Result<OggPackets, AudioError> {
     Ok(OggPackets {
         packets,
         last_granule,
+        page_ends,
         serial: serial.unwrap_or(0),
     })
 }

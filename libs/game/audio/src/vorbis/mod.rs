@@ -66,9 +66,29 @@ pub fn decode(bytes: &[u8]) -> Result<Pcm, AudioError> {
     // block half-sizes, which is what makes mixed long/short blocks line up.
     let mut prev_center: Option<usize> = None;
     let mut prev_n = 0usize;
-    let mut first_center = 0usize;
+    // Where valid PCM starts. Two things move it:
+    //
+    // 1. The first audio packet produces no output — its window only primes the
+    //    overlap-add — so audio begins one block centre in.
+    // 2. Vorbis carries encoder delay in the granule position: the first page
+    //    that reports a granule says how many samples SHOULD have been emitted
+    //    by then, and any excess we decoded is priming to discard from the
+    //    front. That excess varies per file (measured 128, 960 and 1103 on
+    //    three Kenney sounds), so it cannot be assumed — without reading it the
+    //    stream plays shifted and starts with a burst of priming garbage.
+    let mut first_center: Option<usize> = None;
+    let mut single_block_center = 0usize;
+    // Packet index whose page first reports a real granule, and that granule.
+    let first_granule_page = stream
+        .page_ends
+        .iter()
+        .find(|(count, g)| *g != u64::MAX && *g > 0 && *count > 0)
+        .map(|(count, g)| (count - 1, *g));
+    let mut priming: Option<usize> = None;
+    let mut packet_index = 2usize; // packets[0..=2] are the headers
 
     for packet in stream.packets.iter().skip(3) {
+        packet_index += 1;
         if packet.is_empty() {
             continue;
         }
@@ -82,11 +102,26 @@ pub fn decode(bytes: &[u8]) -> Result<Pcm, AudioError> {
         let n = block.n;
         let center = match prev_center {
             None => {
-                first_center = n / 2;
+                // Fallback only: a stream with a single audio packet has no
+                // valid PCM by the spec, but emitting its centre onward beats
+                // returning silence for a malformed-but-decodable file.
+                single_block_center = n / 2;
                 n / 2
             }
             Some(c) => c + (prev_n + n) / 4,
         };
+        if prev_center.is_some() && first_center.is_none() {
+            first_center = Some(center);
+        }
+        // The page that first reports a granule pins the priming: whatever we
+        // decoded beyond what that page claims was encoder delay.
+        if priming.is_none() {
+            if let Some((idx, g)) = first_granule_page {
+                if packet_index >= idx {
+                    priming = Some(center.saturating_sub(g as usize));
+                }
+            }
+        }
         let start = center.saturating_sub(n / 2);
         let need = start + n;
         if need > MAX_SAMPLES_PER_CHANNEL {
@@ -105,8 +140,13 @@ pub fn decode(bytes: &[u8]) -> Result<Pcm, AudioError> {
         prev_n = n;
     }
 
-    // Valid PCM runs from the first block's centre; the granule position caps
-    // the tail so the final block's lapping does not leak past the end.
+    // Valid PCM starts after the encoder's priming, plus the half-window the
+    // first (output-less) packet occupies. Falls back to the second block's
+    // centre when no page reported a usable granule.
+    let first_center = match priming {
+        Some(p) => p + ident.blocksize_0 / 2,
+        None => first_center.unwrap_or(single_block_center),
+    };
     let mut frames = out[0].len().saturating_sub(first_center);
     if stream.last_granule > 0 && (stream.last_granule as usize) < frames {
         frames = stream.last_granule as usize;
@@ -125,6 +165,80 @@ pub fn decode(bytes: &[u8]) -> Result<Pcm, AudioError> {
         sample_rate: ident.sample_rate,
         samples,
     })
+}
+
+/// Diagnostic: the raw overlap-added buffer before trimming, plus the
+/// computed valid start and the stream granule. Used to derive the trim
+/// rule from reference audio rather than guessing it. Not used by playback.
+pub fn debug_raw(bytes: &[u8]) -> Result<(Vec<Vec<f32>>, usize, u64), AudioError> {
+    let stream = ogg::read_packets(bytes)?;
+    if stream.packets.len() < 3 {
+        return Err(AudioError::Truncated);
+    }
+    let ident = read_ident(&stream.packets[0])?;
+    let setup = read_setup(&stream.packets[2], ident.channels)?;
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); ident.channels];
+    let mut prev_center: Option<usize> = None;
+    let mut prev_n = 0usize;
+    let mut first_center: Option<usize> = None;
+    for packet in stream.packets.iter().skip(3) {
+        if packet.is_empty() {
+            continue;
+        }
+        let block = match decode_packet(packet, &ident, &setup) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(_) => break,
+        };
+        let n = block.n;
+        let center = match prev_center {
+            None => n / 2,
+            Some(c) => c + (prev_n + n) / 4,
+        };
+        if prev_center.is_some() && first_center.is_none() {
+            first_center = Some(center);
+        }
+        let start = center.saturating_sub(n / 2);
+        let need = start + n;
+        if need > MAX_SAMPLES_PER_CHANNEL {
+            break;
+        }
+        for (ch, samples) in block.channels.iter().enumerate() {
+            let buf = &mut out[ch];
+            if buf.len() < need {
+                buf.resize(need, 0.0);
+            }
+            for (i, s) in samples.iter().enumerate() {
+                buf[start + i] += s;
+            }
+        }
+        prev_center = Some(center);
+        prev_n = n;
+    }
+    Ok((out, first_center.unwrap_or(0), stream.last_granule))
+}
+
+/// Diagnostic: the block size of each audio packet, for alignment analysis.
+/// Not used by playback.
+pub fn debug_block_sizes(bytes: &[u8]) -> Result<Vec<usize>, AudioError> {
+    let stream = ogg::read_packets(bytes)?;
+    if stream.packets.len() < 3 {
+        return Err(AudioError::Truncated);
+    }
+    let ident = read_ident(&stream.packets[0])?;
+    let setup = read_setup(&stream.packets[2], ident.channels)?;
+    let mut out = Vec::new();
+    for packet in stream.packets.iter().skip(3) {
+        if packet.is_empty() {
+            continue;
+        }
+        match decode_packet(packet, &ident, &setup) {
+            Ok(Some(b)) => out.push(b.n),
+            Ok(None) => continue,
+            Err(_) => break,
+        }
+    }
+    Ok(out)
 }
 
 fn read_ident(packet: &[u8]) -> Result<Ident, AudioError> {
@@ -386,8 +500,13 @@ fn decode_packet(packet: &[u8], ident: &Ident, setup: &Setup) -> Result<Option<B
     }
 
     // --- floor multiply, IMDCT, window ---
+    // No normalisation here: `imdct` is the unnormalised sum, which is exactly
+    // what Vorbis wants — the encoder's forward transform already carried the
+    // 1/M factor, so applying it again here scaled every block down by n/2
+    // (measured: reference = ours * 1024.0 on 2048-sample blocks, and a
+    // different factor on 256-sample ones, because 2/n varies with block size
+    // while the true correction is constant).
     let win = lapped_window(n, ident.blocksize_0, prev_flag, next_flag);
-    let scale = 2.0f32 / n as f32;
     let mut channels_out = Vec::with_capacity(ch);
     for c in 0..ch {
         let mut spec = std::mem::take(&mut spectra[c]);
@@ -405,7 +524,7 @@ fn decode_packet(packet: &[u8], ident: &Ident, setup: &Setup) -> Result<Option<B
         }
         let mut time = mdct::imdct(&spec);
         for (t, w) in time.iter_mut().zip(win.iter()) {
-            *t = *t * w * scale;
+            *t *= *w;
         }
         channels_out.push(time);
     }
