@@ -13,8 +13,8 @@ use makepad_game_render::particles::ParticleSystem;
 use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
-    DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws, GameRenderer,
-    SkinnedBatch, SkinnedDraw,
+    DrawGameShadow, DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws,
+    GameRenderer, SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_session::{Session, SessionEvent};
 use makepad_game_sim::{
@@ -22,7 +22,8 @@ use makepad_game_sim::{
     ParticleSpec, Shape, SkyConfig, SunConfig, TICK_DT,
 };
 use makepad_widgets::*;
-use makepad_game_script::ScriptHost;
+use makepad_game_script::audio3d::Listener;
+use makepad_game_script::{AudioRequest, ScriptHost};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -72,6 +73,8 @@ pub struct ArcadeView {
     draw_sky: DrawGameSky,
     #[live]
     draw_terrain: DrawGameTerrain,
+    #[live]
+    draw_shadow: DrawGameShadow,
     #[live]
     draw_skinned: DrawGameSkinned,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
@@ -129,6 +132,10 @@ pub struct ArcadeView {
     session_status: String,
     #[rust(false)]
     world_built: bool,
+    /// Sounds the Rust-side demo world asks for. Script games queue theirs in
+    /// the host instead; both drain through `drain_audio`.
+    #[rust]
+    demo_audio: Vec<AudioRequest>,
     /// Offscreen pass targets are created once, independent of which mode
     /// supplied the world (`#[new]` textures have no format and panic on use).
     #[rust(false)]
@@ -151,6 +158,9 @@ pub struct ArcadeView {
     captured_1: bool,
     #[rust]
     captured_2: bool,
+    /// Render/bake numbers are logged once, not per frame.
+    #[rust]
+    logged_render_stats: bool,
     /// How this device presents the world (game.md §Presentation modes).
     /// `ARCADE_XR=mr|vr` picks a headset stage; unset stays flat. The
     /// simulation is identical in all three — only the projection differs.
@@ -321,6 +331,20 @@ impl Knight {
 }
 
 impl ArcadeView {
+    /// Take the frame's queued sounds together with the listener this device
+    /// hears from. Local tier by construction: the listener is *this*
+    /// camera, so two players in a room hear the same game differently and
+    /// none of it reaches the wire.
+    pub fn drain_audio(&mut self) -> (Vec<AudioRequest>, Listener) {
+        let mut requests = std::mem::take(&mut self.demo_audio);
+        if let Some(host) = &self.script {
+            requests.extend(host.take_audio());
+        }
+        let world = self.world.borrow();
+        let listener = Listener::from_yaw(world.cam_target, world.cam_yaw);
+        (requests, listener)
+    }
+
     /// Switch to script-driven mode: a `game.splash` owns the world.
     /// Returns the eval error, if the first eval failed.
     pub fn load_game(&mut self, cx: &mut Cx, path: &std::path::Path) -> Option<String> {
@@ -684,6 +708,17 @@ impl ArcadeView {
         // this the next `self.world.borrow()` panics.
         let _ = w;
         drop(world);
+
+        // A crate hitting the slab clanks where it landed — the demo's proof
+        // that positional audio is wired, not merely implemented.
+        for at in &impacts {
+            self.demo_audio.push(AudioRequest::SfxAt {
+                name: "clank".to_string(),
+                pitch: 1.0,
+                at: *at,
+                range: 60.0,
+            });
+        }
 
         // Particles, entirely device-local: the requests never touch the sim,
         // and the system carries its own RNG (see render/particles.rs).
@@ -1057,8 +1092,9 @@ impl Widget for ArcadeView {
                 alpha: &mut self.draw_alpha,
                 sky: &mut self.draw_sky,
                 terrain: &mut self.draw_terrain,
+                shadow: Some(&mut self.draw_shadow),
             };
-            self.renderer.draw_scene_full(
+            let stats = self.renderer.draw_scene_full(
                 cx3d,
                 &mut self.draw_list,
                 &mut draws,
@@ -1066,6 +1102,24 @@ impl Widget for ArcadeView {
                 scene_state,
                 batch,
             );
+            // One line, once: the numbers BUDGETS.md quotes come from here
+            // rather than from counting struct fields by hand.
+            if !self.logged_render_stats {
+                self.logged_render_stats = true;
+                let b = stats.bake;
+                log!(
+                    "arcade: {} floats/instance ({} B) · bake ao {} us, sun {} us, probes {} us \
+                     ({} probes, {} statics, {} occluders)",
+                    stats.instance_floats,
+                    stats.instance_floats * 4,
+                    b.ao_us,
+                    b.sun_us,
+                    b.probe_us,
+                    b.probes,
+                    b.statics,
+                    b.occluders
+                );
+            }
         }
         cx.end_pass(&self.pass);
 

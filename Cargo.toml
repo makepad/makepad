@@ -7,11 +7,13 @@ workspace.members = [
     "libs/game/render",
     "libs/game/sim",
     "libs/game/blocks",
+    "libs/game/audio",
     "libs/game/script",
     "libs/game/net",
     "libs/game/coedit",
     "libs/game/pkg",
     "libs/game/session",
+    "libs/game/assets",
     # === examples ===
     "examples/hotload_ui",
     "examples/teamtalk",
