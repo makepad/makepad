@@ -4443,7 +4443,11 @@ fn build_tile_buffers_from_features_profiled(
                 h.write(&building_units_per_m.to_bits().to_le_bytes());
                 h.write(&render_scale.to_bits().to_le_bytes());
                 h.write(&(building_jobs.len() as u32).to_le_bytes());
-                for job in building_jobs.iter().filter(|_| !faces_bake_sink_armed()) {
+                // Hash job content UNCONDITIONALLY: the bake sink runs with
+                // faces_bake_sink_armed() true, and a sink-gated filter here
+                // made the baker store a jobs-less signature no runtime could
+                // ever match — the shadow bake was dead weight in the stream.
+                for job in building_jobs.iter() {
                     h.write(&job.height_m.to_bits().to_le_bytes());
                     h.write(&job.base_m.to_bits().to_le_bytes());
                     h.write(&(job.polygon.len() as u32).to_le_bytes());
