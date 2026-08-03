@@ -208,6 +208,12 @@ impl StaticModel {
         };
         let mut vert_total = 0usize;
         let mut parts: Vec<(Vec3f, Vec3f)> = Vec::new();
+        // Kept alongside the packed stream purely so AO can be baked once the
+        // whole mesh is known — occlusion needs every triangle, and primitives
+        // arrive one at a time. Dropped at the end of this function.
+        let mut raw_pos: Vec<Vec3f> = Vec::new();
+        let mut raw_nrm: Vec<Vec3f> = Vec::new();
+        let mut raw_tint: Vec<[f32; 3]> = Vec::new();
 
         for (node_index, n) in node_vals.iter().enumerate() {
             let Some(mesh_index) = n.get("mesh").and_then(Val::usize) else {
@@ -308,13 +314,21 @@ impl StaticModel {
                     pmax.y = pmax.y.max(p.y);
                     pmax.z = pmax.z.max(p.z);
                     let (ox, oy) = oct_encode(nrm);
+                    raw_pos.push(p);
+                    raw_nrm.push(nrm);
+                    raw_tint.push([tint[0], tint[1], tint[2]]);
                     vertices.extend_from_slice(&[
                         p.x,
                         p.y,
                         p.z,
                         makepad_draw::pack_pair_f16(ox, oy),
                         makepad_draw::pack_pair_f16(g(&uv, 2, 0, 0.0), g(&uv, 2, 1, 0.0)),
-                        makepad_draw::pack_unorm8x4(tint[0], tint[1], tint[2], tint[3]),
+                        // Colour's alpha lane is a PLACEHOLDER here: baked AO
+                        // is written into it below, once every primitive has
+                        // been read. The material's own alpha was already
+                        // discarded by the shader (it returns opaque), so the
+                        // lane costs nothing to repurpose.
+                        makepad_draw::pack_unorm8x4(tint[0], tint[1], tint[2], 1.0),
                     ]);
                 }
                 if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
@@ -331,6 +345,19 @@ impl StaticModel {
         }
         if vertices.is_empty() {
             return Err("no mesh primitives found".into());
+        }
+
+        // Bake self-occlusion into the colour's alpha lane. This is the whole
+        // reason a prop reads as a solid object rather than a flat-shaded
+        // shell: the underside of an eave, the inside of an arch and the gap
+        // between a bench's slats all darken, and none of it moves when the
+        // sun does. Zero extra vertex bytes — the lane was already there and
+        // already ignored.
+        let ao = crate::ao::bake_vertex_ao(&raw_pos, &raw_nrm, &indices, min, max);
+        for (i, a) in ao.iter().enumerate() {
+            let t = raw_tint[i];
+            vertices[i * MODEL_VERTEX_FLOATS + 5] =
+                makepad_draw::pack_unorm8x4(t[0], t[1], t[2], *a);
         }
 
         // First image URI: Kenney packs use exactly one atlas per pack, and a

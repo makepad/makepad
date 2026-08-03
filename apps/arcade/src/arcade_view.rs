@@ -5,6 +5,7 @@
 //! makepad-game-render into an offscreen pass composited into the pane.
 //! Mouse drag orbits, wheel zooms — the same raw-event pattern GameView uses.
 
+use crate::bigworld;
 use makepad_game_blocks::{
     Blocks, Car, CarConfig, ControlSource, DriveInput, Npc, NpcConfig, Poi, PoiSet,
 };
@@ -100,6 +101,16 @@ pub struct ArcadeView {
     /// (their footprints come from model bounds, which need the GLBs).
     #[rust]
     village: Vec<ModelInstance>,
+    /// The big world's plan, when `ARCADE_WORLD=big`.
+    ///
+    /// Decided at world-build time — [`bigworld::plan`] is pure, so the whole
+    /// layout exists before there is a GPU — and realised once the models it
+    /// asked for are loaded. Holding it between the two is the only state the
+    /// two-phase split needs.
+    #[rust]
+    world_plan: Option<bigworld::WorldPlan>,
+    /// Asset id of the driveable car's mesh, once loaded.
+    vehicle_model: Option<String>,
     #[live(vec4(0.03, 0.045, 0.075, 1.0))]
     clear_color: Vec4f,
     #[new]
@@ -287,7 +298,6 @@ enum Blocking {
 struct PropCollider {
     pos: Vec3f,
     half: Vec3f,
-    tag: &'static str,
 }
 
 /// The stock skinned character (KayKit Knight, CC0) + its animation state.
@@ -601,7 +611,152 @@ impl ArcadeView {
         host.set_source(cx, &source).and_then(|r| r.error)
     }
 
+    /// `ARCADE_WORLD=big` swaps the village street for the whole map.
+    ///
+    /// An env switch rather than a replacement because the street is still the
+    /// useful demo for anything close-range — collision, the physics yard, the
+    /// crowd — and a world that takes seconds to plan is the wrong thing to
+    /// pay for when checking whether a bench blocks.
+    fn big_world_requested() -> bool {
+        std::env::var("ARCADE_WORLD").map(|v| v == "big").unwrap_or(false)
+    }
+
+    /// The Zelda-scale world: six regions, each from one art pack, connected
+    /// by generated roads.
+    ///
+    /// Only the parts that need a world are done here — ground, inhabitants,
+    /// camera. The props themselves cannot be placed until their models are
+    /// loaded (a prop is scaled from its own bounds), so the plan is held and
+    /// realised in the first frame that has a `Cx`, exactly as the street's
+    /// props are.
+    fn build_big_world(&mut self) {
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
+        let index = makepad_game_assets::AssetIndex::build(&root);
+        const SEED: u64 = 0xB16_0F0A;
+        let plan = bigworld::plan(&index, SEED);
+        log!(
+            "arcade: world planned in {} ms — {} props ({} distinct models), {} tiles, {} npcs, \
+             {} pois, {} interactables",
+            plan.stats.gen_us / 1000,
+            plan.stats.props,
+            plan.stats.distinct_models,
+            plan.stats.tiles,
+            plan.stats.npcs,
+            plan.pois.len(),
+            plan.interactables.len(),
+        );
+        for (region, n) in &plan.stats.per_region {
+            log!("arcade:   {:<8} {} props", region.name(), n);
+        }
+
+        let mut world = self.world.borrow_mut();
+        let w = &mut *world;
+        w.reset_content();
+        w.sky = Some(SkyConfig {
+            horizon: vec4(0.66, 0.76, 0.80, 1.0),
+            // Thinner than the street's: the castle is 100 units from the
+            // village and has to stay readable as a landmark, which is the
+            // whole reason it is where it is.
+            fog: 0.0009,
+            ..SkyConfig::default()
+        });
+
+        // ARCADE_VIEW picks among the plan's own viewpoints: 0 is the
+        // establishing shot down the road toward the castle, then one per
+        // region. The plan knows where its regions are, so the camera does not
+        // have to be told twice.
+        let vp = std::env::var("ARCADE_VIEW")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        if let Some((eye, target)) = plan.viewpoints.get(vp).copied() {
+            let d = eye - target;
+            w.cam_target = target;
+            w.cam_distance = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt().max(6.0);
+            w.orbit_yaw = d.x.atan2(d.z);
+            w.orbit_pitch = -(d.y / w.cam_distance).clamp(-0.999, 0.999).asin();
+        }
+
+        // Ground: sized to the map rather than the street. The regions sit
+        // inside ±110, so 260 across leaves the horizon beyond the far woods
+        // instead of cutting them off mid-scatter.
+        spawn(
+            w,
+            BodyKind::Static,
+            Shape::Box,
+            vec3f(0.0, -0.5, 0.0),
+            vec3f(260.0, 1.0, 260.0),
+            vec4(0.46, 0.56, 0.36, 1.0),
+            "ground",
+        );
+
+        // Inhabitants. Same Movers as the street's villagers — hidden boxes
+        // whose appearance is a skinned mesh — so they collide with the props
+        // and each other exactly as the player does.
+        for (i, npc) in plan.npcs.iter().enumerate() {
+            let id = spawn(
+                w,
+                BodyKind::Mover,
+                Shape::Box,
+                vec3f(npc.pos.x, 0.9, npc.pos.z),
+                vec3f(0.7, 1.8, 0.7),
+                vec4(0.85, 0.85, 0.9, 1.0),
+                "villager",
+            );
+            if let Some(e) = w.entity_mut(id) {
+                e.hidden = true;
+                // Zero under Entity::default(): a villager with gravity_scale
+                // 0 hangs in the air, and with speed_mult 0 never moves however
+                // hard the brain pushes.
+                e.gravity_scale = 1.0;
+                e.speed_mult = 1.0;
+            }
+            self.villagers.push(Villager::new(id, 0xB16_5EED ^ i as u64));
+        }
+
+        // The car, at the village square: a world you can only walk is a
+        // diorama, and the roads exist to be driven.
+        w.next_id += 1;
+        let car = w.next_id;
+        w.push_entity(Entity {
+            id: car,
+            kind: BodyKind::Rigid,
+            pos: vec3f(plan.player_start.x + 6.0, 1.2, plan.player_start.z + 4.0),
+            half: vec3f(0.9, 0.4, 1.6),
+            color: vec4(0.86, 0.32, 0.28, 1.0),
+            tag: "car".to_string(),
+            collide: true,
+            gravity_scale: 1.0,
+            speed_mult: 1.0,
+            scale: vec3f(1.0, 1.0, 1.0),
+            scale_target: vec3f(1.0, 1.0, 1.0),
+            density: 1.0,
+            friction: 0.7,
+            ..Default::default()
+        });
+        w.mark_render_dirty();
+        drop(world);
+
+        self.blocks.borrow_mut().cars.push(Car::new(
+            car,
+            CarConfig::default(),
+            ControlSource::Player,
+        ));
+
+        self.cast = CharacterModel::load_cast();
+        let kinds = self.cast.len().max(1);
+        for (i, v) in self.villagers.iter_mut().enumerate() {
+            v.kind = i % kinds;
+        }
+        self.world_plan = Some(plan);
+        self.world_built = true;
+    }
+
     fn build_world(&mut self) {
+        if Self::big_world_requested() {
+            self.build_big_world();
+            return;
+        }
         let mut world = self.world.borrow_mut();
         let w = &mut *world;
         w.reset_content();
@@ -837,6 +992,200 @@ impl ArcadeView {
     /// through the asset index — the same path a generated game takes, so the
     /// demo exercises what Fable will actually use rather than a private
     /// shortcut with hardcoded paths.
+    /// Load exactly the models the big-world plan named.
+    ///
+    /// No searching here: the plan already chose, and choosing again at load
+    /// time would let the two disagree — the layout would be fitted for one
+    /// model and drawn with another.
+    fn load_plan_models(&mut self, cx: &mut Cx) {
+        let Some(plan) = self.world_plan.as_ref() else {
+            return;
+        };
+        let models_root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/models"));
+        let mut wanted: Vec<String> = plan.placements.iter().map(|p| p.model.clone()).collect();
+        wanted.sort();
+        wanted.dedup();
+        let (mut ok, mut failed) = (0usize, 0usize);
+        for id in &wanted {
+            // id is `<source>/<pack>/<stem>`; the atlas is the pack's own.
+            let mut parts = id.splitn(3, '/');
+            let (src, pack, stem) = match (parts.next(), parts.next(), parts.next()) {
+                (Some(a), Some(b), Some(c)) => (a, b, c),
+                _ => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let dir = models_root.join(src).join(pack);
+            let glb = dir.join(format!("{stem}.glb"));
+            let glb = if glb.exists() { glb } else { dir.join(format!("{stem}.gltf")) };
+            let png = std::fs::read(dir.join("Textures").join("colormap.png")).ok();
+            let Ok(bytes) = std::fs::read(&glb) else {
+                failed += 1;
+                continue;
+            };
+            if self.renderer.load_model(cx, id, &bytes, png.as_deref()).is_ok() {
+                ok += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        log!("arcade: world models {ok} loaded, {failed} unavailable");
+    }
+
+    /// The driveable car's mesh, positioned from its rigid body this frame.
+    ///
+    /// A coloured slab standing in for a car was the last placeholder in the
+    /// scene, and the library has 4,442 models. The chassis stays the box3d
+    /// rigid body — collision fidelity past a sane box buys nothing for an
+    /// arcade car — and this is only its appearance, scaled from the model's
+    /// own bounds to the body it rides so the wheels meet the road.
+    fn vehicle_instance(&self) -> Option<ModelInstance> {
+        let id = self.vehicle_model.as_ref()?;
+        let (min, max) = self.renderer.model_bounds(id)?;
+        let world = self.world.borrow();
+        let car = world.entities.iter().find(|e| e.tag == "car")?;
+        // Scale the model's length onto the chassis length: a car reads by its
+        // proportions, and the packs author them at every size.
+        let native_len = (max.z - min.z).max(max.x - min.x).max(0.001);
+        let s = (car.half.z * 2.0) / native_len;
+        let mut m = GameRenderer::rigid_transform(car);
+        for i in 0..12 {
+            m.v[i] *= s;
+        }
+        // Sit the model on the chassis floor rather than its centre, or the
+        // car floats by half its own height.
+        m.v[13] -= car.half.y;
+        Some(ModelInstance {
+            model: id.clone(),
+            transform: m,
+        })
+    }
+
+    /// Turn the plan's placements into draw instances and collider boxes.
+    ///
+    /// The plan is pure and knows nothing about what loaded, so this is where
+    /// the two meet: `realise` asks for each model's real bounds and gets
+    /// `None` for anything whose pack never downloaded. A missing model leaves
+    /// a hole rather than a wrongly-scaled stand-in, and the count is logged —
+    /// a gap in a region is otherwise indistinguishable from a layout bug.
+    fn realise_plan(&mut self) -> (Vec<ModelInstance>, Vec<(Vec3f, Vec3f)>) {
+        let Some(plan) = self.world_plan.take() else {
+            return (Vec::new(), Vec::new());
+        };
+        let renderer = &self.renderer;
+        let out = bigworld::realise(&plan, |id| {
+            let (min, max) = renderer.model_bounds(id)?;
+            Some(bigworld::ModelGeometry {
+                min,
+                max,
+                triangles: renderer.model_triangles(id).unwrap_or(0),
+                collider_parts: renderer
+                    .model_collider_parts(id)
+                    .map(|p| p.to_vec())
+                    .unwrap_or_default(),
+            })
+        });
+        if !out.missing.is_empty() {
+            log!(
+                "arcade: {} models unavailable, e.g. {}",
+                out.missing.len(),
+                out.missing.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        let colliders = out.colliders.iter().map(|c| (c.pos, c.half)).collect();
+        self.world_plan = Some(plan);
+        (out.instances, colliders)
+    }
+
+    /// Give the plan's inhabitants their destinations and brains.
+    fn wire_plan_blocks(&mut self) {
+        let Some(plan) = self.world_plan.as_ref() else {
+            return;
+        };
+        let mut blocks = self.blocks.borrow_mut();
+        let mut pois = PoiSet::default();
+        for p in &plan.pois {
+            pois.push(Poi::new(p.pos, p.tag).with_capacity(p.capacity));
+        }
+        blocks.pois = pois;
+
+        let world = self.world.borrow();
+        let ids: Vec<u64> = world
+            .entities
+            .iter()
+            .filter(|e| e.tag == "villager")
+            .map(|e| e.id)
+            .collect();
+        // The plan's Nth npc is the Nth villager entity: build_big_world
+        // spawned them in plan order and nothing has removed one since.
+        for (i, id) in ids.iter().enumerate() {
+            let (home, speed) = plan
+                .npcs
+                .get(i)
+                .map(|n| (n.home, n.speed))
+                .unwrap_or((vec3f(0.0, 0.9, 0.0), 2.4));
+            let mut cfg = NpcConfig::default();
+            cfg.speed = speed;
+            blocks.npcs.push(Npc::new(
+                *id,
+                cfg,
+                home,
+                0x51de_0000 ^ (i as u64).wrapping_mul(0x9E37_79B9),
+            ));
+        }
+        log!(
+            "arcade: {} npcs over {} pois",
+            blocks.npcs.len(),
+            blocks.pois.list.len()
+        );
+    }
+
+    /// The driveable car's mesh, chosen by description like every other prop.
+    ///
+    /// Searched rather than hardcoded so the demo exercises the path a
+    /// generated game takes — and `Variants` rather than `Mixed`, because a
+    /// car must be ONE recognisable object: spreading across families returns
+    /// a car, then a tractor, then a boat.
+    fn load_vehicle_model(&mut self, cx: &mut Cx) {
+        use makepad_game_assets::{AssetKind, Filters, Spread, VarietyParams};
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
+        let index = makepad_game_assets::AssetIndex::build(&root);
+        let params = VarietyParams {
+            count: 6,
+            spread: Spread::Variants,
+            seed: 0x5eed_1701,
+            filters: Filters {
+                kind: Some(AssetKind::Model),
+                ..Default::default()
+            },
+        };
+        for entry in index.find_many("race car vehicle", &params) {
+            let (id, path) = (entry.id.clone(), entry.path.clone());
+            let png = path
+                .parent()
+                .map(|d| d.join("Textures").join("colormap.png"))
+                .and_then(|p| std::fs::read(p).ok());
+            let Ok(glb) = std::fs::read(&path) else { continue };
+            if self.renderer.load_model(cx, &id, &glb, png.as_deref()).is_ok() {
+                log!("arcade: vehicle model = {id}");
+                self.vehicle_model = Some(id);
+                // The chassis box is now only the physics body; leaving it
+                // visible would draw a coloured slab inside the car.
+                let mut world = self.world.borrow_mut();
+                let car = world.entities.iter().find(|e| e.tag == "car").map(|e| e.id);
+                if let Some(car) = car {
+                    if let Some(e) = world.entity_mut(car) {
+                        e.hidden = true;
+                    }
+                }
+                world.mark_render_dirty();
+                return;
+            }
+        }
+        log!("arcade: no loadable vehicle model — car stays a box");
+    }
+
     fn load_props(&mut self, cx: &mut Cx) {
         use makepad_game_assets::{AssetKind, Filters, Spread, VarietyParams};
         let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
@@ -1043,7 +1392,6 @@ impl ArcadeView {
                 colliders.push(PropCollider {
                     pos: vec3f(x + ox, cy.max(ey), z + oz),
                     half: vec3f(ex.max(0.08), ey.max(0.08), ez.max(0.08)),
-                    tag: "scenery",
                 });
                 pushed += 1;
             }
@@ -1060,7 +1408,6 @@ impl ArcadeView {
                 colliders.push(PropCollider {
                     pos: vec3f(x, hy, z),
                     half: vec3f((hx * ph).max(0.18), hy, (hz * ph).max(0.18)),
-                    tag: "scenery",
                 });
             }
         };
@@ -1725,7 +2072,14 @@ impl Widget for ArcadeView {
             // already built its world from game.splash.
             if self.session.simulates() && !self.world_built {
                 self.build_world();
-                self.spawn_blocks();
+                // The big world spawns its own car in build_big_world and gets
+                // its POIs and brains from the plan once the props exist
+                // (wire_plan_blocks). Running the street's spawn_blocks too
+                // gave every villager a SECOND Npc block — two brains steering
+                // one body against each other — and a second car.
+                if !Self::big_world_requested() {
+                    self.spawn_blocks();
+                }
             }
             self.next_frame = cx.new_next_frame();
         }
@@ -1746,24 +2100,32 @@ impl Widget for ArcadeView {
             // Stock props are uploaded once, on the first frame that has a Cx.
             if !self.props_loaded {
                 self.props_loaded = true;
-                self.load_props(cx.cx);
-                // Compose once, then spawn a collider per solid prop. Doing
-                // it here (not in build_world) is forced by ordering: the
-                // footprints come from model bounds, which only exist after
-                // the GLBs are loaded, which needs a Cx.
-                let (models, colliders) = self.compose_village();
+                // Both worlds place props the same way — models uploaded, then
+                // instances and collider boxes derived from the models' own
+                // bounds. They differ only in who chose the layout: the street
+                // composes it inline, the big world reads a plan that was
+                // computed with no Cx at all.
+                self.load_vehicle_model(cx.cx);
+                let (models, colliders) = if Self::big_world_requested() {
+                    self.load_plan_models(cx.cx);
+                    self.realise_plan()
+                } else {
+                    self.load_props(cx.cx);
+                    let (m, c) = self.compose_village();
+                    (m, c.into_iter().map(|c| (c.pos, c.half)).collect())
+                };
                 self.village = models;
                 if self.script.is_none() {
                     let mut world = self.world.borrow_mut();
-                    for c in &colliders {
+                    for (pos, half) in &colliders {
                         let id = spawn(
                             &mut world,
                             BodyKind::Static,
                             Shape::Box,
-                            c.pos,
-                            vec3f(c.half.x * 2.0, c.half.y * 2.0, c.half.z * 2.0),
+                            *pos,
+                            vec3f(half.x * 2.0, half.y * 2.0, half.z * 2.0),
                             vec4(0.5, 0.5, 0.5, 1.0),
-                            c.tag,
+                            "scenery",
                         );
                         // The mesh is the prop's appearance; this box is only
                         // its substance.
@@ -1772,10 +2134,21 @@ impl Widget for ArcadeView {
                         }
                     }
                     log!(
-                        "arcade: village {} props, {} colliders",
+                        "arcade: {} props, {} colliders, {} triangles",
                         self.village.len(),
-                        colliders.len()
+                        colliders.len(),
+                        self.village
+                            .iter()
+                            .filter_map(|i| self.renderer.model_triangles(&i.model))
+                            .sum::<usize>(),
                     );
+                }
+                // The plan's inhabitants need destinations, and those only
+                // become blocks once the world exists. Doing it here rather
+                // than in build_big_world keeps the ordering honest: POIs are
+                // positions, but the NPCs that score them are entities.
+                if Self::big_world_requested() {
+                    self.wire_plan_blocks();
                 }
             }
             // Character atlases are created before Cx3d mutably borrows cx.
@@ -1870,8 +2243,15 @@ impl Widget for ArcadeView {
                     skinned_verts * 6 * 4 / 1024,
                 );
             }
-            // Built before `batch` borrows self mutably.
-            let prop_instances = self.village.clone();
+            // Built before `batch` borrows self mutably. The static props are
+            // fixed; the car's instance is rebuilt each frame from its rigid
+            // body, so its mesh rides the physics rather than the other way
+            // round — the chassis stays the box3d body and the model is only
+            // its appearance, which is the same split the villagers use.
+            let mut prop_instances = self.village.clone();
+            if let Some(inst) = self.vehicle_instance() {
+                prop_instances.push(inst);
+            }
             let textures: Vec<&Texture> =
                 self.cast.iter().filter_map(|c| c.texture.as_ref()).collect();
             let batch = if skinned_items.is_empty() || textures.is_empty() {

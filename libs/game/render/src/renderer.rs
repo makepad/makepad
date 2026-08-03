@@ -565,6 +565,14 @@ impl GameRenderer {
     /// Rotation part of an entity's transform. Rigids carry a full box3d
     /// orientation quat (M1a); everything else rotates by visual yaw exactly
     /// as before. Column-major, same layout as Mat4f::rotation.
+    pub fn rigid_transform(e: &Entity) -> Mat4f {
+        let mut m = Self::entity_rotation(e);
+        m.v[12] = e.pos.x;
+        m.v[13] = e.pos.y;
+        m.v[14] = e.pos.z;
+        m
+    }
+
     fn entity_rotation(e: &Entity) -> Mat4f {
         if e.kind == BodyKind::Rigid {
             let (x, y, z, w) = (e.orient.x, e.orient.y, e.orient.z, e.orient.w);
@@ -868,6 +876,16 @@ impl GameRenderer {
             .iter()
             .find(|(k, _)| k == id)
             .map(|(_, m)| (m.min, m.max))
+    }
+
+    /// Triangle count of a loaded prop, so a caller can budget a scene before
+    /// drawing it. Counted from the index buffer rather than stored, because
+    /// this is a reporting path, not a hot one.
+    pub fn model_triangles(&self, id: &str) -> Option<usize> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.triangles)
     }
 
     /// Draw the placed stock props. Instances are grouped by model, so N

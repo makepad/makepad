@@ -379,6 +379,110 @@ pub fn build_caster_shadow(
     true
 }
 
+/// How dark the skirt is right at a prop's base.
+///
+/// Deliberately well under the cast shadow's alpha. Both land in the same
+/// alpha-blended mesh, so where they overlap they composite rather than take a
+/// max — 0.20 against a 0.35 shadow reaches ~0.48, which reads as "darkest at
+/// the wall" instead of a black band. Raising this is the fastest way to make
+/// every prop look like it is standing in a puddle.
+pub const CONTACT_ALPHA: f32 = 0.20;
+/// Skirt width as a fraction of the footprint's half-extent.
+const CONTACT_SKIRT: f32 = 0.34;
+/// Above this height off the receiver a prop is not touching it, so it gets no
+/// contact darkening — a hanging sign or a bird should not stain the ground.
+const CONTACT_MAX_GAP: f32 = 0.25;
+/// Segments round the skirt. 16 is not arbitrary: it puts a sample exactly on
+/// each of the four corners and four edge midpoints of the footprint, which is
+/// what the squircle below needs to keep its corners square.
+const CONTACT_SEGMENTS: usize = 16;
+
+/// The sun-independent half of grounding: a soft dark skirt where a prop meets
+/// the ground.
+///
+/// A cast shadow swings and shortens as the day cycles; the darkness in the
+/// crack at the base of a wall does not. That constancy is what stops a prop
+/// reading as a decal laid over the grass — which is the complaint this
+/// answers. It is emitted into the SAME mesh as the cast shadows, so all of it
+/// still ships as one geometry and one draw call.
+///
+/// A ring, not a disc: the area directly under a solid prop is hidden by the
+/// prop itself, so filling it would be pure overdraw — and overdraw is the one
+/// thing a tiler cannot forgive.
+///
+/// **Pass the COLLIDER footprint, not the model bounds.** For a house the two
+/// agree, but a tree's bounds are its canopy — sizing the skirt from those
+/// would ring the ground at branch radius, metres away from the trunk that
+/// actually touches it. `StaticModel::collider_parts` already returns the
+/// trunk-only box for exactly this reason, so the caller has the right number
+/// to hand.
+pub fn build_contact_ao(
+    centre: Vec3f,
+    half_x: f32,
+    half_z: f32,
+    receiver: &Receiver,
+    out: &mut ShadowMeshBuilder,
+) -> bool {
+    let (hx, hz) = (half_x.abs(), half_z.abs());
+    if hx < 1.0e-3 || hz < 1.0e-3 {
+        return false;
+    }
+    // Not resting on this receiver: no contact, no darkening.
+    let gap = centre.y - receiver.base_y;
+    if !(-0.5..CONTACT_MAX_GAP).contains(&gap) {
+        return false;
+    }
+    // Fade out over the last of the allowed gap, so a prop lifted slightly
+    // (a crate on a slope) loosens its skirt rather than dropping it abruptly.
+    let contact = (1.0 - (gap.max(0.0) / CONTACT_MAX_GAP)).clamp(0.0, 1.0);
+    let alpha = CONTACT_ALPHA * contact;
+    if alpha <= 0.002 {
+        return false;
+    }
+
+    let place = |x: f32, z: f32, a: f32, out: &mut ShadowMeshBuilder| -> u32 {
+        let (y, normal) = receiver.sample(x, z);
+        let slope = (1.0 - normal.y.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let lift = SHADOW_NORMAL_BIAS + SHADOW_SLOPE_BIAS * slope;
+        out.push_vertex(
+            vec3f(x + normal.x * lift, y + normal.y * lift, z + normal.z * lift),
+            a,
+        )
+    };
+
+    let mut inner = Vec::with_capacity(CONTACT_SEGMENTS);
+    let mut outer = Vec::with_capacity(CONTACT_SEGMENTS);
+    for i in 0..CONTACT_SEGMENTS {
+        let t = i as f32 / CONTACT_SEGMENTS as f32 * std::f32::consts::TAU;
+        let (s, c) = (t.sin(), t.cos());
+        // Sized from the prop's OWN footprint, so a house gets a wide skirt and
+        // a bench a small one. A fixed radius is what makes contact AO look
+        // like stickers.
+        //
+        // The shape is a squircle, not an ellipse: |x|⁴+|z|⁴=1 rather than
+        // |x|²+|z|²=1. A plain ellipse inscribed in a square footprint pulls
+        // away from the wall at the corners, and a castle piece then reads as
+        // standing in a spotlight instead of touching the ground. The fourth
+        // power reaches ~1.19 at 45° against the square's 1.41 — square enough
+        // for kit walls, still round enough for a barrel or a tree.
+        let r = 1.0 / (c * c * c * c + s * s * s * s).sqrt().sqrt();
+        let (dx, dz) = (c * r, s * r);
+        inner.push(place(centre.x + dx * hx * 0.92, centre.z + dz * hz * 0.92, alpha, out));
+        outer.push(place(
+            centre.x + dx * hx * (1.0 + CONTACT_SKIRT),
+            centre.z + dz * hz * (1.0 + CONTACT_SKIRT),
+            0.0,
+            out,
+        ));
+    }
+    for i in 0..CONTACT_SEGMENTS {
+        let j = (i + 1) % CONTACT_SEGMENTS;
+        out.push_tri(inner[i], outer[i], outer[j]);
+        out.push_tri(inner[i], outer[j], inner[j]);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,4 +663,67 @@ mod tests {
             out.len()
         );
     }
+
+    /// The skirt must scale with the prop, or a house and a bench get the same
+    /// ring and both look wrong.
+    #[test]
+    fn contact_skirt_is_sized_from_the_footprint() {
+        let mut small = ShadowMeshBuilder::default();
+        assert!(build_contact_ao(vec3f(0.0, 0.0, 0.0), 0.4, 0.4, &flat(), &mut small));
+        let mut large = ShadowMeshBuilder::default();
+        assert!(build_contact_ao(vec3f(0.0, 0.0, 0.0), 4.0, 4.0, &flat(), &mut large));
+
+        let extent = |b: &ShadowMeshBuilder| {
+            let mut m: f32 = 0.0;
+            for v in b.vertices.chunks(SHADOW_VERTEX_FLOATS) {
+                m = m.max(v[0].abs());
+            }
+            m
+        };
+        assert!(
+            extent(&large) > extent(&small) * 5.0,
+            "skirt did not scale: {} vs {}",
+            extent(&large),
+            extent(&small)
+        );
+    }
+
+    /// A floating prop must not stain the ground beneath it.
+    #[test]
+    fn a_prop_off_the_ground_gets_no_skirt() {
+        let mut out = ShadowMeshBuilder::default();
+        assert!(!build_contact_ao(vec3f(0.0, 3.0, 0.0), 1.0, 1.0, &flat(), &mut out));
+        assert!(out.is_empty());
+    }
+
+    /// Sun-independent by construction: the function takes no sun at all, so
+    /// the skirt cannot move when the day cycles. This pins the property
+    /// rather than the implementation.
+    #[test]
+    fn the_skirt_is_a_ring_that_fades_outward() {
+        let mut out = ShadowMeshBuilder::default();
+        assert!(build_contact_ao(vec3f(0.0, 0.0, 0.0), 1.0, 1.0, &flat(), &mut out));
+        let mut near_alpha = 0.0f32;
+        let mut far_alpha = 1.0f32;
+        for v in out.vertices.chunks(SHADOW_VERTEX_FLOATS) {
+            let r = (v[0] * v[0] + v[2] * v[2]).sqrt();
+            let a = ((v[5].to_bits() >> 24) & 0xff) as f32 / 255.0;
+            if r < 1.0 {
+                near_alpha = near_alpha.max(a);
+            } else {
+                far_alpha = far_alpha.min(a);
+            }
+        }
+        assert!(near_alpha > 0.1, "inner edge too faint: {near_alpha}");
+        assert!(far_alpha < 0.01, "outer edge does not fade: {far_alpha}");
+        // A ring leaves the middle open: nothing is emitted at the centre,
+        // because a solid prop hides it and filling it is pure overdraw.
+        let centre_verts = out
+            .vertices
+            .chunks(SHADOW_VERTEX_FLOATS)
+            .filter(|v| (v[0] * v[0] + v[2] * v[2]).sqrt() < 0.5)
+            .count();
+        assert_eq!(centre_verts, 0, "skirt filled its own centre");
+    }
+
 }

@@ -4,6 +4,7 @@ pub use makepad_widgets;
 pub mod ai;
 pub mod arcade_view;
 pub mod audio;
+pub mod bigworld;
 pub mod authoring;
 pub mod browser;
 pub mod capability;

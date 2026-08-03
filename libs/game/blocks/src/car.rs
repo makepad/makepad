@@ -40,7 +40,6 @@ use makepad_box3d::math_functions::{pos as b3pos, vec3 as b3vec3, Pos as B3Pos, 
 use makepad_box3d::physics_world::world_cast_ray;
 use makepad_box3d::shape::shape_get_body;
 use makepad_box3d::types::default_query_filter;
-use makepad_game_math as gm;
 use makepad_game_sim::{GameWorld, TICK_DT};
 use makepad_math::*;
 
@@ -306,7 +305,14 @@ impl Car {
         let speed_factor = (self.speed.abs() / self.config.steer_peak_speed).clamp(0.0, 1.0);
         // Reversing steers the other way, exactly like a real car.
         let direction = if self.speed < -0.1 { -1.0 } else { 1.0 };
-        let want_yaw_rate = steer * self.config.steer_rate * speed_factor * direction;
+        // Sign lives in heading::steer_to_yaw_rate, not here: forward is -Z and
+        // positive yaw turns LEFT, so a driver pulling right needs the heading
+        // to DECREASE. Negating inline is how this came out backwards, and how
+        // the plane and the boat would each come out backwards on their own.
+        let want_yaw_rate = makepad_game_sim::steer_to_yaw_rate(
+            steer * speed_factor * direction,
+            self.config.steer_rate,
+        );
         let yaw_rate = from_b3_vec3(body_get_angular_velocity(w, body)).dot(normal);
         // Torque toward the wanted yaw rate; the same term damps the residual
         // spin when the wheel is centred, which is what keeps it from tank-slapping.
@@ -338,17 +344,14 @@ impl Car {
         if to.length() < 4.0 {
             self.route_at = (self.route_at + 1) % self.route.len();
         }
-        // Heading error in the chassis frame; -z forward means the yaw of a
-        // direction is atan2(-x, -z), the same convention step_world uses.
-        let want = gm::atan2(-to.x, -to.z);
-        let mut diff = want - entity.yaw_from_orient();
-        while diff > std::f32::consts::PI {
-            diff -= std::f32::consts::TAU;
-        }
-        while diff < -std::f32::consts::PI {
-            diff += std::f32::consts::TAU;
-        }
-        self.input.steer = (diff * 1.8).clamp(-1.0, 1.0);
+        // Heading error, shortest way round (see sim::heading for the
+        // convention). `diff` is positive when the target is to the LEFT, and
+        // steer input is positive for RIGHT — so the driver's input is the
+        // NEGATED error. This is the same sign trap the steering torque had;
+        // both now state it explicitly rather than assuming.
+        let want = makepad_game_sim::forward_to_heading(to);
+        let diff = makepad_game_sim::heading_delta(entity.yaw_from_orient(), want);
+        self.input.steer = (-diff * 1.8).clamp(-1.0, 1.0);
         // Slow into the tight stuff so the AI doesn't understeer off the road.
         let corner = 1.0 - (diff.abs() / std::f32::consts::FRAC_PI_2).clamp(0.0, 0.8);
         self.input.throttle = (self.route_pace * corner).clamp(0.0, 1.0);
@@ -452,7 +455,7 @@ impl EntityYaw for makepad_game_sim::Entity {
             return self.yaw;
         }
         let forward = rotate(self.orient, vec3f(0.0, 0.0, -1.0));
-        gm::atan2(-forward.x, -forward.z)
+        makepad_game_sim::forward_to_heading(forward)
     }
 }
 

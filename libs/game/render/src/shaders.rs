@@ -154,7 +154,11 @@ script_mod! {
             self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)
             self.v_direct = self.sun_color * dp
             self.v_uv = unpack2f16(self.geom.uv)
-            self.v_tint = unpack4u8(self.geom.color) * self.tint
+            // rgb is the material tint (x the per-character wash); the ALPHA
+            // lane carries baked self-AO from model.rs, not opacity — this
+            // shader has always returned opaque, so the lane was free.
+            let vc = unpack4u8(self.geom.color)
+            self.v_tint = vec4(vc.x * self.tint.x, vc.y * self.tint.y, vc.z * self.tint.z, vc.w)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             self.vertex_pos = self.draw_pass.camera_projection * view_pos
         }
@@ -164,8 +168,13 @@ script_mod! {
             // UV-map into one colormap (tint = white), nature-kit and friends
             // carry no texture and colour per material (atlas = white 1x1).
             // Multiplying serves both without a branch or a second shader.
-            let albedo = self.tex.sample_as_bgra(self.v_uv) * self.v_tint
-            let lit = albedo.xyz * (self.v_ambient + self.v_direct)
+            let tex = self.tex.sample_as_bgra(self.v_uv)
+            let albedo = vec3(tex.x * self.v_tint.x, tex.y * self.v_tint.y, tex.z * self.v_tint.z)
+            // AO scales AMBIENT only. Ambient is light arriving from
+            // everywhere, which is exactly what a crevice blocks; direct
+            // sunlight is already zero where the surface faces away. Folding
+            // it into both would darken a lit wall twice for the same reason.
+            let lit = albedo * (self.v_ambient * self.v_tint.w + self.v_direct)
             return vec4(mix(lit, self.fog_color, self.v_fog), 1.0)
         }
 

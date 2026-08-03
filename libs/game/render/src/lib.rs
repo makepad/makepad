@@ -11,6 +11,7 @@
 //! theming keeps working — the widget lends them per frame via [`GameDraws`].
 //! Camera state is per-view ([`CameraRig`]) — nothing here assumes one view.
 
+pub mod ao;
 pub mod bake;
 pub mod geometry;
 pub mod hud;
