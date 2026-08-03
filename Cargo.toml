@@ -10,6 +10,7 @@ workspace.members = [
     "libs/game/script",
     "libs/game/net",
     "libs/game/coedit",
+    "libs/game/pkg",
     "libs/game/session",
     # === examples ===
     "examples/hotload_ui",

@@ -6,12 +6,15 @@
 
 mod build;
 pub mod callbacks;
+pub mod audio3d;
 pub mod dispatch;
 pub mod host;
+pub mod sandbox;
 pub mod value;
 
 pub use dispatch::{AudioRequest, Ctx, ToneWave, VerbFn, VERBS};
 pub use host::{EvalReport, ScriptHost};
+pub use sandbox::{strip_capabilities, Trust};
 
 /// `game.api()` text — also what splashgame.md documents.
 pub fn api_text() -> String {

@@ -9,6 +9,7 @@
 
 use crate::callbacks::CallbackTable;
 use crate::dispatch::{suggest, verb_table, AudioRequest, Ctx, VerbFn};
+use crate::sandbox::{strip_capabilities, Trust};
 use makepad_game_blocks::Blocks;
 use makepad_game_sim::*;
 use makepad_widgets::*;
@@ -34,8 +35,12 @@ pub struct ScriptHost {
     pub blocks: Rc<RefCell<Blocks>>,
     callbacks: Rc<RefCell<CallbackTable>>,
     audio: Rc<RefCell<Vec<AudioRequest>>>,
+    /// Device-local particle requests; drained by the host each frame like
+    /// audio. Never simulation state — see makepad_game_sim::particles.
+    particles: Rc<RefCell<Vec<ParticleRequest>>>,
     eval_gen: Rc<Cell<u64>>,
     next_tone: Rc<Cell<u64>>,
+    next_emitter: Rc<Cell<u64>>,
     verbs: Rc<HashMap<LiveId, VerbFn>>,
     vm_id: SplashVmId,
     /// Checkpoint identity for streaming eval. gamemaker abuses the widget's
@@ -45,6 +50,9 @@ pub struct ScriptHost {
     source: String,
     generation: u64,
     last_error: Option<String>,
+    /// Downloaded games get a capability-stripped isolate. Set before the
+    /// first eval — that is when the isolate is allocated and stripped.
+    trust: Trust,
 }
 
 /// Distinct per host instance, so two games in one process never collide.
@@ -66,15 +74,41 @@ impl ScriptHost {
             blocks: Rc::new(RefCell::new(Blocks::new())),
             callbacks: Rc::new(RefCell::new(CallbackTable::default())),
             audio: Rc::new(RefCell::new(Vec::new())),
+            particles: Rc::new(RefCell::new(Vec::new())),
             eval_gen: Rc::new(Cell::new(0)),
             next_tone: Rc::new(Cell::new(0)),
+            next_emitter: Rc::new(Cell::new(0)),
             verbs: Rc::new(verb_table()),
             vm_id: MAIN_SPLASH_VM_ID,
             body_id: next_body_id(),
             source: String::new(),
             generation: 0,
             last_error: None,
+            trust: Trust::Local,
         }
+    }
+
+    /// A host for a game that arrived from a registry or a peer: its isolate is
+    /// capability-stripped when allocated. Untrusted games are untrusted code.
+    pub fn new_sandboxed() -> Self {
+        Self {
+            trust: Trust::Downloaded,
+            ..Self::new()
+        }
+    }
+
+    pub fn trust(&self) -> Trust {
+        self.trust
+    }
+
+    /// Must be called before the first eval; afterwards the isolate exists and
+    /// its capabilities are already fixed.
+    pub fn set_trust(&mut self, trust: Trust) -> Result<(), &'static str> {
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            return Err("trust is fixed once the isolate has been allocated");
+        }
+        self.trust = trust;
+        Ok(())
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -90,8 +124,15 @@ impl ScriptHost {
         std::mem::take(&mut *self.audio.borrow_mut())
     }
 
+    /// Drain this frame's particle requests for the device's ParticleSystem.
+    pub fn take_particles(&self) -> Vec<ParticleRequest> {
+        std::mem::take(&mut *self.particles.borrow_mut())
+    }
+
     fn ctx(&self) -> Ctx {
         Ctx {
+            particles: self.particles.clone(),
+            next_emitter: self.next_emitter.clone(),
             world: self.world.clone(),
             blocks: self.blocks.clone(),
             callbacks: self.callbacks.clone(),
@@ -113,6 +154,12 @@ impl ScriptHost {
     pub fn eval(&mut self, cx: &mut Cx) -> EvalReport {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.vm_id = cx.alloc_splash_vm_with_network(false);
+            // Strip before the handle is registered and before any source is
+            // evaluated, so a downloaded game never sees the modules at all.
+            if self.trust.is_sandboxed() {
+                let vm_id = self.vm_id;
+                cx.with_script_vm_id(vm_id, |vm| strip_capabilities(vm));
+            }
             self.register_handle(cx);
         }
         self.generation += 1;

@@ -18,6 +18,9 @@ pub mod scene;
 pub mod shaders;
 pub mod skin;
 pub mod stage;
+pub mod particles;
+pub mod shadow;
+pub mod sun;
 
 pub use geometry::*;
 pub use hud::*;
@@ -25,6 +28,9 @@ pub use renderer::*;
 pub use scene::*;
 pub use shaders::*;
 pub use stage::*;
+pub use particles::*;
+pub use shadow::*;
+pub use sun::*;
 
 use makepad_draw::*;
 

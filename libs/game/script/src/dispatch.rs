@@ -53,6 +53,9 @@ impl ToneWave {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AudioRequest {
     Sfx { name: String, pitch: f32 },
+    /// Positional one-shot: the host mixes it against the local listener
+    /// (audio3d.rs). Local tier — where you stand changes what you hear.
+    SfxAt { name: String, pitch: f32, at: Vec3f, range: f32 },
     Beep { freq: f32, to: f32, ms: f32, wave: ToneWave, gain: f32 },
     Jingle { notes: String, ms: f32 },
     Tone { id: u64, freq: f32, wave: ToneWave, gain: f32 },
@@ -73,6 +76,12 @@ pub struct Ctx {
     /// Next sustained-tone handle. Host-owned state expressed as a hook, so
     /// the crate never reaches for a synth it cannot depend on.
     pub next_tone: Rc<Cell<u64>>,
+    /// Device-local particle requests, drained by the host each frame. The
+    /// sim never sees these — that is what keeps particles off the world
+    /// RNG and out of tape parity (see makepad_game_sim::particles).
+    pub particles: Rc<RefCell<Vec<ParticleRequest>>>,
+    /// Next emitter handle, minted host-side like tone ids.
+    pub next_emitter: Rc<Cell<u64>>,
 }
 
 pub type VerbFn = fn(&mut ScriptVm, &Ctx, ScriptObject) -> ScriptValue;
@@ -747,6 +756,147 @@ fn v_jingle(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
     ctx.audio
         .borrow_mut()
         .push(AudioRequest::Jingle { notes, ms });
+    nil()
+}
+
+// ── lighting / particles / positional audio (the pretty pass) ──────────
+
+fn v_sun(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let Some(opts) = opts_of(vm, args, 0) else {
+        return nil();
+    };
+    warn_unknown_keys(
+        vm,
+        &ctx.world,
+        "sun",
+        opts,
+        &[id!(time_of_day), id!(latitude), id!(dir), id!(color), id!(ambient), id!(shadow_alpha)],
+    );
+    let mut cfg = SunConfig {
+        latitude: 52.0,
+        ..Default::default()
+    };
+    let hours = opt_f32(vm, opts, id!(time_of_day), f32::NAN);
+    if hours.is_finite() {
+        cfg.time_of_day = Some(hours);
+    }
+    cfg.latitude = opt_f32(vm, opts, id!(latitude), 52.0);
+    let dir = opt_vec3(vm, opts, id!(dir), vec3f(0.0, 0.0, 0.0));
+    if dir.x != 0.0 || dir.y != 0.0 || dir.z != 0.0 {
+        cfg.dir = Some(dir);
+    }
+    let none = vec3f(-1.0, -1.0, -1.0);
+    let color = opt_vec3(vm, opts, id!(color), none);
+    if color != none {
+        cfg.color = Some(color);
+    }
+    let ambient = opt_vec3(vm, opts, id!(ambient), none);
+    if ambient != none {
+        cfg.ambient = Some(ambient);
+    }
+    let shadow = opt_f32(vm, opts, id!(shadow_alpha), f32::NAN);
+    if shadow.is_finite() {
+        cfg.shadow_alpha = Some(shadow);
+    }
+    let mut world = ctx.world.borrow_mut();
+    world.sun = cfg;
+    world.mark_render_dirty();
+    nil()
+}
+
+/// Shared option parsing for `particles` and `burst`.
+fn particle_spec(vm: &mut ScriptVm, ctx: &Ctx, verb: &str, opts: ScriptObject) -> ParticleSpec {
+    warn_unknown_keys(
+        vm,
+        &ctx.world,
+        verb,
+        opts,
+        &[id!(kind), id!(rate), id!(count), id!(life), id!(size), id!(color), id!(spread), id!(speed), id!(gravity)],
+    );
+    let kind = match opt_string(vm, opts, id!(kind)) {
+        Some(name) => ParticleKind::parse(&name),
+        None => ParticleKind::Spark,
+    };
+    let mut spec = ParticleSpec::new(kind);
+    // `count` is the friendlier name for a burst; both mean the same field.
+    let count = opt_f32(vm, opts, id!(count), spec.rate);
+    spec.rate = opt_f32(vm, opts, id!(rate), count);
+    spec.life = opt_f32(vm, opts, id!(life), spec.life);
+    spec.size = opt_f32(vm, opts, id!(size), spec.size);
+    spec.color = opt_color(vm, opts, id!(color), spec.color);
+    spec.spread = opt_f32(vm, opts, id!(spread), spec.spread);
+    spec.speed = opt_f32(vm, opts, id!(speed), spec.speed);
+    spec.gravity = opt_f32(vm, opts, id!(gravity), spec.gravity);
+    spec
+}
+
+fn v_particles(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    // First arg is an entity id to follow, or a vec3 to sit at.
+    let first = arg(vm, args, 0);
+    // First arg is a vec3 to sit at, or an entity id to follow — a vec3
+    // parses as a vec3 first, the same overload rule game.attach uses.
+    let ip = vm.bx.threads.cur_ref().trap.ip;
+    let anchor = match NumericValue::from_script_value_heap(&vm.bx.heap, first, ip) {
+        NumericValue::Vec3(v) => EmitterAnchor::Point(v),
+        _ => EmitterAnchor::Entity(value_f32(vm, first) as u64),
+    };
+    let Some(opts) = opts_of(vm, args, 1) else {
+        return nil();
+    };
+    let spec = particle_spec(vm, ctx, "particles", opts);
+    let id = ctx.next_emitter.get() + 1;
+    ctx.next_emitter.set(id);
+    ctx.particles
+        .borrow_mut()
+        .push(ParticleRequest::Emitter { id, anchor, spec });
+    ScriptValue::from_f64(id as f64)
+}
+
+fn v_burst(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let at_v = arg(vm, args, 0);
+    let at = value_vec3(vm, at_v);
+    let Some(opts) = opts_of(vm, args, 1) else {
+        return nil();
+    };
+    let mut spec = particle_spec(vm, ctx, "burst", opts);
+    // A burst's default is a puff, not a per-second rate.
+    if spec.rate == ParticleSpec::new(spec.kind).rate {
+        spec.rate = 16.0;
+    }
+    ctx.particles
+        .borrow_mut()
+        .push(ParticleRequest::Burst { at, spec });
+    nil()
+}
+
+fn v_particles_stop(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let id = arg_id(vm, args, 0);
+    ctx.particles
+        .borrow_mut()
+        .push(ParticleRequest::Stop { id });
+    nil()
+}
+
+fn v_sfx_at(vm: &mut ScriptVm, ctx: &Ctx, args: ScriptObject) -> ScriptValue {
+    let at_v = arg(vm, args, 0);
+    let at = value_vec3(vm, at_v);
+    let name = arg_string(vm, args, 1);
+    let (pitch, range) = match opts_of(vm, args, 2) {
+        Some(opts) => {
+            warn_unknown_keys(vm, &ctx.world, "sfx_at", opts, &[id!(pitch), id!(range)]);
+            (
+                opt_f32(vm, opts, id!(pitch), 1.0),
+                opt_f32(vm, opts, id!(range), crate::audio3d::DEFAULT_RANGE),
+            )
+        }
+        None => (1.0, crate::audio3d::DEFAULT_RANGE),
+    };
+    ctx.audio.borrow_mut().push(AudioRequest::SfxAt {
+        name,
+        pitch,
+        at,
+        range,
+    });
     nil()
 }
 
@@ -1702,6 +1852,11 @@ pub const VERBS: &[(&str, VerbFn, &str)] = &[
     ("ground_y", v_ground_y, "(x, z) -> terrain height"),
     ("ground_normal", v_ground_normal, "(x, z) -> vec3"),
     ("sfx", v_sfx, "(name, pitch)"),
+    ("sfx_at", v_sfx_at, "(pos, name, {pitch, range}) — positional, device-local"),
+    ("sun", v_sun, "({time_of_day, latitude, dir, color, ambient, shadow_alpha})"),
+    ("particles", v_particles, "(id_or_pos, {kind: spark|smoke|dust|trail, rate, life, size, color, spread, speed, gravity}) -> emitter — device-local, never replicated"),
+    ("burst", v_burst, "(pos, {kind, count, life, size, color, spread, speed, gravity}) — one-shot, device-local"),
+    ("particles_stop", v_particles_stop, "(emitter)"),
     ("beep", v_beep, "({freq, to, ms, gain})"),
     ("jingle", v_jingle, "(notes, ms)"),
     ("car", v_car, "({pos, size, color, tag, player, top_speed, accel, braking, grip, steer_rate, seats}) -> id"),
@@ -1830,6 +1985,8 @@ mod tests {
             audio: Rc::new(RefCell::new(Vec::new())),
             eval_gen: Rc::new(Cell::new(1)),
             next_tone: Rc::new(Cell::new(0)),
+            particles: Rc::new(RefCell::new(Vec::new())),
+            next_emitter: Rc::new(Cell::new(0)),
         }
     }
 
@@ -2332,10 +2489,13 @@ mod tests {
     /// count moves, the two implementations have drifted again.
     #[test]
     fn the_verb_surface_matches_gamemakers() {
+        // Gamemaker runs on this table now, so this pins the shared surface:
+        // 102 at the migration, +5 for the pretty pass (sfx_at, sun,
+        // particles, burst, particles_stop).
         assert_eq!(
             VERBS.len(),
-            102,
-            "verb count changed — sync with examples/gamemaker GAME_API and splashgame.md"
+            107,
+            "verb count changed — sync with splashgame.md"
         );
     }
 
@@ -2429,4 +2589,143 @@ mod tests {
             );
         }
     }
+    // ── the pretty pass: sun / particles / positional audio ─────────────
+
+    #[test]
+    fn sun_stores_what_script_asked_for() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let opts = opts_of_pairs(
+            &mut vm,
+            &[
+                (id!(time_of_day), ScriptValue::from_f64(7.5)),
+                (id!(shadow_alpha), ScriptValue::from_f64(0.4)),
+            ],
+        );
+        call("sun", &mut vm, &ctx, &[opts]);
+        let sun = ctx.world.borrow().sun;
+        assert_eq!(sun.time_of_day, Some(7.5));
+        assert_eq!(sun.shadow_alpha, Some(0.4));
+        // Untouched knobs stay None so the renderer keeps its defaults.
+        assert_eq!(sun.color, None);
+        assert_eq!(sun.dir, None);
+    }
+
+    #[test]
+    fn particles_and_burst_queue_without_touching_the_world() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let kind = vm.bx.heap.new_string_from_str("smoke");
+        let opts = opts_of_pairs(&mut vm, &[(id!(kind), kind), (id!(rate), ScriptValue::from_f64(30.0))]);
+        let emitter = call("particles", &mut vm, &ctx, &[ScriptValue::from_f64(7.0), opts]);
+        assert!(emitter.as_f64().unwrap_or(0.0) > 0.0, "emitter id returned");
+
+        let at = vec3_value(&mut vm, vec3f(1.0, 2.0, 3.0));
+        let bopts = opts_of_pairs(&mut vm, &[(id!(count), ScriptValue::from_f64(9.0))]);
+        call("burst", &mut vm, &ctx, &[at, bopts]);
+
+        let q = ctx.particles.borrow();
+        assert_eq!(q.len(), 2);
+        match q[0] {
+            ParticleRequest::Emitter { anchor, spec, .. } => {
+                assert_eq!(anchor, EmitterAnchor::Entity(7));
+                assert_eq!(spec.kind, ParticleKind::Smoke);
+                assert_eq!(spec.rate, 30.0);
+            }
+            _ => panic!("expected an emitter"),
+        }
+        match q[1] {
+            ParticleRequest::Burst { at, spec } => {
+                assert_eq!(at, vec3f(1.0, 2.0, 3.0));
+                assert_eq!(spec.rate, 9.0);
+            }
+            _ => panic!("expected a burst"),
+        }
+        // Entity count unchanged: particles are not entities.
+        assert!(ctx.world.borrow().entities.is_empty());
+    }
+
+    #[test]
+    fn a_vec3_first_argument_anchors_the_emitter_in_place() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let at = vec3_value(&mut vm, vec3f(4.0, 0.0, -2.0));
+        let kind = vm.bx.heap.new_string_from_str("dust");
+        let opts = opts_of_pairs(&mut vm, &[(id!(kind), kind)]);
+        call("particles", &mut vm, &ctx, &[at, opts]);
+        let queued = ctx.particles.borrow().clone();
+        match queued[0] {
+            ParticleRequest::Emitter { anchor, .. } => {
+                assert_eq!(anchor, EmitterAnchor::Point(vec3f(4.0, 0.0, -2.0)));
+            }
+            _ => panic!("expected an emitter"),
+        }
+    }
+
+    /// The parity-protecting test: emitting particles must not advance the
+    /// world RNG, or a device that draws fewer of them would desync the sim
+    /// and every recorded tape would stop replaying.
+    #[test]
+    fn particles_never_advance_the_world_rng() {
+        fn run(with_particles: bool) -> (u64, f32) {
+            let mut h = Harness::new();
+            let mut vm = h.vm();
+            let ctx = ctx_with(GameWorld::new());
+            let mut last = 0.0;
+            for i in 0..32 {
+                if with_particles {
+                    let opts = opts_of_pairs(
+                        &mut vm,
+                        &[(id!(count), ScriptValue::from_f64(20.0))],
+                    );
+                    let at = vec3_value(&mut vm, vec3f(i as f32, 0.0, 0.0));
+                    call("burst", &mut vm, &ctx, &[at, opts]);
+                    let eopts = opts_of_pairs(&mut vm, &[(id!(rate), ScriptValue::from_f64(50.0))]);
+                    call("particles", &mut vm, &ctx, &[ScriptValue::from_f64(1.0), eopts]);
+                }
+                // A real draw from the world RNG, interleaved.
+                last = call("rand", &mut vm, &ctx, &[]).as_f64().unwrap_or(0.0) as f32;
+            }
+            let rng = ctx.world.borrow().rng;
+            (rng, last)
+        }
+        let (rng_without, last_without) = run(false);
+        let (rng_with, last_with) = run(true);
+        assert_eq!(
+            rng_without, rng_with,
+            "particle verbs moved the world RNG — tape parity would break"
+        );
+        assert_eq!(last_without, last_with, "the RNG stream diverged");
+    }
+
+    #[test]
+    fn sfx_at_carries_position_and_range() {
+        let mut h = Harness::new();
+        let mut vm = h.vm();
+        let ctx = ctx_with(GameWorld::new());
+        let at = vec3_value(&mut vm, vec3f(5.0, 1.0, -3.0));
+        let name = vm.bx.heap.new_string_from_str("clank");
+        let opts = opts_of_pairs(&mut vm, &[(id!(range), ScriptValue::from_f64(12.0))]);
+        call("sfx_at", &mut vm, &ctx, &[at, name, opts]);
+        match ctx.audio.borrow().last().cloned() {
+            Some(AudioRequest::SfxAt { name, at, range, pitch }) => {
+                assert_eq!(name, "clank");
+                assert_eq!(at, vec3f(5.0, 1.0, -3.0));
+                assert_eq!(range, 12.0);
+                assert_eq!(pitch, 1.0);
+            }
+            other => panic!("expected SfxAt, got {other:?}"),
+        }
+        // The 2D verb still works and stays 2D.
+        let n2 = vm.bx.heap.new_string_from_str("beep");
+        call("sfx", &mut vm, &ctx, &[n2]);
+        assert!(matches!(
+            ctx.audio.borrow().last(),
+            Some(AudioRequest::Sfx { .. })
+        ));
+    }
+
 }

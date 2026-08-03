@@ -9,6 +9,7 @@ use makepad_game_blocks::{
     Blocks, Car, CarConfig, Character, CharacterConfig, ControlSource, DriveInput,
 };
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
+use makepad_game_render::particles::ParticleSystem;
 use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
@@ -16,7 +17,10 @@ use makepad_game_render::{
     SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_session::{Session, SessionEvent};
-use makepad_game_sim::{BodyKind, Entity, GameWorld, PadState, Shape, SkyConfig, TICK_DT};
+use makepad_game_sim::{
+    BodyKind, EmitterAnchor, Entity, GameWorld, PadState, ParticleKind, ParticleRequest,
+    ParticleSpec, Shape, SkyConfig, SunConfig, TICK_DT,
+};
 use makepad_widgets::*;
 use makepad_game_script::ScriptHost;
 use std::cell::RefCell;
@@ -94,6 +98,13 @@ pub struct ArcadeView {
     area: Area,
     #[rust]
     renderer: GameRenderer,
+    /// Device-local particles: exhaust, dust and impact sparks. Never sim
+    /// state, never replicated — a peer may draw a different number.
+    #[rust]
+    particles: ParticleSystem,
+    /// Last frame's rigid speeds, to notice a hard landing worth a spark.
+    #[rust]
+    impact_speed: Vec<(u64, f32)>,
     /// Shared with `script` when a game.splash is loaded, so both modes read
     /// and write one world.
     #[rust(Rc::new(RefCell::new(GameWorld::new())))]
@@ -313,8 +324,23 @@ impl ArcadeView {
     /// Switch to script-driven mode: a `game.splash` owns the world.
     /// Returns the eval error, if the first eval failed.
     pub fn load_game(&mut self, cx: &mut Cx, path: &std::path::Path) -> Option<String> {
+        self.load_game_with_trust(cx, path, makepad_game_script::Trust::Local)
+    }
+
+    /// As `load_game`, but for a game that arrived from a registry or a peer:
+    /// its isolate is capability-stripped (no fs, no process spawn, no net).
+    pub fn load_game_with_trust(
+        &mut self,
+        cx: &mut Cx,
+        path: &std::path::Path,
+        trust: makepad_game_script::Trust,
+    ) -> Option<String> {
         let source = std::fs::read_to_string(path).ok()?;
-        let mut host = ScriptHost::new();
+        let mut host = if trust.is_sandboxed() {
+            ScriptHost::new_sandboxed()
+        } else {
+            ScriptHost::new()
+        };
         // Share the host's world/blocks so render and input keep working
         // through exactly the same fields as the demo path.
         self.world = host.world.clone();
@@ -611,6 +637,33 @@ impl ArcadeView {
                 }
             }
         }
+        // Cycle the sun across the day so the unified lighting and the
+        // projected shadows are visibly doing something: a full 24h in 40s.
+        let hours = 6.0 + (t * 0.45) % 12.0;
+        w.sun = SunConfig {
+            time_of_day: Some(hours),
+            latitude: 52.0,
+            ..Default::default()
+        };
+
+        // Hard landings throw sparks. Compared against last frame's speed so
+        // a resting crate does not spark forever.
+        let mut impacts: Vec<Vec3f> = Vec::new();
+        let mut speeds: Vec<(u64, f32)> = Vec::new();
+        for e in w.entities.iter() {
+            if e.kind != BodyKind::Rigid {
+                continue;
+            }
+            let speed = e.vel.length();
+            if let Some((_, was)) = self.impact_speed.iter().find(|(id, _)| *id == e.id) {
+                if *was > 6.0 && speed < was * 0.45 {
+                    impacts.push(e.pos);
+                }
+            }
+            speeds.push((e.id, speed));
+        }
+        self.impact_speed = speeds;
+
         // Kick the rigid corner every 5 seconds: crates tumble, balls fly.
         if w.tick % 300 == 200 {
             let ids: Vec<u64> = w
@@ -631,6 +684,42 @@ impl ArcadeView {
         // this the next `self.world.borrow()` panics.
         let _ = w;
         drop(world);
+
+        // Particles, entirely device-local: the requests never touch the sim,
+        // and the system carries its own RNG (see render/particles.rs).
+        let mut requests: Vec<ParticleRequest> = Vec::new();
+        for at in impacts {
+            let mut spec = ParticleSpec::new(ParticleKind::Spark);
+            spec.rate = 14.0;
+            spec.color = vec4f(1.0, 0.8, 0.35, 1.0);
+            requests.push(ParticleRequest::Burst { at, spec });
+        }
+        if self.particles.emitter_count() == 0 {
+            // Exhaust follows the car by entity id — no sim state involved.
+            if let Some(car) = self.blocks.borrow().cars.first().map(|c| c.entity) {
+                let mut smoke = ParticleSpec::new(ParticleKind::Smoke);
+                smoke.rate = 18.0;
+                smoke.size = 0.14;
+                smoke.color = vec4f(0.7, 0.7, 0.75, 0.5);
+                requests.push(ParticleRequest::Emitter {
+                    id: 1,
+                    anchor: EmitterAnchor::Entity(car),
+                    spec: smoke,
+                });
+            }
+        }
+        if !requests.is_empty() {
+            self.particles.apply(&requests);
+        }
+        {
+            let world = self.world.borrow();
+            let lookup = |id: u64| {
+                makepad_game_sim::entity_index_sorted(&world.entities, id)
+                    .map(|i| world.entities[i].pos)
+            };
+            self.particles.step(TICK_DT, &lookup);
+        }
+
         let player_input = self.player_input();
         self.blocks.borrow_mut().player_input = player_input;
         // One tick, whichever role this device holds: Local and Host simulate,
@@ -961,6 +1050,7 @@ impl Widget for ArcadeView {
                 _ => None,
             };
 
+            self.renderer.set_particles(self.particles.instances());
             let cx3d = &mut Cx3d::new(cx.cx);
             let mut draws = GameDraws {
                 cube: &mut self.draw_cube,

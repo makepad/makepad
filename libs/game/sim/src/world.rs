@@ -108,6 +108,9 @@ pub struct GameWorld {
     pub terrain: Option<Terrain>,
     /// Sky/fog, enabled by game.sky().
     pub sky: Option<SkyConfig>,
+    /// What game.sun() asked for; the renderer resolves it (see SunConfig).
+    /// Presentation only — the step never reads it.
+    pub sun: SunConfig,
     /// Orbit-camera yaw, mirrored from the widget each tick so scripts can do
     /// camera-relative movement ("run where the camera looks").
     pub cam_yaw: f32,
@@ -264,6 +267,7 @@ impl GameWorld {
         self.labels.clear();
         self.terrain = None;
         self.sky = None;
+        self.sun = SunConfig::default();
         self.next_id = 0;
         self.gravity = 30.0;
         self.on_tick = None;
