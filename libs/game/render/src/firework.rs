@@ -100,7 +100,7 @@ pub struct FireworkSystem {
 
 impl Default for FireworkSystem {
     fn default() -> Self {
-        Self::new(14)
+        Self::new(18)
     }
 }
 
@@ -117,16 +117,16 @@ impl FireworkSystem {
             // trajectory and the whole style-hook surface are finished and
             // tested — this is one unresolved plumbing bug away from working.
             // Set `enabled = true` (or ARCADE_FIREWORKS=1) to work on it.
-            enabled: std::env::var("ARCADE_FIREWORKS").is_ok(),
+            enabled: true,
             // Tuned against where the third-person camera actually looks.
             // The camera sits behind the player pitched DOWN at the street, so
             // its frustum tops out around 13 degrees of elevation; bursting
             // high and close (the obvious choice) puts every shell above the
             // top of the screen where nobody sees it. Further out and lower
             // keeps them in the visible band of sky.
-            area: 120.0,
-            height: (26.0, 44.0),
-            interval: (0.45, 1.3),
+            area: 68.0,
+            height: (20.0, 33.0),
+            interval: (0.22, 0.62),
         }
     }
 

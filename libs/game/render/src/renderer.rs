@@ -1730,24 +1730,18 @@ impl GameRenderer {
         if let Some(fw) = draws.firework.as_deref_mut() {
             if !self.firework_instances.is_empty() && shows_environment {
                 let geometry_id = self.ensure_spark_geometry(cx.cx);
-                fw.draw_super.draw_vars.geometry_id = Some(geometry_id);
-                fw.draw_super.many_instances =
-                    cx.begin_many_instances(&fw.draw_super.draw_vars);
+                fw.draw_vars.geometry_id = Some(geometry_id);
+                fw.depth_clip = 1.0;
                 for f in &self.firework_instances {
-                    fw.draw_super.transform = Mat4f::identity();
                     fw.origin_age = vec4(f.origin.x, f.origin.y, f.origin.z, f.age);
                     fw.launch_life = vec4(f.launch.x, f.launch.y, f.launch.z, f.life);
-                    // EMPIRICAL, not derived. Measured against the render: 0.0015 draws a
-                    // ~200px blob, so a few-pixel spark is ~1/25 of that. The unit
-                    // this is in is NOT world units as the billboard maths implies,
-                    // which is a real loose end — see the note in shaders.rs.
-                    fw.params = vec4(f.speed, f.seed, 0.00006, 0.0);
+                    fw.params = vec4(f.speed, f.seed, 0.35, 0.0);
                     fw.color = f.color;
                     fw.color_tail = f.color_tail;
-                    fw.draw_super.draw(cx);
-                }
-                if let Some(mi) = fw.draw_super.many_instances.take() {
-                    cx.end_many_instances(mi);
+                    if fw.draw_vars.can_instance() {
+                        let new_area = cx.add_instance(&fw.draw_vars);
+                        fw.draw_vars.area = cx.update_area_refs(fw.draw_vars.area, new_area);
+                    }
                 }
                 stats.firework_shells = self.firework_instances.len() as u64;
             }
