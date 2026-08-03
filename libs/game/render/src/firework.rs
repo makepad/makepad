@@ -32,10 +32,12 @@
 
 use makepad_draw::makepad_math::*;
 
-/// Sparks per shell. One geometry is built for this count and shared by every
-/// shell; the shader indexes into it, so raising it costs geometry once rather
-/// than per burst.
-pub const SPARKS_PER_SHELL: usize = 320;
+/// Sparks per shell, where a "spark" is one BEAD. The shader splits this into
+/// 64 stars of 8 beads each: a star is a train of dots sampling its own path
+/// at 40ms intervals, which is what makes a ray read as a streak. One geometry
+/// is built for this count and shared by every shell, so raising it costs
+/// geometry once rather than per burst.
+pub const SPARKS_PER_SHELL: usize = 512;
 
 /// A shell in flight or bursting. Sixteen floats, and the only thing the CPU
 /// touches after launch is `age` for expiry.

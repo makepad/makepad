@@ -91,20 +91,24 @@ script_mod! {
             // A hot core with a soft halo and a faint cross-flare, which is
             // what makes a point of light read as bright rather than big.
             spark_pixel: fn(uv: vec2, tint: vec4) -> vec4 {
-                // The sprite must reach zero BEFORE the quad border, or the
-                // billboard's straight edge cuts the glow and every spark
-                // shows as a clipped square. `d` is scaled so the falloff dies
-                // at 0.8 of the half-width — inside the corners too, which sit
-                // at sqrt(2) further out than the edge midpoints.
-                let p = uv - vec2(0.5, 0.5)
-                let d = clamp(length(p) * 2.5, 0.0, 1.0)
-                let fall = 1.0 - d
-                // Hot core plus a soft halo, both radial so nothing is square.
-                let core = fall * fall * fall * fall
-                let halo = fall * fall * 0.35
-                let a = clamp(core + halo, 0.0, 1.0) * tint.w
-                // Unpremultiplied colour with ZERO alpha = pure additive light
-                // under premultiplied blending: sparks add, never occlude.
+                // A round, antialiased dot. Each bead of a streak is one of
+                // these; the streak is made by the TRAIN of them, never by
+                // stretching the quad.
+                //
+                // `smoothstep` rather than a linear ramp is what antialiases
+                // the rim — a hard cutoff shows the rasteriser's stair edge on
+                // something this small, and small bright things are exactly
+                // where aliasing is most visible.
+                let d = length(uv - vec2(0.5, 0.5)) * 2.0
+                // Both terms reach zero at d = 0.8, inside the quad's corners
+                // as well as its edges, so the billboard border can never cut
+                // the dot.
+                let core = 1.0 - smoothstep(0.0, 0.34, d)
+                let halo = 1.0 - smoothstep(0.10, 0.80, d)
+                let a = clamp(core + halo * 0.55, 0.0, 1.0) * tint.w
+                // Unpremultiplied colour with ZERO alpha: pure additive light
+                // under premultiplied blending, so overlapping beads brighten
+                // toward white and never occlude the sky.
                 return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
             }
 
@@ -2592,18 +2596,6 @@ impl ArcadeView {
         // Fireworks: the whole per-frame CPU cost is ageing a dozen shells and
         // occasionally starting one.
         self.fireworks.step(TICK_DT);
-        // A shell opens: bang, positioned in the world so it pans and
-        // attenuates with distance like everything else. Long range because a
-        // firework is meant to be heard from across the map — and the delay
-        // between seeing and hearing it is a nicety for another day.
-        for at in self.fireworks.take_bursts() {
-            self.demo_audio.push(AudioRequest::SfxAt {
-                name: "firework".to_string(),
-                pitch: 0.75 + (at.x.abs() % 7.0) * 0.05,
-                at,
-                range: 200.0,
-            });
-        }
         {
         }
 

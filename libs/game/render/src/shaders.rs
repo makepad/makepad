@@ -178,8 +178,19 @@ script_mod! {
             // The golden angle steps phi so successive stars never line up,
             // and z steps linearly so they are evenly spread in AREA, not in
             // latitude (which would bunch them at the poles).
-            let n = 320.0
-            let fi = idx + 0.5
+            // Each STAR is a train of particles, not one stretched rect. That
+            // is what the reference photos show: every ray is beaded, a string
+            // of glowing points strung along the path the star has flown.
+            //
+            // So the spark index splits: which star, and how far back along its
+            // trail. A trail particle is the SAME star sampled at an earlier
+            // time — nothing new to simulate, just the closed form evaluated
+            // at t - delay.
+            let trail_n = 8.0
+            let star_i = floor(idx / trail_n)
+            let trail_i = idx - star_i * trail_n
+            let n = 512.0 / trail_n
+            let fi = star_i + 0.5
             let cz = 1.0 - 2.0 * fi / n
             let sz = sqrt(max(1.0 - cz * cz, 0.0))
             // Per-shell rotation so two shells are not the same object twice.
@@ -197,7 +208,10 @@ script_mod! {
             // looking machined.
             let speed = self.params.x * (0.94 + 0.06 * r3)
 
-            let age = self.origin_age.w
+            // 40ms between beads: close enough to read as a continuous streak,
+            // far enough that the beads are visible the way they are in a
+            // photograph.
+            let age = self.origin_age.w - trail_i * 0.040
             let t = max(age, 0.0)
             // Drag: v(t) = v0*exp(-k t), so displacement is v0/k*(1-exp(-k t)).
             // Sparks decelerate hard and then hang, which is the shape of a
@@ -222,18 +236,23 @@ script_mod! {
 
             // Billboard in VIEW space: offsetting after the view transform is
             // camera-facing by construction, so no camera axes are needed.
-            // Through the draw list's world transform FIRST, exactly like the
-            // cube path (`draw_list.view_transform * transform`). Skipping it
-            // and going straight to camera_view puts every spark wherever the
-            // scene's world transform is not identity — which on an XR stage
-            // is always, and cost an afternoon here.
+            //
+            // STRETCHED ALONG THE MOTION. This is what makes it a firework
+            // instead of an expanding ball of dots: a chrysanthemum is read as
+            // radial STREAKS from a centre, and a round sprite can never say
+            // that however many you draw. The quad is elongated along the
+            // screen projection of the spark's own velocity and squeezed
+            // across it, so every star draws the little comet it actually is.
             self.world = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
             let life_t = clamp(t / self.launch_life.w, 0.0, 1.0)
-            // Sparks shrink as they burn out; the rising shell is a small dot.
-            let size = self.params.z * (1.0 - life_t * 0.75)
-                * mix(0.35, 1.0, step(0.0, age))
+            // Beads shrink and dim toward the tail, so a streak has a bright
+            // head and fades back toward the burst centre.
+            let tail_t = trail_i / trail_n
+            let taper = 1.0 - tail_t * 0.75
+            let size = self.params.z * (1.0 - life_t * 0.6) * taper
                 * self.spark_size(life_t, r1, r3)
+
             let corner = self.geom.geom_pos
             let billboard = vec4(
                 view_pos.x + corner.x * size,
@@ -254,11 +273,12 @@ script_mod! {
             let heat = clamp(1.0 - t * 4.0, 0.0, 1.0)
             let speed_t = r3
             let styled = self.spark_color(life_t, heat, r1, speed_t)
+            let bead_fade = (1.0 - tail_t * 0.85)
             self.v_color = vec4(
                 styled.x,
                 styled.y,
                 styled.z,
-                styled.w * step(0.0, age + 0.85)
+                styled.w * bead_fade * step(0.0, age + 0.85)
             )
             // Geometry attributes do not exist in the fragment stage, so the
             // quad's uv has to travel as a varying.
