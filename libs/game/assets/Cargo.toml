@@ -1,0 +1,8 @@
+[package]
+name = "makepad-game-assets"
+version = "0.1.0"
+edition = "2021"
+description = "AI-queryable index over Makepad Arcade's stock CC0 model library (see game.md)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

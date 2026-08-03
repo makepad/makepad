@@ -1,0 +1,32 @@
+# Machine-readable attribution for the stock asset library.
+#
+# A published game package carries this so credit travels with the game, even
+# though CC0 does not require it. Generated games should copy the rows for the
+# sources they actually use.
+
+[[source]]
+name = "Kenney"
+url = "https://kenney.nl/assets"
+license = "CC0-1.0"
+credit = "Kenney (kenney.nl) — CC0"
+packs = [
+    "arena (Starter-Kit-Basic-Scene)",
+    "city (Starter-Kit-City-Builder)",
+    "fps (Starter-Kit-FPS)",
+    "platformer (Starter-Kit-3D-Platformer)",
+    "racing (Starter-Kit-Racing)",
+    "impact-sounds",
+    "interface-sounds",
+    "sci-fi-sounds",
+    "music-jingles",
+    "ui-audio",
+    "rpg-audio",
+    "digital-audio",
+]
+
+[[source]]
+name = "KayKit / Kay Lousberg"
+url = "https://kaylousberg.itch.io/"
+license = "CC0-1.0"
+credit = "KayKit / Kay Lousberg (kaylousberg.com) — CC0"
+packs = ["characters (KayKit Character Pack: Adventurers)"]
