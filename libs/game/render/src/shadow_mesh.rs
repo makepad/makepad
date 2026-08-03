@@ -75,12 +75,17 @@ impl Receiver<'_> {
     }
 }
 
+/// Floats per vertex in the packed `geom.GameMeshVertex` layout.
+pub const SHADOW_VERTEX_FLOATS: usize = 6;
+
 /// Accumulates every caster's shadow triangles into ONE mesh, so all the
 /// shadows in a frame cost a single draw call rather than one each.
+///
+/// Packed layout (6 floats, not PbrVertex's 16): a shadow needs only a
+/// position and an alpha, so carrying a normal, uv and tangent per vertex was
+/// 40 bytes of nothing. Alpha rides in the unorm8 colour slot.
 #[derive(Default)]
 pub struct ShadowMeshBuilder {
-    /// PbrVertex layout (16 floats): position in `pos_nx.xyz`, per-vertex
-    /// alpha in `color.w`. Premultiplied black, so RGB stays 0.
     pub vertices: Vec<f32>,
     pub indices: Vec<u32>,
 }
@@ -103,19 +108,24 @@ impl ShadowMeshBuilder {
     /// static shadows into the per-frame mesh so everything still ships as
     /// one geometry and one draw call.
     pub fn append(&mut self, other: &ShadowMeshBuilder) {
-        let base = (self.vertices.len() / 16) as u32;
+        let base = (self.vertices.len() / SHADOW_VERTEX_FLOATS) as u32;
         self.vertices.extend_from_slice(&other.vertices);
         self.indices
             .extend(other.indices.iter().map(|i| i + base));
     }
 
     fn push_vertex(&mut self, p: Vec3f, alpha: f32) -> u32 {
-        let index = (self.vertices.len() / 16) as u32;
+        let index = (self.vertices.len() / SHADOW_VERTEX_FLOATS) as u32;
         self.vertices.extend_from_slice(&[
-            p.x, p.y, p.z, 0.0, // pos + normal.x (unused)
-            1.0, 0.0, 0.0, 0.0, // normal.yz + uv
-            0.0, 0.0, 0.0, alpha, // colour: premultiplied black
-            1.0, 0.0, 0.0, 1.0, // tangent
+            p.x,
+            p.y,
+            p.z,
+            // Normal is unused by the shadow shader; oct(0,0) keeps the slot
+            // well-formed for anything that later reads this layout.
+            makepad_draw::pack_pair_f16(0.0, 0.0),
+            makepad_draw::pack_pair_f16(0.0, 0.0),
+            // Premultiplied black: RGB 0, coverage in alpha.
+            makepad_draw::pack_unorm8x4(0.0, 0.0, 0.0, alpha),
         ]);
         index
     }
@@ -200,9 +210,9 @@ pub fn caster_points(shape: Shape, transform: &Mat4f, size: Vec3f, out: &mut Vec
 /// per frame would cost more than the shadow is worth, and the hull only
 /// keeps the outline anyway. Because the samples come from the *posed*
 /// vertices, the silhouette walks when the character walks.
-pub fn skinned_proxy_points(pbr_vertices: &[f32], transform: &Mat4f, out: &mut Vec<Vec3f>) {
+pub fn skinned_proxy_points(packed_vertices: &[f32], transform: &Mat4f, out: &mut Vec<Vec3f>) {
     out.clear();
-    let count = pbr_vertices.len() / 16;
+    let count = packed_vertices.len() / crate::skin::SKIN_VERTEX_FLOATS;
     if count == 0 {
         return;
     }
@@ -210,8 +220,8 @@ pub fn skinned_proxy_points(pbr_vertices: &[f32], transform: &Mat4f, out: &mut V
     let stride = (count / 64).max(1);
     let mut i = 0;
     while i < count {
-        let b = i * 16;
-        let l = vec3f(pbr_vertices[b], pbr_vertices[b + 1], pbr_vertices[b + 2]);
+        let b = i * crate::skin::SKIN_VERTEX_FLOATS;
+        let l = vec3f(packed_vertices[b], packed_vertices[b + 1], packed_vertices[b + 2]);
         out.push(vec3f(
             transform.v[0] * l.x + transform.v[4] * l.y + transform.v[8] * l.z + transform.v[12],
             transform.v[1] * l.x + transform.v[5] * l.y + transform.v[9] * l.z + transform.v[13],
@@ -390,8 +400,12 @@ mod tests {
     /// Vertex positions in the built mesh, as (x, y, z, alpha).
     fn verts(b: &ShadowMeshBuilder) -> Vec<(f32, f32, f32, f32)> {
         b.vertices
-            .chunks(16)
-            .map(|v| (v[0], v[1], v[2], v[11]))
+            .chunks(SHADOW_VERTEX_FLOATS)
+            .map(|v| {
+                // alpha is the top unorm8 lane of the packed colour slot
+                let a = ((v[5].to_bits() >> 24) & 0xff) as f32 / 255.0;
+                (v[0], v[1], v[2], a)
+            })
             .collect()
     }
 
@@ -531,11 +545,11 @@ mod tests {
 
     #[test]
     fn skinned_proxy_decimates_instead_of_projecting_every_vertex() {
-        // 4000 vertices in PbrVertex layout.
+        // 4000 vertices in the packed GameMeshVertex layout.
         let mut verts = Vec::new();
         for i in 0..4000 {
             let f = i as f32 * 0.001;
-            verts.extend_from_slice(&[f, f, f, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+            verts.extend_from_slice(&[f, f, f, 0.0, 0.0, 0.0]);
         }
         let mut out = Vec::new();
         skinned_proxy_points(&verts, &Mat4f::identity(), &mut out);

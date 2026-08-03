@@ -822,9 +822,16 @@ impl SkinnedModel {
 
     /// CPU-skin into the PbrVertex float layout (16 floats/vertex:
     /// pos+nx, ny+nz+uv, color, tangent) — same layout the terrain mesh uses.
-    pub fn skin_to_pbr(&self, palette: &[Mat4f], out: &mut Vec<f32>) {
+    /// Skin the mesh into the packed `geom.GameMeshVertex` layout.
+    ///
+    /// 6 floats per vertex, not PbrVertex's 16. This is the single largest
+    /// vertex stream in the app and, because skinning runs on the CPU, it is
+    /// re-uploaded in full every frame — so the saving is per frame, not per
+    /// load. Position stays f32; the normal is octahedral in two f16 lanes
+    /// and the uv is another f16 pair.
+    pub fn skin_to_packed(&self, palette: &[Mat4f], out: &mut Vec<f32>) {
         out.clear();
-        out.reserve(self.vertices.len() * 16);
+        out.reserve(self.vertices.len() * SKIN_VERTEX_FLOATS);
         for v in &self.vertices {
             let mut pos = Vec3f::default();
             let mut normal = Vec3f::default();
@@ -851,11 +858,38 @@ impl SkinnedModel {
                 normal.y /= len;
                 normal.z /= len;
             }
+            let (ox, oy) = oct_encode(normal);
             out.extend_from_slice(&[
-                pos.x, pos.y, pos.z, normal.x, normal.y, normal.z, v.uv[0], v.uv[1], 1.0, 1.0,
-                1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+                pos.x,
+                pos.y,
+                pos.z,
+                makepad_draw::pack_pair_f16(ox, oy),
+                makepad_draw::pack_pair_f16(v.uv[0], v.uv[1]),
+                makepad_draw::pack_unorm8x4(1.0, 1.0, 1.0, 1.0),
             ]);
         }
+    }
+}
+
+/// Floats per vertex in the packed skinned stream.
+pub const SKIN_VERTEX_FLOATS: usize = 6;
+
+/// Octahedral normal encoding: a unit vector into two components in [-1, 1].
+/// Standard sphere->octahedron->square unfolding; ~1 degree of error at f16,
+/// far below what flat-shaded game geometry can show.
+fn oct_encode(n: Vec3f) -> (f32, f32) {
+    let l1 = n.x.abs() + n.y.abs() + n.z.abs();
+    if l1 < 1.0e-8 {
+        return (0.0, 0.0);
+    }
+    let (x, y, z) = (n.x / l1, n.y / l1, n.z / l1);
+    if z >= 0.0 {
+        (x, y)
+    } else {
+        // Fold the lower hemisphere out across the diagonals.
+        let sx = if x >= 0.0 { 1.0 } else { -1.0 };
+        let sy = if y >= 0.0 { 1.0 } else { -1.0 };
+        ((1.0 - y.abs()) * sx, (1.0 - x.abs()) * sy)
     }
 }
 
@@ -1040,7 +1074,7 @@ mod tests {
         // t=0: identity — vertex 0 stays at (1,0,0).
         model.sample_clip(0, 0.0, &mut pose);
         model.palette(&pose, &mut palette);
-        model.skin_to_pbr(&palette, &mut verts);
+        model.skin_to_packed(&palette, &mut verts);
         assert!((verts[0] - 1.0).abs() < 1.0e-5, "x at rest: {}", verts[0]);
         assert!(verts[1].abs() < 1.0e-5);
 
@@ -1048,14 +1082,14 @@ mod tests {
         // (t=1.0 wraps to 0 by design.)
         model.sample_clip(0, 0.999999, &mut pose);
         model.palette(&pose, &mut palette);
-        model.skin_to_pbr(&palette, &mut verts);
+        model.skin_to_packed(&palette, &mut verts);
         assert!(verts[0].abs() < 1.0e-3, "x after spin: {}", verts[0]);
         assert!((verts[1] - 1.0).abs() < 1.0e-3, "y after spin: {}", verts[1]);
 
         // Midpoint between key 0 and key 1 (t=0.25 → 22.5°).
         model.sample_clip(0, 0.25, &mut pose);
         model.palette(&pose, &mut palette);
-        model.skin_to_pbr(&palette, &mut verts);
+        model.skin_to_packed(&palette, &mut verts);
         let angle = verts[1].atan2(verts[0]);
         assert!(
             (angle - std::f32::consts::PI / 8.0).abs() < 1.0e-3,
@@ -1069,7 +1103,7 @@ mod tests {
         let mut blended = PoseBuffer::new();
         SkinnedModel::blend_pose(&rest, &spun, 0.5, &mut blended);
         model.palette(&blended, &mut palette);
-        model.skin_to_pbr(&palette, &mut verts);
+        model.skin_to_packed(&palette, &mut verts);
         let angle = verts[1].atan2(verts[0]);
         assert!(
             (angle - std::f32::consts::PI / 4.0).abs() < 1.0e-2,
