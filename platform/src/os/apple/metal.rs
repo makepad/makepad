@@ -1719,6 +1719,18 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
+        // Generated shader source is what an author — increasingly an AI —
+        // actually has to debug, and it is otherwise invisible. Dumping it is
+        // opt-in and costs nothing when the var is unset.
+        if let Ok(dir) = std::env::var("MAKEPAD_SHADER_DUMP") {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&mtlsl, &mut hasher);
+            let name = format!("{}/shader_{:016x}.metal", dir, std::hash::Hasher::finish(&hasher));
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&name, mtlsl.as_bytes());
+        }
+        let _mp_t0 = std::time::Instant::now();
+        let _mp_src_len = mtlsl.len();
         let options = RcObjcId::from_owned(unsafe { msg_send![class!(MTLCompileOptions), new] });
         unsafe {
             let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
@@ -1748,6 +1760,8 @@ impl CxOsDrawShader {
             },
         );
 
+        let _mp_lib_ms = _mp_t0.elapsed().as_secs_f64() * 1000.0;
+        let _mp_t1 = std::time::Instant::now();
         let descriptor = RcObjcId::from_owned(
             NonNull::new(unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] }).unwrap(),
         );
@@ -1791,6 +1805,13 @@ impl CxOsDrawShader {
             ]
         }).unwrap());
 
+        // Opt-in: shader compile timing is only interesting when someone is
+        // measuring it, and every boot compiles dozens of shaders.
+        if std::env::var("MAKEPAD_SHADER_BENCH").is_ok() {
+            crate::log!("MPSHADERBENCH src={} bytes lib={:.2}ms pipeline={:.2}ms total={:.2}ms",
+                _mp_src_len, _mp_lib_ms, _mp_t1.elapsed().as_secs_f64()*1000.0,
+                _mp_t0.elapsed().as_secs_f64()*1000.0);
+        }
         // Look up buffer IDs from shader output bindings by Pod type name
         let draw_call_uniform_buffer_id = bindings
             .get_by_type_name(id!(DrawCallUniforms))

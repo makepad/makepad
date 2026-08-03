@@ -13,6 +13,48 @@ use crate::*;
 use makepad_live_id::*;
 use std::fmt::Write;
 
+/// Hard ceiling on iterations for any loop whose bound this compiler cannot
+/// prove at compile time.
+///
+/// Shader source reaching this compiler may come from a downloaded game or
+/// from an AI, and a loop that never terminates does not merely misbehave —
+/// it hangs the GPU and most drivers respond by resetting the device, which
+/// takes the whole app with it (and on a headset, that is about as bad as a
+/// failure gets). Since the loop bound is an arbitrary expression string,
+/// rather than trying to prove it safe, the cap is *emitted* into the
+/// generated code: legitimate shaders never approach it, pathological ones
+/// terminate. 65536 is far above any real per-pixel loop (the built-ins use
+/// single- or double-digit counts) while still bounding a runaway to a
+/// blink rather than a hang.
+pub const LOOP_GUARD_MAX_ITERS: u32 = 65536;
+
+/// Parse an emitted bound expression as a plain integer literal.
+///
+/// Bounds arrive as already-lowered target-language strings, so this
+/// deliberately recognises only the simple literal forms (`7`, `7u`, `16u32`,
+/// and the casts the backends emit). Anything else — a uniform, an
+/// arithmetic expression, a function call — is treated as unprovable and
+/// gets the emitted guard. Being conservative here costs one comparison per
+/// iteration in rare loops; being permissive would cost a device reset.
+pub(crate) fn literal_bound(expr: &str) -> Option<u64> {
+    let s = expr.trim();
+    // Unwrap a single layer of backend casts: `uint(12)`, `u32(12)`.
+    let s = s
+        .strip_prefix("uint(")
+        .or_else(|| s.strip_prefix("u32("))
+        .and_then(|r| r.strip_suffix(')'))
+        .map(str::trim)
+        .unwrap_or(s);
+    let digits = s
+        .trim_end_matches("u32")
+        .trim_end_matches("u")
+        .trim_end_matches("U");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok()
+}
+
 impl ShaderFnCompiler {
     /// Check if we're currently in unreachable code (after a return in the current branch)
     pub(crate) fn is_unreachable(&self) -> bool {
@@ -514,7 +556,12 @@ impl ShaderFnCompiler {
         // when to stop, rather than relying on the Return trap.
     }
 
-    pub(crate) fn handle_for_1(&mut self, vm: &mut ScriptVm, backend: &ShaderBackend) {
+    pub(crate) fn handle_for_1(
+        &mut self,
+        vm: &mut ScriptVm,
+        _output: &mut ShaderOutput,
+        backend: &ShaderBackend,
+    ) {
         let (source, _) = self.stack.pop(self.trap.pass());
         let (val_id, _) = self.stack.pop(self.trap.pass());
         if let ShaderType::Range { start, end, mut ty } = source {
@@ -536,6 +583,13 @@ impl ShaderFnCompiler {
                 let shadow = self.shader_scope.define_var(id, ty);
                 let loop_var_name = backend.map_local_name(id, shadow);
                 let ty_name = backend.map_pod_name(id!(u32));
+                // `end` is an arbitrary expression string, so a bound like
+                // `0..some_uniform` is unbounded at compile time. A literal
+                // small enough to trust is emitted as-is (the overwhelmingly
+                // common case, and it keeps generated code readable); anything
+                // else gets a hard iteration cap so a hostile or merely buggy
+                // shader terminates instead of hanging the GPU.
+                let bounded = literal_bound(&end).is_some_and(|n| n <= LOOP_GUARD_MAX_ITERS as u64);
                 match backend {
                     ShaderBackend::Wgsl => {
                         write!(
@@ -572,6 +626,27 @@ impl ShaderFnCompiler {
                         .ok();
                     }
                 }
+                if !bounded {
+                    // The loop variable itself is the counter, so no extra
+                    // local is needed: bail once it has advanced further from
+                    // its start than any legitimate shader loop would.
+                    match backend {
+                        ShaderBackend::Rust => {
+                            write!(
+                                self.out,
+                                "if {loop_var_name} - ({start}) >= {LOOP_GUARD_MAX_ITERS} {{ break; }}\n"
+                            )
+                            .ok();
+                        }
+                        _ => {
+                            write!(
+                                self.out,
+                                "if({loop_var_name} - ({start}) >= {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
+                            )
+                            .ok();
+                        }
+                    }
+                }
                 self.mes.push(ShaderMe::ForLoop {
                     var_id: id,
                     stack_depth: self.stack.types.len(),
@@ -600,9 +675,39 @@ impl ShaderFnCompiler {
         }
     }
 
-    pub(crate) fn handle_loop(&mut self) {
+    pub(crate) fn handle_loop(&mut self, output: &mut ShaderOutput, backend: &ShaderBackend) {
         self.shader_scope.enter_scope();
-        self.out.push_str("while(true){\n");
+        let guard = output.next_loop_guard();
+        // `loop{}` breaks on a runtime condition, so nothing in the source
+        // bounds it. A shader that never exits hangs the GPU and, on most
+        // drivers, takes the whole app down with a device reset — so the
+        // bound is emitted rather than trusted. See LOOP_GUARD_MAX_ITERS.
+        match backend {
+            ShaderBackend::Wgsl => {
+                write!(self.out, "var {guard}: u32 = 0u;\nloop{{\n").ok();
+                write!(
+                    self.out,
+                    "{guard} = {guard} + 1u; if({guard} > {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
+                )
+                .ok();
+            }
+            ShaderBackend::Rust => {
+                write!(self.out, "let mut {guard}: u32 = 0;\nwhile true {{\n").ok();
+                write!(
+                    self.out,
+                    "{guard} += 1; if {guard} > {LOOP_GUARD_MAX_ITERS} {{ break; }}\n"
+                )
+                .ok();
+            }
+            _ => {
+                write!(self.out, "uint {guard} = 0u;\nwhile(true){{\n").ok();
+                write!(
+                    self.out,
+                    "{guard}++; if({guard} > {LOOP_GUARD_MAX_ITERS}u){{break;}}\n"
+                )
+                .ok();
+            }
+        }
         self.mes.push(ShaderMe::LoopBody {
             stack_depth: self.stack.types.len(),
         });
@@ -651,5 +756,57 @@ impl ShaderFnCompiler {
             self.stack.free_string(end_s);
             script_err_type_mismatch!(self.trap, "range requires numbers");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The guard is only skipped when the bound is provably a small literal.
+    // Everything else must fall through to the emitted iteration cap — these
+    // cases are the difference between a bounded loop and a device reset.
+    #[test]
+    fn literal_bounds_are_recognised() {
+        assert_eq!(literal_bound("7"), Some(7));
+        assert_eq!(literal_bound("7u"), Some(7));
+        assert_eq!(literal_bound("16u32"), Some(16));
+        assert_eq!(literal_bound(" 42 "), Some(42));
+        assert_eq!(literal_bound("uint(12)"), Some(12));
+        assert_eq!(literal_bound("u32(12)"), Some(12));
+    }
+
+    #[test]
+    fn non_literal_bounds_are_treated_as_unprovable() {
+        // A uniform, a varying, arithmetic, a call, or anything else the
+        // compiler cannot fold: all must be guarded.
+        for expr in [
+            "count",
+            "self.count",
+            "n + 1",
+            "uint(self.rect_size.x)",
+            "textureSize(tex)",
+            "",
+            "0x10",
+            "1e9",
+            "-1",
+        ] {
+            assert_eq!(literal_bound(expr), None, "expr {expr:?} must not be trusted");
+        }
+    }
+
+    #[test]
+    fn absurd_literal_bounds_still_get_guarded() {
+        // Parsed fine, but far above LOOP_GUARD_MAX_ITERS — handle_for_1
+        // compares against the cap, so this still receives the break.
+        let n = literal_bound("4000000000").unwrap();
+        assert!(n > LOOP_GUARD_MAX_ITERS as u64);
+    }
+
+    #[test]
+    fn guard_cap_is_generous_versus_real_shader_loops() {
+        // Built-in shaders use single/double-digit loop counts; the cap must
+        // sit far above them so no legitimate shader is ever clipped.
+        assert!(LOOP_GUARD_MAX_ITERS >= 4096);
     }
 }
