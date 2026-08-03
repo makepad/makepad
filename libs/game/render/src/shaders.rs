@@ -189,7 +189,9 @@ script_mod! {
             let trail_n = 8.0
             let star_i = floor(idx / trail_n)
             let trail_i = idx - star_i * trail_n
-            let n = 512.0 / trail_n
+            // 2560 beads / 8 = 320 stars. Keep in step with SPARKS_PER_SHELL
+            // and TRAIL_LEN in firework.rs.
+            let n = 2560.0 / trail_n
             let fi = star_i + 0.5
             let cz = 1.0 - 2.0 * fi / n
             let sz = sqrt(max(1.0 - cz * cz, 0.0))
