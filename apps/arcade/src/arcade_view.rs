@@ -9,13 +9,14 @@ use makepad_game_blocks::{
     Blocks, Car, CarConfig, Character, CharacterConfig, ControlSource, DriveInput,
 };
 use makepad_game_render::skin::{PoseBuffer, SkinnedModel};
+use makepad_game_render::stage::{Stage, StageMode};
 use makepad_game_render::{
     scene_state as render_scene_state, set_pass_camera, CameraRig, DrawGameAlpha, DrawGameCube,
     DrawGameSkinned, DrawGameSky, DrawGameTerrain, DrawGameTexture, GameDraws, GameRenderer,
     SkinnedBatch, SkinnedDraw,
 };
 use makepad_game_session::{Session, SessionEvent};
-use makepad_game_sim::{BodyKind, Entity, GameWorld, Shape, SkyConfig, TICK_DT};
+use makepad_game_sim::{BodyKind, Entity, GameWorld, PadState, Shape, SkyConfig, TICK_DT};
 use makepad_widgets::*;
 use makepad_game_script::ScriptHost;
 use std::cell::RefCell;
@@ -139,6 +140,21 @@ pub struct ArcadeView {
     captured_1: bool,
     #[rust]
     captured_2: bool,
+    /// How this device presents the world (game.md §Presentation modes).
+    /// `ARCADE_XR=mr|vr` picks a headset stage; unset stays flat. The
+    /// simulation is identical in all three — only the projection differs.
+    #[rust(crate::xr_input::stage_from_env())]
+    stage: Stage,
+    /// Last XR frame's intent, kept so button edges survive between ticks.
+    #[rust]
+    xr_pad: PadState,
+    /// Head yaw from the last XR frame: this player's "forward".
+    #[rust]
+    xr_head_yaw: f32,
+    /// True once an XR frame has arrived, so the flat mouse-orbit camera
+    /// stops fighting the headset for the camera rig.
+    #[rust(false)]
+    xr_active: bool,
 }
 
 /// Entity literal with the same defaults gamemaker's spawn verb uses.
@@ -533,12 +549,43 @@ impl ArcadeView {
             - (down(KeyCode::ArrowLeft) || down(KeyCode::KeyA)) as i8 as f32;
         let throttle = (down(KeyCode::ArrowUp) || down(KeyCode::KeyW)) as i8 as f32
             - (down(KeyCode::ArrowDown) || down(KeyCode::KeyS)) as i8 as f32;
+        // A headset drives the same player as the keyboard: whichever moved
+        // wins, so picking up a controller mid-session just works.
+        let (xr_steer, xr_throttle) = if self.xr_active {
+            (self.xr_pad.axis_x as f32, -self.xr_pad.axis_z as f32)
+        } else {
+            (0.0, 0.0)
+        };
         DriveInput {
-            steer,
-            throttle,
-            brake: down(KeyCode::Space) as i8 as f32,
+            steer: if steer != 0.0 { steer } else { xr_steer },
+            throttle: if throttle != 0.0 {
+                throttle
+            } else {
+                xr_throttle
+            },
+            brake: (down(KeyCode::Space) as i8 as f32).max(self.xr_pad.jump as i8 as f32),
             ..Default::default()
         }
+    }
+
+    /// Fold a headset frame into this device's input. The result is an
+    /// ordinary player packet — the sim cannot tell a Quest from a laptop.
+    fn apply_xr_state(&mut self, state: &makepad_platform::event::xr::XrState) {
+        let intent = crate::xr_input::intent_from_xr(state);
+        crate::xr_input::apply_intent_to_pad(&intent, &mut self.xr_pad);
+        self.xr_head_yaw = intent.head_yaw;
+        self.xr_active = true;
+        // Right stick turns the world under a seated player. In MR the
+        // diorama spins instead of the room, which is what "turn the track
+        // to see the far corner" should feel like.
+        if intent.turn.abs() > 0.0 && self.stage.mode == StageMode::MrDiorama {
+            self.stage.yaw += intent.turn * 0.03;
+            self.renderer.set_stage(self.stage);
+        }
+        let mut world = self.world.borrow_mut();
+        world.pad = self.xr_pad;
+        // Movement resolves against the head's forward, carried per player.
+        world.cam_yaw = intent.head_yaw;
     }
 
     fn run_tick(&mut self) {
@@ -579,7 +626,11 @@ impl ArcadeView {
                 w.dynamics.rigid_spin(*id, vec3f(0.6 * side, 0.9, 0.3));
             }
         }
+        // Release the world before the session borrows it below — `let _ = w`
+        // only drops the reborrow, not the RefMut it came from, so without
+        // this the next `self.world.borrow()` panics.
         let _ = w;
+        drop(world);
         let player_input = self.player_input();
         self.blocks.borrow_mut().player_input = player_input;
         // One tick, whichever role this device holds: Local and Host simulate,
@@ -684,6 +735,10 @@ impl Widget for ArcadeView {
             }
             Event::KeyUp(key) => {
                 self.keys.retain(|k| *k != key.key_code);
+            }
+            Event::XrUpdate(xr) => {
+                let state = xr.state.clone();
+                self.apply_xr_state(&state);
             }
             _ => {}
         }
@@ -790,6 +845,19 @@ impl Widget for ArcadeView {
         }
         if !self.pass_ready {
             self.pass_ready = true;
+            // The stage is a render-side projection: telling the renderer is
+            // the whole of "switch to MR", and the sim never hears about it.
+            self.renderer.set_stage(self.stage);
+            log!(
+                "arcade: stage {:?} (scale {:.3}) — environment {}",
+                self.stage.mode,
+                self.stage.scale,
+                if self.stage.shows_environment() {
+                    "game-supplied"
+                } else {
+                    "the room (passthrough)"
+                }
+            );
             // Offscreen pass targets (same formats GameView uses).
             self.color_texture = Texture::new_with_format(
                 cx.cx,

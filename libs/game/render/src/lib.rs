@@ -17,12 +17,14 @@ pub mod renderer;
 pub mod scene;
 pub mod shaders;
 pub mod skin;
+pub mod stage;
 
 pub use geometry::*;
 pub use hud::*;
 pub use renderer::*;
 pub use scene::*;
 pub use shaders::*;
+pub use stage::*;
 
 use makepad_draw::*;
 
