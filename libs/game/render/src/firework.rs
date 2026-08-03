@@ -37,7 +37,11 @@ use makepad_draw::makepad_math::*;
 /// at 40ms intervals, which is what makes a ray read as a streak. One geometry
 /// is built for this count and shared by every shell, so raising it costs
 /// geometry once rather than per burst.
-pub const SPARKS_PER_SHELL: usize = 512;
+pub const SPARKS_PER_SHELL: usize = 2560;
+
+/// Beads per star. `SPARKS_PER_SHELL / TRAIL_LEN` is the star count — the
+/// number of RAYS you actually see. MUST match `trail_n` in the shader.
+pub const TRAIL_LEN: usize = 8;
 
 /// A shell in flight or bursting. Sixteen floats, and the only thing the CPU
 /// touches after launch is `age` for expiry.
@@ -135,8 +139,8 @@ impl FireworkSystem {
             // keeps them in the visible band of sky.
             // A 3in shell reaches ~80m; ours burst lower than life so they
             // stay inside a camera that is pitched down at a street.
-            area: 105.0,
-            height: (38.0, 58.0),
+            area: 78.0,
+            height: (30.0, 46.0),
             interval: (0.22, 0.62),
         }
     }
@@ -209,7 +213,16 @@ impl FireworkSystem {
         // in about a second, so the shell opens to speed/k across. At k = 3.08
         // that is a 30-52 m diameter break — a 3in to 6in shell, which is what
         // a town display actually fires.
-        let speed = self.range(48.0, 80.0);
+        // Star count and break size are ONE decision, not two. A sphere is
+        // filled by rays per steradian, so doubling the radius needs four
+        // times the stars to look equally dense — which is exactly why a
+        // physically honest 30-52 m break at 64 stars read as a handful of
+        // unrelated dots.
+        //
+        // 320 stars into a 17-28 m break (a 3in shell) is dense enough to
+        // read as a flower. Going wider means going denser again, and the
+        // triangle count is what pays for it.
+        let speed = self.range(26.0, 44.0);
         let life = self.range(3.6, 5.4);
         let seed = self.next_f32() * 1024.0;
         // A display is a mix. Roughly a third are two-tone and a sixth are
@@ -322,6 +335,20 @@ pub fn spark_sheet_vertices() -> (Vec<u32>, Vec<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shader hardcodes the star count as SPARKS_PER_SHELL / TRAIL_LEN.
+    /// If these drift apart the Fibonacci distribution silently covers the
+    /// wrong fraction of the sphere and the break stops being round — a
+    /// failure that looks like a tuning problem, not a constant mismatch.
+    #[test]
+    fn the_bead_and_trail_counts_divide_evenly() {
+        assert_eq!(
+            SPARKS_PER_SHELL % TRAIL_LEN,
+            0,
+            "{SPARKS_PER_SHELL} beads do not split evenly into trails of {TRAIL_LEN}"
+        );
+        assert_eq!(SPARKS_PER_SHELL / TRAIL_LEN, 320, "star count changed — update `n` in the shader");
+    }
 
     #[test]
     fn the_sheet_has_one_quad_per_spark_with_its_index_attached() {
