@@ -179,14 +179,21 @@ script_mod! {
             // A shell is not a uniform ball: the burst charge throws sparks at
             // a spread of speeds, and that spread is most of what makes the
             // front edge read as a shockwave rather than a balloon.
-            let speed = self.params.x * (0.55 + 0.45 * r3)
+            // A WIDE spread (4:1) is what fills a burst. The canvas demos use
+            // speed = random(1,10); a narrow spread leaves a hollow shell with
+            // nothing in the middle.
+            let speed = self.params.x * (0.25 + 0.75 * r3 * r3)
 
             let age = self.origin_age.w
             let t = max(age, 0.0)
             // Drag: v(t) = v0*exp(-k t), so displacement is v0/k*(1-exp(-k t)).
             // Sparks decelerate hard and then hang, which is the shape of a
             // real burst; ballistic-only looks like a thrown handful.
-            let k = 1.9
+            // Matches the canvas-demo convention: speed *= 0.95 every frame at
+            // 60fps is exactly e^(-kt) with k = -60*ln(0.95) = 3.08. Sparks
+            // decelerate hard and then hang, which is the shape of a real
+            // burst; a softer k reads as a thrown handful.
+            let k = 3.08
             let drag = (1.0 - exp(0.0 - k * t)) / k
             let fall = 0.5 * 7.5 * t * t
             let origin = self.origin_age.xyz

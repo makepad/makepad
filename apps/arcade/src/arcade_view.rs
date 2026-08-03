@@ -66,20 +66,18 @@ script_mod! {
             // Swirl and fizzle. The engine gives a clean ballistic arc; this
             // adds the wobble that makes sparks look like burning matter
             // rather than points on a sphere.
+            // Real fireworks are SYMMETRIC. Every canvas demo worth copying
+            // picks one uniform radial angle per spark and then applies
+            // nothing but friction and gravity — the shape comes from the
+            // speed spread, not from moving the sparks around. Adding a curl
+            // here made them squiggle and travel in visible waves, which is
+            // the one thing a firework never does.
+            //
+            // The hook stays because it is the right seam for a style that
+            // WANTS to be strange (a spiral shell, a jellyfish). The default
+            // is zero on purpose.
             spark_motion: fn(dir: vec3, t: float, rnd: float) -> vec3 {
-                // A slow curl around the burst axis, growing with time so the
-                // shell shears as it expands.
-                let a = rnd * 6.28318530718 + t * (1.6 + rnd * 2.2)
-                let curl = t * t * (0.5 + rnd * 1.1)
-                // Fizzle: a fast, small jitter that dies away, so the first
-                // moments crackle and the tail drifts smoothly.
-                let fizz = exp(0.0 - t * 2.5) * 0.35
-                let j = sin(t * (40.0 + rnd * 55.0) + rnd * 20.0)
-                return vec3(
-                    cos(a) * curl + j * fizz,
-                    j * fizz * 0.6 - t * t * 0.15,
-                    sin(a) * curl + cos(t * 37.0 + rnd * 11.0) * fizz
-                )
+                return vec3(0.0, 0.0, 0.0)
             }
 
             // Glitter sparks bloom briefly as they strobe; the rest taper.
@@ -93,20 +91,20 @@ script_mod! {
             // A hot core with a soft halo and a faint cross-flare, which is
             // what makes a point of light read as bright rather than big.
             spark_pixel: fn(uv: vec2, tint: vec4) -> vec4 {
+                // The sprite must reach zero BEFORE the quad border, or the
+                // billboard's straight edge cuts the glow and every spark
+                // shows as a clipped square. `d` is scaled so the falloff dies
+                // at 0.8 of the half-width — inside the corners too, which sit
+                // at sqrt(2) further out than the edge midpoints.
                 let p = uv - vec2(0.5, 0.5)
-                let d = length(p) * 2.0
-                let glow = clamp(1.0 - d, 0.0, 1.0)
-                let core = glow * glow * glow
-                let halo = glow * 0.35
-                let flare = clamp(1.0 - abs(p.x) * 14.0, 0.0, 1.0)
-                    * clamp(1.0 - abs(p.y) * 14.0, 0.0, 1.0) * 0.5
-                let a = clamp(core + halo + flare, 0.0, 1.0) * tint.w
-                // ADDITIVE, via premultiplied alpha: the pipeline composites
-                // `src.rgb + dst * (1 - src.a)`, so emitting colour with a
-                // ZERO alpha adds light without ever occluding what is behind
-                // it. Premultiplying normally (alpha = a) makes each spark a
-                // little opaque sticker, and a few thousand of them stack into
-                // the white-out this had.
+                let d = clamp(length(p) * 2.5, 0.0, 1.0)
+                let fall = 1.0 - d
+                // Hot core plus a soft halo, both radial so nothing is square.
+                let core = fall * fall * fall * fall
+                let halo = fall * fall * 0.35
+                let a = clamp(core + halo, 0.0, 1.0) * tint.w
+                // Unpremultiplied colour with ZERO alpha = pure additive light
+                // under premultiplied blending: sparks add, never occlude.
                 return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
             }
 
@@ -2594,6 +2592,18 @@ impl ArcadeView {
         // Fireworks: the whole per-frame CPU cost is ageing a dozen shells and
         // occasionally starting one.
         self.fireworks.step(TICK_DT);
+        // A shell opens: bang, positioned in the world so it pans and
+        // attenuates with distance like everything else. Long range because a
+        // firework is meant to be heard from across the map — and the delay
+        // between seeing and hearing it is a nicety for another day.
+        for at in self.fireworks.take_bursts() {
+            self.demo_audio.push(AudioRequest::SfxAt {
+                name: "firework".to_string(),
+                pitch: 0.75 + (at.x.abs() % 7.0) * 0.05,
+                at,
+                range: 200.0,
+            });
+        }
         {
         }
 
