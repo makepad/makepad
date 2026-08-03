@@ -17,7 +17,10 @@
 #     Vehicles, city, arena, platformer and FPS kits. Thank you @KenneyNL.
 #
 #   KayKit / Kay Lousberg — https://kaylousberg.itch.io/
-#     Rigged + animated adventurer characters.
+#     Rigged + animated characters: 5 adventurers (Knight, Barbarian, Mage,
+#     Rogue, Rogue_Hooded) and 4 skeletons (Warrior, Mage, Rogue, Minion).
+#     All nine share one 41-joint rig. CC0 verified in each pack's LICENSE.txt
+#     at the pinned commit. Thank you Kay.
 #
 # NOTE ON AUDIO FORMAT: every Kenney audio pack ships Ogg Vorbis only (no WAV
 # variant exists upstream — checked all seven packs). This tree has no vorbis
@@ -77,10 +80,52 @@ KENNEY_PACKS=(
 	"racing|Starter-Kit-Racing|f5241ebdf00c25bc951bf4fdb7950bb1b78b4bcc|models"
 )
 
-# KayKit Character Pack : Adventurers, pinned.
-KAYKIT_COMMIT="672074b73ba276876a19e8816ecdc5241817ab47"
-KAYKIT_BASE="https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0/$KAYKIT_COMMIT"
-KAYKIT_DIR="addons/kaykit_character_pack_adventures/Characters/gltf"
+# KayKit character packs, pinned. CC0 verified in each repo's LICENSE.txt at
+# the pinned commit ("License: (Creative Commons Zero, CC0)").
+#
+# ALL NINE CHARACTERS SHARE ONE RIG — 41 joints, identical names in identical
+# order, verified by hashing the joint-name list of every file (both packs
+# produce the same digest). So one animation-driving code path serves the whole
+# cast, and a clip authored against any of them plays on all of them.
+# Adventurers ship 76 clips; skeletons ship those same 76 plus 19 undead extras
+# (awaken, resurrect, spawn, taunt) — a strict superset, no clip is lost.
+#
+# The GLBs EMBED their texture (image/png in a bufferView), so unlike the Kenney
+# packs there is no external URI to resolve and no path to get wrong. The
+# sidecar *_texture.png files are fetched anyway because the skin loader
+# deliberately ignores materials ("the caller binds its own texture"), so the
+# app supplies the atlas itself.
+KAYKIT_ADV_COMMIT="672074b73ba276876a19e8816ecdc5241817ab47"
+KAYKIT_ADV_BASE="https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0/$KAYKIT_ADV_COMMIT"
+KAYKIT_ADV_DIR="addons/kaykit_character_pack_adventures/Characters/gltf"
+KAYKIT_SKEL_COMMIT="15b62b9bad122f72926c10fb14d622c73819fa54"
+KAYKIT_SKEL_BASE="https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/$KAYKIT_SKEL_COMMIT"
+KAYKIT_SKEL_DIR="addons/kaykit_character_pack_skeletons/Characters/gltf"
+
+# <local-name>|<pack>|<upstream file>|<sha256>|<texture local-name>
+# Rogue_Hooded has no atlas of its own upstream — it re-skins rogue_texture.
+KAYKIT_CHARS=(
+	"knight|adv|Knight.glb|60428e3abc09ba83e595d256e3af8c5c976b46cdae599f0802fc82b4a3445168|knight_texture.png"
+	"barbarian|adv|Barbarian.glb|cefc311a0e10c7858b6141f5ada7e33268727564fb8ac1347aab97d000669cc6|barbarian_texture.png"
+	"mage|adv|Mage.glb|cf898585da33fab50c724d31605fb931eb2912e6d2280092141e98ca81ad507d|mage_texture.png"
+	"rogue|adv|Rogue.glb|e825437cd4d2ee9c1960b517a74a69101e33eb409ae7fa8cedc7134a998fbb7d|rogue_texture.png"
+	"rogue_hooded|adv|Rogue_Hooded.glb|93e6e25213009952276d9cf34f5d96a243767334c66f280db0433ddfabb91545|rogue_texture.png"
+	"skeleton_warrior|skel|Skeleton_Warrior.glb|178b6fda810b814c250d8a2010c24dfd9b458b9006dd323353e620b7ff118bbe|skeleton_texture.png"
+	"skeleton_mage|skel|Skeleton_Mage.glb|e05b0f5cfa395271c9f75fd07c0a0613c56f401ece4ab644e080001a79971075|skeleton_texture.png"
+	"skeleton_rogue|skel|Skeleton_Rogue.glb|4003f2b77891bb56f7e0de7d555abcb497aebbcaee35b614211f16275f9ccae3|skeleton_texture.png"
+	"skeleton_minion|skel|Skeleton_Minion.glb|6ffc003f895bed0b074791e0e490846210a2e2f8fc7da300aba53cc185f95968|skeleton_texture.png"
+)
+
+# <local-name>|<pack>|<upstream file>|<sha256>
+KAYKIT_TEXTURES=(
+	"knight_texture.png|adv|knight_texture.png|5d250ccc5da020e6126bfa3839f83bd9a465a951ed223e4d13c08b1925e154d4"
+	"barbarian_texture.png|adv|barbarian_texture.png|7329b2ff9709e8d54c886d5ef49c08bd42b12be3bbb2facb1488a6b48b1e8a80"
+	"mage_texture.png|adv|mage_texture.png|ea49f094b960402635fe51db9f1864960c97271b17f2e3554e5aca1b2bbba144"
+	"rogue_texture.png|adv|rogue_texture.png|a4032e877c3b91939f5cdbb630349c1998fdbc3211bbd587c111125500fe4cc5"
+	"skeleton_texture.png|skel|skeleton_texture.png|15741a25c53e04fa9bf3beac3bc0de442359404b1ff9be863b892cb551ad3657"
+)
+
+kaykit_base() { case "$1" in adv) echo "$KAYKIT_ADV_BASE/$KAYKIT_ADV_DIR" ;; skel) echo "$KAYKIT_SKEL_BASE/$KAYKIT_SKEL_DIR" ;; esac; }
 
 # Per-pack file manifest: "<filename> <sha256>" lines.
 pack_files() {
@@ -210,7 +255,8 @@ if [[ "${1:-}" == "--list" ]]; then
 		IFS='|' read -r pack repo _commit _dir <<<"$entry"
 		printf '%-12s %-6s %-10s %s\n' "$pack" "$(pack_count "$pack")" "CC0-1.0" "kenney.nl (KenneyNL/$repo)"
 	done
-	printf '%-12s %-6s %-10s %s\n' "characters" "1" "CC0-1.0" "kaylousberg.com (KayKit Adventurers)"
+	printf '%-12s %-6s %-10s %s\n' "characters" "${#KAYKIT_CHARS[@]}" "CC0-1.0" \
+		"kaylousberg.com (KayKit Adventurers + Skeletons, one shared rig)"
 
 for entry in "${KENNEY_AUDIO[@]}"; do
 		IFS='|' read -r pack _hash _sha count <<<"$entry"
@@ -292,11 +338,15 @@ for entry in "${KENNEY_PACKS[@]}"; do
 done
 
 mkdir -p "$CHARS"
-echo "kaykit/characters (1 model)"
-fetch "$KAYKIT_BASE/$KAYKIT_DIR/Knight.glb" "$CHARS/knight.glb" \
-	60428e3abc09ba83e595d256e3af8c5c976b46cdae599f0802fc82b4a3445168 "kaykit/knight.glb"
-fetch "$KAYKIT_BASE/$KAYKIT_DIR/knight_texture.png" "$CHARS/knight_texture.png" \
-	5d250ccc5da020e6126bfa3839f83bd9a465a951ed223e4d13c08b1925e154d4 "kaykit/knight_texture.png"
+echo "kaykit/characters (${#KAYKIT_CHARS[@]} rigged models, one shared 41-joint rig)"
+for entry in "${KAYKIT_CHARS[@]}"; do
+	IFS='|' read -r local pack file sha _tex <<<"$entry"
+	fetch "$(kaykit_base "$pack")/$file" "$CHARS/$local.glb" "$sha" "kaykit/$local.glb"
+done
+for entry in "${KAYKIT_TEXTURES[@]}"; do
+	IFS='|' read -r local pack file sha <<<"$entry"
+	fetch "$(kaykit_base "$pack")/$file" "$CHARS/$local" "$sha" "kaykit/$local"
+done
 
 # ---- 3D model packs (manifest-driven) -------------------------------------
 if [[ -f "$MANIFEST" ]]; then

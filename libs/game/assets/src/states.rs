@@ -36,6 +36,13 @@ pub const STATE_WORDS: &[(&str, &[&str])] = &[
     ("carry", &["carry", "pickup", "pick_up"]),
     ("climb", &["climb"]),
     ("sleep", &["sleep", "lie", "rest"]),
+    // The skeleton packs' 19 extra clips were invisible to the vocabulary
+    // above: an undead rising from the floor is exactly the thing a game asks
+    // for by name, and "Skeletons_Awaken_Floor" matched nothing.
+    ("spawn", &["spawn", "awaken", "summon", "emerge"]),
+    ("resurrect", &["resurrect", "revive", "reanimate"]),
+    ("taunt", &["taunt", "provoke", "jeer"]),
+    ("use", &["use_item", "useitem", "interact", "activate"]),
 ];
 
 /// Modular-tile roles → filename fragments that identify them.

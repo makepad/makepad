@@ -485,3 +485,95 @@ pub fn kits_to_json(kits: &[KitResult]) -> String {
     s.push(']');
     s
 }
+
+/// Discover the rigged casts — characters that share a skeleton.
+///
+/// Separate from `find_model` because the useful unit here is the SET, not the
+/// individual: an AI casting a village wants to know that twelve civilians
+/// share one rig (so one animation path drives them all, and swapping a
+/// villager for an orc costs nothing), and that a different, richer rig holds
+/// the heroes and undead. Choosing two characters from two rigs is the
+/// character-level version of building a level from five different tile kits.
+pub const FIND_CAST: ToolDescriptor = ToolDescriptor {
+    name: "find_cast",
+    description: "List the rigged, animated character casts. Each cast is a set of characters \
+                  sharing one skeleton, so ANY animation state works on EVERY member and you \
+                  can recast a part without changing animation code. Returns the cast's joint \
+                  count (its identity), its members, and the states they can all perform \
+                  (idle, walk, run, jump, attack, block, dodge, hurt, die, sit, dance, spawn, \
+                  resurrect, taunt, ...). Pick characters from ONE cast for a scene, and use \
+                  DIFFERENT members so your villagers are not clones.",
+    params: &[ToolParam {
+        name: "state",
+        ty: "string",
+        description: "Optional: only casts whose members can all do this, e.g. \"attack\", \
+                      \"resurrect\", \"sit\".",
+        required: false,
+    }],
+};
+
+pub struct CastResult {
+    pub joints: u32,
+    pub members: Vec<String>,
+    pub states: Vec<String>,
+    pub max_clips: u32,
+    /// Members carrying the largest clip set — a superset worth knowing about
+    /// when one part needs a state the rest of the cast lacks.
+    pub richest: Vec<String>,
+}
+
+pub fn execute_cast(index: &AssetIndex, state: Option<&str>) -> Vec<CastResult> {
+    let want = state.map(|s| s.to_ascii_lowercase());
+    index
+        .casts()
+        .into_iter()
+        .filter(|c| {
+            want.as_ref()
+                .is_none_or(|w| c.shared_states.iter().any(|s| s == w))
+        })
+        .map(|c| CastResult {
+            joints: c.joints,
+            members: c.members,
+            states: c.shared_states,
+            max_clips: c.max_clips,
+            richest: c.richest,
+        })
+        .collect()
+}
+
+/// Compact JSON: the AI needs the member ids and what they can do, not every
+/// clip name — a 95-clip list per character would dwarf the rest of the turn.
+pub fn casts_to_json(casts: &[CastResult], max_members: usize) -> String {
+    let mut s = String::from("[");
+    for (i, c) in casts.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"rig\":{},\"count\":{},\"members\":[",
+            c.joints,
+            c.members.len()
+        ));
+        for (j, m) in c.members.iter().take(max_members).enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("\"{m}\""));
+        }
+        s.push_str("],\"states\":[");
+        for (j, st) in c.states.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("\"{st}\""));
+        }
+        s.push(']');
+        if c.richest.len() < c.members.len() {
+            s.push_str(&format!(",\"most_clips\":{}", c.max_clips));
+        }
+        // One brace: the object opened by the `{{` in the format! above.
+        s.push('}');
+    }
+    s.push(']');
+    s
+}

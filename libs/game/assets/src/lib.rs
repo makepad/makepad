@@ -166,6 +166,30 @@ pub struct KitInfo {
     pub roles: Vec<(String, u32)>,
 }
 
+/// A set of rigged characters that share one skeleton, and the states they can
+/// all perform.
+///
+/// The character counterpart of [`KitInfo`], and it exists for the same reason:
+/// picking a cast from ONE rig means every animation authored for one member
+/// plays on all of them, so an AI can swap a villager for a skeleton without
+/// touching a single clip name. Mixing rigs is the character-level version of
+/// the junk-drawer level.
+#[derive(Debug, Clone)]
+pub struct CastInfo {
+    /// Joint count — the rig's identity as far as clip compatibility goes.
+    pub joints: u32,
+    /// Member ids, ordered.
+    pub members: Vec<String>,
+    /// States EVERY member can perform. Deliberately the intersection: an AI
+    /// told the cast can "attack" must not discover one member cannot.
+    pub shared_states: Vec<String>,
+    /// Largest clip count in the set — the members offering it are listed in
+    /// `richest`, since a superset (skeletons add awaken/resurrect) is worth
+    /// knowing about when choosing who plays a part.
+    pub max_clips: u32,
+    pub richest: Vec<String>,
+}
+
 fn tile_size_of(items: &[&AssetEntry]) -> Option<f32> {
     let mut widths: Vec<f32> = items
         .iter()
@@ -335,6 +359,51 @@ impl AssetIndex {
                 }
             })
             .collect()
+    }
+
+    /// Rigged characters grouped by the skeleton they share, largest cast
+    /// first.
+    ///
+    /// Joint count is the grouping key rather than the pack, because the
+    /// interesting fact is cross-pack: KayKit's adventurers and skeletons are
+    /// separate downloads on the SAME 41-joint rig, so a knight and a skeleton
+    /// warrior are interchangeable in any animation code. Grouping by pack
+    /// would hide exactly the property worth exploiting.
+    pub fn casts(&self) -> Vec<CastInfo> {
+        use std::collections::BTreeMap;
+        let mut by_rig: BTreeMap<u32, Vec<&AssetEntry>> = BTreeMap::new();
+        for e in self.entries.iter().filter(|e| e.rigged && e.joints > 0) {
+            by_rig.entry(e.joints).or_default().push(e);
+        }
+        let mut out: Vec<CastInfo> = by_rig
+            .into_iter()
+            .map(|(joints, items)| {
+                // Intersection, not union: a cast advertising a state it
+                // cannot universally perform is worse than a smaller list.
+                let mut shared: Option<Vec<String>> = None;
+                for e in &items {
+                    let st = states::states_from_clips(&e.clips);
+                    shared = Some(match shared {
+                        None => st,
+                        Some(acc) => acc.into_iter().filter(|s| st.contains(s)).collect(),
+                    });
+                }
+                let max_clips = items.iter().map(|e| e.clips.len() as u32).max().unwrap_or(0);
+                CastInfo {
+                    joints,
+                    members: items.iter().map(|e| e.id.clone()).collect(),
+                    shared_states: shared.unwrap_or_default(),
+                    max_clips,
+                    richest: items
+                        .iter()
+                        .filter(|e| e.clips.len() as u32 == max_clips)
+                        .map(|e| e.id.clone())
+                        .collect(),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then(a.joints.cmp(&b.joints)));
+        out
     }
 
     /// Tiles of one kit filtered to a role, e.g. every corner in `city-kit-roads`.

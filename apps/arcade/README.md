@@ -16,8 +16,8 @@ are **not** vendored in git — fetch them once:
 The default fetches a **core** set (~1900 models) so a fresh clone isn't forced
 to pull the lot; `--packs=all` gets the full Kenney 3D catalogue (**4669 models
 across 47 packs**), and `--packs=nature-kit,car-kit` picks specific ones. Add
-the 556 sounds and the rigged KayKit character and the full library is ~5000
-searchable assets.
+the 556 sounds and the nine rigged KayKit characters and the full library is
+~5000 searchable assets — of which **36 are rigged and animated**.
 
 Everything is gitignored and pinned — starter kits to exact GitHub commits, the
 rest to content-hashed kenney.nl URLs — and every file is sha256-verified, so a
@@ -81,9 +81,28 @@ to give them away.
   (impact, interface, sci-fi, music jingles, UI, RPG and digital audio). Thank
   you for the extraordinary breadth of free, consistent, genuinely usable game
   assets — this library is most of what Arcade can build with.
-- **KayKit / Kay Lousberg** — <https://kaylousberg.itch.io/> — the rigged and
-  animated adventurer characters. Thank you for giving away rigs and animation
-  sets, which are the expensive part.
+- **KayKit / Kay Lousberg** — <https://kaylousberg.itch.io/> — nine rigged and
+  animated characters: five adventurers (Knight, Barbarian, Mage, Rogue,
+  Rogue_Hooded) and four skeletons (Warrior, Mage, Rogue, Minion). All nine
+  share one 41-joint skeleton, so an animation authored for any of them plays
+  on every one — the adventurers ship 76 clips and the skeletons those same 76
+  plus 19 undead extras. Thank you for giving away rigs and animation sets,
+  which are the expensive part.
+
+### Rigged characters
+
+`find_cast` lists the animated casts. A cast is a set of characters sharing one
+skeleton, so any state works on any member and a part can be recast without
+touching animation code:
+
+| rig | members | clips | notable states |
+|-----|---------|-------|----------------|
+| 41 joints (KayKit) | 9 | 76–95 | block, dodge, hurt, dance, sleep, carry |
+| 7 joints (Kenney mini) | 22 | 25–32 | walk, run, jump, attack, sit, wave |
+| 6 joints (Kenney platformer) | 5 | 25 | walk, run, jump, attack |
+
+Pick members from ONE cast for a scene, and use different members so a crowd
+isn't clones — the same rule that applies to props.
 
 Machine-readable attribution lives in `resources/CREDITS.toml` so a published
 game package can carry credit with it.
