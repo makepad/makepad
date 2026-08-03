@@ -757,9 +757,11 @@ fn build_audio_entry(source: Source, pack: &str, file: &Path) -> AssetEntry {
         size: None,
         duration: None,
         loops,
-        // No vorbis decoder exists in this repo, so ogg is indexed and
-        // searchable but not yet playable — see AssetIndex::undecodable.
-        decodable: format != "ogg",
+        // Every shipped format decodes: WAV natively, and ogg since the
+        // in-house Vorbis decoder reached sample-exact on all 556 Kenney
+        // sounds (mono and stereo). `undecodable` stays as the reporting
+        // path for any future format we index before we can play it.
+        decodable: true,
         format,
         bytes,
     }
