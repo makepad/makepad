@@ -4506,7 +4506,10 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 paths.push(std::mem::take(ring));
             };
-            for job in building_jobs.iter().filter(|_| !faces_bake_sink_armed()) {
+            // No sink gate here: the WHOLE POINT of the bake is to run this
+            // sweep offline. Gated, the baker captured deck-only shadow sets
+            // (invisible while the sig bug masked it with permanent misses).
+            for job in building_jobs.iter() {
                 let height = job.height_m;
                 if height <= 0.5 {
                     continue;

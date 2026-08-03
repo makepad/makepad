@@ -172,6 +172,21 @@ fn main() {
                     {
                         fingerprint ^= baked.signature.rotate_left(bucket);
                         fingerprint ^= baked.shadow_signature.rotate_right(bucket);
+                        // Content strength: signature-neutral capture bugs
+                        // (e.g. a gated sweep baking empty shadow sets) must
+                        // still change the fingerprint.
+                        let shadow_points: u64 = baked
+                            .shadow_shapes
+                            .iter()
+                            .flat_map(|shape| shape.iter())
+                            .map(|ring| ring.len() as u64)
+                            .sum();
+                        fingerprint ^= (baked.shadow_shapes.len() as u64)
+                            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                            .rotate_left(bucket * 2);
+                        fingerprint ^= shadow_points
+                            .wrapping_mul(0xbf58_476d_1ce4_e5b9)
+                            .rotate_right(bucket * 2);
                     }
                 }
             })
