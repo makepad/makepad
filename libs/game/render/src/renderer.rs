@@ -8,6 +8,7 @@ use makepad_game_sim::{entity_index_sorted, BodyKind, Entity, GameWorld, Shape, 
 
 use crate::geometry::shape_geometry_data;
 use crate::shaders::{DrawGameAlpha, DrawGameCube, DrawGameSkinned, DrawGameSky, DrawGameTerrain};
+use crate::stage::Stage;
 
 /// The host widget's themed draw structs, lent to the renderer per frame.
 /// They stay `#[live]` fields on the widget so script-side styling applies.
@@ -25,6 +26,13 @@ pub struct RenderStats {
     pub slab_us: u64,
     pub static_instances: u64,
     pub dyn_instances: u64,
+    /// Sky dome drawn this frame (suppressed on an MR stage — the room is
+    /// the environment). Tests assert the suppression.
+    pub sky_drawn: bool,
+    /// Terrain mesh drawn this frame (suppressed on an MR stage).
+    pub terrain_drawn: bool,
+    /// Shadow-catcher quad drawn under the diorama (MR only).
+    pub shadow_catcher_drawn: bool,
 }
 
 /// GPU-side caches for one view family: unit shape geometries, the packed
@@ -46,6 +54,10 @@ pub struct GameRenderer {
     /// GPU meshes for CPU-skinned characters, keyed by caller id, re-uploaded
     /// every frame (the skinning happens CPU-side; see skin.rs).
     skinned_geometries: Vec<(u64, Geometry)>,
+    /// How this device projects the world (flat / VR 1:1 / MR diorama).
+    /// Applied as the scene draw list's view transform, so it costs one
+    /// uniform and never invalidates the static slabs. See stage.rs.
+    stage: Stage,
 }
 
 /// One CPU-skinned mesh instance for [`GameRenderer::draw_scene_full`].
@@ -70,6 +82,50 @@ fn perf_us(t0: std::time::Instant) -> u64 {
 }
 
 impl GameRenderer {
+    /// How this device projects the world. Changing it is free — the stage
+    /// is a draw-list uniform, so nothing cached needs rebuilding, and the
+    /// simulation never learns it happened.
+    pub fn stage(&self) -> Stage {
+        self.stage
+    }
+
+    pub fn set_stage(&mut self, stage: Stage) {
+        self.stage = stage;
+    }
+
+    /// Ground-plane extent of the world's content, in world units: the
+    /// centre and half-width of everything the diorama's shadow should
+    /// catch. `None` when there is nothing to stand on.
+    fn world_footprint(world: &GameWorld) -> Option<(Vec3f, f32)> {
+        let mut min = vec3f(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = vec3f(f32::MIN, f32::MIN, f32::MIN);
+        let mut any = false;
+        for e in world.entities.iter() {
+            let (p, h) = (e.pos, e.half);
+            min.x = min.x.min(p.x - h.x);
+            min.y = min.y.min(p.y - h.y);
+            min.z = min.z.min(p.z - h.z);
+            max.x = max.x.max(p.x + h.x);
+            max.z = max.z.max(p.z + h.z);
+            any = true;
+        }
+        if let Some(t) = world.terrain.as_ref() {
+            let half = t.cell_size * (t.cells.saturating_sub(1)) as f32 * 0.5;
+            let c = t.origin + half;
+            min.x = min.x.min(c - half);
+            min.z = min.z.min(c - half);
+            max.x = max.x.max(c + half);
+            max.z = max.z.max(c + half);
+            any = true;
+        }
+        if !any {
+            return None;
+        }
+        let center = vec3f((min.x + max.x) * 0.5, min.y, (min.z + max.z) * 0.5);
+        let radius = ((max.x - min.x).max(max.z - min.z) * 0.5).max(0.5);
+        Some((center, radius))
+    }
+
     /// Rebuild the terrain GPU mesh when the world's terrain revision moved.
     /// Godot-style: two triangles per cell, verts duplicated per triangle so
     /// normals are flat, per-tri color = average of its corners.
@@ -324,16 +380,33 @@ impl GameRenderer {
         let camera_pos = scene_state.camera_pos;
         draw_list.begin_always(cx);
         cx.begin_scene_3d(scene_state);
-        let previous_world = cx.set_scene_world_transform_3d(Mat4f::identity());
+        let stage_matrix = self.stage.matrix();
+        let previous_world = cx.set_scene_world_transform_3d(stage_matrix);
+        // The stage rides on the draw list's view transform: every game
+        // shader computes `draw_list.view_transform * transform`, so one
+        // uniform scales and anchors sky, terrain, cubes and characters
+        // together. The instance transforms below stay in world units, which
+        // is why the cached static slabs survive a stage change untouched.
+        // (The view matrix cannot carry this — in XR the runtime overwrites
+        // camera_view/_r with its own eye matrices every frame.)
+        cx.cx.draw_lists[draw_list.id()]
+            .draw_list_uniforms
+            .view_transform = stage_matrix;
+        // MR puts the game on your real floor: the room supplies the
+        // horizon, so the game's own environment would only paint over the
+        // passthrough feed.
+        let shows_environment = self.stage.shows_environment();
 
         // Fog only exists once the script asked for a sky.
         let (fog_color, fog_density) = match &world.sky {
-            Some(sky) => (vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z), sky.fog),
-            None => (vec3(0.75, 0.87, 0.96), 0.0),
+            Some(sky) if shows_environment => {
+                (vec3(sky.horizon.x, sky.horizon.y, sky.horizon.z), sky.fog)
+            }
+            _ => (vec3(0.75, 0.87, 0.96), 0.0),
         };
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn first).
-        if let Some(sky) = &world.sky {
+        if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment) {
             let mut transform = Mat4f::identity();
             transform.v[12] = camera_pos.x;
             transform.v[13] = camera_pos.y;
@@ -349,10 +422,11 @@ impl GameRenderer {
             draws.sky.sky_bottom =
                 vec3(sky.ground_bottom.x, sky.ground_bottom.y, sky.ground_bottom.z);
             draws.sky.cube.draw(cx);
+            stats.sky_drawn = true;
         }
 
         // 2. The smooth terrain mesh.
-        if let Some(terrain) = world.terrain.clone() {
+        if let Some(terrain) = world.terrain.clone().filter(|_| shows_environment) {
             let geometry_id = self.ensure_terrain_geometry(cx.cx, &terrain);
             draws.terrain.draw_vars.geometry_id = Some(geometry_id);
             draws.terrain.transform = Mat4f::identity();
@@ -364,6 +438,7 @@ impl GameRenderer {
                 draws.terrain.draw_vars.area =
                     cx.update_area_refs(draws.terrain.draw_vars.area, new_area);
             }
+            stats.terrain_drawn = true;
         }
 
         // PERF: sections 3+4 batch per shape through many_instances. Statics
@@ -641,6 +716,32 @@ impl GameRenderer {
             }
             if let Some(mi) = draws.alpha.cube.cube.many_instances.take() {
                 cx.end_many_instances(mi);
+            }
+        }
+
+        // 5. MR shadow catcher: a dark translucent slab just under the
+        // diorama's footprint. Without it the world reads as floating
+        // stickers over the passthrough feed; with it, planted on the floor.
+        // Drawn last so it blends over everything it sits beneath.
+        if !shows_environment {
+            if let Some(footprint) = Self::world_footprint(world) {
+                let (center, radius) = footprint;
+                let mut transform = Mat4f::identity();
+                transform.v[12] = center.x;
+                transform.v[13] = center.y - 0.02 / self.stage.scale.max(1.0e-4);
+                transform.v[14] = center.z;
+                draws.alpha.cube.cube.transform = transform;
+                draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                // Flat slab: thin in y, footprint-sized in x/z.
+                let thickness = 0.04 / self.stage.scale.max(1.0e-4);
+                draws.alpha.cube.cube.cube_size =
+                    vec3(radius * 2.0, thickness, radius * 2.0);
+                draws.alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, 0.25);
+                draws.alpha.cube.cube.depth_clip = 1.0;
+                draws.alpha.cube.glow = 0.0;
+                draws.alpha.cube.cube.draw(cx);
+                stats.dyn_instances += 1;
+                stats.shadow_catcher_drawn = true;
             }
         }
 
