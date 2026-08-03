@@ -64,7 +64,10 @@ struct Config {
     pbf: PathBuf,
     out: PathBuf,
     mkmap: PathBuf,
-    local_worker: bool,
+    /// Number of concurrent local bake workers (0 disables; --local-worker
+    /// is shorthand for 1). Raise so this box can finish a run solo after
+    /// the LAN decouples.
+    local_workers: usize,
 }
 
 struct Shared {
@@ -152,7 +155,12 @@ fn main() {
             thread::sleep(Duration::from_secs(30));
         }));
     }
-    if config.local_worker || config.hosts.is_empty() {
+    let local_workers = if config.local_workers == 0 && config.hosts.is_empty() {
+        1
+    } else {
+        config.local_workers
+    };
+    for _ in 0..local_workers {
         let shared = shared.clone();
         let config = config.clone();
         handles.push(thread::spawn(move || local_worker(&shared, &config)));
@@ -187,7 +195,7 @@ fn parse_args() -> Result<Config, String> {
         pbf: "local/maps/pbf/planet-latest.osm.pbf".into(),
         out: "local/maps/world-cells".into(),
         mkmap: "local/maps/world.mkmap".into(),
-        local_worker: false,
+        local_workers: 0,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -231,8 +239,14 @@ fn parse_args() -> Result<Config, String> {
                 index += 2;
             }
             "--local-worker" => {
-                config.local_worker = true;
+                config.local_workers = config.local_workers.max(1);
                 index += 1;
+            }
+            "--local-workers" => {
+                config.local_workers = take(index)?
+                    .parse()
+                    .map_err(|_| "--local-workers needs a number".to_string())?;
+                index += 2;
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -498,6 +512,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
     // the streaming frontier inside claim_cell.
     let mut pushed_bridge_dz = false;
     let mut last_fail: Option<usize> = None;
+    let mut connect_fails = 0_u32;
     while !shared.stop.load(Ordering::SeqCst) {
         let Some((index, bbox)) = claim_cell(shared, config, true) else {
             return;
@@ -575,6 +590,19 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
                 }
             }
             other => {
+                if matches!(&other, Err(err) if matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::ConnectionRefused | io::ErrorKind::HostUnreachable)) {
+                    connect_fails += 1;
+                } else {
+                    connect_fails = 0;
+                }
+                if connect_fails >= 3 {
+                    eprintln!("mapfleet: {host} unreachable x{connect_fails} — parking 10min");
+                    requeue(shared, index);
+                    shared.in_flight.lock().unwrap().remove(&index);
+                    shared.active.fetch_sub(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_secs(600));
+                    continue;
+                }
                 if last_fail == Some(index) {
                     // Second consecutive failure of this cell on this box
                     // (low RAM/disk for the frame, sick toolchain, ...):
@@ -598,6 +626,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
             }
         }
         last_fail = None;
+        connect_fails = 0;
         shared.in_flight.lock().unwrap().remove(&index);
         shared.active.fetch_sub(1, Ordering::SeqCst);
     }
