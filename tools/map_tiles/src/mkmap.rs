@@ -397,13 +397,40 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
             ));
         }
     }
-    // Stable resolution: sort by (id, src) then keep the first of each id.
+    // Stable resolution: sort by (id, src). z14+ duplicates resolve
+    // first-source-wins (full per-tile spool copies — identical content).
+    // BELOW z14 the copies are per-cell clipped pyramid halves; keep all
+    // sources per id so pass 2 can MERGE them (first-wins there produced
+    // blank stripes along every cell boundary).
     tiles.sort_unstable_by_key(|&(id, _, _, _, src)| (id, src));
     let before = tiles.len();
-    tiles.dedup_by_key(|&mut (id, ..)| id);
+    let mut merge_sources: HashMap<u64, Vec<u32>> = HashMap::new();
+    {
+        let mut read = 0usize;
+        let mut write = 0usize;
+        while read < tiles.len() {
+            let (id, zoom, ..) = tiles[read];
+            let mut end = read + 1;
+            while end < tiles.len() && tiles[end].0 == id {
+                end += 1;
+            }
+            if end - read > 1 && zoom < 14 {
+                merge_sources
+                    .insert(id, tiles[read..end].iter().map(|t| t.4).collect());
+            }
+            tiles[write] = tiles[read];
+            write += 1;
+            read = end;
+        }
+        tiles.truncate(write);
+    }
     let woven_out = before - tiles.len();
     if woven_out > 0 {
-        println!("  {} duplicate tiles resolved first-source-wins", woven_out);
+        println!(
+            "  {} duplicate tiles: {} merged below z14, rest first-source-wins",
+            woven_out,
+            merge_sources.len()
+        );
     }
     println!("  {} tiles, z{}..z{}", tiles.len(), min_zoom, max_zoom);
 
@@ -464,13 +491,45 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
         Ok(())
     };
 
+    let output_compression = TileCompression::Brotli { quality: 11 };
     for (index, &(id, zoom, x, y, src)) in tiles.iter().enumerate() {
         let axis = 1_i64 << zoom;
         let tms_row = axis - 1 - i64::from(y);
-        let blob = readers[src as usize]
-            .get_tile(i64::from(zoom), i64::from(x), tms_row)
-            .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
-            .ok_or_else(|| format!("tile z{zoom}/{x}/{y} vanished during transmux"))?;
+        let blob = match merge_sources.get(&id) {
+            Some(sources) => {
+                let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(sources.len());
+                for &merge_src in sources {
+                    let copy = readers[merge_src as usize]
+                        .get_tile(i64::from(zoom), i64::from(x), tms_row)
+                        .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
+                        .ok_or_else(|| {
+                            format!("tile z{zoom}/{x}/{y} vanished during transmux")
+                        })?;
+                    let raw = readers[merge_src as usize]
+                        .decode_tile(&copy)
+                        .map_err(|err| format!("decode z{zoom}/{x}/{y}: {err}"))?;
+                    let raw = strip_baked_field(raw);
+                    if !decoded.contains(&raw) {
+                        decoded.push(raw);
+                    }
+                }
+                let mut merged =
+                    Vec::with_capacity(decoded.iter().map(Vec::len).sum());
+                for part in &decoded {
+                    merged.extend_from_slice(part);
+                }
+                makepad_mbtile_reader::compress_tile(
+                    &output_compression,
+                    dict.as_deref(),
+                    &merged,
+                )
+                .map_err(|err| format!("compress merged z{zoom}/{x}/{y}: {err}"))?
+            }
+            None => readers[src as usize]
+                .get_tile(i64::from(zoom), i64::from(x), tms_row)
+                .map_err(|err| format!("read z{zoom}/{x}/{y}: {err}"))?
+                .ok_or_else(|| format!("tile z{zoom}/{x}/{y} vanished during transmux"))?,
+        };
         let hash = content_hash(&blob);
         let blob_ref = if let Some(existing) = dedup.get(&hash) {
             *existing
@@ -592,6 +651,54 @@ pub fn transmux(options: TransmuxOptions) -> Result<(), String> {
     // Pass 3: verification (mandatory) — against the READABLE sources.
     println!("mkmap: pass 3/3 verification");
     verify(&source_paths, &options.output, options.sample_stride)
+}
+
+/// Remove any baked-faces field (field 101, LEN) from a decoded tile
+/// payload: a per-cell bake covers clipped content and is invalid for a
+/// merged border tile.
+fn strip_baked_field(pbf: Vec<u8>) -> Vec<u8> {
+    const BAKED_FACES_FIELD: u64 = 101;
+    let read_varint = |bytes: &[u8], i: &mut usize| -> Option<u64> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let byte = *bytes.get(*i)?;
+            *i += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+            shift += 7;
+            if shift > 63 {
+                return None;
+            }
+        }
+    };
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0usize;
+    while i < pbf.len() {
+        let start = i;
+        let Some(key) = read_varint(&pbf, &mut i) else { break };
+        if key & 0x7 != 2 {
+            break;
+        }
+        let Some(len) = read_varint(&pbf, &mut i) else { break };
+        let end = i + len as usize;
+        if end > pbf.len() {
+            break;
+        }
+        if key >> 3 == BAKED_FACES_FIELD {
+            if out.is_none() {
+                let mut fresh = Vec::with_capacity(pbf.len());
+                fresh.extend_from_slice(&pbf[..start]);
+                out = Some(fresh);
+            }
+        } else if let Some(out) = out.as_mut() {
+            out.extend_from_slice(&pbf[start..end]);
+        }
+        i = end;
+    }
+    out.unwrap_or(pbf)
 }
 
 /// Free bytes on the filesystem holding `path` (via df; None if that
@@ -779,7 +886,7 @@ pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(
                 .map_err(|err| format!("open {}: {err}", path.display()))?,
         );
     }
-    let mut owner: HashMap<u64, (usize, u8, u32, u32)> = HashMap::new();
+    let mut owner: HashMap<u64, (usize, u8, u32, u32, u32)> = HashMap::new();
     for (src, reader) in readers.iter_mut().enumerate() {
         reader
             .for_each_tile(|tile| {
@@ -787,7 +894,10 @@ pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(
                 let axis = 1_u32 << zoom;
                 let x = tile.tile_column as u32;
                 let y = axis - 1 - tile.tile_row as u32;
-                owner.entry(tile_id(zoom, x, y)).or_insert((src, zoom, x, y));
+                owner
+                    .entry(tile_id(zoom, x, y))
+                    .and_modify(|entry| entry.4 += 1)
+                    .or_insert((src, zoom, x, y, 1));
             })
             .map_err(|err| format!("scan {}: {err}", sources[src].display()))?;
     }
@@ -799,21 +909,25 @@ pub fn verify(sources: &[PathBuf], mkmap: &Path, sample_stride: u64) -> Result<(
         ));
     }
     // Resolve in Hilbert order so leaf loads are sequential.
-    let mut listed: Vec<(u64, usize, u8, u32, u32)> = owner
+    let mut listed: Vec<(u64, usize, u8, u32, u32, u32)> = owner
         .into_iter()
-        .map(|(id, (src, zoom, x, y))| (id, src, zoom, x, y))
+        .map(|(id, (src, zoom, x, y, copies))| (id, src, zoom, x, y, copies))
         .collect();
     listed.sort_unstable_by_key(|&(id, ..)| id);
     let mut resolved = 0_u64;
     let mut compared = 0_u64;
-    for (index, &(_, src, zoom, x, y)) in listed.iter().enumerate() {
+    for (index, &(_, src, zoom, x, y, copies)) in listed.iter().enumerate() {
         let blob_ref = container
             .resolve(zoom, x, y)?
             .ok_or_else(|| {
                 format!("VERIFICATION FAILED: z{zoom}/{x}/{y} does not resolve")
             })?;
         resolved += 1;
-        if index as u64 % sample_stride == 0 {
+        // Merged tiles (multi-copy below z14) are a layer-union of their
+        // sources: resolvable, but byte-compare against one source would
+        // rightly fail — skip the sample there.
+        let merged = copies > 1 && zoom < 14;
+        if !merged && index as u64 % sample_stride == 0 {
             let from_shard =
                 container.read_range(blob_ref.shard, blob_ref.offset, blob_ref.len)?;
             let axis = 1_i64 << zoom;
