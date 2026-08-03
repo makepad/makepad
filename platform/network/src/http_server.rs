@@ -80,22 +80,25 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
                 let http_server = http_server.clone();
                 connection_counter += 1;
                 let _read_thread = std::thread::spawn(move || {
-                    let headers = HttpServerHeaders::from_tcp_stream(&mut tcp_stream);
-                    if headers.is_none() {
+                    let head = HttpServerHeaders::from_tcp_stream(&mut tcp_stream);
+                    if head.is_none() {
                         return http_error_out(tcp_stream, 500);
                     }
-                    let headers = headers.unwrap();
+                    // Whatever arrived in the same segment as the headers is
+                    // already off the socket and has to be handed onward.
+                    let (headers, body_prefix) = head.unwrap();
 
                     if headers.sec_websocket_key.is_some() {
                         return handle_web_socket(
                             http_server,
                             tcp_stream,
                             headers,
+                            body_prefix,
                             connection_counter,
                         );
                     }
                     if headers.verb == "POST" {
-                        return handle_post(http_server, tcp_stream, headers);
+                        return handle_post(http_server, tcp_stream, headers, body_prefix);
                     }
                     if headers.verb == "GET" {
                         return handle_get(http_server, tcp_stream, headers);
@@ -108,7 +111,12 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
     Some(listen_thread)
 }
 
-fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {
+fn handle_post(
+    http_server: HttpServer,
+    mut tcp_stream: TcpStream,
+    headers: HttpServerHeaders,
+    body_prefix: Vec<u8>,
+) {
     // we have to have a content-length or bust
     if headers.content_length.is_none() {
         return http_error_out(tcp_stream, 500);
@@ -121,7 +129,12 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
     let mut body = Vec::new();
     body.resize(bytes_total, 0u8);
 
-    let mut bytes_left = bytes_total;
+    // Body bytes that came in with the headers are already read; reading them
+    // from the socket again would block until the peer or the timeout gives up.
+    let prefix_len = body_prefix.len().min(bytes_total);
+    body[..prefix_len].copy_from_slice(&body_prefix[..prefix_len]);
+
+    let mut bytes_left = bytes_total - prefix_len;
     while bytes_left > 0 {
         let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
         let bytes_read = tcp_stream.read(buf);
@@ -159,6 +172,7 @@ fn handle_web_socket(
     http_server: HttpServer,
     mut tcp_stream: TcpStream,
     headers: HttpServerHeaders,
+    body_prefix: Vec<u8>,
     web_socket_id: u64,
 ) {
     // Low-latency control traffic (e.g. studio Tick messages) benefits from
@@ -216,9 +230,21 @@ fn handle_web_socket(
     };
 
     let mut web_socket = WebSocketParser::new();
+    // A client may pipeline its first frames into the same segment as the
+    // upgrade request; those bytes came off the socket with the headers and
+    // must be parsed before we block waiting for more.
+    let mut pending = body_prefix;
     loop {
         let mut data = [0u8; 65535];
-        match tcp_stream.read(&mut data) {
+        let pipelined;
+        let read = if pending.is_empty() {
+            tcp_stream.read(&mut data)
+        } else {
+            pipelined = std::mem::take(&mut pending);
+            data[..pipelined.len()].copy_from_slice(&pipelined);
+            Ok(pipelined.len())
+        };
+        match read {
             Ok(n) => {
                 if n == 0 {
                     let _ = tcp_stream.shutdown(Shutdown::Both);
