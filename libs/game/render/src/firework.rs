@@ -57,6 +57,10 @@ pub struct Shell {
     /// Secondary colour; sparks cross-fade toward it as they die, which is
     /// what makes a firework read as burning out rather than dimming.
     pub color_tail: Vec4f,
+    /// 0 = single colour, 1 = dual-colour break (half the stars carry the
+    /// second colour from the start, the two-tone shells in every display),
+    /// 2 = willow (slower, longer-lived, droops).
+    pub style: f32,
     /// Where the shell was launched from, for the rising streak.
     pub launch: Vec3f,
 }
@@ -79,6 +83,7 @@ pub struct FireworkInstance {
     pub color: Vec4f,
     pub color_tail: Vec4f,
     pub launch: Vec3f,
+    pub style: f32,
 }
 
 /// CPU side: decides when a shell goes up and where. Deliberately not `Clone`
@@ -128,8 +133,10 @@ impl FireworkSystem {
             // high and close (the obvious choice) puts every shell above the
             // top of the screen where nobody sees it. Further out and lower
             // keeps them in the visible band of sky.
-            area: 46.0,
-            height: (17.0, 28.0),
+            // A 3in shell reaches ~80m; ours burst lower than life so they
+            // stay inside a camera that is pitched down at a street.
+            area: 105.0,
+            height: (38.0, 58.0),
             interval: (0.22, 0.62),
         }
     }
@@ -198,9 +205,17 @@ impl FireworkSystem {
         let z = sa * radius;
         let y = self.range(self.height.0, self.height.1);
         let (color, color_tail) = self.pick_color();
-        let speed = self.range(17.0, 27.0);
-        let life = self.range(3.2, 4.6);
+        // Real stars leave the burst charge at 50-100 m/s and drag stops them
+        // in about a second, so the shell opens to speed/k across. At k = 3.08
+        // that is a 30-52 m diameter break — a 3in to 6in shell, which is what
+        // a town display actually fires.
+        let speed = self.range(48.0, 80.0);
+        let life = self.range(3.6, 5.4);
         let seed = self.next_f32() * 1024.0;
+        // A display is a mix. Roughly a third are two-tone and a sixth are
+        // willows; the rest are plain peonies.
+        let roll = self.next_f32();
+        let style = if roll > 0.82 { 2.0 } else if roll > 0.50 { 1.0 } else { 0.0 };
         // Every random drawn BEFORE the push: `self.range` borrows self
         // mutably, and so does `self.shells.push`.
         let age = -self.range(0.55, 0.95);
@@ -217,6 +232,7 @@ impl FireworkSystem {
             color,
             color_tail,
             launch: vec3f(x + jitter_x, 0.5, z + jitter_z),
+            style,
         });
     }
 
@@ -262,6 +278,7 @@ impl FireworkSystem {
                 color: s.color,
                 color_tail: s.color_tail,
                 launch: s.launch,
+                style: s.style,
             })
             .collect()
     }

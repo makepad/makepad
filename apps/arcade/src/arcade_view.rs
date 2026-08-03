@@ -112,20 +112,28 @@ script_mod! {
                 return vec4(tint.x * a, tint.y * a, tint.z * a, 0.0)
             }
 
-            spark_color: fn(life_t: float, heat: float, rnd: float, speed_t: float) -> vec4 {
+            spark_color: fn(life_t: float, heat: float, rnd: float, style: float) -> vec4 {
                 // Three-stage burn, the way a real star behaves: a white-hot
                 // flash, then the shell's own metal-salt colour, then a cooling
                 // ember. Colour is TEMPERATURE, not a gradient between two
                 // arbitrary tints, which is what stops it looking like tinted
                 // dots.
-                let core = mix(self.color.xyz, self.color_tail.xyz, life_t * life_t)
+                // A DUAL-COLOUR break (style 1): half the stars carry the
+                // second colour from the start rather than only cooling into
+                // it, which is the two-tone shell in every display photo. The
+                // split is per star and stable, so a ray keeps one colour all
+                // the way out instead of shimmering between them.
+                let dual = step(0.5, style) * (1.0 - step(1.5, style))
+                let swap = dual * step(0.5, rnd)
+                let base = mix(self.color.xyz, self.color_tail.xyz, swap)
+                let ember = mix(self.color_tail.xyz, self.color.xyz, swap)
+                let core = mix(base, ember, life_t * life_t)
                 let hot = mix(core, vec3(1.0, 0.97, 0.90), heat * heat)
 
                 // The fast outer shell runs hotter and holds its colour; the
                 // slow core cools first. That difference is what gives a burst
                 // a bright leading edge instead of a uniform ball.
-                let edge = mix(0.72, 1.35, speed_t)
-                let lit = hot * edge
+                let lit = hot
 
                 // Glitter: about a fifth of the sparks strobe hard, the rest
                 // shimmer gently. Fireworks that twinkle uniformly read as
