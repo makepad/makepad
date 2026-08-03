@@ -129,7 +129,15 @@ impl InputFrame {
 pub enum Intent {
     Respawn,
     Custom { kind: u32, a: f64, b: f64 },
+    /// "Make the cars faster" from a device with no API key of its own: the
+    /// host owns the agent, so a keyless client asks it to author instead.
+    /// Text off the wire is untrusted and unbounded — see `MAX_AUTHORING_TEXT`.
+    Authoring { text: String },
 }
+
+/// Longest authoring request the host will accept. A prompt is a sentence, not
+/// a payload; anything past this is someone probing for a buffer to grow.
+pub const MAX_AUTHORING_TEXT: usize = 4096;
 
 /// Host-authored events on the reliable channel.
 #[derive(Clone, Debug, PartialEq, SerBin, DeBin)]

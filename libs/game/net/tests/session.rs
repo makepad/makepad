@@ -314,3 +314,29 @@ fn lobby_is_capped_at_max_players() {
     assert_eq!(host.player_count(), MAX_PLAYERS, "cap enforced");
     assert!(host.stats.rejected_full > 0, "over-cap joins were rejected");
 }
+
+#[test]
+fn a_client_authoring_request_reaches_the_host() {
+    // The keyless-client path: a device with no API key types a request and
+    // the host — which owns the agent — receives it verbatim.
+    let mut clock = 0.0;
+    let mut host = host();
+    let mut client = join(&mut host, 7, "tablet", &mut clock);
+
+    client.send_intent(Intent::Authoring {
+        text: "make a racing game with boats".to_string(),
+    });
+    let (events, _) = settle(&mut host, std::slice::from_mut(&mut client), &mut clock);
+
+    let authoring: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            HostEvent::Intent { player, intent: Intent::Authoring { text } } => {
+                Some((*player, text.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(authoring.len(), 1, "expected exactly one authoring intent");
+    assert_eq!(authoring[0].1, "make a racing game with boats");
+}
