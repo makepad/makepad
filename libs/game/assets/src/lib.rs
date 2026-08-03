@@ -725,6 +725,26 @@ fn whole_query_bonus(entry: &AssetEntry, query: &str) -> u32 {
         } else if stem.split_whitespace().any(|w| w == q) {
             // "coin" naming platformer/coin, not merely listed as a keyword.
             bonus += 4;
+        } else {
+            // An adjective must not erase the name match. Every bonus above
+            // tests the WHOLE query, so "fence" scored the actual fence at 28
+            // while "wooden fence" scored it 8 — tied with everything else,
+            // leaving alphabetical order to pick, which is how the demo asked
+            // for a fence and got `arena/wall`.
+            //
+            // The credit goes only to an entry whose entire name IS one of the
+            // asked-for words: `fence` earns it for "wooden fence", while
+            // `wall narrow wood fence` does not, because a name with four
+            // words in it is a less direct answer than a name with one. Worth
+            // less than the whole-query match it backs up, so it reorders ties
+            // rather than overturning a better hit.
+            let terms = tokenize(query);
+            if terms.len() > 1
+                && !stem.contains(' ')
+                && terms.iter().any(|t| *t == stem)
+            {
+                bonus += 5;
+            }
         }
     }
     bonus

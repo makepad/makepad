@@ -710,13 +710,6 @@ impl GameRenderer {
         // Points come from the model's own mesh rather than its bounds: a
         // pine's shadow should taper like a pine. The projector convex-hulls
         // them anyway, so the decimated set carries the silhouette.
-        let ground = world
-            .entities
-            .iter()
-            .filter(|e| e.kind == BodyKind::Static && !e.sensor)
-            .map(|e| e.pos.y + e.half.y * e.scale.y)
-            .fold(f32::MIN, f32::max);
-        let ground = if ground == f32::MIN { 0.0 } else { ground };
         for inst in &self.placed_models {
             let Some((_, m)) = self.static_models.iter().find(|(k, _)| *k == inst.model) else {
                 continue;
@@ -733,8 +726,22 @@ impl GameRenderer {
                     t.v[2] * l.x + t.v[6] * l.y + t.v[10] * l.z + t.v[14],
                 )
             }));
+            // The surface a prop stands on is its OWN lowest point, not a
+            // scene-wide figure. Taking the highest static top instead put the
+            // receiver plane at ~4.5 — the roof height of a house collider,
+            // since the per-prop colliders are themselves static entities —
+            // so every prop was projected onto a plane ABOVE itself and cast
+            // nothing. 54 props produced 15 casters, all of them movers.
+            //
+            // A prop's base is where it meets the ground by construction, so
+            // this is also right on a slope, where one shared plane never is.
+            let base_y = self
+                .shadow_points
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::MAX, f32::min);
             let receiver = Receiver {
-                base_y: ground,
+                base_y: if base_y == f32::MAX { 0.0 } else { base_y },
                 terrain: world.terrain.as_ref(),
             };
             if crate::shadow_mesh::build_caster_shadow(

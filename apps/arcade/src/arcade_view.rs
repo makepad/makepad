@@ -86,9 +86,14 @@ pub struct ArcadeView {
     /// other one for the same frame.
     #[live]
     draw_models: DrawGameSkinned,
-    /// role -> stock asset id, resolved by description at load.
+    /// role -> the DISTINCT stock models resolved for it, most relevant first.
+    ///
+    /// A list rather than one id because a village of five identical houses is
+    /// what a single `find()` hit gives you, and it reads as copy-paste. The
+    /// index holds 21 suburban house designs; `find_many` returns as many
+    /// different ones as asked for.
     #[rust]
-    props: HashMap<String, String>,
+    props: HashMap<String, Vec<String>>,
     #[rust]
     props_loaded: bool,
     /// The composed scene's model instances, built once after the props load
@@ -209,7 +214,12 @@ fn spawn(
     world.mark_render_dirty();
     world.next_id += 1;
     let id = world.next_id;
-    world.entities.push(Entity {
+    // `push_entity`, never `entities.push`: M0r made it the only spawn path
+    // because it asserts ascending-id order, and entity lookup is a BINARY
+    // SEARCH over that invariant. Bypassing it means a future ordering
+    // mistake returns the wrong entity — or silently loses a collider nothing
+    // can find — instead of tripping the assert where it happened.
+    world.push_entity(Entity {
         id,
         kind,
         shape,
@@ -288,8 +298,12 @@ struct Knight {
     /// 0 = idle, 1 = walking — eased toward the patrol state each tick.
     blend: f32,
     angle: f32,
+    /// Where the SWEEP put him, read back after the step — not where the walk
+    /// wanted him. The two differ exactly when something is in the way.
     pos: Vec3f,
     yaw: f32,
+    /// -1, 0 or 1: which way this leg of the patrol is heading.
+    heading: f32,
 }
 
 impl Knight {
@@ -335,6 +349,7 @@ impl Knight {
             angle: 0.0,
             pos: vec3f(-20.0, 0.0, 5.6),
             yaw: 0.0,
+            heading: 0.0,
         })
     }
 
@@ -352,21 +367,29 @@ impl Knight {
             self.angle += dt * 0.30;
             // Walks the pavement on the south side of the road, turning at
             // each end — a pedestrian on a street, not an orbit in a field.
-            // A triangle wave over x with a fixed z keeps him on the verge.
-            let span = 20.0;
             let t = self.angle * 0.5;
             let saw = t - (t / 2.0).floor() * 2.0; // 0..2
-            let tri = if saw < 1.0 { saw } else { 2.0 - saw }; // 0..1..0
-            self.pos = vec3f(-span + tri * span * 2.0, 0.0, 5.6);
-            // Facing follows the leg of the walk he is on.
+            // Which way he is heading on this leg of the walk.
+            self.heading = if saw < 1.0 { 1.0 } else { -1.0 };
             self.yaw = if saw < 1.0 {
                 std::f32::consts::FRAC_PI_2
             } else {
                 -std::f32::consts::FRAC_PI_2
             };
+        } else {
+            self.heading = 0.0;
         }
         self.idle_time += dt;
         self.walk_time += dt;
+    }
+
+    /// Desired ground velocity for this tick. The sweep turns it into an
+    /// actual position, so a bench in the way stops him instead of being
+    /// walked through — which is the entire difference between a character in
+    /// a world and a sprite sliding over a picture of one.
+    fn desired_velocity(&self) -> Vec3f {
+        const SPEED: f32 = 3.2;
+        vec3f(self.heading * SPEED, 0.0, 0.0)
     }
 }
 
@@ -453,7 +476,23 @@ impl ArcadeView {
         let mut world = self.world.borrow_mut();
         let w = &mut *world;
         w.reset_content();
-        w.sky = Some(SkyConfig::default());
+        // Fog is `1 - exp(-dist * density)`, so the default 0.004 puts the far
+        // treeline (~70 units out at this camera) 24% of the way to the horizon
+        // colour — and that colour is a very pale blue-white, so a saturated
+        // green pine arrives grey. Three separate reviews called the scene
+        // "washed out"; this is the whole of it.
+        //
+        // 0.0015 leaves ~10% at the same distance: enough that depth still
+        // reads, not enough to launder the colour out of anything. The horizon
+        // also comes down a little and warms toward the sun, so what haze
+        // remains looks like air rather than a grey veil. Set on the demo
+        // rather than in SkyConfig::default(), which gamemaker and every
+        // existing game also read.
+        w.sky = Some(SkyConfig {
+            horizon: vec4(0.66, 0.76, 0.80, 1.0),
+            fog: 0.0015,
+            ..SkyConfig::default()
+        });
         // Framed on the street rather than on the origin: the road runs
         // east-west through z=0, so looking slightly north of it puts the
         // houses in frame and keeps the empty foreground off the bottom edge.
@@ -555,22 +594,31 @@ impl ArcadeView {
         );
         // Rigid-body stack (M1a): real box3d dynamics, kicked periodically by
         // the tick loop; between kicks it settles and sleeps.
-        for i in 0..6 {
-            let id = spawn(
-                w,
-                BodyKind::Rigid,
-                Shape::Box,
-                vec3f(
-                    YARD_X - 5.0 + (i as f32) * 0.04,
-                    0.55 + i as f32 * 1.05,
-                    YARD_Z - 4.0,
-                ),
-                vec3f(1.0, 1.0, 1.0),
-                vec4(0.9, 0.6 - 0.06 * i as f32, 0.2, 1.0),
-                "rigid_crate",
-            );
-            if let Some(e) = w.entity_mut(id) {
-                e.restitution = 0.05;
+        //
+        // Stacked as a PYRAMID, not a column. Six crates in a single tower is
+        // the same six bodies but reads as a chimney — a shape nobody stacks
+        // on purpose, so it looks like a bug rather than a demo. Three-two-one
+        // is what a yard actually looks like, and it still topples on a kick.
+        const CRATE: f32 = 1.0;
+        let mut crate_i = 0;
+        for (row, count) in [(0usize, 3usize), (1, 2), (2, 1)] {
+            for c in 0..count {
+                // Centre each row over the one below.
+                let span = (count as f32 - 1.0) * CRATE * 2.05;
+                let x = YARD_X - 5.0 - span * 0.5 + c as f32 * CRATE * 2.05;
+                let id = spawn(
+                    w,
+                    BodyKind::Rigid,
+                    Shape::Box,
+                    vec3f(x, CRATE * 0.55 + row as f32 * CRATE * 2.02, YARD_Z - 4.0),
+                    vec3f(CRATE, CRATE, CRATE),
+                    vec4(0.9, 0.6 - 0.06 * crate_i as f32, 0.2, 1.0),
+                    "rigid_crate",
+                );
+                if let Some(e) = w.entity_mut(id) {
+                    e.restitution = 0.05;
+                }
+                crate_i += 1;
             }
         }
         for i in 0..2 {
@@ -588,6 +636,37 @@ impl ArcadeView {
                 e.friction = 0.4;
             }
         }
+        // The Knight is a MOVER in the world, not a transform the demo draws
+        // wherever it likes. He used to be the latter — `Knight::tick` wrote a
+        // triangle wave straight into `self.pos` and nothing looked him up in
+        // `world.entities` — so he walked through benches, houses and trees
+        // alike. Not a collider bug: he was never in the world to be collided
+        // with. Now the walk sets his VELOCITY and the sweep decides where he
+        // actually ends up.
+        //
+        // Half-extents are a person — 0.7 m across, 1.8 m tall — so a bench at
+        // 0.9 m intersects him and a doorway does not. `spawn` takes full
+        // size, so these are doubled from the half-extents.
+        //
+        // He walks the pavement BETWEEN the road edge (z 3.5) and the bench
+        // line (z 5.2), because a pedestrian route that runs through the
+        // furniture leaves him jammed against the first bench forever now
+        // that he genuinely collides. Walking round obstacles is NPC
+        // behaviour, not layout, and belongs with the brains work.
+        spawn(
+            w,
+            BodyKind::Mover,
+            Shape::Box,
+            vec3f(-20.0, 0.9, 4.1),
+            vec3f(0.7, 1.8, 0.7),
+            vec4(0.85, 0.85, 0.9, 1.0),
+            "knight",
+        );
+        if let Some(e) = w.entities.iter_mut().find(|e| e.tag == "knight") {
+            // The skinned mesh is his appearance; this box is only his
+            // substance, exactly as for the stock props.
+            e.hidden = true;
+        }
         self.knight = Knight::load();
         self.world_built = true;
     }
@@ -599,55 +678,84 @@ impl ArcadeView {
     /// demo exercises what Fable will actually use rather than a private
     /// shortcut with hardcoded paths.
     fn load_props(&mut self, cx: &mut Cx) {
+        use makepad_game_assets::{AssetKind, Filters, Spread, VarietyParams};
         let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/resources"));
         let index = makepad_game_assets::AssetIndex::build(&root);
-        // (query, how many to place, what it is for)
-        let wanted: &[(&str, &str)] = &[
-            ("pine tree", "tree"),
-            ("broadleaf tree", "tree2"),
-            ("rock stone", "rock"),
-            ("wooden fence", "fence"),
-            ("suburban house building", "house"),
-            ("suburban house type", "house2"),
-            ("park bench wooden", "bench"),
-            ("street light post tall", "lamp"),
+        // Fixed so the demo is reproducible: the same seed picks the same
+        // models every run, which is also what lets multiplayer replicate a
+        // scene as (query, seed) instead of shipping a model list.
+        const SEED: u64 = 0x5eed_1701;
+        // (query, role, how many DISTINCT models to resolve, spread)
+        //
+        // `Variants` where the point is a row of the same KIND of thing that
+        // differs in detail — five house designs from one suburb, not one
+        // house from each of five art styles. `Mixed` where genuine species
+        // variety is wanted, as in a wood.
+        //
+        // `Variants` is also the safe choice for anything that must be ONE
+        // recognisable object: it takes only the best-matching family, so it
+        // cannot wander. `Mixed` round-robins across families, which is right
+        // for a wood (pine, oak, birch) and wrong for a bench — asking for a
+        // "park bench wooden" spread across families returned the bench, then
+        // a COASTER TRAIN and a PARK ENTRANCE, because each of those matches
+        // one word of the query.
+        let wanted: &[(&str, &str, usize, Spread)] = &[
+            ("pine tree", "tree", 4, Spread::Mixed),
+            ("broadleaf tree", "tree2", 3, Spread::Mixed),
+            // Two, not three: the third hit is `cliff_blockCave_rock`, a
+            // cave-mouth tile that reads as a small teal-roofed building
+            // dropped on the grass. A known ranking wart — asking for fewer
+            // is the honest workaround until "rock" stops meaning that.
+            ("rock stone", "rock", 2, Spread::Mixed),
+            ("fence", "fence", 1, Spread::Variants),
+            ("suburban house building", "house", 5, Spread::Variants),
+            ("park bench", "bench", 2, Spread::Variants),
+            ("street light post", "lamp", 2, Spread::Variants),
         ];
-        for (query, role) in wanted {
-            // Walk the ranked hits rather than taking only the best one: a
-            // pack whose atlas was not downloaded cannot render, so the next
-            // candidate is a better answer than a hole in the scene. The
-            // same fallthrough is what a generated game wants.
-            // Some kit tiles are welded to a chunk of ground
-            // (`hexagon-kit/building-house` is a house on a hex of grass) and
-            // read as floating islands when dropped on open grass. Skipping
-            // whole kits is the wrong lever though — it pushed "house" to a
-            // HOUSEBOAT — so the queries steer instead, and the ranked walk
-            // takes the first candidate that actually loads.
-            let mut placed = false;
-            for hit in index
-                .find(query)
-                .into_iter()
-                .filter(|h| h.entry.kind == makepad_game_assets::AssetKind::Model)
-                .filter(|h| !h.entry.id.contains("hexagon-kit"))
-                .take(14)
-            {
-                let id = hit.entry.id.clone();
-                let path = hit.entry.path.clone();
+        for (query, role, count, spread) in wanted {
+            // Ask for more than needed: some candidates belong to packs whose
+            // atlas was never downloaded and cannot render, so the surplus is
+            // what keeps the scene full rather than leaving holes. The same
+            // over-ask is what a generated game wants.
+            //
+            // Kit tiles welded to a chunk of ground (`hexagon-kit/building-
+            // house` is a house on a hex of grass) read as floating islands on
+            // open grass. Excluding whole kits by name is the wrong lever —
+            // it pushed "house" to a HOUSEBOAT — so the query steers and the
+            // load walk skips what will not render.
+            let params = VarietyParams {
+                count: count + 6,
+                spread: *spread,
+                seed: SEED,
+                filters: Filters {
+                    kind: Some(AssetKind::Model),
+                    ..Default::default()
+                },
+            };
+            let mut ids = Vec::new();
+            for entry in index.find_many(query, &params) {
+                if ids.len() >= *count {
+                    break;
+                }
+                if entry.id.contains("hexagon-kit") {
+                    continue;
+                }
+                let (id, path) = (entry.id.clone(), entry.path.clone());
                 // The atlas sits beside the model in the pack's Textures/ dir.
                 let png = path
                     .parent()
                     .map(|d| d.join("Textures").join("colormap.png"))
                     .and_then(|p| std::fs::read(p).ok());
                 let Ok(glb) = std::fs::read(&path) else { continue };
-                if let Ok(tris) = self.renderer.load_model(cx, &id, &glb, png.as_deref()) {
-                    log!("arcade: prop '{role}' = {id} ({tris} tris)");
-                    self.props.insert(role.to_string(), id);
-                    placed = true;
-                    break;
+                if self.renderer.load_model(cx, &id, &glb, png.as_deref()).is_ok() {
+                    ids.push(id);
                 }
             }
-            if !placed {
+            if ids.is_empty() {
                 log!("arcade: no loadable stock model for '{query}'");
+            } else {
+                log!("arcade: prop '{role}' = {} distinct: {}", ids.len(), ids.join(", "));
+                self.props.insert(role.to_string(), ids);
             }
         }
     }
@@ -666,13 +774,42 @@ impl ArcadeView {
         // fixed multiplier gives a 12-unit bench beside a 2-unit house. Scale
         // to a TARGET HEIGHT read off the model's own bounds instead, and the
         // scene keeps its proportions whichever pack a query resolves to.
-        let mut place = |role: &str, x: f32, z: f32, yaw: f32, target_h: f32, block: Blocking| {
-            let Some(id) = self.props.get(role) else { return };
+        // `variant` selects among the DISTINCT models resolved for this role,
+        // wrapping if fewer came back than the scene asks for. Every caller
+        // passes a different one, which is the whole point: the index returned
+        // five house designs and placing hit #1 five times is what made the
+        // street look copy-pasted.
+        let mut place = |role: &str,
+                         variant: usize,
+                         x: f32,
+                         z: f32,
+                         yaw: f32,
+                         target_h: f32,
+                         block: Blocking| {
+            let Some(ids) = self.props.get(role) else { return };
+            if ids.is_empty() {
+                return;
+            }
+            let id = &ids[variant % ids.len()];
             let Some((min, max)) = self.renderer.model_bounds(id) else {
                 return;
             };
             let native_h = (max.y - min.y).max(0.001);
-            let s = target_h / native_h;
+            let mut s = target_h / native_h;
+            // Scaling by height alone assumes the model is roughly as tall as
+            // it is wide. A short, wide model — a ground patch, a fallen log,
+            // a canopy authored flat — then blows up sideways into a coloured
+            // slab lying across the scene. Cap the footprint at a few times
+            // the target height and re-derive the scale from width when it
+            // would exceed that. Any library picked by description will
+            // eventually hand back something oddly proportioned, so the guard
+            // belongs here rather than in a list of models to avoid.
+            let native_w = (max.x - min.x).max(max.z - min.z).max(0.001);
+            let max_w = target_h * 2.5;
+            if native_w * s > max_w {
+                s = max_w / native_w;
+            }
+            let s = s;
             let mut m = Mat4f::rotation(vec3f(0.0, yaw, 0.0));
             for i in 0..12 {
                 m.v[i] *= s;
@@ -764,28 +901,56 @@ impl ArcadeView {
         // Uniform facing is the point: a row of houses that agree about where
         // the street is reads as a street, and random yaw reads as debris.
         const FACE_SOUTH: f32 = 0.0;
+        // A different house design at every lot, and heights that vary a
+        // little: a terrace of clones reads as wallpaper, however good the
+        // model is.
         for (i, x) in [-19.0f32, -10.0, 0.5, 10.0, 19.0].iter().enumerate() {
-            let role = if i % 2 == 1 && self.props.contains_key("house2") {
-                "house2"
-            } else {
-                "house"
-            };
-            place(role, *x, -10.0, FACE_SOUTH, 4.4, Blocking::Solid);
+            let h = 4.2 + (i % 3) as f32 * 0.35;
+            place("house", i, *x, -10.0, FACE_SOUTH, h, Blocking::Solid);
         }
         // Lamps down the north verge, evenly spaced like street furniture.
         for i in 0..5 {
-            place("lamp", -18.0 + i as f32 * 9.0, -4.6, 0.0, 3.2, Blocking::None);
+            place("lamp", i, -18.0 + i as f32 * 9.0, -4.6, 0.0, 3.2, Blocking::None);
         }
         // Benches on the south verge, turned to face the road.
-        for x in [-12.0f32, 0.0, 12.0] {
-            place("bench", x, 5.2, std::f32::consts::PI, 0.9, Blocking::Solid);
+        for (i, x) in [-12.0f32, 0.0, 12.0].iter().enumerate() {
+            place("bench", i, *x, 5.2, std::f32::consts::PI, 0.9, Blocking::Solid);
         }
 
         // --- boundary --------------------------------------------------
         // A fence along the south edge of the green: a continuous run, not a
-        // scatter, so it reads as an enclosure.
-        for i in 0..9 {
-            place("fence", -16.0 + i as f32 * 4.0, 17.0, 0.0, 1.1, Blocking::Solid);
+        // scatter, so it reads as an enclosure. One design for the whole run —
+        // a fence that changes style panel to panel is a fence nobody built.
+        //
+        // Spacing comes from the panel's OWN scaled width. A fixed 4-unit step
+        // left a one-unit panel with three units of air between it and the
+        // next, which reads as a line of signposts rather than a fence — the
+        // model is the only thing that knows how wide a panel is.
+        const FENCE_H: f32 = 1.1;
+        let fence_step = self
+            .props
+            .get("fence")
+            .and_then(|ids| ids.first())
+            .and_then(|id| self.renderer.model_bounds(id))
+            .map(|(min, max)| {
+                let s = FENCE_H / (max.y - min.y).max(0.001);
+                // Panels butt up rather than overlap; a hair of slack keeps
+                // coincident faces from z-fighting along the run.
+                ((max.x - min.x) * s * 0.98).max(0.4)
+            })
+            .unwrap_or(1.6);
+        let fence_run = 30.0f32;
+        let panels = (fence_run / fence_step).ceil() as usize;
+        for i in 0..panels {
+            place(
+                "fence",
+                0,
+                -fence_run * 0.5 + i as f32 * fence_step,
+                17.0,
+                0.0,
+                FENCE_H,
+                Blocking::Solid,
+            );
         }
 
         // --- woodland --------------------------------------------------
@@ -799,9 +964,11 @@ impl ArcadeView {
                 let r = 3.0 + ((si * 5 + i * 3) % 7) as f32 * 1.3;
                 let x = cx + makepad_game_math::cos(a) * r;
                 let z = cz + makepad_game_math::sin(a) * r * 0.7;
+                // Species AND variant both turn over: a wood of one silhouette
+                // repeated is an orchard, and that is what a single hit gives.
                 let role = if (si + i) % 3 == 0 { "tree2" } else { "tree" };
                 let h = 5.5 + ((i * 3 + si) % 4) as f32 * 1.4;
-                place(role, x, z, a, h, Blocking::Trunk);
+                place(role, si + i, x, z, a, h, Blocking::Trunk);
             }
         }
         // Rocks at the wood's edge, where scree actually collects.
@@ -809,7 +976,15 @@ impl ArcadeView {
             .iter()
             .enumerate()
         {
-            place("rock", *x, *z, i as f32 * 1.3, 1.1 + i as f32 * 0.35, Blocking::Solid);
+            place(
+                "rock",
+                i,
+                *x,
+                *z,
+                i as f32 * 1.3,
+                1.1 + i as f32 * 0.35,
+                Blocking::Solid,
+            );
         }
         (models, colliders)
     }
@@ -1066,6 +1241,19 @@ impl ArcadeView {
         }
         if let Some(knight) = &mut self.knight {
             knight.tick();
+            // Drive the mover, then take back whatever the sweep decided. The
+            // walk only ever expresses INTENT; a bench, a house wall or a
+            // fence panel gets the final say on where he ends up.
+            let mut world = self.world.borrow_mut();
+            let v = knight.desired_velocity();
+            if let Some(e) = world.entities.iter_mut().find(|e| e.tag == "knight") {
+                e.vel.x = v.x;
+                e.vel.z = v.z;
+            }
+            if let Some(e) = world.entities.iter().find(|e| e.tag == "knight") {
+                // The mesh's origin is at his feet; the mover's is its centre.
+                knight.pos = vec3f(e.pos.x, e.pos.y - e.half.y, e.pos.z);
+            }
         }
     }
 
@@ -1439,8 +1627,13 @@ impl Widget for ArcadeView {
             if !self.logged_render_stats {
                 self.logged_render_stats = true;
                 log!(
-                    "arcade: stock props {} instances in {} draw items, {} tris",
-                    stats.model_instances, stats.model_draws, stats.model_triangles
+                    "arcade: stock props {} instances in {} draw items, {} tris; \
+                     {} shadow casters ({} projected)",
+                    stats.model_instances,
+                    stats.model_draws,
+                    stats.model_triangles,
+                    stats.shadows,
+                    stats.projected_shadows
                 );
                 let b = stats.bake;
                 log!(

@@ -173,11 +173,27 @@ fn shuffle_key(seed: u64, id: &str) -> u64 {
     h
 }
 
-/// The pack the query most belongs to, by summed relevance of its hits. Summed
-/// rather than counted so two strong matches beat ten weak brushes.
+/// The pack the query most belongs to.
+///
+/// Only hits at or near the TOP score are considered, and they are summed
+/// within that band. Summing across all 60 hits instead — mass rather than
+/// quality — let a pack with many weak brushes outrank the pack that actually
+/// answered the query: "street light post tall" ranks three `racing-kit`
+/// lightPosts at 18, but `nature-kit` has enough incidental "tall" matches to
+/// out-sum them, so the preferred pack became nature-kit and asking for a
+/// lamp returned a CACTUS. `find` had the right answer all along; only this
+/// preference threw it away.
+///
+/// The band keeps the tie-breaking that summing was for: when two packs both
+/// hold top-scoring hits, the one with more of them still wins.
 fn dominant_pack(hits: &[Hit<'_>]) -> Option<String> {
+    let top = hits.first()?.score;
+    // Generous enough that a pack whose best hit is a point or two behind can
+    // still win on depth, tight enough that an unrelated pack cannot buy the
+    // preference with volume.
+    let floor = top.saturating_sub(top / 4);
     let mut packs: Vec<(&str, u32)> = Vec::new();
-    for h in hits.iter().take(60) {
+    for h in hits.iter().take(60).filter(|h| h.score >= floor) {
         let p = h.entry.pack.as_str();
         match packs.iter_mut().find(|(name, _)| *name == p) {
             Some((_, s)) => *s += h.score,
