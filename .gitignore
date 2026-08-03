@@ -52,3 +52,9 @@ ggml-*.bin
 /kokoro_voices/
 __pycache__/
 tesla_credentials.json
+
+# Studio per-checkout runtime state: terminal scrollback, AI chat logs, window
+# layout. Committed once by mistake (fab00bf27 "Studio term histories") — it is
+# local scratch, it churns every session, and it had grown to ~30 MB of chat
+# JSON and terminal buffers carrying developer email addresses and home paths.
+.makepad/
