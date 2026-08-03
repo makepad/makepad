@@ -9,6 +9,7 @@ pub mod callbacks;
 pub mod audio3d;
 pub mod dispatch;
 pub mod host;
+pub mod input;
 pub mod sandbox;
 pub mod value;
 

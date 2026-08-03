@@ -22,7 +22,7 @@ use crate::capability::{arcade_home, Capabilities};
 use crate::chat::{ChatData, ChatRole};
 // Named rather than glob-imported: `makepad_ai::*` and the widgets prelude
 // both re-export a `makepad_widgets`, and the collision is a warning.
-use makepad_ai::agent::{Agent, AgentEvent, PromptId, SessionConfig, SessionId};
+use makepad_ai::agent::{Agent, AgentEvent, PromptId, SessionId};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -405,11 +405,11 @@ impl MatchEvent for App {
                     if let Some(dir) = &dir {
                         let _ = std::fs::create_dir_all(dir);
                     }
-                    let config = SessionConfig {
-                        cwd: dir.map(|d| d.to_string_lossy().to_string()),
-                        system_prompt: Some(ai::system_prompt(&makepad_game_script::api_text())),
-                        ..Default::default()
-                    };
+                    let config = ai::authoring_session(
+                        dir.map(|d| d.to_string_lossy().to_string()),
+                        &makepad_game_script::api_text(),
+                        None,
+                    );
                     self.session_id = Some(agent.create_session(cx, config));
                     self.agent = Some(agent);
                 }

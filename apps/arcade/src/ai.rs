@@ -9,7 +9,7 @@
 use crate::capability::{Capabilities, Tier};
 use crate::library::{classify_deterministic, Action, Librarian, Library, Manifest};
 use crate::pairing::{has_key, load_key, Provider};
-use makepad_ai::agent::{Agent, StatelessBackendAdapter};
+use makepad_ai::agent::{Agent, SessionConfig, StatelessBackendAdapter};
 use makepad_ai::backend::BackendConfig;
 use makepad_ai::backends::claude::ClaudeBackend;
 use makepad_ai::backends::claude_code::ClaudeCodeAgent;
@@ -18,8 +18,69 @@ use makepad_ai::backends::openai::OpenAiBackend;
 use makepad_converse::filter::{FilterDecision, PassthroughFilter, TranscriptFilter};
 use makepad_converse::pipeline::ConversePipeline;
 
+/// Tools the authoring session may use. Without this the CLI is launched with
+/// `--tools ""` and the agent is chat-only: it answers, sounds correct, and
+/// never writes game.splash.
+pub const AUTHORING_TOOLS: &[&str] = &["Read", "Write", "Edit", "Glob", "Grep"];
+
+/// Inline settings rather than a file in `cwd`: workspace settings are ignored
+/// until the user accepts a trust dialog, which no kid will ever see. Edits are
+/// confined to the game dir — `../**` is denied so a game cannot rewrite the
+/// library around it.
+pub const PERMISSION_POLICY: &str = r#"{"permissions":{
+"allow":["Read","Glob","Grep","Edit(./**)","Write(./**)"],
+"deny":["Bash","Edit(../**)","Write(../**)"]}}"#;
+
+/// The session config for authoring one game in `dir`.
+pub fn authoring_session(dir: Option<String>, api: &str, model: Option<String>) -> SessionConfig {
+    SessionConfig {
+        cwd: dir,
+        system_prompt: Some(system_prompt(api)),
+        model,
+        allowed_tools: AUTHORING_TOOLS.iter().map(|t| t.to_string()).collect(),
+        permission_mode: Some("dontAsk".to_string()),
+        settings_json: Some(PERMISSION_POLICY.to_string()),
+        ..Default::default()
+    }
+}
+
+/// A worked example is worth more than any amount of prose: this is the whole
+/// idiom — build the world at the top, configure engine blocks, drive it from
+/// one `on_tick` — in the shape we want back.
+const WORKED_EXAMPLE: &str = r#"let SPEED = 7.0
+
+game.sky({})
+game.sun({time_of_day: 10.0})
+game.terrain({size: 160, cells: 129, smooth: true, seed: 3, amp: 8})
+
+let hero = game.character({pos: vec3(0, 6, 0), color: #4a7fd6, player: true, view: "third"})
+game.label(hero, "You")
+
+let pig = game.mover({pos: vec3(6, 6, 4), size: vec3(0.9, 0.7, 1.4), color: #ffb3c1, tag: "animal"})
+game.wander(pig, {home: vec3(6, 0, 4), range: 12, speed: 2.5})
+
+let score = 0
+game.text("score", "Caught: 0", {anchor: "top_left"})
+
+game.on_touch(|a, b| {
+    if game.tag(b) == "animal" {
+        score = score + 1
+        game.text("score", "Caught: " + score)
+        game.sfx("pickup")
+        game.burst(game.pos(b), {kind: "spark", count: 12})
+        game.remove(b)
+    }
+})
+"#;
+
 /// The system prompt is the whole game-authoring contract: the agent writes
 /// splash against the `game.*` verbs and nothing else.
+///
+/// The rules below are not style advice — each one is a failure the eval
+/// harness caught the model making (`tools/arcade_eval`). Types coerce
+/// silently in a few places, so a wrong literal produces a game that reads
+/// correctly and renders an empty world; saying so up front is cheaper than
+/// letting it discover that through an error loop.
 pub fn system_prompt(api: &str) -> String {
     format!(
         "You build small 3D games for kids in the Makepad Arcade engine.\n\
@@ -29,6 +90,23 @@ pub fn system_prompt(api: &str) -> String {
          Keep games short and readable. Prefer engine blocks (game.car, \
          game.character, game.plane, game.wander/chase/patrol, game.checkpoint/\
          race) over hand-written movement.\n\n\
+         RULES THAT BREAK GAMES IF IGNORED:\n\
+         1. Positions and sizes are `vec3(x, y, z)`. An array `[x, y, z]` is \
+         NOT a position — it silently becomes vec3(0,0,0) and every object \
+         stacks at the origin.\n\
+         2. Colors are bare hex literals: `#ff8800`. A quoted string \
+         \"#ff8800\" is NOT a color. If a digit is followed by `e` or `E`, use \
+         the `#x` prefix (`#x2ecc71`, `#x1e1e2e`) — otherwise the tokenizer \
+         reads it as scientific notation and the file will not parse.\n\
+         3. `game.terrain` needs `smooth: true` for a landscape mesh. Without \
+         it the engine spawns one static box per cell (cells:48 = 2304 \
+         entities) which is slow and can destabilise physics. Keep `cells` \
+         between 33 and 129.\n\
+         4. Only use verbs from the list below. Inventing an option name is \
+         warned about; inventing a verb is a hard error that stops the game.\n\
+         5. Budget: aim well under ~400 entities. Prefer one `game.terrain` \
+         over a field of boxes.\n\n\
+         A COMPLETE GAME LOOKS LIKE THIS:\n```\n{WORKED_EXAMPLE}```\n\n\
          Verbs:\n{api}"
     )
 }
