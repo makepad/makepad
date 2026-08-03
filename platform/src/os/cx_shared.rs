@@ -545,6 +545,11 @@ impl Cx {
                     phase: crate::event::ScrollPhase::None,
                 }));
             }
+            StudioToApp::GameInput(states) => {
+                // Replace wholesale rather than merge: Studio sends the whole
+                // set, so a pad that unplugs disappears by being absent.
+                self.game_input_remote = states.into_iter().map(|s| s.into()).collect();
+            }
             StudioToApp::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
                 self.call_event_handler(&Event::KeyDown(e));
