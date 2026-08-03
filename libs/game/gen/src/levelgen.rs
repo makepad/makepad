@@ -61,6 +61,14 @@ impl Level {
     fn push(&mut self, layout: TileLayout) {
         self.add(&layout.kit_id, layout.tile_size, layout.placements);
     }
+
+    /// Add placements from a generator that builds its own tile list rather
+    /// than going through [`fit_grid`] — interiors place floors directly,
+    /// since a floor has no connection mask to fit. Merges by kit id on the
+    /// same terms as everything else, so a kit is still one batch.
+    pub fn push_layer(&mut self, kit_id: &str, tile_size: f32, placements: Vec<TilePlacement>) {
+        self.add(kit_id, tile_size, placements);
+    }
 }
 
 // ---------------------------------------------------------------- roads

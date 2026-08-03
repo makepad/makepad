@@ -11,6 +11,7 @@
 
 pub mod cache;
 pub mod implicit;
+pub mod interior;
 pub mod kit;
 pub mod levelgen;
 pub mod lsystem;
@@ -23,6 +24,7 @@ pub mod tree;
 
 pub use cache::*;
 pub use implicit::*;
+pub use interior::*;
 pub use kit::*;
 pub use levelgen::*;
 pub use lsystem::*;

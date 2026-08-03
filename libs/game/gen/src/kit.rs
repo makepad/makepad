@@ -200,23 +200,43 @@ impl Kit {
     /// rather than as a hole in the world. Adjacency stays valid either way,
     /// because the extra opening faces a cell where no tile exists.
     pub fn fit(&self, target: u8, rng: &mut GenRng) -> Option<(u32, u32)> {
+        self.fit_where(target, |_| true, rng)
+    }
+
+    /// [`Kit::fit`], restricted to tiles whose role passes `allow`.
+    ///
+    /// A door and a wall segment both connect along their own run, so they
+    /// carry the same mask — meaning an unrestricted fit of a room's wall ring
+    /// would sprinkle doors along it at random. Callers that care which *kind*
+    /// of tile answers a mask filter here rather than re-implementing the
+    /// rotation search, so there is one place where rotation arithmetic can be
+    /// wrong and one set of tests pinning it.
+    pub fn fit_where(
+        &self,
+        target: u8,
+        allow: impl Fn(TileRole) -> bool,
+        rng: &mut GenRng,
+    ) -> Option<(u32, u32)> {
         let target = target & 0xF;
+        let ok = |i: usize, exact: bool| {
+            allow(self.tiles[i].role)
+                .then(|| self.match_rotation(i, target, exact))
+                .flatten()
+        };
         // Count, pick, then re-scan. Collecting candidates into a Vec would
         // allocate on every cell of every level, and a Cross tile is a
         // superset of every target — so the fallback pass in particular would
         // push constantly. Two cheap passes over a handful of tiles beat one
         // pass plus a heap allocation.
         for exact in [true, false] {
-            let n = (0..self.tiles.len())
-                .filter(|&i| self.match_rotation(i, target, exact).is_some())
-                .count();
+            let n = (0..self.tiles.len()).filter(|&i| ok(i, exact).is_some()).count();
             if n == 0 {
                 continue;
             }
             let pick = rng.index(n);
             let mut seen = 0;
             for i in 0..self.tiles.len() {
-                if let Some(q) = self.match_rotation(i, target, exact) {
+                if let Some(q) = ok(i, exact) {
                     if seen == pick {
                         return Some((i as u32, q));
                     }
