@@ -257,7 +257,11 @@ pub fn play_named_at(name: &str, pitch: f32, gain_scale: f32, pan: f32) -> bool 
         "shove" => b(200.0, 200.0, 0.06, Wave::Noise, 0.30, 0.0),
         // Firework: a noise burst sweeping down into a long tail. Noise
         // because a shell is broadband — a tone reads as a laser, not a bang.
-        "firework" => b(900.0 * p, 70.0 * p, 0.85, Wave::Noise, 0.34, 0.0),
+        // A distant SHELL, not a hiss: a low thump that falls away. The
+        // first version swept 900Hz of broadband noise at 0.34 gain, which is
+        // a shotgun in a small room. Fireworks are heard from far off — mostly
+        // low frequency by the time they arrive, and quiet.
+        "firework" => b(220.0 * p, 38.0 * p, 1.1, Wave::Noise, 0.085, 0.0),
         "board" => b(220.0 * p, 330.0 * p, 0.11, Wave::Sine, 0.22, 0.0),
         "coin" => j("B5 E6", 0.07, Wave::Triangle, 0.20),
         "hurt" => b(300.0 * p, 120.0 * p, 0.15, Wave::Saw, 0.22, 0.0),

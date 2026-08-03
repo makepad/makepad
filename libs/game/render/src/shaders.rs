@@ -168,21 +168,34 @@ script_mod! {
             let r2 = fract(sin(h * 78.2330) * 24634.6345)
             let r3 = fract(sin(h * 39.4257) * 15731.7433)
 
-            // Even distribution over the sphere. Using acos on a uniform z is
-            // what keeps sparks off the poles — sampling two angles uniformly
-            // bunches them at the top and bottom and reads as a bow tie.
-            let cz = r1 * 2.0 - 1.0
+            // A FIBONACCI SPHERE, not random scatter. A real shell packs its
+            // stars evenly around the burst charge and lights them at once, so
+            // the break is a true sphere — that even spacing is exactly why a
+            // peony looks round from every angle. Hashing a direction per
+            // spark gives clumps and holes, which reads as noise however many
+            // sparks you throw at it.
+            //
+            // The golden angle steps phi so successive stars never line up,
+            // and z steps linearly so they are evenly spread in AREA, not in
+            // latitude (which would bunch them at the poles).
+            let n = 320.0
+            let fi = idx + 0.5
+            let cz = 1.0 - 2.0 * fi / n
             let sz = sqrt(max(1.0 - cz * cz, 0.0))
-            let phi = r2 * 6.28318530718
+            // Per-shell rotation so two shells are not the same object twice.
+            let phi = fi * 2.3999632297 + seed
             let dir = vec3(sz * cos(phi), cz, sz * sin(phi))
 
             // A shell is not a uniform ball: the burst charge throws sparks at
             // a spread of speeds, and that spread is most of what makes the
             // front edge read as a shockwave rather than a balloon.
-            // A WIDE spread (4:1) is what fills a burst. The canvas demos use
-            // speed = random(1,10); a narrow spread leaves a hollow shell with
-            // nothing in the middle.
-            let speed = self.params.x * (0.25 + 0.75 * r3 * r3)
+            // Nearly UNIFORM speed. The stars are identical and ignite
+            // together, so they travel together and the shell stays a crisp
+            // expanding sphere. (The wide random(1,10) spread in the canvas
+            // demos is a 2D trick for filling a disc — in 3D it just turns the
+            // sphere to mush.) A few percent of jitter keeps the edge from
+            // looking machined.
+            let speed = self.params.x * (0.94 + 0.06 * r3)
 
             let age = self.origin_age.w
             let t = max(age, 0.0)
