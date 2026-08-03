@@ -10,7 +10,7 @@ use makepad_live_id::*;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum ShaderBackend {
     #[default]
     Metal,

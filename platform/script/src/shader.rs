@@ -413,6 +413,23 @@ impl ShaderFnCompiler {
         //output.backend = ShaderBackend::Wgsl;
         output.backend.register_ids();
 
+        // Each call site inlines a fresh copy of the callee, so a branching
+        // call graph expands exponentially with depth. `recur_block` stops
+        // self-recursion only; this bounds the blow-up that isn't recursive.
+        if output.emitted_bytes > crate::shader_output::MAX_EMITTED_BYTES {
+            if !output.size_exceeded {
+                output.size_exceeded = true;
+                output.has_errors = true;
+                script_err_not_allowed!(
+                    self.trap,
+                    "shader too large: emitted source exceeded {} bytes (deeply nested or heavily branching function calls inline exponentially)",
+                    crate::shader_output::MAX_EMITTED_BYTES
+                );
+            }
+            return vm.bx.code.builtins.pod.pod_void;
+        }
+        let fn_start_len = self.out.len();
+
         self.mes.push(ShaderMe::FnBody {
             ret: None,
             escaped: false,
@@ -511,6 +528,7 @@ impl ShaderFnCompiler {
             // we ignore it and continue processing to properly close all control structures.
             self.trap.on.take();
         }
+        output.emitted_bytes += self.out.len().saturating_sub(fn_start_len);
         let value = self.mes.pop();
         if let Some(ShaderMe::FnBody { ret, .. }) = value {
             return ret.unwrap_or(vm.bx.code.builtins.pod.pod_void);
@@ -1479,14 +1497,14 @@ impl ShaderFnCompiler {
                 script_err_shader!(self.trap, "SCOPE: `scope` keyword not supported in shaders");
             }
             // For
-            Opcode::FOR_1 => self.handle_for_1(vm, &output.backend),
+            Opcode::FOR_1 => self.handle_for_1(vm, output, &output.backend.clone()),
             Opcode::FOR_2 => {
                 script_err_shader!(self.trap, "FOR_2: `for k, v in obj` iteration not supported in shaders, use `for i in 0..n`");
             }
             Opcode::FOR_3 => {
                 script_err_shader!(self.trap, "FOR_3: `for i, k, v in obj` iteration not supported in shaders, use `for i in 0..n`");
             }
-            Opcode::LOOP => self.handle_loop(),
+            Opcode::LOOP => self.handle_loop(output, &output.backend.clone()),
             Opcode::FOR_END => self.handle_for_end(),
             Opcode::BREAK => self.handle_break(),
             Opcode::BREAKIFNOT => self.handle_breakifnot(),
